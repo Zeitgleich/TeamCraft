@@ -33,7 +33,8 @@ private let bubbleTextInset: CGFloat = 9
 /// One message as a chat bubble (#713, the same design as the Android app): own messages on the
 /// trailing side in the accent, others on the leading side in a neutral bubble with the sender's
 /// name and avatar once per group (channels and groups). Reactions, "not sent" and the thread link
-/// go below the bubble. Messages without text and files (joins, renames) are a quiet line instead.
+/// go below the bubble. System messages (joins, renames, who added whom) are a quiet line instead,
+/// worded as on desktop and web (#769).
 struct MessageRow: View {
   let entry: FeedEntry
   let maybeExtras: MessageExtras?
@@ -43,10 +44,12 @@ struct MessageRow: View {
   let showsThreadLink: Bool
   let onOpenThread: () -> Void
   var displayNames: [String: String] = [:]
+  /// Without the right to react, the reactions stay readable but don't toggle (issue #758).
+  var canReact = true
 
   var body: some View {
-    if isEvent {
-      Text("chat_preview_event")
+    if let line = SystemLine(message: message, maybeExtras: maybeExtras, names: displayNames) {
+      Text(line.text)
         .font(.footnote.italic())
         .foregroundStyle(Theme.textMuted)
         .multilineTextAlignment(.center)
@@ -58,9 +61,6 @@ struct MessageRow: View {
   }
 
   private var message: MessageItem { entry.message }
-  private var files: [FileInfo] { maybeExtras?.files ?? [] }
-  private var isDeleted: Bool { maybeExtras?.isDeleted == true }
-  private var isEvent: Bool { message.body.isEmpty && files.isEmpty && !isDeleted }
   private var showsSender: Bool { look.showsSenders && !isMine }
 
   private var bubbleRow: some View {
@@ -83,7 +83,10 @@ struct MessageRow: View {
           showsName: showsSender && !entry.isContinuation, displayNames: displayNames)
         if !isMine { Spacer(minLength: look.gutter(listWidth: listWidth)) }
       }
-      BelowBubble(message: message, maybeExtras: maybeExtras, showsThreadLink: showsThreadLink, onOpenThread: onOpenThread)
+      BelowBubble(
+        message: message, maybeExtras: maybeExtras, showsThreadLink: showsThreadLink, onOpenThread: onOpenThread,
+        canReact: canReact
+      )
         .padding(.leading, showsSender ? senderAvatarSize + senderAvatarGap : 0)
     }
     .frame(maxWidth: .infinity, alignment: isMine ? .trailing : .leading)
@@ -341,9 +344,27 @@ struct BubbleFooter: View {
     } else if message.isPending {
       // Not confirmed by the server yet; the core keeps retrying in the background.
       Image(systemName: "clock").accessibilityLabel(Text("pending"))
+    } else if maybeExtras?.isRead == true {
+      // The other member of the DM read it: two ticks at the bubble's full text colour, where the
+      // single "sent" tick is muted (desktop and web: two accent ticks, #769).
+      DoubleCheckmark().foregroundStyle(Theme.onOwnBubble).accessibilityLabel(Text("message_read"))
     } else {
       Image(systemName: "checkmark").accessibilityLabel(Text("message_sent"))
     }
+  }
+}
+
+/// Two overlapping ticks, the read state of an own message. SF Symbols has no double tick, so two
+/// `checkmark`s share some room; the overlap scales with the text like the symbols do.
+struct DoubleCheckmark: View {
+  @ScaledMetric(relativeTo: .caption2) private var overlap: CGFloat = 5
+
+  var body: some View {
+    HStack(spacing: -overlap) {
+      Image(systemName: "checkmark")
+      Image(systemName: "checkmark")
+    }
+    .accessibilityElement(children: .ignore)
   }
 }
 
@@ -354,6 +375,7 @@ struct BelowBubble: View {
   let maybeExtras: MessageExtras?
   let showsThreadLink: Bool
   let onOpenThread: () -> Void
+  var canReact = true
 
   var body: some View {
     if maybeExtras?.isSendFailed == true { notSentLine }
@@ -366,6 +388,7 @@ struct BelowBubble: View {
                 .toggleReaction(conversationId: message.conversationId, messageId: message.id, emoji: reaction.emoji))
             }
           }
+          .disabled(!canReact)
         }
       }
     }
@@ -434,16 +457,51 @@ struct BubbleReplyQuote: View {
   }
 }
 
-/// Square tiles, two per row, across the bubble; a tap opens the picture like a single one.
+/// A message's pictures as an album across the bubble, laid out as on every platform (the core's
+/// `albumLayout`): two side by side, three with the first spanning both rows, four in two rows, and
+/// "+N" on the last tile for the rest. A tap opens the viewer on that picture; it pages through all of
+/// them.
 struct ImageGrid: View {
   let images: [FileInfo]
   let width: CGFloat
 
+  private let spacing: CGFloat = 3
+
   var body: some View {
-    LazyVGrid(columns: [GridItem(.flexible(), spacing: 3), GridItem(.flexible(), spacing: 3)], spacing: 3) {
-      ForEach(images) { image in AttachmentView(file: image, isTile: true) }
+    let layout =
+      albumLayout(pictures: UInt32(clamping: images.count))
+      ?? AlbumLayout(tiles: UInt32(clamping: images.count), hidden: 0, isFirstTall: false)
+    let shown = Array(images.prefix(Int(layout.tiles)))
+    let side = max(0, (width - spacing) / 2)
+    Group {
+      if layout.isFirstTall, shown.count == 3 {
+        HStack(spacing: spacing) {
+          tile(shown, 0, layout).frame(width: side, height: side * 2 + spacing)
+          VStack(spacing: spacing) {
+            tile(shown, 1, layout).frame(width: side, height: side)
+            tile(shown, 2, layout).frame(width: side, height: side)
+          }
+        }
+      } else {
+        VStack(spacing: spacing) {
+          ForEach(Array(stride(from: 0, to: shown.count, by: 2)), id: \.self) { row in
+            HStack(spacing: spacing) {
+              ForEach(row..<min(row + 2, shown.count), id: \.self) { index in
+                tile(shown, index, layout).frame(width: side, height: side)
+              }
+            }
+            .frame(width: width, alignment: .leading)
+          }
+        }
+      }
     }
-    .frame(width: width)
+    .frame(width: width, alignment: .leading)
+  }
+
+  private func tile(_ shown: [FileInfo], _ index: Int, _ layout: AlbumLayout) -> some View {
+    let isLast = index + 1 == Int(layout.tiles)
+    return AttachmentView(
+      file: shown[index], isTile: true, maybeHiddenCount: isLast && layout.hidden > 0 ? Int(layout.hidden) : nil)
   }
 }
 

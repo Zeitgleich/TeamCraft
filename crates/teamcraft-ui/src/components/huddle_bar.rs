@@ -1,5 +1,6 @@
 use leptos::prelude::*;
 
+use crate::areas::{self, Place, lazy_area};
 use crate::calls::{CallKind, CallPhase, CallRequest};
 use crate::components::avatar::{Avatar, AvatarSize};
 use crate::components::icons::{Icon, IconName};
@@ -12,6 +13,22 @@ use crate::state::use_app_state;
 /// Strip under the channel header: a running huddle to join, or the controls of the user's own call.
 #[component]
 pub fn HuddleBar(conversation: ConversationId) -> impl IntoView {
+  let state = use_app_state();
+  let call = state.call;
+  let is_shown = Memo::new(move |_| {
+    call.is_in_call_for(conversation) || state.read(|backend| backend.huddle(conversation)).is_some()
+  });
+  // The bar loads with the first call it shows (`areas::huddle_bar`), next to the call screens.
+  move || {
+    is_shown
+      .get()
+      .then(|| lazy_area(Place::Inline, move || areas::huddle_bar(conversation)))
+  }
+}
+
+/// The bar itself, while a call goes on in the conversation or this account is in it.
+#[component]
+pub fn HuddleBarContent(conversation: ConversationId) -> impl IntoView {
   let state = use_app_state();
   let i18n = use_i18n();
   let call = state.call;

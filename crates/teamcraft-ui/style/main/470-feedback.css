@@ -1,0 +1,18 @@
+/* A failed action (issue #322): stays until closed, with the details behind a toggle. */
+.toast-error { border-color: var(--danger); border-inline-start-width: 4px; }
+.toast-details summary { cursor: pointer; font-size: var(--text-xs); letter-spacing: var(--tracking-xs); color: var(--text-muted); }
+.toast-detail-text { display: block; margin-top: .25rem; font-size: var(--text-xs); letter-spacing: var(--tracking-xs); white-space: pre-wrap; overflow-wrap: anywhere; user-select: text; }
+
+/* A button whose work runs (PendingAction): disabled, with a spinner in front of its label. */
+.btn[aria-busy="true"] { cursor: progress; }
+.btn .spinner { display: inline-block; width: 14px; height: 14px; margin-inline-end: .4rem; vertical-align: -2px; border-color: color-mix(in srgb, currentColor 30%, transparent); border-top-color: currentColor; }
+
+/* After a panic the app can't go on; this covers everything and only offers a reload. It is built
+   without the app's code (which is dead by then), so it keeps its look without the theme too. */
+.panic-overlay { position: fixed; inset: 0; z-index: 2147483647; display: flex; align-items: center; justify-content: center; padding: 16px; background: rgba(0, 0, 0, .55); }
+.panic-card { display: flex; flex-direction: column; gap: 12px; width: min(32rem, 100%); padding: 24px; border-radius: 12px; background: var(--surface, Canvas); color: var(--text, CanvasText); box-shadow: 0 12px 40px rgba(0, 0, 0, .4); font: var(--text-md)/1.45 system-ui, sans-serif; }
+.panic-card h2 { margin: 0; font-size: var(--text-xl); letter-spacing: var(--tracking-xl); line-height: var(--leading-xl); }
+.panic-card p { margin: 0; }
+.panic-details { width: 100%; min-height: 6rem; resize: vertical; font: var(--text-xs)/1.4 ui-monospace, monospace; }
+.panic-reload { align-self: flex-start; padding: 8px 16px; border-radius: 8px; background: var(--accent, #2563eb); color: var(--on-accent, #fff); text-decoration: none; font-weight: var(--weight-semibold); }
+

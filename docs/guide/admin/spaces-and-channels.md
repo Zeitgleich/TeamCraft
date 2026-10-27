@@ -55,10 +55,10 @@ permission check is the finer control.
 
 ## Admin joining a private channel
 
-An admin can add themselves to a private channel, never silently: members see a system message with
-an admin badge. The policy `admin_self_join` controls it, see
-[Security policy](security-policy.md). `owner_approval` is not implemented yet and currently behaves
-like a refusal.
+An admin can add themselves to a private channel, never silently: every member's app shows "…
+joined this channel as a workspace admin", worked out from the encrypted membership change itself.
+The policy `admin_self_join` controls it, see [Security policy](security-policy.md); with
+`owner_approval` the admin asks and a channel owner lets them in.
 
 ## History policy
 

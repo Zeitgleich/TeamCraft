@@ -122,6 +122,11 @@ pub struct MessageExtras {
   /// or "delete" ([`crate::remote::ChatAction::DiscardUnsent`]) instead of "sending…" forever.
   #[serde(default)]
   pub is_send_failed: bool,
+  /// An own message every other member read, in a conversation whose receipts show as ticks
+  /// ([`crate::receipts::ReadIndicator::Ticks`]): its two ticks (#568, #769). Never set without
+  /// receipts (channels, group DMs, receipts off on either side).
+  #[serde(default)]
+  pub is_read: bool,
 }
 
 impl MessageExtras {
@@ -144,6 +149,7 @@ impl MessageExtras {
       maybe_link_preview: None,
       maybe_workspace_event: None,
       is_send_failed: false,
+      is_read: false,
     }
   }
 }
@@ -337,6 +343,10 @@ pub enum FileFailure {
   /// The file storage (or the server) answered "unavailable": an outage a later retry gets
   /// through (#742).
   StorageUnavailable,
+  /// The server doesn't have the file (any more), or doesn't give it to this user.
+  Missing,
+  /// A captive portal answered, or the connection's certificate isn't trusted.
+  Intercepted,
 }
 
 /// The sender's preview of a link, inside the encrypted message (e2ee.md §12).
@@ -569,6 +579,8 @@ pub enum BrowseJoin {
   AsAdmin,
   /// A private channel whose owners have to approve an admin (`admin_self_join: owner_approval`).
   NeedsApproval,
+  /// Like [`Self::NeedsApproval`], and the admin asked already: the owners decide.
+  Requested,
   /// A public channel: anyone in the space joins.
   #[default]
   #[serde(other)]
@@ -611,30 +623,46 @@ pub enum WorkspaceEvent {
     user: UserId,
     by: UserId,
   },
+  // The next five are changes the server records of the channel (issue #818): the server's word.
+  // They name who made the change (`by`) only when that member's own encrypted announcement
+  // matched it, or the user made it on this device; otherwise `by` is absent ("This channel was
+  // archived").
   Archived {
-    by: UserId,
+    #[serde(rename = "by", default, skip_serializing_if = "Option::is_none")]
+    maybe_by: Option<UserId>,
   },
   Unarchived {
-    by: UserId,
+    #[serde(rename = "by", default, skip_serializing_if = "Option::is_none")]
+    maybe_by: Option<UserId>,
   },
   MadePrivate {
-    by: UserId,
+    #[serde(rename = "by", default, skip_serializing_if = "Option::is_none")]
+    maybe_by: Option<UserId>,
   },
   MadePublic {
-    by: UserId,
+    #[serde(rename = "by", default, skip_serializing_if = "Option::is_none")]
+    maybe_by: Option<UserId>,
   },
-  /// The channel moved to the space with this name (empty if the mover's client did not know it).
+  /// The channel moved to the space with this name (empty if this device does not know it).
   Moved {
-    by: UserId,
+    #[serde(rename = "by", default, skip_serializing_if = "Option::is_none")]
+    maybe_by: Option<UserId>,
     space: String,
   },
   Pinned {
     message: MessageId,
     by: UserId,
   },
-  /// A workspace admin added themselves to the private channel (admin.md §2.4): always shown.
+  /// A workspace admin joined the private channel (admin.md §2.4): always shown. By themselves
+  /// (`visible`, neither field), let in by a channel member under `owner_approval`
+  /// (`maybe_approved_by`), or added by somebody without an approval to ask for
+  /// (`maybe_added_by`); at most one of them is set.
   AdminJoined {
     user: UserId,
+    #[serde(rename = "approved_by", default, skip_serializing_if = "Option::is_none")]
+    maybe_approved_by: Option<UserId>,
+    #[serde(rename = "added_by", default, skip_serializing_if = "Option::is_none")]
+    maybe_added_by: Option<UserId>,
   },
   #[serde(other)]
   Unknown,
@@ -755,6 +783,42 @@ mod tests {
     assert_eq!(parsed.priority, MessagePriority::Normal);
     assert!(!parsed.is_silent && !parsed.wants_acknowledgement && parsed.files.is_empty());
     assert_eq!(parsed.conversation, id_from_raw(7));
+  }
+
+  #[test]
+  fn read_state_and_workspace_events_keep_the_names_the_mobile_apps_decode() {
+    let mut extras = MessageExtras::new(id_from_raw(9));
+    extras.is_read = true;
+    assert_eq!(serde_json::to_value(&extras).expect("serialize")["is_read"], true);
+    assert_eq!(
+      serde_json::to_value(WorkspaceEvent::MemberAdded {
+        user: id_from_raw(2),
+        by: id_from_raw(1),
+        history: HistoryPolicy::Full,
+      })
+      .expect("serialize"),
+      serde_json::json!({ "event": "member_added", "user": "2", "by": "1", "history": "full" })
+    );
+    assert_eq!(
+      serde_json::to_value(WorkspaceEvent::Moved {
+        maybe_by: Some(id_from_raw(1)),
+        space: "Project A".into(),
+      })
+      .expect("serialize"),
+      serde_json::json!({ "event": "moved", "by": "1", "space": "Project A" })
+    );
+    // A change nobody is named for (issue #818) leaves `by` out; the apps word it without a name.
+    assert_eq!(
+      serde_json::to_value(WorkspaceEvent::Archived { maybe_by: None }).expect("serialize"),
+      serde_json::json!({ "event": "archived" })
+    );
+    assert_eq!(
+      serde_json::from_value::<WorkspaceEvent>(serde_json::json!({ "event": "made_private", "by": "4" }))
+        .expect("parse"),
+      WorkspaceEvent::MadePrivate {
+        maybe_by: Some(id_from_raw(4))
+      }
+    );
   }
 
   #[test]

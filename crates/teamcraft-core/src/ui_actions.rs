@@ -8,6 +8,7 @@ use teamcraft_client_api::actions::{
 use teamcraft_client_api::model::{
   Bookmark, ConversationId, IntegrationSource, Message, MessageId, NewIntegrationSource, ThreadId, UserId,
 };
+use teamcraft_client_api::receipts::{is_read_by_all, seen_by};
 use teamcraft_proto::{ClientMessageId, SourceChange, SourceId};
 
 use crate::client::previews::queue_preview;
@@ -303,6 +304,39 @@ impl<S: LocalStore> CoreChatBackend<S> {
       .is_some_and(|authority| authority.may_manage(self.me_id()))
   }
 
+  /// Whether this user signs the channel's roles in a way members accept: an admin of the fresh
+  /// workspace roster, a signed channel admin, or, while nothing is signed, an admin the server
+  /// lists, who founds the log (e2ee.md §4.6.1).
+  pub(crate) fn ui_can_sign_channel_roles(&self, conversation: ConversationId) -> bool {
+    let members: Option<teamcraft_proto::ListConversationMembersResponse> = self.read(records::get_json(
+      self.store_ref(),
+      Table::Members,
+      &conversation.to_string(),
+    ));
+    let is_listed_admin = members
+      .into_iter()
+      .flat_map(|list| list.members)
+      .any(|member| member.user.id == self.me_id() && member.role == teamcraft_proto::ChannelRole::Admin);
+    let workspace: crate::workspace::WorkspaceState = self.read(
+      records::get_json(self.store_ref(), Table::Workspace, crate::client::WORKSPACE_KEY)
+        .map(Option::unwrap_or_default),
+    );
+    let signed: crate::channel_roles::ChannelRoleState = self.read(
+      records::get_json(
+        self.store_ref(),
+        Table::Workspace,
+        &crate::client::channel_roles_key(conversation),
+      )
+      .map(Option::unwrap_or_default),
+    );
+    let max_age_ms =
+      i64::try_from(crate::ClientSettings::default().workspace_max_age.as_millis()).unwrap_or(i64::MAX);
+    signed
+      .signing_authorities(self.me_id(), &workspace, self.now_ms(), max_age_ms)
+      .into_iter()
+      .any(|authority| authority != crate::channel_roles::SignerAuthority::Founder || is_listed_admin)
+  }
+
   fn source_authority(&self) -> Option<SourceAuthority> {
     let workspace: crate::workspace::WorkspaceState = self.read(
       records::get_json(self.store_ref(), Table::Workspace, crate::client::WORKSPACE_KEY)
@@ -409,10 +443,8 @@ impl<S: LocalStore> CoreChatBackend<S> {
       .conversations_raw()
       .into_iter()
       .find(|candidate| candidate.id == conversation)?;
-    self
-      .unread_messages(&response)
-      .first()
-      .and_then(|stored| stored.maybe_server_id)
+    // A line derived from a commit can be the first unread one: its row goes by the commit's ID.
+    self.unread_messages(&response).first().map(ui_message_id)
   }
 
   pub(crate) fn ui_message_extras(
@@ -422,11 +454,19 @@ impl<S: LocalStore> CoreChatBackend<S> {
   ) -> Vec<MessageExtras> {
     let all = self.all_messages(conversation);
     let data = self.read(stored_account_data(self.store_ref()));
+    let ticks = Ticks::read(self, conversation);
     messages
       .iter()
       .filter_map(|id| {
-        let stored = all.iter().find(|stored| ui_message_id(stored) == *id)?;
+        // A server can give a message the ID a derived line sits at (a commit's, issue #811; the
+        // announcement a line moved to is hidden, issue #818); the line wins, so the ID clash
+        // can't hide it.
+        let stored = all
+          .iter()
+          .find(|stored| stored.is_local_line() && ui_message_id(stored) == *id)
+          .or_else(|| all.iter().find(|stored| ui_message_id(stored) == *id))?;
         let mut extras = MessageExtras::new(*id);
+        extras.is_read = ticks.is_read(stored, self.me_id());
         extras.is_pinned = stored.is_pinned;
         extras.is_saved = data.is_saved(conversation, stored.client_message_id);
         extras.is_deleted = matches!(stored.content, MessageContent::Deleted);
@@ -448,7 +488,7 @@ impl<S: LocalStore> CoreChatBackend<S> {
         match &stored.content {
           MessageContent::Text { meta, .. } => self.fill_from_meta(&mut extras, meta, &all),
           MessageContent::Event { event } => {
-            extras.maybe_workspace_event = workspace_event(event, stored.sender_user_id);
+            extras.maybe_workspace_event = workspace_event(event, stored);
           },
           _ => {},
         }
@@ -528,6 +568,37 @@ impl<S: LocalStore> CoreChatBackend<S> {
   }
 }
 
+/// What the two ticks of the user's own messages need, read once per conversation: its members
+/// and their receipts where receipts show as ticks (a DM, #635), nothing elsewhere.
+struct Ticks {
+  maybe_members: Option<Vec<UserId>>,
+  receipts: Vec<(UserId, MessageId)>,
+}
+
+impl Ticks {
+  fn read<S: LocalStore>(backend: &CoreChatBackend<S>, conversation: ConversationId) -> Self {
+    let maybe_members = backend.tick_members(conversation);
+    let receipts = match maybe_members {
+      Some(_) => backend.read_receipts(conversation),
+      None => Vec::new(),
+    };
+    Self {
+      maybe_members,
+      receipts,
+    }
+  }
+
+  /// Whether every other member read `stored`, an own message the server has (#568, #769).
+  fn is_read(&self, stored: &StoredMessage, me: UserId) -> bool {
+    match (&self.maybe_members, stored.maybe_server_id) {
+      (Some(members), Some(server_id)) if stored.sender_user_id == me => {
+        is_read_by_all(&seen_by(&self.receipts, server_id), members, me)
+      },
+      _ => false,
+    }
+  }
+}
+
 fn priority_of(priority: MessagePriority) -> Priority {
   match priority {
     MessagePriority::Normal => Priority::Normal,
@@ -559,9 +630,12 @@ fn parse_permalink(link: &str) -> Option<PermalinkTarget> {
   })
 }
 
-/// The UI's view of a conversation event, sent by `actor`; `None` for events the UI shows through
-/// its own system events only (joins, leaves, renames, topics).
-fn workspace_event(event: &ConversationEvent, actor: UserId) -> Option<WorkspaceEvent> {
+/// The UI's view of the conversation event `stored` holds; `None` for events the UI shows through
+/// its own system events only (joins, leaves, renames, topics). A change the server reports names
+/// whoever the line names, if anybody (issue #818); other events their sender.
+fn workspace_event(event: &ConversationEvent, stored: &StoredMessage) -> Option<WorkspaceEvent> {
+  let actor = stored.sender_user_id;
+  let maybe_by = stored.maybe_actor();
   Some(match event {
     ConversationEvent::MemberAdded { user, history } => WorkspaceEvent::MemberAdded {
       user: *user,
@@ -572,13 +646,19 @@ fn workspace_event(event: &ConversationEvent, actor: UserId) -> Option<Workspace
       user: *user,
       by: actor,
     },
-    ConversationEvent::AdminJoined { user } => WorkspaceEvent::AdminJoined { user: *user },
-    ConversationEvent::Archived => WorkspaceEvent::Archived { by: actor },
-    ConversationEvent::Unarchived => WorkspaceEvent::Unarchived { by: actor },
-    ConversationEvent::MadePrivate => WorkspaceEvent::MadePrivate { by: actor },
-    ConversationEvent::MadePublic => WorkspaceEvent::MadePublic { by: actor },
+    // Only the line derived from the commit shows (issue #811): its author is who let the admin
+    // in, or the admin for their own self-join.
+    ConversationEvent::AdminJoined { user, is_approved } => WorkspaceEvent::AdminJoined {
+      user: *user,
+      maybe_approved_by: is_approved.then_some(actor),
+      maybe_added_by: (!is_approved && actor != *user).then_some(actor),
+    },
+    ConversationEvent::Archived => WorkspaceEvent::Archived { maybe_by },
+    ConversationEvent::Unarchived => WorkspaceEvent::Unarchived { maybe_by },
+    ConversationEvent::MadePrivate => WorkspaceEvent::MadePrivate { maybe_by },
+    ConversationEvent::MadePublic => WorkspaceEvent::MadePublic { maybe_by },
     ConversationEvent::Moved { space } => WorkspaceEvent::Moved {
-      by: actor,
+      maybe_by,
       space: space.clone(),
     },
     ConversationEvent::Joined

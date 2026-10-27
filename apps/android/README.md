@@ -191,7 +191,7 @@ adb install app/build/outputs/apk/full/debug/app-full-debug.apk
 ```
 
 Enter `http://127.0.0.1:8081` as the server address. Debug builds accept plain HTTP to any host
-(`src/debug/res/xml/network_security_config.xml`), e.g. `http://10.0.2.2:8081` or a machine on the
+(`BuildConfig.DEBUG`, which the core enforces), e.g. `http://10.0.2.2:8081` or a machine on the
 LAN, but the issuer the server announces must be reachable from the device under the same name:
 Keycloak writes the host the device used into the token's issuer, and the server accepts only its
 configured issuer, which is why `adb reverse` and `127.0.0.1` are the easy way. The dev realm's
@@ -206,8 +206,10 @@ Release builds allow plain HTTP only to the device itself (`127.0.0.1`, `localho
 - **OIDC session:** AppAuth's state (refresh token included) is sealed the same way.
 - **Backups:** off, and every domain excluded from cloud backup and device transfer. A new phone is
   set up by linking it from another device or with the recovery passphrase.
-- **TLS:** the core trusts the Mozilla root set (`webpki-roots`) on Android; HTTPS is required except
-  for the device itself (and any host in debug builds, see above).
+- **TLS:** every request the app sends itself goes through the core, sign-in and token refresh included
+  (`core/CoreHttp.kt`, issue #433). It trusts the CAs the app hands over (`core/NetworkTrust.kt`,
+  docs/operations.md), else the Mozilla root set (`webpki-roots`); HTTPS is required except for the
+  device itself (and any host in debug builds, see above).
 
 ## Push and notifications
 

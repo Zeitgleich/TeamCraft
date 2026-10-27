@@ -1,0 +1,21 @@
+/* A slim bar between the feed and the composer: it takes its own space, so it never covers a message. */
+.jump-latest {
+  flex: none;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  height: 30px;
+  border: 0;
+  border-top: 1px solid var(--border);
+  background: var(--accent-soft);
+  color: var(--accent-strong);
+  font-weight: var(--weight-semibold);
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .jump-latest:hover {
+    background: var(--surface-3);
+  }
+}
+

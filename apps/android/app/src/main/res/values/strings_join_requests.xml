@@ -1,0 +1,39 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+  <!-- Admins asking to join a private channel the user owns (admin.md §2.4.1) -->
+  <string name="join_requests_title">Requests to join</string>
+  <string name="join_request_summary">%1$s asks to join %2$s as a workspace admin</string>
+  <string name="join_request_summary_here">%1$s asks to join as a workspace admin</string>
+  <string name="join_request_hint">Approving lets them read what is posted from now on, as joining by themselves would. Everybody in the channel sees that a workspace admin joined.</string>
+  <string name="join_request_hint_history">Approving lets them read the earlier history too. Everybody in the channel sees that a workspace admin joined.</string>
+  <string name="join_request_share_history">Also share the earlier history</string>
+  <string name="join_request_not_admin">The signed roster on this device doesn\'t list them as a workspace admin, so you can only decline.</string>
+  <string name="join_request_approve">Approve</string>
+  <string name="join_request_decline">Decline</string>
+  <string name="join_request_gone">This request is no longer open: it was decided on another device or by another owner, withdrawn, or it expired.</string>
+  <string name="join_request_not_approvable">This device can\'t approve this request: the signed policy no longer asks for an owner\'s approval, or it isn\'t a private channel you are in.</string>
+  <string name="join_ask_too_soon">You asked to join this channel recently, and that request was declined or withdrawn. You can ask again once it would have expired.</string>
+  <string name="join_ask_not_admin">This device doesn\'t have a current signed roster that lists you as a workspace admin yet. Try again in a moment.</string>
+
+  <!-- Channel browser -->
+  <string name="browse_private">Private channel</string>
+  <string name="browse_join_ask">Ask to join</string>
+  <string name="browse_join_requested">Requested</string>
+  <string name="browse_join_requested_hint">The channel\'s owners decide. The request expires if nobody does.</string>
+  <string name="browse_join_withdraw">Withdraw</string>
+  <string name="browse_join_admin_elsewhere">Join as admin on desktop or web</string>
+
+  <!-- System lines -->
+  <string name="event_admin_joined">%1$s joined this channel as a workspace admin</string>
+  <string name="event_admin_joined_approved">%1$s joined this channel as a workspace admin, approved by %2$s</string>
+  <string name="event_admin_joined_added">%1$s joined this channel as a workspace admin, added by %2$s</string>
+
+  <!-- Notifications -->
+  <string name="notification_channel_join_requests">Requests to join</string>
+  <string name="notification_channel_join_requests_description">Workspace admins asking to join a channel you own</string>
+  <string name="join_request_notification_title">%1$s asks to join %2$s</string>
+  <string name="join_request_notification_title_unnamed">%1$s asks to join a channel</string>
+  <string name="join_request_notification_text">As a workspace admin. Approve shares only what is posted from now on; to share the earlier history, approve in Activity.</string>
+  <string name="join_request_notification_hidden_title">Request to join</string>
+  <string name="join_request_notification_hidden_text">A workspace admin asks to join a channel you own.</string>
+</resources>

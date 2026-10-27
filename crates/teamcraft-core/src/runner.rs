@@ -1,7 +1,8 @@
 //! Drives a [`Client`] for an app: keeps the gateway connected (through the
 //! [`ConnectionSupervisor`]), flushes the outbox, commits waiting membership changes and runs the
 //! UI's commands. File uploads and downloads run beside the loop, so a large file holds up neither
-//! sends nor the gateway.
+//! sends nor the gateway. It reports the device's activity on every new connection, so a resumed
+//! session the server timed out comes back online (docs/gateway.md, "Presence").
 //!
 //! The runner is a plain future without `Send` bounds: native apps poll it on a tokio task, the
 //! browser with `wasm_bindgen_futures::spawn_local` (ARCHITECTURE.md §7, one engine for all shells).
@@ -11,7 +12,7 @@ use std::time::Duration;
 use futures_channel::mpsc;
 use futures_util::StreamExt;
 use futures_util::future::{Either, select};
-use teamcraft_proto::GatewayServerMessage;
+use teamcraft_proto::{DeviceActivity, GatewayClientMessage, GatewayServerMessage};
 
 use crate::api::{ApiError, ServerApi};
 use crate::client::Client;
@@ -20,6 +21,8 @@ use crate::connection::{ConnectionSettings, ConnectionStatus, ConnectionSupervis
 use crate::downloads::{Downloads, Finished};
 use crate::platform;
 use crate::store::LocalStore;
+#[cfg(feature = "ui")]
+use crate::typing::TypingAnnouncer;
 #[cfg(feature = "ui")]
 use crate::ui_backend::CoreCommand;
 use crate::upkeep::{self, Upkeep, UploadMode};
@@ -37,9 +40,9 @@ pub struct SyncRunner<A: ServerApi, S> {
   /// connection (a frame every few seconds) can't postpone heartbeats until the server drops it.
   next_tick_ms: i64,
   upkeep: Upkeep,
-  /// When the user's typing was last announced, to send at most one per [`TYPING_INTERVAL_MS`].
+  /// The user's own typing, sent at most once per [`crate::typing::TYPING_INTERVAL_MS`].
   #[cfg(feature = "ui")]
-  last_typing: Option<(teamcraft_proto::ConversationId, i64)>,
+  typing: TypingAnnouncer,
   /// The file going up beside the loop.
   maybe_upload: Option<BlobUpload>,
   /// A file may be waiting for its upload: one was queued, a retry came due, or one finished.
@@ -52,10 +55,6 @@ pub struct SyncRunner<A: ServerApi, S> {
 
 /// How often the app is told to read again while a file goes up or down, for its progress.
 const TRANSFER_PROGRESS: Duration = Duration::from_millis(500);
-
-/// The server forwards one typing frame per 3 s and conversation; sending more is wasted.
-#[cfg(feature = "ui")]
-const TYPING_INTERVAL_MS: i64 = 3_000;
 
 /// Timing of the runner. Configurable; the defaults suit desktop and browser alike.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -84,6 +83,9 @@ pub enum RunnerCommand {
   /// A request the UI adapter queued.
   #[cfg(feature = "ui")]
   Ui(CoreCommand),
+  /// The device became active or idle (the app came to the foreground or went to the background,
+  /// or the user touched it): told to the server now if connected, and on every new connection.
+  SetActivity(DeviceActivity),
   /// Ends [`SyncRunner::run`], which hands the client back.
   Stop,
 }
@@ -132,7 +134,7 @@ impl<A: ServerApi, S: LocalStore> SyncRunner<A, S> {
       next_tick_ms: i64::MIN,
       upkeep,
       #[cfg(feature = "ui")]
-      last_typing: None,
+      typing: TypingAnnouncer::default(),
       maybe_upload: None,
       is_upload_due: true,
       downloads: Downloads::default(),
@@ -161,6 +163,8 @@ impl<A: ServerApi, S: LocalStore> SyncRunner<A, S> {
     self.flush().await;
     loop {
       if self.connection.connect_if_due(&mut self.client).await.is_some() {
+        // A resumed session keeps what the server last knew, which may be an away timeout.
+        self.report_activity().await;
         // Back online: what waited goes out now, not on the next tick.
         self.is_upload_due = true;
         self.flush().await;
@@ -253,6 +257,12 @@ impl<A: ServerApi, S: LocalStore> SyncRunner<A, S> {
   async fn on_command(&mut self, command: RunnerCommand) {
     match command {
       RunnerCommand::Flush => {},
+      RunnerCommand::SetActivity(activity) => {
+        self.client.set_device_activity(activity);
+        self.report_activity().await;
+        // Nothing to flush: the activity changes no stored state.
+        return;
+      },
       #[cfg(feature = "ui")]
       RunnerCommand::Ui(CoreCommand::Typing { conversation }) => {
         self.announce_typing(conversation).await;
@@ -326,27 +336,29 @@ impl<A: ServerApi, S: LocalStore> SyncRunner<A, S> {
     }
   }
 
-  /// Tells the other members that the user types, at most once per [`TYPING_INTERVAL_MS`] and
-  /// conversation; offline, it is dropped (a late indicator would be wrong).
+  /// Tells the other members that the user types (throttled; offline, it is dropped: a late
+  /// indicator would be wrong).
   #[cfg(feature = "ui")]
   async fn announce_typing(&mut self, conversation: teamcraft_proto::ConversationId) {
     let now = self.client.now_ms();
-    if self
-      .last_typing
-      .is_some_and(|(last, at)| last == conversation && now.saturating_sub(at) < TYPING_INTERVAL_MS)
-    {
-      return;
-    }
+    self
+      .typing
+      .announce(&mut self.connection, conversation, now)
+      .await;
+  }
+
+  /// Tells the server what the device last said about its activity; offline, the next connection
+  /// does. A failed send replaces the connection, which then reports it again.
+  async fn report_activity(&mut self) {
     if !self.connection.is_connected() {
       return;
     }
-    self.last_typing = Some((conversation, now));
-    if !self
-      .connection
-      .send(now, &Client::<A, S>::typing_frame(conversation))
-      .await
-    {
-      tracing::debug!("typing not announced");
+    let message = GatewayClientMessage::SetActivity {
+      activity: self.client.device_activity().clone(),
+    };
+    let now = self.client.now_ms();
+    if !self.connection.send(now, &message).await {
+      tracing::debug!("device activity not reported");
     }
   }
 

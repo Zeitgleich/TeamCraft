@@ -104,8 +104,8 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       records::put_json(&self.store, Table::Account, REPLACED_LAST_RESORT_KEY, &kept)?;
     }
     if !spent.is_empty() {
-      records::save_mls_storage(&self.store, &self.provider)?;
-      // The storage was rewritten without the bundles; the old copy goes from the files too.
+      self.save_mls_storage()?;
+      // The bundles' records are deleted; their old bytes go from the files too.
       self.store.purge_freed()?;
       tracing::info!(deleted = spent.len(), "deleted spent key packages");
     }

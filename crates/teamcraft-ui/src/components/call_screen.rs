@@ -5,8 +5,8 @@ use leptos::prelude::*;
 use teamcraft_proto::VideoTrackKind;
 
 use crate::calls::{
-  CallKind, CallLayout, CallRequest, Participant, ScreenContentMode, ScreenShareSound,
-  selected_camera_is_rear,
+  CallEvent, CallKind, CallLayout, CallRequest, MediaDevice, Participant, ScreenContentMode,
+  ScreenShareSound, selected_camera_is_rear,
 };
 use crate::components::call_prejoin::call_heading;
 use crate::components::call_video::{
@@ -176,6 +176,28 @@ pub fn CallScreen(request: CallRequest) -> impl IntoView {
   let participant_count = move || remote.get().len() + 1;
 
   let cameras = Memo::new(move |_| state.read(|backend| backend.media_devices()).cameras);
+  // A phone flips between front and back with one tap; elsewhere the camera button has a menu of
+  // the cameras (#819).
+  let has_camera_menu = Memo::new(move |_| !state.is_compact() && cameras.with(|cameras| cameras.len() > 1));
+  let has_camera_flip = Memo::new(move |_| state.is_compact() && cameras.with(|cameras| cameras.len() > 1));
+  // The list may be old: a camera plugged in, an iPhone that came near.
+  Effect::new(move |_| {
+    if call.is_camera_menu_open.get() {
+      effects_open.set(false);
+      share_open.set(false);
+      call.emit(CallEvent::RefreshDevices);
+    }
+  });
+  // The next call screen starts with the menu closed.
+  on_cleanup(move || {
+    // Gone only while the app itself is torn down.
+    let _ = call.is_camera_menu_open.try_set(false);
+  });
+  let pick_camera = move |id: String| {
+    call.is_camera_menu_open.set(false);
+    call.choose_camera(id.clone());
+    state.settings.prefs.update(|prefs| prefs.calls.camera_id = id);
+  };
   // Only the front camera is mirrored; a back camera shows the scene as it is.
   let is_self_mirrored = Signal::derive(move || {
     call.mirror_self_view.get()
@@ -469,6 +491,25 @@ pub fn CallScreen(request: CallRequest) -> impl IntoView {
           <BackgroundPicker effect=call.effect />
         </div>
       </Show>
+      <Show when=move || call.is_camera_menu_open.get() fallback=|| ()>
+        <div class="effects-popover camera-popover" role="dialog" aria-label=move || i18n.t("control-camera-choose")>
+          <h2 id="camera-menu-title">{move || i18n.t("prejoin-camera")}</h2>
+          <div class="camera-options" role="radiogroup" aria-labelledby="camera-menu-title">
+            {move || {
+              let listed = cameras.get();
+              if listed.is_empty() {
+                return view! { <p class="muted-text">{i18n.t("prejoin-no-camera")}</p> }.into_any();
+              }
+              let default_id = listed[0].id.clone();
+              listed
+                .into_iter()
+                .map(|camera| camera_option(camera, &default_id, call.camera_id, pick_camera))
+                .collect_view()
+                .into_any()
+            }}
+          </div>
+        </div>
+      </Show>
       <footer class="call-controls" role="toolbar" aria-label=move || i18n.t("call-controls-label")>
         <ControlButton
           is_off=Signal::derive(move || !call.is_mic_on.get())
@@ -490,11 +531,23 @@ pub fn CallScreen(request: CallRequest) -> impl IntoView {
           label=Signal::derive(move || if call.is_camera_on.get() { i18n.t("control-camera-off") } else { i18n.t("control-camera-on") })
           on_press=move || call.set_camera(!call.is_camera_on.get_untracked())
         />
-        <Show when=move || cameras.with(|cameras| cameras.len() > 1) fallback=|| ()>
+        <Show when=move || has_camera_flip.get() fallback=|| ()>
           <ControlButton
             icon=IconName::SwitchCamera
             label=Signal::derive(move || i18n.t("control-camera-flip"))
-            on_press=move || cameras.with_untracked(|cameras| call.flip_camera(cameras))
+            on_press=move || {
+              cameras.with_untracked(|cameras| call.flip_camera(cameras));
+              let id = call.camera_id.get_untracked();
+              state.settings.prefs.update(|prefs| prefs.calls.camera_id = id);
+            }
+          />
+        </Show>
+        <Show when=move || has_camera_menu.get() fallback=|| ()>
+          <ControlButton
+            is_active=call.is_camera_menu_open
+            icon=IconName::SwitchCamera
+            label=Signal::derive(move || i18n.t("control-camera-choose"))
+            on_press=move || call.is_camera_menu_open.update(|open| *open = !*open)
           />
         </Show>
         <Show when=can_share_screen fallback=|| ()>
@@ -508,6 +561,7 @@ pub fn CallScreen(request: CallRequest) -> impl IntoView {
             } else {
               // What to share comes from the system picker; the options come first.
               effects_open.set(false);
+              call.is_camera_menu_open.set(false);
               share_open.update(|open| *open = !*open);
             }
           }
@@ -529,6 +583,7 @@ pub fn CallScreen(request: CallRequest) -> impl IntoView {
             label=Signal::derive(move || i18n.t("call-effects"))
             on_press=move || {
               share_open.set(false);
+              call.is_camera_menu_open.set(false);
               effects_open.update(|open| *open = !*open);
             }
           />
@@ -570,6 +625,37 @@ pub fn CallScreen(request: CallRequest) -> impl IntoView {
 
 fn me_name(state: crate::state::AppState) -> String {
   state.me().display_name
+}
+
+/// One camera in the call's camera menu, checked while it is the one in use (nothing chosen: the
+/// default, `default_id`).
+fn camera_option(
+  camera: MediaDevice,
+  default_id: &str,
+  chosen: RwSignal<String>,
+  pick: impl Fn(String) + Copy + 'static,
+) -> impl IntoView {
+  let id = camera.id;
+  let is_default = id == default_id;
+  let is_chosen = {
+    let id = id.clone();
+    Signal::derive(move || chosen.with(|chosen| *chosen == id || (chosen.is_empty() && is_default)))
+  };
+  view! {
+    <button
+      type="button"
+      role="radio"
+      class="camera-option"
+      class:chosen=move || is_chosen.get()
+      aria-checked=move || is_chosen.get().to_string()
+      on:click=move |_| pick(id.clone())
+    >
+      <span class="camera-option-name">{camera.label}</span>
+      <Show when=move || is_chosen.get() fallback=|| ()>
+        <Icon name=IconName::Check />
+      </Show>
+    </button>
+  }
 }
 
 #[component]

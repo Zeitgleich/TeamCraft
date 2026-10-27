@@ -4,7 +4,7 @@
 use std::collections::BTreeMap;
 use std::future::Future;
 use std::panic::AssertUnwindSafe;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -19,7 +19,9 @@ use teamcraft_client_api::search::parse_query;
 use teamcraft_core::api::{AccessTokenSource, ApiError, HttpRendezvous, HttpServerApi, ServerApi};
 use teamcraft_core::client::NewDeviceLink;
 use teamcraft_core::client::files::sweep_staged_copies;
-use teamcraft_core::client::{LinkAnnouncement, LinkApproval, LinkRequestList};
+use teamcraft_core::client::{
+  LinkAnnouncement, LinkApproval, LinkRequestList, ReceiptCancel, SIGN_OUT_REVOKE_PATIENCE,
+};
 use teamcraft_core::clock::{Clock as _, SystemClock};
 use teamcraft_core::connection::{ConnectionStatus, NetworkChanges};
 use teamcraft_core::notify_rules::{load_mention_preferences, save_mention_preferences};
@@ -32,21 +34,20 @@ use teamcraft_core::runner::{RunnerCommand, RunnerHandle, RunnerSettings, SyncRu
 use teamcraft_core::store::{LocalStore as _, SealedSqliteStore, StaticKeySource};
 use teamcraft_core::ui_backend::{CoreChatBackend, CoreCommand};
 use teamcraft_core::{
-  Client, ClientSettings, EnrollmentOptions, EnrollmentSecret, LinkOffer, PendingEnrollment,
+  Client, ClientSettings, CoreError, EnrollmentOptions, EnrollmentSecret, LinkOffer, PendingEnrollment,
 };
 use teamcraft_crypto::backup::Argon2Settings;
 use teamcraft_crypto::secret::{SecretBytes, SymmetricKey};
-use teamcraft_proto::{CallJoinTokenResponse, ConversationId, Id, ThreadId};
-use tokio::sync::mpsc;
+use teamcraft_proto::{CallJoinTokenResponse, ConversationId, DeviceActivity, Id, ThreadId};
+use tokio::sync::{mpsc, oneshot};
 use tokio::task::{JoinHandle, LocalSet};
 
 use crate::calls::{CallHub, CallPreparation};
 use crate::error::TeamCraftError;
 use crate::types::{
-  AccountState, AppConfig, ConversationItem, ConversationKind, LinkPlatform, LinkRequestItem,
-  MentionSettings, MessageItem, NotificationContent, NotificationContentSettings, Presence,
-  PushDiagnosticsInfo, PushNotification, PushService, SearchHitItem, SegmentPrefetchMode,
-  SegmentPrefetchResult, TestPushResult,
+  AccountState, AppConfig, ConversationItem, LinkPlatform, LinkRequestItem, MentionSettings, MessageItem,
+  NotificationContent, NotificationContentSettings, Presence, PushDiagnosticsInfo, PushNotification,
+  PushService, SearchHitItem, SegmentPrefetchMode, SegmentPrefetchResult, StoreProblem, TestPushResult,
 };
 use crate::{EventListener, TokenProvider};
 
@@ -101,6 +102,9 @@ pub(crate) struct Engine {
   link_requests: LinkRequestList,
   maybe_new_link: Option<NewDeviceLink<HttpRendezvous>>,
   maybe_approval: Option<PendingApproval>,
+  /// Stops the wait for the receipt of the keys this device sent, which runs beside the jobs
+  /// (issue #415).
+  maybe_receipt: Option<ReceiptCancel>,
   calls: CallHub,
   /// Applied to decrypted push texts (keywords, first name).
   mentions: MentionSettings,
@@ -112,6 +116,29 @@ pub(crate) struct Engine {
 pub(crate) struct SyncSignals {
   pub(crate) network: NetworkChanges,
   pub(crate) connection: ConnectionStatus,
+}
+
+/// What opening the engine needs, checked once. The handle keeps it while the local store is
+/// unreadable, to open the engine again after a reset (issue #414); the key zeroizes on drop.
+pub(crate) struct EngineStart {
+  server_url: String,
+  maybe_push_gateway_url: Option<String>,
+  /// The app's private files directory.
+  data_dir: PathBuf,
+  account: String,
+  key: SymmetricKey,
+  tokens: Arc<dyn TokenProvider>,
+  listener: Arc<dyn EventListener>,
+  signals: SyncSignals,
+}
+
+/// Why the engine didn't open.
+#[derive(Debug)]
+pub(crate) enum OpenError {
+  /// The local store can't be read by this version, now or after a restart (issue #414): the user
+  /// decides what happens to it.
+  Unreadable(StoreProblem),
+  Failed(TeamCraftError),
 }
 
 /// Where the client is: not enrolled yet, held by the engine, or running in the sync loop.
@@ -141,6 +168,24 @@ pub(crate) enum PushOpening {
   Retry,
 }
 
+/// Who opens a push: the app, whose client may catch the conversation up, or a notification
+/// extension next to the app (iOS), which must not advance the account's state: two processes
+/// would each advance their own copy of the MLS state (e2ee.md §7.2, issue #424 review H2).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum PushReader {
+  App,
+  Extension,
+}
+
+impl PushReader {
+  /// Whether the client catches the push's conversation up (welcomes, MLS backlog, messages)
+  /// when the preview couldn't read the message: only the app's own, and only while it isn't
+  /// syncing (the sync loop brings the message itself).
+  fn catches_up(self, needs_catch_up: bool, is_client_idle: bool) -> bool {
+    self == Self::App && needs_catch_up && is_client_idle
+  }
+}
+
 /// The app's [`TokenProvider`] as the core's token source.
 #[derive(Clone)]
 pub(crate) struct ForeignTokens(Arc<dyn TokenProvider>);
@@ -168,13 +213,9 @@ async fn catch_up_for_push(
   Ok(())
 }
 
-/// Starts the engine thread and waits until the store is open.
-pub(crate) fn spawn(
-  config: AppConfig,
-  tokens: Arc<dyn TokenProvider>,
-  listener: Arc<dyn EventListener>,
-  signals: SyncSignals,
-) -> Result<mpsc::UnboundedSender<Job>, TeamCraftError> {
+/// Starts the engine thread for `start` and waits until the store is open.
+pub(crate) fn spawn(start: &EngineStart) -> Result<mpsc::UnboundedSender<Job>, OpenError> {
+  let start = start.duplicate();
   let (ready, opened) = std::sync::mpsc::channel();
   let (jobs, mut queue) = mpsc::unbounded_channel::<Job>();
   std::thread::Builder::new()
@@ -184,14 +225,14 @@ pub(crate) fn spawn(
         Ok(runtime) => runtime,
         Err(error) => {
           // The constructor waits for this; if it has gone, nobody needs the answer.
-          let _ = ready.send(Err(TeamCraftError::Core(error.to_string())));
+          let _ = ready.send(Err(OpenError::Failed(TeamCraftError::Core(error.to_string()))));
           return;
         },
       };
       LocalSet::new().block_on(&runtime, async move {
         // A panic while opening would otherwise only show as `EngineStopped`; Rust's panic output
         // goes nowhere on Android, so the error carries the message and location instead.
-        let mut engine = match open_reporting_panics(config, ForeignTokens(tokens), listener, signals) {
+        let mut engine = match open_reporting_panics(start) {
           Ok(engine) => engine,
           Err(error) => {
             let _ = ready.send(Err(error));
@@ -205,18 +246,15 @@ pub(crate) fn spawn(
         engine.stop_runner().await;
       });
     })
-    .map_err(|error| TeamCraftError::Core(error.to_string()))?;
-  opened.recv().map_err(|_| TeamCraftError::EngineStopped)??;
+    .map_err(|error| OpenError::Failed(TeamCraftError::Core(error.to_string())))?;
+  opened
+    .recv()
+    .map_err(|_| OpenError::Failed(TeamCraftError::EngineStopped))??;
   Ok(jobs)
 }
 
 /// [`Engine::open`], with a panic turned into an error that says where it happened.
-fn open_reporting_panics(
-  config: AppConfig,
-  tokens: ForeignTokens,
-  listener: Arc<dyn EventListener>,
-  signals: SyncSignals,
-) -> Result<Engine, TeamCraftError> {
+fn open_reporting_panics(start: EngineStart) -> Result<Engine, OpenError> {
   let report = Arc::new(Mutex::new(String::new()));
   let previous_hook = std::panic::take_hook();
   let hook_report = report.clone();
@@ -225,22 +263,55 @@ fn open_reporting_panics(
       *report = info.to_string();
     }
   }));
-  let opened = std::panic::catch_unwind(AssertUnwindSafe(|| {
-    Engine::open(config, tokens, listener, signals)
-  }));
+  let opened = std::panic::catch_unwind(AssertUnwindSafe(|| Engine::open(start)));
   std::panic::set_hook(previous_hook);
   opened.unwrap_or_else(|_| {
     let message = report.lock().map(|report| report.clone()).unwrap_or_default();
-    Err(TeamCraftError::Core(format!(
+    Err(OpenError::Failed(TeamCraftError::Core(format!(
       "opening the engine panicked: {message}"
-    )))
+    ))))
   })
 }
 
-impl Engine {
-  fn open(
+/// Sets the unreadable database at `path` aside: it and its log are renamed beside themselves
+/// (`….db.unreadable-<now_ms>`), never deleted, so a new one opens there (issue #414). The log goes
+/// first: a new database must never find the old one's log, and a failure leaves the database
+/// where it was.
+pub(crate) fn set_store_aside(path: &Path, now_ms: i64) -> Result<(), TeamCraftError> {
+  for extension in ["db-wal", "db-shm", "db"] {
+    let file = path.with_extension(extension);
+    let aside = path.with_extension(format!("{extension}.unreadable-{now_ms}"));
+    match std::fs::rename(&file, &aside) {
+      Ok(()) => tracing::warn!(file = extension, "set the unreadable local database aside"),
+      Err(error) if error.kind() == std::io::ErrorKind::NotFound => {},
+      Err(error) => {
+        return Err(TeamCraftError::Storage(format!(
+          "could not set the local database aside: {error}"
+        )));
+      },
+    }
+  }
+  Ok(())
+}
+
+/// Deletes plaintext folders (decrypted downloads, staged uploads); a missing one is fine.
+pub(crate) fn delete_plaintext_dirs<'a>(
+  directories: impl IntoIterator<Item = &'a Path>,
+) -> Result<(), TeamCraftError> {
+  for directory in directories {
+    match std::fs::remove_dir_all(directory) {
+      Ok(()) => {},
+      Err(error) if error.kind() == std::io::ErrorKind::NotFound => {},
+      Err(error) => return Err(TeamCraftError::Storage(error.to_string())),
+    }
+  }
+  Ok(())
+}
+
+impl EngineStart {
+  pub(crate) fn new(
     config: AppConfig,
-    tokens: ForeignTokens,
+    tokens: Arc<dyn TokenProvider>,
     listener: Arc<dyn EventListener>,
     signals: SyncSignals,
   ) -> Result<Self, TeamCraftError> {
@@ -249,12 +320,70 @@ impl Engine {
     if config.account.is_empty() || config.account.contains(['/', '\\']) || config.account.contains("..") {
       return Err(TeamCraftError::InvalidInput("account name".into()));
     }
-    let directory = PathBuf::from(&config.data_dir);
-    std::fs::create_dir_all(&directory).map_err(|error| TeamCraftError::Storage(error.to_string()))?;
-    remove_shared_downloads(&directory.join(DOWNLOADS_DIR));
-    let path = directory.join(format!("{}.teamcraft.db", config.account));
-    let store = Arc::new(SealedSqliteStore::open(&path, &StaticKeySource::new(key))?);
-    let upload_staging_dir = directory.join(UPLOAD_STAGING_DIR).join(&config.account);
+    Ok(Self {
+      server_url: config.server_url,
+      maybe_push_gateway_url: config.push_gateway_url.filter(|url| !url.is_empty()),
+      data_dir: PathBuf::from(config.data_dir),
+      account: config.account,
+      key,
+      tokens,
+      listener,
+      signals,
+    })
+  }
+
+  /// The account's sealed database.
+  pub(crate) fn store_path(&self) -> PathBuf {
+    self.data_dir.join(format!("{}.teamcraft.db", self.account))
+  }
+
+  /// Where the account's plaintext files lie: decrypted downloads and staged uploads, each per
+  /// account, so another account signed in on this device never sees them.
+  pub(crate) fn plaintext_dirs(&self) -> [PathBuf; 2] {
+    [self.download_dir(), self.upload_staging_dir()]
+  }
+
+  fn download_dir(&self) -> PathBuf {
+    self.data_dir.join(DOWNLOADS_DIR).join(&self.account)
+  }
+
+  fn upload_staging_dir(&self) -> PathBuf {
+    self.data_dir.join(UPLOAD_STAGING_DIR).join(&self.account)
+  }
+
+  fn duplicate(&self) -> Self {
+    Self {
+      server_url: self.server_url.clone(),
+      maybe_push_gateway_url: self.maybe_push_gateway_url.clone(),
+      data_dir: self.data_dir.clone(),
+      account: self.account.clone(),
+      key: self.key.duplicate(),
+      tokens: self.tokens.clone(),
+      listener: self.listener.clone(),
+      signals: self.signals.clone(),
+    }
+  }
+}
+
+impl Engine {
+  fn open(start: EngineStart) -> Result<Self, OpenError> {
+    std::fs::create_dir_all(&start.data_dir)
+      .map_err(|error| OpenError::Failed(TeamCraftError::Storage(error.to_string())))?;
+    remove_shared_downloads(&start.data_dir.join(DOWNLOADS_DIR));
+    let [download_dir, upload_staging_dir] = start.plaintext_dirs();
+    let path = start.store_path();
+    let EngineStart {
+      server_url,
+      maybe_push_gateway_url,
+      key,
+      tokens,
+      listener,
+      signals,
+      ..
+    } = start;
+    let store =
+      SealedSqliteStore::open(&path, &StaticKeySource::new(key)).map_err(|error| open_error(error.into()))?;
+    let store = Arc::new(store);
     // Plaintext copies of files that were never sent (taken out of the composer, app stopped).
     if let Err(error) = sweep_staged_copies(store.as_ref(), &upload_staging_dir) {
       tracing::debug!(%error, "stray staged upload copies could not be listed");
@@ -263,15 +392,13 @@ impl Engine {
     let mentions: MentionSettings = load_mention_preferences(store.as_ref())
       .unwrap_or_default()
       .into();
-    let download_dir = directory.join(DOWNLOADS_DIR).join(&config.account);
     trim_downloads(&download_dir, MAX_DOWNLOADS_BYTES);
     let mut engine = Self {
-      server_url: config.server_url,
-      maybe_push_gateway_url: config.push_gateway_url.filter(|url| !url.is_empty()),
-      // Per account, so another account signed in on this device never sees these files.
+      server_url,
+      maybe_push_gateway_url,
       download_dir,
       upload_staging_dir,
-      tokens,
+      tokens: ForeignTokens(tokens),
       listener,
       store,
       client: ClientSlot::Missing,
@@ -283,16 +410,21 @@ impl Engine {
       link_requests: LinkRequestList::default(),
       maybe_new_link: None,
       maybe_approval: None,
+      maybe_receipt: None,
       calls: CallHub::default(),
       mentions,
       signals,
     };
-    if let Some(client) = Client::open(
+    // Records that don't decode, or a key bag its own key doesn't open, make the store unreadable
+    // too.
+    let maybe_client = Client::open(
       engine.api(),
       engine.store.clone(),
       Box::new(SystemClock),
       engine.client_settings(),
-    )? {
+    )
+    .map_err(open_error)?;
+    if let Some(client) = maybe_client {
       engine.adopt(client);
     }
     Ok(engine)
@@ -327,6 +459,7 @@ impl Engine {
       // Dropped if they can't work; the user links again.
       Err(error) => tracing::warn!(%error, "could not finish the enrollment of an interrupted device link"),
     }
+    self.drop_abandoned_setup().await;
     let api = self.api();
     let me = api.me().await.map_err(teamcraft_core::CoreError::from)?;
     let has_existing_identity = api
@@ -337,6 +470,37 @@ impl Engine {
     Ok(AccountState::NeedsEnrollment {
       has_existing_identity,
     })
+  }
+
+  /// Drops the device key pair of a setup the user gave up on and revokes its registration (issue
+  /// #415). Not while a link is in progress here; enrolling is one job, so it never overlaps. A
+  /// failure (offline) is retried when the app asks for the account state again.
+  async fn drop_abandoned_setup(&self) {
+    if self.maybe_link_offer.is_some() || self.maybe_new_link.is_some() {
+      return;
+    }
+    let settings = self.client_settings();
+    if let Err(error) =
+      PendingEnrollment::drop_abandoned(&self.api(), &self.store, &SystemClock, &settings).await
+    {
+      tracing::info!(%error, "could not revoke the device of a setup that was given up yet");
+    }
+  }
+
+  /// The user signs out before this device is set up (issues #168, #415): the keys of a link and the
+  /// device key pair go at once, and the server gets a few seconds to revoke the device that key
+  /// pair registered (otherwise the next start of this account does). Nothing changes on a device
+  /// that is set up.
+  pub(crate) async fn forget_unfinished_setup(&mut self) -> Result<(), TeamCraftError> {
+    if !matches!(self.client, ClientSlot::Missing) {
+      return Ok(());
+    }
+    self.maybe_link_offer = None;
+    self.maybe_link_announcement = None;
+    self.maybe_new_link = None;
+    PendingEnrollment::forget_unfinished(&self.api(), &self.store, &SystemClock, SIGN_OUT_REVOKE_PATIENCE)
+      .await?;
+    Ok(())
   }
 
   pub(crate) async fn enroll(
@@ -469,8 +633,14 @@ impl Engine {
 
   /// Existing device: the user typed the code the new device shows. Only a match sends the keys
   /// (docs/security-review.md C3: a script or a stray tap can't approve a device the user did not
-  /// see); a few wrong codes end the attempt.
-  pub(crate) async fn confirm_device_link(&mut self, typed_code: String) -> Result<(), TeamCraftError> {
+  /// see); a few wrong codes end the attempt. Syncing resumes once the keys are sent; the new
+  /// device's receipt is awaited beside the engine's jobs (issue #415), and the returned receiver
+  /// gets its outcome. One receipt is awaited at a time: a wait still running for an earlier link
+  /// ends as cancelled.
+  pub(crate) async fn confirm_device_link(
+    &mut self,
+    typed_code: String,
+  ) -> Result<oneshot::Receiver<Result<(), TeamCraftError>>, TeamCraftError> {
     let digits = |text: &str| text.chars().filter(char::is_ascii_digit).collect::<String>();
     let pending = self
       .maybe_approval
@@ -493,16 +663,25 @@ impl Engine {
       .take()
       .ok_or(TeamCraftError::NoLinkInProgress)?;
     let mut client = self.take_client().await?;
-    let result = client.complete_link_approval(pending.approval).await;
+    let sent = client.send_link_transfer(pending.approval).await;
     self.client = ClientSlot::Idle(client);
     if pending.was_running {
       self.start().await?;
     }
-    Ok(result?)
+    let (waiting, cancel) = sent?.detach();
+    self.maybe_receipt = Some(cancel);
+    let (outcome, receiver) = oneshot::channel();
+    tokio::task::spawn_local(async move {
+      // The app may have stopped waiting (a cancelled coroutine); nobody is left to tell then.
+      let _ = outcome.send(waiting.await.map_err(TeamCraftError::from));
+    });
+    Ok(receiver)
   }
 
-  /// Drops an approval the user abandoned (the codes were never confirmed) and resumes syncing.
+  /// Drops an approval the user abandoned (the codes were never confirmed) and resumes syncing; a
+  /// receipt still awaited ends as cancelled.
   pub(crate) async fn cancel_device_link_approval(&mut self) -> Result<(), TeamCraftError> {
+    self.maybe_receipt = None;
     let Some(pending) = self.maybe_approval.take() else {
       return Ok(());
     };
@@ -535,6 +714,21 @@ impl Engine {
     Ok(())
   }
 
+  /// The device became active or idle (issue #472): the sync loop tells the server now and on every
+  /// new connection; a client that isn't syncing keeps it for its next connection.
+  pub(crate) fn report_activity(&mut self, activity: DeviceActivity) {
+    match &mut self.client {
+      ClientSlot::Running { handle, .. } => {
+        // Refused only by a loop that ended abnormally; the app reports again on its next
+        // foreground or touch.
+        handle.send(RunnerCommand::SetActivity(activity));
+      },
+      ClientSlot::Idle(client) => client.set_device_activity(activity),
+      // Not enrolled yet: the first connection identifies as active.
+      ClientSlot::Missing => {},
+    }
+  }
+
   pub(crate) async fn stop(&mut self) -> Result<(), TeamCraftError> {
     self.stop_runner().await;
     // The app goes to the background: clear what the debounce kept in the write-ahead log (#417).
@@ -556,25 +750,16 @@ impl Engine {
       conversations.extend(backend.space_conversations(*space));
     }
     conversations.extend(backend.direct_conversations());
-    let me = backend.me().id;
+    let me = backend.me();
     Ok(
       conversations
         .into_iter()
-        .map(|conversation| ConversationItem {
-          maybe_peer_presence: peer_presence(backend, &conversation, me),
-          id: conversation.id.to_string(),
-          maybe_space_id: conversation.maybe_space.map(|space| space.to_string()),
-          maybe_space_name: conversation
+        .map(|conversation| {
+          let maybe_peer_presence = peer_presence(backend, &conversation, me.id);
+          let maybe_space_name = conversation
             .maybe_space
-            .and_then(|space| spaces.get(&space).cloned()),
-          kind: ConversationKind::from_view(conversation.kind),
-          name: conversation.name,
-          topic: conversation.topic,
-          unread_count: conversation.unread_count,
-          mention_count: conversation.mention_count,
-          is_favorite: conversation.is_favorite,
-          is_muted: conversation.is_muted,
-          can_post: conversation.can_post,
+            .and_then(|space| spaces.get(&space).cloned());
+          ConversationItem::from_view(conversation, maybe_space_name, maybe_peer_presence, me.is_guest)
         })
         .collect(),
     )
@@ -766,8 +951,9 @@ impl Engine {
     payload: Vec<u8>,
     utc_offset_minutes: i16,
     opening: PushOpening,
+    reader: PushReader,
   ) -> Result<PushNotification, TeamCraftError> {
-    let preview = self.push_preview_within_budget(&payload).await?;
+    let preview = self.push_preview_within_budget(&payload, reader).await?;
     let now_ms = SystemClock.now_ms();
     let store = self.store.as_ref();
     // A retry is the same push again: counting it would skew the received count and the delay.
@@ -801,7 +987,11 @@ impl Engine {
   /// The preview of a wake-up within [`PUSH_PREVIEW_BUDGET`], so the push service's time for the
   /// app (FCM: about 10 s) is never spent on a slow network: a fetch that takes longer, or a catch-up
   /// that doesn't finish, leaves a notification that names the sender instead of none.
-  async fn push_preview_within_budget(&mut self, payload: &[u8]) -> Result<PushPreview, TeamCraftError> {
+  async fn push_preview_within_budget(
+    &mut self,
+    payload: &[u8],
+    reader: PushReader,
+  ) -> Result<PushPreview, TeamCraftError> {
     let deadline = tokio::time::Instant::now() + PUSH_PREVIEW_BUDGET;
     let api = self.api();
     // Without a token the preview still names conversation and sender.
@@ -828,8 +1018,10 @@ impl Engine {
     };
     // The app's own client may catch the conversation up: a conversation this device was just
     // added to, or keys that changed while the app was closed. Not while the sync loop runs: it
-    // brings the message itself, and taking the client would cut its connection.
-    if preview.needs_catch_up()
+    // brings the message itself, and taking the client would cut its connection. Never in a
+    // notification extension ([`PushReader::Extension`]).
+    let is_client_idle = matches!(self.client, ClientSlot::Idle(_));
+    if reader.catches_up(preview.needs_catch_up(), is_client_idle)
       && let ClientSlot::Idle(client) = &mut self.client
     {
       let conversation = preview.wake_up.conversation_id;
@@ -1049,14 +1241,7 @@ impl Engine {
   /// Deletes this account's plaintext files: decrypted downloads and staged upload copies (at
   /// sign-out; the sealed store stays).
   pub(crate) fn delete_plaintext_files(&self) -> Result<(), TeamCraftError> {
-    for directory in [&self.download_dir, &self.upload_staging_dir] {
-      match std::fs::remove_dir_all(directory) {
-        Ok(()) => {},
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {},
-        Err(error) => return Err(TeamCraftError::Storage(error.to_string())),
-      }
-    }
-    Ok(())
+    delete_plaintext_dirs([self.download_dir.as_path(), self.upload_staging_dir.as_path()])
   }
 
   pub(crate) fn backend(&self) -> Result<&CoreChatBackend<Store>, TeamCraftError> {
@@ -1071,12 +1256,8 @@ impl Engine {
   }
 
   fn message_item(&self, backend: &CoreChatBackend<Store>, message: &MessageView) -> MessageItem {
-    let author_name = backend
-      .user(message.author)
-      .map(|user| user.display_name)
-      .unwrap_or_default();
-    let is_pending = is_pending(message.id);
-    MessageItem::from_view(message, author_name, is_pending)
+    let maybe_author = backend.user(message.author);
+    MessageItem::from_view(message, maybe_author.as_ref(), is_pending(message.id))
   }
 
   fn client_settings(&self) -> ClientSettings {
@@ -1126,6 +1307,18 @@ async fn run_offline_tolerant(client: &mut CoreClient, command: CoreCommand) -> 
     Ok(()) => Ok(()),
     Err(error) if error.is_transient() => Ok(()),
     Err(error) => Err(error.into()),
+  }
+}
+
+/// An error of opening the store or the client on it: data this version can't read, now or after a
+/// restart, gets its own answer (issue #414); anything else stays a plain failure.
+fn open_error(error: CoreError) -> OpenError {
+  match error.unreadable_store() {
+    Some(problem) => {
+      tracing::error!(%error, ?problem, "the local database is unreadable");
+      OpenError::Unreadable(problem.into())
+    },
+    None => OpenError::Failed(error.into()),
   }
 }
 
@@ -1211,6 +1404,19 @@ mod tests {
 
   use super::*;
 
+  /// Issue #424 review, H2: a notification extension never catches a conversation up (it would
+  /// advance the MLS state next to the app's copy); the app's idle client does.
+  #[test]
+  fn only_the_apps_idle_client_catches_a_push_up() {
+    assert!(PushReader::App.catches_up(true, true));
+    assert!(
+      !PushReader::App.catches_up(true, false),
+      "the sync loop brings it"
+    );
+    assert!(!PushReader::App.catches_up(false, true), "nothing missing");
+    assert!(!PushReader::Extension.catches_up(true, true));
+  }
+
   #[test]
   fn downloads_above_the_limit_lose_their_least_recently_used_files() {
     let directory = TestDir::new("lru");
@@ -1239,6 +1445,70 @@ mod tests {
     trim_downloads(directory.path(), 10);
     assert!(directory.path().join("one").is_file());
     trim_downloads(&directory.path().join("missing"), 0);
+  }
+
+  mod unreadable_store {
+    use teamcraft_core::store::StoreError;
+
+    use super::*;
+
+    #[test]
+    fn open_errors_name_what_this_version_can_not_read() {
+      let newer = CoreError::Store(StoreError::NewerSchema {
+        found: 9,
+        supported: 2,
+      });
+      assert!(matches!(
+        open_error(newer),
+        OpenError::Unreadable(StoreProblem::NewerVersion)
+      ));
+      for damaged in [
+        CoreError::Store(StoreError::WrongKey),
+        CoreError::Store(StoreError::Corrupt("file is not a database".into())),
+        CoreError::Corrupt("a record does not decode".into()),
+      ] {
+        assert!(matches!(
+          open_error(damaged),
+          OpenError::Unreadable(StoreProblem::Damaged)
+        ));
+      }
+      // Busy or out of space: the data may be fine, so it stays a failure to try again.
+      assert!(matches!(
+        open_error(CoreError::Store(StoreError::Database(
+          "database is locked".into()
+        ))),
+        OpenError::Failed(TeamCraftError::Storage(_))
+      ));
+    }
+
+    #[test]
+    fn the_database_and_its_log_are_renamed_aside_never_deleted() {
+      let directory = TestDir::new("aside");
+      let path = directory.path().join("alice.teamcraft.db");
+      for (name, content) in [
+        ("alice.teamcraft.db", "records"),
+        ("alice.teamcraft.db-wal", "log"),
+        ("alice.teamcraft.db-shm", "index"),
+      ] {
+        std::fs::write(directory.path().join(name), content).unwrap();
+      }
+
+      set_store_aside(&path, 1_700_000_000_000).unwrap();
+
+      for (name, content) in [
+        ("alice.teamcraft.db.unreadable-1700000000000", "records"),
+        ("alice.teamcraft.db-wal.unreadable-1700000000000", "log"),
+        ("alice.teamcraft.db-shm.unreadable-1700000000000", "index"),
+      ] {
+        assert_eq!(
+          std::fs::read_to_string(directory.path().join(name)).unwrap(),
+          content
+        );
+      }
+      assert!(!path.exists());
+      // Nothing left to move (the log already went, or never was): fine.
+      set_store_aside(&path, 1_700_000_000_001).unwrap();
+    }
   }
 
   /// A fresh folder in the system's temporary directory, removed when dropped.

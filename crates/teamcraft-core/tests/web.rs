@@ -10,14 +10,15 @@ mod common;
 use std::rc::Rc;
 
 use common::{PASSPHRASE, clock, options, settings};
+use openmls_traits::OpenMlsProvider as _;
 use rand_core::{OsRng, RngCore};
-use teamcraft_core::PendingEnrollment;
 use teamcraft_core::api::ServerApi;
 use teamcraft_core::api::fake::FakeServer;
 use teamcraft_core::store::{
   IndexedDbStore, LocalStore, MessageContent, MessageFilter, StoreError, StoredMessage, Table,
-  browser_database_key,
+  browser_database_key, browser_database_key_without_upgrade,
 };
+use teamcraft_core::{PendingEnrollment, mls_storage};
 use teamcraft_crypto::push::{open_wakeup, seal_wakeup};
 use teamcraft_crypto::secret::SymmetricKey;
 use teamcraft_proto::{ClientMessageId, ConversationId, Id, Snowflake, UserId};
@@ -179,6 +180,50 @@ async fn two_browser_clients_exchange_an_encrypted_message() {
   assert_eq!(texts(&reopened, channel), ["sealed in wasm"]);
 }
 
+/// Issue #424: a database of the first schema version opens with this one, and the MLS state a
+/// version before 1.0.9 wrote as one record moves to one record per entry, which reopens.
+#[wasm_bindgen_test]
+async fn an_older_database_opens_and_its_mls_state_moves_to_entries() {
+  let name = database_name();
+  let key = SymmetricKey::generate(&mut OsRng);
+  create_first_version(&name).await;
+  let store = IndexedDbStore::open(&name, &key).await.unwrap();
+  let mut legacy = Vec::new();
+  for chunk in [b"group".as_slice(), b"state".as_slice()] {
+    legacy.extend_from_slice(&u32::try_from(chunk.len()).unwrap().to_be_bytes());
+    legacy.extend_from_slice(chunk);
+  }
+  store.put(Table::MlsStorage, "provider", &legacy).unwrap();
+  store.flush().await.unwrap();
+  drop(store);
+
+  for _ in 0..2 {
+    let store = IndexedDbStore::open(&name, &key).await.unwrap();
+    let (provider, _) = mls_storage::load_mls_storage(&store).unwrap();
+    assert_eq!(
+      provider.storage().values.read().unwrap().get(b"group".as_slice()),
+      Some(&b"state".to_vec())
+    );
+    store.flush().await.unwrap();
+    assert_eq!(store.get(Table::MlsStorage, "provider").unwrap(), None);
+  }
+}
+
+/// Issue #424 review, M2: the service worker opens the store at the version it has and never
+/// upgrades it, so a push never closes an older page that still owns the store; a page does.
+#[wasm_bindgen_test]
+async fn the_service_worker_never_upgrades_the_database() {
+  let name = database_name();
+  create_first_version(&name).await;
+  let key = browser_database_key_without_upgrade(&name).await.unwrap();
+  drop(IndexedDbStore::open_without_upgrade(&name, &key).await.unwrap());
+  assert_eq!(database_version(&name).await, 1.0);
+
+  let key = browser_database_key(&name).await.unwrap();
+  drop(IndexedDbStore::open(&name, &key).await.unwrap());
+  assert_eq!(database_version(&name).await, 2.0);
+}
+
 #[wasm_bindgen_test]
 fn push_wake_up_round_trips_in_wasm() {
   let key = SymmetricKey::generate(&mut OsRng);
@@ -227,6 +272,8 @@ fn message(conversation: i64, client: u8, text: &str) -> StoredMessage {
     edits: Vec::new(),
     maybe_edit_id: None,
     is_pinned: false,
+    maybe_verified_commit: None,
+    maybe_server_change: None,
   }
 }
 
@@ -262,6 +309,46 @@ async fn open_with_newer_version(name: &str) {
     .unwrap()
     .unchecked_into();
   database.close();
+}
+
+/// Creates `name` as the first schema version did: version 1 with the same object stores.
+async fn create_first_version(name: &str) {
+  use wasm_bindgen::JsCast;
+  let script = format!(
+    "new Promise((resolve, reject) => {{
+      const request = indexedDB.open({name:?}, 1);
+      request.onupgradeneeded = () => {{
+        request.result.createObjectStore('records');
+        request.result.createObjectStore('keys');
+      }};
+      request.onsuccess = () => {{ request.result.close(); resolve(); }};
+      request.onerror = () => reject(request.error);
+    }})"
+  );
+  let created: js_sys::Promise = js_sys::eval(&script).unwrap().unchecked_into();
+  wasm_bindgen_futures::JsFuture::from(created).await.unwrap();
+}
+
+/// The version `name` has now (opened without one, so nothing is upgraded).
+async fn database_version(name: &str) -> f64 {
+  use wasm_bindgen::JsCast;
+  let script = format!(
+    "new Promise((resolve, reject) => {{
+      const request = indexedDB.open({name:?});
+      request.onsuccess = () => {{
+        const version = request.result.version;
+        request.result.close();
+        resolve(version);
+      }};
+      request.onerror = () => reject(request.error);
+    }})"
+  );
+  let opened: js_sys::Promise = js_sys::eval(&script).unwrap().unchecked_into();
+  wasm_bindgen_futures::JsFuture::from(opened)
+    .await
+    .unwrap()
+    .as_f64()
+    .unwrap()
 }
 
 /// Each test gets its own database, so tests don't see each other's data.

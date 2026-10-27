@@ -5,11 +5,15 @@
 // web_service_worker.rs.
 #![cfg(not(target_arch = "wasm32"))]
 
+mod abandoned_setup;
 mod account_data;
 mod activity;
+mod admin_add_policy;
+mod admin_joins;
 mod backgrounds;
 mod calls;
 mod catch_up;
+mod channel_roles;
 mod chat_actions;
 #[path = "../common/mod.rs"]
 mod common;
@@ -17,18 +21,22 @@ mod connection;
 mod custom_status;
 mod dev_stack;
 mod devices;
+mod direct_uploads;
 mod dm_setup;
 mod enrollment;
 mod files;
+mod first_add_back;
 mod guest_meetings;
 mod key_packages;
 mod link_previews;
 mod linking;
+mod live_permissions;
 mod meeting_chats;
 mod member_devices;
 mod member_removal;
 mod messages;
 mod mls_recovery;
+mod mls_storage;
 mod offline_actions;
 mod org_backgrounds;
 mod org_recovery;
@@ -40,6 +48,7 @@ mod removal_followups;
 mod runner;
 mod search;
 mod sending;
+mod server_changes;
 mod snapshot_cache;
 mod store_integrity;
 mod sync_engine;

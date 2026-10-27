@@ -25,6 +25,7 @@ pub use teamcraft_client_api::failure::{
 
 use crate::i18n::I18n;
 use crate::model::TimestampMs;
+use crate::state::ToastAction;
 
 /// How long a background failure stays quiet after its toast was raised (#344): a read that keeps
 /// failing shows at most this often, also after the user closed the toast.
@@ -93,6 +94,15 @@ pub fn failure_message(i18n: I18n, failure: &ActionFailure) -> String {
   i18n.t(failure_message_key(failure))
 }
 
+/// The next step a failure's toast offers, if one helps: another camera for a camera that didn't
+/// open or deliver (#819).
+pub fn failure_action(failure: &ActionFailure) -> Option<ToastAction> {
+  match failure.kind {
+    FailureKind::Call(call) if call.is_camera_failure() => Some(ToastAction::ChooseCamera),
+    _ => None,
+  }
+}
+
 /// The i18n key of a failure's message; unknown causes get the generic one (with the details).
 pub fn failure_message_key(failure: &ActionFailure) -> &'static str {
   match &failure.kind {
@@ -123,6 +133,8 @@ pub fn failure_message_key(failure: &ActionFailure) -> &'static str {
       CallFailure::CameraMissing => "error-call-camera-missing",
       CallFailure::CameraInUse => "error-call-camera-in-use",
       CallFailure::CameraUnsupported => "error-call-camera-unsupported",
+      CallFailure::CameraNotConnected => "error-call-camera-not-connected",
+      CallFailure::CameraUnavailable => "error-call-camera-unavailable",
       CallFailure::ScreenUnavailable => "error-call-screen-unavailable",
       CallFailure::CameraNoPicture => "error-call-camera-no-picture",
       CallFailure::ScreenNoPicture => "error-call-screen-no-picture",
@@ -147,6 +159,8 @@ pub fn failure_message_key(failure: &ActionFailure) -> &'static str {
       ErrorCode::LastOwner => "admin-error-last-owner",
       ErrorCode::CannotDeleteSelf => "admin-error-cannot-delete-self",
       ErrorCode::LastAdmin => "admin-error-last-admin",
+      ErrorCode::AdminJoinRequestNotFound => "error-admin-join-request-gone",
+      ErrorCode::AdminJoinRequestTooSoon => "error-admin-join-request-too-soon",
       // All `*_not_found` codes, including ones this version doesn't know yet.
       other if other.as_str().ends_with("_not_found") => "error-not-found",
       _ => "error-generic",
@@ -363,6 +377,24 @@ mod tests {
   mod messages {
     use super::*;
 
+    /// #819: each way a camera fails gets its own hint (not "close other apps" for everything) and
+    /// the way to another camera.
+    #[test]
+    fn camera_failures_name_the_cause_and_offer_another_camera() {
+      let camera = |failure| ActionFailure::new(FailureKind::Call(failure), "x");
+      for (failure, key) in [
+        (CallFailure::CameraNotConnected, "error-call-camera-not-connected"),
+        (CallFailure::CameraInUse, "error-call-camera-in-use"),
+        (CallFailure::CameraUnsupported, "error-call-camera-unsupported"),
+        (CallFailure::CameraUnavailable, "error-call-camera-unavailable"),
+      ] {
+        assert_eq!(failure_message_key(&camera(failure)), key);
+        assert_eq!(failure_action(&camera(failure)), Some(ToastAction::ChooseCamera));
+      }
+      assert_eq!(failure_action(&camera(CallFailure::CameraDenied)), None);
+      assert_eq!(failure_action(&ActionFailure::other("x")), None);
+    }
+
     #[test]
     fn a_channel_add_outside_the_space_says_to_invite_first() {
       let failure = ActionFailure::new(FailureKind::Server(ErrorCode::NotSpaceMember), "x");
@@ -394,8 +426,8 @@ mod tests {
 
     #[test]
     fn every_message_key_is_translated() {
-      let en = include_str!("../i18n/en.ftl");
-      let de = include_str!("../i18n/de.ftl");
+      let en = crate::i18n::joined_source(crate::i18n::Locale::En);
+      let de = crate::i18n::joined_source(crate::i18n::Locale::De);
       let kinds = [
         FailureKind::Network,
         FailureKind::Other,
@@ -411,13 +443,16 @@ mod tests {
         FailureKind::Call(CallFailure::SpeakersUnavailable),
         FailureKind::Call(CallFailure::SpeakersMissing),
         FailureKind::Call(CallFailure::SoundBlocked),
+        FailureKind::Call(CallFailure::CameraInUse),
+        FailureKind::Call(CallFailure::CameraNotConnected),
+        FailureKind::Call(CallFailure::CameraUnavailable),
       ];
       for kind in kinds {
         let key = failure_message_key(&ActionFailure::new(kind, "x"));
-        for (name, source) in [("en", en), ("de", de)] {
+        for (name, source) in [("en", &en), ("de", &de)] {
           assert!(
             source.contains(&format!("\n{key} =")),
-            "{key} missing in {name}.ftl"
+            "{key} missing in i18n/{name}"
           );
         }
       }

@@ -4,13 +4,14 @@
 //! [`LocalStore`] is synchronous, IndexedDB is not. Opening reads every record; writes are queued
 //! and issued together in one transaction a moment later ([`BATCH_DELAY`], or at once when much is
 //! queued or on [`IndexedDbStore::flush`]). Of several writes of one record in that time only the
-//! last is issued: a catch-up rewrites some records (the MLS state) after every group it processes,
-//! and one transaction per write left the browser writing for minutes after the catch-up was done
+//! last is issued: a catch-up rewrites some records after every group it processes, and one
+//! transaction per write left the browser writing for minutes after the catch-up was done
 //! (docs/performance.md). Records are sealed only when their batch is issued, so a replaced write
-//! costs no encryption either, and a batch holding a large record (the MLS state, megabytes on a
-//! big workspace) waits [`LARGE_BATCH_EXTRA`] longer to take the next rewrite of it along (issue
-//! #326: sealing it after every group a catch-up joined blocked the page). IndexedDB runs read-write transactions on the same object store in the
-//! order they were created, so the database follows the cache in order.
+//! costs no encryption either, and a batch holding a large record waits [`LARGE_BATCH_EXTRA`]
+//! longer to take the next rewrite of it along (issue #326: the MLS state was one record of
+//! megabytes, sealed after every group a catch-up joined; since #424 it is one record per entry).
+//! IndexedDB runs read-write transactions on the same object store in the order they were created,
+//! so the database follows the cache in order.
 //! [`IndexedDbStore::flush`] waits until everything written so far is committed.
 //!
 //! Durability: a batch is one transaction, so what survives a page that dies is always a prefix of
@@ -39,7 +40,7 @@ use wasm_bindgen::prelude::Closure;
 use wasm_bindgen::{JsCast, JsValue};
 use web_sys::{IdbDatabase, IdbObjectStore, IdbTransaction, IdbTransactionMode};
 
-use super::idb::{self, RECORDS};
+use super::idb::{self, OpenMode, RECORDS};
 use crate::store::StoreError;
 use crate::store::sealed::{LazySeal, RecordBackend, SealedStore, format_id, parse_id};
 use crate::store::write_queue::{Issue, RecordValue, WriteFailure, Writes};
@@ -72,9 +73,20 @@ struct Inner {
 }
 
 impl SealedStore<IndexedDbRecords> {
-  /// Opens the database `name` and decrypts it into memory with `database_key`.
+  /// Opens the database `name` and decrypts it into memory with `database_key`; a page that owns
+  /// the store (it holds the Web Lock) upgrades it to this version.
   pub async fn open(name: &str, database_key: &SymmetricKey) -> Result<Self, StoreError> {
-    let database = idb::open_database(name).await?;
+    Self::open_with(name, database_key, OpenMode::Upgrade).await
+  }
+
+  /// [`Self::open`] for the service worker, at whatever version the database has: it never
+  /// upgrades it ([`OpenMode::AsIs`]).
+  pub async fn open_without_upgrade(name: &str, database_key: &SymmetricKey) -> Result<Self, StoreError> {
+    Self::open_with(name, database_key, OpenMode::AsIs).await
+  }
+
+  async fn open_with(name: &str, database_key: &SymmetricKey, mode: OpenMode) -> Result<Self, StoreError> {
+    let database = idb::open_database_with(name, mode).await?;
     let records = match read_all(&database).await {
       Ok(records) => records,
       Err(error) => {

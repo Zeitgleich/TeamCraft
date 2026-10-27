@@ -7,7 +7,8 @@
 //! and click listeners must be registered synchronously at startup, before wasm has loaded). It
 //! calls [`handle_push`] and [`handle_notification_click`], exported with the `service-worker`
 //! feature. Everything else happens here: the service worker opens the encrypted store read-only,
-//! opens the sealed wake-up with the device push key and shows the preview.
+//! opens the sealed wake-up with the device push key and shows the preview, with the sender's or
+//! channel's picture from the media cache (#543, [`crate::push_picture`]).
 
 use teamcraft_proto::PushProvider;
 use wasm_bindgen::{JsCast, JsValue};
@@ -130,10 +131,12 @@ mod service_worker {
   use crate::api::{HttpServerApi, ServerApi, StaticToken, change_web_push_subscription};
   use crate::clock::{Clock, SystemClock};
   use crate::error::CoreError;
+  use crate::media_cache::{BrowserMediaCache, MAX_MEDIA_MAX_AGE, MediaKey};
+  use crate::push_picture::{account_user, icon_data_url, push_picture_keys};
   use crate::push_preview::{PushPreview, push_preview, push_session};
   use crate::push_subscription::{subscription_change, subscription_change_from};
   use crate::push_text::{NotificationLabels, notification_text};
-  use crate::store::{IndexedDbStore, browser_database_key};
+  use crate::store::{IndexedDbStore, browser_database_key_without_upgrade};
 
   /// Key of the conversation ID in a notification's `data`.
   const CONVERSATION_FIELD: &str = "conversation_id";
@@ -163,12 +166,17 @@ mod service_worker {
       .map(NotificationLabels::from_json)
       .unwrap_or_default();
     let (title, options) = match preview(&database_name, &payload).await {
-      Ok(preview) => {
+      Ok(opened) => {
+        let preview = &opened.preview;
         if let Some(gap) = preview.maybe_gap {
           // Why the notification shows less than the message; never what the message says.
           tracing::info!(?gap, "push shown without the full message");
         }
-        notification(&preview, &labels)
+        let (title, options) = notification(preview, &labels);
+        if let Some(icon) = picture_icon(opened.maybe_account, &opened.picture_keys).await {
+          options.set_icon(&icon);
+        }
+        (title, options)
       },
       Err(error) => {
         tracing::warn!(%error, "push could not be opened");
@@ -268,8 +276,9 @@ mod service_worker {
     let unreadable = || CoreError::Corrupt("unreadable notification data".into());
     let conversation: ConversationId = conversation.parse().map_err(|_| unreadable())?;
     let message_id: MessageId = message.parse().map_err(|_| unreadable())?;
-    let key = browser_database_key(database_name).await?;
-    let store = IndexedDbStore::open(database_name, &key).await?;
+    // Never upgrades the database: only the page that owns the store does (e2ee.md §9.4).
+    let key = browser_database_key_without_upgrade(database_name).await?;
+    let store = IndexedDbStore::open_without_upgrade(database_name, &key).await?;
     let session = push_session(&store, SystemClock.now_ms())?
       .ok_or_else(|| CoreError::Browser("no valid push session".into()))?;
     let api = HttpServerApi::new(&session.server_url, StaticToken(session.access_token));
@@ -312,8 +321,9 @@ mod service_worker {
     maybe_old_subscription: Option<&str>,
     token: &str,
   ) -> Result<bool, CoreError> {
-    let key = browser_database_key(database_name).await?;
-    let store = IndexedDbStore::open(database_name, &key).await?;
+    // Never upgrades the database: only the page that owns the store does (e2ee.md §9.4).
+    let key = browser_database_key_without_upgrade(database_name).await?;
+    let store = IndexedDbStore::open_without_upgrade(database_name, &key).await?;
     let Some(change) = subscription_change(&store, token)? else {
       return Ok(false);
     };
@@ -342,13 +352,62 @@ mod service_worker {
     JsValue::from_str(&error.to_string())
   }
 
-  async fn preview(database_name: &str, payload: &[u8]) -> Result<PushPreview, CoreError> {
-    let key = browser_database_key(database_name).await?;
-    let store = IndexedDbStore::open(database_name, &key).await?;
+  /// A push opened with the store: the preview, and where its picture may come from.
+  struct OpenedPush {
+    preview: PushPreview,
+    /// The account whose media cache holds the pictures.
+    maybe_account: Option<teamcraft_proto::UserId>,
+    /// Best first; empty where the preview names nobody.
+    picture_keys: Vec<MediaKey>,
+  }
+
+  async fn preview(database_name: &str, payload: &[u8]) -> Result<OpenedPush, CoreError> {
+    // Never upgrades the database: only the page that owns the store does (e2ee.md §9.4).
+    let key = browser_database_key_without_upgrade(database_name).await?;
+    let store = IndexedDbStore::open_without_upgrade(database_name, &key).await?;
     let maybe_api = push_session(&store, SystemClock.now_ms())?
       .map(|session| HttpServerApi::new(&session.server_url, StaticToken(session.access_token)));
     // Read-only: the preview never writes, so the app's own cache stays authoritative.
-    push_preview(&store, maybe_api.as_ref(), payload).await
+    let preview = push_preview(&store, maybe_api.as_ref(), payload).await?;
+    let picture_keys = push_picture_keys(&store, &preview);
+    // Without the account the notification only goes without its picture.
+    let maybe_account = account_user(&store).ok().flatten();
+    Ok(OpenedPush {
+      preview,
+      maybe_account,
+      picture_keys,
+    })
+  }
+
+  /// The first of `keys` the account's media cache holds, as a `data:` URL; `None` (the browser's
+  /// default icon) when it holds none or can't be opened. The cache's own age setting lives in the
+  /// page; the worker takes the longest the settings offer, so its read never drops what the page
+  /// keeps.
+  async fn picture_icon(maybe_account: Option<teamcraft_proto::UserId>, keys: &[MediaKey]) -> Option<String> {
+    let account = maybe_account?;
+    if keys.is_empty() {
+      return None;
+    }
+    let cache =
+      match BrowserMediaCache::open_without_upgrade(&BrowserMediaCache::database_name(account)).await {
+        Ok(cache) => cache,
+        Err(error) => {
+          tracing::debug!(%error, "no media cache for the notification's picture");
+          return None;
+        },
+      };
+    let mut maybe_icon = None;
+    for key in keys {
+      if let Some(media) = cache.get(key, MAX_MEDIA_MAX_AGE).await
+        && let Some(icon) = icon_data_url(&media.content_type, media.bytes.expose_secret())
+      {
+        maybe_icon = Some(icon);
+        break;
+      }
+    }
+    // A sign-out in a page deletes the database; an open handle would hold that up.
+    cache.close();
+    maybe_icon
   }
 
   /// Title and body from the preview's names and text and the page's translated labels

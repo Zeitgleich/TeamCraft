@@ -1,0 +1,336 @@
+/* ---- Modals ---- */
+
+/* Dialogs (#706): one raised panel on a dimming scrim, without bars. The title leads in a larger
+   weight, the content follows on one spacing rhythm (--dialog-pad around, --space-* inside), and
+   the actions sit at the bottom edge: filled primary, tinted secondary, filled destructive. On a
+   phone the panel is a bottom sheet (see "Dialogs and the search" under the compact layout). */
+.modal-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 60;
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  padding: 12vh 16px 16px;
+  background: var(--scrim);
+  overscroll-behavior: contain;
+}
+
+.modal {
+  width: min(560px, 100%);
+  max-height: min(80vh, 760px);
+  display: flex;
+  flex-direction: column;
+  border: 0;
+  border-radius: var(--dialog-radius);
+  background: var(--dialog-surface);
+  box-shadow: inset 0 1px 0 var(--dialog-highlight), 0 0 0 1px var(--dialog-edge), var(--dialog-shadow);
+  overflow: hidden;
+  /* Takes focus only from code to hold the focus trap; its controls show the ring. */
+  outline: none;
+}
+
+.modal form {
+  display: contents;
+}
+
+.modal-small {
+  width: min(460px, 100%);
+}
+
+.modal-switcher {
+  width: min(600px, 100%);
+}
+
+.modal-head,
+.modal-foot {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+/* No rule under the title: its weight and the space around it set it apart from the content. */
+.modal-head {
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--space-3);
+  padding: var(--space-5) var(--space-4) var(--space-2) var(--dialog-pad);
+}
+
+.modal-head h2 {
+  min-width: 0;
+  padding-top: var(--space-1);
+  font-size: var(--text-xl);
+  letter-spacing: var(--tracking-xl);
+  line-height: var(--leading-xl);
+  font-weight: var(--weight-bold);
+  overflow-wrap: anywhere;
+}
+
+/* Close and the other header buttons: small filled circles, quieter than any action. */
+.modal-head > .icon-btn {
+  flex: none;
+  border-radius: var(--radius-pill);
+  background: var(--field-bg);
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .modal-head > .icon-btn:hover:not(:disabled) {
+    background: var(--field-bg-hover);
+  }
+}
+
+/* No rule above the actions either; inside a form's body they follow its last field. */
+.modal-foot {
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  padding: var(--space-2) var(--dialog-pad) var(--dialog-pad);
+}
+
+.modal-body {
+  padding: var(--space-2) var(--dialog-pad) var(--dialog-pad);
+  overflow-y: auto;
+}
+
+.modal-body:first-child {
+  padding-top: var(--dialog-pad);
+}
+
+.modal-body + .modal-foot {
+  padding-top: 0;
+}
+
+.modal-body .modal-foot {
+  margin-top: var(--space-3);
+  padding: var(--space-2) 0 0;
+}
+
+/* Actions: one height and radius, the hierarchy in the fill. A plain `.btn` is the secondary
+   action (a tint, no outline); `.btn-primary` and `.btn-danger` are filled; `.btn-quiet` is text. */
+.modal-foot .btn {
+  min-height: var(--control-h);
+  padding: 0 var(--space-5);
+  border: 0;
+  border-radius: var(--control-radius);
+  background: var(--field-bg);
+  font-weight: var(--weight-semibold);
+}
+
+.modal-foot .btn-primary {
+  background: var(--accent);
+  color: var(--on-accent);
+}
+
+.modal-foot .btn-danger {
+  background: var(--danger);
+  color: var(--on-danger);
+}
+
+.modal-foot .btn-quiet {
+  background: transparent;
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .modal-foot .btn:hover:not(:disabled) {
+    background: var(--field-bg-hover);
+  }
+
+  .modal-foot .btn-primary:hover:not(:disabled) {
+    background: var(--accent-strong);
+  }
+
+  .modal-foot .btn-danger:hover:not(:disabled) {
+    background: color-mix(in srgb, var(--danger) 85%, black);
+  }
+
+  .modal-foot .btn-quiet:hover:not(:disabled) {
+    background: var(--danger-soft);
+  }
+}
+
+.modal-foot .btn:disabled {
+  opacity: 0.45;
+}
+
+/* Buttons inside the content (upload a picture, reset a colour) are secondary actions too: the
+   same tint and radius, at their own height. `:where` keeps pressed toggles and the filled kinds
+   in charge. */
+.modal-body :where(.btn:not(.btn-primary, .btn-danger, .btn-quiet)) {
+  border-color: transparent;
+  border-radius: var(--control-radius);
+  background: var(--field-bg);
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .modal-body :where(.btn:not(.btn-primary, .btn-danger, .btn-quiet)):hover:not(:disabled) {
+    background: var(--field-bg-hover);
+  }
+}
+
+/* Fields: filled and rounded, not boxed; the label above names them, focus draws the edge and
+   the ring. */
+.modal-body .input:not(.input-small) {
+  min-height: var(--control-h);
+  padding: 0 var(--space-3);
+  border-color: transparent;
+  border-radius: var(--control-radius);
+  background: var(--field-bg);
+}
+
+.modal-body textarea.input {
+  padding: var(--space-2) var(--space-3);
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .modal-body .input:hover:not(:focus-visible, :disabled) {
+    border-color: transparent;
+    background: var(--field-bg-hover);
+  }
+}
+
+.modal-body .input:focus-visible {
+  border-color: var(--focus);
+  background: var(--dialog-surface);
+}
+
+/* Checkboxes in a dialog are rows of one group: filled, a hairline between neighbours. */
+.modal-body .check-row {
+  min-height: var(--control-h);
+  margin: var(--space-1) 0;
+  padding: var(--space-2) var(--space-3);
+  gap: var(--space-3);
+  border-radius: var(--control-radius);
+  background: var(--field-bg);
+  cursor: pointer;
+}
+
+.modal-body .check-row:has(+ .check-row) {
+  margin-bottom: 0;
+  border-bottom-left-radius: 0;
+  border-bottom-right-radius: 0;
+}
+
+.modal-body .check-row + .check-row {
+  margin-top: 0;
+  border-top-left-radius: 0;
+  border-top-right-radius: 0;
+  box-shadow: inset 0 1px 0 var(--dialog-edge);
+}
+
+/* More contrast: a solid edge around the panel and the fields instead of tints alone. Forced
+   colours drop shadows, so the panel keeps an outline there. */
+@media (prefers-contrast: more) {
+  .modal {
+    border: 1px solid var(--border-strong);
+  }
+
+  .modal-body .input {
+    border-color: var(--border-strong);
+  }
+}
+
+@media (forced-colors: active) {
+  .modal {
+    border: 1px solid CanvasText;
+  }
+}
+
+.emoji-input {
+  width: 52px;
+  text-align: center;
+  font-size: var(--text-xl);
+  letter-spacing: var(--tracking-xl);
+  line-height: var(--leading-xl);
+}
+
+/* The status emoji (#705): a square as tall as the text field beside it, which takes the rest of
+   the row. It opens the emoji picker; the press answers at once. */
+.emoji-pick-btn {
+  flex: none;
+  display: grid;
+  place-items: center;
+  width: 34px;
+  height: 34px;
+  padding: 0;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+  color: var(--text-muted);
+  font-size: var(--text-xl);
+  line-height: 1;
+  transition: transform var(--dur-fast) var(--ease-standard), border-color var(--dur-fast) var(--ease-standard);
+}
+
+.emoji-pick-btn:active:not(:disabled) {
+  transform: scale(0.94);
+}
+
+.emoji-pick-btn:disabled {
+  opacity: 0.6;
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .emoji-pick-btn:hover:not(:disabled) {
+    border-color: var(--text-muted);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .emoji-pick-btn:active:not(:disabled) {
+    transform: none;
+  }
+}
+
+.preset-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 12px 0 16px;
+}
+
+.preset {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 28px;
+  padding: 0 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-pill);
+  background: var(--surface);
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .preset:hover {
+    background: var(--surface-2);
+  }
+}
+
+.shortcut-section {
+  margin: 16px 0 6px;
+  font-size: var(--text-sm);
+  color: var(--text-muted);
+}
+
+.shortcut-table {
+  width: 100%;
+  border-collapse: collapse;
+  margin: 8px 0;
+}
+
+.shortcut-table th {
+  padding: 8px 16px;
+  font-weight: var(--weight-regular);
+  text-align: left;
+}
+
+.shortcut-table td {
+  padding: 8px 16px;
+  text-align: right;
+  white-space: nowrap;
+}
+
+.shortcut-table tr + tr {
+  border-top: 1px solid var(--border);
+}
+

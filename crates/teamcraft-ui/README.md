@@ -65,12 +65,32 @@ tour also walks every screen in German and fails on missing translation keys.
 The 50,000-line `#app-logs` channel (see `docs/screenshots/log-channel-dark.png`) keeps scrolling at
 frame rate because only the visible rows are in the DOM.
 
+## Stylesheets and strings
+
+Every feature used to append to `style/main.css` and `i18n/*.ftl`, so parallel branches collided at
+their ends. Both are split per area of the app (#614); new work goes into the area's file, or into a
+new file for a new area, without touching a shared list.
+
+- **Styles:** `style/main/NNN-<area>.css`. `scripts/bundle-css.sh` (a Trunk hook) joins them in name
+  order into `gen/main.css`, the one stylesheet `index.html` links: one request, nothing inline, so
+  the CSP (`style-src 'self'`) holds. The number is the file's place in the cascade: a new area
+  usually takes the next free number at the end (as an addition at the end of the old file did); a
+  file that must come before rules it overrides takes a number before them. Each file closes its own
+  blocks (a test checks), and `scripts/check-css.py` reads them in the same order as one stylesheet.
+- **Strings:** `i18n/<language>/<area>.ftl`. build.rs embeds every file it finds, the bundle of a
+  language loads them all. Each message id lives in one file, the same file name in every language;
+  the tests in `src/i18n.rs` check that no id is defined twice and that every language has every
+  English message in the same file.
+
+`scripts/split-hotspots.py` made the split from the old files; `scripts/split-hotspots.py --check`
+(CI) fails if one of them comes back, for instance from a merge that keeps a branch's `main.css`.
+
 ## Motion and loading
 
-- Tokens in the first block of `style/main.css`: `--dur-fast` (120 ms), `--dur-base` (180 ms),
+- Tokens in `style/main/000-tokens.css`: `--dur-fast` (120 ms), `--dur-base` (180 ms),
   `--dur-slow` (260 ms), `--dur-exit` (100 ms) and the curves `--ease-standard`,
   `--ease-emphasized`, `--ease-exit`, `--ease-pop`. With `prefers-reduced-motion` every duration is
-  ~0. The transitions themselves are in the stylesheet's last section ("Motion").
+  ~0. The transitions themselves are in `style/main/680-motion.css`.
 - Only `transform` and `opacity` animate; entrances run once when an element mounts, nothing loops
   while it isn't visible (placeholders pulse a few times, then stand still).
 - Exits: `motion::use_leave_ghost` leaves an inert copy of a dialog, menu or toast that plays the
@@ -93,9 +113,10 @@ frame rate because only the visible rows are in the DOM.
 - Quick switcher (Ctrl/Cmd+K), status menu (online, away, do not disturb, offline, custom status
   with expiry and presets), settings modal (display, sidebar work; notifications and advanced are
   stubs), shortcuts reference (Ctrl/Cmd+/).
-- Light and dark theme through CSS variables (`style/main.css`, first block), "match system" default.
-- i18n with Fluent: `i18n/en.ftl` is the source, `i18n/de.ftl` the translation. A test fails when
-  German misses a message that English has.
+- Light and dark theme through CSS variables (`style/main/000-tokens.css`), "match system" default.
+- i18n with Fluent: `i18n/en/` is the source, `i18n/de/` the translation, one file per area of the
+  app with the same names in each language. A test fails when German misses a message that English
+  has, or keeps it in another file.
 - Keyboard and screen readers: skip link, landmarks, labelled controls, focus-visible rings, roving
   focus in menus and tabs, modal focus trap and focus return, arrow keys between messages,
   `prefers-reduced-motion`.
@@ -180,7 +201,8 @@ to the path it started on.
 | `markdown` (re-export)  | Safe Markdown subset (teamcraft-client-api, shared with mobile)         |
 | `src/editor_doc.rs`     | Composer document model: DOM tree ↔ Markdown, paste allow-list          |
 | `src/components/`       | One module per screen area                                              |
-| `style/main.css`        | Design tokens, layout, components                                       |
+| `style/main/`           | The stylesheet, one file per area (see "Stylesheets and strings")       |
+| `i18n/<language>/`      | Fluent messages, one file per area (see "Stylesheets and strings")      |
 
 The backend traits (`ChatBackend`, `SearchBackend`, `CallBackend`, `AdminBackend`, `SecurityBackend`)
 and the view models live in `teamcraft-client-api`, which `teamcraft-core` (feature `ui`) implements
@@ -262,7 +284,7 @@ the app checks the session and opens the account's data, until the app's first v
 (`src/startup.rs`): then the mark flies onto the sign-in card's mark, or the screen crossfades into the
 chat. A check that takes longer says so under the bar. A reload with single sign-on loads the page
 twice (to the identity provider and back); the second load shows the mark already assembled. Its texts
-are the `loader-*` messages of `i18n/*.ftl`, which `scripts/finish-loader.sh` (a Trunk hook) copies into
+are the `loader-*` messages of `i18n/<language>/loader.ftl`, which `scripts/finish-loader.sh` (a Trunk hook) copies into
 `init.js` together with the size of the built wasm. Release builds use the `web-release` Cargo profile
 (size over speed) and `wasm-opt -Oz`; the release tarball adds `.br`/`.gz` variants
 (`scripts/compress-web.sh`), which the server serves by `Accept-Encoding`. Browser login needs the server's

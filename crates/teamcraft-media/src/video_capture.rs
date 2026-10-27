@@ -27,9 +27,32 @@ pub trait VideoCapture: Send {
 /// A camera to show in a picker.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CameraInfo {
-  /// Platform id (a device path on Linux, an index on macOS); stable enough to store as a setting.
+  /// Platform id, stable across restarts and re-plugging, so it can be stored as the user's
+  /// choice: a device path on Linux, AVFoundation's unique id on macOS, the device's symbolic
+  /// link on Windows.
   pub id: String,
   pub name: String,
+  /// What sort of camera it is, as far as the platform tells (orders the default choice, #819).
+  pub kind: CameraKind,
+}
+
+/// What sort of camera a [`CameraInfo`] is. The variants are in order of preference for the
+/// default camera (`camera_choice` has the rules).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum CameraKind {
+  /// The computer's own camera (AVFoundation's built-in device types).
+  BuiltIn,
+  /// A camera plugged in (USB): AVFoundation's external device type.
+  External,
+  /// The platform doesn't tell (Linux, Windows): a real camera as far as we know.
+  Unknown,
+  /// An iPhone or iPad used as a camera (Continuity Camera). Using it asks on the phone, which
+  /// the user may decline.
+  Continuity,
+  /// Desk View: the iPhone's view of the desk, not of the person.
+  DeskView,
+  /// A camera made by software (OBS, v4l2loopback, …): it shows whatever that software sends.
+  Virtual,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -67,6 +90,16 @@ pub enum CaptureError {
   Cancelled(&'static str),
   #[error("capture: {0}")]
   Device(String),
+  /// Another app holds the camera.
+  #[error("the camera is in use by another app: {0}")]
+  InUse(String),
+  /// The camera didn't come up: an iPhone camera (Continuity Camera) declined on the phone, the
+  /// phone locked or out of reach.
+  #[error("the camera did not connect: {0}")]
+  NotConnected(String),
+  /// None of the modes the camera offers could be set.
+  #[error("the camera offers no mode we can use: {0}")]
+  NoUsableMode(String),
   #[error("unsupported pixel format {0}")]
   UnsupportedFormat(String),
   #[error(transparent)]

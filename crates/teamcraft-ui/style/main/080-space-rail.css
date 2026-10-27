@@ -1,0 +1,215 @@
+/* ---- Space rail ---- */
+
+.space-rail {
+  flex: none;
+  width: var(--rail-w);
+  min-height: 0;
+  background: var(--chrome);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--space-2);
+  padding: 10px 0;
+}
+
+/* Only the spaces and "add space" scroll (#652); the destinations above and Focus at the foot stay
+   put. An edge fades where spaces are scrolled out of sight (`.has-more-*`, rail.rs), instead of a
+   hard cut. */
+.rail-spaces {
+  flex: 0 1 auto;
+  min-height: 0;
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--space-2);
+  padding: 6px 0;
+  overflow: hidden auto;
+  overscroll-behavior: contain;
+  scrollbar-width: none;
+  --rail-fade-top: 0px;
+  --rail-fade-bottom: 0px;
+  -webkit-mask-image: linear-gradient(to bottom, transparent, black var(--rail-fade-top), black calc(100% - var(--rail-fade-bottom)), transparent);
+  mask-image: linear-gradient(to bottom, transparent, black var(--rail-fade-top), black calc(100% - var(--rail-fade-bottom)), transparent);
+}
+
+.rail-spaces::-webkit-scrollbar {
+  display: none;
+}
+
+.rail-spaces.has-more-above {
+  --rail-fade-top: var(--space-6);
+}
+
+.rail-spaces.has-more-below {
+  --rail-fade-bottom: var(--space-6);
+}
+
+.space-rail ul {
+  flex: none;
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.rail-bottom {
+  flex: none;
+  margin-top: auto;
+  display: flex;
+  justify-content: center;
+}
+
+/* Global destinations: an icon with a short label under it (Home, Activity, Threads). */
+.rail-destinations {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+}
+
+.rail-dest {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+  width: 64px;
+  padding: 4px 0 2px;
+  border: 0;
+  border-radius: var(--radius);
+  background: transparent;
+  color: var(--chrome-text);
+}
+
+.rail-dest-icon {
+  position: relative;
+  display: grid;
+  place-items: center;
+  width: 36px;
+  height: 30px;
+  border-radius: var(--radius);
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .rail-dest:hover {
+    color: var(--chrome-strong);
+  }
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .rail-dest:hover .rail-dest-icon {
+    background: rgba(255, 255, 255, 0.1);
+  }
+}
+
+.rail-dest.current {
+  color: var(--chrome-strong);
+}
+
+.rail-dest.current .rail-dest-icon {
+  background: var(--accent);
+  color: var(--on-accent);
+}
+
+.rail-dest-label {
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: var(--text-2xs);
+  letter-spacing: var(--tracking-2xs);
+  font-weight: var(--weight-semibold);
+  line-height: var(--leading-2xs);
+}
+
+.rail-dest .badge-count {
+  position: absolute;
+  right: -8px;
+  top: -5px;
+  box-shadow: 0 0 0 2px var(--chrome);
+}
+
+.space-btn {
+  position: relative;
+  width: 40px;
+  height: 40px;
+  /* No button padding: the space picture fills the whole tile instead of being squeezed. */
+  padding: 0;
+  border: 0;
+  border-radius: var(--radius-md);
+  background: hsl(var(--hue) 40% 32%);
+  color: var(--on-fill);
+  font-weight: var(--weight-bold);
+}
+
+/* The pill at the rail's edge: half height on hover, full for the current space. Only its scale
+   animates. */
+.space-btn::before {
+  content: "";
+  position: absolute;
+  left: -16px;
+  top: 10px;
+  bottom: 10px;
+  width: 4px;
+  border-radius: 0 4px 4px 0;
+  background: var(--on-fill);
+  transform: scaleY(0);
+  transition: transform var(--dur-base) var(--ease-emphasized);
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .space-btn:hover::before {
+    transform: scaleY(0.5);
+  }
+}
+
+.space-btn.current::before {
+  transform: scaleY(1);
+}
+
+/* Unread on a space tile (#715), as on the macOS Dock: mentions as a white bold number in a round
+   system-red bubble on the top-right corner, overlapping the tile, with a thin ring in the rail's
+   colour that cuts it out of the tile. The number is capped (rail.rs), so the bubble stays round
+   or nearly so. Unread messages without a mention are a small neutral dot in the same place. */
+.space-btn .badge-count {
+  position: absolute;
+  right: -5px;
+  top: -5px;
+  min-width: 18px;
+  height: 18px;
+  padding: 0 4px;
+  background: var(--dock-red);
+  color: #fff;
+  font-size: var(--text-2xs);
+  letter-spacing: 0;
+  font-weight: var(--weight-bold);
+  line-height: 18px;
+  box-shadow: 0 0 0 2px var(--chrome);
+}
+
+.space-btn .dot-unread {
+  position: absolute;
+  right: -3px;
+  top: -3px;
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: var(--chrome-strong);
+  box-shadow: 0 0 0 2px var(--chrome);
+}
+
+.rail-add {
+  flex: none;
+  width: 40px;
+  height: 40px;
+  border: 1px dashed rgba(255, 255, 255, 0.3);
+  border-radius: var(--radius-md);
+  background: transparent;
+  color: var(--chrome-text);
+  display: grid;
+  place-items: center;
+  opacity: 0.6;
+}
+

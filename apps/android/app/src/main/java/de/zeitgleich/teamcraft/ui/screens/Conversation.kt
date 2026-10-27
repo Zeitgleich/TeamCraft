@@ -55,7 +55,6 @@ import androidx.compose.material3.TextField
 import androidx.compose.material3.TextFieldDefaults
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SnackbarHost
-import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
@@ -95,6 +94,7 @@ import java.io.File
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import de.zeitgleich.teamcraft.R
+import de.zeitgleich.teamcraft.TeamCraftApplication
 import de.zeitgleich.teamcraft.calls.CallOptions
 import de.zeitgleich.teamcraft.core.Bookmark
 import de.zeitgleich.teamcraft.core.ChatActions
@@ -106,7 +106,10 @@ import de.zeitgleich.teamcraft.core.MessageExtras
 import de.zeitgleich.teamcraft.core.PickedFile
 import de.zeitgleich.teamcraft.core.SendOptions
 import de.zeitgleich.teamcraft.ui.ComposerPrefs
+import de.zeitgleich.teamcraft.ui.ConversationRights
 import de.zeitgleich.teamcraft.ui.MainViewModel
+import de.zeitgleich.teamcraft.ui.MessageAction
+import de.zeitgleich.teamcraft.ui.messageActions
 import de.zeitgleich.teamcraft.ui.EmojiInput
 import de.zeitgleich.teamcraft.ui.FirstUnread
 import de.zeitgleich.teamcraft.ui.Mentions
@@ -116,6 +119,9 @@ import de.zeitgleich.teamcraft.ui.shouldNotifyTyping
 import de.zeitgleich.teamcraft.ui.typingLine
 import de.zeitgleich.teamcraft.ui.entry
 import de.zeitgleich.teamcraft.ui.sensitiveClip
+import de.zeitgleich.teamcraft.ui.requestsIn
+import uniffi.teamcraft_ffi.ConnectionState
+import uniffi.teamcraft_ffi.JoinRequestItem
 import uniffi.teamcraft_ffi.emojiConvert
 import uniffi.teamcraft_ffi.emojiSuggestions
 import uniffi.teamcraft_ffi.needsChannelConfirmation
@@ -139,10 +145,13 @@ fun ConversationScreen(
   var messages by remember { mutableStateOf<List<Message>>(emptyList()) }
   var extras by remember { mutableStateOf<Map<String, MessageExtras>>(emptyMap()) }
   var pinned by remember { mutableStateOf<List<Message>>(emptyList()) }
+  // Admins asking to join this channel, when the user owns it (admin.md §2.4.1).
+  var joinRequests by remember { mutableStateOf<List<JoinRequestItem>>(emptyList()) }
   var firstUnread by remember { mutableStateOf<FirstUnread>(FirstUnread.Loading) }
   // Counts sends from this screen's composer: each one brings the newest message into view.
   var sentCount by remember { mutableIntStateOf(0) }
   var undecrypted by remember { mutableStateOf(0) }
+  val rights = rememberRights(viewModel, conversationId, changes)
   LaunchedEffect(conversationId) {
     // Where the user stopped reading, before marking the conversation read.
     val maybeMessage = viewModel.readChat { query(ChatQueries.firstUnread(conversationId)).maybeMessage }
@@ -155,19 +164,29 @@ fun ConversationScreen(
     undecrypted = maybeWindow?.undecrypted ?: 0
     extras = viewModel.readChat { extras(conversationId, messages.map { it.id }) } ?: emptyMap()
     pinned = viewModel.readChat { query(ChatQueries.pinned(conversationId)).messages } ?: emptyList()
+    joinRequests = requestsIn(conversationId, viewModel.joinRequests.list())
   }
   FollowTransfers(extras) { extras = viewModel.readChat { extras(conversationId, messages.map { it.id }) } ?: extras }
   LaunchedEffect(conversationId, messages.size) { viewModel.markRead(conversationId) }
+  // Receipts sent while this device was offline never arrive as events: they are read when the
+  // conversation opens and whenever the connection comes back (#769). Channels have none, so the
+  // core doesn't ask for theirs; a failure stays quiet, the next connection asks again.
+  val maybeConnection by TeamCraftApplication.graph(LocalContext.current).core.connectionState.collectAsState()
+  val isConnected = maybeConnection is ConnectionState.Connected
+  LaunchedEffect(conversationId, isConnected) {
+    if (isConnected) viewModel.readChat { act(ChatActions.refreshReadReceipts(conversationId)) }
+  }
   val conversation = snapshot?.conversation(conversationId)
   ChatScaffold(
     viewModel = viewModel,
     topBar = {
       ConversationTopBar(snapshot, conversation, onBack) {
-        ConversationMenu(viewModel, conversationId, conversation, onOpenFiles)
+        ConversationMenu(viewModel, conversationId, conversation, rights, onOpenFiles)
       }
     },
   ) {
     if (pinned.isNotEmpty()) PinnedBanner(pinned.last())
+    JoinRequestBanner(joinRequests, viewModel.joinRequests)
     // Received but not readable here yet: without this the conversation would just look empty.
     if (undecrypted > 0) {
       Text(
@@ -186,7 +205,10 @@ fun ConversationScreen(
       firstUnread = firstUnread,
       sentCount = sentCount,
       onOpenThread = onOpenThread,
-      maybeOnReply = { message -> ReplyTarget.set(conversationId, message, snapshot?.name(message.author).orEmpty()) },
+      maybeOnReply = { message: Message ->
+        ReplyTarget.set(conversationId, message, snapshot?.name(message.author).orEmpty())
+      }.takeIf { rights.canPost },
+      rights = rights,
       modifier = Modifier.weight(1f),
       maybeFocusMessage = maybeFocusMessage,
       onOpenPermalink = onOpenPermalink,
@@ -195,11 +217,7 @@ fun ConversationScreen(
     if (conversation?.canPost != false) {
       Composer(viewModel, conversationId, maybeThread = null, snapshot = snapshot, onSent = { sentCount++ })
     } else {
-      Text(
-        stringResource(R.string.read_only_channel),
-        color = MaterialTheme.colorScheme.onSurfaceVariant,
-        modifier = Modifier.padding(16.dp),
-      )
+      ReadOnlyNote()
     }
   }
 }
@@ -219,6 +237,7 @@ fun ThreadScreen(
   var extras by remember { mutableStateOf<Map<String, MessageExtras>>(emptyMap()) }
   var isFollowed by remember { mutableStateOf(false) }
   var sentCount by remember { mutableIntStateOf(0) }
+  val rights = rememberRights(viewModel, conversationId, changes)
   LaunchedEffect(changes, threadId) {
     snapshot = viewModel.readChat { snapshot() }
     messages = viewModel.readChat { query(ChatQueries.thread(conversationId, threadId)).messages } ?: emptyList()
@@ -248,13 +267,41 @@ fun ThreadScreen(
       sentCount = sentCount,
       onOpenThread = null,
       maybeOnReply = null,
+      rights = rights,
       modifier = Modifier.weight(1f),
       maybeFocusMessage = maybeFocusMessage,
       onOpenPermalink = onOpenPermalink,
     )
     TypingIndicator(viewModel, conversationId, snapshot, changes)
-    Composer(viewModel, conversationId, maybeThread = threadId, snapshot = snapshot, onSent = { sentCount++ })
+    if (rights.canPost) {
+      Composer(viewModel, conversationId, maybeThread = threadId, snapshot = snapshot, onSent = { sentCount++ })
+    } else {
+      ReadOnlyNote()
+    }
   }
+}
+
+/**
+ * What the user may do in the conversation, read again with every change: a role or scheme change
+ * on the server reaches the screen without reopening it (issue #758).
+ */
+@Composable
+private fun rememberRights(viewModel: MainViewModel, conversationId: String, changes: Long): ConversationRights {
+  var rights by remember(conversationId) { mutableStateOf(ConversationRights()) }
+  LaunchedEffect(changes, conversationId) {
+    rights = ConversationRights.of(viewModel.conversations().firstOrNull { it.id == conversationId })
+  }
+  return rights
+}
+
+/** In place of the composer where the user may only read. */
+@Composable
+private fun ReadOnlyNote() {
+  Text(
+    stringResource(R.string.read_only_channel),
+    color = MaterialTheme.colorScheme.onSurfaceVariant,
+    modifier = Modifier.padding(16.dp),
+  )
 }
 
 /**
@@ -308,15 +355,7 @@ private fun ChatScaffold(
   topBar: @Composable () -> Unit,
   content: @Composable androidx.compose.foundation.layout.ColumnScope.() -> Unit,
 ) {
-  val snackbars = remember { SnackbarHostState() }
-  val maybeFailure by viewModel.lastFailure.collectAsState()
-  val context = LocalContext.current
-  LaunchedEffect(maybeFailure) {
-    maybeFailure?.let {
-      snackbars.showSnackbar(context.getString(it))
-      viewModel.failureShown()
-    }
-  }
+  val snackbars = rememberFailureSnackbars(viewModel)
   Scaffold(
     contentWindowInsets = ScreenInsets,
     topBar = topBar,
@@ -335,11 +374,13 @@ private fun ConversationMenu(
   viewModel: MainViewModel,
   conversationId: String,
   maybeConversation: Conversation?,
+  rights: ConversationRights,
   onOpenFiles: () -> Unit,
 ) {
   val isFavorite = maybeConversation?.isFavorite == true
   val name = maybeConversation?.name.orEmpty()
-  val isChannel = maybeConversation?.isDirect == false
+  // Archiving changes the channel itself; DMs have none to archive.
+  val canArchive = maybeConversation?.isDirect == false && rights.canManageChannel
   var isOpen by remember { mutableStateOf(false) }
   var isNotifying by remember { mutableStateOf(false) }
   var isShowingBookmarks by remember { mutableStateOf(false) }
@@ -381,7 +422,7 @@ private fun ConversationMenu(
       isOpen = false
       isShowingBookmarks = true
     })
-    if (isChannel) {
+    if (canArchive) {
       DropdownMenuItem(text = { Text(stringResource(R.string.channel_archive)) }, onClick = {
         isOpen = false
         maybeConfirming = ChannelConfirmation.Archive
@@ -519,6 +560,7 @@ private fun MessageList(
   sentCount: Int,
   onOpenThread: ((String) -> Unit)?,
   maybeOnReply: ((Message) -> Unit)?,
+  rights: ConversationRights,
   modifier: Modifier,
   maybeFocusMessage: String?,
   onOpenPermalink: (String) -> Unit,
@@ -537,6 +579,7 @@ private fun MessageList(
     modifier = modifier,
     maybeFocusMessage = maybeFocusMessage,
     onOpenPermalink = onOpenPermalink,
+    canReact = rights.canReact,
   )
   maybeSelected?.let { message ->
     MessageActions(
@@ -545,6 +588,7 @@ private fun MessageList(
       message = message,
       maybeExtras = extras[message.id],
       snapshot = snapshot,
+      rights = rights,
       onOpenThread = onOpenThread,
       onDismiss = { maybeSelected = null },
     )
@@ -566,6 +610,7 @@ private fun MessageActions(
   message: Message,
   maybeExtras: MessageExtras?,
   snapshot: ChatSnapshot?,
+  rights: ConversationRights,
   onOpenThread: ((String) -> Unit)?,
   onDismiss: () -> Unit,
 ) {
@@ -575,65 +620,64 @@ private fun MessageActions(
   var isEditing by remember { mutableStateOf(false) }
   var isForwarding by remember { mutableStateOf(false) }
   var isConfirmingDelete by remember { mutableStateOf(false) }
+  val actions = messageActions(
+    rights = rights,
+    isMine = isMine,
+    isDeleted = maybeExtras?.isDeleted == true,
+    hasThreads = onOpenThread != null,
+    wantsAcknowledgement = maybeExtras?.wantsAcknowledgement == true,
+  )
   ModalBottomSheet(onDismissRequest = onDismiss) {
     Column(Modifier.padding(bottom = 24.dp)) {
       // One row, spread over the width: the reactions are the sheet's most used part.
-      Row(Modifier.fillMaxWidth().padding(horizontal = 8.dp), horizontalArrangement = Arrangement.SpaceEvenly) {
-        for (emoji in QUICK_REACTIONS) {
-          val label = stringResource(R.string.react_quick, emoji)
-          TextButton(
-            onClick = {
-              viewModel.act(ChatActions.react(conversationId, message.id, emoji))
-              onDismiss()
-            },
-            contentPadding = PaddingValues(4.dp),
-            // "React with 👍": TalkBack names the emoji and says what the button does.
-            modifier = Modifier.weight(1f).semantics(mergeDescendants = true) { contentDescription = label },
-          ) { Text(emoji, style = MaterialTheme.typography.titleLarge) }
-        }
-      }
-      SheetItem(R.string.action_reply) {
-        ReplyTarget.set(conversationId, message, snapshot?.name(message.author).orEmpty())
+      if (rights.canReact) QuickReactions { emoji ->
+        viewModel.act(ChatActions.react(conversationId, message.id, emoji))
         onDismiss()
       }
-      if (onOpenThread != null) SheetItem(R.string.reply_in_thread) {
-        onOpenThread(message.id)
-        onDismiss()
-      }
-      if (isMine && maybeExtras?.isDeleted != true) {
-        SheetItem(R.string.action_edit) { isEditing = true }
-        SheetItem(R.string.action_delete) { isConfirmingDelete = true }
-      }
-      SheetItem(R.string.action_forward) { isForwarding = true }
-      SheetItem(if (maybeExtras?.isPinned == true) R.string.action_unpin else R.string.action_pin) {
-        viewModel.act(ChatActions.setPinned(conversationId, message.id, maybeExtras?.isPinned != true))
-        onDismiss()
-      }
-      SheetItem(if (maybeExtras?.isSaved == true) R.string.action_unsave else R.string.action_save) {
-        viewModel.act(ChatActions.setSaved(conversationId, message.id, maybeExtras?.isSaved != true))
-        onDismiss()
-      }
-      if (maybeExtras?.wantsAcknowledgement == true && !isMine) SheetItem(R.string.action_acknowledge) {
-        viewModel.act(ChatActions.acknowledge(conversationId, message.id))
-        onDismiss()
-      }
-      SheetItem(R.string.action_copy_link) {
-        scope.launch {
-          viewModel.readChat { query(ChatQueries.permalink(conversationId, message.id)).maybeLink }?.let { link ->
-            val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
-            clipboard.setPrimaryClip(sensitiveClip(link))
+      for (action in actions) {
+        when (action) {
+          MessageAction.Reply -> SheetItem(R.string.action_reply) {
+            ReplyTarget.set(conversationId, message, snapshot?.name(message.author).orEmpty())
+            onDismiss()
           }
-          onDismiss()
+          MessageAction.ReplyInThread -> SheetItem(R.string.reply_in_thread) {
+            onOpenThread?.invoke(message.id)
+            onDismiss()
+          }
+          MessageAction.Edit -> SheetItem(R.string.action_edit) { isEditing = true }
+          MessageAction.Delete -> SheetItem(R.string.action_delete) { isConfirmingDelete = true }
+          MessageAction.Forward -> SheetItem(R.string.action_forward) { isForwarding = true }
+          MessageAction.Pin -> SheetItem(if (maybeExtras?.isPinned == true) R.string.action_unpin else R.string.action_pin) {
+            viewModel.act(ChatActions.setPinned(conversationId, message.id, maybeExtras?.isPinned != true))
+            onDismiss()
+          }
+          MessageAction.Save -> SheetItem(if (maybeExtras?.isSaved == true) R.string.action_unsave else R.string.action_save) {
+            viewModel.act(ChatActions.setSaved(conversationId, message.id, maybeExtras?.isSaved != true))
+            onDismiss()
+          }
+          MessageAction.Acknowledge -> SheetItem(R.string.action_acknowledge) {
+            viewModel.act(ChatActions.acknowledge(conversationId, message.id))
+            onDismiss()
+          }
+          MessageAction.CopyLink -> SheetItem(R.string.action_copy_link) {
+            scope.launch {
+              viewModel.readChat { query(ChatQueries.permalink(conversationId, message.id)).maybeLink }?.let { link ->
+                val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+                clipboard.setPrimaryClip(sensitiveClip(link))
+              }
+              onDismiss()
+            }
+          }
+          MessageAction.CopyText -> SheetItem(R.string.action_copy_text) {
+            val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+            clipboard.setPrimaryClip(sensitiveClip(message.body))
+            onDismiss()
+          }
+          MessageAction.MarkUnread -> SheetItem(R.string.action_mark_unread) {
+            viewModel.act(ChatActions.markUnread(conversationId, message.id))
+            onDismiss()
+          }
         }
-      }
-      SheetItem(R.string.action_copy_text) {
-        val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
-        clipboard.setPrimaryClip(sensitiveClip(message.body))
-        onDismiss()
-      }
-      SheetItem(R.string.action_mark_unread) {
-        viewModel.act(ChatActions.markUnread(conversationId, message.id))
-        onDismiss()
       }
       if (!maybeExtras?.edits.isNullOrEmpty()) {
         Text(
@@ -680,6 +724,22 @@ private fun MessageActions(
   }
 }
 
+/** The quick reactions at the top of a message's action sheet, spread over the width. */
+@Composable
+private fun QuickReactions(onReact: (String) -> Unit) {
+  Row(Modifier.fillMaxWidth().padding(horizontal = 8.dp), horizontalArrangement = Arrangement.SpaceEvenly) {
+    for (emoji in QUICK_REACTIONS) {
+      val label = stringResource(R.string.react_quick, emoji)
+      TextButton(
+        onClick = { onReact(emoji) },
+        contentPadding = PaddingValues(4.dp),
+        // "React with 👍": TalkBack names the emoji and says what the button does.
+        modifier = Modifier.weight(1f).semantics(mergeDescendants = true) { contentDescription = label },
+      ) { Text(emoji, style = MaterialTheme.typography.titleLarge) }
+    }
+  }
+}
+
 @Composable
 private fun SheetItem(label: Int, onClick: () -> Unit) {
   Text(
@@ -701,7 +761,7 @@ fun TextDialog(title: Int, initial: String, onConfirm: (String) -> Unit, onDismi
 }
 
 @Composable
-private fun ForwardDialog(snapshot: ChatSnapshot, onPick: (String) -> Unit, onDismiss: () -> Unit) {
+internal fun ForwardDialog(snapshot: ChatSnapshot, onPick: (String) -> Unit, onDismiss: () -> Unit) {
   AlertDialog(
     onDismissRequest = onDismiss,
     title = { Text(stringResource(R.string.action_forward)) },

@@ -33,14 +33,18 @@ LABEL org.opencontainers.image.title="teamcraft-bridge" \
       org.opencontainers.image.licenses="AGPL-3.0-or-later"
 COPY --from=build /out/teamcraft-bridge /usr/local/bin/teamcraft-bridge
 COPY --from=build --chown=65532:65532 /out/data /var/lib/teamcraft-bridge
-# Non-root. The bridge writes only its database, in the volume at /var/lib/teamcraft-bridge (owned
-# by 65532); the rest of the filesystem can be read-only.
+COPY --from=build --chown=65532:65532 /out/data /var/spool/teamcraft-bridge
+# Non-root. The bridge writes its database in the volume at /var/lib/teamcraft-bridge, and the files
+# of webhooks while they upload in the volume at /var/spool/teamcraft-bridge (both owned by 65532;
+# the spool is narrowed to 0700 at start, and kept apart so files can't fill the database's volume).
+# The rest of the filesystem can be read-only.
 USER 65532:65532
 # Inside a container the endpoints must listen on all interfaces (publish the port on loopback
 # only on the host: `-p 127.0.0.1:8088:8088`). `[::]` is dual stack.
 ENV TEAMCRAFT_BRIDGE_LISTEN__ADDRS='["[::]:8088"]' \
-    TEAMCRAFT_BRIDGE_STORE__PATH=/var/lib/teamcraft-bridge/bridge.db
-VOLUME ["/var/lib/teamcraft-bridge"]
+    TEAMCRAFT_BRIDGE_STORE__PATH=/var/lib/teamcraft-bridge/bridge.db \
+    TEAMCRAFT_BRIDGE_FILES__SPOOL_DIR=/var/spool/teamcraft-bridge
+VOLUME ["/var/lib/teamcraft-bridge", "/var/spool/teamcraft-bridge"]
 EXPOSE 8088/tcp
 HEALTHCHECK --interval=30s --timeout=5s --start-period=30s --retries=3 \
   CMD ["/usr/local/bin/teamcraft-bridge", "healthcheck"]

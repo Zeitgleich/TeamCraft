@@ -5,12 +5,17 @@
 //! pseudorandom lookup ID. Opening decrypts all records into a [`MemoryStore`], which answers every
 //! read; writes update the cache and go to the backend right away. A backend that collects writes
 //! may seal a record only when it writes it ([`RecordBackend::put_lazy`]), so a record rewritten
-//! before then is sealed once (issue #326: the MLS state, megabytes, after every group joined).
+//! before then is sealed once (issue #326: the MLS state, then one record of megabytes, after
+//! every group joined; one record per entry since #424).
 //!
 //! A group of writes that the backend rolls back stays in the cache: the running app goes on
-//! with it (as with any failed write), the next start reads what the backend kept.
+//! with it (as with any failed write), the next start reads what the backend kept. The entries such
+//! a group deleted are remembered ([`LocalStore::lost_deletes`]): the cache no longer lists them,
+//! the disk still holds them, and a caller that writes its state again (the MLS state) deletes them
+//! again.
 
-use std::sync::Arc;
+use std::collections::BTreeSet;
+use std::sync::{Arc, Mutex, MutexGuard};
 
 use rand_core::OsRng;
 use serde::{Deserialize, Serialize};
@@ -20,7 +25,9 @@ use teamcraft_crypto::local_store::{LocalStoreKeys, LookupId};
 use teamcraft_crypto::secret::SymmetricKey;
 use teamcraft_proto::{Base64Bytes, ClientMessageId, ConversationId, MessageId};
 
-use super::{LocalStore, MediaRange, MemoryStore, MessageFilter, StoreError, StoredMessage, Table};
+use super::{
+  LocalStore, MediaRange, MemoryStore, MessageFilter, StoreError, StoredMessage, Table, WriteTally,
+};
 
 const ENTRY_NAMESPACE: &str = "entry";
 const MESSAGE_NAMESPACE: &str = "message";
@@ -31,6 +38,17 @@ pub struct SealedStore<B> {
   /// Shared with the seals a backend runs later ([`LazySeal`]).
   keys: Arc<LocalStoreKeys>,
   cache: MemoryStore,
+  entries: Mutex<EntryLog>,
+}
+
+/// The entries the open group of writes touched, and deletes the backend rolled back.
+#[derive(Default)]
+struct EntryLog {
+  depth: u32,
+  /// Entries written (`false`) or deleted (`true`) in the open group.
+  in_group: Vec<(Table, String, bool)>,
+  /// Entries deleted in groups the backend rolled back ([`LocalStore::lost_deletes`]).
+  lost_deletes: BTreeSet<(Table, String)>,
 }
 
 /// Seals one record when called (again, if a seal failed).
@@ -68,6 +86,11 @@ pub trait RecordBackend {
   }
   /// [`LocalStore::write_soon`] for the records.
   fn write_soon(&self) {}
+  /// [`LocalStore::write_tally`] for the records. The cache keeps a group the backend rolled back,
+  /// so the tally is the only way a caller learns that the disk lost it.
+  fn write_tally(&self) -> Option<WriteTally> {
+    None
+  }
 }
 
 /// What a sealed record holds: the plaintext name next to the value, so loading can rebuild the
@@ -104,6 +127,7 @@ impl<B: RecordBackend> SealedStore<B> {
       backend,
       keys: Arc::new(LocalStoreKeys::derive(database_key)),
       cache: MemoryStore::new(),
+      entries: Mutex::default(),
     };
     let (mut opened, mut maybe_failure) = (0usize, None);
     for (id, sealed) in records {
@@ -178,6 +202,27 @@ impl<B: RecordBackend> SealedStore<B> {
   }
 }
 
+impl<B> SealedStore<B> {
+  fn entry_log(&self) -> MutexGuard<'_, EntryLog> {
+    // A poisoned lock only means another thread panicked; the log stays usable.
+    self
+      .entries
+      .lock()
+      .unwrap_or_else(|poisoned| poisoned.into_inner())
+  }
+
+  /// Notes a write (`is_delete`: a delete) of an entry that the backend took: inside a group it
+  /// counts once the group ended, outside one it reached the disk.
+  fn note_entry_write(&self, table: Table, key: &str, is_delete: bool) {
+    let mut log = self.entry_log();
+    if log.depth > 0 {
+      log.in_group.push((table, key.to_string(), is_delete));
+    } else {
+      log.lost_deletes.remove(&(table, key.to_string()));
+    }
+  }
+}
+
 impl<B: RecordBackend> LocalStore for SealedStore<B> {
   fn get(&self, table: Table, key: &str) -> Result<Option<Vec<u8>>, StoreError> {
     self.cache.get(table, key)
@@ -185,12 +230,29 @@ impl<B: RecordBackend> LocalStore for SealedStore<B> {
 
   fn put(&self, table: Table, key: &str, value: &[u8]) -> Result<(), StoreError> {
     self.cache.put(table, key, value)?;
-    self.write_entry(table, key, value)
+    self.write_entry(table, key, value)?;
+    self.note_entry_write(table, key, false);
+    Ok(())
   }
 
   fn delete(&self, table: Table, key: &str) -> Result<(), StoreError> {
     self.cache.delete(table, key)?;
-    self.backend.delete_record(&self.entry_id(table, key))
+    match self.backend.delete_record(&self.entry_id(table, key)) {
+      Ok(()) => {
+        self.note_entry_write(table, key, true);
+        Ok(())
+      },
+      Err(error) => {
+        // Gone from the cache, maybe not from the disk (inside a group the group fails too).
+        let mut log = self.entry_log();
+        if log.depth > 0 {
+          log.in_group.push((table, key.to_string(), true));
+        } else {
+          log.lost_deletes.insert((table, key.to_string()));
+        }
+        Err(error)
+      },
+    }
   }
 
   fn list(&self, table: Table) -> Result<Vec<(String, Vec<u8>)>, StoreError> {
@@ -271,15 +333,44 @@ impl<B: RecordBackend> LocalStore for SealedStore<B> {
   }
 
   fn begin_writes(&self) -> Result<(), StoreError> {
-    self.backend.begin_writes()
+    self.backend.begin_writes()?;
+    self.entry_log().depth += 1;
+    Ok(())
   }
 
   fn end_writes(&self) -> Result<(), StoreError> {
-    self.backend.end_writes()
+    let ended = self.backend.end_writes();
+    let mut log = self.entry_log();
+    log.depth = log.depth.saturating_sub(1);
+    if log.depth == 0 {
+      let touched = std::mem::take(&mut log.in_group);
+      for (table, key, is_delete) in touched {
+        if ended.is_ok() {
+          log.lost_deletes.remove(&(table, key));
+        } else if is_delete {
+          log.lost_deletes.insert((table, key));
+        }
+      }
+    }
+    ended
   }
 
   fn write_soon(&self) {
     self.backend.write_soon();
+  }
+
+  fn write_tally(&self) -> Option<WriteTally> {
+    self.backend.write_tally()
+  }
+
+  fn lost_deletes(&self, table: Table) -> Vec<String> {
+    self
+      .entry_log()
+      .lost_deletes
+      .iter()
+      .filter(|(lost_table, _)| *lost_table == table)
+      .map(|(_, key)| key.clone())
+      .collect()
   }
 }
 

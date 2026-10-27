@@ -1,6 +1,6 @@
-//! Local store integrity (issues #160, #168): a crash on any write never leaves a stuck message or
-//! a group out of step with its cursor, concurrent edits converge, and a restart during linking
-//! keeps the keys the existing device handed over.
+//! Local store integrity (issues #160, #168, #424): a crash on any write never leaves a stuck
+//! message, a group out of step with its cursor or a half-written MLS state, concurrent edits
+//! converge, and a restart during linking keeps the keys the existing device handed over.
 // Test helpers outside `#[test]` functions panic on failure like the tests themselves.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
@@ -9,12 +9,15 @@ use std::sync::{Arc, Mutex};
 use crate::common;
 
 use common::{PASSPHRASE, Peer, TestClient, clock, link_device, settings, settle};
+use openmls_rust_crypto::OpenMlsRustCrypto;
+use openmls_traits::OpenMlsProvider as _;
 use teamcraft_core::api::fake::{FakeGateway, FakeServer, FakeServerApi};
-use teamcraft_core::records;
 use teamcraft_core::store::{
-  LocalStore, MemoryStore, MessageContent, MessageFilter, StoreError, StoredMessage, Table,
+  ConversationEvent, LocalStore, MemoryStore, MessageContent, MessageFilter, StoreError, StoredMessage, Table,
 };
+use teamcraft_core::workspace::RosterRole;
 use teamcraft_core::{Client, LinkOffer, PendingEnrollment};
+use teamcraft_core::{mls_storage, records};
 use teamcraft_proto::{ClientMessageId, ConversationId};
 
 /// Writes a crash-test store takes before it fails; more than any scenario here needs.
@@ -114,6 +117,213 @@ mod kill_points {
       }
     }
     panic!("processing never finished within {MAX_KILL_POINTS} writes");
+  }
+
+  /// Issue #811: a crash on any write while a member's device processes an admin's addition
+  /// leaves exactly one "joined as a workspace admin" line once the commit is processed again.
+  #[tokio::test]
+  async fn a_crash_while_an_admin_joins_leaves_one_line() {
+    for kill_point in 0..MAX_KILL_POINTS {
+      let server = FakeServer::new();
+      let mut alice = Peer::enroll(&server, "Alice").await;
+      let dave = Peer::enroll(&server, "Dave").await;
+      let (mut bob, mut bob_gateway, store) = enroll_on_kill_point_store(&server, "Bob").await;
+      let (alice_id, dave_id) = (alice.client.user_id(), dave.client.user_id());
+      alice
+        .client
+        .publish_roster(&[(alice_id, RosterRole::Owner), (dave_id, RosterRole::Admin)])
+        .await
+        .unwrap();
+      let channel = alice
+        .client
+        .create_channel(alice.space().await, "private")
+        .await
+        .unwrap();
+      alice.client.add_member(channel, bob.user_id()).await.unwrap();
+      pump_until_quiet(&mut bob, &mut bob_gateway, &mut alice).await;
+
+      // Bob's device verifies Alice's commit that brings the admin in, and dies on one write.
+      store.crash_after(kill_point);
+      alice.client.add_member(channel, dave_id).await.unwrap();
+      let processed = pump_until_quiet_or_crash(&mut bob, &mut bob_gateway, &mut alice).await;
+      let has_crashed = store.has_crashed();
+      if !has_crashed {
+        processed.unwrap();
+      }
+
+      let mut reopened = reopen(&bob, store.durable());
+      let (mut gateway, _) = reopened.connect_gateway().await.unwrap();
+      pump_until_quiet(&mut reopened, &mut gateway, &mut alice).await;
+      assert_eq!(
+        admin_lines(&store.durable(), channel),
+        1,
+        "kill point {kill_point}"
+      );
+      if !has_crashed {
+        return;
+      }
+    }
+    panic!("processing never finished within {MAX_KILL_POINTS} writes");
+  }
+
+  /// Issue #818: a crash on any write while a member's device sees the server archive a channel and
+  /// receives the announcement leaves exactly one "archived" line, naming who archived it, once the
+  /// device is back.
+  #[tokio::test]
+  async fn a_crash_while_a_channel_is_archived_leaves_one_named_line() {
+    for kill_point in 0..MAX_KILL_POINTS {
+      let server = FakeServer::new();
+      let mut alice = Peer::enroll(&server, "Alice").await;
+      let (mut bob, mut bob_gateway, store) = enroll_on_kill_point_store(&server, "Bob").await;
+      let channel = alice
+        .client
+        .create_channel(alice.space().await, "ops")
+        .await
+        .unwrap();
+      alice.client.add_member(channel, bob.user_id()).await.unwrap();
+      pump_until_quiet(&mut bob, &mut bob_gateway, &mut alice).await;
+
+      store.crash_after(kill_point);
+      alice
+        .client
+        .update_channel(
+          channel,
+          &teamcraft_proto::UpdateConversationRequest {
+            maybe_is_archived: Some(true),
+            ..Default::default()
+          },
+        )
+        .await
+        .unwrap();
+      let processed = pump_until_quiet_or_crash(&mut bob, &mut bob_gateway, &mut alice).await;
+      let has_crashed = store.has_crashed();
+      if !has_crashed {
+        processed.unwrap();
+      }
+
+      let mut reopened = reopen(&bob, store.durable());
+      let (mut gateway, _) = reopened.connect_gateway().await.unwrap();
+      pump_until_quiet(&mut reopened, &mut gateway, &mut alice).await;
+      assert_eq!(
+        archived_lines(&store.durable(), channel),
+        vec![Some(alice.client.user_id())],
+        "kill point {kill_point}"
+      );
+      if !has_crashed {
+        return;
+      }
+    }
+    panic!("processing never finished within {MAX_KILL_POINTS} writes");
+  }
+
+  /// Issue #424: the MLS state is one record per entry; a crash on any write of a save leaves
+  /// the state of before or of after the save on disk, never a mix of both.
+  #[test]
+  fn a_crash_on_any_write_of_an_mls_save_leaves_the_state_before_or_after_it() {
+    for kill_point in 0..MAX_KILL_POINTS {
+      let store = KillPointStore::default();
+      let provider = OpenMlsRustCrypto::default();
+      let saved = mls_storage::SavedMlsStorage::default();
+      for key in ["tree", "context", "secrets", "key package"] {
+        set_entry(&provider, key, Some("epoch 1"));
+      }
+      mls_storage::save_mls_storage(&store, &provider, &saved).unwrap();
+      let before = entries(&provider);
+      for key in ["tree", "context", "secrets"] {
+        set_entry(&provider, key, Some("epoch 2"));
+      }
+      set_entry(&provider, "key package", None);
+      set_entry(&provider, "proposal", Some("epoch 2"));
+      let after = entries(&provider);
+
+      store.crash_after(kill_point);
+      let saving = mls_storage::save_mls_storage(&store, &provider, &saved);
+      let has_crashed = store.has_crashed();
+
+      let (on_disk, _) = mls_storage::load_mls_storage(&*store.durable()).unwrap();
+      let on_disk = entries(&on_disk);
+      assert!(
+        on_disk == before || on_disk == after,
+        "kill point {kill_point}: half old, half new: {on_disk:?}"
+      );
+      if !has_crashed {
+        saving.unwrap();
+        assert_eq!(on_disk, after);
+        return;
+      }
+    }
+    panic!("the save never finished within {MAX_KILL_POINTS} writes");
+  }
+
+  /// Issue #424: a crash on any write while the one MLS record of a version before 1.0.9 moves to
+  /// entries keeps the old record (moved on the next start) or the entries; nothing is lost.
+  #[test]
+  fn a_crash_on_any_write_of_the_move_to_entries_loses_no_mls_state() {
+    let mut old: Vec<(String, String)> = (0..20)
+      .map(|index| (format!("entry {index}"), format!("value {index}")))
+      .collect();
+    old.sort();
+    for kill_point in 0..MAX_KILL_POINTS {
+      let store = KillPointStore::default();
+      store
+        .put(Table::MlsStorage, "provider", &legacy_record(&old))
+        .unwrap();
+
+      store.crash_after(kill_point);
+      let moving = mls_storage::load_mls_storage(&store);
+      let has_crashed = store.has_crashed();
+
+      let durable = store.durable();
+      let (reopened, _) = mls_storage::load_mls_storage(&*durable).unwrap();
+      let expected: Vec<(Vec<u8>, Vec<u8>)> = old
+        .iter()
+        .map(|(key, value)| (key.clone().into_bytes(), value.clone().into_bytes()))
+        .collect();
+      assert_eq!(entries(&reopened), expected, "kill point {kill_point}");
+      assert_ne!(
+        durable.get(Table::MlsStorage, "provider").unwrap(),
+        Some(legacy_record(&old)),
+        "kill point {kill_point}: moved on the start after"
+      );
+      if !has_crashed {
+        assert_eq!(entries(&moving.unwrap().0), expected);
+        return;
+      }
+    }
+    panic!("the move never finished within {MAX_KILL_POINTS} writes");
+  }
+
+  fn set_entry(provider: &OpenMlsRustCrypto, key: &str, maybe_value: Option<&str>) {
+    let mut values = provider.storage().values.write().unwrap();
+    match maybe_value {
+      Some(value) => values.insert(key.as_bytes().to_vec(), value.as_bytes().to_vec()),
+      None => values.remove(key.as_bytes()),
+    };
+  }
+
+  fn entries(provider: &OpenMlsRustCrypto) -> Vec<(Vec<u8>, Vec<u8>)> {
+    let mut entries: Vec<_> = provider
+      .storage()
+      .values
+      .read()
+      .unwrap()
+      .iter()
+      .map(|(key, value)| (key.clone(), value.clone()))
+      .collect();
+    entries.sort();
+    entries
+  }
+
+  /// The one MLS record of a version before 1.0.9: length-prefixed keys and values.
+  fn legacy_record(entries: &[(String, String)]) -> Vec<u8> {
+    let mut encoded = Vec::new();
+    for (key, value) in entries {
+      for chunk in [key.as_bytes(), value.as_bytes()] {
+        encoded.extend_from_slice(&u32::try_from(chunk.len()).unwrap().to_be_bytes());
+        encoded.extend_from_slice(chunk);
+      }
+    }
+    encoded
   }
 }
 
@@ -503,6 +713,39 @@ async fn linked_peer(owner: &mut Peer) -> Peer {
     client,
     gateway,
   }
+}
+
+/// How many "joined as a workspace admin" lines `store` lists in `conversation`.
+fn admin_lines(store: &MemoryStore, conversation: ConversationId) -> usize {
+  store
+    .messages(conversation, MessageFilter::TopLevel)
+    .unwrap()
+    .into_iter()
+    .filter(|message| {
+      matches!(
+        message.content,
+        MessageContent::Event {
+          event: ConversationEvent::AdminJoined { .. }
+        }
+      )
+    })
+    .count()
+}
+
+/// Whom each "archived" line `store` lists in `conversation` names.
+fn archived_lines(store: &MemoryStore, conversation: ConversationId) -> Vec<Option<teamcraft_proto::UserId>> {
+  store
+    .messages(conversation, MessageFilter::TopLevel)
+    .unwrap()
+    .into_iter()
+    .filter(|message| {
+      message.content
+        == MessageContent::Event {
+          event: ConversationEvent::Archived,
+        }
+    })
+    .map(|message| message.maybe_actor())
+    .collect()
 }
 
 fn texts(store: &MemoryStore, conversation: ConversationId) -> Vec<String> {

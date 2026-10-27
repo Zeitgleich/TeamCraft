@@ -50,6 +50,24 @@ final class BrowseTests: XCTestCase {
     XCTAssertEqual(addition, CallAddition(inCall: ["1", "2"], added: ["3"]))
   }
 
+  func testChannelCreationAndBrowsingFollowTheCore() throws {
+    let snapshot = try XCTUnwrap(Wire.decode(BrowseSnapshot.self, from: snapshotJSON))
+    XCTAssertTrue(snapshot.canBrowseChannels)
+    XCTAssertEqual(snapshot.spaces?.first?.offersChannelCreation, true, "an older core doesn't say")
+    let guest = """
+      {
+        "me": {"id": "1", "username": "ext", "display_name": "Ext", "is_guest": true},
+        "spaces": [
+          {"id": "9", "name": "Project A", "can_create_channels": false},
+          {"id": "8", "name": "Project B", "can_create_channels": true}
+        ]
+      }
+      """
+    let decoded = try XCTUnwrap(Wire.decode(BrowseSnapshot.self, from: guest))
+    XCTAssertFalse(decoded.canBrowseChannels)
+    XCTAssertEqual(decoded.spaces?.map(\.offersChannelCreation), [false, true])
+  }
+
   func testBrowseActionsOnTheWire() {
     XCTAssertEqual(ChatAction.openDm(userId: "2").json, #"{"action":"open_dm","user":"2"}"#)
     XCTAssertEqual(

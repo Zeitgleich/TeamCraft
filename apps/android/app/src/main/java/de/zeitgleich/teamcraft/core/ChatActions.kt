@@ -96,6 +96,9 @@ object ChatActions {
 
   fun markRead(conversation: String) = action("mark_read") { put("conversation", conversation) }
 
+  /** Reads again how far the others read: receipts sent while the app was offline never arrive. */
+  fun refreshReadReceipts(conversation: String) = action("refresh_read_receipts") { put("conversation", conversation) }
+
   fun markUnread(conversation: String, from: String) = action("mark_unread") {
     put("conversation", conversation)
     put("from", from)
@@ -134,6 +137,13 @@ object ChatActions {
   fun download(conversation: String, message: String) = action("download_file") {
     put("conversation", conversation)
     put("message", message)
+  }
+
+  /** One file of a message: the image viewer fetches only the picture on screen. */
+  fun downloadAttachment(conversation: String, message: String, fileId: String) = action("download_attachment") {
+    put("conversation", conversation)
+    put("message", message)
+    put("file_id", fileId)
   }
 
   fun setFavorite(conversation: String, isFavorite: Boolean) = action("set_favorite") {

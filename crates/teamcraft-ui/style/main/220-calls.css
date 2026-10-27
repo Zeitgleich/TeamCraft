@@ -1,0 +1,942 @@
+/* ---- Calls ---- */
+
+.btn-small {
+  min-height: 28px;
+  padding: 0 10px;
+  font-size: var(--text-sm);
+}
+
+.btn-danger {
+  background: var(--danger);
+  border-color: var(--danger);
+  color: var(--on-danger);
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .btn-danger:hover {
+    background: color-mix(in srgb, var(--danger) 85%, black);
+  }
+}
+
+.small {
+  font-size: var(--text-xs);
+  letter-spacing: var(--tracking-xs);
+}
+
+.mono {
+  font-family: var(--font-mono);
+}
+
+.huddle-bar {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 6px 16px;
+  border-bottom: 1px solid var(--border);
+  background: var(--accent-soft);
+}
+
+.huddle-icon {
+  color: var(--accent-strong);
+}
+
+.huddle-info {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.huddle-names {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-muted);
+}
+
+.huddle-controls {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+/* In the call on another device: three choices don't fit next to the names on a phone; they move
+   to their own row, the main one last (nearest the thumb). */
+@media (max-width: 600px) {
+  .huddle-bar-choices {
+    flex-wrap: wrap;
+    row-gap: 6px;
+  }
+
+  .huddle-bar-choices .huddle-info {
+    flex-basis: calc(100% - 40px);
+  }
+
+  .huddle-bar-choices .huddle-controls {
+    flex-basis: 100%;
+    justify-content: flex-end;
+  }
+}
+
+.call-pill {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  margin: 8px;
+  padding: 6px 6px 6px 12px;
+  border-radius: var(--radius);
+  background: rgba(255, 255, 255, 0.08);
+  color: var(--chrome-strong);
+}
+
+.call-pill-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--online);
+}
+
+.call-pill-name {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  padding: 0 4px;
+  border: 0;
+  background: none;
+  color: inherit;
+  text-align: left;
+  overflow: hidden;
+}
+
+.call-pill .leave {
+  background: var(--call-danger);
+  color: var(--on-fill);
+}
+
+.hangup {
+  transform: rotate(135deg);
+}
+
+/* Pre-join and call screens use their own dark surface in both themes. */
+.prejoin,
+.call-screen {
+  position: fixed;
+  inset: calc(var(--topbar-h) + var(--banners-h, 0px)) 0 0 0;
+  z-index: 20;
+  background: var(--call-bg);
+  color: var(--call-text);
+}
+
+.prejoin {
+  display: grid;
+  grid-template-columns: minmax(0, 1.2fr) minmax(340px, 0.8fr);
+  gap: 32px;
+  align-items: center;
+  padding: 32px clamp(16px, 5vw, 72px);
+  overflow-y: auto;
+}
+
+.prejoin .muted-text,
+.call-screen .muted-text {
+  color: var(--call-muted);
+}
+
+.prejoin-preview {
+  position: relative;
+  max-width: 760px;
+  width: 100%;
+  justify-self: center;
+}
+
+.prejoin-preview .tile {
+  aspect-ratio: 16 / 10;
+}
+
+/* The own tile without a camera image: a calm surface with the user's picture, like a muted
+   participant in a call, and what the camera does. */
+.tile.prejoin-self {
+  background: var(--call-surface-solid);
+  outline-color: var(--call-border);
+  outline-width: 1px;
+  outline-offset: -1px;
+}
+
+.prejoin-self-body {
+  position: absolute;
+  inset: 0 0 56px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 14px;
+}
+
+.prejoin-self-status {
+  color: var(--call-muted);
+  font-size: var(--text-sm);
+}
+
+/* The camera's first picture takes over from the user's picture with a short fade (#442), an
+   opacity change that stays with reduced motion. */
+.prejoin-preview .live-video {
+  animation: motion-fade-in var(--dur-base) var(--ease-standard);
+}
+
+.preview-controls {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 14px;
+  display: flex;
+  justify-content: center;
+  gap: 12px;
+}
+
+.round-btn {
+  display: grid;
+  place-items: center;
+  width: 44px;
+  height: 44px;
+  border: 0;
+  border-radius: 50%;
+  background: rgba(20, 26, 38, 0.75);
+  color: var(--on-fill);
+  backdrop-filter: blur(6px);
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .round-btn:hover {
+    background: rgba(60, 70, 90, 0.9);
+  }
+}
+
+.round-btn.off {
+  background: var(--danger);
+}
+
+.round-btn .icon {
+  width: 20px;
+  height: 20px;
+}
+
+.prejoin-panel {
+  max-width: 480px;
+  width: 100%;
+}
+
+.prejoin-panel h1 {
+  font-size: var(--text-2xl);
+  letter-spacing: var(--tracking-2xl);
+  line-height: var(--leading-2xl);
+  margin-bottom: 4px;
+}
+
+.prejoin-panel .field {
+  margin-top: 16px;
+  margin-bottom: 0;
+}
+
+.prejoin .input {
+  background: var(--call-surface);
+  border-color: var(--call-border);
+  color: var(--call-text);
+}
+
+.prejoin .btn {
+  background: var(--call-surface);
+  border-color: var(--call-border);
+  color: var(--call-text);
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .prejoin .btn:hover:not(:disabled) {
+    background: #202838;
+  }
+}
+
+.prejoin .btn-primary {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--on-accent);
+}
+
+.field-title {
+  font-weight: var(--weight-semibold);
+}
+
+.meter {
+  display: flex;
+  gap: 3px;
+  height: 8px;
+  margin-top: 4px;
+}
+
+.meter-bar {
+  flex: 1;
+  border-radius: 2px;
+  background: #263044;
+}
+
+.meter-bar.lit {
+  background: var(--online);
+}
+
+.e2ee-note {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 16px;
+  color: var(--call-muted);
+  font-size: var(--text-sm);
+}
+
+.prejoin-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 20px;
+}
+
+.effect-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.effect-group {
+  grid-column: 1 / -1;
+  margin: 8px 0 0;
+  color: var(--text-muted);
+  font-size: var(--text-xs);
+  letter-spacing: var(--tracking-xs);
+  font-weight: var(--weight-semibold);
+}
+
+.effect-photo {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.effect-tile {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 4px;
+  border: 2px solid transparent;
+  border-radius: var(--radius-md);
+  background: transparent;
+  color: inherit;
+  text-align: center;
+}
+
+.effect-tile[aria-checked="true"] {
+  border-color: var(--accent);
+}
+
+.effect-tile:disabled {
+  opacity: 0.55;
+}
+
+.effect-swatch {
+  position: relative;
+  display: grid;
+  place-items: center;
+  aspect-ratio: 16 / 10;
+  border-radius: var(--radius-sm);
+  overflow: hidden;
+  background: #1d2535;
+}
+
+.effect-name {
+  font-size: var(--text-xs);
+  letter-spacing: var(--tracking-xs);
+  line-height: 1.2;
+}
+
+/* Scenes: the room behind the user. Blur is applied to the scene only, never to the person. */
+.scene {
+  position: absolute;
+  inset: 0;
+  background:
+    linear-gradient(90deg, transparent 0 18%, rgba(255, 255, 255, 0.08) 18% 20%, transparent 20% 62%, rgba(255, 255, 255, 0.08) 62% 64%, transparent 64%),
+    linear-gradient(180deg, #5b6b82 0 55%, #3c4658 55% 100%);
+}
+
+.effect-blur-light .scene {
+  filter: blur(3px);
+}
+
+.effect-blur-strong .scene {
+  filter: blur(11px);
+}
+
+.effect-office .scene {
+  background: linear-gradient(180deg, #cfd8e3 0 60%, #8d99a8 60%), radial-gradient(circle at 70% 30%, #fff8, transparent 40%);
+  background-blend-mode: normal;
+}
+
+.effect-bookshelf .scene {
+  background:
+    repeating-linear-gradient(90deg, #7a4f32 0 6px, #a06a42 6px 12px, #5f6f4a 12px 17px, #8a6a2f 17px 24px),
+    #5b3d27;
+  background-size: 100% 33.4%;
+}
+
+.effect-sunrise .scene {
+  background: linear-gradient(180deg, #2f3e78 0%, #c0568a 45%, #f4a259 75%, #f7d57a 100%);
+}
+
+.effect-forest .scene {
+  background:
+    radial-gradient(ellipse at 20% 100%, #1f5a3a 0 40%, transparent 41%),
+    radial-gradient(ellipse at 70% 110%, #164a30 0 45%, transparent 46%),
+    linear-gradient(180deg, #86b7a0, #3f7a5c);
+}
+
+.effect-upload {
+  border: 1px dashed #4a5670;
+  background: transparent;
+}
+
+/* Tiles */
+.tile {
+  position: relative;
+  min-width: 0;
+  min-height: 0;
+  border-radius: var(--radius-md);
+  overflow: hidden;
+  background: hsl(var(--hue) 28% 22%);
+  outline: 3px solid transparent;
+  outline-offset: -3px;
+  transition: outline-color var(--dur-fast) var(--ease-standard);
+}
+
+.tile-speaking {
+  outline-color: var(--accent);
+}
+
+/* Connection lost, rejoining: dimmed until the person is back. */
+.tile-reconnecting .video-surface {
+  opacity: 0.45;
+}
+
+.tile-status {
+  position: absolute;
+  top: 8px;
+  left: 8px;
+  padding: 2px 8px;
+  border-radius: var(--radius-pill);
+  background: rgb(0 0 0 / 0.6);
+  color: var(--on-fill);
+  font-size: var(--text-xs);
+  letter-spacing: var(--tracking-xs);
+}
+
+.video-surface {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  overflow: hidden;
+}
+
+.tile-initials {
+  display: grid;
+  place-items: center;
+  width: clamp(48px, 28%, 120px);
+  aspect-ratio: 1;
+  border-radius: 50%;
+  background: hsl(var(--hue) 45% 38%);
+  color: var(--on-fill);
+  font-size: clamp(18px, 3vw, 36px);
+  font-weight: var(--weight-semibold);
+  /* The profile picture fills the same circle. */
+  overflow: hidden;
+}
+
+.silhouette {
+  position: absolute;
+  left: 50%;
+  bottom: -6%;
+  width: 46%;
+  height: 78%;
+  transform: translateX(-50%);
+}
+
+.silhouette.mirrored {
+  transform: translateX(-50%) scaleX(-1);
+}
+
+/* Real call video (browser): fills the tile; a shared screen keeps its whole picture. */
+.live-video {
+  position: absolute;
+  inset: 0;
+  background: #05070b;
+}
+
+.live-video > canvas,
+.live-video > video {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.live-video.mirrored {
+  transform: scaleX(-1);
+}
+
+.shared-screen .live-video {
+  position: static;
+  width: 100%;
+  height: 100%;
+}
+
+.shared-screen .live-video > canvas {
+  object-fit: contain;
+}
+
+.silhouette::before,
+.silhouette::after {
+  content: "";
+  position: absolute;
+  left: 50%;
+  transform: translateX(-50%);
+  background: hsl(var(--hue) 35% 62%);
+}
+
+.silhouette::before {
+  top: 4%;
+  width: 36%;
+  aspect-ratio: 1;
+  border-radius: 50%;
+}
+
+.silhouette::after {
+  top: 48%;
+  width: 92%;
+  height: 60%;
+  border-radius: 50% 50% 0 0 / 70% 70% 0 0;
+  background: hsl(var(--hue) 40% 48%);
+}
+
+.tile-label {
+  position: absolute;
+  left: 8px;
+  bottom: 8px;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  max-width: calc(100% - 16px);
+  padding: 2px 8px;
+  border-radius: var(--radius-sm);
+  background: rgba(8, 12, 20, 0.62);
+  color: var(--on-fill);
+  font-size: var(--text-sm);
+}
+
+.tile-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tile-badge {
+  width: 14px;
+  height: 14px;
+  color: #ff8a7a;
+}
+
+.tile-hand {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  display: grid;
+  place-items: center;
+  width: 30px;
+  height: 30px;
+  border-radius: 50%;
+  background: #f0b04a;
+  color: #231a05;
+}
+
+/* Call screen */
+.call-screen {
+  display: flex;
+  flex-direction: column;
+}
+
+.call-header {
+  flex: none;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 10px 20px;
+}
+
+.call-heading h1 {
+  font-size: var(--text-lg);
+  letter-spacing: var(--tracking-lg);
+}
+
+.call-meta {
+  display: flex;
+  gap: 12px;
+  font-size: var(--text-sm);
+  color: var(--call-muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.e2ee-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 12px;
+  border-radius: var(--radius-pill);
+  background: #16261f;
+  color: #7be0b0;
+  font-size: var(--text-sm);
+}
+
+.e2ee-pill .mono {
+  color: #b7c4d8;
+}
+
+.call-stage-wrap {
+  flex: 1;
+  min-height: 0;
+  padding: 0 20px;
+  display: flex;
+}
+
+.stage {
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  display: grid;
+  gap: 10px;
+}
+
+.stage-gallery {
+  grid-template-columns: repeat(var(--cols, 2), minmax(0, 1fr));
+  grid-auto-rows: minmax(0, 1fr);
+}
+
+.stage-speaker {
+  grid-template-rows: minmax(0, 1fr) 130px;
+}
+
+.speaker-main {
+  min-height: 0;
+  display: grid;
+}
+
+.filmstrip {
+  display: flex;
+  gap: 10px;
+  min-width: 0;
+  overflow-x: auto;
+}
+
+.filmstrip .tile {
+  flex: none;
+  aspect-ratio: 16 / 10;
+  height: 100%;
+}
+
+.stage-share {
+  grid-template-columns: minmax(0, 1fr) 190px;
+}
+
+.filmstrip-side {
+  flex-direction: column;
+  overflow-x: visible;
+  overflow-y: auto;
+}
+
+.filmstrip-side .tile {
+  height: auto;
+  width: 100%;
+}
+
+.share-main {
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.share-banner {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 12px;
+  border-radius: var(--radius);
+  background: #1b2434;
+  font-size: var(--text-sm);
+}
+
+.share-banner .btn {
+  margin-left: auto;
+  background: #2a3550;
+  border-color: #3a4766;
+  color: var(--on-fill);
+}
+
+.shared-screen {
+  flex: 1;
+  min-height: 0;
+  display: grid;
+  place-items: center;
+  border-radius: var(--radius-md);
+  background: #05070b;
+  padding: 16px;
+}
+
+.mock-window {
+  width: min(100%, 880px);
+  aspect-ratio: 16 / 10;
+  max-height: 100%;
+  display: flex;
+  flex-direction: column;
+  border-radius: var(--radius);
+  background: #f4f6fa;
+  overflow: hidden;
+}
+
+.mock-titlebar {
+  display: flex;
+  gap: 6px;
+  padding: 8px 10px;
+  background: #dfe4ec;
+}
+
+.mock-titlebar span {
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  background: #aab3c2;
+}
+
+.mock-body {
+  flex: 1;
+  display: flex;
+  min-height: 0;
+}
+
+.mock-sidebar {
+  width: 22%;
+  background: #1a2434;
+}
+
+.mock-content {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 16px;
+}
+
+.mock-line {
+  height: 9px;
+  width: 60%;
+  border-radius: var(--radius-xs);
+  background: #c7cfdc;
+}
+
+.mock-line.wide {
+  width: 85%;
+  background: #aeb9cc;
+}
+
+.mock-chart {
+  flex: 1;
+  min-height: 40px;
+  border-radius: var(--radius-sm);
+  background: linear-gradient(135deg, #d6e4ff, #a8c6ff);
+}
+
+.call-controls {
+  flex: none;
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  gap: 10px;
+  padding: 14px 16px 18px;
+}
+
+.control-btn {
+  display: grid;
+  place-items: center;
+  width: 46px;
+  height: 46px;
+  border: 0;
+  border-radius: 50%;
+  background: #1f2736;
+  color: var(--call-text);
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .control-btn:hover {
+    background: #2c3649;
+  }
+}
+
+.control-btn.off {
+  background: #e0e4ec;
+  color: #1b2230;
+}
+
+.control-btn.active {
+  background: var(--accent);
+  color: var(--on-accent);
+}
+
+.control-btn .icon {
+  width: 20px;
+  height: 20px;
+}
+
+.leave-btn {
+  --leave: var(--call-danger);
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  height: 46px;
+  margin-left: 12px;
+  padding: 0 18px;
+  border: 0;
+  border-radius: var(--radius-pill);
+  background: var(--leave);
+  color: var(--on-fill);
+  font-weight: var(--weight-semibold);
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .leave-btn:hover {
+    background: var(--call-danger-hover);
+  }
+}
+
+.effects-popover {
+  position: absolute;
+  left: 50%;
+  bottom: 84px;
+  transform: translateX(-50%);
+  width: min(520px, calc(100% - 32px));
+  padding: 14px;
+  border: 1px solid var(--call-border);
+  border-radius: var(--radius-md);
+  background: var(--call-surface);
+  box-shadow: var(--shadow);
+}
+
+.effects-popover h2 {
+  margin-bottom: 10px;
+  font-size: var(--text-base);
+}
+
+.share-popover {
+  width: min(380px, calc(100% - 32px));
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.share-popover .checkbox small {
+  display: block;
+  margin-top: 2px;
+}
+
+.share-popover .btn {
+  align-self: flex-end;
+}
+
+.share-sound {
+  color: #b9c3d6;
+}
+
+/* The camera menu of the call (#819): the cameras as a short list, the one in use checked. */
+.camera-popover {
+  width: min(340px, calc(100% - 32px));
+}
+
+.camera-options {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.camera-option {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 40px;
+  padding: 8px 10px;
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--call-text);
+  text-align: left;
+  transition: background-color 120ms ease-out;
+}
+
+.camera-option:active {
+  background: var(--call-border);
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .camera-option:hover:not(:active) {
+    background: rgba(255, 255, 255, 0.06);
+  }
+}
+
+.camera-option.chosen {
+  font-weight: var(--weight-semibold);
+}
+
+.camera-option-name {
+  flex: 1;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.camera-option .icon {
+  flex: none;
+  width: 18px;
+  height: 18px;
+  color: var(--accent);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .camera-option {
+    transition: none;
+  }
+}
+
+.system-effects-hint {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 10px;
+}
+
+.system-effects-hint p {
+  flex: 1;
+}
+
+.call-screen :focus-visible,
+.prejoin :focus-visible {
+  outline-color: var(--on-fill);
+}
+

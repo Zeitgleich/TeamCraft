@@ -39,8 +39,8 @@ use crate::admin_live::AdminLive;
 use crate::auth::Authenticator;
 use crate::backend::{AdminBackend, CallBackend, ChatBackend, SearchBackend, SecurityBackend};
 use crate::calls::{
-  ActiveCall, BackgroundEffect, BackgroundImageInfo, CallRequest, HuddleInfo, IncomingCall, MediaDevices,
-  Participant,
+  ActiveCall, BackgroundEffect, BackgroundImageInfo, CallPreview, CallRequest, CameraFallback, HuddleInfo,
+  IncomingCall, JoinMedia, MediaDevices, Participant, PreviewCamera,
 };
 use crate::clock::now_ms;
 use crate::i18n::translate_current;
@@ -705,6 +705,18 @@ impl<C: ChatBackend + 'static> ChatBackend for Hybrid<C> {
     self.chat.channel_roles(conversation)
   }
 
+  fn can_sign_channel_roles(&self, conversation: ConversationId) -> bool {
+    self.chat.can_sign_channel_roles(conversation)
+  }
+
+  fn confirm_channel_role(&self, conversation: ConversationId, user: UserId) {
+    self.chat.confirm_channel_role(conversation, user);
+  }
+
+  fn refresh_channel_roles(&self, conversation: ConversationId) {
+    self.chat.refresh_channel_roles(conversation);
+  }
+
   fn set_channel_role(
     &self,
     conversation: ConversationId,
@@ -764,6 +776,10 @@ impl<C: ChatBackend + 'static> ChatBackend for Hybrid<C> {
 
   fn activity(&self) -> teamcraft_client_api::activity::ActivityFeed {
     self.chat.activity()
+  }
+
+  fn join_requests(&self) -> Vec<teamcraft_client_api::activity::JoinRequest> {
+    self.chat.join_requests()
   }
 
   fn mark_activity_read(&self) {
@@ -848,6 +864,22 @@ impl<C: ChatBackend + 'static> ChatBackend for Hybrid<C> {
     self.chat.admin_add_self(conversation);
   }
 
+  fn request_admin_join(&self, conversation: ConversationId) {
+    self.chat.request_admin_join(conversation);
+  }
+
+  fn withdraw_admin_join(&self, conversation: ConversationId) {
+    self.chat.withdraw_admin_join(conversation);
+  }
+
+  fn approve_admin_join(&self, conversation: ConversationId, user: UserId, history: HistoryPolicy) {
+    self.chat.approve_admin_join(conversation, user, history);
+  }
+
+  fn decline_admin_join(&self, conversation: ConversationId, user: UserId) {
+    self.chat.decline_admin_join(conversation, user);
+  }
+
   fn current_announcement(&self) -> Option<AnnouncementResponse> {
     self.maybe_live.as_ref().and_then(LiveServer::announcement)
   }
@@ -867,6 +899,14 @@ impl<C: ChatBackend + 'static> ChatBackend for Hybrid<C> {
       .maybe_live
       .as_ref()
       .map_or_else(Vec::new, |live| live.seen_by(conversation, message))
+  }
+
+  fn typing_users(&self, conversation: ConversationId) -> Vec<UserId> {
+    self.chat.typing_users(conversation)
+  }
+
+  fn notify_typing(&self, conversation: ConversationId) {
+    self.chat.notify_typing(conversation);
   }
 }
 
@@ -975,9 +1015,9 @@ impl<C: ChatBackend> CallBackend for Hybrid<C> {
       .map_or_else(Vec::new, RemoteCalls::incoming)
   }
 
-  fn join_call(&self, request: CallRequest, is_muted: bool) {
+  fn join_call(&self, request: CallRequest, media: JoinMedia) {
     if let Some(calls) = &self.maybe_calls {
-      calls.join(request, is_muted);
+      calls.join(request, media);
     }
   }
 
@@ -1053,6 +1093,10 @@ impl<C: ChatBackend> CallBackend for Hybrid<C> {
     }
   }
 
+  fn camera_fallback(&self) -> Option<CameraFallback> {
+    self.maybe_calls.as_ref().and_then(RemoteCalls::camera_fallback)
+  }
+
   fn set_background_effect(&self, effect: BackgroundEffect) {
     if let Some(calls) = &self.maybe_calls {
       calls.act(CallAction::SetBackgroundEffect { effect });
@@ -1084,6 +1128,23 @@ impl<C: ChatBackend> CallBackend for Hybrid<C> {
     if let Some(calls) = &self.maybe_calls {
       calls.act(CallAction::SetStatusSounds { sounds });
     }
+  }
+
+  fn set_call_preview(&self, preview: CallPreview) {
+    if let Some(calls) = &self.maybe_calls {
+      calls.set_preview(preview);
+    }
+  }
+
+  fn call_preview_camera(&self) -> PreviewCamera {
+    self
+      .maybe_calls
+      .as_ref()
+      .map_or(PreviewCamera::Off, RemoteCalls::preview_camera)
+  }
+
+  fn call_preview_level(&self) -> f32 {
+    self.maybe_calls.as_ref().map_or(0.0, RemoteCalls::preview_level)
   }
 }
 
@@ -1289,7 +1350,11 @@ impl<C: ChatBackend> AdminBackend for Hybrid<C> {
         self.chat.admin_add_self(channel);
         SelfJoinOutcome::Joined
       },
-      teamcraft_proto::AdminSelfJoin::OwnerApproval => SelfJoinOutcome::ApprovalRequested,
+      // The channel's owners decide (admin.md §2.4).
+      teamcraft_proto::AdminSelfJoin::OwnerApproval => {
+        self.chat.request_admin_join(channel);
+        SelfJoinOutcome::ApprovalRequested
+      },
       teamcraft_proto::AdminSelfJoin::Disabled | teamcraft_proto::AdminSelfJoin::Unknown(_) => {
         SelfJoinOutcome::Disabled
       },
@@ -1498,6 +1563,19 @@ impl<C: ChatBackend> SecurityBackend for Hybrid<C> {
 
   fn refresh_my_devices(&self) {
     self.chat.refresh_own_devices();
+  }
+
+  fn rename_my_device(&self, device: DeviceId, name: String) {
+    self.chat.rename_own_device(device, name);
+  }
+
+  fn test_push_my_device(&self, device: DeviceId) {
+    self.chat.test_push_own_device(device);
+  }
+
+  /// `None` while the core has not reported it (or there is no core).
+  fn key_backup(&self) -> Option<teamcraft_client_api::security::KeyBackupState> {
+    self.chat.security_keys().maybe_backup
   }
 
   fn key_change(&self, conversation: ConversationId) -> Option<KeyChange> {

@@ -91,6 +91,7 @@ import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.customActions
 import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
@@ -122,17 +123,22 @@ import de.zeitgleich.teamcraft.ui.FirstUnread
 import de.zeitgleich.teamcraft.ui.MainViewModel
 import de.zeitgleich.teamcraft.ui.MarkupColors
 import de.zeitgleich.teamcraft.ui.MentionNames
+import de.zeitgleich.teamcraft.ui.PictureTarget
 import de.zeitgleich.teamcraft.ui.Pictures
 import de.zeitgleich.teamcraft.ui.THUMBNAIL_DECODE_PX
 import de.zeitgleich.teamcraft.ui.bubbleCorners
 import de.zeitgleich.teamcraft.ui.decideFeedScroll
 import de.zeitgleich.teamcraft.ui.feedItems
 import de.zeitgleich.teamcraft.ui.isNearBottom
+import de.zeitgleich.teamcraft.ui.localizedText
 import de.zeitgleich.teamcraft.ui.newerMessages
 import de.zeitgleich.teamcraft.ui.rememberThumbnail
 import de.zeitgleich.teamcraft.ui.showsSenders
+import de.zeitgleich.teamcraft.ui.systemLine
 import de.zeitgleich.teamcraft.ui.thumbnailKey
 import de.zeitgleich.teamcraft.ui.theme.LocalTeamCraftColors
+import uniffi.teamcraft_ffi.AlbumLayout
+import uniffi.teamcraft_ffi.albumLayout
 import uniffi.teamcraft_ffi.isOpenableLink
 
 /** The reaction a double tap toggles, as in most chat apps. */
@@ -196,6 +202,8 @@ fun MessageFeed(
   modifier: Modifier = Modifier,
   maybeFocusMessage: String? = null,
   onOpenPermalink: (String) -> Unit = {},
+  /** Whether the user may react here; without it the reactions stay readable but don't toggle. */
+  canReact: Boolean = true,
 ) {
   // Newest first in a reversed list: the bottom stays anchored when the keyboard opens or a picture
   // above grows, and the rows keep their place by key (the message ID) when new ones arrive.
@@ -213,8 +221,8 @@ fun MessageFeed(
   // Measured while composing the new rows, before the list lays them out: afterwards the list has
   // kept its place on the previous newest row, and the end would already look far away.
   val wasNearBottom = remember(items) { Snapshot.withoutReadObservation { listState.isNearBottom() } }
-  // Saveable: a rotation keeps the viewer open.
-  var maybeViewedId by rememberSaveable { mutableStateOf<String?>(null) }
+  // Saveable: a rotation keeps the viewer open (the conversation, message and file it opened on).
+  var maybeViewing by rememberSaveable { mutableStateOf<List<String>?>(null) }
   var maybeHighlighted by remember(maybeFocusMessage) { mutableStateOf(maybeFocusMessage) }
   LaunchedEffect(maybeHighlighted) {
     if (maybeHighlighted != null) {
@@ -255,8 +263,8 @@ fun MessageFeed(
   val context = LocalContext.current
   val onOpenFile: (FileInfo) -> Unit = remember(viewModel, context) {
     { file ->
-      // Images open in the viewer at once (it shows the thumbnail and fetches the full picture).
-      if (file.isImage && file.maybeThumbnail != null) maybeViewedId = file.fileId else openOrDownload(viewModel, file, context)
+      // Pictures open in the viewer at once (it shows the thumbnail and fetches the original).
+      if (file.isImage && file.maybeThumbnail != null) maybeViewing = PictureTarget.of(file).toList() else openOrDownload(viewModel, file, context)
     }
   }
   // Once per snapshot, not per row: mentions are matched against every user's name.
@@ -287,6 +295,7 @@ fun MessageFeed(
               maybeOnReply = maybeOnReply,
               isHighlighted = item.message.id == maybeHighlighted,
               onOpenPermalink = onOpenPermalink,
+              canReact = canReact,
             )
           }
         }
@@ -305,14 +314,8 @@ fun MessageFeed(
       }
     }
   }
-  maybeViewedId?.let { fileId ->
-    ImageViewer(
-      // Oldest first, so swiping to the right goes back in time as in the feed above.
-      images = messages.flatMap { message -> extras[message.id]?.files.orEmpty() }.filter { it.isImage && it.maybeThumbnail != null },
-      startFileId = fileId,
-      onDownload = { file -> viewModel.act(ChatActions.download(file.conversation, file.message)) },
-      onDismiss = { maybeViewedId = null },
-    )
+  maybeViewing?.let(PictureTarget::fromList)?.let { target ->
+    ImageViewer(viewModel, snapshot, target, onDismiss = { maybeViewing = null })
   }
 }
 
@@ -589,12 +592,14 @@ private fun MessageRow(
   maybeOnReply: ((Message) -> Unit)?,
   isHighlighted: Boolean,
   onOpenPermalink: (String) -> Unit,
+  canReact: Boolean,
 ) {
   val message = entry.message
-  if (message.maybeSystemEvent != null || maybeExtras?.maybeWorkspaceEvent != null) {
-    // Joins, renames and the like: a quiet centred line, not a bubble.
+  val maybeSystemLine = systemLine(message, maybeExtras) { snapshot?.user(it)?.displayName.orEmpty() }
+  if (maybeSystemLine != null) {
+    // Joins, renames, who added whom: a quiet centred line in the desktop and web wording (#769).
     Text(
-      systemText(message, maybeExtras, snapshot),
+      maybeSystemLine.localizedText(),
       style = MaterialTheme.typography.labelMedium,
       fontStyle = FontStyle.Italic,
       color = MaterialTheme.colorScheme.onSurfaceVariant,
@@ -617,6 +622,7 @@ private fun MessageRow(
     else -> 4.dp
   }
   val alignment = if (isMine) Alignment.End else Alignment.Start
+  val reactQuickly: () -> Unit = { viewModel.act(ChatActions.react(message.conversation, message.id, QUICK_REACTION)) }
   Column(
     Modifier
       .fillMaxWidth()
@@ -628,7 +634,8 @@ private fun MessageRow(
       )
       .combinedClickable(
         onClick = {},
-        onDoubleClick = { viewModel.act(ChatActions.react(message.conversation, message.id, QUICK_REACTION)) },
+        // Without the right to react, a tap doesn't wait to tell a double tap apart either.
+        onDoubleClick = reactQuickly.takeIf { canReact },
         onLongClick = {
           haptics.performHapticFeedback(HapticFeedbackType.LongPress)
           onLongPress()
@@ -637,10 +644,7 @@ private fun MessageRow(
       .semantics {
         customActions = listOfNotNull(
           maybeOnReply?.let { reply -> CustomAccessibilityAction(replyLabel) { reply(message); true } },
-          CustomAccessibilityAction(reactLabel) {
-            viewModel.act(ChatActions.react(message.conversation, message.id, QUICK_REACTION))
-            true
-          },
+          CustomAccessibilityAction(reactLabel) { reactQuickly(); true }.takeIf { canReact },
           CustomAccessibilityAction(moreLabel) { onLongPress(); true },
         )
       }
@@ -673,7 +677,7 @@ private fun MessageRow(
       }
     }
     Column(Modifier.padding(start = indent).widthIn(max = look.bubbleMax), horizontalAlignment = alignment) {
-      BelowBubble(viewModel, message, maybeExtras, onOpenThread)
+      BelowBubble(viewModel, message, maybeExtras, onOpenThread, canReact)
     }
   }
 }
@@ -754,10 +758,19 @@ private fun Bubble(
   }
 }
 
-/** Reactions, read confirmations, "not sent" and the thread link, under the bubble. */
+/**
+ * Reactions, read confirmations, "not sent" and the thread link, under the bubble. Without the
+ * right to react, the reactions stay readable but don't toggle (issue #758).
+ */
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
-private fun BelowBubble(viewModel: MainViewModel, message: Message, maybeExtras: MessageExtras?, onOpenThread: ((String) -> Unit)?) {
+private fun BelowBubble(
+  viewModel: MainViewModel,
+  message: Message,
+  maybeExtras: MessageExtras?,
+  onOpenThread: ((String) -> Unit)?,
+  canReact: Boolean,
+) {
   if (maybeExtras?.isSendFailed == true) NotSentLine(viewModel, message)
   if (message.reactions.isNotEmpty()) {
     FlowRow(
@@ -766,7 +779,7 @@ private fun BelowBubble(viewModel: MainViewModel, message: Message, maybeExtras:
       modifier = Modifier.padding(top = 2.dp),
     ) {
       for (reaction in message.reactions) {
-        ReactionPill(reaction.emoji, reaction.count, reaction.reactedByMe) {
+        ReactionPill(reaction.emoji, reaction.count, reaction.reactedByMe, isEnabled = canReact) {
           viewModel.act(ChatActions.react(message.conversation, message.id, reaction.emoji))
         }
       }
@@ -796,10 +809,11 @@ private fun BelowBubble(viewModel: MainViewModel, message: Message, maybeExtras:
 
 /** One reaction: the emoji and how many, outlined in the accent when the user is among them. */
 @Composable
-private fun ReactionPill(emoji: String, count: Int, isMine: Boolean, onClick: () -> Unit) {
+private fun ReactionPill(emoji: String, count: Int, isMine: Boolean, isEnabled: Boolean, onClick: () -> Unit) {
   val scheme = MaterialTheme.colorScheme
   Surface(
     onClick = onClick,
+    enabled = isEnabled,
     shape = CircleShape,
     color = if (isMine) scheme.primaryContainer else scheme.surfaceContainerHigh,
     border = BorderStroke(1.dp, if (isMine) scheme.primary else scheme.outlineVariant),
@@ -849,6 +863,14 @@ private fun ColumnScope.Footer(message: Message, maybeExtras: MessageExtras?, co
       maybeExtras?.isSendFailed == true -> Icon(
         painterResource(R.drawable.ic_warning),
         contentDescription = stringResource(R.string.not_sent),
+        tint = colors.content,
+        modifier = Modifier.size(14.dp),
+      )
+      // The other member of the DM read it: two ticks at the bubble's full text colour, where the
+      // single "sent" tick is muted (desktop and web: two accent ticks, #769).
+      maybeExtras?.isRead == true -> Icon(
+        painterResource(R.drawable.ic_done_all),
+        contentDescription = stringResource(R.string.message_read),
         tint = colors.content,
         modifier = Modifier.size(14.dp),
       )
@@ -1029,23 +1051,6 @@ fun openLink(context: Context, url: String) {
   }
 }
 
-@Composable
-private fun systemText(message: Message, maybeExtras: MessageExtras?, snapshot: ChatSnapshot?): String {
-  val who = snapshot?.name(message.author).orEmpty()
-  val event = message.maybeSystemEvent?.toString().orEmpty()
-  val workspace = maybeExtras?.maybeWorkspaceEvent?.get("event")?.toString()?.trim('"').orEmpty()
-  return when {
-    event.contains("Joined") -> stringResource(R.string.event_joined, who)
-    event.contains("Left") -> stringResource(R.string.event_left, who)
-    event.contains("Renamed") -> stringResource(R.string.event_renamed, who)
-    event.contains("TopicChanged") -> stringResource(R.string.event_topic, who)
-    workspace == "archived" -> stringResource(R.string.event_archived, who)
-    workspace == "made_private" -> stringResource(R.string.event_private, who)
-    workspace == "made_public" -> stringResource(R.string.event_public, who)
-    else -> stringResource(R.string.event_changed, who)
-  }
-}
-
 /**
  * A picture across the bubble's width at its own shape, at most [PREVIEW_MAX_HEIGHT] tall: portrait
  * photos stay whole instead of being cut to a strip (#315). Its size is known from the thumbnail's
@@ -1102,30 +1107,68 @@ private fun FileCard(file: FileInfo, colors: BubbleColors, onOpen: (FileInfo) ->
   }
 }
 
-/** Square tiles, two per row, across the bubble; a tap opens the picture like a single one. */
+/**
+ * A message's pictures as an album across the bubble, laid out as on every platform (the core's
+ * `albumLayout`, #240): two side by side, three with the first spanning both rows, four in two
+ * rows, and "+N" on the last tile for the rest. A tap opens the viewer on that picture; it pages
+ * through all of them.
+ */
 @Composable
 private fun ImageGrid(images: List<FileInfo>, bubbleMax: Dp, onOpen: (FileInfo) -> Unit) {
-  Column(Modifier.width(bubbleMax - BUBBLE_MEDIA_PADDING * 2), verticalArrangement = Arrangement.spacedBy(3.dp)) {
-    for (row in images.chunked(2)) {
-      Row(horizontalArrangement = Arrangement.spacedBy(3.dp)) {
-        for (image in row) {
-          Box(
-            Modifier
-              .weight(1f)
-              .aspectRatio(1f)
-              .clip(RoundedCornerShape(MEDIA_CORNER))
-              .background(MaterialTheme.colorScheme.surfaceVariant)
-              .clickable(onClickLabel = stringResource(R.string.file_open)) { onOpen(image) },
-          ) {
-            TransferOverlay(image) { Thumbnail(image, ContentScale.Crop) }
-          }
+  val layout = remember(images.size) { albumLayout(images.size.toUInt()) }
+    ?: AlbumLayout(tiles = images.size.toUInt(), hidden = 0u, isFirstTall = false)
+  val shown = images.take(layout.tiles.toInt())
+  val width = bubbleMax - BUBBLE_MEDIA_PADDING * 2
+  val side = (width - ALBUM_GAP) / 2
+  fun hiddenAt(index: Int): Int? = if (index == shown.lastIndex && layout.hidden > 0u) layout.hidden.toInt() else null
+  if (layout.isFirstTall && shown.size == 3) {
+    Row(Modifier.width(width), horizontalArrangement = Arrangement.spacedBy(ALBUM_GAP)) {
+      AlbumTile(shown[0], null, Modifier.width(side).height(side * 2 + ALBUM_GAP), onOpen)
+      Column(verticalArrangement = Arrangement.spacedBy(ALBUM_GAP)) {
+        AlbumTile(shown[1], null, Modifier.size(side), onOpen)
+        AlbumTile(shown[2], hiddenAt(2), Modifier.size(side), onOpen)
+      }
+    }
+  } else {
+    Column(Modifier.width(width), verticalArrangement = Arrangement.spacedBy(ALBUM_GAP)) {
+      for ((row, pair) in shown.chunked(2).withIndex()) {
+        Row(horizontalArrangement = Arrangement.spacedBy(ALBUM_GAP)) {
+          pair.forEachIndexed { column, image -> AlbumTile(image, hiddenAt(row * 2 + column), Modifier.size(side), onOpen) }
         }
-        // An odd last picture keeps its tile size.
-        if (row.size == 1) Spacer(Modifier.weight(1f))
       }
     }
   }
 }
+
+/** One tile of an album; on the last one, the pictures it doesn't show ("+3"). */
+@Composable
+private fun AlbumTile(image: FileInfo, maybeHidden: Int?, modifier: Modifier, onOpen: (FileInfo) -> Unit) {
+  val more = maybeHidden?.let { pluralStringResource(R.plurals.album_more_pictures, it, it) }
+  Box(
+    modifier
+      .clip(RoundedCornerShape(MEDIA_CORNER))
+      .background(MaterialTheme.colorScheme.surfaceVariant)
+      .clickable(onClickLabel = stringResource(R.string.file_open)) { onOpen(image) }
+      .semantics { more?.let { stateDescription = it } },
+  ) {
+    TransferOverlay(image) { Thumbnail(image, ContentScale.Crop) }
+    maybeHidden?.let { hidden ->
+      Box(Modifier.fillMaxSize().background(Color.Black.copy(alpha = ALBUM_MORE_SCRIM)), contentAlignment = Alignment.Center) {
+        Text(
+          "+$hidden",
+          color = Color.White,
+          style = MaterialTheme.typography.headlineSmall,
+          fontWeight = FontWeight.SemiBold,
+          modifier = Modifier.clearAndSetSemantics {},
+        )
+      }
+    }
+  }
+}
+
+/** The gap between an album's tiles, and the shade under "+N". */
+private val ALBUM_GAP = 3.dp
+private const val ALBUM_MORE_SCRIM = 0.45f
 
 /** A preview's picture, decoded in the background; the tile's own color stands in until then. */
 @Composable

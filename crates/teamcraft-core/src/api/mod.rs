@@ -7,6 +7,8 @@
 #[cfg(not(target_arch = "wasm32"))]
 mod connect;
 pub mod fake;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod fetch;
 mod http;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod proxy;
@@ -22,20 +24,22 @@ use std::pin::Pin;
 
 use serde::{Deserialize, Serialize};
 
+#[cfg(all(not(target_arch = "wasm32"), any(test, feature = "test-support")))]
+pub use connect::black_hole;
 pub use http::{
   AccessTokenSource, HttpGateway, HttpRendezvous, HttpServerApi, StaticToken, change_web_push_subscription,
 };
 use teamcraft_proto::{
-  AddConversationMemberRequest, AddSpaceMemberRequest, ClaimKeyPackagesRequest, ClaimKeyPackagesResponse,
-  ConversationId, ConversationMemberResponse, ConversationResponse, CreateChannelRequest, CreateDmRequest,
-  CreateGroupDmRequest, DeviceId, DeviceListResponse, DeviceResponse, ErrorBody, ErrorCode,
-  GatewayClientMessage, GatewayServerMessage, GetMeResponse, IdentityKeyResponse, KeyBagResponse,
-  KeyPackageStatusResponse, ListConversationMembersResponse, ListConversationsResponse, ListDevicesResponse,
-  ListMessagesQuery, ListMessagesResponse, ListMlsMessagesQuery, ListMlsMessagesResponse,
-  ListSpaceMembersResponse, ListSpacesResponse, MessageResponse, MlsMessageResponse, MoveChannelRequest,
-  PostMlsCommitRequest, PostMlsCommitResponse, PostMlsMessageRequest, PutDeviceListRequest, PutKeyBagRequest,
-  RegisterDeviceRequest, SearchUsersResponse, SendMessageRequest, SpaceId, SpaceMemberResponse,
-  UploadIdentityKeyRequest, UploadKeyPackagesRequest, UserId, UserSummary,
+  AddConversationMemberRequest, AddSpaceMemberRequest, AdminJoinRequestResponse, ClaimKeyPackagesRequest,
+  ClaimKeyPackagesResponse, ConversationId, ConversationMemberResponse, ConversationResponse,
+  CreateChannelRequest, CreateDmRequest, CreateGroupDmRequest, DeviceId, DeviceListResponse, DeviceResponse,
+  ErrorBody, ErrorCode, GatewayClientMessage, GatewayServerMessage, GetMeResponse, IdentityKeyResponse,
+  KeyBagResponse, KeyPackageStatusResponse, ListConversationMembersResponse, ListConversationsResponse,
+  ListDevicesResponse, ListMessagesQuery, ListMessagesResponse, ListMlsMessagesQuery,
+  ListMlsMessagesResponse, ListSpaceMembersResponse, ListSpacesResponse, MessageResponse, MlsMessageResponse,
+  MoveChannelRequest, PostMlsCommitRequest, PostMlsCommitResponse, PostMlsMessageRequest,
+  PutDeviceListRequest, PutKeyBagRequest, RegisterDeviceRequest, SearchUsersResponse, SendMessageRequest,
+  SpaceId, SpaceMemberResponse, UploadIdentityKeyRequest, UploadKeyPackagesRequest, UserId, UserSummary,
 };
 use teamcraft_proto::{
   AppendWorkspaceLogRequest, ListWorkspaceLogQuery, ListWorkspaceLogResponse, WorkspaceLogEntryResponse,
@@ -69,6 +73,7 @@ use teamcraft_proto::{
 };
 use teamcraft_proto::{ListThreadsQuery, ListThreadsResponse, MessageId, SyncHeadsResponse, UnreadResponse};
 use teamcraft_proto::{NotificationSettings, TestPushResponse};
+use teamcraft_proto::{PushHealthResponse, UpdateDeviceRequest};
 use teamcraft_proto::{RendezvousClientMessage, RendezvousServerMessage};
 use teamcraft_proto::{SetPresenceRequest, SetReadPositionRequest, UpdateConversationMemberRequest};
 #[cfg(not(target_arch = "wasm32"))]
@@ -102,6 +107,12 @@ pub trait ServerApi {
     request: &RegisterDeviceRequest,
   ) -> impl Future<Output = Result<DeviceResponse, ApiError>>;
   fn list_user_devices(&self, user: UserId) -> impl Future<Output = Result<ListDevicesResponse, ApiError>>;
+  /// Renames one of the user's devices (`PATCH /devices/{id}`).
+  fn update_device(
+    &self,
+    device: DeviceId,
+    request: &UpdateDeviceRequest,
+  ) -> impl Future<Output = Result<DeviceResponse, ApiError>>;
   fn put_identity_key(
     &self,
     request: &UploadIdentityKeyRequest,
@@ -129,6 +140,29 @@ pub trait ServerApi {
   fn reject_device_link(&self, request_id: &str) -> impl Future<Output = Result<(), ApiError>>;
   /// The new device gives up its request.
   fn withdraw_device_link(&self, request_id: &str) -> impl Future<Output = Result<(), ApiError>>;
+
+  /// The open requests of admins to join private channels the caller owns, and the caller's own
+  /// (`GET /admin-join-requests`, admin.md §2.4).
+  fn admin_join_requests(&self) -> impl Future<Output = Result<Vec<AdminJoinRequestResponse>, ApiError>>;
+  /// The caller, a workspace admin, asks the owners of a private channel to let them in;
+  /// idempotent while a request is open.
+  fn request_admin_join(
+    &self,
+    conversation: ConversationId,
+  ) -> impl Future<Output = Result<AdminJoinRequestResponse, ApiError>>;
+  /// An owner lets the admin in: the server membership (the MLS add is the owner's commit).
+  /// Answers the membership also when the admin is in already.
+  fn approve_admin_join(
+    &self,
+    conversation: ConversationId,
+    user: UserId,
+  ) -> impl Future<Output = Result<ConversationMemberResponse, ApiError>>;
+  /// Declines a request (an owner) or withdraws one's own; idempotent.
+  fn close_admin_join(
+    &self,
+    conversation: ConversationId,
+    user: UserId,
+  ) -> impl Future<Output = Result<(), ApiError>>;
 
   fn upload_key_packages(
     &self,
@@ -373,6 +407,12 @@ pub trait ServerApi {
   /// bare 404 from a server older than the endpoint.
   fn sync_heads(&self) -> impl Future<Output = Result<SyncHeadsResponse, ApiError>>;
 
+  /// How far the other members of a DM or group DM read (`GET /conversations/{id}/read-receipts`).
+  fn read_receipts(
+    &self,
+    conversation: ConversationId,
+  ) -> impl Future<Output = Result<teamcraft_proto::ReadReceiptsResponse, ApiError>>;
+
   fn post_mls_commit(
     &self,
     conversation: ConversationId,
@@ -420,6 +460,19 @@ pub trait ServerApi {
     kind: &WorkspaceLogKind,
     request: &AppendWorkspaceLogRequest,
   ) -> impl Future<Output = Result<WorkspaceLogEntryResponse, ApiError>>;
+
+  /// Entries of a channel's signed role log after `query.maybe_after`, oldest first (issue #380).
+  fn list_channel_role_log(
+    &self,
+    conversation: ConversationId,
+    query: &teamcraft_proto::ListChannelRoleLogQuery,
+  ) -> impl Future<Output = Result<teamcraft_proto::ListChannelRoleLogResponse, ApiError>>;
+  /// Appends an entry to a channel's role log (needs `manage_channel_roles`).
+  fn append_channel_role_log(
+    &self,
+    conversation: ConversationId,
+    request: &teamcraft_proto::AppendChannelRoleLogRequest,
+  ) -> impl Future<Output = Result<teamcraft_proto::ChannelRoleLogEntryResponse, ApiError>>;
 
   /// Announces an attachment upload; returns the presigned upload URL.
   fn create_attachment(
@@ -519,6 +572,8 @@ pub trait ServerApi {
   fn unregister_push(&self, device: DeviceId) -> impl Future<Output = Result<(), ApiError>>;
   /// Asks the server to send a test wake-up to the device (`POST /devices/{id}/push/test`).
   fn send_test_push(&self, device: DeviceId) -> impl Future<Output = Result<TestPushResponse, ApiError>>;
+  /// Push service and delivery counts of the user's own devices (`GET /me/push-health`).
+  fn my_push_health(&self) -> impl Future<Output = Result<PushHealthResponse, ApiError>>;
   /// The user's notification settings (`GET /me/notification-settings`).
   fn notification_settings(&self) -> impl Future<Output = Result<NotificationSettings, ApiError>>;
   /// How the server reaches its push gateway (`GET /push/gateway`), for sealing device tokens.

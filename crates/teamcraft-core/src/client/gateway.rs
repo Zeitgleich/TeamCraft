@@ -101,17 +101,23 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     Ok((start.connection, start.outcome))
   }
 
-  /// Like [`Self::connect_gateway`], with a deadline for every handshake step and the heartbeat
-  /// interval from `hello`. The connection keeps sending heartbeats while the sync after the
-  /// handshake runs, which can take minutes on a workspace that grew (issue #325); what arrives
-  /// meanwhile comes back in [`GatewayStart::held`]. A rejected token comes back as an API error
-  /// with status 401 ([`CoreError::is_sign_in_required`]).
   /// Remembers what the device says about its activity, so the next gateway session identifies
   /// with it instead of claiming to be active (the shells send the report on the live connection).
   pub fn set_device_activity(&mut self, activity: DeviceActivity) {
     self.device_activity = activity;
   }
 
+  /// What the device last said about its activity ([`Self::set_device_activity`]); a resumed
+  /// session hears it again, since the server keeps what it last knew (docs/gateway.md).
+  pub fn device_activity(&self) -> &DeviceActivity {
+    &self.device_activity
+  }
+
+  /// Like [`Self::connect_gateway`], with a deadline for every handshake step and the heartbeat
+  /// interval from `hello`. The connection keeps sending heartbeats while the sync after the
+  /// handshake runs, which can take minutes on a workspace that grew (issue #325); what arrives
+  /// meanwhile comes back in [`GatewayStart::held`]. A rejected token comes back as an API error
+  /// with status 401 ([`CoreError::is_sign_in_required`]).
   pub async fn start_gateway(
     &mut self,
     timing: GatewayTiming,
@@ -193,6 +199,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
           }
           self.refresh_link_requests().await;
           self.trace_lap("link requests");
+          self.refresh_admin_join_requests_after_connect().await;
           self.trace_finish("resumed");
           return Ok(GatewayStart {
             connection,
@@ -250,6 +257,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     .await?;
     self.refresh_link_requests().await;
     self.trace_lap("link requests");
+    self.refresh_admin_join_requests_after_connect().await;
     self.trace_finish("fresh");
     Ok(GatewayStart {
       connection,
@@ -523,6 +531,9 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       | GatewayEvent::SpaceMemberAdd { .. }
       | GatewayEvent::SpaceMemberRemove { .. } => self.refresh_spaces().await,
       GatewayEvent::WorkspaceUpdate { .. } => self.sync_workspace_and_recovery().await,
+      GatewayEvent::ChannelRolesUpdate { conversation_id, .. } => {
+        self.sync_channel_roles(conversation_id).await
+      },
       // The user's own device that revoked it signs the removal (`Client::revoke_device`); the
       // user's other devices finish it if the signed device list says so (#232).
       GatewayEvent::DeviceRemove { user_id, device_id } => {
@@ -594,6 +605,14 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       },
       GatewayEvent::DeviceLinkClosed { request_id, .. } => {
         self.forget_link_request(&request_id);
+        Ok(())
+      },
+      // The list is read again; the change itself is only a hint (admin.md §2.4).
+      GatewayEvent::AdminJoinRequestUpdate { .. } => {
+        if let Err(error) = self.refresh_admin_join_requests().await {
+          // Not fatal: the next connect reads the list again.
+          tracing::debug!(%error, "could not read the admin join requests");
+        }
         Ok(())
       },
       // Call roster and ringing go to the app's call handling (media runs outside the core).

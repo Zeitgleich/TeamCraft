@@ -161,6 +161,7 @@ pushes.
 | Don't push to mobile while desktop is active (with delay, e.g. 2 min) | v1    |                                            |
 | Push gateway so store apps work with any self-hosted server           | v1    | Sees only sealed wake-ups; e2ee.md §7      |
 | DND schedule, DND override for specific people (e.g. manager)         | v1    | Also: urgent messages may break through    |
+| Sound for new messages: built-in or own file (desktop, web)           | v1    | #800; own file stays on the device         |
 | Notification sound per conversation                                   | v1.x  |                                            |
 | Email digest of missed mentions                                       | later | Can only say "3 new mentions", not content |
 | Activity feed (mentions, reactions to my messages, thread replies)    | v1    | Built client-side from decrypted data      |
@@ -183,6 +184,7 @@ shared in a chat can get a download link for people outside (e2ee.md §4.5.1).
 | Upload via drag & drop, paste, picker                                                  | v1    | Encrypted before upload                          |
 | Image/video preview + gallery                                                          | v1    | Thumbnails generated client-side                 |
 | PDF preview                                                                            | v1.x  | Rendered client-side                             |
+| Text and log preview (line numbers, find, levels, JSON formatting)                     | v1.x  | Plain text only, client-side (e2ee.md §4.5.0)    |
 | Files tab per conversation                                                             | v1    |                                                  |
 | Max file size (configurable, e.g. 2 GB), resumable chunked upload                      | v1    |                                                  |
 | Screenshot paste + basic annotation                                                    | later |                                                  |

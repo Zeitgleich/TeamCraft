@@ -1,0 +1,20 @@
+/* One card for linked messages and link previews (#372). */
+.embed-card, .linked-message {
+  display: flex;
+  gap: var(--space-3);
+  max-width: 36rem;
+  margin-top: 6px;
+  padding: var(--space-2) var(--space-3);
+  border: 1px solid var(--border);
+  border-inline-start: 3px solid var(--accent);
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+}
+.embed-card.has-wide-image { flex-direction: column; gap: var(--space-2); }
+.embed-text { display: flex; flex-direction: column; min-width: 0; flex: 1; }
+.embed-card .embed-site { color: var(--text-muted); font-size: var(--text-xs); letter-spacing: var(--tracking-xs); }
+.embed-card .embed-title { font-weight: var(--weight-semibold); }
+.embed-card .embed-description { color: var(--text-muted); font-size: var(--text-sm); }
+.embed-thumb { flex: none; width: 64px; height: 64px; border-radius: var(--radius-xs); object-fit: cover; background: var(--surface-3); }
+.embed-wide { display: block; width: 100%; max-height: 200px; border-radius: var(--radius-xs); object-fit: cover; background: var(--surface-3); }
+

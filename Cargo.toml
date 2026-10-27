@@ -5,7 +5,7 @@ members = ["crates/*", "apps/desktop", "tests/e2e"]
 exclude = ["crates/vendor", "fuzz"]
 
 [workspace.package]
-version = "1.0.8"
+version = "1.0.9"
 edition = "2024"
 license = "AGPL-3.0-or-later"
 repository = "https://github.com/Zeitgleich/TeamCraft"
@@ -56,6 +56,8 @@ teamcraft-net = { path = "crates/teamcraft-net" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 utoipa = "6"
+# Routes register their OpenAPI paths and schemas where they are defined (#614).
+utoipa-axum = "0.3"
 
 # Errors, logging, secrets
 thiserror = "2"

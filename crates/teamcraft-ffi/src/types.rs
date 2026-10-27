@@ -2,7 +2,9 @@
 //! 64-bit unsigned type that matches, and the app only passes them back.
 
 use teamcraft_client_api::model::{self as view, ConversationKind as ConversationKindView, PresenceStatus};
+use teamcraft_core::UnreadableStore;
 use teamcraft_core::client::LinkRequestInfo;
+use teamcraft_core::device_activity::AppUse;
 use teamcraft_core::notify_rules::MentionPreferences;
 use teamcraft_core::prefetch::SegmentPrefetch;
 use teamcraft_core::push_guard::{PushDiagnostics, Suppression};
@@ -39,6 +41,30 @@ pub enum AccountState {
     /// Shown for out-of-band comparison (safety number).
     identity_fingerprint: String,
   },
+  /// The local data can't be read by this version, and a retry won't change that (issue #414):
+  /// the app offers to set the device up again (`TeamCraft::reset_store`), which sets the file
+  /// aside instead of deleting it.
+  StoreUnreadable { problem: StoreProblem },
+}
+
+/// Why the local data can't be read ([`AccountState::StoreUnreadable`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
+pub enum StoreProblem {
+  /// The file is damaged, or the key that opens it is gone (the keystore lost or replaced it).
+  Damaged,
+  /// A newer version of the app changed it: update the app.
+  NewerVersion,
+}
+
+/// What the user does with the app, for presence (`TeamCraft::report_activity`, issue #472).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
+pub enum AppActivity {
+  /// The app came to the foreground (opened, resumed, unlocked).
+  Foreground,
+  /// The user touched the screen or pressed a key.
+  Interaction,
+  /// The app went to the background.
+  Background,
 }
 
 /// Where the gateway connection stands. The banner follows this, not the OS connectivity: the
@@ -124,6 +150,18 @@ pub struct ConversationItem {
   /// The other person's presence in a one-to-one DM (the direct messages list shows it).
   #[uniffi(default = None)]
   pub maybe_peer_presence: Option<Presence>,
+  // What the user may do here besides posting, as the core decided it from the server's
+  // `my_permissions` (issue #758): the apps offer an action only when it is allowed. Defaulted
+  // (to offered) for items the apps build themselves; the server checks every request again.
+  /// React to messages (`add_reaction`).
+  #[uniffi(default = true)]
+  pub can_react: bool,
+  /// Pin and unpin messages (`manage_bookmarks`).
+  #[uniffi(default = true)]
+  pub can_manage_bookmarks: bool,
+  /// Change the channel itself, such as archiving it (`manage_channel_properties`); never in DMs.
+  #[uniffi(default = true)]
+  pub can_manage_channel: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
@@ -141,6 +179,26 @@ pub struct MessageItem {
   /// Set on replies: the thread (root message ID) they belong to.
   pub maybe_thread_id: Option<String>,
   pub reactions: Vec<ReactionItem>,
+  /// The author's account was deleted (issue #630): the app shows its own "Deleted user" instead of
+  /// `author_name`, the server's placeholder (issue #751). Defaulted, so items the apps
+  /// build in tests need no change.
+  #[uniffi(default = false)]
+  pub is_author_deleted: bool,
+  /// What a system message reports (a join, a rename), shown as a line instead of a bubble; `None`
+  /// for messages people wrote. Membership and channel changes by someone else come with the
+  /// message's extras (`maybe_workspace_event`). Defaulted, so items the apps build need no change.
+  #[uniffi(default = None)]
+  pub maybe_system_event: Option<SystemEventItem>,
+}
+
+/// The system events of [`MessageItem::maybe_system_event`]; the message's author is who joined,
+/// left, renamed or changed the topic (issue #769).
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Enum)]
+pub enum SystemEventItem {
+  Joined,
+  Left,
+  Renamed { name: String },
+  TopicChanged { topic: String },
 }
 
 /// An emoji the composer offers for a typed `:name`.
@@ -184,10 +242,12 @@ pub struct BrandAccent {
   pub maybe_accent_soft: Option<String>,
 }
 
-/// The brand's legal and support links; https only.
+/// The brand's legal, support and documentation links; https only.
 #[derive(Clone, Debug, Default, PartialEq, Eq, uniffi::Record)]
 pub struct BrandLinks {
   pub maybe_support: Option<String>,
+  /// The instance's user documentation (Help & about, issue #410).
+  pub maybe_documentation: Option<String>,
   pub maybe_privacy: Option<String>,
   pub maybe_terms: Option<String>,
   pub maybe_imprint: Option<String>,
@@ -387,6 +447,36 @@ pub enum Presence {
   Offline,
 }
 
+impl ConversationItem {
+  /// The list entry of a conversation; the caller looks up the space's name and the DM peer's
+  /// presence. `is_guest` is the user's, for what a conversation offers when an older server
+  /// didn't say (issue #758).
+  pub(crate) fn from_view(
+    conversation: view::Conversation,
+    maybe_space_name: Option<String>,
+    maybe_peer_presence: Option<Presence>,
+    is_guest: bool,
+  ) -> Self {
+    Self {
+      can_react: conversation.can_react(),
+      can_manage_bookmarks: conversation.can_manage_bookmarks(is_guest),
+      can_manage_channel: conversation.can_manage_channel(),
+      id: conversation.id.to_string(),
+      maybe_space_id: conversation.maybe_space.map(|space| space.to_string()),
+      maybe_space_name,
+      kind: ConversationKind::from_view(conversation.kind),
+      name: conversation.name,
+      topic: conversation.topic,
+      unread_count: conversation.unread_count,
+      mention_count: conversation.mention_count,
+      is_favorite: conversation.is_favorite,
+      is_muted: conversation.is_muted,
+      can_post: conversation.can_post,
+      maybe_peer_presence,
+    }
+  }
+}
+
 impl ConversationKind {
   pub(crate) fn from_view(kind: ConversationKindView) -> Self {
     match kind {
@@ -400,19 +490,27 @@ impl ConversationKind {
 }
 
 impl MessageItem {
-  /// `author_name` is resolved by the caller (the view model only has the ID).
-  pub(crate) fn from_view(message: &view::Message, author_name: String, is_pending: bool) -> Self {
+  /// `maybe_author` is looked up by the caller (the view model only has the ID); an unknown author
+  /// has no name yet.
+  pub(crate) fn from_view(
+    message: &view::Message,
+    maybe_author: Option<&view::User>,
+    is_pending: bool,
+  ) -> Self {
     Self {
       id: message.id.to_string(),
       conversation_id: message.conversation.to_string(),
       author_id: message.author.to_string(),
-      author_name,
+      author_name: maybe_author
+        .map(|author| author.display_name.clone())
+        .unwrap_or_default(),
       sent_at_ms: message.sent_at,
       body: message.body.clone(),
       is_edited: message.is_edited,
       is_pending,
       reply_count: message.reply_count,
       maybe_thread_id: message.maybe_thread.map(|thread| thread.to_string()),
+      maybe_system_event: SystemEventItem::of(&message.kind),
       reactions: message
         .reactions
         .iter()
@@ -422,7 +520,22 @@ impl MessageItem {
           reacted_by_me: reaction.reacted_by_me,
         })
         .collect(),
+      is_author_deleted: maybe_author.is_some_and(|author| author.is_deleted),
     }
+  }
+}
+
+impl SystemEventItem {
+  fn of(kind: &view::MessageKind) -> Option<Self> {
+    let view::MessageKind::System(event) = kind else {
+      return None;
+    };
+    Some(match event {
+      view::SystemEvent::Joined => Self::Joined,
+      view::SystemEvent::Left => Self::Left,
+      view::SystemEvent::Renamed { name } => Self::Renamed { name: name.clone() },
+      view::SystemEvent::TopicChanged { topic } => Self::TopicChanged { topic: topic.clone() },
+    })
   }
 }
 
@@ -688,6 +801,25 @@ impl From<teamcraft_core::connection::ConnectionState> for ConnectionState {
   }
 }
 
+impl From<UnreadableStore> for StoreProblem {
+  fn from(problem: UnreadableStore) -> Self {
+    match problem {
+      UnreadableStore::Damaged => Self::Damaged,
+      UnreadableStore::NewerVersion => Self::NewerVersion,
+    }
+  }
+}
+
+impl From<AppActivity> for AppUse {
+  fn from(activity: AppActivity) -> Self {
+    match activity {
+      AppActivity::Foreground => Self::Foreground,
+      AppActivity::Interaction => Self::Interaction,
+      AppActivity::Background => Self::Background,
+    }
+  }
+}
+
 impl From<LinkPlatform> for DeviceLinkPlatform {
   fn from(platform: LinkPlatform) -> Self {
     match platform {
@@ -731,6 +863,126 @@ impl From<LinkRequestInfo> for LinkRequestItem {
 mod tests {
   use super::*;
 
+  mod system_events {
+    use super::*;
+
+    #[test]
+    fn each_kind_reaches_the_apps_with_its_text() {
+      let cases = [
+        (view::SystemEvent::Joined, SystemEventItem::Joined),
+        (view::SystemEvent::Left, SystemEventItem::Left),
+        (
+          view::SystemEvent::Renamed {
+            name: "Project A".into(),
+          },
+          SystemEventItem::Renamed {
+            name: "Project A".into(),
+          },
+        ),
+        (
+          view::SystemEvent::TopicChanged {
+            topic: "Launch plan".into(),
+          },
+          SystemEventItem::TopicChanged {
+            topic: "Launch plan".into(),
+          },
+        ),
+      ];
+      for (event, expected) in cases {
+        let item = MessageItem::from_view(&message_of(view::MessageKind::System(event)), None, false);
+        assert_eq!(item.maybe_system_event, Some(expected));
+      }
+    }
+
+    /// A change (archived, an admin who joined) is read from the extras' workspace event, as the
+    /// apps do already.
+    #[test]
+    fn written_messages_log_lines_and_changes_are_no_system_events() {
+      for kind in [
+        view::MessageKind::User,
+        view::MessageKind::Log(view::LogLevel::Info),
+        view::MessageKind::Change,
+      ] {
+        let item = MessageItem::from_view(&message_of(kind), None, false);
+        assert_eq!(item.maybe_system_event, None);
+      }
+    }
+
+    fn message_of(kind: view::MessageKind) -> view::Message {
+      view::Message {
+        id: view::id_from_raw(7),
+        conversation: view::id_from_raw(5),
+        author: view::id_from_raw(3),
+        kind,
+        sent_at: 0,
+        body: String::new(),
+        is_edited: false,
+        reactions: Vec::new(),
+        reply_count: 0,
+        maybe_thread: None,
+      }
+    }
+  }
+
+  #[test]
+  fn conversation_items_carry_what_the_user_may_do() {
+    let item = |kind, maybe_permissions, is_guest| {
+      let conversation = view::Conversation {
+        id: view::id_from_raw(5),
+        maybe_space: Some(view::id_from_raw(2)),
+        kind,
+        category: view::SidebarCategory::Channels,
+        name: "news".into(),
+        topic: "Daily".into(),
+        member_ids: Vec::new(),
+        unread_count: 3,
+        mention_count: 1,
+        is_favorite: false,
+        is_muted: false,
+        can_post: true,
+        bookmarks: Vec::new(),
+        is_catching_up: false,
+        maybe_image_version: None,
+        is_notes_to_self: false,
+        maybe_permissions,
+        has_only_deactivated_others: false,
+      };
+      ConversationItem::from_view(conversation, Some("Project A".into()), None, is_guest)
+    };
+    let rights = |item: &ConversationItem| {
+      (
+        item.can_post,
+        item.can_react,
+        item.can_manage_bookmarks,
+        item.can_manage_channel,
+      )
+    };
+    // The server's answer: a moderated channel where members may post but not react or pin.
+    let moderated = item(
+      ConversationKindView::Public,
+      Some(vec![teamcraft_proto::Permission::CreatePost]),
+      false,
+    );
+    assert_eq!(rights(&moderated), (true, false, false, false));
+    assert_eq!(
+      (moderated.id.as_str(), moderated.maybe_space_name.as_deref()),
+      ("5", Some("Project A"))
+    );
+    // An older server: the built-in scheme, where guests keep no pins; DMs have no channel.
+    assert_eq!(
+      rights(&item(ConversationKindView::Private, None, false)),
+      (true, true, true, true)
+    );
+    assert_eq!(
+      rights(&item(ConversationKindView::Private, None, true)),
+      (true, true, false, true)
+    );
+    assert_eq!(
+      rights(&item(ConversationKindView::Direct, None, false)),
+      (true, true, true, false)
+    );
+  }
+
   #[test]
   fn notification_content_maps_both_ways_and_unknown_modes_are_strictest() {
     for content in [
@@ -745,5 +997,55 @@ mod tests {
       NotificationContent::from(&PushContentMode::Unknown("later".into())),
       NotificationContent::Nothing
     );
+  }
+
+  #[test]
+  fn a_deleted_author_is_flagged_for_the_apps_own_name() {
+    let message = message();
+    let mut author = author();
+    assert!(!MessageItem::from_view(&message, Some(&author), false).is_author_deleted);
+
+    author.is_deleted = true;
+    author.display_name = "Deleted user".into();
+    let item = MessageItem::from_view(&message, Some(&author), false);
+    assert!(item.is_author_deleted);
+    assert_eq!(item.author_name, "Deleted user");
+
+    let unknown = MessageItem::from_view(&message, None, false);
+    assert!(!unknown.is_author_deleted);
+    assert_eq!(unknown.author_name, "");
+  }
+
+  fn message() -> view::Message {
+    view::Message {
+      id: view::id_from_raw(7),
+      conversation: view::id_from_raw(5),
+      author: view::id_from_raw(3),
+      kind: view::MessageKind::User,
+      sent_at: 0,
+      body: "Hello".into(),
+      is_edited: false,
+      reactions: Vec::new(),
+      reply_count: 0,
+      maybe_thread: None,
+    }
+  }
+
+  fn author() -> view::User {
+    view::User {
+      id: view::id_from_raw(3),
+      username: "sam".into(),
+      display_name: "Sam Doe".into(),
+      presence: PresenceStatus::Offline,
+      maybe_custom_status: None,
+      avatar_hue: 0,
+      is_guest: false,
+      is_bot: false,
+      maybe_organization: None,
+      is_deactivated: false,
+      is_deleted: false,
+      device_setup: view::DeviceSetup::Unknown,
+      maybe_email: None,
+    }
   }
 }

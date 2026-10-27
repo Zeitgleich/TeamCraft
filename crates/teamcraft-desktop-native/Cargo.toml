@@ -47,14 +47,15 @@ undocumented_unsafe_blocks = "deny"
 thiserror.workspace = true
 tracing.workspace = true
 
-# macOS: NSWorkspaceDidWakeNotification through the safe-ish objc2 bindings (Zlib/Apache-2.0/MIT;
-# already in the tree through Tauri's macOS stack).
+# macOS: NSWorkspaceDidWakeNotification, the notification delegate and notification attachments
+# through the safe-ish objc2 bindings (Zlib/Apache-2.0/MIT; already in the tree through Tauri's macOS
+# stack).
 [target.'cfg(target_os = "macos")'.dependencies]
 block2 = "0.6.2"
 objc2 = "0.6.2"
-objc2-user-notifications = { version = "0.3.2", default-features = false, features = ["std", "block2", "UNNotification", "UNNotificationRequest", "UNNotificationResponse", "UNUserNotificationCenter"] }
+objc2-user-notifications = { version = "0.3.2", default-features = false, features = ["std", "block2", "UNNotification", "UNNotificationAttachment", "UNNotificationRequest", "UNNotificationResponse", "UNUserNotificationCenter"] }
 objc2-app-kit = { version = "0.3.2", default-features = false, features = ["std", "NSWorkspace"] }
-objc2-foundation = { version = "0.3.2", default-features = false, features = ["std", "block2", "NSNotification", "NSObject", "NSOperation", "NSString"] }
+objc2-foundation = { version = "0.3.2", default-features = false, features = ["std", "block2", "NSError", "NSNotification", "NSObject", "NSOperation", "NSString", "NSURL"] }
 
 # Windows: PowerRegisterSuspendResumeNotification (MIT/Apache-2.0; the version the shell uses).
 [target.'cfg(windows)'.dependencies]

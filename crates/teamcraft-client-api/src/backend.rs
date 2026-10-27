@@ -30,7 +30,9 @@ use crate::calls::{
   CallStatusSounds, CallsUnavailableReason, HuddleInfo, IncomingCall, MediaDevices, Participant,
   RemoteVideoTrack, ScreenContentMode,
 };
-use crate::calls::{OrgBackgroundRule, OrgBackgrounds};
+use crate::calls::{
+  CallPreview, CameraFallback, JoinMedia, OrgBackgroundRule, OrgBackgrounds, PreviewCamera,
+};
 use crate::model::{
   Conversation, ConversationId, CustomStatus, DeviceId, MembershipIssue, Message, MessageId, PresenceStatus,
   Space, SpaceId, ThreadId, ThreadSummary, TimestampMs, User, UserId,
@@ -132,6 +134,9 @@ pub trait ChatBackend {
   fn seen_by(&self, _conversation: ConversationId, _message: MessageId) -> Vec<UserId> {
     Vec::new()
   }
+  /// The conversation is shown: read its members' receipts again, since those sent while this
+  /// device was offline never arrive as events. Backends whose UI reads receipts itself ignore it.
+  fn refresh_read_receipts(&self, _conversation: ConversationId) {}
   /// Unread counts, threads, presence and receipts the backend keeps current from gateway events.
   /// `None` when it has no gateway (the UI then asks the server itself).
   fn live_snapshot(&self) -> Option<crate::live::LiveSnapshot> {
@@ -174,6 +179,16 @@ pub trait ChatBackend {
   fn publish_roster(&self, _base_version: u64, _members: Vec<crate::admin::RosterEntry>) {}
   /// Adds the signed-in admin to a conversation through the encryption group (admin.md §2.2).
   fn admin_add_self(&self, _conversation: ConversationId) {}
+  /// The signed-in admin asks the owners of a private channel to let them in (admin.md §2.4,
+  /// `admin_self_join = owner_approval`).
+  fn request_admin_join(&self, _conversation: ConversationId) {}
+  /// Takes the signed-in admin's request back.
+  fn withdraw_admin_join(&self, _conversation: ConversationId) {}
+  /// A channel owner lets the admin in: the server membership, this device's MLS add and the
+  /// visible "joined as a workspace admin" message. `history` is what the owner chose to share:
+  /// `from_join` (what a self-join gets) unless they explicitly chose `full`.
+  fn approve_admin_join(&self, _conversation: ConversationId, _user: UserId, _history: HistoryPolicy) {}
+  fn decline_admin_join(&self, _conversation: ConversationId, _user: UserId) {}
   /// Removes a deactivated user from all chats with signed removals (admin.md §3.2.1). Needs
   /// [`Self::can_sign_workspace`].
   fn admin_remove_from_all_chats(&self, _user: UserId) {}
@@ -522,7 +537,7 @@ pub trait ChatBackend {
     Vec::new()
   }
   /// Whether sources the user adds would be in force: they need an admin of the verified
-  /// workspace roster (channel roles aren't signed yet, issue #380).
+  /// workspace roster (signed channel roles don't count for sources yet, e2ee.md §13.1).
   fn can_manage_integration_sources(&self) -> bool {
     false
   }
@@ -541,8 +556,18 @@ pub trait ChatBackend {
   }
   /// Gives a channel member another role. The UI offers only what [`crate::role_rules`] allows;
   /// the server enforces the permission and its invariants, and a refusal shows as a failed
-  /// action. The role is the server's record, not yet a signed assignment (issue #380).
+  /// action. The core then signs the channel's new roles where the user can (issue #380).
   fn set_channel_role(&self, _conversation: ConversationId, _user: UserId, _role: crate::model::ChannelRole) {
+  }
+  /// Signs the role the server lists for a member, whose role is the server's word only
+  /// ([`crate::model::ChannelMember::is_role_signed`]); nothing changes on the server.
+  fn confirm_channel_role(&self, _conversation: ConversationId, _user: UserId) {}
+  /// Reads the channel's members and signed roles afresh (the members section opened).
+  fn refresh_channel_roles(&self, _conversation: ConversationId) {}
+  /// Whether the user can sign the channel's roles in a way members accept: a signed channel
+  /// admin or an admin of the signed workspace roster.
+  fn can_sign_channel_roles(&self, _conversation: ConversationId) -> bool {
+    false
   }
   /// The members of a space with their roles, as far as the user may see them.
   fn space_members(&self, _space: SpaceId) -> crate::model::SpaceRoster {
@@ -580,6 +605,11 @@ pub trait ChatBackend {
   }
   /// The user looked at the feed: everything in it so far counts as read (synced to their devices).
   fn mark_activity_read(&self) {}
+  /// The admins' requests waiting for the user's decision, as in [`Self::activity`]; backends that
+  /// build the feed locally answer without building it (the notifications ask on every change).
+  fn join_requests(&self) -> Vec<crate::activity::JoinRequest> {
+    self.activity().join_requests
+  }
   /// When the person was last active, if they are offline and let others see it. Backends that
   /// read the server ask for it on first look and answer `None` until it arrives.
   fn last_seen(&self, _user: UserId) -> Option<TimestampMs> {
@@ -612,6 +642,12 @@ pub trait ChatBackend {
 
   /// Signs out one of the user's other devices (e2ee.md §3: the signed device list drops it).
   fn revoke_own_device(&self, _device: DeviceId) {}
+
+  /// Renames one of the user's devices; the list shows the new name after the next answer.
+  fn rename_own_device(&self, _device: DeviceId, _name: String) {}
+
+  /// Sends a test push to one of the user's devices; the outcome shows in the device list.
+  fn test_push_own_device(&self, _device: DeviceId) {}
 }
 
 /// Calls and huddles. Media runs in `teamcraft-media`; this is the roster and device view of it,
@@ -671,9 +707,10 @@ pub trait CallBackend {
   fn incoming_calls(&self) -> Vec<IncomingCall> {
     Vec::new()
   }
-  /// Joins (or starts) the conversation's call, leaving any other call first.
-  /// `is_muted`: the microphone stays muted from the first frame (nothing is sent before an unmute).
-  fn join_call(&self, _request: CallRequest, _is_muted: bool) {}
+  /// Joins (or starts) the conversation's call, leaving any other call first. The media starts as
+  /// `media` says: a muted microphone sends nothing before an unmute, a chosen camera starts with
+  /// the call.
+  fn join_call(&self, _request: CallRequest, _media: JoinMedia) {}
   fn leave_call(&self) {}
   /// Stops ringing for this call on this device; the call goes on for the others.
   fn decline_call(&self, _conversation: ConversationId) {}
@@ -695,6 +732,10 @@ pub trait CallBackend {
   fn test_speakers(&self, _maybe_device: Option<String>) {}
   fn set_call_camera(&self, _is_on: bool) {}
   fn select_camera(&self, _maybe_device: Option<String>) {}
+  /// The camera that stood in for the chosen one at the last camera start, if one did (#819).
+  fn camera_fallback(&self) -> Option<CameraFallback> {
+    None
+  }
   fn set_background_effect(&self, _effect: BackgroundEffect) {}
   /// Opens the system's video effects panel (macOS); nothing elsewhere.
   fn open_system_video_effects(&self) {}
@@ -704,6 +745,18 @@ pub trait CallBackend {
   /// The push-to-talk key inside the window went down (`true`) or up.
   fn set_talking(&self, _is_talking: bool) {}
   fn stop_screen_share(&self) {}
+  /// Starts, changes or ends the pre-join check (#442): the camera for the self view, the
+  /// microphone for [`CallBackend::call_preview_level`]. Nothing of it leaves the device.
+  fn set_call_preview(&self, _preview: CallPreview) {}
+  /// How far the pre-join check got with the camera.
+  fn call_preview_camera(&self) -> PreviewCamera {
+    PreviewCamera::Off
+  }
+  /// The microphone's level in the pre-join check, from 0.0 (silence) to 1.0 (full scale); the
+  /// meter reads it a few times a second.
+  fn call_preview_level(&self) -> f32 {
+    0.0
+  }
 }
 
 /// Administration without content access: every read returns metadata only.
@@ -877,6 +930,13 @@ pub trait SecurityBackend {
   fn set_contact_verified(&self, user: UserId, is_verified: bool);
   /// The device list was opened: ask the server again.
   fn refresh_my_devices(&self) {}
+  fn rename_my_device(&self, _device: DeviceId, _name: String) {}
+  fn test_push_my_device(&self, _device: DeviceId) {}
+  /// The key backup as this device knows it; `None` without encryption keys (or before the core
+  /// reported it).
+  fn key_backup(&self) -> Option<crate::security::KeyBackupState> {
+    None
+  }
 }
 
 /// Full-text search over everything the user can read. `teamcraft-core` will answer from encrypted

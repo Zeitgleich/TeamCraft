@@ -1,0 +1,69 @@
+/* ---- Emoji picker ---- */
+
+.emoji-picker {
+  position: fixed;
+  z-index: 41;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  /* rem: grows with the text size; emoji_picker.rs places it with the same size. */
+  width: 20.25rem;
+  height: 18.75rem;
+  padding: 8px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+  color: var(--text);
+  box-shadow: var(--shadow);
+}
+
+.emoji-hint {
+  margin: 0;
+  color: var(--text-muted);
+  font-size: var(--text-xs);
+  letter-spacing: var(--tracking-xs);
+  font-weight: var(--weight-semibold);
+}
+
+.emoji-grid {
+  display: grid;
+  grid-template-columns: repeat(8, 1fr);
+  align-content: start;
+  gap: 2px;
+  margin: 0;
+  padding: 0;
+  overflow-y: auto;
+  list-style: none;
+}
+
+.emoji-grid li {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 34px;
+  border-radius: var(--radius-sm);
+  font-size: 20px;
+  cursor: pointer;
+}
+
+.emoji-grid li.active {
+  background: var(--accent-soft);
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+
+.emoji-grid .emoji-empty {
+  grid-column: 1 / -1;
+  height: auto;
+  padding: 12px;
+  color: var(--text-muted);
+  font-size: var(--text-sm);
+  cursor: default;
+}
+
+.msg-toolbar .quick-reaction {
+  font-size: var(--text-lg);
+  letter-spacing: var(--tracking-lg);
+  line-height: 1;
+}
+

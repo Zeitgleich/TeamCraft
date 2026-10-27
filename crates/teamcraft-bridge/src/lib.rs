@@ -10,17 +10,25 @@
 //!
 //! - [`config`]: the TOML file.
 //! - [`render`]: webhook payloads and log lines to message text.
-//! - [`batch`], [`limiter`]: collecting lines into messages, per-source rate limits.
+//! - [`batch`], [`limiter`]: collecting lines into messages, rate limits.
 //! - [`sources`]: the sources the endpoints accept: announced in the app, or in the file.
-//! - [`http`]: the endpoints.
-//! - [`worker`]: the task that owns the client (gateway, sending, index segments).
+//! - [`http`]: the endpoints; [`idempotency`]: retries with an `Idempotency-Key` are answered once.
+//! - [`multipart`], [`form`], [`spool`], [`file_hooks`], [`file_jobs`]: webhooks with files, from
+//!   the form as it arrives to the encrypted uploads.
+//! - [`worker`]: the task that owns the client (gateway, sending, uploads, index segments).
 //! - [`app`]: wiring for the binary.
 
 pub mod app;
 pub mod batch;
 pub mod config;
+pub mod file_hooks;
+pub mod file_jobs;
+pub mod form;
 pub mod http;
+pub mod idempotency;
 pub mod limiter;
+pub mod multipart;
 pub mod render;
 pub mod sources;
+pub mod spool;
 pub mod worker;

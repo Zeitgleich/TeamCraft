@@ -175,8 +175,9 @@ How the apps behave on networks between the user and the server (issue #157):
 - Happy Eyeballs (RFC 8305, issue #420): when the host's IPv6 route swallows packets, the apps fall
   back to IPv4 instead of staying "unreachable". REST (hyper-util, 300 ms), the gateway and relay
   WebSockets and the QUIC handshake to the SFU for calls (250 ms) race the address families. The
-  Android app's own few requests (sign-in, token refresh, server check) use the platform's
-  `HttpURLConnection`, which tries the next address only after the connect timeout (15 s, #433).
+  Android app's own requests (sign-in at the identity provider and token refresh, a local
+  account's sign-in, the server check, brand images, the video codec download) go through the
+  core's HTTP client too, with the same proxy and certificate authorities (#433).
 
 ## Backup and restore
 
