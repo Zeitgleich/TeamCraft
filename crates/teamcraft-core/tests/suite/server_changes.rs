@@ -247,6 +247,43 @@ mod forgery {
     assert_eq!(lines(&erin, channel), vec![(ConversationEvent::Archived, None)]);
   }
 
+  /// A claim from before the device saw the change, which it only loads afterwards (jumping to a
+  /// date in a channel too big to hold), can't name anybody on the change.
+  #[tokio::test]
+  async fn an_older_claim_loaded_later_names_nobody() {
+    let (_server, mut carol, mut dave, mut erin, channel) = setup().await;
+    let claim = send(
+      &mut dave,
+      channel,
+      MessageContent::Event {
+        event: ConversationEvent::Archived,
+      },
+    )
+    .await;
+    carol.client.send_text(channel, None, "later").await.unwrap();
+    settle(&mut [&mut carol, &mut dave, &mut erin]).await;
+    // Erin's device hasn't loaded that part of the history (yet).
+    let sent_ms = erin.store.message(channel, claim).unwrap().unwrap().sent_at_ms;
+    erin.store.delete_message(channel, claim).unwrap();
+
+    carol
+      .api
+      .update_conversation(
+        channel,
+        &UpdateConversationRequest {
+          maybe_is_archived: Some(true),
+          ..UpdateConversationRequest::default()
+        },
+      )
+      .await
+      .unwrap();
+    settle(&mut [&mut carol, &mut dave, &mut erin]).await;
+    erin.client.load_messages_from(channel, sent_ms).await.unwrap();
+
+    assert_eq!(announcements(&erin, channel), 1, "the claim is back");
+    assert_eq!(lines(&erin, channel), vec![(ConversationEvent::Archived, None)]);
+  }
+
   /// Two members claim the same change: the line names neither.
   #[tokio::test]
   async fn a_second_claim_leaves_the_line_without_a_name() {
