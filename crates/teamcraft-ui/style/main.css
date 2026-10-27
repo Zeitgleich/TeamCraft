@@ -12803,8 +12803,29 @@ select.tv-level { min-width: 0; }
   min-height: 100dvh;
 }
 
+/* A part of a view (a bar, a toolbar, a prompt) on its way: a line, not a box. */
+.lazy-area-inline {
+  min-height: 24px;
+}
+
+/* A popover on its way floats like a dialog; its error keeps the app usable around the card. */
+.lazy-area-popover {
+  position: fixed;
+  inset: 0;
+  z-index: 60;
+  pointer-events: none;
+}
+
 .lazy-area-failed {
   padding: 16px;
+  pointer-events: auto;
+}
+
+.lazy-area-failed.lazy-area-popover {
+  pointer-events: none;
+}
+
+.lazy-area-popover .lazy-area-card {
   pointer-events: auto;
 }
 

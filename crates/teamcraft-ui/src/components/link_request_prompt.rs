@@ -8,6 +8,7 @@ use leptos::task::spawn_local;
 use teamcraft_client_api::remote::LinkRequestView;
 use teamcraft_proto::DeviceLinkPlatform;
 
+use crate::areas::{self, Place, lazy_area};
 use crate::components::icons::{Icon, IconName};
 use crate::i18n::{I18n, use_i18n};
 use crate::reactive::{SetIfAlive, UpdateIfAlive};
@@ -20,7 +21,7 @@ const EXPIRY_SLACK_MS: u32 = 1_000;
 
 /// Where one request stands on this device.
 #[derive(Clone, Debug, PartialEq, Eq)]
-enum Step {
+pub enum Step {
   /// Taking it up (joining the relay).
   Joining,
   /// Waiting for the code of the new device; `maybe_error` after a wrong one.
@@ -62,6 +63,22 @@ pub fn LinkRequestPrompt() -> impl IntoView {
     reload();
   });
 
+  // The prompts load with the first request (`areas::link_requests`): most visits see none.
+  let has_any = Memo::new(move |_| requests.with(|list| !list.is_empty()) || active.with(Option::is_some));
+  view! {
+    <div class="link-prompts" role="region" aria-label=move || i18n.t("link-request-region")>
+      {move || has_any.get().then(|| lazy_area(Place::Inline, move || areas::link_requests(requests, active)))}
+    </div>
+  }
+}
+
+/// The requests' prompts and the one this device took up.
+#[component]
+pub fn LinkRequestCards(
+  requests: RwSignal<Vec<LinkRequestView>>,
+  active: RwSignal<Option<(LinkRequestView, Step)>>,
+) -> impl IntoView {
+  let i18n = use_i18n();
   let review = move |request: LinkRequestView| {
     active.set(Some((request.clone(), Step::Joining)));
     spawn_local(async move {
@@ -84,41 +101,39 @@ pub fn LinkRequestPrompt() -> impl IntoView {
     });
   };
   view! {
-    <div class="link-prompts" role="region" aria-label=move || i18n.t("link-request-region")>
-      {move || {
-        let taken = active.get().map(|(request, _)| request.id);
-        requests
-          .get()
-          .into_iter()
-          .filter(|request| Some(&request.id) != taken.as_ref())
-          .map(|request| {
-            let id = request.id.clone();
-            let for_review = request.clone();
-            let description = describe(&i18n, &request);
-            view! {
-              <section class="link-prompt" role="alert">
-                <h2>{move || i18n.t("link-request-title")}</h2>
-                <p translate="no">{description}</p>
-                <p class="no-content-note small">
-                  <Icon name=IconName::Alert />
-                  <span>{move || i18n.t("link-request-warning")}</span>
-                </p>
-                <div class="link-prompt-actions">
-                  <button class="btn" on:click=move |_| deny(id.clone())>{move || i18n.t("link-request-deny")}</button>
-                  <button class="btn btn-primary" on:click=move |_| review(for_review.clone())>
-                    {move || i18n.t("link-request-review")}
-                  </button>
-                </div>
-              </section>
-            }
-          })
-          .collect_view()
-      }}
-      {move || {
-        let (request, step) = active.get()?;
-        Some(view! { <ActivePrompt request step active /> })
-      }}
-    </div>
+    {move || {
+      let taken = active.get().map(|(request, _)| request.id);
+      requests
+        .get()
+        .into_iter()
+        .filter(|request| Some(&request.id) != taken.as_ref())
+        .map(|request| {
+          let id = request.id.clone();
+          let for_review = request.clone();
+          let description = describe(&i18n, &request);
+          view! {
+            <section class="link-prompt" role="alert">
+              <h2>{move || i18n.t("link-request-title")}</h2>
+              <p translate="no">{description}</p>
+              <p class="no-content-note small">
+                <Icon name=IconName::Alert />
+                <span>{move || i18n.t("link-request-warning")}</span>
+              </p>
+              <div class="link-prompt-actions">
+                <button class="btn" on:click=move |_| deny(id.clone())>{move || i18n.t("link-request-deny")}</button>
+                <button class="btn btn-primary" on:click=move |_| review(for_review.clone())>
+                  {move || i18n.t("link-request-review")}
+                </button>
+              </div>
+            </section>
+          }
+        })
+        .collect_view()
+    }}
+    {move || {
+      let (request, step) = active.get()?;
+      Some(view! { <ActivePrompt request step active /> })
+    }}
   }
 }
 

@@ -7,6 +7,7 @@ use teamcraft_client_api::updates::{
   TooOldAction, UpdateBanner, UpdateBlocker, UpdatePreference, UpdateState, UpdateStatus,
 };
 
+use crate::areas::{self, Place, lazy_area};
 use crate::auth::tauri;
 use crate::components::icons::{Icon, IconName};
 use crate::components::message_actions::copy_to_clipboard;
@@ -33,6 +34,13 @@ const PREFERENCES: [UpdatePreference; 3] = [
 /// to end.
 #[component]
 pub fn UpdateNotice() -> impl IntoView {
+  // Only the desktop app loads the banner (`areas::update_notice`); its chunk is on the disk there.
+  tauri::is_available().then(|| lazy_area(Place::Inline, || areas::update_notice(())))
+}
+
+/// The banner of [`UpdateNotice`].
+#[component]
+pub fn UpdateNoticeBanner() -> impl IntoView {
   let i18n = use_i18n();
   let status = use_update_status();
   let dismissed = RwSignal::new(None::<String>);

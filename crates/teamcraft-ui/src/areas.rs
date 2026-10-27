@@ -24,6 +24,7 @@ use leptos::task::spawn_local_scoped_with_cancellation;
 use leptos::wasm_split::{SplitLoaderError, wasm_split};
 
 use crate::admin::AdminSection;
+use crate::admin_live::{AdminLive, AdminTask};
 use crate::calls::CallRequest;
 use crate::components::activity_view::{ActivityHome, ActivitySidebar};
 use crate::components::add_to_call::AddToCallDialog;
@@ -34,12 +35,17 @@ use crate::components::call_screen::CallScreen;
 use crate::components::calls_unavailable::CallsUnavailableDialog;
 use crate::components::calls_view::CallsView;
 use crate::components::channel_preview::ChannelPreview;
+use crate::components::composer_toolbar::{ActiveFormats, FormatAction, FormatToolbarPanel};
+use crate::components::date_jump::{DateJumpMenu, DateJumpPanel};
 use crate::components::directory_view::DirectoryView;
+use crate::components::emoji_picker::EmojiPickerPanel;
 use crate::components::file_preview::FilePreview;
 use crate::components::files_view::FilesView;
 use crate::components::guest_meeting::{GuestMeeting, GuestSession};
 use crate::components::home::NewMessageDialog;
+use crate::components::huddle_bar::HuddleBarContent;
 use crate::components::lightbox::Lightbox;
+use crate::components::link_request_prompt::{LinkRequestCards, Step as LinkStep};
 use crate::components::log_view::IntegrationFeed;
 use crate::components::login::SessionGate;
 use crate::components::meetings_view::{MeetingCreatedDialog, MeetingsView, ScheduleMeetingDialog};
@@ -55,6 +61,8 @@ use crate::components::settings_modal::{SettingsModal, ShortcutsModal};
 use crate::components::share_link_dialog::ShareLinkDialog;
 use crate::components::space_invites::{AddToChannelDialog, BrowseSpacesDialog, InvitePeopleDialog};
 use crate::components::status_menu::{CustomStatusDialog, StatusMenu};
+use crate::components::tab_elsewhere::TabElsewhere;
+use crate::components::update_notice::UpdateNoticeBanner;
 use crate::components::video_player::VideoPlayer;
 use crate::components::workspace_dialogs::{
   BrowseChannelsDialog, ChannelSettingsDialog, NewChannelDialog, NewSpaceDialog, SpaceSettingsDialog,
@@ -65,6 +73,8 @@ use crate::model::{ConversationId, MessageId, SpaceId, UserId};
 use crate::reactive::SetIfAlive;
 use crate::settings::Settings;
 use crate::state::AppState;
+use crate::tab_handover::TabState;
+use teamcraft_client_api::remote::LinkRequestView;
 use teamcraft_proto::{AttachmentId, MeetingId};
 
 /// Where an area shows: how its placeholder and its error sit in the page.
@@ -81,6 +91,11 @@ pub enum Place {
   Sidebar,
   /// A conversation's side panel: the placeholder takes its box.
   Panel,
+  /// A part of a view (a bar, a toolbar, a prompt): the placeholder is a line in its place.
+  Inline,
+  /// A popover (a picker, a menu): the placeholder floats; the error leaves the app usable, and
+  /// what opened the popover closes it.
+  Popover,
 }
 
 /// Where an area stands.
@@ -138,6 +153,8 @@ areas! {
   call_prejoin(request: CallRequest) => calls: view! { <PreJoinScreen request=request /> };
   call_screen(request: CallRequest) => calls: view! { <CallScreen request=request /> };
   add_to_call(conversation: ConversationId) => calls: view! { <AddToCallDialog conversation=conversation /> };
+  /// The bar of a call going on in a conversation, once there is one: it leads to the call screens.
+  huddle_bar(conversation: ConversationId) => calls: view! { <HuddleBarContent conversation=conversation /> };
   meetings(_unit: ()) => meetings: view! { <MeetingsView /> };
   schedule_meeting(_unit: ()) => meetings: view! { <ScheduleMeetingDialog /> };
   edit_meeting(meeting: MeetingId) => meetings: view! { <ScheduleMeetingDialog maybe_edit=meeting /> };
@@ -162,6 +179,26 @@ areas! {
   link_device(_unit: ()) => dialogs: view! { <LinkDeviceDialog /> };
   device_approval(_unit: ()) => dialogs: view! { <DeviceApprovalDialog /> };
   calls_unavailable(_unit: ()) => dialogs: view! { <CallsUnavailableDialog /> };
+  /// Another device asking to be linked to this account, once one asks.
+  link_requests(
+    requests: RwSignal<Vec<LinkRequestView>>,
+    active: RwSignal<Option<(LinkRequestView, LinkStep)>>
+  ) => dialogs: view! {
+    <LinkRequestCards requests=requests active=active />
+  };
+  /// The formatting toolbar above the message input: off until it is turned on.
+  format_toolbar(active: Signal<ActiveFormats>, on_action: Callback<FormatAction>) => dialogs: view! {
+    <FormatToolbarPanel active=active on_action=on_action />
+  };
+  /// The desktop app's update banner; the browser has no updates to show and never loads it.
+  update_notice(_unit: ()) => dialogs: view! { <UpdateNoticeBanner /> };
+  /// The emoji picker and the date pills' menu, the first time they open.
+  emoji_picker(anchor: web_sys::Element, on_pick: Callback<String>, on_close: Callback<()>, returns_focus: bool) => dialogs: view! {
+    <EmojiPickerPanel anchor=anchor on_pick=on_pick on_close=on_close returns_focus=returns_focus />
+  };
+  date_jump(conversation: ConversationId, menu: DateJumpMenu) => dialogs: view! { <DateJumpPanel conversation=conversation menu=menu /> };
+  /// What a browser tab shows while another tab of the account runs the app (#744).
+  tab_elsewhere(tab: Signal<TabState>) => dialogs: view! { <TabElsewhere tab=tab /> };
   /// The account menu behind the user's picture and the custom status it opens.
   status_menu(_unit: ()) => account: view! { <StatusMenu /> };
   custom_status(_unit: ()) => account: view! { <CustomStatusDialog /> };
@@ -196,6 +233,23 @@ pub fn message_sound(
   sound: teamcraft_client_api::message_sound::BuiltInSound,
 ) -> Result<Vec<f32>, SplitLoaderError> {
   Ok(teamcraft_media::message_sounds::synthesize(sound))
+}
+
+/// Reading the administration console's data (`admin_live.rs`): the lists, their details and the
+/// wire types they arrive in, which only an admin's console needs. They load with the console's
+/// chunk.
+#[wasm_split(admin, wasm_split_path = ::leptos::wasm_split, fallible)]
+pub fn admin_refresh(live: AdminLive) -> Result<Pin<Box<dyn Future<Output = ()>>>, SplitLoaderError> {
+  Ok(Box::pin(async move { live.refresh_once().await }))
+}
+
+/// The console's other requests (changes, on-demand data, connection tests), in its chunk as well.
+#[wasm_split(admin, wasm_split_path = ::leptos::wasm_split, fallible)]
+pub fn admin_task(
+  live: AdminLive,
+  task: AdminTask,
+) -> Result<Pin<Box<dyn Future<Output = ()>>>, SplitLoaderError> {
+  Ok(Box::pin(async move { live.perform(task).await }))
 }
 
 /// Shows the view `load` builds once its chunk is there: a placeholder until then, and a message
@@ -301,6 +355,8 @@ impl Place {
       Self::Screen => "lazy-area-screen",
       Self::Sidebar => "sidebar",
       Self::Panel => "side-panel",
+      Self::Inline => "lazy-area-inline",
+      Self::Popover => "lazy-area-popover",
     }
   }
 }
