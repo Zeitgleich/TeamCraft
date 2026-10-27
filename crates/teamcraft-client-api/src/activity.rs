@@ -67,6 +67,10 @@ pub struct JoinRequest {
 pub enum JoinRequestStanding {
   /// The fresh signed roster lists the person as an admin: approving adds them to the channel.
   Approvable,
+  /// The person is an admin, but the owner's own role in the channel is the server's word only:
+  /// members would refuse the add. A signed admin or a workspace admin signs it first ("Sign
+  /// role" in the channel's members); until then the request can only be declined.
+  OwnerRoleNotSigned,
   /// Only the server calls the person an admin (or the roster is too old to trust): the request
   /// can only be declined (admin.md §2.3).
   #[serde(other)]

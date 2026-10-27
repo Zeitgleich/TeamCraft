@@ -46,6 +46,9 @@ pub(crate) struct WorkspaceAuthority {
   maybe_vouched_in_meeting: Option<HashSet<crypto::UserId>>,
   self_join: AdminSelfJoin,
   is_public_channel: bool,
+  /// The admins of the channel's signed role log (e2ee.md §4.6.1), once anything is signed for it;
+  /// `None` for a channel from before signed roles, which keeps the rule "every member".
+  maybe_signed_channel_admins: Option<HashSet<crypto::UserId>>,
   /// Decides like clients before v1.0.9, which held only an admin's own self-join to the policy.
   /// Only for tests of how this version takes such members' commits.
   is_before_v1_0_9: bool,
@@ -126,6 +129,7 @@ impl WorkspaceAuthority {
       maybe_vouched_in_meeting: None,
       self_join,
       is_public_channel: false,
+      maybe_signed_channel_admins: None,
       is_before_v1_0_9: false,
     }
   }
@@ -150,6 +154,19 @@ impl WorkspaceAuthority {
   /// A public, unarchived channel: members joining by themselves is fine.
   pub(crate) fn for_public_channel(mut self, is_public_channel: bool) -> Self {
     self.is_public_channel = is_public_channel;
+    self
+  }
+
+  /// The channel's signed admins. From then on, under `owner_approval`, a member lets an admin in
+  /// only if it is one of them (e2ee.md §4.6.1, issue #380). Pass `None` while nothing is signed
+  /// for the channel: it keeps the rule of before, so a channel nobody signed yet doesn't refuse
+  /// every approval.
+  pub(crate) fn with_signed_channel_admins(
+    mut self,
+    maybe_admins: Option<impl IntoIterator<Item = UserId>>,
+  ) -> Self {
+    self.maybe_signed_channel_admins =
+      maybe_admins.map(|admins| admins.into_iter().map(convert::user).collect());
     self
   }
 
@@ -180,7 +197,7 @@ impl MembershipAuthority for WorkspaceAuthority {
       };
     }
     if self.members.contains(&actor) {
-      return true;
+      return self.member_may(actor, action);
     }
     // Anyone the server let into a public channel may add themselves (and only themselves).
     if self.is_public_channel
@@ -208,6 +225,21 @@ impl MembershipAuthority for WorkspaceAuthority {
 }
 
 impl WorkspaceAuthority {
+  /// A member's change: anything, except bringing a workspace admin into a private channel whose
+  /// roles are signed while the policy asks for an owner's approval: that takes a signed channel
+  /// admin (admin.md §2.4.1). The server's member list never decides it.
+  fn member_may(&self, actor: crypto::UserId, action: &MembershipAction) -> bool {
+    let MembershipAction::AddUser { user_id, .. } = action else {
+      return true;
+    };
+    let Some(signed_admins) = &self.maybe_signed_channel_admins else {
+      return true;
+    };
+    let is_admin_added = self.admins.contains(user_id);
+    let needs_owner = self.self_join == AdminSelfJoin::OwnerApproval && !self.is_public_channel;
+    !(is_admin_added && needs_owner) || signed_admins.contains(&actor)
+  }
+
   /// Whether `actor`, an admin who isn't a member, adding `target` lets an admin in without the
   /// members: their own self-join, or another admin's addition of them, so two admins can't add
   /// each other around the policy (issue #816). `admin_self_join` decides those (admin.md §2.4).
@@ -226,6 +258,51 @@ mod tests {
   use teamcraft_proto::{Id, Snowflake};
 
   use super::*;
+
+  /// Issue #380: under `owner_approval` in a channel with signed roles, only a signed admin lets
+  /// an admin in; everything else a member does is unchanged. Nothing signed: every member, as before.
+  #[test]
+  fn signed_channel_roles_decide_who_lets_an_admin_in() {
+    let (owner, member, guest_admin_target) = (
+      crypto::UserId::new(1),
+      crypto::UserId::new(2),
+      UserId::from_snowflake(Snowflake::new(3).unwrap()),
+    );
+    let conversation = crypto::ConversationId::new(9);
+    let add = |user| MembershipAction::AddUser {
+      user_id: user,
+      history: HistoryShare::FromJoin,
+    };
+    let admin_target = convert::user(guest_admin_target);
+    let owner_user = UserId::from_snowflake(Snowflake::new(1).unwrap());
+    let authority = |policy, signed: Option<Vec<UserId>>| {
+      WorkspaceAuthority::new([owner, member], [guest_admin_target], policy)
+        .with_signed_channel_admins(signed)
+    };
+
+    // Signed: the owner may, a member (the server's "owner" included) may not.
+    let signed = authority(AdminSelfJoin::OwnerApproval, Some(vec![owner_user]));
+    assert!(signed.is_authorized(owner, conversation, &add(admin_target)));
+    assert!(!signed.is_authorized(member, conversation, &add(admin_target)));
+    // Everything else a member does is untouched: ordinary adds, removals.
+    assert!(signed.is_authorized(member, conversation, &add(crypto::UserId::new(7))));
+    assert!(signed.is_authorized(
+      member,
+      conversation,
+      &MembershipAction::RemoveUser { user_id: owner }
+    ));
+    // Nothing signed (a channel from before): every member, so no approval is refused.
+    let legacy = authority(AdminSelfJoin::OwnerApproval, None);
+    assert!(legacy.is_authorized(member, conversation, &add(admin_target)));
+    // An empty signed snapshot still counts as signed: nobody is admin.
+    let none = authority(AdminSelfJoin::OwnerApproval, Some(Vec::new()));
+    assert!(!none.is_authorized(owner, conversation, &add(admin_target)));
+    // Other policies and public channels don't ask for an owner.
+    let visible = authority(AdminSelfJoin::Visible, Some(vec![owner_user]));
+    assert!(visible.is_authorized(member, conversation, &add(admin_target)));
+    let public = authority(AdminSelfJoin::OwnerApproval, Some(vec![owner_user])).for_public_channel(true);
+    assert!(public.is_authorized(member, conversation, &add(admin_target)));
+  }
 
   #[test]
   fn members_and_admins_may_change_membership_but_self_join_follows_policy() {

@@ -239,9 +239,14 @@ admin in is an owner's own membership change.
   After a decline or a withdrawal the admin can ask again only once that request would have
   expired (`admin_join_request_too_soon`), so asking and withdrawing can't notify the owners over
   and over.
-- **Who decides.** The channel's owners: members with the channel role `admin`. That role is the
-  server's record until channel roles are signed (issue #380), so the server decides who is asked
-  and who may approve; what an approval can do is limited by the checks below. The server tells
+- **Who decides.** The channel's owners: members with the channel role `admin`. The server decides
+  who is asked, but an owner's app approves only if its own verified channel roles (e2ee.md §4.6.1)
+  make that owner an admin, and members take the add in only from a signed channel admin. An owner
+  the server alone lists sees the request with "Your owner role in this channel isn't signed" and
+  can only decline, until a signed admin or a workspace admin signs the role ("Sign role" in the
+  channel's members; an owner of a channel from before signed roles signs their own, which founds
+  the log). A channel nobody signed yet keeps the rule of before for members, so older apps in the
+  group are not split off; what an approval can do is limited by the checks below. The server tells
   them (gateway `admin_join_request_update`) and their apps show the request at the top of
   Activity, in the channel settings above the member list and as a system notification, each with
   Approve and Decline and the admin's name with their username. The badge counts it until it is
@@ -265,7 +270,8 @@ admin in is an owner's own membership change.
 - **The server's word is a hint.** The owner's app shows and approves a request only if its own
   state agrees: the verified policy says `owner_approval`, the conversation is a private,
   unarchived channel the owner is in (a request for a DM, a meeting chat or an unknown
-  conversation is neither shown nor approved) and the owner's device is in its group. Approve is
+  conversation is neither shown nor approved), the owner's device is in its group and the owner is
+  a signed admin of the channel. Approve is
   offered only for somebody the fresh verified roster lists as an admin; for anybody else the app
   says so and offers Decline only. A request the server makes up can at most ask an owner to let a
   real admin of the signed roster into one of the owner's private channels, with the history from

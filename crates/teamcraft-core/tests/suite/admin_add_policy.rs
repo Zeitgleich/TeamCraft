@@ -121,9 +121,9 @@ mod an_admin_outside_adds_an_admin {
   }
 }
 
-/// A member's addition of an admin is an ordinary one under every policy: a member may add
-/// people (no channel role is signed yet, issue #380), and under `owner_approval` the approving
-/// owner is such a member.
+/// A member's addition of an admin is an ordinary one under every policy but `owner_approval`: a
+/// member may add people. Under `owner_approval` it takes a signed channel admin (issue #380,
+/// e2ee.md §4.6.1): Carol, who made the channel, is one; Alice and Dave are plain members.
 mod a_member_adds_an_admin {
   use super::*;
 
@@ -144,14 +144,20 @@ mod a_member_adds_an_admin {
         "{policy:?}: Carol let Alice in"
       );
 
-      team
-        .alice
-        .client
-        .admin_add_member(team.channel, erin)
-        .await
-        .unwrap();
+      let outcome = team.alice.client.admin_add_member(team.channel, erin).await;
       team.settle().await;
 
+      if policy == AdminSelfJoin::OwnerApproval {
+        // Alice is no signed channel admin: nobody commits the addition of the admin Erin.
+        let _ = outcome;
+        assert!(
+          !team.erin.client.has_group(team.channel).unwrap(),
+          "{policy:?}: members refuse an unsigned owner's addition"
+        );
+        assert_eq!(lines(&team.dave, team.channel), vec![(alice, Some(carol))]);
+        continue;
+      }
+      outcome.unwrap();
       assert!(
         team.erin.client.has_group(team.channel).unwrap(),
         "{policy:?}: Alice let Erin in"
@@ -171,14 +177,19 @@ mod a_member_adds_an_admin {
       let mut team = Team::new(policy.clone()).await;
       let (dave, erin) = (team.dave.client.user_id(), team.erin.client.user_id());
 
-      team
-        .dave
-        .client
-        .admin_add_member(team.channel, erin)
-        .await
-        .unwrap();
+      let outcome = team.dave.client.admin_add_member(team.channel, erin).await;
       team.settle().await;
 
+      if policy == AdminSelfJoin::OwnerApproval {
+        // Dave is no signed channel admin (issue #380).
+        let _ = outcome;
+        assert!(
+          !team.erin.client.has_group(team.channel).unwrap(),
+          "{policy:?}: members refuse a plain member's addition of an admin"
+        );
+        continue;
+      }
+      outcome.unwrap();
       assert!(
         team.erin.client.has_group(team.channel).unwrap(),
         "{policy:?}: Dave let Erin in"

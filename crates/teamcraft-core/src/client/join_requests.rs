@@ -10,8 +10,8 @@
 
 use teamcraft_crypto::membership::HistoryShare;
 use teamcraft_proto::{
-  AdminJoinRequestResponse, AdminSelfJoin, ConversationId, ConversationKind, ConversationResponse,
-  ConversationVisibility, HistoryPolicy, UserId,
+  AdminJoinRequestResponse, AdminSelfJoin, ChannelRole, ConversationId, ConversationKind,
+  ConversationResponse, ConversationVisibility, HistoryPolicy, UserId,
 };
 
 use super::Client;
@@ -67,7 +67,9 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
   /// `history` (full history only when the owner chose it), then the visible message. Only when
   /// this device's own state agrees (admin.md §2.3): the verified policy asks for an owner's
   /// approval, the fresh verified roster lists the person as an admin, and the conversation is a
-  /// private, unarchived channel this device knows and is in the group of. A request the server
+  /// private, unarchived channel this device knows and is in the group of, and this user's own
+  /// channel role is a signed admin (a role only the server lists isn't: members would refuse the
+  /// add). A request the server
   /// makes up for a DM, a meeting chat or an unknown conversation adds nobody. Somebody already in
   /// the group (another owner was first) is neither added nor announced again.
   pub async fn approve_admin_join_sharing(
@@ -95,6 +97,14 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     // Only a member of the group can commit the add.
     if !self.has_group(conversation)? {
       return Err(CoreError::NoGroup(conversation));
+    }
+    // Members take in an admin's addition only from a signed channel admin (e2ee.md §4.6.1), never
+    // from an owner only the server lists: read the log first, then judge by what is signed.
+    self.sync_channel_roles(conversation).await?;
+    if self.verified_channel_role(conversation, self.user_id())? != ChannelRole::Admin {
+      return Err(CoreError::JoinRequestNotApprovable(
+        JoinRequestRefusal::OwnerRoleNotSigned,
+      ));
     }
     self.cancel_removal_on_add(conversation, user)?;
     self.api.approve_admin_join(conversation, user).await?;

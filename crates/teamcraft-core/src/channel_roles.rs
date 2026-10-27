@@ -127,6 +127,16 @@ impl ChannelRoleState {
       .map_or(ChannelRole::Member, |assignment| assignment.role.clone())
   }
 
+  /// The users the accepted snapshot makes admins.
+  pub fn admins(&self) -> Vec<UserId> {
+    self
+      .assignments
+      .iter()
+      .filter(|assignment| assignment.role == ChannelRole::Admin)
+      .map(|assignment| assignment.user_id)
+      .collect()
+  }
+
   /// Whether anything was signed for the channel; before that its roles are the server's word.
   pub fn is_signed(&self) -> bool {
     self.version > 0

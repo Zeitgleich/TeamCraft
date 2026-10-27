@@ -245,6 +245,7 @@ join-request-hint = Approving lets them read what is posted from now on, as join
 join-request-hint-history = Approving lets them read the earlier history too. Everybody in the channel sees that a workspace admin joined.
 join-request-share-history = Also share the earlier history
 join-request-not-admin = The signed roster on this device doesn't list them as a workspace admin, so you can only decline.
+join-request-owner-not-signed = Your owner role in this channel isn't signed yet, so other members wouldn't accept the admin. Ask a signed admin or a workspace admin to sign your role in the channel's members; until then you can only decline.
 join-request-approve = Approve
 join-request-decline = Decline
 

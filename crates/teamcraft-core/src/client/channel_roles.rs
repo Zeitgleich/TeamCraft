@@ -55,6 +55,21 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     Ok(self.channel_role_state(conversation)?.role_of(user))
   }
 
+  /// Before a commit is judged: under `owner_approval` it may add an admin, which only a signed
+  /// channel admin may do (e2ee.md §4.6.1), and the admin's role entry may be newer than this
+  /// device's copy. Reads the log then; a failure only means the copy stays as it is.
+  pub(crate) async fn refresh_channel_roles_for_commit(&mut self, conversation: ConversationId) {
+    let is_owner_approval = self.workspace().is_ok_and(|workspace| {
+      workspace.policy.admin_self_join == teamcraft_proto::AdminSelfJoin::OwnerApproval
+    });
+    if !is_owner_approval {
+      return;
+    }
+    if let Err(error) = self.sync_channel_roles(conversation).await {
+      tracing::warn!(conversation_id = %conversation, %error, "could not read the channel roles before judging a commit");
+    }
+  }
+
   /// Reads the channel's new role entries and verifies them. Skipped entries are logged; the state
   /// keeps the last accepted snapshot. A server that refuses the log (not a member any more, an
   /// older server) changes nothing.
