@@ -188,6 +188,16 @@ pub fn thumbnail(bytes: &[u8], media_type: &str) -> Result<Option<Vec<u8>>, Spli
   Ok(teamcraft_core::thumbnail::thumbnail(bytes, media_type))
 }
 
+/// The app's own message sounds (#800), synthesized by teamcraft-media in the page: a first visit
+/// doesn't need them, so they load with the first sound (the page keeps each one once made).
+#[cfg(target_arch = "wasm32")]
+#[wasm_split(sounds, wasm_split_path = ::leptos::wasm_split, fallible)]
+pub fn message_sound(
+  sound: teamcraft_client_api::message_sound::BuiltInSound,
+) -> Result<Vec<f32>, SplitLoaderError> {
+  Ok(teamcraft_media::message_sounds::synthesize(sound))
+}
+
 /// Shows the view `load` builds once its chunk is there: a placeholder until then, and a message
 /// with a retry when the chunk can't be loaded.
 pub fn lazy_area<F, Fut>(place: Place, load: F) -> AnyView

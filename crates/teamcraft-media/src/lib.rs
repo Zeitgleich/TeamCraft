@@ -16,10 +16,14 @@ pub mod call_resilience;
 pub mod datagram;
 pub mod fragment;
 pub mod jitter;
+#[cfg(feature = "message-sounds")]
+pub mod message_sounds;
 #[cfg(feature = "native")]
 pub mod openh264_library;
 pub mod ringtone;
 pub mod rtp;
+#[cfg(feature = "sound-files")]
+pub mod sound_file;
 pub mod uplink_layers;
 pub mod video;
 #[cfg(any(feature = "native", feature = "web"))]

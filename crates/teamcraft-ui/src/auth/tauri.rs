@@ -14,7 +14,7 @@ use super::{
   ApiBytes, ApiMethod, ApiResponse, AuthError, Authenticator, BinaryBody, LocalFuture, SignInLook,
 };
 use teamcraft_client_api::call_window::CallWindow;
-use teamcraft_client_api::os_notify::{NotificationTag, OsNotification, TagTarget};
+use teamcraft_client_api::os_notify::{NotificationSound, NotificationTag, OsNotification, TagTarget};
 
 use crate::feedback::{ActionFailure, FailureKind, NotificationFailure};
 use crate::model::ConversationId;
@@ -941,6 +941,11 @@ fn page_notification_options(notification: &OsNotification) -> js_sys::Object {
   set(&options, "data", &data);
   if notification.kind.is_ringing() {
     set(&options, "requireInteraction", &JsValue::TRUE);
+  }
+  // The page plays the message sound itself, or the user chose none (#800). A ringing call keeps
+  // the system's sound: a tab that may not play sound can't ring.
+  if notification.sound == NotificationSound::Silent {
+    set(&options, "silent", &JsValue::TRUE);
   }
   let actions = js_sys::Array::new();
   for button in &notification.actions {

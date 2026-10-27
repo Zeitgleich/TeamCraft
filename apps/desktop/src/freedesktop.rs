@@ -79,8 +79,11 @@ pub struct DesktopNotification<'a> {
   pub maybe_reply_placeholder: Option<&'a str>,
   /// `im.received`, `call.incoming`, … (the spec's categories); servers pick sounds and icons by it.
   pub category: &'a str,
-  /// A ringing call: critical urgency (stays until withdrawn), no server sound (the app rings).
+  /// A ringing call: critical urgency (stays until withdrawn).
   pub is_ringing: bool,
+  /// No server sound: a ringing call (the app rings) or a message whose sound the app plays itself
+  /// (or none, the user's choice).
+  pub is_quiet: bool,
   /// The sender's or channel's picture (#543).
   pub maybe_image: Option<HintImage<'a>>,
 }
@@ -157,7 +160,7 @@ impl Buses {
       URGENCY_NORMAL
     };
     hints.insert("urgency", Value::from(urgency));
-    if notification.is_ringing {
+    if notification.is_quiet {
       hints.insert("suppress-sound", Value::from(true));
     }
     if let Some(image) = notification.maybe_image.and_then(image_data) {
@@ -651,6 +654,7 @@ mod tests {
     call.body = "Bob is calling you";
     call.category = "call.incoming";
     call.is_ringing = true;
+    call.is_quiet = true;
     let id = buses.notify(&call).await.expect("a notification server answers");
     call.replaces_id = id;
     call.body = "Bob is still calling you";
@@ -679,6 +683,7 @@ mod tests {
       maybe_reply_placeholder,
       category: "im.received",
       is_ringing: false,
+      is_quiet: false,
       maybe_image: None,
     }
   }

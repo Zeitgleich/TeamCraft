@@ -29,6 +29,7 @@ const ENTRIES: &[(SettingsTab, &str)] = &[
   (SettingsTab::Notifications, "notif-test"),
   (SettingsTab::Notifications, "notif-desktop"),
   (SettingsTab::Notifications, "notif-preview"),
+  (SettingsTab::Notifications, "notif-message-sound"),
   (SettingsTab::Notifications, "notif-first-name"),
   (SettingsTab::Notifications, "notif-channel-mentions"),
   (SettingsTab::Notifications, "notif-confirm-channel"),
