@@ -14,6 +14,14 @@ final class PictureViewerTests: XCTestCase {
     XCTAssertEqual(many.hidden, 5)
   }
 
+  func testTheSettingDefaultsToWifiOnlyAndKeepsAnExplicitChoice() {
+    XCTAssertEqual(OriginalDownloadSetting.fallback, .unmeteredOnly)
+    XCTAssertEqual(OriginalDownloadSetting.stored(nil), .unmeteredOnly)
+    XCTAssertEqual(OriginalDownloadSetting.stored("sometimes"), .unmeteredOnly)
+    XCTAssertEqual(OriginalDownloadSetting.stored("always"), .always)
+    XCTAssertEqual(OriginalDownloadSetting.stored("never"), .never)
+  }
+
   func testTheSettingDecidesByTheNetwork() {
     XCTAssertEqual(OriginalDownloadSetting(rawValue: "unmetered_only"), .unmeteredOnly)
     XCTAssertTrue(fetchesOriginalAutomatically(setting: OriginalDownloadSetting.always.setting, isMetered: true))

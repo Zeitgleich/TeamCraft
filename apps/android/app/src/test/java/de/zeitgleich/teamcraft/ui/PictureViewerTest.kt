@@ -16,10 +16,10 @@ class PictureViewerTest {
   }
 
   @Test
-  fun theOriginalDownloadSettingReadsBackAndDefaultsToAlways() {
-    assertEquals(OriginalDownload.UNMETERED_ONLY, originalDownloadOf(OriginalDownload.UNMETERED_ONLY.name))
+  fun theOriginalDownloadSettingReadsBackAndDefaultsToWifiOnly() {
+    assertEquals(OriginalDownload.ALWAYS, originalDownloadOf(OriginalDownload.ALWAYS.name))
     assertEquals(OriginalDownload.NEVER, originalDownloadOf("NEVER"))
-    assertEquals(OriginalDownload.ALWAYS, originalDownloadOf(null))
-    assertEquals(OriginalDownload.ALWAYS, originalDownloadOf("sometimes"))
+    assertEquals(OriginalDownload.UNMETERED_ONLY, originalDownloadOf(null))
+    assertEquals(OriginalDownload.UNMETERED_ONLY, originalDownloadOf("sometimes"))
   }
 }

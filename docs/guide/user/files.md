@@ -16,8 +16,8 @@ hold ciphertext. The file name and size travel inside the encrypted message.
   message's pictures, or switch to all pictures of the chat (the ends don't wrap around). Pinch or
   double-tap to zoom; sender and time are on top, save, share and forward at the bottom. The preview
   shows at once and the original loads with its progress. **Settings → Chats → Download original
-  images automatically** (*Always*, *On Wi-Fi only*, *Never*) decides whether it loads by itself or
-  waits for **Load original**.
+  images automatically** (*Always*, *On Wi-Fi only* by default, *Never*) decides whether it loads by
+  itself or waits for **Load original**; on mobile data the default waits.
 - The **Files** tab of a conversation lists everything shared in it.
 - **Link previews** are made by the sender's device, within the limits and domain list your admin set.
 

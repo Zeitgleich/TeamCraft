@@ -112,13 +112,15 @@ pub struct AlbumGrid {
 
 /// When the mobile viewers fetch a picture's original by themselves (#199, #240); the thumbnail
 /// shows at once either way, and the original can always be loaded by hand. A setting of the
-/// device: data plans belong to the phone, not to the account.
+/// device: data plans belong to the phone, not to the account. Unless the user chose otherwise,
+/// originals come by themselves on Wi-Fi only, so opening pictures never spends mobile data
+/// unasked.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum OriginalDownload {
   /// As soon as the picture is opened, as desktop and web do.
-  #[default]
   Always,
   /// Only on networks that aren't metered (Wi-Fi, not mobile data or a hotspot).
+  #[default]
   UnmeteredOnly,
   /// Only when the user asks ("Load original").
   Never,
@@ -911,8 +913,8 @@ mod tests {
       assert!(!OriginalDownload::Never.fetches_automatically(false));
       assert_eq!(
         OriginalDownload::default(),
-        OriginalDownload::Always,
-        "as desktop and web"
+        OriginalDownload::UnmeteredOnly,
+        "no mobile data unless the user chose so"
       );
     }
   }
