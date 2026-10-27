@@ -26,7 +26,14 @@ const KEY_BAG_KEY: &str = "key_bag";
 const SYNC_KEY: &str = "sync";
 const PENDING_DEVICE_KEY: &str = "pending_device";
 const PENDING_LINK_KEY: &str = "pending_link";
+const ABANDONED_DEVICES_KEY: &str = "abandoned_devices";
 const MLS_STORAGE_KEY: &str = "provider";
+/// At most this many registrations of dropped device key pairs wait to be revoked; older ones are
+/// given up (they stay in the user's device list, where the user can remove them).
+const MAX_ABANDONED_DEVICES: usize = 16;
+/// The device ID in a pending key pair: the server assigns the real one at registration. It plays
+/// no part in the public keys.
+pub(crate) const PENDING_DEVICE_ID: u64 = 0;
 
 /// This device's identity: the user's keys (inside the key bag) and the device's own keys.
 pub struct Account {
@@ -103,6 +110,16 @@ pub struct PendingDevice {
   pub device: DeviceKeyPair,
 }
 
+/// Registrations of device key pairs that were dropped before their enrollment finished (issue
+/// #415): their public keys alone, kept until the server revoked what they registered. No secret is
+/// in here; the key pairs themselves are gone.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AbandonedDevices {
+  pub user_id: UserId,
+  /// As the server stores them (signing key, then agreement key), oldest first.
+  pub public_keys: Vec<Base64Bytes>,
+}
+
 /// Secrets an existing device handed over by linking, kept until the account is stored (issue
 /// #168): a new device that stops after confirming the transfer finishes enrolling on its next
 /// start instead of asking for another link.
@@ -133,6 +150,10 @@ struct PendingDeviceRecord {
   identity_public_key: [u8; 32],
   device_signing_secret: [u8; 32],
   device_agreement_secret: [u8; 32],
+  /// When the key pair was stored (issue #415); missing in records of v1.0.8 and earlier.
+  #[zeroize(skip)]
+  #[serde(rename = "created_at_ms", default, skip_serializing_if = "Option::is_none")]
+  maybe_created_at_ms: Option<i64>,
 }
 
 /// [`PendingLink`] as stored, protected like [`AccountRecord`].
@@ -238,15 +259,37 @@ pub fn load_account(store: &impl LocalStore) -> Result<Option<Account>, CoreErro
   }))
 }
 
-pub fn save_pending_device(store: &impl LocalStore, pending: &PendingDevice) -> Result<(), CoreError> {
+/// Stores the key pair an enrollment is about to register, at `created_at_ms`: the expiry of an
+/// enrollment nobody finishes counts from then (issue #415).
+pub fn save_pending_device(
+  store: &impl LocalStore,
+  pending: &PendingDevice,
+  created_at_ms: i64,
+) -> Result<(), CoreError> {
   let (signing, agreement) = pending.device.to_secrets();
   let record = PendingDeviceRecord {
     user_id: pending.user_id,
     identity_public_key: pending.identity_public_key,
     device_signing_secret: *signing.expose_secret(),
     device_agreement_secret: *agreement.expose_secret(),
+    maybe_created_at_ms: Some(created_at_ms),
   };
   put_json(store, Table::Account, PENDING_DEVICE_KEY, &record)
+}
+
+/// When the pending device key pair was stored, if there is one. A record of an older version has
+/// no time: it is given `now_ms` (and keeps it), so it gets the whole expiry from the upgrade on
+/// instead of being dropped at once (issue #415).
+pub fn pending_device_created_at(store: &impl LocalStore, now_ms: i64) -> Result<Option<i64>, CoreError> {
+  let Some(mut record) = get_json::<PendingDeviceRecord>(store, Table::Account, PENDING_DEVICE_KEY)? else {
+    return Ok(None);
+  };
+  if let Some(created_at_ms) = record.maybe_created_at_ms {
+    return Ok(Some(created_at_ms));
+  }
+  record.maybe_created_at_ms = Some(now_ms);
+  put_json(store, Table::Account, PENDING_DEVICE_KEY, &record)?;
+  Ok(Some(now_ms))
 }
 
 /// The pending device, with the provisional device ID `provisional`.
@@ -301,22 +344,113 @@ pub fn load_pending_link(store: &impl LocalStore) -> Result<Option<PendingLink>,
   }))
 }
 
+/// Whether the keys of a link wait to be enrolled, without opening them.
+pub fn has_pending_link(store: &impl LocalStore) -> Result<bool, CoreError> {
+  Ok(store.get(Table::Account, PENDING_LINK_KEY)?.is_some())
+}
+
 pub fn delete_pending_link(store: &impl LocalStore) -> Result<(), CoreError> {
   Ok(store.delete(Table::Account, PENDING_LINK_KEY)?)
 }
 
 /// Drops what an unfinished enrollment kept, the secrets of a link and the pending device key pair:
-/// the user signed out instead of finishing it (issue #168). Does nothing once the account is
-/// stored. A device the pending key registered stays on the server unused; its key was never
-/// trusted anywhere (no signed device list names it).
+/// the user signed out instead of finishing it (issues #168, #415). Does nothing once the account is
+/// stored. The secrets are gone at once, and the store's free pages are purged so they can't be read
+/// back from its files; the key pair's public key stays ([`AbandonedDevices`]) until the server
+/// revoked the device it may have registered (`client::revoke_abandoned_devices`).
 pub fn forget_unfinished_enrollment(store: &impl LocalStore) -> Result<(), CoreError> {
-  if store.get(Table::Account, ACCOUNT_KEY)?.is_some() {
+  if is_account_stored(store)? {
     return Ok(());
   }
   write_group(store, || {
     delete_pending_link(store)?;
-    delete_pending_device(store)
-  })
+    move_pending_device_to_abandoned(store)
+  })?;
+  Ok(store.purge_freed()?)
+}
+
+/// Drops the pending device key pair of an enrollment nobody finishes (issue #415). Its public key
+/// goes to the [`AbandonedDevices`] in the same group of writes, so a crash leaves either the key
+/// pair or the registration to revoke, never neither; the store's free pages are purged afterwards.
+/// Returns whether there was a key pair.
+pub fn abandon_pending_device(store: &impl LocalStore) -> Result<bool, CoreError> {
+  let is_abandoned = write_group(store, || move_pending_device_to_abandoned(store))?;
+  if is_abandoned {
+    store.purge_freed()?;
+  }
+  Ok(is_abandoned)
+}
+
+/// The registrations still to revoke, if any.
+pub fn load_abandoned_devices(store: &impl LocalStore) -> Result<Option<AbandonedDevices>, CoreError> {
+  get_json(store, Table::Account, ABANDONED_DEVICES_KEY)
+}
+
+/// Keeps what is still to revoke; the record goes once nothing is.
+pub fn save_abandoned_devices(
+  store: &impl LocalStore,
+  abandoned: &AbandonedDevices,
+) -> Result<(), CoreError> {
+  if abandoned.public_keys.is_empty() {
+    return Ok(store.delete(Table::Account, ABANDONED_DEVICES_KEY)?);
+  }
+  put_json(store, Table::Account, ABANDONED_DEVICES_KEY, abandoned)
+}
+
+/// Whether this store holds an enrolled account.
+pub fn is_account_stored(store: &impl LocalStore) -> Result<bool, CoreError> {
+  Ok(store.get(Table::Account, ACCOUNT_KEY)?.is_some())
+}
+
+/// What the server stores as a device's public key: signing key, then agreement key.
+pub(crate) fn device_public_key(device: &DeviceKeyPair) -> Vec<u8> {
+  let public = device.public_keys();
+  let mut public_key = public.signing_key.as_bytes().to_vec();
+  public_key.extend_from_slice(public.agreement_key.as_bytes());
+  public_key
+}
+
+/// [`abandon_pending_device`] without its group of writes and the purge.
+fn move_pending_device_to_abandoned(store: &impl LocalStore) -> Result<bool, CoreError> {
+  let Some(record) = get_json::<PendingDeviceRecord>(store, Table::Account, PENDING_DEVICE_KEY)? else {
+    return Ok(false);
+  };
+  let public_key = {
+    let device = DeviceKeyPair::from_secrets(
+      convert::user(record.user_id),
+      teamcraft_crypto::ids::DeviceId::new(PENDING_DEVICE_ID),
+      &SymmetricKey::from_bytes(record.device_signing_secret),
+      &SymmetricKey::from_bytes(record.device_agreement_secret),
+    );
+    Base64Bytes::new(device_public_key(&device))
+  };
+  let mut abandoned = match load_abandoned_devices(store)? {
+    Some(abandoned) if abandoned.user_id == record.user_id => abandoned,
+    maybe_other => {
+      if maybe_other.is_some() {
+        // Stores are per account; this account couldn't revoke another's devices anyway.
+        tracing::warn!("dropping the device registrations to revoke of another account");
+      }
+      AbandonedDevices {
+        user_id: record.user_id,
+        public_keys: Vec::new(),
+      }
+    },
+  };
+  if !abandoned.public_keys.contains(&public_key) {
+    abandoned.public_keys.push(public_key);
+  }
+  let excess = abandoned.public_keys.len().saturating_sub(MAX_ABANDONED_DEVICES);
+  if excess > 0 {
+    tracing::warn!(
+      excess,
+      "giving up revoking the oldest device registrations of dropped enrollments"
+    );
+    abandoned.public_keys.drain(..excess);
+  }
+  save_abandoned_devices(store, &abandoned)?;
+  delete_pending_device(store)?;
+  Ok(true)
 }
 
 pub fn load_sync_state(store: &impl LocalStore) -> Result<SyncState, CoreError> {
@@ -682,26 +816,125 @@ mod tests {
   fn signing_out_of_an_unfinished_enrollment_forgets_its_secrets_only() {
     let store = MemoryStore::new();
     let account = sample_account();
-    let pending = PendingDevice {
-      user_id: account.user_id,
-      identity_public_key: [1; 32],
-      device: DeviceKeyPair::generate(
-        convert::user(account.user_id),
-        convert::device(account.device_id),
-        &mut OsRng,
-      ),
-    };
-    save_pending_device(&store, &pending).unwrap();
+    let pending = sample_pending(account.user_id);
+    save_pending_device(&store, &pending, 0).unwrap();
     store.put(Table::Account, PENDING_LINK_KEY, b"{}").unwrap();
     forget_unfinished_enrollment(&store).unwrap();
     assert_eq!(store.get(Table::Account, PENDING_DEVICE_KEY).unwrap(), None);
     assert_eq!(store.get(Table::Account, PENDING_LINK_KEY).unwrap(), None);
+    // The public key alone stays, until the server revoked its registration (issue #415).
+    let abandoned = load_abandoned_devices(&store).unwrap().unwrap();
+    assert_eq!(abandoned.user_id, account.user_id);
+    assert_eq!(
+      abandoned.public_keys,
+      vec![Base64Bytes::new(device_public_key(&pending.device))]
+    );
 
     // An enrolled device keeps everything.
     save_account(&store, &account).unwrap();
-    save_pending_device(&store, &pending).unwrap();
+    save_pending_device(&store, &pending, 0).unwrap();
     forget_unfinished_enrollment(&store).unwrap();
     assert!(store.get(Table::Account, PENDING_DEVICE_KEY).unwrap().is_some());
+  }
+
+  mod abandoned_devices {
+    use super::*;
+
+    #[test]
+    fn a_pending_record_of_an_older_version_gets_its_time_when_first_seen() {
+      let store = MemoryStore::new();
+      save_pending_device(&store, &sample_pending(sample_user()), 7).unwrap();
+      // As v1.0.8 wrote it: no time.
+      let mut json: serde_json::Value =
+        serde_json::from_slice(&store.get(Table::Account, PENDING_DEVICE_KEY).unwrap().unwrap()).unwrap();
+      json.as_object_mut().unwrap().remove("created_at_ms");
+      store
+        .put(
+          Table::Account,
+          PENDING_DEVICE_KEY,
+          &serde_json::to_vec(&json).unwrap(),
+        )
+        .unwrap();
+
+      assert_eq!(pending_device_created_at(&store, 1_000).unwrap(), Some(1_000));
+      assert_eq!(pending_device_created_at(&store, 9_000).unwrap(), Some(1_000));
+      assert_eq!(
+        pending_device_created_at(&MemoryStore::new(), 1_000).unwrap(),
+        None
+      );
+    }
+
+    #[test]
+    fn only_the_newest_registrations_wait_to_be_revoked() {
+      let store = MemoryStore::new();
+      let user = sample_user();
+      let mut public_keys = Vec::new();
+      for _ in 0..=MAX_ABANDONED_DEVICES {
+        let pending = sample_pending(user);
+        public_keys.push(Base64Bytes::new(device_public_key(&pending.device)));
+        save_pending_device(&store, &pending, 0).unwrap();
+        assert!(abandon_pending_device(&store).unwrap());
+      }
+      assert!(!abandon_pending_device(&store).unwrap(), "nothing left to drop");
+      let abandoned = load_abandoned_devices(&store).unwrap().unwrap();
+      assert_eq!(abandoned.public_keys, public_keys[1..]);
+
+      // Nothing left to revoke: the record goes.
+      save_abandoned_devices(
+        &store,
+        &AbandonedDevices {
+          user_id: user,
+          public_keys: Vec::new(),
+        },
+      )
+      .unwrap();
+      assert_eq!(load_abandoned_devices(&store).unwrap(), None);
+    }
+
+    /// The dropped key pair can't be read back from the files, also not with the database key.
+    #[cfg(all(feature = "sealed-sqlite", not(target_arch = "wasm32")))]
+    #[test]
+    fn a_dropped_key_pair_leaves_no_ciphertext_in_the_files() {
+      use rand_core::RngCore;
+
+      use crate::store::{SealedSqliteStore, StaticKeySource};
+
+      let directory = std::env::temp_dir().join(format!("teamcraft-records-{}", OsRng.next_u64()));
+      std::fs::create_dir_all(&directory).unwrap();
+      let path = directory.join("store.db");
+      let store =
+        SealedSqliteStore::open(&path, &StaticKeySource::new(SymmetricKey::generate(&mut OsRng))).unwrap();
+      save_pending_device(&store, &sample_pending(sample_user()), 0).unwrap();
+      let before = sealed_values(&path);
+
+      assert!(abandon_pending_device(&store).unwrap());
+
+      let after = sealed_values(&path);
+      let gone: Vec<Vec<u8>> = before
+        .into_iter()
+        .filter(|value| !after.contains(value))
+        .collect();
+      assert_eq!(gone.len(), 1, "the key pair's record");
+      let needle = &gone[0][gone[0].len() / 2..][..32];
+      let raw = std::fs::read(&path).unwrap();
+      let wal = std::fs::read(path.with_extension("db-wal")).unwrap_or_default();
+      for bytes in [&raw, &wal] {
+        assert!(!bytes.windows(needle.len()).any(|window| window == needle));
+      }
+      drop(store);
+      std::fs::remove_dir_all(&directory).unwrap();
+    }
+
+    #[cfg(all(feature = "sealed-sqlite", not(target_arch = "wasm32")))]
+    fn sealed_values(path: &std::path::Path) -> Vec<Vec<u8>> {
+      let connection = rusqlite::Connection::open(path).unwrap();
+      let mut statement = connection.prepare("SELECT value FROM sealed_records").unwrap();
+      statement
+        .query_map([], |row| row.get(0))
+        .unwrap()
+        .map(Result::unwrap)
+        .collect()
+    }
   }
 
   #[test]
@@ -741,6 +974,22 @@ mod tests {
       certificate,
       backup_secret: SymmetricKey::generate(&mut OsRng),
       key_bag: KeyBag::new(convert::user(user_id), identity),
+    }
+  }
+
+  fn sample_user() -> UserId {
+    UserId::from_snowflake(Snowflake::new(5).unwrap())
+  }
+
+  fn sample_pending(user_id: UserId) -> PendingDevice {
+    PendingDevice {
+      user_id,
+      identity_public_key: [1; 32],
+      device: DeviceKeyPair::generate(
+        convert::user(user_id),
+        teamcraft_crypto::ids::DeviceId::new(PENDING_DEVICE_ID),
+        &mut OsRng,
+      ),
     }
   }
 }

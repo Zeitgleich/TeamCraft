@@ -1039,6 +1039,9 @@ final class AppModel {
     // Best effort and at most a few seconds; offline, the push key is still gone.
     if let core = try? core() {
       await Self.awaitAtMost(seconds: 5) { try? await core.unregisterPush() }
+      // A setup given up on leaves no keys behind, and its device is revoked (issue #415); the core
+      // waits a few seconds for the server at most.
+      await Self.awaitAtMost(seconds: 6) { try? await core.forgetUnfinishedSetup() }
     }
     // A local session also ends on the server (best effort; offline, the token just expires).
     if let local = vault.loadLocal(),

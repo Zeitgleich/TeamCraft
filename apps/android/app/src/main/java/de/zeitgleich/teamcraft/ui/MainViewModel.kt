@@ -664,6 +664,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     review.value = null
     graph.calls.hangUp()
     graph.push.unregister()
+    // A setup given up on leaves no keys behind, and its device is revoked (issue #415).
+    runCatching { graph.core.core().forgetUnfinishedSetup() }
     runCatching { graph.core.core().deletePlaintextFiles() }
     graph.core.close()
     graph.auth.signOut()

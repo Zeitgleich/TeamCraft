@@ -258,11 +258,13 @@ impl TeamCraft {
 
   /// Existing device: the user typed the short code the new device shows; sends the keys if it is
   /// right. A wrong code is `LinkCodeRejected` (try again); after the last try it is
-  /// `LinkAttemptEnded`.
+  /// `LinkAttemptEnded`. Returns once the new device confirmed the keys (up to a minute if it went
+  /// away); syncing and the other calls go on meanwhile (issue #415).
   pub async fn confirm_device_link(&self, typed_code: String) -> Result<(), TeamCraftError> {
-    self
+    let receipt = self
       .call(move |engine| Box::pin(engine.confirm_device_link(typed_code)))
-      .await
+      .await?;
+    receipt.await.map_err(|_| TeamCraftError::EngineStopped)?
   }
 
   /// New devices of this account that ask to be linked (e2ee.md §5). Read it when the app is told
@@ -290,10 +292,19 @@ impl TeamCraft {
   }
 
   /// Existing device: the user left the comparison without confirming; nothing is sent and
-  /// syncing resumes.
+  /// syncing resumes. A confirmation still waiting for the new device ends as cancelled.
   pub async fn cancel_device_link_approval(&self) -> Result<(), TeamCraftError> {
     self
       .call(|engine| Box::pin(engine.cancel_device_link_approval()))
+      .await
+  }
+
+  /// Sign-out before this device is set up (issue #415): drops the keys an unfinished setup kept
+  /// and asks the server to revoke the device it registered, waiting a few seconds at most. Call it
+  /// before the session ends; it changes nothing on a device that is set up.
+  pub async fn forget_unfinished_setup(&self) -> Result<(), TeamCraftError> {
+    self
+      .call(|engine| Box::pin(engine.forget_unfinished_setup()))
       .await
   }
 
