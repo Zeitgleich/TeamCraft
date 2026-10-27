@@ -7,9 +7,12 @@
 //! - `GET /healthz`: for the container health check.
 //!
 //! The token selects the source, and so the conversation and the limits (`sources.rs`). Unknown
-//! tokens, and tokens of a source of the other kind, get 404, like Slack's webhook URLs, so
-//! scanning for valid ones learns nothing. Other refusals answer `{"error_code", "message"}` with a
-//! stable `error_code` ([`HookError`]).
+//! tokens, and tokens of a source of the other kind, get 404 before anything else is looked at or
+//! read, like Slack's webhook URLs, so scanning for valid ones learns nothing. Other refusals
+//! answer `{"error_code", "message"}` with a stable `error_code` ([`HookError`]).
+//!
+//! A webhook may carry an `Idempotency-Key` header: a repeat of a request the bridge accepted is
+//! answered `200` again without posting (`idempotency.rs`).
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -22,6 +25,7 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde_json::json;
+use teamcraft_crypto::fingerprint::Fingerprint;
 use tokio::sync::mpsc;
 use tracing::warn;
 
@@ -29,7 +33,11 @@ use crate::batch::LogLine;
 use crate::file_hooks::{FileSettings, FormBody, receive_form};
 use crate::file_jobs::{FilesFailure, FilesMessage};
 use crate::form::FormError;
-use crate::render::{PayloadError, parse_log_lines, parse_webhook};
+use crate::idempotency::{
+  IDEMPOTENT_REPLAYED_HEADER, IdempotencyKey, IdempotencyStore, InvalidKey, KeyGuard, KeyUse,
+  MessageFingerprint,
+};
+use crate::render::{PayloadError, WebhookMessage, parse_log_lines, parse_webhook};
 use crate::sources::{Endpoint, Source, SourceRegistry};
 
 /// What the endpoints hand to the worker.
@@ -57,6 +65,26 @@ pub struct HttpState {
   sources: SourceRegistry,
   sender: mpsc::Sender<Submission>,
   files: Arc<FileSettings>,
+  keys: IdempotencyStore,
+}
+
+/// How an accepted webhook was taken.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Accepted {
+  /// Its message is queued for sending.
+  Posted,
+  /// It repeats a request with the same idempotency key and message that was accepted: nothing was
+  /// posted again.
+  Replayed,
+}
+
+/// Whether a webhook's message is posted, after its idempotency key ([`HttpState::claim_key`]).
+#[derive(Debug)]
+pub enum KeyClaim {
+  /// Post it; with a key, accept the guard once it is posted.
+  Post(Option<KeyGuard>),
+  /// Post nothing and answer as the request it repeats was answered.
+  Repeat,
 }
 
 /// Why a request was refused: a status and a stable `error_code` (api-conventions.md).
@@ -98,6 +126,10 @@ pub enum HookError {
   Busy,
   #[error("the bridge is shutting down")]
   ShuttingDown,
+  #[error(transparent)]
+  InvalidIdempotencyKey(#[from] InvalidKey),
+  #[error("the Idempotency-Key was used for another message")]
+  IdempotencyKeyReused,
 }
 
 /// When a busy or stopping bridge expects to have room again.
@@ -105,10 +137,14 @@ const RETRY_SOON: Duration = Duration::from_secs(5);
 /// When a full spool, a server out of reach or a channel the bot isn't in yet may be better.
 const RETRY_LATER: Duration = Duration::from_secs(30);
 
-/// A webhook's body: read whole up to `listen.max_body_bytes` (JSON, the form-encoded `payload=`),
-/// or left to stream for `multipart/form-data`, which carries files far larger than that.
+/// A webhook's body, not read yet: read whole up to `listen.max_body_bytes` once the token is
+/// known (JSON, the form-encoded `payload=`), or streamed for `multipart/form-data`, which carries
+/// files far larger than that.
 enum WebhookBody {
-  Whole { content_type: String, bytes: Bytes },
+  Whole {
+    content_type: String,
+    request: Box<Request>,
+  },
   Form(FormBody),
 }
 
@@ -116,11 +152,17 @@ enum WebhookBody {
 struct WholeBody(Bytes);
 
 impl HttpState {
-  pub fn new(sources: SourceRegistry, sender: mpsc::Sender<Submission>, files: FileSettings) -> Self {
+  pub fn new(
+    sources: SourceRegistry,
+    sender: mpsc::Sender<Submission>,
+    files: FileSettings,
+    keys: IdempotencyStore,
+  ) -> Self {
     Self {
       sources,
       sender,
       files: Arc::new(files),
+      keys,
     }
   }
 
@@ -130,6 +172,29 @@ impl HttpState {
 
   pub fn files(&self) -> &FileSettings {
     &self.files
+  }
+
+  pub fn keys(&self) -> &IdempotencyStore {
+    &self.keys
+  }
+
+  /// Settles a request's idempotency key, with the fingerprint of the message it would post,
+  /// before anything is posted: no key or a free one posts, a repeat of an accepted request
+  /// doesn't, and a key used for another message is refused. A repeat of a request still running
+  /// waits for it.
+  pub async fn claim_key(
+    &self,
+    source: &Source,
+    maybe_keyed: Option<(IdempotencyKey, Fingerprint)>,
+  ) -> Result<KeyClaim, HookError> {
+    let Some((key, fingerprint)) = maybe_keyed else {
+      return Ok(KeyClaim::Post(None));
+    };
+    match self.keys.claim(&source.key, &key, fingerprint).await {
+      KeyUse::Run(guard) => Ok(KeyClaim::Post(Some(guard))),
+      KeyUse::Replay => Ok(KeyClaim::Repeat),
+      KeyUse::Mismatch => Err(HookError::IdempotencyKeyReused),
+    }
   }
 
   /// A place in the worker's queue, held while a request with files is read, so a request is never
@@ -158,34 +223,65 @@ pub fn router(state: HttpState, max_body_bytes: usize) -> Router {
 async fn webhook_handler(
   State(state): State<HttpState>,
   Path(token): Path<String>,
+  headers: HeaderMap,
   body: WebhookBody,
 ) -> Response {
   let Some(source) = state.sources.find(&token, Endpoint::Webhook) else {
     return StatusCode::NOT_FOUND.into_response();
   };
+  let maybe_key = match IdempotencyKey::from_headers(&headers) {
+    Ok(maybe_key) => maybe_key,
+    Err(error) => return HookError::from(error).into_response(),
+  };
   if let Some(refusal) = refuse_if_limited(&state, &source, 1) {
     return refusal;
   }
   let accepted = match body {
-    WebhookBody::Whole { content_type, bytes } => {
-      match parse_webhook(&content_type, &bytes, source.danger_is_alert) {
-        Ok(message) => submit(
-          &state,
-          Submission::Message {
-            source,
-            text: message.text,
-            is_alert: message.is_alert,
-          },
-        ),
-        Err(error) => Err(HookError::Payload(error)),
-      }
-    },
-    WebhookBody::Form(form) => receive_form(&state, source, form).await,
+    WebhookBody::Whole {
+      content_type,
+      request,
+    } => receive_whole(&state, source, &content_type, *request, maybe_key).await,
+    WebhookBody::Form(form) => receive_form(&state, source, form, maybe_key).await,
   };
   match accepted {
-    Ok(()) => (StatusCode::OK, "ok").into_response(),
+    Ok(Accepted::Posted) => (StatusCode::OK, "ok").into_response(),
+    Ok(Accepted::Replayed) => (StatusCode::OK, [(IDEMPOTENT_REPLAYED_HEADER, "true")], "ok").into_response(),
     Err(error) => error.into_response(),
   }
+}
+
+/// A webhook without files: reads the body, then hands the message to the worker without waiting.
+async fn receive_whole(
+  state: &HttpState,
+  source: Arc<Source>,
+  content_type: &str,
+  request: Request,
+  maybe_key: Option<IdempotencyKey>,
+) -> Result<Accepted, HookError> {
+  let WholeBody(bytes) = WholeBody::from_request(request, state).await?;
+  let message = parse_webhook(content_type, &bytes, source.danger_is_alert)?;
+  let maybe_keyed = maybe_key.map(|key| (key, fingerprint(&message)));
+  let maybe_guard = match state.claim_key(&source, maybe_keyed).await? {
+    KeyClaim::Post(maybe_guard) => maybe_guard,
+    KeyClaim::Repeat => return Ok(Accepted::Replayed),
+  };
+  submit(
+    state,
+    Submission::Message {
+      source,
+      text: message.text,
+      is_alert: message.is_alert,
+    },
+  )?;
+  if let Some(guard) = maybe_guard {
+    guard.accept(Instant::now());
+  }
+  Ok(Accepted::Posted)
+}
+
+/// The fingerprint of a message without files.
+fn fingerprint(message: &WebhookMessage) -> Fingerprint {
+  MessageFingerprint::default().finish(&message.text, message.is_alert)
 }
 
 async fn ingest_handler(
@@ -275,7 +371,8 @@ impl HookError {
         StatusCode::PAYLOAD_TOO_LARGE
       },
       Self::RequestTimeout => StatusCode::REQUEST_TIMEOUT,
-      Self::UnreadableBody | Self::Payload(_) => StatusCode::BAD_REQUEST,
+      Self::UnreadableBody | Self::Payload(_) | Self::InvalidIdempotencyKey(_) => StatusCode::BAD_REQUEST,
+      Self::IdempotencyKeyReused => StatusCode::UNPROCESSABLE_ENTITY,
       Self::Form(error) => match error {
         FormError::Multipart(_) | FormError::NotText(_) => StatusCode::BAD_REQUEST,
         FormError::TooManyFiles { .. }
@@ -319,6 +416,8 @@ impl HookError {
       Self::ServerUnreachable => "server_unreachable",
       Self::Busy => "bridge_busy",
       Self::ShuttingDown => "shutting_down",
+      Self::InvalidIdempotencyKey(_) => "invalid_idempotency_key",
+      Self::IdempotencyKeyReused => "idempotency_key_reused",
     }
   }
 
@@ -363,7 +462,7 @@ impl From<FilesFailure> for HookError {
 impl<S: Send + Sync> FromRequest<S> for WebhookBody {
   type Rejection = HookError;
 
-  async fn from_request(request: Request, state: &S) -> Result<Self, Self::Rejection> {
+  async fn from_request(request: Request, _state: &S) -> Result<Self, Self::Rejection> {
     let content_type = raw_content_type(request.headers()).to_owned();
     if content_type
       .to_ascii_lowercase()
@@ -380,10 +479,10 @@ impl<S: Send + Sync> FromRequest<S> for WebhookBody {
         body: request.into_body(),
       }));
     }
-    let WholeBody(bytes) = WholeBody::from_request(request, state).await?;
+    // Kept with its extensions: the body limit applies when it is read.
     Ok(Self::Whole {
       content_type: content_type.to_ascii_lowercase(),
-      bytes,
+      request: Box::new(request),
     })
   }
 }
@@ -461,17 +560,24 @@ mod tests {
   }
 
   async fn start_with(config: BridgeConfig) -> (String, mpsc::Receiver<Submission>) {
+    let (base, receiver, _) = start_with_state(config).await;
+    (base, receiver)
+  }
+
+  /// Also returns the endpoints' state, for its spool and its idempotency keys.
+  async fn start_with_state(config: BridgeConfig) -> (String, mpsc::Receiver<Submission>, HttpState) {
     let (sender, receiver) = mpsc::channel(64);
     let state = HttpState::new(
       SourceRegistry::new(&config),
       sender,
       FileSettings::from_config(&config),
+      IdempotencyStore::new(&config.idempotency),
     );
-    let app = router(state, config.listen.max_body_bytes);
+    let app = router(state.clone(), config.listen.max_body_bytes);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let base = format!("http://{}", listener.local_addr().unwrap());
     tokio::spawn(async move { axum::serve(listener, app).await });
-    (base, receiver)
+    (base, receiver, state)
   }
 
   async fn post(url: String, content_type: &str, body: &'static str) -> (StatusCode, String, Option<String>) {
@@ -1026,6 +1132,401 @@ mod tests {
         .map(|(name, maybe_file_name, data)| (*name, *maybe_file_name, None, *data))
         .collect();
       crate::multipart::tests::form(&parts)
+    }
+  }
+
+  /// Repeats with an `Idempotency-Key` (docs/bridge.md, "Retries").
+  mod retries {
+    use super::*;
+    use crate::file_jobs::FilesFailure;
+    use crate::idempotency::IDEMPOTENCY_KEY_HEADER;
+
+    const JSON: &str = "application/json";
+    const FORM_TYPE: &str = "multipart/form-data; boundary=XyZ";
+
+    mod text {
+      use super::*;
+
+      #[tokio::test]
+      async fn a_repeat_is_answered_without_posting_again() {
+        let (base, mut receiver, _) = start_with_state(config(60)).await;
+        let url = format!("{base}/hooks/{TOKEN_A}");
+        let first = post_keyed(&url, JSON, &["k-1"], br#"{"text":"Deploy done"}"#.to_vec()).await;
+        assert_eq!(first, answer(StatusCode::OK, "ok", false));
+        // The same message, written differently, and as a form.
+        let repeat = post_keyed(&url, JSON, &["k-1"], br#"{ "text" : "Deploy done" }"#.to_vec()).await;
+        assert_eq!(repeat, answer(StatusCode::OK, "ok", true));
+        let as_form = files::form(&[("text", None, b"Deploy done".as_slice())]);
+        let repeat = post_keyed(&url, FORM_TYPE, &["k-1"], as_form).await;
+        assert_eq!(repeat, answer(StatusCode::OK, "ok", true));
+        assert_eq!(posted(&mut receiver), ["Deploy done"]);
+      }
+
+      // Several threads, so requests really overlap, as on the bridge's runtime.
+      #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+      async fn many_repeats_at_once_post_one_message() {
+        let (base, mut receiver, _) = start_with_state(config(60)).await;
+        let url = format!("{base}/hooks/{TOKEN_A}");
+        let requests: Vec<_> = (0..20)
+          .map(|_| {
+            let url = url.clone();
+            tokio::spawn(
+              async move { post_keyed(&url, JSON, &["k-1"], br#"{"text":"once"}"#.to_vec()).await },
+            )
+          })
+          .collect();
+        let mut replayed = 0;
+        for request in requests {
+          let (status, _, is_replayed) = request.await.unwrap();
+          assert_eq!(status, StatusCode::OK);
+          replayed += usize::from(is_replayed);
+        }
+        assert_eq!(replayed, 19);
+        assert_eq!(posted(&mut receiver), ["once"]);
+      }
+
+      #[tokio::test]
+      async fn a_key_used_for_another_message_is_refused_with_422() {
+        let (base, mut receiver, _) = start_with_state(config(60)).await;
+        let url = format!("{base}/hooks/{TOKEN_A}");
+        post_keyed(&url, JSON, &["k-1"], br#"{"text":"first"}"#.to_vec()).await;
+        let (status, body, _) = post_keyed(&url, JSON, &["k-1"], br#"{"text":"second"}"#.to_vec()).await;
+        assert_eq!(
+          (status, error_code(&body)),
+          (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "idempotency_key_reused".to_owned()
+          )
+        );
+        assert_eq!(posted(&mut receiver), ["first"]);
+      }
+
+      #[tokio::test]
+      async fn a_refused_request_leaves_its_key_free() {
+        let (base, mut receiver, _) = start_with_state(config(60)).await;
+        let url = format!("{base}/hooks/{TOKEN_A}");
+        let (status, ..) = post_keyed(&url, JSON, &["k-1"], b"{}".to_vec()).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        let retry = post_keyed(&url, JSON, &["k-1"], br#"{"text":"fixed"}"#.to_vec()).await;
+        assert_eq!(retry, answer(StatusCode::OK, "ok", false));
+        assert_eq!(posted(&mut receiver), ["fixed"]);
+      }
+
+      #[tokio::test]
+      async fn keys_are_per_source() {
+        let (base, mut receiver, _) = start_with_state(config(60)).await;
+        for token in [TOKEN_A, TOKEN_B] {
+          let url = format!("{base}/hooks/{token}");
+          let answer_of = post_keyed(&url, JSON, &["k-1"], br#"{"text":"x"}"#.to_vec()).await;
+          assert_eq!(answer_of, answer(StatusCode::OK, "ok", false));
+        }
+        assert_eq!(posted(&mut receiver).len(), 2);
+      }
+
+      #[tokio::test]
+      async fn a_key_is_forgotten_after_its_window() {
+        let (base, mut receiver, state) = start_with_state(config(60)).await;
+        let url = format!("{base}/hooks/{TOKEN_A}");
+        post_keyed(&url, JSON, &["k-1"], br#"{"text":"x"}"#.to_vec()).await;
+        state.keys().expire(Instant::now() + Duration::from_secs(600));
+        let later = post_keyed(&url, JSON, &["k-1"], br#"{"text":"x"}"#.to_vec()).await;
+        assert_eq!(later, answer(StatusCode::OK, "ok", false));
+        assert_eq!(posted(&mut receiver), ["x", "x"]);
+      }
+
+      #[tokio::test]
+      async fn over_the_bound_the_oldest_keys_are_forgotten() {
+        let config = config_with_files(60, "[idempotency]\nmax_keys = 1");
+        let (base, mut receiver, state) = start_with_state(config).await;
+        let url = format!("{base}/hooks/{TOKEN_A}");
+        for (key, text) in [("k-1", "a"), ("k-2", "b"), ("k-1", "a")] {
+          let body = format!(r#"{{"text":"{text}"}}"#).into_bytes();
+          assert_eq!(
+            post_keyed(&url, JSON, &[key], body).await,
+            answer(StatusCode::OK, "ok", false)
+          );
+        }
+        assert_eq!(posted(&mut receiver), ["a", "b", "a"]);
+        assert_eq!(state.keys().usage().0, 1);
+      }
+
+      #[tokio::test]
+      async fn invalid_keys_are_refused_with_400() {
+        let (base, mut receiver, _) = start_with_state(config(60)).await;
+        let url = format!("{base}/hooks/{TOKEN_A}");
+        let too_long = "k".repeat(256);
+        for keys in [vec![""], vec![too_long.as_str()], vec!["a", "b"]] {
+          let (status, body, _) = post_keyed(&url, JSON, &keys, br#"{"text":"x"}"#.to_vec()).await;
+          assert_eq!(
+            (status, error_code(&body)),
+            (StatusCode::BAD_REQUEST, "invalid_idempotency_key".to_owned())
+          );
+        }
+        assert!(posted(&mut receiver).is_empty());
+      }
+
+      #[tokio::test]
+      async fn the_log_endpoint_takes_no_keys() {
+        let (base, mut receiver, _) = start_with_state(config(60)).await;
+        let url = format!("{base}/ingest/{TOKEN_A}");
+        for _ in 0..2 {
+          let (status, ..) = post_keyed(&url, "text/plain", &["k-1"], b"line\n".to_vec()).await;
+          assert_eq!(status, StatusCode::OK);
+        }
+        let mut batches = 0;
+        while let Ok(submission) = receiver.try_recv() {
+          assert!(matches!(submission, Submission::Lines { .. }), "{submission:?}");
+          batches += 1;
+        }
+        assert_eq!(batches, 2, "a stream of lines is taken as it comes");
+      }
+    }
+
+    mod files {
+      use super::*;
+
+      #[tokio::test]
+      async fn a_repeat_uploads_nothing_again_whatever_its_boundary() {
+        let (base, mut receiver, state) = start_with_state(config(60)).await;
+        let url = format!("{base}/hooks/{TOKEN_A}");
+        let body = form(&[
+          ("text", None, b"Build 7".as_slice()),
+          ("file", Some("report.txt"), b"all green"),
+        ]);
+        let first = spawn_post(&url, FORM_TYPE, "k-1", body.clone());
+        answer_files(&mut receiver, Ok(())).await;
+        assert_eq!(first.await.unwrap(), answer(StatusCode::OK, "ok", false));
+
+        let (content_type, repeat) = with_boundary(&body, "AbC");
+        let answer_of = post_keyed(&url, &content_type, &["k-1"], repeat).await;
+        assert_eq!(answer_of, answer(StatusCode::OK, "ok", true));
+        assert!(receiver.try_recv().is_err(), "nothing reached the worker");
+        assert_eq!(
+          state.files().spool.used_bytes(),
+          0,
+          "the repeat's file left the spool"
+        );
+      }
+
+      #[tokio::test]
+      async fn other_files_under_a_used_key_are_refused_with_422() {
+        let (base, mut receiver, state) = start_with_state(config(60)).await;
+        let url = format!("{base}/hooks/{TOKEN_A}");
+        let green = form(&[("file", Some("report.txt"), b"all green".as_slice())]);
+        let red = form(&[("file", Some("report.txt"), b"all red".as_slice())]);
+        let first = spawn_post(&url, FORM_TYPE, "k-1", green);
+        let mut held = Some(files_message(&mut receiver).await);
+        // While the first runs, and after it was accepted.
+        for _ in 0..2 {
+          let (status, body, _) = post_keyed(&url, FORM_TYPE, &["k-1"], red.clone()).await;
+          assert_eq!(
+            (status, error_code(&body)),
+            (
+              StatusCode::UNPROCESSABLE_ENTITY,
+              "idempotency_key_reused".to_owned()
+            )
+          );
+          if let Some(message) = held.take() {
+            answer_message(message, Ok(()));
+          }
+        }
+        assert_eq!(first.await.unwrap().0, StatusCode::OK);
+        assert!(receiver.try_recv().is_err());
+        assert_eq!(state.files().spool.used_bytes(), 0);
+      }
+
+      #[tokio::test]
+      async fn a_repeat_waits_for_the_running_request_and_gets_its_answer() {
+        let (base, mut receiver, state) = start_with_state(config(60)).await;
+        let url = format!("{base}/hooks/{TOKEN_A}");
+        let body = form(&[("file", Some("a.bin"), b"1".as_slice())]);
+        let first = spawn_post(&url, FORM_TYPE, "k-1", body.clone());
+        let held = files_message(&mut receiver).await;
+        let repeat = spawn_post(&url, FORM_TYPE, "k-1", body);
+        wait_until("the repeat waits", || state.keys().waiting_for("k-1") == 1).await;
+        assert!(
+          receiver.try_recv().is_err(),
+          "the repeat did not reach the worker"
+        );
+        answer_message(held, Ok(()));
+        assert_eq!(first.await.unwrap(), answer(StatusCode::OK, "ok", false));
+        assert_eq!(repeat.await.unwrap(), answer(StatusCode::OK, "ok", true));
+        assert!(receiver.try_recv().is_err(), "posted once");
+      }
+
+      #[tokio::test]
+      async fn a_repeat_of_a_request_that_fails_meanwhile_runs_itself() {
+        let (base, mut receiver, state) = start_with_state(config(60)).await;
+        let url = format!("{base}/hooks/{TOKEN_A}");
+        let body = form(&[("file", Some("a.bin"), b"1".as_slice())]);
+        let first = spawn_post(&url, FORM_TYPE, "k-1", body.clone());
+        let held = files_message(&mut receiver).await;
+        let repeat = spawn_post(&url, FORM_TYPE, "k-1", body);
+        wait_until("the repeat waits", || state.keys().waiting_for("k-1") == 1).await;
+        answer_message(held, Err(FilesFailure::Failed));
+        let (status, failed, _) = first.await.unwrap();
+        assert_eq!(
+          (status, error_code(&failed)),
+          (StatusCode::BAD_GATEWAY, "upload_failed".to_owned())
+        );
+        // Nothing was posted, so the repeat goes up itself.
+        answer_files(&mut receiver, Ok(())).await;
+        assert_eq!(repeat.await.unwrap(), answer(StatusCode::OK, "ok", false));
+      }
+
+      /// The next message with files, held as the worker holds it while uploading.
+      async fn files_message(receiver: &mut mpsc::Receiver<Submission>) -> FilesMessage {
+        match receiver.recv().await {
+          Some(Submission::Files(message)) => message,
+          other => panic!("no files: {other:?}"),
+        }
+      }
+
+      async fn answer_files(receiver: &mut mpsc::Receiver<Submission>, result: Result<(), FilesFailure>) {
+        let message = files_message(receiver).await;
+        answer_message(message, result);
+      }
+
+      /// As the worker does: the files are deleted once uploaded, then the producer is answered
+      /// (which keeps the key when the message was sent).
+      fn answer_message(message: FilesMessage, result: Result<(), FilesFailure>) {
+        let FilesMessage { reply, files, .. } = message;
+        drop(files);
+        reply.send(result).unwrap();
+      }
+
+      fn spawn_post(
+        url: &str,
+        content_type: &'static str,
+        key: &'static str,
+        body: Vec<u8>,
+      ) -> tokio::task::JoinHandle<(StatusCode, String, bool)> {
+        let url = url.to_owned();
+        tokio::spawn(async move { post_keyed(&url, content_type, &[key], body).await })
+      }
+
+      /// `body`, a form with the boundary `XyZ`, with another boundary; and its content type.
+      fn with_boundary(body: &[u8], boundary: &str) -> (String, Vec<u8>) {
+        let (old, new) = (b"--XyZ".as_slice(), format!("--{boundary}"));
+        let mut changed = Vec::new();
+        let mut rest = body;
+        while let Some(at) = rest.windows(old.len()).position(|window| window == old) {
+          changed.extend_from_slice(&rest[..at]);
+          changed.extend_from_slice(new.as_bytes());
+          rest = &rest[at + old.len()..];
+        }
+        changed.extend_from_slice(rest);
+        (format!("multipart/form-data; boundary={boundary}"), changed)
+      }
+
+      async fn wait_until(what: &str, mut done: impl FnMut() -> bool) {
+        for _ in 0..2000 {
+          if done() {
+            return;
+          }
+          tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        panic!("timed out waiting until {what}");
+      }
+
+      /// A form with the boundary `XyZ`: (name, file name, data).
+      pub(super) fn form(parts: &[(&str, Option<&str>, &[u8])]) -> Vec<u8> {
+        let parts: Vec<_> = parts
+          .iter()
+          .map(|(name, maybe_file_name, data)| (*name, *maybe_file_name, None, *data))
+          .collect();
+        crate::multipart::tests::form(&parts)
+      }
+    }
+
+    mod unknown_tokens {
+      use super::*;
+
+      #[tokio::test]
+      async fn get_404_before_the_key_or_the_body_is_read() {
+        let (base, _receiver, _) = start_with_state(config(60)).await;
+        for (token, content_type, wanted) in [
+          ("unknown-token-0123456789", JSON, "HTTP/1.1 404"),
+          ("unknown-token-0123456789", FORM_TYPE, "HTTP/1.1 404"),
+          (TOKEN_A, JSON, "HTTP/1.1 400"),
+          (TOKEN_A, FORM_TYPE, "HTTP/1.1 400"),
+        ] {
+          // An empty key, and a body announced that never comes: only an answer that reads
+          // neither arrives.
+          let head = format!(
+            "POST /hooks/{token} HTTP/1.1\r\nhost: bridge\r\ncontent-type: {content_type}\r\n\
+             {IDEMPOTENCY_KEY_HEADER}: \r\ncontent-length: 1000\r\n\r\n"
+          );
+          let answer = answer_head(&base, &head).await;
+          assert!(answer.starts_with(wanted), "{token} {content_type}: {answer}");
+        }
+      }
+
+      /// The status line and headers the bridge answers `head` with.
+      async fn answer_head(base: &str, head: &str) -> String {
+        let address = base.trim_start_matches("http://");
+        let mut stream = tokio::net::TcpStream::connect(address).await.unwrap();
+        tokio::io::AsyncWriteExt::write_all(&mut stream, head.as_bytes())
+          .await
+          .unwrap();
+        let mut answer = Vec::new();
+        let mut buffer = [0u8; 1024];
+        while !answer.windows(4).any(|window| window == b"\r\n\r\n") {
+          let read = tokio::time::timeout(
+            Duration::from_secs(10),
+            tokio::io::AsyncReadExt::read(&mut stream, &mut buffer),
+          )
+          .await
+          .expect("an answer without the body")
+          .unwrap();
+          assert!(read > 0, "closed without an answer");
+          answer.extend_from_slice(&buffer[..read]);
+        }
+        String::from_utf8_lossy(&answer).into_owned()
+      }
+    }
+
+    /// Posts `body` with an `Idempotency-Key` header for each of `keys`: the status, the body and
+    /// whether the answer was given from memory.
+    async fn post_keyed(
+      url: &str,
+      content_type: &str,
+      keys: &[&str],
+      body: Vec<u8>,
+    ) -> (StatusCode, String, bool) {
+      let mut request = reqwest::Client::new()
+        .post(url)
+        .header("content-type", content_type);
+      for key in keys {
+        request = request.header(IDEMPOTENCY_KEY_HEADER, *key);
+      }
+      let response = request.body(body).send().await.unwrap();
+      let is_replayed = response
+        .headers()
+        .get(IDEMPOTENT_REPLAYED_HEADER)
+        .is_some_and(|value| value == "true");
+      (response.status(), response.text().await.unwrap(), is_replayed)
+    }
+
+    fn answer(status: StatusCode, body: &str, is_replayed: bool) -> (StatusCode, String, bool) {
+      (status, body.to_owned(), is_replayed)
+    }
+
+    /// The texts of the messages without files that reached the worker.
+    fn posted(receiver: &mut mpsc::Receiver<Submission>) -> Vec<String> {
+      let mut texts = Vec::new();
+      while let Ok(submission) = receiver.try_recv() {
+        match submission {
+          Submission::Message { text, .. } => texts.push(text),
+          other => panic!("{other:?}"),
+        }
+      }
+      texts
+    }
+
+    fn error_code(answer: &str) -> String {
+      let value: serde_json::Value = serde_json::from_str(answer).unwrap();
+      value["error_code"].as_str().unwrap().to_owned()
     }
   }
 

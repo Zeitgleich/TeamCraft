@@ -7,6 +7,10 @@
 //! `files.max_concurrent_requests`, one of its source's, and one in the worker's queue. Without one
 //! it gets `503` at once. Then every piece of the body is paid from the source's and the bridge's
 //! byte budgets as it arrives; a request that ends before its upload begins gets its bytes back.
+//!
+//! A request with an `Idempotency-Key` is read like any other, its files fingerprinted as they
+//! arrive; only then is its key looked up ([`crate::idempotency`]), so a repeat is recognised by its
+//! content and a repeat of an accepted request gives everything back without uploading.
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -19,9 +23,10 @@ use tokio::sync::{Semaphore, oneshot};
 use tracing::warn;
 
 use crate::config::BridgeConfig;
-use crate::file_jobs::FilesMessage;
+use crate::file_jobs::{FilesMessage, FilesReply};
 use crate::form::{FileAction, FormLimits, FormReader};
-use crate::http::{HookError, HttpState, Submission};
+use crate::http::{Accepted, HookError, HttpState, KeyClaim, Submission};
+use crate::idempotency::{IdempotencyKey, MessageFingerprint};
 use crate::sources::{FileBytes, FileCharge, Source};
 use crate::spool::{SpoolDir, SpoolError, SpoolWriter, SpooledFile};
 use crate::worker::alert_text;
@@ -79,8 +84,14 @@ impl FileSettings {
   }
 }
 
-/// Reads the form, spools its files and hands its message on; `Ok` once the message is queued.
-pub async fn receive_form(state: &HttpState, source: Arc<Source>, form: FormBody) -> Result<(), HookError> {
+/// Reads the form, spools its files and hands its message on; `Ok` once the message is queued, or
+/// at once for a repeat of an accepted request with the same key.
+pub async fn receive_form(
+  state: &HttpState,
+  source: Arc<Source>,
+  form: FormBody,
+  maybe_key: Option<IdempotencyKey>,
+) -> Result<Accepted, HookError> {
   let settings = state.files();
   // The request's places, held until it is answered.
   let Ok(_request) = settings.requests.clone().try_acquire_owned() else {
@@ -103,19 +114,39 @@ pub async fn receive_form(state: &HttpState, source: Arc<Source>, form: FormBody
   };
   let mut reader = FormReader::new(&form.content_type, limits)?;
   let mut charge = FileCharge::new(state.sources().clone(), source.clone());
-  let files = read_files(settings, &mut reader, form.body, &mut charge, max_request_bytes).await?;
+  let mut maybe_fingerprint = maybe_key.as_ref().map(|_| MessageFingerprint::default());
+  let mut files = read_files(
+    settings,
+    &mut reader,
+    form.body,
+    &mut charge,
+    max_request_bytes,
+    maybe_fingerprint.as_mut(),
+  )
+  .await?;
   let fields = reader.finish()?;
   let message = fields.message(source.danger_is_alert, !files.is_empty())?;
+  if !files.is_empty() {
+    check_message_size(settings, &source, &message.text, message.is_alert, &files)?;
+  }
+  let maybe_keyed =
+    maybe_key.zip(maybe_fingerprint.map(|fingerprint| fingerprint.finish(&message.text, message.is_alert)));
+  let maybe_guard = match state.claim_key(&source, maybe_keyed).await? {
+    KeyClaim::Post(maybe_guard) => maybe_guard,
+    // Its files leave the spool and its bytes come back as it is dropped.
+    KeyClaim::Repeat => return Ok(Accepted::Replayed),
+  };
   if files.is_empty() {
     queue_place.send(Submission::Message {
       source,
       text: message.text,
       is_alert: message.is_alert,
     });
-    return Ok(());
+    if let Some(guard) = maybe_guard {
+      guard.accept(Instant::now());
+    }
+    return Ok(Accepted::Posted);
   }
-  check_message_size(settings, &source, &message.text, message.is_alert, &files)?;
-  let mut files = files;
   for file in &mut files {
     add_picture_details(settings, file).await;
   }
@@ -126,22 +157,24 @@ pub async fn receive_form(state: &HttpState, source: Arc<Source>, form: FormBody
     is_alert: message.is_alert,
     files,
     charge,
-    reply,
+    reply: FilesReply::new(reply, maybe_guard),
   }));
   match answer.await {
-    Ok(result) => result.map_err(HookError::from),
+    Ok(result) => result.map(|()| Accepted::Posted).map_err(HookError::from),
     // The worker stopped before it got to the message.
     Err(_) => Err(HookError::ShuttingDown),
   }
 }
 
-/// Reads the body to the form's end, writing the files into the spool and paying for every piece.
+/// Reads the body to the form's end, writing the files into the spool and paying for every piece;
+/// with a fingerprint, the files are fed into it too.
 async fn read_files(
   settings: &FileSettings,
   reader: &mut FormReader,
   body: Body,
   charge: &mut FileCharge,
   max_request_bytes: u64,
+  mut maybe_fingerprint: Option<&mut MessageFingerprint>,
 ) -> Result<Vec<SpooledFile>, HookError> {
   let mut files: Vec<SpooledFile> = Vec::new();
   let mut maybe_writer: Option<SpoolWriter> = None;
@@ -163,18 +196,27 @@ async fn read_files(
     for action in reader.feed(&chunk)? {
       match action {
         FileAction::Start(info) => {
+          if let Some(fingerprint) = maybe_fingerprint.as_deref_mut() {
+            fingerprint.start_file(&info.file_name, &info.media_type);
+          }
           let writer = settings.spool.create(info.file_name, info.media_type).await;
           maybe_writer = Some(writer.map_err(spool_failed)?);
         },
         FileAction::Data(bytes) => {
           if let Some(writer) = maybe_writer.as_mut() {
             writer.write(&bytes).await.map_err(spool_failed)?;
+            if let Some(fingerprint) = maybe_fingerprint.as_deref_mut() {
+              fingerprint.file_data(&bytes);
+            }
           }
         },
         FileAction::End => {
           if let Some(writer) = maybe_writer.take() {
             let file = writer.finish().await.map_err(spool_failed)?;
             pay(charge, MIN_FILE_CHARGE_BYTES.saturating_sub(file.size_bytes))?;
+            if let Some(fingerprint) = maybe_fingerprint.as_deref_mut() {
+              fingerprint.end_file(file.size_bytes);
+            }
             files.push(file);
           }
         },

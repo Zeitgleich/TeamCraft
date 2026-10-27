@@ -79,6 +79,17 @@ max_thumbnail_pixels = 16000000
 # filling the database's.
 # spool_dir = "/var/spool/teamcraft-bridge"
 
+# Idempotency-Key of webhooks (docs/bridge.md "Retries"): a producer's retry of a request the bridge
+# accepted is answered again without posting. Kept in memory only; a restart forgets the keys.
+[idempotency]
+# How long the key of an accepted request is remembered, in seconds from its answer on.
+window_secs = 600
+# Keys remembered at most, all sources together; beyond, the source holding the most loses its
+# oldest first.
+max_keys = 10000
+# Their memory at most; each key counts its length and 128 bytes.
+max_bytes = 4194304
+
 # Log lines are collected into one message per conversation.
 [batching]
 interval_ms = 1000
@@ -97,6 +108,8 @@ interval_secs = 3600
 #     curl -d '{"text":"Deploy finished","username":"ci"}' http://127.0.0.1:8088/hooks/<token>
 #   With files (multipart/form-data, like Discord's and Slack's webhooks):
 #     curl -F 'text=Nightly report' -F 'file=@report.pdf' http://127.0.0.1:8088/hooks/<token>
+#   Retries that never post twice (one key per message, sent with every attempt):
+#     curl --retry 5 -H "Idempotency-Key: $(uuidgen)" -d '{"text":"Done"}' http://127.0.0.1:8088/hooks/<token>
 #   Log lines (plain text; NDJSON with Content-Type application/x-ndjson):
 #     journalctl -f | curl -T - -H 'Content-Type: text/plain' http://127.0.0.1:8088/ingest/<token>
 [app_sources]
