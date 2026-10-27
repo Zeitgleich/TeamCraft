@@ -119,6 +119,7 @@ pub mod status_menu;
 pub mod storage_banner;
 pub mod tab_elsewhere;
 pub mod tab_list;
+pub mod text_viewer;
 pub mod thread_panel;
 pub mod top_bar;
 pub mod typing_indicator;

@@ -183,6 +183,7 @@ shared in a chat can get a download link for people outside (e2ee.md §4.5.1).
 | Upload via drag & drop, paste, picker                                                  | v1    | Encrypted before upload                          |
 | Image/video preview + gallery                                                          | v1    | Thumbnails generated client-side                 |
 | PDF preview                                                                            | v1.x  | Rendered client-side                             |
+| Text and log preview (line numbers, find, levels, JSON formatting)                     | v1.x  | Plain text only, client-side (e2ee.md §4.5.0)    |
 | Files tab per conversation                                                             | v1    |                                                  |
 | Max file size (configurable, e.g. 2 GB), resumable chunked upload                      | v1    |                                                  |
 | Screenshot paste + basic annotation                                                    | later |                                                  |

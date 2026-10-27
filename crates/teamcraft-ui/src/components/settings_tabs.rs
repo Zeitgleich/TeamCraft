@@ -21,7 +21,7 @@ use crate::i18n::{Locale, use_i18n};
 use crate::keys::t_with_shortcuts;
 use crate::prefs::{CallPrefs, Density, ImageSize, SidebarSort, TextSize, Zoom};
 use crate::reactive::SetIfAlive;
-use crate::settings::{MediaCacheLimit, MediaCacheMaxAge, SendMode, Theme};
+use crate::settings::{MediaCacheLimit, MediaCacheMaxAge, PreviewLimit, SendMode, Theme};
 use crate::state::use_app_state;
 
 /// The tray icon styles' values in the settings' choices (their wire names).
@@ -267,6 +267,7 @@ pub fn PreferencesSection() -> impl IntoView {
   let prefs = settings.prefs;
   let media_cache_limit = RwSignal::new(MediaCacheLimit::load());
   let media_cache_max_age = RwSignal::new(MediaCacheMaxAge::load());
+  let preview_limit = RwSignal::new(PreviewLimit::load());
   let language_options: Vec<(String, String)> = Locale::ALL
     .into_iter()
     .map(|locale| (locale.tag().to_owned(), format!("language-{}", locale.tag())))
@@ -374,6 +375,18 @@ pub fn PreferencesSection() -> impl IntoView {
           if let Some(age) = MediaCacheMaxAge::from_slug(&slug) {
             age.save();
             media_cache_max_age.set(age);
+          }
+        })
+      />
+      <SelectRow
+        label="settings-preview-limit"
+        hint="settings-preview-limit-hint"
+        options=slug_options(&PreviewLimit::ALL.map(PreviewLimit::slug), "settings-preview-limit-")
+        value=Signal::derive(move || preview_limit.get().slug().to_owned())
+        on_change=Callback::new(move |slug: String| {
+          if let Some(limit) = PreviewLimit::from_slug(&slug) {
+            limit.save();
+            preview_limit.set(limit);
           }
         })
       />

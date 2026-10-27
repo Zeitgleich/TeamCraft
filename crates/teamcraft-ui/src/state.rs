@@ -225,7 +225,7 @@ pub enum Overlay {
   SpaceSettings(SpaceId),
   /// The image lightbox over a conversation, opened on this image.
   Lightbox(ConversationId, MediaKey),
-  /// The preview of a Markdown, HTML or PDF file of a conversation.
+  /// The preview of a Markdown, HTML, PDF or text file of a conversation.
   FilePreview(ConversationId, MediaKey),
   /// The versions of an edited message.
   EditHistory(ConversationId, MessageId),
