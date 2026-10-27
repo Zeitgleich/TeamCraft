@@ -6,7 +6,7 @@
 //! - Markdown: the app's own renderer, a tree of elements.
 //! - HTML: a sandboxed frame with no permissions and its own policy; its links are listed next to
 //!   it and open in the system browser.
-//! - PDF: the vendored PDF.js (`pdf-viewer.mjs`), loaded when the first PDF opens.
+//! - PDF: the vendored PDF.js (`pdf-viewer.mjs`), loaded when the first PDF opens (`pdf_pane.rs`).
 //! - Text, logs and data files: plain text in the text viewer (`text_viewer.rs`).
 //!
 //! A file above the preview limit (a setting, `PreviewLimit`) is not loaded: the preview says how
@@ -14,7 +14,7 @@
 
 use std::rc::Rc;
 
-use js_sys::{Function, Reflect, Uint8Array};
+use js_sys::Uint8Array;
 use leptos::html;
 use leptos::prelude::*;
 use leptos::task::spawn_local;
@@ -22,11 +22,10 @@ use teamcraft_client_api::actions::FileInfo;
 use teamcraft_client_api::admin::format_bytes;
 use teamcraft_client_api::remote::AttachmentPriority;
 use wasm_bindgen::JsCast;
-use wasm_bindgen::prelude::*;
-use wasm_bindgen_futures::JsFuture;
 
 use crate::components::icons::{Icon, IconName};
 use crate::components::modal::Modal;
+use crate::components::pdf_pane::pdf_pane;
 use crate::components::rich_text::RichText;
 use crate::components::text_viewer::text_viewer;
 use crate::i18n::{I18n, use_i18n};
@@ -37,45 +36,6 @@ use crate::preview::{self, PreviewKind};
 use crate::reactive::SetIfAlive;
 use crate::settings::PreviewLimit;
 use crate::state::{AppState, use_app_state};
-
-/// The PDF viewer module; the version in the path is the cache key of the vendored PDF.js
-/// (`vendor/pdfjs-*`, `index.html`).
-const PDF_VIEWER_MODULE: &str = "/pdfjs-6.4.299/pdf-viewer.mjs";
-/// One zoom step of the PDF viewer.
-const PDF_ZOOM_STEP: f64 = 1.25;
-
-#[wasm_bindgen(inline_js = "export function import_module(url) { return import(url); }")]
-extern "C" {
-  /// `import(url)`: loads an ES module of the page's own origin.
-  fn import_module(url: &str) -> js_sys::Promise;
-}
-
-#[wasm_bindgen]
-extern "C" {
-  /// The viewer `pdf-viewer.mjs` returns.
-  type PdfViewer;
-
-  #[wasm_bindgen(method, getter, js_name = pageCount)]
-  fn page_count(this: &PdfViewer) -> u32;
-
-  #[wasm_bindgen(method, js_name = setScale)]
-  fn set_scale(this: &PdfViewer, scale: f64) -> f64;
-
-  #[wasm_bindgen(method, js_name = fitWidth)]
-  fn fit_width(this: &PdfViewer) -> f64;
-
-  #[wasm_bindgen(method, js_name = goTo)]
-  fn go_to(this: &PdfViewer, page: u32);
-
-  #[wasm_bindgen(method)]
-  fn find(this: &PdfViewer, query: &str) -> js_sys::Promise;
-
-  #[wasm_bindgen(method)]
-  fn destroy(this: &PdfViewer);
-}
-
-/// Told by the viewer which page is in view; kept alive as long as the viewer.
-type PageCallback = Closure<dyn Fn(u32)>;
 
 /// What the preview is showing.
 #[derive(Clone)]
@@ -173,7 +133,7 @@ pub fn FilePreview(conversation: ConversationId, key: MediaKey) -> impl IntoView
     .into_any(),
     Load::Ready(Content::Bytes(bytes)) => match kind {
       PreviewKind::Text(format) => text_viewer(state, i18n, bytes, format, viewer_name.get_value(), download),
-      _ => pdf_pane(i18n, bytes),
+      _ => pdf_pane(i18n, bytes, download),
     },
     Load::Ready(Content::Text(text)) => match (kind, is_source.get()) {
       (_, true) => view! { <pre class="preview-source" translate="no">{text.as_str().to_owned()}</pre> }.into_any(),
@@ -304,159 +264,4 @@ fn links_of(html: &str) -> Vec<String> {
     .filter_map(|anchor| anchor.get_attribute("href"))
     .collect();
   preview::listed_links(hrefs.iter().map(String::as_str))
-}
-
-/// A PDF file in the vendored viewer.
-fn pdf_pane(i18n: I18n, bytes: Uint8Array) -> AnyView {
-  let container = NodeRef::<html::Div>::new();
-  let viewer: StoredValue<Option<PdfViewer>, LocalStorage> = StoredValue::new_local(None);
-  let is_broken = RwSignal::new(false);
-  let page = RwSignal::new(1u32);
-  let page_count = RwSignal::new(0u32);
-  let scale = RwSignal::new(1.0f64);
-  let find_result = RwSignal::new(FindResult::Idle);
-  let query_input = NodeRef::<html::Input>::new();
-  let on_page: StoredValue<Option<PageCallback>, LocalStorage> = StoredValue::new_local(None);
-  let bytes = StoredValue::new_local(Some(bytes));
-
-  Effect::new(move |_| {
-    let (Some(container), Some(bytes)) = (container.get(), bytes.try_update_value(Option::take).flatten())
-    else {
-      return;
-    };
-    let callback = Closure::<dyn Fn(u32)>::new(move |number| page.set_if_alive(number));
-    let on_page_fn: Function = callback.as_ref().unchecked_ref::<Function>().clone();
-    on_page.set_value(Some(callback));
-    spawn_local(async move {
-      match open_viewer(&container, &bytes, &on_page_fn).await {
-        Ok(opened) => {
-          page_count.set_if_alive(opened.page_count());
-          scale.set_if_alive(opened.fit_width());
-          // Hands the viewer back when the pane is gone already: nobody is left to use it.
-          if let Some(orphan) = viewer.try_set_value(Some(opened)).flatten() {
-            orphan.destroy();
-          }
-        },
-        Err(error) => {
-          tracing::warn!(error = ?error, "a PDF could not be opened");
-          is_broken.set_if_alive(true);
-        },
-      }
-    });
-  });
-  on_cleanup(move || {
-    // Frees the document, its worker and the page bitmaps.
-    drop(viewer.try_update_value(|maybe_viewer| maybe_viewer.take().inspect(PdfViewer::destroy)));
-  });
-
-  let zoom = move |factor: f64| {
-    viewer.with_value(|maybe_viewer| {
-      if let Some(opened) = maybe_viewer {
-        scale.set(opened.set_scale(scale.get_untracked() * factor));
-      }
-    });
-  };
-  let fit = move |_| {
-    viewer.with_value(|maybe_viewer| {
-      if let Some(opened) = maybe_viewer {
-        scale.set(opened.fit_width());
-      }
-    });
-  };
-  let jump = move |ev: web_sys::Event| {
-    let number = event_target_value(&ev).parse::<u32>().unwrap_or(1);
-    viewer.with_value(|maybe_viewer| {
-      if let Some(opened) = maybe_viewer {
-        opened.go_to(number);
-      }
-    });
-  };
-  let search = move |ev: web_sys::SubmitEvent| {
-    ev.prevent_default();
-    let query = query_input
-      .get_untracked()
-      .map(|field| field.value())
-      .unwrap_or_default();
-    let maybe_promise =
-      viewer.with_value(|maybe_viewer| maybe_viewer.as_ref().map(|opened| opened.find(&query)));
-    let Some(promise) = maybe_promise else {
-      return;
-    };
-    find_result.set(FindResult::Searching);
-    spawn_local(async move {
-      let found = JsFuture::from(promise)
-        .await
-        .ok()
-        .and_then(|number| number.as_f64())
-        .unwrap_or(0.0);
-      find_result.set_if_alive(if found >= 1.0 {
-        FindResult::Found
-      } else {
-        FindResult::None
-      });
-    });
-  };
-
-  view! {
-    <div class="pdf-tools">
-      <button class="icon-btn" aria-label=move || i18n.t("preview-zoom-out") data-tip=move || i18n.t("preview-zoom-out") on:click=move |_| zoom(1.0 / PDF_ZOOM_STEP)>
-        <Icon name=IconName::ZoomOut />
-      </button>
-      <button class="btn btn-small" on:click=fit>{move || format!("{} %", (scale.get() * 100.0).round())}</button>
-      <button class="icon-btn" aria-label=move || i18n.t("preview-zoom-in") data-tip=move || i18n.t("preview-zoom-in") on:click=move |_| zoom(PDF_ZOOM_STEP)>
-        <Icon name=IconName::ZoomIn />
-      </button>
-      <label class="pdf-page-field">
-        <span class="visually-hidden">{move || i18n.t("preview-page")}</span>
-        <input
-          class="input pdf-page-input"
-          type="number"
-          min="1"
-          prop:max=move || page_count.get()
-          prop:value=move || page.get()
-          on:change=jump
-        />
-        <span aria-hidden="true">{move || format!("/ {}", page_count.get())}</span>
-      </label>
-      <form class="pdf-find" on:submit=search>
-        <input class="input" type="search" node_ref=query_input maxlength="200" placeholder=move || i18n.t("preview-find") aria-label=move || i18n.t("preview-find") />
-        <span class="pdf-find-state" role="status">
-          {move || match find_result.get() {
-            FindResult::None => i18n.t("preview-find-none"),
-            _ => String::new(),
-          }}
-        </span>
-      </form>
-    </div>
-    {move || is_broken.get().then(|| view! {
-      <div class="preview-status" role="alert"><p>{move || i18n.t("preview-pdf-unreadable")}</p></div>
-    })}
-    <div class="pdf-pages" node_ref=container tabindex="0" prop:hidden=move || is_broken.get()></div>
-  }
-  .into_any()
-}
-
-/// Where a search in the PDF stands.
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum FindResult {
-  Idle,
-  Searching,
-  Found,
-  None,
-}
-
-/// Loads the viewer module (the first time) and opens `bytes` in `container`.
-async fn open_viewer(
-  container: &web_sys::HtmlElement,
-  bytes: &Uint8Array,
-  on_page: &Function,
-) -> Result<PdfViewer, JsValue> {
-  let module = JsFuture::from(import_module(PDF_VIEWER_MODULE)).await?;
-  let open: Function = Reflect::get(&module, &JsValue::from_str("openPdf"))?.dyn_into()?;
-  let opened = open.call3(&JsValue::NULL, container, bytes, on_page)?;
-  Ok(
-    JsFuture::from(js_sys::Promise::from(opened))
-      .await?
-      .unchecked_into(),
-  )
 }

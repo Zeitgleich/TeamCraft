@@ -531,7 +531,8 @@ The list is read from an inert parsed copy of the file (`DOMParser`).
 first-visit bundle is untouched. It runs with `isEvalSupported: false`, no
 scripting (the scripting sandbox is not shipped) and no annotation, form or link layer: pages are canvases
 plus a text layer for selecting text and searching. Memory stays bounded: only pages near the viewport are
-drawn.
+drawn. A document that can't be opened or drawn, or isn't open after 45 s, gives way to a message with the
+download, and the preview closes in every state (#835).
 
 #### 4.5.1 Share links for external download
 

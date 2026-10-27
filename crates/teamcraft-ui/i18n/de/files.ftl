@@ -75,6 +75,8 @@ preview-links = { $count ->
    *[other] { $count } Links in dieser Datei
   }
 preview-pdf-unreadable = Dieses PDF konnte nicht geöffnet werden. Lade es herunter, um es anderswo anzusehen.
+preview-pdf-not-drawn = Dieses PDF kann hier nicht angezeigt werden. Lade es herunter, um es mit einer anderen App zu öffnen.
+preview-pdf-timed-out = Dieses PDF braucht zu lange zum Öffnen. Lade es herunter, um es mit einer anderen App zu öffnen.
 preview-zoom-in = Vergrößern
 preview-zoom-out = Verkleinern
 preview-page = Seite

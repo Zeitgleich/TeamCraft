@@ -86,6 +86,7 @@ pub mod notification_prompt;
 pub mod offline_banner;
 pub mod org_badge;
 pub mod page;
+pub mod pdf_pane;
 pub mod pending_button;
 pub mod people_picker;
 pub mod profile_views;

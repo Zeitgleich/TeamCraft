@@ -20,8 +20,12 @@ const MIN_SCALE = 0.25;
 const MAX_SCALE = 4;
 
 /// Opens `bytes` (a Uint8Array, which PDF.js takes over) in `container`, a scrollable element.
-/// `onpage(n)` is told which page is in view. Rejects when the file is not a readable PDF.
-export async function openPdf(container, bytes, onpage) {
+/// `onpage(n)` is told which page is in view, `onfailure()` once when a page can't be drawn (#835).
+/// Rejects when the file is not a readable PDF.
+///
+/// The app calls into the viewer from Rust: an exception thrown back through the app's wasm leaves
+/// it in a broken state, so `destroy` never throws and the callbacks into the app are guarded.
+export async function openPdf(container, bytes, onpage, onfailure) {
   const loading = pdfjs.getDocument({
     data: bytes,
     isEvalSupported: false,
@@ -31,18 +35,36 @@ export async function openPdf(container, bytes, onpage) {
     disableAutoFetch: true,
     disableStream: true,
   });
-  const doc = await loading.promise;
-  return new Viewer(doc, container, onpage);
+  try {
+    const doc = await loading.promise;
+    return await new Viewer(loading, doc, container, onpage, onfailure);
+  } catch (error) {
+    // Frees the worker; a failure here changes nothing for the caller, who gets `error`.
+    loading.destroy().catch(() => {});
+    throw error;
+  }
+}
+
+/// Calls `callback` of the app, which may be gone (dropped with its view) by now.
+function notify(callback, ...args) {
+  try {
+    callback?.(...args);
+  } catch (error) {
+    console.warn("PDF viewer: the app's callback failed", error);
+  }
 }
 
 class Viewer {
   #onScroll;
   #isScanQueued = false;
 
-  constructor(doc, container, onpage) {
+  constructor(loading, doc, container, onpage, onfailure) {
+    this.loading = loading;
     this.doc = doc;
     this.container = container;
     this.onpage = onpage;
+    this.onfailure = onfailure;
+    this.hasFailed = false;
     this.scale = 1;
     this.pages = [];
     this.current = 1;
@@ -105,12 +127,23 @@ class Viewer {
     return 0;
   }
 
+  /// Frees the pages, the document and its worker. Never throws (see `openPdf`): whatever fails
+  /// here, the app's view is closing anyway.
   destroy() {
+    if (this.isDestroyed) return;
     this.isDestroyed = true;
-    this.container.removeEventListener("scroll", this.#onScroll);
-    for (const page of this.pages) this.#release(page);
-    this.container.replaceChildren();
-    this.doc.destroy();
+    this.onpage = null;
+    this.onfailure = null;
+    try {
+      this.container.removeEventListener("scroll", this.#onScroll);
+      for (const page of this.pages) this.#release(page);
+      this.container.replaceChildren();
+    } catch (error) {
+      console.warn("PDF viewer: releasing the pages failed", error);
+    }
+    // The loading task owns the document and its worker. PDF.js 5 dropped
+    // `PDFDocumentProxy.destroy`, whose call threw here and broke closing the viewer (#835).
+    this.loading.destroy().catch((error) => console.warn("PDF viewer: closing the document failed", error));
   }
 
   async #text(number) {
@@ -166,7 +199,7 @@ class Viewer {
     }
     if (current !== this.current) {
       this.current = current;
-      this.onpage?.(current);
+      notify(this.onpage, current);
     }
   }
 
@@ -218,8 +251,17 @@ class Viewer {
       if (page.token === token && error?.name !== "RenderingCancelledException") {
         page.element.classList.add("is-broken");
         page.state = "broken";
+        this.#fail(error);
       }
     }
+  }
+
+  /// Tells the app once that pages can't be drawn: it shows a message and the download instead.
+  #fail(error) {
+    console.warn("PDF viewer: a page could not be drawn", error);
+    if (this.hasFailed || this.isDestroyed) return;
+    this.hasFailed = true;
+    notify(this.onfailure);
   }
 
   #release(page) {
