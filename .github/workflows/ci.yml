@@ -76,7 +76,9 @@ jobs:
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           key: check-${{ matrix.arch }}
-          save-if: ${{ github.ref == 'refs/heads/main' }}
+          # arm64 compiles the same sources as x86_64; its caches (2.3 GB for check and test) don't
+          # fit the repository's 10 GB budget next to the others, so it starts cold on main.
+          save-if: ${{ github.ref == 'refs/heads/main' && matrix.arch == 'x86_64' }}
           cache-bin: "false"
       - name: Placeholder UI bundle (the desktop build embeds crates/teamcraft-ui/dist)
         run: mkdir -p crates/teamcraft-ui/dist
@@ -130,7 +132,7 @@ jobs:
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           key: test-${{ matrix.arch }}
-          save-if: ${{ github.ref == 'refs/heads/main' }}
+          save-if: ${{ github.ref == 'refs/heads/main' && matrix.arch == 'x86_64' }}
           cache-bin: "false"
       - name: Placeholder UI bundle (the desktop build embeds crates/teamcraft-ui/dist)
         run: mkdir -p crates/teamcraft-ui/dist
@@ -180,6 +182,9 @@ jobs:
     runs-on: windows-latest
     env:
       SQLX_OFFLINE: "true"
+      # No PDBs for the workspace's test binaries: the build output is the largest cache after the
+      # Linux ones, and the Linux jobs build the same way.
+      CARGO_PROFILE_DEV_DEBUG: "0"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
@@ -218,6 +223,8 @@ jobs:
     env:
       # Current macOS and the two releases before it (26 Tahoe, 15 Sequoia, 14 Sonoma).
       MACOSX_DEPLOYMENT_TARGET: "14.0"
+      # No debug info for the workspace crates: smaller cache, same as the Linux test job.
+      CARGO_PROFILE_DEV_DEBUG: "0"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable

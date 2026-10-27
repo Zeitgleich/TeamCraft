@@ -50,6 +50,10 @@ jobs:
     if: github.event_name != 'pull_request' || github.event.pull_request.user.login == 'dependabot[bot]' || contains(github.event.pull_request.labels.*.name, 'ci')
     runs-on: ubuntu-latest
     timeout-minutes: 60
+    permissions:
+      contents: read
+      # Deletes the superseded cache after saving a new one (see "Save cache").
+      actions: write
     env:
       TEAMCRAFT_ANDROID_IMAGE: teamcraft-android-build:ci
       # Debug core for both ABIs (phones and emulator): it compiles the bindings and the app like a
@@ -69,7 +73,9 @@ jobs:
         run: docker build -t "${TEAMCRAFT_ANDROID_IMAGE}" apps/android/docker
       # Dependencies and the Rust build output; the SDK and NDK are downloaded on every run (they
       # are large, and the repository's cache space is shared with the Rust jobs). Only runs on
-      # main save the cache; pull requests restore main's.
+      # main save the cache, and only when the key (the lockfiles, the Gradle files and the build
+      # image) has no cache yet; pull requests restore main's. One key per toolchain state: a key per
+      # run wrote 1.4 GB on every push to main and pushed the other caches out of the 10 GB budget.
       - name: Restore cache
         id: cache
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
@@ -81,21 +87,32 @@ jobs:
             ${{ runner.temp }}/android/gradle/caches/modules-2
             ${{ runner.temp }}/android/gradle/wrapper/dists
             ${{ runner.temp }}/android/target
-          key: android-${{ hashFiles('Cargo.lock', 'apps/android/gradle/**', 'apps/android/**/*.gradle.kts', 'apps/android/docker/Dockerfile') }}-${{ github.run_id }}
-          # No generic fallback: a cache from another toolchain (NDK, Gradle, Cargo.lock) carries
-          # CMake caches that point at the old NDK path and break the native builds.
-          restore-keys: |
-            android-${{ hashFiles('Cargo.lock', 'apps/android/gradle/**', 'apps/android/**/*.gradle.kts', 'apps/android/docker/Dockerfile') }}-
+          key: android-${{ hashFiles('Cargo.lock', 'apps/android/gradle/**', 'apps/android/**/*.gradle.kts', 'apps/android/docker/Dockerfile') }}
+          # No fallback to another key: a cache from another toolchain (NDK, Gradle, Cargo.lock)
+          # carries CMake caches that point at the old NDK path and break the native builds.
       - name: Rust core, Kotlin bindings, app and unit tests
         run: >
           apps/android/scripts/docker-build.sh
           assembleFullDebug testFullDebugUnitTest testLibreDebugUnitTest
       - name: Save cache
-        if: github.ref == 'refs/heads/main'
+        id: save
+        if: github.ref == 'refs/heads/main' && steps.cache.outputs.cache-hit != 'true'
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: *cache-paths
           key: ${{ steps.cache.outputs.cache-primary-key }}
+      # Only the newest toolchain state is useful; older Android caches would sit in the budget until
+      # they are evicted, together with the Rust caches.
+      - name: Delete superseded caches
+        if: steps.save.outcome == 'success'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          CURRENT_KEY: ${{ steps.cache.outputs.cache-primary-key }}
+        run: |
+          gh cache list --key android- --ref refs/heads/main --limit 100 --json id,key \
+            --jq ".[] | select(.key != \"$CURRENT_KEY\") | .id" \
+            | while read -r id; do gh cache delete "$id" || true; done
       - name: Upload the unit test reports on failure
         if: failure()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
