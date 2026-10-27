@@ -33,8 +33,6 @@ use tokio::sync::{Barrier, Notify, mpsc};
 use wtransport::{ClientConfig, Connection, Endpoint, Identity, tls::Sha256Digest};
 
 const CALL_ID: u64 = 42;
-/// All participants belong to this user; the SFU only cares about devices.
-const USER_ID: u64 = 1000;
 const FRAMES_PER_SENDER: u32 = 50;
 const FRAME_INTERVAL: Duration = Duration::from_millis(20);
 /// Typical size of a 20 ms Opus voice frame at ~24 kbit/s.
@@ -223,7 +221,8 @@ async fn run_client(
 ) -> ClientReport {
   let connection = connect(addr, certificate_hash).await;
   let (mut send, mut recv) = connection.open_bi().await.unwrap().await.unwrap();
-  let token = format!("dev:{CALL_ID}:{USER_ID}:{participant_id}");
+  // One account per participant: the SFU limits the devices of one account in a call.
+  let token = format!("dev:{CALL_ID}:{participant_id}:{participant_id}");
   write_message(
     &mut send,
     &CallClientMessage::Join {
