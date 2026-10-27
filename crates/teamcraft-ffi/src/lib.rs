@@ -11,6 +11,7 @@ mod calls;
 mod engine;
 mod error;
 mod http_fetch;
+mod join_requests;
 mod markup;
 mod media_viewer;
 mod server_entry;
@@ -29,6 +30,9 @@ pub use error::TeamCraftError;
 pub use http_fetch::{
   HttpFetchError, HttpFetchHeader, HttpFetchMethod, HttpFetchRedirects, HttpFetchRequest, HttpFetchResponse,
   http_fetch,
+};
+pub use join_requests::{
+  JoinHistory, JoinRequestAlertChanges, JoinRequestItem, JoinRequestOutcome, JoinRequestStanding,
 };
 pub use markup::{
   MarkupBlock, MarkupLine, MarkupListKind, MarkupRun, MarkupRunKind, is_long_message, message_markup,
