@@ -256,7 +256,7 @@ fun ImageViewer(viewModel: MainViewModel, snapshot: ChatSnapshot?, target: Pictu
           maybeScope = state.scope.takeIf { state.canSwitchScope },
           onScope = { chosen ->
             resumeScope = chosen.name
-            state.setScope(chosen)
+            state.switchScope(chosen)
             scope.launch { state.load() }
           },
           onForward = { isForwarding = true },

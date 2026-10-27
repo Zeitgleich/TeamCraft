@@ -144,7 +144,7 @@ class PictureViewerState(val target: PictureTarget, private val chat: ChatClient
   }
 
   /** Switches between the album and the conversation; then [load]. */
-  fun setScope(scope: MediaScope) {
+  fun switchScope(scope: MediaScope) {
     maybeViewer?.setScope(scope)
     this.scope = scope
   }
