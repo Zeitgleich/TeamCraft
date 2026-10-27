@@ -6,8 +6,10 @@
 //! `Event.timeStamp` and `performance.now()`), so the view only samples it once per frame.
 //! Velocities are in pixels per millisecond.
 
-use std::collections::VecDeque;
 use std::f64::consts::TAU;
+
+use crate::gestures::physics::{AxisTracker, SCROLL_DECELERATION};
+pub use crate::gestures::physics::{RUBBERBAND_CONSTANT, project, rubberband, unrubberband};
 
 use super::{Direction, Point, Size};
 
@@ -16,7 +18,7 @@ pub const DRAG_HYSTERESIS_PX: f64 = 10.0;
 /// Deceleration of a page flick per millisecond; a snappy one, like a paging scroll view.
 pub const PAGE_DECELERATION: f64 = 0.99;
 /// Deceleration of a zoomed picture gliding after a pan flick, like a normal scroll view.
-pub const GLIDE_DECELERATION: f64 = 0.998;
+pub const GLIDE_DECELERATION: f64 = SCROLL_DECELERATION;
 /// A flick at least this fast pages, however short it was.
 pub const PAGE_FLICK_PX_PER_MS: f64 = 0.3;
 /// A flick at least this fast closes, however short it was.
@@ -25,16 +27,12 @@ pub const DISMISS_FLICK_PX_PER_MS: f64 = 0.5;
 pub const DISMISS_DISTANCE_RATIO: f64 = 0.25;
 /// Smallest scale of a picture dragged away to close.
 pub const DISMISS_MIN_SCALE: f64 = 0.85;
-/// How strongly a limit resists: the classic UIScrollView constant.
-pub const RUBBERBAND_CONSTANT: f64 = 0.55;
 /// Response of the critically damped spring every transition settles with.
 pub const SPRING_RESPONSE_MS: f64 = 300.0;
 /// Space between neighbouring pictures while paging.
 pub const PAGE_GAP_PX: f64 = 24.0;
 /// How far past its limits a zoom may be pinched, as a factor (in log space, like the slider).
 pub const ZOOM_OVERSHOOT_FACTOR: f64 = 1.5;
-/// Pointer samples older than this don't count towards the release velocity.
-const VELOCITY_WINDOW_MS: f64 = 100.0;
 /// A position this close to its target has arrived (half a pixel).
 const PIXEL_PRECISION: f64 = 0.5;
 /// The same for scales and opacities.
@@ -59,10 +57,11 @@ pub enum PageOutcome {
   Turn(Direction),
 }
 
-/// Pointer velocity from the samples of the last [`VELOCITY_WINDOW_MS`].
+/// Pointer velocity from the samples of the last 100 ms, one [`AxisTracker`] per axis.
 #[derive(Clone, Debug, Default)]
 pub struct VelocityTracker {
-  samples: VecDeque<(f64, Point)>,
+  x: AxisTracker,
+  y: AxisTracker,
 }
 
 /// A critically damped spring from `from` (moving at `velocity`) to `target`: it never overshoots
@@ -106,32 +105,6 @@ enum Motion {
     min: f64,
     max: f64,
   },
-}
-
-/// How far momentum carries a release at `velocity` (px/ms) with `deceleration` per millisecond:
-/// Apple's `v/1000 · d/(1−d)` with the velocity in px/s.
-pub fn project(velocity: f64, deceleration: f64) -> f64 {
-  velocity * deceleration / (1.0 - deceleration)
-}
-
-/// How far something dragged `overshoot` past a limit moves: less and less the further it goes, and
-/// never more than `dimension`.
-pub fn rubberband(overshoot: f64, dimension: f64, constant: f64) -> f64 {
-  if dimension <= 0.0 {
-    return 0.0;
-  }
-  overshoot * dimension * constant / (dimension + constant * overshoot.abs())
-}
-
-/// The overshoot that [`rubberband`] turns into `shown`: to pick a resisted value up again where
-/// it is on screen.
-pub fn unrubberband(shown: f64, dimension: f64, constant: f64) -> f64 {
-  if dimension <= 0.0 {
-    return 0.0;
-  }
-  // Just short of the asymptote, so a value at the limit maps to a large but finite overshoot.
-  let shown = shown.clamp(-dimension * 0.999, dimension * 0.999);
-  shown * dimension / (constant * (dimension - shown.abs()))
 }
 
 /// `value` inside `min..=max`, and resisted beyond.
@@ -335,39 +308,25 @@ impl Rect {
 impl VelocityTracker {
   /// Starts over at the press.
   pub fn reset(&mut self, time_ms: f64, at: Point) {
-    self.samples.clear();
-    self.samples.push_back((time_ms, at));
+    self.x.reset(time_ms, at.x);
+    self.y.reset(time_ms, at.y);
   }
 
   /// Forgets the samples: a pinch's fingers say nothing about a pan's velocity.
   pub fn clear(&mut self) {
-    self.samples.clear();
+    self.x.clear();
+    self.y.clear();
   }
 
   pub fn push(&mut self, time_ms: f64, at: Point) {
-    self.samples.push_back((time_ms, at));
-    while self
-      .samples
-      .front()
-      .is_some_and(|(sampled, _)| time_ms - sampled > VELOCITY_WINDOW_MS)
-      && self.samples.len() > 2
-    {
-      self.samples.pop_front();
-    }
+    self.x.push(time_ms, at.x);
+    self.y.push(time_ms, at.y);
   }
 
   /// The velocity at `time_ms` (the release): zero when the pointer rested for the whole window
   /// before letting go.
   pub fn velocity(&self, time_ms: f64) -> Point {
-    let (Some(&(first_ms, first)), Some(&(last_ms, last))) = (self.samples.front(), self.samples.back())
-    else {
-      return Point::ORIGIN;
-    };
-    let elapsed = last_ms - first_ms;
-    if elapsed <= 0.0 || time_ms - last_ms > VELOCITY_WINDOW_MS {
-      return Point::ORIGIN;
-    }
-    Point::new((last.x - first.x) / elapsed, (last.y - first.y) / elapsed)
+    Point::new(self.x.velocity_at(time_ms), self.y.velocity_at(time_ms))
   }
 }
 
