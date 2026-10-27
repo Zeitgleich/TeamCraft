@@ -52,6 +52,9 @@ struct FileInfo: Decodable, Equatable, Identifiable, Sendable {
   /// PNG bytes of the thumbnail the sender's core made (images and videos).
   let maybeThumbnailPng: [UInt8]?
   let transfer: FileTransfer
+  /// Who sent the message and when (Unix milliseconds), for the image viewer.
+  var maybeSender: String?
+  var maybeSentAt: Int64?
 
   var id: String { fileId }
   var isImage: Bool { mediaType.hasPrefix("image/") }
@@ -91,6 +94,61 @@ struct MessageExtras: Decodable, Equatable, Sendable {
   /// Deleted for everyone: a placeholder instead of the body.
   let isDeleted: Bool?
   let maybeForwarded: ForwardedFrom?
+  /// An own message the other member of a DM read: two ticks instead of one (#769).
+  let isRead: Bool?
+  /// A membership or channel change someone made, shown as a line instead of a bubble.
+  let maybeWorkspaceEvent: WorkspaceEvent?
+}
+
+/// A membership or channel change and who made it (`WorkspaceEvent`, tagged by `event`). Read
+/// leniently: a field missing or an event this version doesn't know never fails the extras.
+enum WorkspaceEvent: Decodable, Equatable, Sendable {
+  case memberAdded(user: String, by: String, sharesHistory: Bool)
+  case memberRemoved(user: String, by: String)
+  // Changes the server reports of the channel (issue #818): `maybeBy` names who made one only when
+  // that member's own announcement matched it; `nil` words the line as the server's statement.
+  case archived(maybeBy: String?)
+  case unarchived(maybeBy: String?)
+  case madePrivate(maybeBy: String?)
+  case madePublic(maybeBy: String?)
+  /// To the space named `space`; empty if this device doesn't know its name.
+  case moved(maybeBy: String?, space: String)
+  case pinned(by: String)
+  /// A workspace admin joined the private channel (admin.md §2.4): by themselves, or let in by the
+  /// channel owner `maybeApprovedBy` who answered their request.
+  case adminJoined(user: String, maybeApprovedBy: String?)
+  /// A workspace admin joined the private channel because `by` added them without an approval to
+  /// ask for (admin.md §2.4.2).
+  case adminAdded(user: String, by: String)
+  case unknown
+
+  private enum CodingKeys: String, CodingKey {
+    case event, user, by, history, space, approvedBy, addedBy
+  }
+
+  init(from decoder: Decoder) throws {
+    let container = try decoder.container(keyedBy: CodingKeys.self)
+    let text = { (key: CodingKeys) -> String? in try? container.decodeIfPresent(String.self, forKey: key) }
+    let by = text(.by) ?? ""
+    let maybeBy = by.isEmpty ? nil : by
+    switch text(.event) {
+    case "member_added": self = .memberAdded(user: text(.user) ?? "", by: by, sharesHistory: text(.history) == "full")
+    case "member_removed": self = .memberRemoved(user: text(.user) ?? "", by: by)
+    case "archived": self = .archived(maybeBy: maybeBy)
+    case "unarchived": self = .unarchived(maybeBy: maybeBy)
+    case "made_private": self = .madePrivate(maybeBy: maybeBy)
+    case "made_public": self = .madePublic(maybeBy: maybeBy)
+    case "moved": self = .moved(maybeBy: maybeBy, space: text(.space) ?? "")
+    case "pinned": self = .pinned(by: by)
+    case "admin_joined":
+      if let addedBy = text(.addedBy), !addedBy.isEmpty {
+        self = .adminAdded(user: text(.user) ?? "", by: addedBy)
+      } else {
+        self = .adminJoined(user: text(.user) ?? "", maybeApprovedBy: text(.approvedBy).flatMap { $0.isEmpty ? nil : $0 })
+      }
+    default: self = .unknown
+    }
+  }
 }
 
 /// Where a forwarded message came from.
@@ -130,16 +188,79 @@ struct ChatAnswer: Decodable, Sendable {
   let channels: [BrowsableChannel]?
 }
 
-/// The people part of the core's chat snapshot: who can be mentioned.
+/// The key backup part of the core's chat snapshot (issue #410): facts the settings put into words.
+struct BackupSnapshot: Decodable, Sendable {
+  struct Security: Decodable, Sendable {
+    let backup: KeyBackup?
+  }
+
+  struct KeyBackup: Decodable, Equatable, Sendable {
+    /// The encrypted key bag is on the server.
+    let isStored: Bool
+    /// `passphrase`, `passkey`, `organization`; unknown values are ignored.
+    let recovery: [String]?
+    /// When the recovery passphrase was last set (epoch milliseconds), if a device recorded it.
+    let passphraseSetAt: Int64?
+
+    var hasPassphrase: Bool { recovery?.contains("passphrase") == true }
+    var hasOrganization: Bool { recovery?.contains("organization") == true }
+    var passphraseSetDate: Date? {
+      passphraseSetAt.map { Date(timeIntervalSince1970: TimeInterval($0) / 1000) }
+    }
+  }
+
+  let security: Security?
+}
+
+/// The people part of the core's chat snapshot: who can be mentioned, and the former accounts that
+/// only name their old messages.
 struct PeopleSnapshot: Decodable, Sendable {
   struct Person: Decodable, Sendable {
     let id: String
     let username: String
     let displayName: String
+    /// Deleted (issue #630): a tombstone the app names by its own "Deleted user" (issue #751).
+    let isDeleted: Bool?
+
+    /// The name to show: the app's own "Deleted user" for a deleted account, as on desktop and web.
+    var shownName: String { isDeleted == true ? deletedUserName : displayName }
   }
 
   let me: Person
+  /// The people to offer in lists, pickers and mentions.
   let users: [Person]?
+  /// Deactivated and deleted accounts: offered nowhere, they only name their old messages.
+  let formerUsers: [Person]?
+
+  /// Names by user ID for reply quotes and calls: everyone this device knows, former accounts
+  /// included.
+  var namesById: [String: String] {
+    let everyone = (users ?? []) + [me] + (formerUsers ?? [])
+    return Dictionary(everyone.map { ($0.id, $0.shownName) }, uniquingKeysWith: { first, _ in first })
+  }
+}
+
+/// The app's own name for a deleted account in the user's language, instead of the server's
+/// placeholder (issue #751).
+private var deletedUserName: String { String(localized: "user_deleted_name") }
+
+extension MessageItem {
+  /// The message with `deletedUserName` as its author's name when the author's account was deleted.
+  func namingDeletedAuthor() -> MessageItem {
+    guard isAuthorDeleted else { return self }
+    var named = self
+    named.authorName = deletedUserName
+    return named
+  }
+}
+
+extension SearchHitItem {
+  /// The hit with `deletedUserName` as its author's name when the author's account was deleted.
+  func namingDeletedAuthor() -> SearchHitItem {
+    var named = self
+    named.message = message.namingDeletedAuthor()
+    return named
+  }
 }
 
 /// A meeting as the server lists it (`GET /meetings`).

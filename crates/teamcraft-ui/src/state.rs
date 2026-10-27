@@ -45,7 +45,25 @@ pub struct Toast {
   pub id: u64,
   pub text: String,
   pub maybe_undo: Option<Undo>,
+  /// The next step a failure's toast offers.
+  pub maybe_action: Option<ToastAction>,
   pub tone: ToastTone,
+}
+
+/// A button on a failure's toast that helps with it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ToastAction {
+  /// Opens the camera choice of the call or the pre-join screen (#819).
+  ChooseCamera,
+}
+
+impl ToastAction {
+  /// The i18n key of the button's label.
+  pub fn label_key(self) -> &'static str {
+    match self {
+      Self::ChooseCamera => "control-camera-choose",
+    }
+  }
 }
 
 /// How a toast looks and is announced.
@@ -207,7 +225,7 @@ pub enum Overlay {
   SpaceSettings(SpaceId),
   /// The image lightbox over a conversation, opened on this image.
   Lightbox(ConversationId, MediaKey),
-  /// The preview of a Markdown, HTML or PDF file of a conversation.
+  /// The preview of a Markdown, HTML, PDF or text file of a conversation.
   FilePreview(ConversationId, MediaKey),
   /// The versions of an edited message.
   EditHistory(ConversationId, MessageId),
@@ -1031,6 +1049,35 @@ impl AppState {
   /// core answered), so it does nothing once the shell is gone. A repeat of any error still shown
   /// adds no second toast; background failures are rate-limited before they get here (#344).
   pub fn show_error(&self, text: String, detail: String) {
+    self.show_error_with(text, detail, None);
+  }
+
+  /// Shows a failed action with what to do about it (its message) and, where one helps, a button
+  /// for the next step: "Choose camera" for a camera that didn't open while a call or its
+  /// pre-join screen is up (#819).
+  pub fn show_failure(&self, i18n: crate::i18n::I18n, failure: &crate::feedback::ActionFailure) {
+    let is_in_call = self
+      .call
+      .phase
+      .try_get_untracked()
+      .is_some_and(|phase| phase != crate::calls::CallPhase::Idle);
+    let maybe_action = crate::feedback::failure_action(failure).filter(|_| is_in_call);
+    self.show_error_with(
+      crate::feedback::failure_message(i18n, failure),
+      failure.detail.clone(),
+      maybe_action,
+    );
+  }
+
+  /// Carries out a toast's action and closes the toast.
+  pub fn run_toast_action(&self, toast: u64, action: ToastAction) {
+    self.dismiss_toast(toast);
+    match action {
+      ToastAction::ChooseCamera => self.call.is_camera_menu_open.set(true),
+    }
+  }
+
+  fn show_error_with(&self, text: String, detail: String, maybe_action: Option<ToastAction>) {
     let Some(id) = self.next_toast.try_get_value() else {
       return;
     };
@@ -1046,6 +1093,7 @@ impl AppState {
             id,
             text,
             maybe_undo: None,
+            maybe_action,
             tone: ToastTone::Error { detail },
           },
         );
@@ -1264,6 +1312,7 @@ impl AppState {
           id,
           text,
           maybe_undo,
+          maybe_action: None,
           tone: ToastTone::Info,
         },
       )

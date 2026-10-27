@@ -10,12 +10,12 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use common::{PASSPHRASE, TokioClock, clock, options, settings};
-use teamcraft_core::PendingEnrollment;
 use teamcraft_core::api::ServerApi;
-use teamcraft_core::api::fake::FakeServer;
+use teamcraft_core::api::fake::{FakeServer, FakeServerApi};
 use teamcraft_core::runner::{RunnerCommand, RunnerSettings, SyncRunner};
 use teamcraft_core::store::{LocalStore, MemoryStore, MessageFilter};
-use teamcraft_proto::GatewayEvent;
+use teamcraft_core::{Client, PendingEnrollment};
+use teamcraft_proto::{DeviceActivity, GatewayEvent};
 
 /// The server's default `heartbeat_timeout_secs`.
 const SERVER_HEARTBEAT_TIMEOUT: Duration = Duration::from_secs(90);
@@ -141,6 +141,101 @@ async fn a_sync_longer_than_the_heartbeat_timeout_keeps_its_connection() {
   );
 }
 
+/// Issue #472: the app's activity reaches the server at once, and every new connection repeats
+/// the last report, so a resumed session the server timed out comes back online.
+#[tokio::test]
+async fn the_device_activity_is_reported_now_and_on_every_new_connection() {
+  let server = FakeServer::new();
+  let api = server.add_user("Dave");
+  let me = api.user_id();
+  let client = enrolled(api).await;
+  let (runner, handle) = SyncRunner::new(client, RunnerSettings::default(), Box::new(|| {}));
+  // Handled in order after connecting.
+  assert!(handle.send(RunnerCommand::SetActivity(DeviceActivity::Idle)));
+  assert!(handle.send(RunnerCommand::Stop));
+  let client = runner.run().await;
+  assert_eq!(
+    server.activity_reports(me),
+    [DeviceActivity::Active, DeviceActivity::Idle],
+    "the new session hears the activity, then the change"
+  );
+
+  // Back in the foreground: the session resumes and hears what the device said last, then the
+  // change.
+  let connects_before = server.gateway_connect_count();
+  let (runner, handle) = SyncRunner::new(client, RunnerSettings::default(), Box::new(|| {}));
+  assert!(handle.send(RunnerCommand::SetActivity(DeviceActivity::Active)));
+  assert!(handle.send(RunnerCommand::Stop));
+  runner.run().await;
+  assert_eq!(server.gateway_connect_count() - connects_before, 1);
+  assert_eq!(
+    server.activity_reports(me),
+    [
+      DeviceActivity::Active,
+      DeviceActivity::Idle,
+      DeviceActivity::Idle,
+      DeviceActivity::Active
+    ]
+  );
+}
+
+#[tokio::test]
+async fn activity_reported_offline_goes_out_with_the_next_connection() {
+  let server = FakeServer::new();
+  let api = server.add_user("Erin");
+  let me = api.user_id();
+  let client = enrolled(api).await;
+  server.set_offline(me, true);
+  let (runner, handle) = SyncRunner::new(client, RunnerSettings::default(), Box::new(|| {}));
+  assert!(handle.send(RunnerCommand::SetActivity(DeviceActivity::Idle)));
+  assert!(handle.send(RunnerCommand::Stop));
+  let client = runner.run().await;
+  assert!(server.activity_reports(me).is_empty());
+
+  server.set_offline(me, false);
+  let (runner, handle) = SyncRunner::new(client, RunnerSettings::default(), Box::new(|| {}));
+  assert!(handle.send(RunnerCommand::Stop));
+  runner.run().await;
+  assert_eq!(server.activity_reports(me), [DeviceActivity::Idle]);
+}
+
+/// Issue #733: typing goes out at most once per interval, and is dropped while offline (a late
+/// indicator would be wrong), not queued like the activity.
+#[cfg(feature = "ui")]
+#[tokio::test]
+async fn typing_goes_out_once_per_interval_and_never_late() {
+  use teamcraft_core::ui_backend::CoreCommand;
+
+  let server = FakeServer::new();
+  let api = server.add_user("Frank");
+  let me = api.user_id();
+  let mut client = enrolled(api.clone()).await;
+  let space = api.list_spaces().await.unwrap().spaces[0].id;
+  let channel = client.create_channel(space, "general").await.unwrap();
+  let other = client.create_channel(space, "random").await.unwrap();
+  let typing = |conversation| RunnerCommand::Ui(CoreCommand::Typing { conversation });
+
+  // Handled in order after connecting, all within the interval.
+  let (runner, handle) = SyncRunner::new(client, RunnerSettings::default(), Box::new(|| {}));
+  assert!(handle.send(typing(channel)));
+  assert!(handle.send(typing(channel)));
+  assert!(handle.send(typing(other)));
+  assert!(handle.send(RunnerCommand::Stop));
+  let client = runner.run().await;
+  assert_eq!(server.typing_reports(me), [channel, other]);
+
+  server.set_offline(me, true);
+  let (runner, handle) = SyncRunner::new(client, RunnerSettings::default(), Box::new(|| {}));
+  assert!(handle.send(typing(channel)));
+  assert!(handle.send(RunnerCommand::Stop));
+  let client = runner.run().await;
+  server.set_offline(me, false);
+  let (runner, handle) = SyncRunner::new(client, RunnerSettings::default(), Box::new(|| {}));
+  assert!(handle.send(RunnerCommand::Stop));
+  runner.run().await;
+  assert_eq!(server.typing_reports(me), [channel, other]);
+}
+
 #[tokio::test]
 async fn dropping_every_handle_stops_the_runner() {
   let server = FakeServer::new();
@@ -163,4 +258,17 @@ async fn dropping_every_handle_stops_the_runner() {
       .list(teamcraft_core::store::Table::Conversations)
       .is_ok()
   );
+}
+
+async fn enrolled(api: FakeServerApi) -> Client<FakeServerApi, Arc<MemoryStore>> {
+  PendingEnrollment::new()
+    .complete(
+      api,
+      Arc::new(MemoryStore::new()),
+      clock(),
+      settings(),
+      options(PASSPHRASE),
+    )
+    .await
+    .unwrap()
 }

@@ -14,4 +14,8 @@
   <string name="local_sign_in_rejected">E-Mail, Passwort oder Code falsch.</string>
   <string name="local_sign_in_disabled">Die Anmeldung mit E-Mail und Passwort ist auf diesem Server nicht verfügbar. Frag deine Administration.</string>
   <string name="local_sign_in_rate_limited">Zu viele Versuche. Warte ein paar Minuten und versuche es dann erneut.</string>
+  <string name="sign_in">Anmelden</string>
+  <string name="sign_in_hint">Melde dich mit deinem Organisationskonto an, um fortzufahren.</string>
+  <string name="sign_in_failed">Die Anmeldung ist fehlgeschlagen. Bitte versuche es erneut.</string>
+  <string name="sign_out">Abmelden</string>
 </resources>

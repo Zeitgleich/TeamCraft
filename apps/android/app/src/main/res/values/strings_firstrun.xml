@@ -22,4 +22,20 @@
   <string name="browse_no_people">People you share a channel with appear here. Join a channel first, or ask a colleague to add you to one.</string>
   <string name="browse_no_channels">Nobody has created a channel you can join here yet. Create one with New channel.</string>
   <string name="browse_no_spaces">You aren\'t in a space yet. Ask your admin to add you to one.</string>
+  <string name="enroll_title">Set up this device</string>
+  <string name="enroll_new_hint">Choose a recovery passphrase. It protects your key backup; without it (or another device) your message history can\'t be restored.</string>
+  <string name="passphrase">Recovery passphrase</string>
+  <string name="passphrase_repeat">Repeat passphrase</string>
+  <string name="passphrase_too_short">Use at least 12 characters.</string>
+  <string name="passphrases_differ">The passphrases don\'t match.</string>
+  <string name="enroll_button">Create keys</string>
+  <string name="recover_button">Restore</string>
+  <string name="link_instead">Link from another device</string>
+  <string name="device_name">Android phone</string>
+  <string name="org_recovery_instead">Recover through my organization</string>
+  <string name="org_recovery_title">Recover through your organization</string>
+  <string name="org_recovery_hint">Read this code to an admin of your organization by phone or in person. Two admins approve the recovery.</string>
+  <string name="org_recovery_new_passphrase">Choose a new recovery passphrase for your key backup:</string>
+  <string name="org_recovery_finish">Finish recovery</string>
+  <string name="org_recovery_pending">The admins haven\'t approved yet. Try again in a moment.</string>
 </resources>

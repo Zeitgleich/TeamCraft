@@ -38,6 +38,21 @@ enforces, which the server hands out as hints:
 announcement channel takes "post" from its members in the UI too. A server that doesn't send it
 leaves the client on the built-in scheme. The server checks every request again.
 
+The desktop, web, Android and iOS clients offer the same actions from the same facts (issue #758).
+When the facts change, the server tells the people concerned, and their clients fetch the
+conversation (`conversation_update`) or the spaces (`space_update`) again, so the UI follows
+without a reload:
+
+| Change                        | Who hears it                                               | Event                                 |
+|-------------------------------|------------------------------------------------------------|---------------------------------------|
+| channel role, moderation      | the channel's members                                      | `conversation_update`                 |
+| space role (e.g. space admin) | the space's members; the person for each of their channels | `space_update`, `conversation_update` |
+| a space's permission scheme   | the space's members; each channel's members                | `space_update`, `conversation_update` |
+
+Changes to the instance scheme reach every conversation of the instance and are not pushed (one
+update per conversation would make every client fetch all of them at once); clients see them at
+their next sync or the conversation's next update.
+
 ## 2. Managing rooms without reading them
 
 ### 2.1 What an admin sees for every conversation
@@ -98,7 +113,13 @@ could add itself to every channel.
 - **Fork detection.** Members send their verified roster and policy heads inside their encrypted
   messages. A colleague with a different entry for the same version, or with entries this client
   isn't shown, raises an alarm.
-- Space admin and channel owner assignments are signed by an admin or a higher role.
+- Space admin and channel owner assignments are signed by an admin or a higher role. Channel roles
+  (admin = owner, moderator) are a signed log per channel (e2ee.md §4.6.1): each entry is signed by
+  a workspace admin or owner of the fresh roster, or by a channel admin of the previous signed
+  entry, under the same role rules the UI and the server use; a channel's creator signs the first
+  entry. Roles only the server lists (channels from before, space admins' changes, older clients)
+  are shown as not signed and count for nothing that needs a signed role; an admin who can sign
+  confirms them in the channel's members section. Space roles are not signed yet.
 - Member clients only commit membership changes that are signed by someone allowed to make them
   (admin, space admin, channel owner, or a member with `manage_members`). Unsigned or wrongly signed
   proposals are rejected and reported.
@@ -168,25 +189,172 @@ self-join asks only for the history from the join on: members' apps refuse a sig
 asks for more, whatever the workspace default (e2ee.md §4.7). That is allowed, but never silent:
 
 - Per instance setting `admin_self_join` for private channels:
-  - `visible` (default) – allowed; members see the same system message as for any added member
-    ("Paul joined"), marked with an admin badge. Unlike normal join/leave messages, it can't be
-    hidden by the user setting,
-  - `owner_approval` – a channel owner must approve,
+  - `visible` (default) – allowed; members see "Paul joined this channel as a workspace admin"
+    (§2.4.2). Unlike normal join/leave messages, it can't be hidden by the user setting,
+  - `owner_approval` – a channel owner must approve (§2.4.1),
   - `disabled`.
 - Member clients enforce this setting themselves (it's part of the signed workspace policy), so the
   server can't bypass it.
+- **Nor can another admin** (issue #816). The setting is about admins getting in without the
+  members, so members' apps hold every signed addition of an owner or admin by an admin who isn't
+  in the channel to it, not only the admin's own: under `owner_approval` and `disabled` they
+  refuse it, and two admins can't add each other around it. An addition signed by a member is an
+  ordinary one under every setting, also of an admin; the approving owner of §2.4.1 is such a
+  member. Admins outside the channel still add everybody else (§2.2). Like the self-join, this is
+  about channels the members' apps know as private or archived (the server's word, §2.4.2); in an
+  open public channel admins join like anybody.
+- **What members' apps can check.** That whoever signed an addition is in the channel's MLS group,
+  verified; not that they may add people there. Which members may (`manage_members`, the channel's
+  owners) is the server's record until channel roles are signed (issues #380, #801), so a hostile
+  server can let any member add an admin. And an admin outside the channel can still add somebody
+  who isn't an admin (§2.2), who can then add an admin as a member: each step is a signed addition
+  members verify, and the line of §2.4.2 names who let the admin in, but neither is refused.
+- **Members on older versions.** Clients before 1.0.9 still commit another admin's addition of an
+  admin whatever the setting says. A member on 1.0.9 or later refuses that commit like any it
+  can't verify, falls out of the group, asks to be added back and is added back into it, with the
+  admin in (e2ee.md §4.6, "Falling out and coming back"); it shows no line for that join, since it
+  never merged the commit. The group doesn't split, but the setting holds in a channel only once
+  none of its members' devices runs an older version. The server doesn't refuse the membership
+  either (it checks only an admin's own join, security review D11).
 - **Where admins join.** The channel browser lists a space's private channels to workspace admins,
-  marked private, as the verified policy allows: "Join as admin" for `visible`, a note to ask a
-  channel admin for `owner_approval` (there is no request flow yet), nothing for `disabled`. The
-  admin's app signs the self-join; the member whose app commits it then posts the encrypted
-  "joined as a workspace admin" message (`AdminJoined`), shown to everybody whatever their
-  join/leave setting. Members' apps let the admin in only while their role is in the fresh signed
-  roster.
+  marked private, as the verified policy allows: "Join as admin" for `visible`, "Ask to join" for
+  `owner_approval` (§2.4.1), nothing for `disabled`. The admin's app signs the self-join. Members'
+  apps let the admin in only while their role is in the fresh signed roster.
+- **How members are told** (§2.4.2): each member's device writes the line "… joined this channel as
+  a workspace admin" (with "approved by …" or "added by …" when somebody else let them in) itself,
+  from the MLS commit that added the admin, once it verified that commit; shown whatever the
+  join/leave setting. No message makes or suppresses it.
+
+#### 2.4.1 Asking the owners (`owner_approval`)
+
+Under `owner_approval` members' apps refuse an admin's own signed self-join, so the admin asks the
+channel's owners instead (issue #776). The server only stores and relays the request; what lets the
+admin in is an owner's own membership change.
+
+- **Asking.** "Ask to join" in the channel browser (or "Add myself" in Administration → Channels)
+  sends `POST /conversations/{id}/admin-join-requests`. The server takes it only from an instance
+  admin, under its copy of the policy, for an open private channel the admin isn't in, in a space
+  they belong to, that has an owner. There is one open request per admin and channel: asking again
+  answers with the open one and tells nobody again. The admin sees "Requested" with "Withdraw".
+  After a decline or a withdrawal the admin can ask again only once that request would have
+  expired (`admin_join_request_too_soon`), so asking and withdrawing can't notify the owners over
+  and over.
+- **Who decides.** The channel's owners: members with the channel role `admin`. That role is the
+  server's record until channel roles are signed (issue #380), so the server decides who is asked
+  and who may approve; what an approval can do is limited by the checks below. The server tells
+  them (gateway `admin_join_request_update`) and their apps show the request at the top of
+  Activity, in the channel settings above the member list and as a system notification, each with
+  Approve and Decline and the admin's name with their username. The badge counts it until it is
+  decided.
+- **Approving** is the owner's app adding the admin. The server approves the request and adds the
+  membership in one transaction (`POST …/admin-join-requests/{user}/approve`, only while the
+  request is open and the person who asked is still an instance admin, by their last sign-in), so
+  of several owners or devices exactly one approves and a decline or an expiry at the same moment
+  wins completely or not at all; only the approving owner's retry is answered again, everybody
+  else gets `admin_join_request_not_found`. Then the owner's own MLS add, which members' apps
+  check like any addition by a member and from which each of them shows "… joined this channel as
+  a workspace admin, approved by …" whatever their join/leave setting (§2.4.2). For older versions
+  the encrypted `AdminJoined` message with "approved by" goes out too, only when this commit put
+  the admin's devices in (a second approval announces nothing).
+- **History.** Approving shares what a self-join gets, the history from the join on (e2ee.md
+  §4.7). The earlier history only when the owner ticks "Also share the earlier history" in
+  Activity or the channel settings; Approve in a notification never shares it, and its text says
+  so.
+- **Declining** (`DELETE …/admin-join-requests/{user}`) closes the request; the admin can ask again
+  once it would have expired.
+- **The server's word is a hint.** The owner's app shows and approves a request only if its own
+  state agrees: the verified policy says `owner_approval`, the conversation is a private,
+  unarchived channel the owner is in (a request for a DM, a meeting chat or an unknown
+  conversation is neither shown nor approved) and the owner's device is in its group. Approve is
+  offered only for somebody the fresh verified roster lists as an admin; for anybody else the app
+  says so and offers Decline only. A request the server makes up can at most ask an owner to let a
+  real admin of the signed roster into one of the owner's private channels, with the history from
+  the join on, and the admin's devices are certified by their pinned identity key.
+- **Expiry.** A request expires after `admin_join_request_days` (instance setting, §6.3, default 7
+  days, 1 to 90, also when the configuration file says otherwise); the account housekeeping
+  deletes it and tells owners and admin. A new policy without `owner_approval` deletes every
+  request (admins join by themselves now, or not at all). Requests whose channel was archived,
+  made public or deleted, whose admin was deactivated, deleted, left the space or lost the admin
+  role, or who is in the channel already are never listed; adding the admin any other way settles
+  their request.
+- **Offline, several devices, restarts.** Requests live in the database, so a server restart loses
+  none. Apps read the list again after every gateway connection while the verified policy asks
+  for approval (otherwise they make no request), and on every `admin_join_request_update`; an
+  owner who was away sees waiting requests when they come back. Telling people and the audit log
+  follow the stored decision as best effort: a failure there is logged and never undoes or
+  strands it. Every step is in the audit log (`admin_join_requested`, `…_approved`, `…_declined`,
+  `…_withdrawn`, `…_expired` with the reason, also for a policy change).
+- **On the phones** (issue #799) owners see the requests at the top of Activity (Android; on iOS
+  above the channels of the Spaces list, whose tab counts them) and above the messages of the
+  channel itself, with the admin's name and username and the same rules: Approve only for an admin
+  of the fresh verified roster (otherwise Decline only, with the reason), the history from the join
+  on unless the owner ticks "Also share the earlier history". While the app runs, a new request
+  shows a notification with Approve and Decline (Decline only for somebody the roster doesn't
+  list; neither names nor actions behind the app lock or while notifications show nothing), once
+  per request and device and withdrawn when the request is gone; its Approve never shares the
+  earlier history, and its text says so. A decision from the notification that doesn't go through
+  shows the notification again with why. Admins ask, see "Requested" and withdraw in the channel
+  browser; joining without asking (`visible`) stays on desktop and web.
+- **Not yet:** no push wakes an owner's phone for a request (wake-ups name messages and calls
+  only; a request kind is a follow-up); a phone that was closed sees the waiting requests when it
+  connects again.
+
+#### 2.4.2 The line comes from the commit (issue #811)
+
+"Never silent" can't rest on a message: a member could send "joined as a workspace admin" without
+anybody joining, and a committer that crashed after its commit, or a server that drops the
+message, would keep a real join quiet. So the line is derived where the join happens:
+
+- **When.** A device that merges a commit, one it verified like any other (§2.3) or its own,
+  compares the group before and after: every user with a device in the group now and none before
+  (not a further device or a device added back), whom the verified roster lists as an owner or
+  admin, gets the line, in a channel that isn't open to everybody as the device knows it (a
+  private channel, or an archived public one; not a DM, group DM or meeting chat, where admins
+  have no way in of their own). The roster is the one the device holds when it processes the
+  commit, as for the commit's own check: a device that catches up late may tell about somebody
+  who was an admin then and isn't any more, or the other way round. The channel's visibility and
+  kind are the server's word here as in the members' check of a self-join (`visible` doesn't
+  apply to an open public channel), so a server that calls a private channel public keeps the
+  line away, as it turns the self-join into an ordinary join. The roster's freshness decides an
+  admin's authority, not whether members are told, so a member adding an admin while the roster
+  waits for re-signing is still told. However the admin got in, the line is there: their own
+  signed self-join, an owner's approval, a member's ordinary add, or another admin's signed change
+  (§2.2; for an admin, only under `visible`, issue #816), which used to be silent.
+- **Who let them in.** The line names the verified signer of the change that added the admin,
+  unless that is the admin (a self-join): "approved by …" when the signer was a member of the
+  channel while the verified policy says `owner_approval` (an owner's approval, whose device also
+  commits it), "added by …" otherwise (a member's ordinary add under `visible` or `disabled`, or
+  another admin who signed the change and only had a member's device commit it). A device's own
+  commit keeps its signer, with the epoch the device made it in, next to the pending commit, so a
+  commit whose answer was lost and that is merged from the queue later names the same person; a
+  kept signer of another epoch, or a commit staged by an older version, names nobody.
+- **Where.** The line sits at the commit's place in the conversation (the commit's ID is the
+  server's time-ordered ID, like a message's), is stored like a message but marked as derived
+  from that commit, and is no message of the server's (no read position, paging cursor or
+  permalink uses it). Its ID comes from the commit and the admin, so processing the commit again
+  after a restart writes it once, on every device of every member, the committer's included.
+  That ID is known to whoever saw the commit, so a message with it is never stored over the line,
+  and no edit, delete or pin changes it. The apps' row of the line goes by the commit's ID; a
+  message the server gives the same ID doesn't take the line's place there either. The apps know
+  it is a line from the message alone (the UI's `MessageKind::Change`), before its text arrives.
+- **Unread.** The line counts as unread like a message at the commit's place, from anybody but
+  the user (an owner's own approval isn't unread to them): the server's read position covers it
+  once a later message was read. A line newer than every message is read when the user reads the
+  conversation on this device; another device of theirs shows it unread until they read it there
+  too (the server's read position names messages only).
+- **Who doesn't see it.** The admin's own devices join by the welcome and see no commit: they show
+  no line. A member who joins later doesn't see lines from before their time either.
+- **Older versions.** The committer still sends the encrypted `AdminJoined` message (members'
+  self-join commits, owners' approvals), which versions before this show; this version stores it
+  hidden and never shows it, also one stored before the update. A self-join committed by an older
+  version is still told here, from its commit.
 
 ### 2.5 Orphaned channels
 
 When the last owner of a private channel leaves the company, an admin assigns a new owner from the
-remaining members. The admin doesn't need to be a member for that.
+remaining members. The admin doesn't need to be a member for that. A workspace admin's signature is
+what makes the new owner count on members' apps (e2ee.md §4.6.1); the console's assignment doesn't
+sign it yet (a follow-up of issue #380), so until then the new owner's role shows as not signed.
 
 ## 3. Admin features
 
@@ -366,7 +534,11 @@ themselves and the server can't relax it.
 Every admin action, recovery, device change and role change is logged with actor, target and time.
 
 - Admins see the full log.
-- Members see admin actions affecting their conversations as system messages.
+- Members see admin actions affecting their conversations as system messages. Archiving,
+  converting and moving a channel show as lines each member's device derives from the server's
+  record of the channel ("This channel was archived"); the member who made the change is named only
+  when their own encrypted announcement matches it (e2ee.md §4.9, issue #818). Until channel
+  properties are signed, the change itself is the server's word.
 - Users see actions affecting themselves (device removed, recovery started) in their security settings.
 - The log contains metadata only, never message content.
 
@@ -392,6 +564,7 @@ What the server offers for the features above (all under `/api/v1`; instance adm
 | Calendar (§6.2)                          | `GET/PUT/DELETE /admin/settings/calendar`, `POST /admin/settings/calendar/test`    |
 | Instance settings (§6.3)                 | `GET/PUT /admin/settings`, `DELETE /admin/settings/{section}`                      |
 | Deactivate, reactivate, remove (§3.2.1)  | `POST /admin/users/{id}/deactivate`, `.../reactivate`, `.../remove-from-chats`      |
+| Admin join requests (§2.4.1)             | `GET /admin-join-requests`; `POST /conversations/{id}/admin-join-requests`, `POST .../{user}/approve`, `DELETE .../{user}` (owners decide, the admin withdraws) |
 | Delete an account (§3.2.1)               | `DELETE /admin/users/{id}`                                                         |
 
 Session length, idle timeout, required second factor, display name format and the privacy of names and
@@ -472,7 +645,7 @@ Groups that are stored and reset as a whole:
 
 | Group            | Values                                                                                                                                        |
 |------------------|-----------------------------------------------------------------------------------------------------------------------------------------------|
-| `server_rules`   | invites need a verified e-mail address; default spaces and channels for new members; days until deactivated users are removed from all chats  |
+| `server_rules`   | invites need a verified e-mail address; default spaces and channels for new members; days until deactivated users are removed from all chats; days until an admin's request to join a private channel expires (§2.4.1) |
 | `notifications`  | read receipt default, urgent repeat interval and count, phone push delay, desktop attention                                                   |
 | `email_digest`   | on/off, default and shortest interval, grace period, subjects and texts                                                                       |
 | `shares`         | on/off, default and longest expiry, download cap, links per user                                                                              |

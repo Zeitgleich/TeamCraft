@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+  <string name="app_name" translatable="false">TeamCraft</string>
+  <string name="back">Back</string>
+  <string name="cancel">Cancel</string>
+  <string name="retry">Try again</string>
+  <string name="loading">Loading…</string>
+  <string name="settings_title">Settings</string>
+  <string name="error_network">Can\'t reach the server. Check your connection.</string>
+  <string name="error_signed_out">Your session expired. Please sign in again.</string>
+  <string name="error_wrong_passphrase">That passphrase doesn\'t open your key backup.</string>
+  <string name="error_storage">The local data couldn\'t be opened.</string>
+  <string name="error_generic">Something went wrong.</string>
+  <string name="you">You</string>
+  <string name="user_deleted_name">Deleted user</string>
+  <string name="ok">OK</string>
+  <string name="more">More</string>
+</resources>

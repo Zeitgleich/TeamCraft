@@ -7,8 +7,8 @@ use std::collections::{BTreeMap, HashMap};
 use serde::{Deserialize, Serialize};
 use teamcraft_proto::live::{AnnouncedPresence, LiveMarks, LiveReceipt, RevisedPresence};
 use teamcraft_proto::{
-  ConversationId, ConversationUnread, MessageId, MessageResponse, ThreadId, ThreadSummary, UnreadResponse,
-  UserId, UserPresence,
+  AdminJoinRequestResponse, ConversationId, ConversationUnread, MessageId, MessageResponse, ThreadId,
+  ThreadSummary, UnreadResponse, UserId, UserPresence,
 };
 
 use crate::error::CoreError;
@@ -17,6 +17,8 @@ use crate::store::{LocalStore, Table};
 
 const UNREAD_KEY: &str = "state";
 const MARKS_KEY: &str = "marks";
+/// The open admin join requests the server last listed (admin.md §2.4), next to the counts.
+const ADMIN_JOIN_REQUESTS_KEY: &str = "admin_join_requests";
 /// The record in [`Table::Presence`] (whose other keys are user IDs) that heads the presence log
 /// in [`Table::AnnouncedPresence`]. Before 1.0.2 it held the whole log; that form reads as a head
 /// with an empty log.
@@ -36,6 +38,23 @@ pub fn threads(store: &impl LocalStore) -> Result<Vec<ThreadSummary>, CoreError>
 /// Unread and mention counts as last reported by the server.
 pub fn unread(store: &impl LocalStore) -> Result<Option<UnreadResponse>, CoreError> {
   records::get_json(store, Table::Unread, UNREAD_KEY)
+}
+
+/// The open requests of admins to join a private channel as the server last listed them: the
+/// user's own and those for channels they own (admin.md §2.4). Only the server's word: the UI
+/// checks the requester against the verified roster before it offers to approve.
+pub fn admin_join_requests(store: &impl LocalStore) -> Result<Vec<AdminJoinRequestResponse>, CoreError> {
+  Ok(records::get_json(store, Table::Unread, ADMIN_JOIN_REQUESTS_KEY)?.unwrap_or_default())
+}
+
+pub(crate) fn put_admin_join_requests(
+  store: &impl LocalStore,
+  requests: &[AdminJoinRequestResponse],
+) -> Result<(), CoreError> {
+  if admin_join_requests(store)? == requests {
+    return Ok(());
+  }
+  records::put_json(store, Table::Unread, ADMIN_JOIN_REQUESTS_KEY, &requests)
 }
 
 /// How far other members of DMs have read, across all conversations.
@@ -607,6 +626,8 @@ mod tests {
           edits: Vec::new(),
           maybe_edit_id: None,
           is_pinned: false,
+          maybe_verified_commit: None,
+          maybe_server_change: None,
         })
         .unwrap();
       note_new_message(&store, &delivered, id(5)).unwrap();

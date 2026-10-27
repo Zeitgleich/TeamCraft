@@ -40,6 +40,19 @@ pub async fn push_health(
   if state.database.get_user(user).await?.is_none() {
     return Err(ApiError::user_not_found());
   }
+  health_of(state, user).await
+}
+
+/// The same for the caller's own devices (Settings > Devices, issue #409): which push service
+/// each one is registered with and when the last push went out.
+pub async fn own_push_health(
+  state: &AppState,
+  caller: &AuthenticatedUser,
+) -> Result<PushHealthResponse, ApiError> {
+  health_of(state, caller.user.id).await
+}
+
+async fn health_of(state: &AppState, user: UserId) -> Result<PushHealthResponse, ApiError> {
   let mut counts = state.push_tracker.counts_of(user);
   let devices = state
     .database

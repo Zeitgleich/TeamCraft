@@ -154,4 +154,22 @@
   <string name="diagnostics_preview_policy">Your workspace\'s policy hides message text in notifications.</string>
   <string name="diagnostics_preview_setting">Your setting hides message text in notifications.</string>
   <string name="diagnostics_unreadable">Notifications this device could not open: %1$d</string>
+  <string name="push_title">Notifications</string>
+  <string name="push_fcm">Google Firebase Cloud Messaging</string>
+  <string name="push_unifiedpush">UnifiedPush</string>
+  <string name="push_none">No push service available. Install a UnifiedPush distributor to get notifications while the app is closed.</string>
+  <string name="push_registered">Notifications are set up.</string>
+  <string name="notification_channel_messages">Channel messages</string>
+  <string name="notification_channel_mentions">Mentions</string>
+  <string name="notification_channel_direct_messages">Direct messages</string>
+  <string name="notification_channel_direct_messages_description">Messages from people you chat with one to one or in small groups.</string>
+  <string name="notification_channel_meetings">Meeting reminders</string>
+  <string name="notification_channel_meetings_description">Reminders shortly before a meeting starts.</string>
+  <string name="notification_mute">Mute for 8 hours</string>
+  <string name="notification_new_message">New message</string>
+  <string name="notification_file">%1$s</string>
+  <string name="notification_reply">Reply</string>
+  <string name="notification_mark_read">Mark as read</string>
+  <string name="push_always">Push notifications always</string>
+  <string name="push_away_only">Push notifications only when I\'m away from the desktop</string>
 </resources>

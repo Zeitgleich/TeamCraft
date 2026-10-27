@@ -84,6 +84,9 @@ struct ConversationListView: View {
         tab = selected.isDirect ? .home : .spaces
       }
     }
+    // Why an action on a request to join didn't go through, also for the open channel's banner;
+    // the channel browser shows its own.
+    .joinNoteAlert(model, isActive: maybeBrowseTab == nil)
     .sheet(isPresented: $isShowingSettings) { SettingsView(account: account) }
     .sheet(isPresented: $isShowingMeetings) { MeetingsView(account: account) }
     .sheet(isPresented: $isShowingFilters) { SearchFiltersView(filters: $filters) }
@@ -125,8 +128,12 @@ struct ConversationListView: View {
               Button("dm_new", systemImage: "square.and.pencil") { maybeBrowseTab = .people }
             }
           }
-        } else if shownSections.isEmpty {
-          Text("chats_no_channels").foregroundStyle(Theme.textMuted)
+        } else {
+          // Admins asking to join a channel the user owns: decided where the channels are (#799).
+          JoinRequestSection()
+          if shownSections.isEmpty {
+            Text("chats_no_channels").foregroundStyle(Theme.textMuted)
+          }
         }
         ForEach(shownSections) { section in
           Section(header: Text(title(of: section.title))) {
@@ -189,12 +196,13 @@ struct ConversationListView: View {
     .padding(.vertical, 6)
   }
 
-  /// "Home (3)": channels count only mentions, DMs every unread message.
+  /// "Home (3)": channels count only mentions (and the requests to join waiting for a decision),
+  /// DMs every unread message.
   private func tabLabel(_ tab: ChatTab) -> String {
     let isDirect = tab == .home
     let name = isDirect ? String(localized: "home_title") : String(localized: "chats_tab_spaces")
     let badge = TabBadge(conversations.filter { $0.isDirect == isDirect })
-    let count = isDirect ? max(badge.mentions, badge.unread) : badge.mentions
+    let count = isDirect ? max(badge.mentions, badge.unread) : badge.mentions + model.joinRequests.count
     if count > 0 { return "\(name) (\(count))" }
     return badge.unread > 0 ? "\(name) •" : name
   }

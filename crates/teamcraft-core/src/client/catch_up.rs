@@ -169,6 +169,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     members_order: &[ConversationId],
   ) -> Result<(), CoreError> {
     let mut phases = PhaseTimer::start(self.now_ms());
+    let mls_written_before = self.saved_mls.written_bytes();
     let mut ahead = AheadOfTheRest {
       conversations: conversations.iter().copied().collect(),
       tried: BTreeSet::new(),
@@ -202,7 +203,8 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     tracing::info!(
       conversations = conversations.len(),
       total_ms = phases.total_ms(),
-      mls_storage_bytes = records::mls_storage_len(&self.provider),
+      mls_storage_bytes = crate::mls_storage::mls_storage_len(&self.provider),
+      mls_written_bytes = self.saved_mls.written_bytes().saturating_sub(mls_written_before),
       "catch-up done"
     );
     Ok(())

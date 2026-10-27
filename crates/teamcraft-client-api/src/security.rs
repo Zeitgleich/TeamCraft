@@ -40,6 +40,46 @@ pub struct ContactVerification {
   pub is_verified: bool,
 }
 
+/// The key backup as this device knows it (e2ee.md §6), for Settings > Security & privacy (issue
+/// #410). Facts only; the settings put them into words and a next step.
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct KeyBackupState {
+  /// The encrypted key bag is on the server, so a new device can restore keys and account data.
+  pub is_stored: bool,
+  /// Changes on this device (new keys, saved items) wait for the next upload.
+  #[serde(default)]
+  pub has_pending_upload: bool,
+  /// How the backup opens on a device without another of the user's devices at hand.
+  #[serde(default)]
+  pub recovery: Vec<RecoveryMethod>,
+  /// When the recovery passphrase was last set, as the device that set it recorded; `None` when an
+  /// older app set it (or there is none).
+  #[serde(
+    rename = "passphrase_set_at",
+    default,
+    skip_serializing_if = "Option::is_none"
+  )]
+  pub maybe_passphrase_set_at: Option<TimestampMs>,
+}
+
+impl KeyBackupState {
+  pub fn has(&self, method: RecoveryMethod) -> bool {
+    self.recovery.contains(&method)
+  }
+}
+
+/// A way the backup key is wrapped for recovery (e2ee.md §6.1–6.3).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RecoveryMethod {
+  Passphrase,
+  Passkey,
+  /// The organization's admins can restore it together (§6.3).
+  Organization,
+  #[serde(other)]
+  Unknown,
+}
+
 /// Placeholder derivation for demo data: a stable pseudo-fingerprint (32 hex characters) from a seed.
 /// The real value comes from the identity keys in `teamcraft-crypto`.
 pub fn demo_fingerprint(seed: u64) -> String {

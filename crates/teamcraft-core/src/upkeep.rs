@@ -79,6 +79,11 @@ impl Upkeep {
         Ok(caught_up) => is_changed |= caught_up > 0,
         Err(error) => tracing::debug!(%error, "skipped conversations not synced yet"),
       }
+      // Devices registered by setups given up before this one finished (issue #415); a local read
+      // while there are none.
+      if let Err(error) = client.revoke_abandoned_devices().await {
+        tracing::debug!(%error, "abandoned device registrations not revoked yet");
+      }
     }
     // Key packages expire; a device that runs for weeks renews them in time (e2ee.md §4.3).
     if let Err(error) = client.renew_key_packages_if_due().await {
@@ -138,6 +143,9 @@ async fn check_workspace<A: ServerApi, S: LocalStore>(client: &mut Client<A, S>)
   }
   if let Err(error) = client.check_workspace_head().await {
     tracing::debug!(%error, "workspace head not checked yet");
+  }
+  if let Err(error) = client.check_channel_roles_heads().await {
+    tracing::debug!(%error, "channel role heads not checked yet");
   }
 }
 

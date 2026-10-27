@@ -147,4 +147,22 @@
   <string name="diagnostics_preview_policy">Die Richtlinie deines Workspace blendet Nachrichtentext in Benachrichtigungen aus.</string>
   <string name="diagnostics_preview_setting">Deine Einstellung blendet Nachrichtentext in Benachrichtigungen aus.</string>
   <string name="diagnostics_unreadable">Benachrichtigungen, die dieses Gerät nicht öffnen konnte: %1$d</string>
+  <string name="push_title">Benachrichtigungen</string>
+  <string name="push_fcm">Google Firebase Cloud Messaging</string>
+  <string name="push_unifiedpush">UnifiedPush</string>
+  <string name="push_none">Kein Push-Dienst verfügbar. Installiere einen UnifiedPush-Distributor, um Benachrichtigungen bei geschlossener App zu erhalten.</string>
+  <string name="push_registered">Benachrichtigungen sind eingerichtet.</string>
+  <string name="notification_channel_messages">Kanalnachrichten</string>
+  <string name="notification_channel_mentions">Erwähnungen</string>
+  <string name="notification_channel_direct_messages">Direktnachrichten</string>
+  <string name="notification_channel_direct_messages_description">Nachrichten von Personen, mit denen du einzeln oder in kleinen Gruppen schreibst.</string>
+  <string name="notification_channel_meetings">Meeting-Erinnerungen</string>
+  <string name="notification_channel_meetings_description">Erinnerungen kurz vor Beginn eines Meetings.</string>
+  <string name="notification_mute">Für 8 Stunden stummschalten</string>
+  <string name="notification_new_message">Neue Nachricht</string>
+  <string name="notification_file">%1$s</string>
+  <string name="notification_reply">Antworten</string>
+  <string name="notification_mark_read">Als gelesen markieren</string>
+  <string name="push_always">Push-Benachrichtigungen immer</string>
+  <string name="push_away_only">Push-Benachrichtigungen nur, wenn ich nicht am Desktop bin</string>
 </resources>

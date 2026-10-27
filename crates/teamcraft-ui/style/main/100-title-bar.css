@@ -1,0 +1,299 @@
+/* ---- Custom title bar (desktop app, components/window_controls.rs) ----
+   `data-titlebar="custom"` on <html> means the window has no native title bar and the top bar is
+   one. `--window-controls-left/right` hold the number of buttons on each side. */
+
+:root {
+  /* Width of one window button (Windows' caption buttons; no target is smaller than 30px). */
+  --window-btn-w: 46px;
+  /* Margin between the controls and the window edge; it moves the window like the bar. */
+  --window-controls-inset: 0px;
+  /* Room for the macOS traffic lights (positioned by the shell). */
+  --traffic-lights-w: 84px;
+}
+
+/* GNOME (libadwaita), also for Linux desktops without a style of their own: a 24px circle and
+   an 8px gap per button, inside a target the full height of the bar. */
+:root[data-platform="linux"] {
+  --window-btn-w: 32px;
+  --window-controls-inset: 4px;
+}
+
+/* KDE (Breeze): 24px circles 6px apart. */
+:root[data-platform="linux"][data-linux-desktop="kde"] {
+  --window-btn-w: 30px;
+  --window-controls-inset: 5px;
+}
+
+/* The title bar is the window's top edge: banners go below it. */
+:root[data-titlebar="custom"] .app {
+  grid-template-rows: var(--topbar-h) auto minmax(0, 1fr);
+}
+
+:root[data-titlebar="custom"] .app > .top-bar {
+  grid-row: 1;
+}
+
+:root[data-titlebar="custom"] .app > .app-banners {
+  grid-row: 2;
+}
+
+:root[data-titlebar="custom"] .app > .app-body {
+  grid-row: 3;
+}
+
+:root[data-titlebar="custom"] .top-bar {
+  padding-left: calc(
+    var(--window-controls-left, 0) * var(--window-btn-w) + var(--window-controls-inset)
+  );
+  padding-right: calc(
+    12px + var(--window-controls-right, 0) * var(--window-btn-w) + var(--window-controls-inset)
+  );
+  -webkit-user-select: none;
+  user-select: none;
+}
+
+/* However narrow the window, some of the title bar stays free to grab beside the search. */
+:root[data-titlebar="custom"] .search-field {
+  width: min(560px, calc(100% - 32px));
+}
+
+:root[data-platform="macos"][data-titlebar="custom"]:not([data-window="fullscreen"]) .top-bar {
+  grid-template-columns: var(--traffic-lights-w) minmax(0, 1fr) auto;
+}
+
+/* The traffic lights sit where the brand would be; fullscreen hides them and the brand returns. */
+:root[data-platform="macos"][data-titlebar="custom"]:not([data-window="fullscreen"]) .top-bar .brand {
+  visibility: hidden;
+}
+
+/* The controls draw in their text colour (`currentColor`), so fills and glyphs follow the bar
+   in light and dark and the plain background of the screens without a top bar. */
+.window-controls {
+  --window-btn-ring: var(--chrome-strong);
+  position: fixed;
+  top: 0;
+  z-index: 200;
+  display: flex;
+  box-sizing: border-box;
+  height: var(--topbar-h);
+}
+
+.window-controls.left {
+  left: 0;
+  padding-left: var(--window-controls-inset);
+}
+
+.window-controls.right {
+  right: 0;
+  padding-right: var(--window-controls-inset);
+}
+
+.window-btn {
+  display: grid;
+  place-items: center;
+  width: var(--window-btn-w);
+  height: 100%;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  color: var(--chrome-text);
+  transition:
+    background-color var(--dur-fast) var(--ease-standard),
+    color var(--dur-fast) var(--ease-standard);
+}
+
+.window-glyph {
+  display: block;
+  transition:
+    background-color var(--dur-fast) var(--ease-standard),
+    color var(--dur-fast) var(--ease-standard),
+    box-shadow var(--dur-fast) var(--ease-standard);
+}
+
+.window-btn:active {
+  color: var(--chrome-strong);
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .window-btn:hover {
+    color: var(--chrome-strong);
+  }
+}
+
+.window-btn:focus-visible {
+  outline: var(--focus-width) solid var(--window-btn-ring);
+  outline-offset: -2px;
+}
+
+/* Screens without the top bar (sign-in, guest join): the controls sit on the page background. */
+:root:not(:has(.top-bar)) .window-controls {
+  --window-btn-ring: var(--focus);
+}
+
+:root:not(:has(.top-bar)) .window-btn {
+  color: var(--text-muted);
+}
+
+:root:not(:has(.top-bar)) .window-btn:active {
+  color: var(--text);
+}
+
+@media (hover: hover) and (pointer: fine) {
+  :root:not(:has(.top-bar)) .window-btn:hover {
+    color: var(--text);
+  }
+}
+
+/* Windows 11: 46×32 caption buttons flush with the top right corner, a light grey on hover,
+   red behind close. */
+:root[data-platform="windows"] .window-controls {
+  height: 32px;
+}
+
+@media (hover: hover) and (pointer: fine) {
+  :root[data-platform="windows"] .window-btn:hover {
+    background-color: color-mix(in srgb, currentColor 9%, transparent);
+  }
+}
+
+:root[data-platform="windows"] .window-btn:active {
+  background-color: color-mix(in srgb, currentColor 6%, transparent);
+}
+
+@media (hover: hover) and (pointer: fine) {
+  :root[data-platform="windows"] .window-btn.close:hover {
+    background-color: #c42b1c;
+    color: var(--on-fill);
+  }
+}
+
+:root[data-platform="windows"] .window-btn.close:active {
+  background-color: #c84031;
+  color: var(--on-fill);
+}
+
+/* Linux: the button is a full-height target; the circle is the glyph's own box. A square never
+   shows, so the focus ring is drawn round the circle too. */
+:root[data-platform="linux"] .window-btn,
+:root[data-platform="linux"] .window-btn:active {
+  background: transparent;
+}
+
+@media (hover: hover) and (pointer: fine) {
+  :root[data-platform="linux"] .window-btn:hover {
+    background: transparent;
+  }
+}
+
+:root[data-platform="linux"] .window-btn:focus-visible {
+  /* The ring is drawn by .window-glyph below. */
+  outline: none;
+}
+
+:root[data-platform="linux"] .window-glyph {
+  box-sizing: content-box;
+  padding: 4px;
+  border-radius: 50%;
+}
+
+:root[data-platform="linux"] .window-btn:focus-visible .window-glyph {
+  outline: var(--focus-width) solid var(--window-btn-ring);
+  outline-offset: 0;
+}
+
+/* GNOME: a light fill at rest, stronger on hover and press; close is not red. */
+:root[data-platform="linux"] .window-glyph {
+  background-color: color-mix(in srgb, currentColor 10%, transparent);
+}
+
+@media (hover: hover) and (pointer: fine) {
+  :root[data-platform="linux"] .window-btn:hover .window-glyph {
+    background-color: color-mix(in srgb, currentColor 16%, transparent);
+  }
+}
+
+:root[data-platform="linux"] .window-btn:active .window-glyph {
+  background-color: color-mix(in srgb, currentColor 24%, transparent);
+}
+
+/* KDE: flat glyphs, a subtle circle on hover, a red circle with a white cross behind close. */
+:root[data-platform="linux"][data-linux-desktop="kde"] .window-glyph {
+  background-color: transparent;
+}
+
+@media (hover: hover) and (pointer: fine) {
+  :root[data-platform="linux"][data-linux-desktop="kde"] .window-btn:hover .window-glyph {
+    background-color: color-mix(in srgb, currentColor 15%, transparent);
+  }
+}
+
+:root[data-platform="linux"][data-linux-desktop="kde"] .window-btn:active .window-glyph {
+  background-color: color-mix(in srgb, currentColor 25%, transparent);
+}
+
+@media (hover: hover) and (pointer: fine) {
+  :root[data-platform="linux"][data-linux-desktop="kde"] .window-btn.close:hover .window-glyph {
+    background-color: #da4453;
+    color: var(--on-fill);
+  }
+}
+
+:root[data-platform="linux"][data-linux-desktop="kde"] .window-btn.close:active .window-glyph {
+  background-color: #b83a47;
+  color: var(--on-fill);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .window-btn,
+  .window-glyph {
+    transition: none;
+  }
+}
+
+/* Screens without the top bar (sign-in, guest join) get a strip to move the window by. */
+.window-drag-strip {
+  position: fixed;
+  inset: 0 0 auto 0;
+  z-index: 199;
+  height: var(--topbar-h);
+}
+
+:root:has(.top-bar) .window-drag-strip {
+  display: none;
+}
+
+/* Without a window manager frame the window needs its own edge (Windows draws one itself). Four
+   one-pixel lines, not one bordered box over the window: WebKitGTK gives a fixed element its own
+   compositing layer, and a window-sized one costs a window of GPU memory and a blend every frame. */
+:root[data-titlebar="custom"][data-platform="linux"][data-window="normal"]::before,
+:root[data-titlebar="custom"][data-platform="linux"][data-window="normal"]::after,
+:root[data-titlebar="custom"][data-platform="linux"][data-window="normal"] body::before,
+:root[data-titlebar="custom"][data-platform="linux"][data-window="normal"] body::after {
+  content: "";
+  position: fixed;
+  z-index: 1000;
+  background: rgba(128, 128, 128, 0.4);
+  pointer-events: none;
+}
+
+:root[data-titlebar="custom"][data-platform="linux"][data-window="normal"]::before {
+  inset: 0 0 auto;
+  height: 1px;
+}
+
+:root[data-titlebar="custom"][data-platform="linux"][data-window="normal"]::after {
+  inset: auto 0 0;
+  height: 1px;
+}
+
+:root[data-titlebar="custom"][data-platform="linux"][data-window="normal"] body::before {
+  inset: 1px auto 1px 0;
+  width: 1px;
+}
+
+:root[data-titlebar="custom"][data-platform="linux"][data-window="normal"] body::after {
+  inset: 1px 0 1px auto;
+  width: 1px;
+}
+

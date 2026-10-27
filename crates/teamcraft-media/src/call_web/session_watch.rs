@@ -41,6 +41,18 @@ pub(super) enum PacketCount {
   Unknown,
 }
 
+impl PacketCount {
+  /// The count of `getStats().packetsReceived`. An open session has received its handshake at
+  /// least, so zero means the browser doesn't count: Safari 26 reports all its stats as zero.
+  pub(super) fn from_stats(maybe_packets_received: Option<f64>) -> Self {
+    match maybe_packets_received {
+      // Counts are whole numbers far below 2^53.
+      Some(count) if count >= 1.0 => Self::Received(count as u64),
+      _ => Self::Unsupported,
+    }
+  }
+}
+
 /// A packet count reading to ask the browser for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) struct Reading {
@@ -214,6 +226,17 @@ mod tests {
 
   mod path {
     use super::*;
+
+    #[test]
+    fn packet_counts_come_from_stats_that_count() {
+      assert_eq!(PacketCount::from_stats(Some(42.0)), PacketCount::Received(42));
+      assert_eq!(PacketCount::from_stats(Some(1.0)), PacketCount::Received(1));
+      // Safari's stats are all zero, also while datagrams arrive.
+      assert_eq!(PacketCount::from_stats(Some(0.0)), PacketCount::Unsupported);
+      assert_eq!(PacketCount::from_stats(Some(-1.0)), PacketCount::Unsupported);
+      assert_eq!(PacketCount::from_stats(Some(f64::NAN)), PacketCount::Unsupported);
+      assert_eq!(PacketCount::from_stats(None), PacketCount::Unsupported);
+    }
 
     #[test]
     fn steady_readings_keep_the_session() {

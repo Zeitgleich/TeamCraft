@@ -19,10 +19,12 @@ use std::time::Duration;
 use leptos::leptos_dom::helpers::{TimeoutHandle, set_timeout_with_handle};
 use leptos::prelude::*;
 use teamcraft_client_api::actions::{MessagePriority, OutgoingMessage};
+use teamcraft_client_api::activity::{JoinRequest, JoinRequestStanding};
 use teamcraft_client_api::call_window::{CallWindow, CallWindowTheme};
 use teamcraft_client_api::os_notify::{
   NOTIFICATION_ACTION_EVENT, NotificationAction, NotificationActionEvent, NotificationButton,
-  NotificationTag, OsNotification, OsNotificationKind, ReplyField, TagTarget,
+  NotificationPicture, NotificationSound, NotificationTag, OsNotification, OsNotificationKind, ReplyField,
+  TagTarget,
 };
 use wasm_bindgen::JsCast;
 use wasm_bindgen::closure::Closure;
@@ -34,14 +36,17 @@ use crate::call_alerts::{
 use crate::calls::{CallKind, CallPhase, CallRequest, IncomingCall};
 use crate::clock::{local_utc_offset_minutes, now_ms};
 use crate::i18n::I18n;
+use crate::join_request_alerts::{AlertChanges, JoinRequestAlerts, tag as join_request_tag};
 use crate::meeting_reminders::{
   DueReminder, FiredReminders, ReminderKind, ReminderSchedule, ReminderSettings,
 };
 use crate::meetings::MeetingsHub;
-use crate::model::{ConversationId, TimestampMs};
+use crate::message_sounds::{MessageSounds, notification_sound};
+use crate::model::{ConversationId, TimestampMs, UserId};
+use crate::notification_pictures::picture_of;
 use crate::notifier::{
-  Decision, NotificationTitle, Notifier, ReadWatcher, all_conversations, needs_channel_confirmation,
-  notifications_for,
+  Decision, NotificationTitle, Notifier, PictureSubject, ReadWatcher, all_conversations,
+  needs_channel_confirmation, notifications_for,
 };
 use crate::reactive::OwnerLiveness;
 use crate::settings::{Theme, load_string, store_string};
@@ -59,6 +64,8 @@ const DUE_SLACK_MS: i64 = 2_000;
 const FIRED_REMINDERS_KEY: &str = "teamcraft.meeting_reminders.";
 /// Storage key prefix of the conversation a tab shows in front; the user ID follows.
 const TAB_FOCUS_KEY: &str = "teamcraft.focused_conversation.";
+/// Storage key prefix of the join requests this device notified about; the user ID follows.
+const JOIN_REQUESTS_KEY: &str = "teamcraft.join_request_alerts.";
 
 /// Ringing calls of this device, shared by the watcher and the call handler (which tells it when
 /// the user accepted or declined here).
@@ -69,7 +76,8 @@ pub struct CallAlertsCell(StoredValue<CallAlerts, LocalStorage>);
 pub fn start(state: AppState, i18n: I18n) {
   let calls = CallAlertsCell(StoredValue::new_local(CallAlerts::default()));
   provide_context(calls);
-  watch_messages(state, i18n);
+  watch_messages(state, i18n, MessageSounds::provide());
+  watch_join_requests(state, i18n);
   if tauri::is_available() {
     watch_calls(state, i18n, calls);
   } else {
@@ -90,8 +98,9 @@ impl CallAlertsCell {
 
 // ---- Messages -------------------------------------------------------------------------------------
 
-/// New messages, mentions and followed thread replies; withdrawn once read anywhere.
-fn watch_messages(state: AppState, i18n: I18n) {
+/// New messages, mentions and followed thread replies; withdrawn once read anywhere. Those that
+/// notify play the message sound, once for a burst (#800).
+fn watch_messages(state: AppState, i18n: I18n, sounds: MessageSounds) {
   let notifier = Notifier::default();
   let read_watcher = ReadWatcher::default();
   let settings = state.settings;
@@ -126,6 +135,11 @@ fn watch_messages(state: AppState, i18n: I18n) {
         prefs.maybe_dnd_until,
       )
     });
+    if !notifications.is_empty() {
+      let is_in_call = state.call.phase.get_untracked() == CallPhase::Active;
+      sounds.on_notifications(&prefs, is_in_call);
+    }
+    let sound = notification_sound(prefs.message_sound);
     for notification in notifications {
       let is_generic = notification.title == NotificationTitle::Generic;
       let title = match &notification.title {
@@ -145,6 +159,9 @@ fn watch_messages(state: AppState, i18n: I18n) {
         placeholder: i18n.t("notify-reply-placeholder"),
         send_label: i18n.t("notify-action-send"),
       });
+      let maybe_picture = notification
+        .maybe_picture
+        .and_then(|subject| state.read(|backend| picture_of(backend, subject)));
       let shown = OsNotification {
         tag: NotificationTag::conversation(notification.conversation),
         kind: OsNotificationKind::Message,
@@ -155,6 +172,8 @@ fn watch_messages(state: AppState, i18n: I18n) {
           i18n.t("notify-action-mark-read"),
         )],
         maybe_reply,
+        maybe_picture,
+        sound,
       };
       leptos::task::spawn_local(async move { tauri::show_notification(&shown).await });
     }
@@ -170,6 +189,118 @@ fn watch_messages(state: AppState, i18n: I18n) {
       leptos::task::spawn_local(async move { tauri::withdraw_tags(&tags).await });
     }
   });
+}
+
+// ---- Join requests --------------------------------------------------------------------------------
+
+/// Admins asking to join a channel the user owns (admin.md §2.4): one notification per request,
+/// with Approve where the verified roster lists the admin and Decline always; withdrawn once the
+/// request is gone. Each device notifies once per request, also across restarts.
+fn watch_join_requests(state: AppState, i18n: I18n) {
+  let alerts = StoredValue::new_local(None::<JoinRequestAlerts>);
+  Effect::new(move |_| {
+    let requests = state.read(|backend| backend.join_requests());
+    // Only the tab that notifies keeps the record (tabs share it): another tab marking a request
+    // as notified would keep the notifying one from ever showing it.
+    if !is_notifying_tab() {
+      return;
+    }
+    let key = format!("{JOIN_REQUESTS_KEY}{}", state.me().id);
+    let Some(changes) = alerts.try_update_value(|maybe_alerts| {
+      let alerts = maybe_alerts.get_or_insert_with(|| {
+        load_string(&key)
+          .map(|text| JoinRequestAlerts::from_json(&text))
+          .unwrap_or_default()
+      });
+      let changes = alerts.update(&requests);
+      store_string(&key, &alerts.to_json());
+      changes
+    }) else {
+      return;
+    };
+    if changes == AlertChanges::default() {
+      return;
+    }
+    let shown: Vec<OsNotification> = changes
+      .new
+      .iter()
+      .map(|request| join_request_notification(state, i18n, request))
+      .collect();
+    let gone = changes.gone;
+    leptos::task::spawn_local(async move {
+      if !gone.is_empty() {
+        tauri::withdraw_tags(&gone).await;
+      }
+      for notification in &shown {
+        tauri::show_notification(notification).await;
+      }
+    });
+  });
+}
+
+fn join_request_notification(state: AppState, i18n: I18n, request: &JoinRequest) -> OsNotification {
+  let channel = state
+    .read(|backend| backend.conversation(request.conversation))
+    .map(|conversation| format!("#{}", conversation.name))
+    .unwrap_or_default();
+  let mut actions = Vec::new();
+  if request.standing == JoinRequestStanding::Approvable {
+    actions.push(button(
+      NotificationAction::Approve,
+      i18n.t("join-request-approve"),
+    ));
+  }
+  actions.push(button(
+    NotificationAction::Decline,
+    i18n.t("join-request-decline"),
+  ));
+  OsNotification {
+    tag: join_request_tag(request),
+    kind: OsNotificationKind::JoinRequest,
+    title: i18n.t_with(
+      "notify-join-request",
+      &[("name", &named(request)), ("channel", &channel)],
+    ),
+    maybe_body: Some(i18n.t("notify-join-request-body")),
+    actions,
+    maybe_reply: None,
+    maybe_picture: person_picture_if_named(state, request.user),
+    sound: NotificationSound::System,
+  }
+}
+
+/// The admin's name with the username, so two people with one name differ.
+fn named(request: &JoinRequest) -> String {
+  match &request.maybe_username {
+    Some(username) => format!("{} (@{username})", request.user_name),
+    None => request.user_name.clone(),
+  }
+}
+
+fn on_join_request_action(state: AppState, conversation: &str, user: &str, action: NotificationAction) {
+  let (Ok(conversation), Ok(user)) = (conversation.parse(), user.parse()) else {
+    return;
+  };
+  // Only while the request still waits (and, for Approve, may be approved here): a notification
+  // left over from before is no reason to add anybody.
+  let maybe_request = state.read(|backend| {
+    backend
+      .join_requests()
+      .into_iter()
+      .find(|request| request.conversation == conversation && request.user == user)
+  });
+  match (action, maybe_request) {
+    (NotificationAction::Approve, Some(request)) if request.standing == JoinRequestStanding::Approvable => {
+      // One click shares no more than a self-join would: history from the join on.
+      state.write(|backend| {
+        backend.approve_admin_join(conversation, user, teamcraft_proto::HistoryPolicy::FromJoin)
+      });
+    },
+    (NotificationAction::Decline, Some(_)) => {
+      state.write(|backend| backend.decline_admin_join(conversation, user));
+    },
+    _ => state.open_activity(),
+  }
 }
 
 // ---- Calls ----------------------------------------------------------------------------------------
@@ -382,6 +513,16 @@ fn caller_name(state: AppState, call: &IncomingCall) -> Option<String> {
   state.read(|backend| backend.user(call.caller).map(|user| user.display_name))
 }
 
+/// The person's avatar (#543) where the workspace policy allows names on the lock screen: a face
+/// names the person as the name does.
+fn person_picture_if_named(state: AppState, user: UserId) -> Option<NotificationPicture> {
+  let mode = state.read(|backend| backend.push_content_mode());
+  if !may_name_names(&mode) {
+    return None;
+  }
+  state.read(|backend| picture_of(backend, PictureSubject::Person(user)))
+}
+
 fn incoming_call_notification(state: AppState, i18n: I18n, call: &IncomingCall) -> OsNotification {
   let maybe_body = caller_name(state, call).map(|name| {
     let key = if call.with_video {
@@ -410,6 +551,8 @@ fn incoming_call_notification(state: AppState, i18n: I18n, call: &IncomingCall) 
     maybe_body,
     actions,
     maybe_reply: None,
+    maybe_picture: person_picture_if_named(state, call.caller),
+    sound: NotificationSound::System,
   }
 }
 
@@ -452,6 +595,8 @@ fn missed_call_notification(state: AppState, i18n: I18n, call: &IncomingCall) ->
       i18n.t("notify-action-call-back"),
     )],
     maybe_reply: None,
+    maybe_picture: person_picture_if_named(state, call.caller),
+    sound: NotificationSound::System,
   }
 }
 
@@ -600,6 +745,8 @@ fn meeting_notification(
     maybe_body: may_name.then(|| reminder.title.clone()),
     actions: vec![button(NotificationAction::JoinMeeting, i18n.t("meetings-join"))],
     maybe_reply: None,
+    maybe_picture: None,
+    sound: NotificationSound::System,
   }
 }
 
@@ -696,6 +843,9 @@ pub fn handle_action(state: AppState, i18n: I18n, event: NotificationActionEvent
       }
     },
     TagTarget::Meeting(id) => on_meeting_action(state, i18n, &id, event.action),
+    TagTarget::JoinRequest { conversation, user } => {
+      on_join_request_action(state, &conversation, &user, event.action);
+    },
     TagTarget::Reminder => {},
   }
 }

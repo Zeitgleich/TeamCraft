@@ -18,6 +18,7 @@ use leptos::task::spawn_local;
 use teamcraft_client_api::actions::{FileFailure, FileInfo, FileTransfer, LinkPreview, PixelSize};
 use teamcraft_client_api::admin::format_bytes;
 use teamcraft_client_api::links::{LINKS_PER_PAGE, LinkInfo};
+use teamcraft_client_api::media_viewer::{AlbumGrid, MAX_ALBUM_TILES};
 use wasm_bindgen::JsCast;
 use wasm_bindgen::closure::Closure;
 
@@ -41,11 +42,9 @@ use crate::media_layout::{
 use crate::model::{ConversationId, MessageId};
 use crate::object_url::{FetchError, ObjectUrl};
 use crate::prefs::ImageSize;
-use crate::preview::{self, PreviewKind};
+use crate::preview::PreviewKind;
 use crate::state::{AppState, Overlay, use_app_state};
 
-/// Most tiles a grid shows; the last one counts the pictures it doesn't show ("+3").
-const MAX_GRID_TILES: usize = 4;
 /// From this size on, a transfer's progress is told in bytes ("12 MB / 48 MB"), below in percent.
 const LARGE_TRANSFER_BYTES: u64 = 1024 * 1024;
 
@@ -124,21 +123,24 @@ enum TileLayout {
 /// Several pictures of a message as a grid; each tile has its own actions.
 #[component]
 fn MediaGrid(files: Vec<FileInfo>) -> impl IntoView {
-  let count = files.len();
-  let hidden = count.saturating_sub(MAX_GRID_TILES);
+  // The same album on every platform: two to four tiles, "+N" on the last (#240).
+  let grid = AlbumGrid::of(files.len()).unwrap_or(AlbumGrid {
+    tiles: files.len().min(MAX_ALBUM_TILES),
+    hidden: 0,
+  });
   let tiles = files
     .into_iter()
-    .take(MAX_GRID_TILES)
+    .take(grid.tiles)
     .enumerate()
     .map(|(index, file)| {
       let layout = TileLayout::Grid {
-        maybe_hidden: (index + 1 == MAX_GRID_TILES && hidden > 0).then_some(hidden),
+        maybe_hidden: grid.hidden_at(index),
       };
       tile(file, layout)
     })
     .collect_view();
   view! {
-    <div class="media-grid" data-tiles=count.min(MAX_GRID_TILES).to_string()>
+    <div class="media-grid" data-tiles=grid.tiles.to_string()>
       {tiles}
     </div>
   }
@@ -862,12 +864,10 @@ pub fn FileCard(file: FileInfo) -> impl IntoView {
     let is_touch = crate::viewport::is_touch_primary();
     menu_file.with_value(|file| attachment_menu::open_on_right_click(maybe_menu, &ev, file, is_touch));
   };
-  // Markdown, HTML and PDF files open in the app (#557) unless they are too large.
-  let maybe_document_key = MediaKey::for_file(&file).filter(|_| {
-    is_on_server
-      && PreviewKind::of(&file.media_type, &file.file_name).is_some()
-      && preview::is_within_limit(file.size_bytes)
-  });
+  // Markdown, HTML, PDF and text files open in the app (#557, #821); one above the preview limit
+  // says so there and offers the download.
+  let maybe_document_key = MediaKey::for_file(&file)
+    .filter(|_| is_on_server && PreviewKind::of(&file.media_type, &file.file_name).is_some());
   let show_download = is_on_server
     && !matches!(
       file.transfer,
@@ -1448,10 +1448,17 @@ fn stall_key(reason: FileFailure, place: StallPlace) -> &'static str {
   }
 }
 
+/// Why a download or save failed, in words: where it broke and what helps, never only "failed"
+/// (issue #807).
 fn failure_key(reason: FileFailure) -> &'static str {
   match reason {
     FileFailure::TooLarge => "file-too-large",
-    _ => "file-failed",
+    FileFailure::Network => "file-download-network",
+    FileFailure::StorageUnavailable => "file-download-storage-unavailable",
+    FileFailure::Missing => "file-download-missing",
+    FileFailure::Intercepted => "file-download-intercepted",
+    FileFailure::Corrupted => "file-download-corrupted",
+    FileFailure::LocalFile => "file-save-unwritable",
   }
 }
 
@@ -1468,6 +1475,32 @@ pub(crate) fn blob_url(bytes: &[u8], media_type: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
   use super::*;
+  use crate::i18n::{Locale, translate};
+
+  /// A failed download names where it broke, in every language, instead of one "Transfer failed"
+  /// for everything (issue #807).
+  #[test]
+  fn each_download_failure_has_its_own_words() {
+    let reasons = [
+      FileFailure::TooLarge,
+      FileFailure::Network,
+      FileFailure::Corrupted,
+      FileFailure::LocalFile,
+      FileFailure::StorageUnavailable,
+      FileFailure::Missing,
+      FileFailure::Intercepted,
+    ];
+    let keys: Vec<&str> = reasons.into_iter().map(failure_key).collect();
+    let mut distinct = keys.clone();
+    distinct.sort_unstable();
+    distinct.dedup();
+    assert_eq!(distinct.len(), keys.len(), "{keys:?}");
+    for key in keys {
+      for locale in [Locale::En, Locale::De] {
+        assert_ne!(translate(locale, key, None), key, "{locale:?} lacks {key}");
+      }
+    }
+  }
 
   #[test]
   fn a_stalled_upload_says_when_the_storage_is_down() {

@@ -65,6 +65,8 @@ enum AppPhase {
   case recovering(RecoveryProgress, failure: AppFailure?)
   case ready(Account)
   case failed(AppFailure)
+  /// The local data can't be read by this version (issue #414); `failure` says why a reset failed.
+  case storeUnreadable(StoreProblem, failure: AppFailure?)
 }
 
 /// The app's state and its one entry to the Rust core. Screens read; the core does the work
@@ -94,6 +96,13 @@ final class AppModel {
   private(set) var linkPrompts: [LinkPrompt] = []
   /// The request or scanned code this device is typing the confirmation for (see `LinkReview`).
   private(set) var maybeLinkReview: LinkReview?
+  /// Admins' requests to join channels the user owns, oldest first (issue #799); read on every
+  /// change (`AppModel+JoinRequests`).
+  var joinRequests: [JoinRequestItem] = []
+  /// Requests (`JoinRequests.key`) and channels (ID) whose action runs: their buttons wait.
+  var pendingJoinKeys: Set<String> = []
+  /// Why the last action on a request didn't go through; the screen showing it clears it.
+  var joinNote: JoinNote?
 
   let calls = CallManager()
   /// The server's brand for the confirmation and sign-in screens.
@@ -288,6 +297,37 @@ final class AppModel {
     }
   }
 
+  // MARK: Unreadable local data
+
+  /// "Set up this device again" (issue #414): the core sets the unreadable database aside (renamed,
+  /// never deleted) and opens a new one; enrollment follows. Off the main thread, since the new
+  /// store opens while it waits.
+  func resetStore() async {
+    guard case .storeUnreadable(let problem, _) = phase, let core = maybeCore else { return }
+    await busy {
+      // The notification extension may have the old file open; the lock keeps it out meanwhile.
+      let lock = processLock
+      let hasLock = await Task.detached { lock.acquire(timeout: 5) }.value
+      defer { if hasLock { lock.release() } }
+      do {
+        try await Task.detached { try core.resetStore() }.value
+        await refreshAccountState()
+      } catch {
+        phase = .storeUnreadable(problem, failure: AppFailure(CoreFailure(error)))
+      }
+    }
+  }
+
+  /// "Try again" on the unreadable-data screen: opens the core afresh (after an update, or a
+  /// keychain that answers again).
+  func retryStore() async {
+    guard case .storeUnreadable = phase else { return }
+    await busy {
+      maybeCore = nil
+      await refreshAccountState()
+    }
+  }
+
   // MARK: Enrollment
 
   func enroll(passphrase: String) async {
@@ -431,11 +471,15 @@ final class AppModel {
   }
 
   func messages(conversationId: String, limit: UInt32 = 200) async -> [MessageItem] {
-    (try? await core().messages(conversationId: conversationId, limit: limit)) ?? []
+    ((try? await core().messages(conversationId: conversationId, limit: limit)) ?? []).map {
+      $0.namingDeletedAuthor()
+    }
   }
 
   func thread(conversationId: String, threadId: String) async -> [MessageItem] {
-    (try? await core().thread(conversationId: conversationId, threadId: threadId)) ?? []
+    ((try? await core().thread(conversationId: conversationId, threadId: threadId)) ?? []).map {
+      $0.namingDeletedAuthor()
+    }
   }
 
   /// The newest message of each conversation, for the chat list. Local reads only.
@@ -450,7 +494,7 @@ final class AppModel {
 
   func search(_ query: String) async -> [SearchHitItem] {
     guard !query.trimmingCharacters(in: .whitespaces).isEmpty else { return [] }
-    return (try? await core().search(query: query)) ?? []
+    return ((try? await core().search(query: query)) ?? []).map { $0.namingDeletedAuthor() }
   }
 
   // MARK: Acting
@@ -602,6 +646,14 @@ final class AppModel {
     if await segmentPrefetch() != .off { SegmentPrefetchTask.schedule() }
   }
 
+  /// Presence (issue #472): the app came to the foreground, went to the background, or the user
+  /// touched it. The open core tells the server (input at most every 30 s), so coming back ends an
+  /// away timeout at once. Opens no core and never waits; call it before starting or stopping sync,
+  /// so the report is queued ahead of them.
+  func reportActivity(_ activity: AppActivity) {
+    maybeCore?.reportActivity(activity: activity)
+  }
+
   // MARK: Push
 
   // "v2": sealed for the push gateway (docs/push-gateway.md); a registration made by an older version
@@ -738,6 +790,7 @@ final class AppModel {
       Task { [weak self] in await self?.pushUpkeep() }
     }
     Task { [weak self] in await self?.refreshLinkRequests() }
+    Task { [weak self] in await self?.refreshJoinRequests() }
     guard maybeReconcile == nil else { return }
     maybeReconcile = Task { [weak self] in
       // Coalesces a burst of changes (a sync delivers many) into one pass.
@@ -871,13 +924,19 @@ final class AppModel {
     await answer(.browseChannels(spaceId: spaceId))?.channels ?? []
   }
 
-  /// Display names by user ID, for reply quotes.
+  /// The key backup as the core knows it (Settings > Security); `nil` before the first key bag sync.
+  func keyBackup() async -> BackupSnapshot.KeyBackup? {
+    guard let json = try? await core().snapshot() else { return nil }
+    return Wire.decode(BackupSnapshot.self, from: json)?.security?.backup
+  }
+
+  /// Display names by user ID, for reply quotes; former accounts too, deleted ones by the app's own
+  /// "Deleted user".
   func displayNames() async -> [String: String] {
     guard let json = try? await core().snapshot(), let people = Wire.decode(PeopleSnapshot.self, from: json) else {
       return [:]
     }
-    let everyone = (people.users ?? []) + [people.me]
-    return Dictionary(everyone.map { ($0.id, $0.displayName) }, uniquingKeysWith: { first, _ in first })
+    return people.namesById
   }
 
   /// Names of the people typing in a conversation right now.
@@ -986,6 +1045,9 @@ final class AppModel {
     // Best effort and at most a few seconds; offline, the push key is still gone.
     if let core = try? core() {
       await Self.awaitAtMost(seconds: 5) { try? await core.unregisterPush() }
+      // A setup given up on leaves no keys behind, and its device is revoked (issue #415); the core
+      // waits a few seconds for the server at most.
+      await Self.awaitAtMost(seconds: 6) { try? await core.forgetUnfinishedSetup() }
     }
     // A local session also ends on the server (best effort; offline, the token just expires).
     if let local = vault.loadLocal(),
@@ -1018,9 +1080,12 @@ final class AppModel {
     }
     do {
       let state = try await core().accountState()
-      if case .needsEnrollment(let hasExistingIdentity) = state {
+      switch state {
+      case .needsEnrollment(let hasExistingIdentity):
         phase = .needsEnrollment(hasExistingIdentity: hasExistingIdentity, failure: nil)
-      } else {
+      case .storeUnreadable(let problem):
+        phase = .storeUnreadable(problem, failure: nil)
+      case .ready:
         await adopt(state)
       }
     } catch {

@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+  <string name="back">Zurück</string>
+  <string name="cancel">Abbrechen</string>
+  <string name="retry">Erneut versuchen</string>
+  <string name="loading">Wird geladen …</string>
+  <string name="settings_title">Einstellungen</string>
+  <string name="error_network">Server nicht erreichbar. Prüfe deine Verbindung.</string>
+  <string name="error_signed_out">Deine Sitzung ist abgelaufen. Bitte melde dich erneut an.</string>
+  <string name="error_wrong_passphrase">Diese Passphrase öffnet deine Schlüsselsicherung nicht.</string>
+  <string name="error_storage">Die lokalen Daten konnten nicht geöffnet werden.</string>
+  <string name="error_generic">Etwas ist schiefgelaufen.</string>
+  <string name="you">Du</string>
+  <string name="user_deleted_name">Gelöschter Nutzer</string>
+  <string name="ok">OK</string>
+  <string name="more">Mehr</string>
+</resources>

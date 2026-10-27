@@ -3,16 +3,19 @@
 //! mobile apps reuse the core's chat logic instead of growing their own. The app mirrors the view
 //! models as plain data classes.
 
+use teamcraft_client_api::model::User;
 use teamcraft_client_api::remote::{
   ChatAction, ChatQuery, ChatSnapshot, ContactKeys, MessageWindow, SecuritySnapshot,
 };
 use teamcraft_core::api::ServerApi as _;
 use teamcraft_core::records;
+use teamcraft_core::store::LocalStore;
+use teamcraft_core::ui_backend::CoreChatBackend;
 use teamcraft_crypto::identity::IdentityPublicKey;
 use teamcraft_crypto::org_recovery::RecoveryRequestKey;
 use teamcraft_proto::{
-  AvatarContentType, AvatarResponse, Base64Bytes, CreateRecoveryRequest, ErrorCode, RecoveryRequestId,
-  RecoveryRequestResponse, RecoveryResultPayload,
+  AvatarContentType, AvatarResponse, Base64Bytes, CreateRecoveryRequest, DeviceActivity, ErrorCode,
+  RecoveryRequestId, RecoveryRequestResponse, RecoveryResultPayload,
 };
 
 use crate::engine::{ClientSlot, Engine, parse_id};
@@ -26,10 +29,29 @@ pub(crate) struct PendingRecovery {
   user: teamcraft_proto::UserId,
 }
 
+/// The [`ChatSnapshot`] as the apps read it. Its `users` are the people to offer in lists, pickers
+/// and mentions; `former_users` are the deactivated and deleted accounts, offered nowhere but still
+/// naming their old messages. The apps show a deleted one as their own "Deleted user", as desktop
+/// and web do (issue #751).
+#[derive(serde::Serialize)]
+struct AppSnapshot {
+  #[serde(flatten)]
+  snapshot: ChatSnapshot,
+  former_users: Vec<User>,
+}
+
+impl AppSnapshot {
+  fn read<S: LocalStore>(backend: &CoreChatBackend<S>, security: SecuritySnapshot) -> Self {
+    Self {
+      snapshot: ChatSnapshot::read(backend, security),
+      former_users: backend.former_users(),
+    }
+  }
+}
+
 impl Engine {
   pub(crate) fn snapshot_json(&self) -> Result<String, TeamCraftError> {
-    let snapshot = ChatSnapshot::read(self.backend()?, self.security_snapshot()?);
-    to_json(&snapshot)
+    to_json(&AppSnapshot::read(self.backend()?, self.security_snapshot()?))
   }
 
   pub(crate) fn window_json(
@@ -96,7 +118,19 @@ impl Engine {
           .with_client(|client| Box::pin(async move { client.accept_identity_change(user) }))
           .await
       },
-      ChatAction::SetActivity { .. } | ChatAction::SetAttention { .. } => Ok(()),
+      // Unthrottled; the apps report through `TeamCraft::report_activity`, which repeats input at
+      // most every 30 s.
+      ChatAction::SetActivity { is_idle } => {
+        self.report_activity(if is_idle {
+          DeviceActivity::Idle
+        } else {
+          DeviceActivity::Active
+        });
+        Ok(())
+      },
+      // Attention holds phone pushes back while a desktop or web session is looked at; a phone
+      // reports none.
+      ChatAction::SetAttention { .. } => Ok(()),
       ChatAction::PublishPolicy { .. }
       | ChatAction::PublishRoster { .. }
       | ChatAction::AdminJoinChannel { .. }
@@ -259,6 +293,13 @@ impl Engine {
         )
       },
       maybe_presence_policy: teamcraft_core::workspace::presence_policy(self.store.as_ref()),
+      maybe_backup: teamcraft_core::ui_snapshot::key_backup_state(self.store.as_ref()).unwrap_or_else(
+        |error| {
+          // The app then shows the backup as unknown; the rest of the snapshot still counts.
+          tracing::warn!(%error, "the key backup state is unreadable");
+          None
+        },
+      ),
     })
   }
 }
@@ -286,6 +327,65 @@ fn avatar_location(answer: &str, is_plain_http_allowed: bool) -> Result<(String,
     ));
   }
   Ok((location.download_url, location.size_bytes))
+}
+
+#[cfg(test)]
+mod snapshot_tests {
+  use teamcraft_client_api::model::id_from_raw;
+  use teamcraft_core::clock::ManualClock;
+  use teamcraft_core::store::{MemoryStore, Table};
+  use teamcraft_proto::{UserKind, UserSummary};
+
+  use super::*;
+
+  #[test]
+  fn deactivated_and_deleted_accounts_only_name_their_old_messages() {
+    let store = MemoryStore::new();
+    for summary in [
+      summary(1, "Alex Example", false, false),
+      summary(2, "Sam Doe", false, false),
+      summary(3, "Former Colleague", true, false),
+      summary(4, "Deleted user", true, true),
+    ] {
+      records::put_json(&store, Table::Users, &summary.id.to_string(), &summary).unwrap();
+    }
+    let backend = CoreChatBackend::new(store, id_from_raw(1), Box::new(ManualClock::default()));
+
+    let json = serde_json::to_value(AppSnapshot::read(&backend, SecuritySnapshot::default())).unwrap();
+
+    assert_eq!(
+      json["me"]["id"], "1",
+      "the snapshot's own fields stay at the top level"
+    );
+    assert_eq!(ids(&json["users"]), ["1", "2"]);
+    assert_eq!(ids(&json["former_users"]), ["3", "4"]);
+    assert_eq!(json["former_users"][0]["is_deactivated"], true);
+    assert!(json["former_users"][0].get("is_deleted").is_none());
+    assert_eq!(json["former_users"][1]["is_deleted"], true);
+  }
+
+  fn summary(id: u64, display_name: &str, is_deactivated: bool, is_deleted: bool) -> UserSummary {
+    UserSummary {
+      id: id_from_raw(id),
+      maybe_username: (!is_deleted).then(|| display_name.to_lowercase().replace(' ', ".")),
+      display_name: display_name.into(),
+      kind: UserKind::Member,
+      maybe_email: None,
+      maybe_organization: None,
+      maybe_has_devices: None,
+      is_deactivated,
+      is_deleted,
+    }
+  }
+
+  fn ids(users: &serde_json::Value) -> Vec<&str> {
+    users
+      .as_array()
+      .into_iter()
+      .flatten()
+      .filter_map(|user| user["id"].as_str())
+      .collect()
+  }
 }
 
 #[cfg(test)]

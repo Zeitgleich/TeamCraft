@@ -30,7 +30,7 @@ use teamcraft_core::{ClientSettings, MAX_VIEWER_BYTES};
 use teamcraft_crypto::attachment::decrypt_attachment;
 use teamcraft_crypto::secret::SecretBytes;
 use teamcraft_crypto::share_link::open_fragment;
-use teamcraft_proto::{AttachmentId, ConversationId};
+use teamcraft_proto::{AttachmentId, ConversationId, MessageId};
 
 #[tokio::test]
 async fn text_with_files_arrives_with_thumbnails_and_downloads() {
@@ -365,6 +365,68 @@ async fn a_file_saved_through_the_dialog_goes_to_the_picked_path() {
   std::fs::remove_dir_all(&directory).unwrap();
 }
 
+/// A save target that can't be written (its folder went away, no permission to write there) leaves
+/// the file failed with that reason, not a bare "Transfer failed" (#807).
+#[tokio::test]
+async fn a_save_target_that_cannot_be_written_fails_with_that_reason() {
+  let (_server, mut alice, mut bob, channel) = channel_with_two().await;
+  let (id, received) = one_file_for_bob(&mut alice, &mut bob, channel, b"RIFF").await;
+  let bob_ui = backend_of(&bob);
+  let target = std::env::temp_dir()
+    .join(format!("teamcraft-no-such-folder-{}", std::process::id()))
+    .join("recording.wav");
+
+  let mut downloads = Downloads::new(1);
+  downloads.save_to(channel, id, target.clone());
+  assert!(downloads.start_due(&mut bob.client).await);
+  let finished = downloads.next_finished().await;
+  assert!(Downloads::finish(&mut bob.client, finished));
+
+  let files = bob_ui.message_extras(channel, &[received])[0].files.clone();
+  assert_eq!(
+    files[0].transfer,
+    FileTransfer::Failed {
+      reason: FileFailure::LocalFile
+    }
+  );
+  assert!(!target.exists());
+}
+
+/// While the file storage is down, saving a file says so on its card; "Try again" gets the file
+/// once the storage is back (#807).
+#[tokio::test]
+async fn a_save_while_the_storage_is_down_says_so_and_a_retry_gets_the_file() {
+  let (server, mut alice, mut bob, channel) = channel_with_two().await;
+  let (id, received) = one_file_for_bob(&mut alice, &mut bob, channel, b"RIFF").await;
+  let bob_ui = backend_of(&bob);
+  let directory = std::env::temp_dir().join(format!("teamcraft-storage-down-{}", std::process::id()));
+  std::fs::create_dir_all(&directory).unwrap();
+  let target = directory.join("recording.wav");
+
+  server.set_unavailable(bob.client.user_id(), Duration::from_secs(30));
+  let mut downloads = Downloads::new(1);
+  downloads.save_to(channel, id, target.clone());
+  assert!(downloads.start_due(&mut bob.client).await, "marked as failed");
+  assert!(!downloads.is_running());
+  let files = bob_ui.message_extras(channel, &[received])[0].files.clone();
+  assert_eq!(
+    files[0].transfer,
+    FileTransfer::Failed {
+      reason: FileFailure::StorageUnavailable
+    }
+  );
+
+  server.clear_unavailable(bob.client.user_id());
+  downloads.save_to(channel, id, target.clone());
+  assert!(downloads.start_due(&mut bob.client).await);
+  let finished = downloads.next_finished().await;
+  assert!(Downloads::finish(&mut bob.client, finished));
+  assert_eq!(std::fs::read(&target).unwrap(), b"RIFF");
+  let files = bob_ui.message_extras(channel, &[received])[0].files.clone();
+  assert!(matches!(files[0].transfer, FileTransfer::Local { .. }));
+  std::fs::remove_dir_all(&directory).unwrap();
+}
+
 /// A refused blob upload (a browser's CSP, a proxy) goes into the same announced attachment on every
 /// retry, so unfinished uploads don't pile up into 409 Conflict. Retries back off, stop after the cap
 /// with a visible state, and the user's "Retry" sends the message once the network allows.
@@ -626,6 +688,27 @@ async fn channel_with_two() -> (FakeServer, Peer, Peer, ConversationId) {
     .unwrap();
   settle(&mut [&mut alice, &mut bob]).await;
   (server, alice, bob, channel)
+}
+
+/// Alice sends one audio file; returns its ID and the message as Bob has it.
+async fn one_file_for_bob(
+  alice: &mut Peer,
+  bob: &mut Peer,
+  channel: ConversationId,
+  bytes: &[u8],
+) -> (AttachmentId, MessageId) {
+  let alice_ui = backend_of(alice);
+  alice_ui.send_message(with_files(
+    channel,
+    "",
+    vec![file("recording.wav", "audio/wav", bytes.to_vec())],
+  ));
+  run_commands(alice, &alice_ui).await;
+  settle(&mut [&mut *alice, &mut *bob]).await;
+  let bob_ui = backend_of(bob);
+  let received = last(&bob_ui, channel);
+  let files = bob_ui.message_extras(channel, &[received.id])[0].files.clone();
+  (files[0].file_id.parse().unwrap(), received.id)
 }
 
 fn with_files(conversation: ConversationId, body: &str, files: Vec<OutgoingFile>) -> OutgoingMessage {

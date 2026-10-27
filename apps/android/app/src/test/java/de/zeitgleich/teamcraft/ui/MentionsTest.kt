@@ -20,4 +20,14 @@ class MentionsTest {
     assertEquals(listOf("bob"), Mentions.suggestions("bu", people).map { it.username })
     assertEquals("hello @bob ", Mentions.complete("hello @bo", people[1]))
   }
+
+  @Test
+  fun deactivatedAndDeletedMembersAreNeverSuggested() {
+    val members = people + listOf(
+      User(id = "4", username = "bea", displayName = "Bea Former", isDeactivated = true),
+      User(id = "5", username = "", displayName = "Deleted user", isDeactivated = true, isDeleted = true),
+    )
+    assertEquals(listOf("bob"), Mentions.suggestions("b", members).map { it.username })
+    assertEquals(emptyList<User>(), Mentions.suggestions("deleted", members))
+  }
 }

@@ -13,6 +13,7 @@ use teamcraft_proto::{
 };
 
 use super::access::require;
+use super::admin_join_requests;
 use super::audit::{self, Target as AuditTarget};
 use super::convert::unix_millis;
 use crate::auth::AuthenticatedUser;
@@ -84,9 +85,11 @@ pub async fn append(
   }
 
   let version = request.expected_version + 1;
-  if let Some(document) = maybe_document {
+  let maybe_self_join = maybe_document.map(|document| {
+    let self_join = document.policy.admin_self_join.clone();
     state.policy.set(document.policy);
-  }
+    self_join
+  });
   audit::record(
     state,
     Some(caller.user.id),
@@ -102,6 +105,13 @@ pub async fn append(
     kind: kind.clone(),
     version,
   });
+  // Best effort after the entry is stored and announced: requests left open are moot under the
+  // new policy anyway (clients hide them) and expire.
+  if let Some(self_join) = maybe_self_join
+    && let Err(error) = admin_join_requests::close_all_after_policy_change(state, &self_join).await
+  {
+    tracing::warn!(%error, "could not close the admin join requests after a policy change");
+  }
 
   let entries = state.database.list_workspace_log(&kind, version - 1, 1).await?;
   entries

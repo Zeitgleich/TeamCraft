@@ -62,7 +62,7 @@ impl<S: LocalStore> CoreChatBackend<S> {
       };
       (conversation, reads, self.stored(conversation))
     });
-    build_feed(self.me_id(), conversations)
+    build_feed(self.me_id(), conversations).with_join_requests(self.ui_join_requests())
   }
 
   /// Reads every entry by moving the read positions of their targets: the conversation's for
@@ -617,6 +617,8 @@ mod tests {
       edits: Vec::new(),
       maybe_edit_id: None,
       is_pinned: false,
+      maybe_verified_commit: None,
+      maybe_server_change: None,
     }
   }
 

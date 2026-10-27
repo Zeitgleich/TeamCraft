@@ -145,6 +145,128 @@ async fn a_lost_transfer_frame_fails_on_both_devices() {
   assert!(received.is_err());
 }
 
+/// Issue #415: the wait for the new device's receipt holds the relay, not the client. The apps run it
+/// on a task of their own ([`LinkReceipt::detach`]); these tests run it the same way, on a local
+/// set, while the "loop" goes on with the client. Time is tokio's paused clock: a minute of silence
+/// passes only when nothing else is left to do.
+mod receipt_beside_the_loop {
+  use teamcraft_core::api::fake::FakeRendezvous;
+  use teamcraft_core::client::LinkReceipt;
+  use tokio::task::LocalSet;
+  use tokio::time::Instant;
+
+  use super::*;
+
+  #[tokio::test(start_paused = true)]
+  async fn the_client_keeps_working_while_the_receipt_is_awaited() {
+    let server = FakeServer::new();
+    let mut alice = Peer::enroll(&server, "Alice").await;
+    let channel = alice
+      .client
+      .create_channel(alice.space().await, "general")
+      .await
+      .unwrap();
+    let (laptop_side, receipt) = keys_sent(&mut alice).await;
+    let (waiting, _cancel) = receipt.detach();
+    LocalSet::new()
+      .run_until(async move {
+        let started = Instant::now();
+        let outcome = tokio::task::spawn_local(waiting);
+        tokio::task::yield_now().await;
+        // The loop goes on with the client while the new device has not answered yet.
+        alice.client.send_text(channel, None, "meanwhile").await.unwrap();
+        settle(&mut [&mut alice]).await;
+        assert_eq!(alice.texts(channel), ["meanwhile"]);
+        assert!(!outcome.is_finished(), "no receipt yet");
+
+        // The new device opens the keys and confirms; the wait ends with success at once.
+        let new_store = Arc::new(MemoryStore::new());
+        laptop_side.receive_secrets(&new_store, "Laptop").await.unwrap();
+        outcome.await.unwrap().unwrap();
+        assert_eq!(started.elapsed(), Duration::ZERO, "no timeout was involved");
+      })
+      .await;
+  }
+
+  #[tokio::test(start_paused = true)]
+  async fn a_new_device_that_never_confirms_fails_after_a_minute_and_the_loop_goes_on() {
+    let server = FakeServer::new();
+    let mut alice = Peer::enroll(&server, "Alice").await;
+    let channel = alice
+      .client
+      .create_channel(alice.space().await, "general")
+      .await
+      .unwrap();
+    // The new device keeps its side of the relay open but never reads the keys (it went to sleep).
+    let (silent_laptop, receipt) = keys_sent(&mut alice).await;
+    let (waiting, _cancel) = receipt.detach();
+    LocalSet::new()
+      .run_until(async move {
+        let started = Instant::now();
+        let outcome = tokio::task::spawn_local(waiting);
+        tokio::task::yield_now().await;
+        alice.client.send_text(channel, None, "meanwhile").await.unwrap();
+        assert!(!outcome.is_finished());
+
+        let result = outcome.await.unwrap();
+        assert!(matches!(result, Err(CoreError::LinkNotConfirmed)), "{result:?}");
+        assert_eq!(started.elapsed(), Duration::from_secs(60));
+        // The client is still usable after the failure.
+        alice.client.send_text(channel, None, "after").await.unwrap();
+        drop(silent_laptop);
+      })
+      .await;
+  }
+
+  #[tokio::test(start_paused = true)]
+  async fn cancelling_ends_the_wait_at_once() {
+    let server = FakeServer::new();
+    let mut alice = Peer::enroll(&server, "Alice").await;
+    let (laptop_side, receipt) = keys_sent(&mut alice).await;
+    let (waiting, cancel) = receipt.detach();
+    LocalSet::new()
+      .run_until(async move {
+        let started = Instant::now();
+        let outcome = tokio::task::spawn_local(waiting);
+        tokio::task::yield_now().await;
+
+        // The user closed the dialog.
+        cancel.cancel();
+
+        let result = outcome.await.unwrap();
+        assert!(matches!(result, Err(CoreError::LinkCancelled)), "{result:?}");
+        assert_eq!(started.elapsed(), Duration::ZERO, "no minute of waiting");
+        drop(laptop_side);
+      })
+      .await;
+  }
+
+  #[tokio::test(start_paused = true)]
+  async fn dropping_the_handle_cancels_too() {
+    let server = FakeServer::new();
+    let mut alice = Peer::enroll(&server, "Alice").await;
+    let (laptop_side, receipt) = keys_sent(&mut alice).await;
+    let (waiting, cancel) = receipt.detach();
+    // The app stopped: its handle went with it.
+    drop(cancel);
+    assert!(matches!(waiting.await, Err(CoreError::LinkCancelled)));
+    drop(laptop_side);
+  }
+
+  /// The handshake of a new laptop of `owner`, and the keys sent after the user confirmed the code.
+  async fn keys_sent(owner: &mut Peer) -> (NewDeviceLink<FakeRendezvous>, LinkReceipt<FakeRendezvous>) {
+    let api = owner.api.clone();
+    let offer = LinkOffer::generate();
+    let code = offer.to_code();
+    let (laptop_side, approval) = tokio::join!(
+      NewDeviceLink::connect(&api, &offer),
+      owner.client.start_link_approval(&code)
+    );
+    let receipt = owner.client.send_link_transfer(approval.unwrap()).await.unwrap();
+    (laptop_side.unwrap(), receipt)
+  }
+}
+
 mod announced {
   use super::*;
 

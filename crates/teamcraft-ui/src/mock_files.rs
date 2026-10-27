@@ -1,9 +1,21 @@
-//! Demo pictures and a demo video in `#design`, so the files, albums and the lightbox can be shown
-//! without a server. The bytes are small generated fixtures (`demo-media/`).
+//! Demo pictures, a demo video and text files in `#design`, so the files, albums, the lightbox and
+//! the previews can be shown without a server. The bytes are small generated fixtures
+//! (`demo-media/`), and one large log made when first asked for.
+
+use std::fmt::Write as _;
+use std::sync::LazyLock;
 
 use teamcraft_client_api::actions::{FileInfo, FileTransfer};
 
 use crate::model::{ConversationId, Message};
+
+/// A generated log of this many lines (about 9 MB, below the default preview limit), for the text
+/// viewer's virtualized rows and finding in a large file (#821).
+const LARGE_LOG_LINES: usize = 100_000;
+const LARGE_LOG_ID: &str = "9000013";
+/// The message the large log is attached to, counted from the newest.
+const LARGE_LOG_AT: usize = 9;
+static LARGE_LOG: LazyLock<Vec<u8>> = LazyLock::new(large_log);
 
 /// A file of the demo, its full bytes and its thumbnail.
 struct DemoFile {
@@ -81,8 +93,26 @@ const CLIP: DemoFile = DemoFile {
   maybe_thumbnail: Some(include_bytes!("../demo-media/clip-thumb.png")),
 };
 
+/// A log with levels, terminal colours and a stack trace, for the text viewer (#821). IDs of the
+/// demo files must not start with one another (`demo_bytes`).
+const SERVER_LOG: DemoFile = DemoFile {
+  id: "9000011",
+  name: "server.log",
+  media_type: "text/plain",
+  bytes: include_bytes!("../demo-media/server.log"),
+  maybe_thumbnail: None,
+};
+/// Minified JSON, to format in the text viewer.
+const SETTINGS_JSON: DemoFile = DemoFile {
+  id: "9000012",
+  name: "settings.json",
+  media_type: "application/json",
+  bytes: include_bytes!("../demo-media/settings.json"),
+  maybe_thumbnail: None,
+};
+
 /// Which files go with which message, counted from the newest message of the channel.
-const ATTACHED: [(usize, &[DemoFile]); 8] = [
+const ATTACHED: [(usize, &[DemoFile]); 9] = [
   (0, &[REPORT]),
   (1, &[LAKE, DUNES, PEAKS]),
   (2, &[DIAGRAM]),
@@ -90,6 +120,7 @@ const ATTACHED: [(usize, &[DemoFile]); 8] = [
   (6, &[PHOTO]),
   (3, &[BOUNCE]),
   (5, &[CLIP]),
+  (7, &[SERVER_LOG, SETTINGS_JSON]),
   (8, &[DUNES]),
 ];
 
@@ -121,15 +152,75 @@ pub(super) fn demo_files(conversation: ConversationId, messages: &[Message]) -> 
       maybe_content_sha256: None,
     }));
   }
+  let maybe_large_log_message = messages
+    .len()
+    .checked_sub(LARGE_LOG_AT + 1)
+    .and_then(|index| messages.get(index));
+  if let Some(message) = maybe_large_log_message {
+    files.push(FileInfo {
+      conversation,
+      message: message.id,
+      file_id: format!("{LARGE_LOG_ID}{LARGE_LOG_AT}"),
+      file_name: "large.log".to_owned(),
+      media_type: "text/plain".to_owned(),
+      size_bytes: LARGE_LOG.len() as u64,
+      maybe_thumbnail_png: None,
+      transfer: FileTransfer::Remote,
+      maybe_sender: Some(message.author),
+      maybe_sent_at: Some(message.sent_at),
+      maybe_dimensions: None,
+      maybe_duration_ms: None,
+      maybe_content_sha256: None,
+    });
+  }
   files
 }
 
 /// The full bytes of a demo file, as the lightbox fetches them.
 pub fn demo_bytes(file_id: &str) -> Option<&'static [u8]> {
+  if file_id.starts_with(LARGE_LOG_ID) {
+    return Some(LARGE_LOG.as_slice());
+  }
   [
-    LAKE, DUNES, PEAKS, BOUNCE, CLIP, REPORT, DIAGRAM, LANDSCAPE, PHOTO,
+    LAKE,
+    DUNES,
+    PEAKS,
+    BOUNCE,
+    CLIP,
+    REPORT,
+    DIAGRAM,
+    LANDSCAPE,
+    PHOTO,
+    SERVER_LOG,
+    SETTINGS_JSON,
   ]
   .into_iter()
   .find(|file| file_id.starts_with(file.id))
   .map(|file| file.bytes)
+}
+
+/// The large log: a line per processed item, every seventh an error, and now and then a very long
+/// line (a dumped payload) that the viewer shows in parts.
+fn large_log() -> Vec<u8> {
+  const LEVELS: [&str; 5] = ["INFO", "DEBUG", "INFO", "WARN", "ERROR"];
+  let mut text = String::with_capacity(LARGE_LOG_LINES * 90);
+  for line in 0..LARGE_LOG_LINES {
+    let seconds = line / 10;
+    let level = LEVELS[line % 7 % LEVELS.len()];
+    // Writing to a String can't fail.
+    let _ = writeln!(
+      text,
+      "2026-10-27T{:02}:{:02}:{:02}.{:03}Z {level:>5} app::worker: processed item {line} of batch {} in {} ms",
+      seconds / 3600 % 24,
+      seconds / 60 % 60,
+      seconds % 60,
+      line % 1000,
+      line / 500,
+      line % 97,
+    );
+    if line % 25_000 == 12_345 {
+      let _ = writeln!(text, "payload of item {line}: {}", "abcdefghij".repeat(2_000));
+    }
+  }
+  text.into_bytes()
 }

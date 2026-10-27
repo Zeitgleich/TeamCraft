@@ -1,0 +1,69 @@
+/* Workspace dialogs */
+.check-row { display: flex; align-items: center; gap: .5rem; margin: .5rem 0; }
+.browse-list, .category-list { list-style: none; margin: .5rem 0; padding: 0; }
+.browse-row, .category-row { display: flex; align-items: center; gap: .5rem; padding: .4rem 0; border-bottom: 1px solid var(--border); }
+.browse-text { flex: 1; display: flex; flex-direction: column; min-width: 0; }
+.browse-topic { color: var(--text-muted); font-size: var(--text-xs); letter-spacing: var(--tracking-xs); }
+.inline-form { display: flex; gap: .5rem; }
+.inline-form .input { flex: 1; min-width: 0; }
+
+/* Settings dialogs in sections (channel and space settings) */
+.modal-settings { width: min(720px, calc(100vw - 32px)); }
+.modal-settings .modal-body { min-height: 420px; }
+.settings-subject { margin: 0 0 var(--space-2); }
+.section-tabs { padding: 0; margin: 0 0 var(--space-3); overflow-x: auto; overflow-y: hidden; scrollbar-width: none; }
+.section-panel > h3:first-child { margin-top: 0; }
+/* `.modal form` is `display: contents`; a settings form keeps its own column. */
+.settings-form, .modal form.settings-form { display: flex; flex-direction: column; gap: 6px; margin-bottom: var(--space-3); }
+.settings-form label { font-weight: var(--weight-semibold); font-size: var(--text-sm); }
+.settings-row { display: flex; align-items: center; gap: var(--space-2); margin-bottom: var(--space-2); }
+.settings-member-list { list-style: none; margin: 0; padding: 0; }
+
+/* Channel settings, Integrations (issue #764): label above each field, hints spaced from what
+   follows. */
+.channel-integrations {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.channel-integrations .detail-heading {
+  margin: var(--space-4) 0 0;
+}
+
+.channel-integrations .detail-heading:first-child {
+  margin-top: 0;
+}
+
+.channel-integrations .field {
+  margin: 0;
+}
+
+.channel-integrations .hint {
+  margin: 0 0 var(--space-2);
+  color: var(--text-muted);
+  font-size: var(--text-sm);
+  line-height: 1.45;
+}
+
+.settings-member .member-name { flex: none; }
+.settings-member { display: flex; align-items: center; gap: var(--space-2); padding: 6px 0; border-bottom: 1px solid var(--border); flex-wrap: wrap; }
+/* A bridge source: its name over who added it when (channel settings, Integrations). */
+.source-meta { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.source-meta > span:first-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.source-meta .muted-text { font-size: var(--text-xs); letter-spacing: var(--tracking-xs); }
+.plain-fieldset { border: 0; margin: 0; padding: 0; min-width: 0; display: flex; flex-direction: column; gap: 6px; }
+.plain-fieldset:disabled { opacity: .7; }
+.radio-explained { align-items: flex-start; }
+.radio-explained > span { display: flex; flex-direction: column; gap: 2px; }
+.input-small { width: auto; padding: 2px 8px; font-size: var(--text-sm); }
+.settings-row .grow { flex: 1; min-width: 0; }
+.inline-actions { display: flex; gap: var(--space-2); margin: 6px 0; }
+.switch-row { display: flex; align-items: flex-start; gap: 10px; margin: var(--space-3) 0; cursor: pointer; }
+.switch-row input[role="switch"] { appearance: none; flex: none; width: 34px; height: 20px; margin-top: 2px; border-radius: 10px; background: var(--border-strong); position: relative; }
+.switch-row input[role="switch"]::after { content: ""; position: absolute; top: 2px; left: 2px; width: 16px; height: 16px; border-radius: 50%; background: var(--on-fill); transition: transform var(--dur-fast) var(--ease-standard); }
+.switch-row input[role="switch"]:checked { background: var(--accent); }
+.switch-row input[role="switch"]:checked::after { transform: translateX(14px); }
+@media (prefers-reduced-motion: reduce) { .switch-row input[role="switch"]::after { transition: none; } }
+.switch-text { display: flex; flex-direction: column; gap: 2px; }
+

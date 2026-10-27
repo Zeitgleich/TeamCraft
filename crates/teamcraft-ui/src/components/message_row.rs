@@ -44,6 +44,9 @@ const LONG_PRESS_SLOP_PX: i32 = 10;
 /// The short tick when the action sheet opens, where the device can vibrate (not iOS Safari).
 const LONG_PRESS_HAPTIC_MS: u32 = 10;
 
+/// A line's i18n key and its arguments.
+type LineText = (&'static str, Vec<(&'static str, String)>);
+
 /// One message in the channel feed or in a thread. The caller recreates it when the message changes.
 #[component]
 pub fn MessageRow(
@@ -75,6 +78,9 @@ pub fn MessageRow(
       let author = state.read(|backend| backend.user(message.author));
       system_line(&message, event, author, locale).into_any()
     },
+    // Decided by the kind, not the extras: a backend that loads them later (the desktop app's)
+    // shows the line as soon as they arrive.
+    MessageKind::Change => workspace_text_line(workspace_text(&message)).into_any(),
     MessageKind::User => {
       let is_grouped = is_grouped(&message, maybe_prev.as_ref());
       user_message(message, is_grouped, in_thread, motion).into_any()
@@ -163,33 +169,10 @@ fn system_line(
   let name = maybe_author.map(|user| user.display_name).unwrap_or_default();
   let event = event.clone();
   let time = format_time(message.sent_at, locale);
-  let (conversation, message_id) = (message.conversation, message.id);
-  // Archive, privacy and membership changes come from the core as workspace events.
-  let workspace_text = Memo::new(move |_| {
-    state.read(|backend| {
-      let extras = backend
-        .message_extras(conversation, &[message_id])
-        .into_iter()
-        .find(|extras| extras.message == message_id)?;
-      workspace_event_text(&extras.maybe_workspace_event?, |user| {
-        backend
-          .user(user)
-          .map(|user| user.display_name)
-          .unwrap_or_default()
-      })
-    })
-  });
+  // Membership changes by somebody else come from the core as workspace events too.
+  let workspace_text = workspace_text(message);
   view! {
-    {move || {
-      workspace_text.get().map(|(key, args)| {
-        let args: Vec<(&str, &str)> = args.iter().map(|(name, value)| (*name, value.as_str())).collect();
-        view! {
-          <div class="msg msg-system" tabindex="-1" data-nav="row">
-            <span class="system-text" translate="no">{i18n.t_with(key, &args)}</span>
-          </div>
-        }
-      })
-    }}
+    {workspace_text_line(workspace_text)}
     {move || {
       state
         .settings
@@ -218,6 +201,42 @@ fn system_line(
           }
         })
     }}
+  }
+}
+
+/// The text of `message`'s workspace event (i18n key and arguments), with the names the backend
+/// knows; `None` without one.
+fn workspace_text(message: &Message) -> Memo<Option<LineText>> {
+  let state = use_app_state();
+  let (conversation, message_id) = (message.conversation, message.id);
+  Memo::new(move |_| {
+    state.read(|backend| {
+      let extras = backend
+        .message_extras(conversation, &[message_id])
+        .into_iter()
+        .find(|extras| extras.message == message_id)?;
+      workspace_event_text(&extras.maybe_workspace_event?, |user| {
+        backend
+          .user(user)
+          .map(|user| user.display_name)
+          .unwrap_or_default()
+      })
+    })
+  })
+}
+
+/// The line showing a workspace event's `text`, while there is one.
+fn workspace_text_line(text: Memo<Option<LineText>>) -> impl IntoView + use<> {
+  let i18n = use_i18n();
+  move || {
+    text.get().map(|(key, args)| {
+      let args: Vec<(&str, &str)> = args.iter().map(|(name, value)| (*name, value.as_str())).collect();
+      view! {
+        <div class="msg msg-system" tabindex="-1" data-nav="row">
+          <span class="system-text" translate="no">{i18n.t_with(key, &args)}</span>
+        </div>
+      }
+    })
   }
 }
 
@@ -990,7 +1009,7 @@ fn tick_haptic() {
 fn workspace_event_text(
   event: &WorkspaceEvent,
   name_of: impl Fn(crate::model::UserId) -> String,
-) -> Option<(&'static str, Vec<(&'static str, String)>)> {
+) -> Option<LineText> {
   Some(match event {
     WorkspaceEvent::MemberAdded { user, by, history } => (
       match history {
@@ -1003,20 +1022,72 @@ fn workspace_event_text(
       "ws-member-removed",
       vec![("name", name_of(*user)), ("by", name_of(*by))],
     ),
-    WorkspaceEvent::Archived { by } => ("ws-archived", vec![("by", name_of(*by))]),
-    WorkspaceEvent::Unarchived { by } => ("ws-unarchived", vec![("by", name_of(*by))]),
-    WorkspaceEvent::MadePrivate { by } => ("ws-made-private", vec![("by", name_of(*by))]),
-    WorkspaceEvent::MadePublic { by } => ("ws-made-public", vec![("by", name_of(*by))]),
-    WorkspaceEvent::Pinned { by, .. } => ("ws-pinned", vec![("by", name_of(*by))]),
-    WorkspaceEvent::AdminJoined { user } => ("ws-admin-joined", vec![("name", name_of(*user))]),
-    WorkspaceEvent::Moved { by, space } if space.is_empty() => {
-      ("ws-moved-unnamed", vec![("by", name_of(*by))])
+    // Changes the server reports (issue #818): who made them only when the line names somebody.
+    WorkspaceEvent::Archived { maybe_by } => {
+      by_or_server(*maybe_by, ("ws-archived", "ws-archived-unattributed"), &name_of)
     },
-    WorkspaceEvent::Moved { by, space } => ("ws-moved", vec![("by", name_of(*by)), ("space", space.clone())]),
+    WorkspaceEvent::Unarchived { maybe_by } => by_or_server(
+      *maybe_by,
+      ("ws-unarchived", "ws-unarchived-unattributed"),
+      &name_of,
+    ),
+    WorkspaceEvent::MadePrivate { maybe_by } => by_or_server(
+      *maybe_by,
+      ("ws-made-private", "ws-made-private-unattributed"),
+      &name_of,
+    ),
+    WorkspaceEvent::MadePublic { maybe_by } => by_or_server(
+      *maybe_by,
+      ("ws-made-public", "ws-made-public-unattributed"),
+      &name_of,
+    ),
+    WorkspaceEvent::Pinned { by, .. } => ("ws-pinned", vec![("by", name_of(*by))]),
+    WorkspaceEvent::AdminJoined {
+      user,
+      maybe_approved_by: Some(by),
+      ..
+    } => (
+      "ws-admin-joined-approved",
+      vec![("name", name_of(*user)), ("by", name_of(*by))],
+    ),
+    WorkspaceEvent::AdminJoined {
+      user,
+      maybe_added_by: Some(by),
+      ..
+    } => (
+      "ws-admin-joined-added",
+      vec![("name", name_of(*user)), ("by", name_of(*by))],
+    ),
+    WorkspaceEvent::AdminJoined { user, .. } => ("ws-admin-joined", vec![("name", name_of(*user))]),
+    WorkspaceEvent::Moved { maybe_by, space } if space.is_empty() => by_or_server(
+      *maybe_by,
+      ("ws-moved-unnamed", "ws-moved-unnamed-unattributed"),
+      &name_of,
+    ),
+    WorkspaceEvent::Moved { maybe_by, space } => {
+      let (key, mut args) = by_or_server(*maybe_by, ("ws-moved", "ws-moved-unattributed"), &name_of);
+      args.push(("space", space.clone()));
+      (key, args)
+    },
     WorkspaceEvent::Unknown => return None,
   })
 }
 
+/// A change's line: the first of `keys` with who made it when somebody is named (`maybe_by`), else
+/// the second, its wording as the server's statement ("This channel was archived", issue #818).
+fn by_or_server(
+  maybe_by: Option<crate::model::UserId>,
+  (named, unattributed): (&'static str, &'static str),
+  name_of: &impl Fn(crate::model::UserId) -> String,
+) -> LineText {
+  match maybe_by {
+    Some(by) => (named, vec![("by", name_of(by))]),
+    None => (unattributed, Vec::new()),
+  }
+}
+
+/// Whether `message` goes under the header of the one before: only a message people wrote has
+/// one (not a line of a change, [`MessageKind::Change`]).
 fn is_grouped(message: &Message, maybe_prev: Option<&Message>) -> bool {
   let Some(prev) = maybe_prev else { return false };
   matches!(prev.kind, MessageKind::User)
@@ -1045,6 +1116,64 @@ mod tests {
     assert!(!is_grouped(&message(3, 2, 60_000), Some(&first)));
     assert!(!is_grouped(&message(4, 1, GROUP_WINDOW_MS), Some(&first)));
     assert!(!is_grouped(&first, None));
+  }
+
+  /// The line of a change (archived, an admin who joined) has no header to go under; a message
+  /// without text (a deleted one) still has one.
+  #[test]
+  fn nothing_is_grouped_under_the_line_of_a_change() {
+    let line = Message {
+      kind: MessageKind::Change,
+      body: String::new(),
+      ..message(1, 1, 0)
+    };
+    assert!(!is_grouped(&message(2, 1, 60_000), Some(&line)));
+    let without_text = Message {
+      body: String::new(),
+      ..message(3, 1, 0)
+    };
+    assert!(is_grouped(&message(4, 1, 60_000), Some(&without_text)));
+  }
+
+  /// Review of #815 (M1): the desktop app's backend answers extras later than the message. The row
+  /// of a change is a line by its kind, and reads its text once the extras arrive.
+  #[test]
+  fn a_change_reads_its_line_once_the_extras_arrive() {
+    use std::rc::Rc;
+
+    use crate::backend::Backend;
+    use crate::mock::MockBackend;
+    use crate::settings::Settings;
+    use crate::state::AppState;
+
+    let mock = Rc::new(MockBackend::new(0));
+    let backend: Rc<dyn Backend> = mock.clone();
+    let state = AppState::new(backend, Settings::for_tests(), None);
+    let owner = Owner::new();
+    owner.with(|| {
+      provide_context(state);
+      let change = Message {
+        kind: MessageKind::Change,
+        body: String::new(),
+        ..message(77_001, 1, 0)
+      };
+      let text = workspace_text(&change);
+      assert_eq!(text.get_untracked(), None, "no extras yet");
+
+      mock.set_workspace_event(
+        change.id,
+        WorkspaceEvent::AdminJoined {
+          user: id_from_raw::<UserId>(2),
+          maybe_approved_by: None,
+          maybe_added_by: Some(id_from_raw::<UserId>(1)),
+        },
+      );
+      state.backend_changed();
+      assert_eq!(
+        text.get_untracked().map(|(key, _)| key),
+        Some("ws-admin-joined-added")
+      );
+    });
   }
 
   #[test]
@@ -1079,6 +1208,107 @@ mod tests {
       ))
     );
     assert_eq!(workspace_event_text(&WorkspaceEvent::Unknown, name_of), None);
+    let approved = WorkspaceEvent::AdminJoined {
+      user,
+      maybe_approved_by: Some(by),
+      maybe_added_by: None,
+    };
+    assert_eq!(
+      workspace_event_text(&approved, name_of),
+      Some((
+        "ws-admin-joined-approved",
+        vec![("name", "Sam".to_owned()), ("by", "Ada".to_owned())]
+      ))
+    );
+    // Review of #815 (L2): no "approved" where nobody asked.
+    let added = WorkspaceEvent::AdminJoined {
+      user,
+      maybe_approved_by: None,
+      maybe_added_by: Some(by),
+    };
+    assert_eq!(
+      workspace_event_text(&added, name_of),
+      Some((
+        "ws-admin-joined-added",
+        vec![("name", "Sam".to_owned()), ("by", "Ada".to_owned())]
+      ))
+    );
+    let own = WorkspaceEvent::AdminJoined {
+      user,
+      maybe_approved_by: None,
+      maybe_added_by: None,
+    };
+    assert_eq!(
+      workspace_event_text(&own, name_of),
+      Some(("ws-admin-joined", vec![("name", "Sam".to_owned())]))
+    );
+  }
+
+  /// Issue #818: a change the server reports names who made it only when the line does; else it
+  /// is worded as the server's statement, with no name at all.
+  #[test]
+  fn server_changes_name_nobody_unless_the_line_does() {
+    let by = id_from_raw::<UserId>(1);
+    let name_of = |_: UserId| "Ada".to_owned();
+    let cases = [
+      (
+        WorkspaceEvent::Archived { maybe_by: None },
+        "ws-archived-unattributed",
+      ),
+      (
+        WorkspaceEvent::Unarchived { maybe_by: None },
+        "ws-unarchived-unattributed",
+      ),
+      (
+        WorkspaceEvent::MadePrivate { maybe_by: None },
+        "ws-made-private-unattributed",
+      ),
+      (
+        WorkspaceEvent::MadePublic { maybe_by: None },
+        "ws-made-public-unattributed",
+      ),
+      (
+        WorkspaceEvent::Moved {
+          maybe_by: None,
+          space: String::new(),
+        },
+        "ws-moved-unnamed-unattributed",
+      ),
+    ];
+    for (event, key) in cases {
+      assert_eq!(
+        workspace_event_text(&event, name_of),
+        Some((key, Vec::new())),
+        "{event:?}"
+      );
+    }
+    assert_eq!(
+      workspace_event_text(
+        &WorkspaceEvent::Moved {
+          maybe_by: None,
+          space: "Project B".into()
+        },
+        name_of
+      ),
+      Some(("ws-moved-unattributed", vec![("space", "Project B".to_owned())]))
+    );
+    assert_eq!(
+      workspace_event_text(&WorkspaceEvent::Archived { maybe_by: Some(by) }, name_of),
+      Some(("ws-archived", vec![("by", "Ada".to_owned())]))
+    );
+    assert_eq!(
+      workspace_event_text(
+        &WorkspaceEvent::Moved {
+          maybe_by: Some(by),
+          space: "Project B".into()
+        },
+        name_of
+      ),
+      Some((
+        "ws-moved",
+        vec![("by", "Ada".to_owned()), ("space", "Project B".to_owned())]
+      ))
+    );
   }
 
   fn message(id: u64, author: u64, sent_at: i64) -> Message {
@@ -1088,7 +1318,7 @@ mod tests {
       author: id_from_raw::<UserId>(author),
       kind: MessageKind::User,
       sent_at,
-      body: String::new(),
+      body: format!("message {id}"),
       is_edited: false,
       reactions: Vec::new(),
       reply_count: 0,

@@ -22,10 +22,11 @@ use teamcraft_client_api::call_view::CallSignal;
 use teamcraft_client_api::calls::CallsUnavailableReason;
 use teamcraft_client_api::failure::ActionFailure;
 use teamcraft_client_api::page_calls::{
-  EXPORT_ACT, EXPORT_CAMERA_VIEW, EXPORT_NETWORK_CHANGED, EXPORT_RING, EXPORT_SIGNAL, EXPORT_START,
-  EXPORT_STOP, EXPORT_UNWATCH_VIDEO, EXPORT_WATCH_VIDEO, MODULE_META, PreparedCall, WORKLET_META,
+  EXPORT_ACT, EXPORT_CAMERA_VIEW, EXPORT_NETWORK_CHANGED, EXPORT_PREVIEW_LEVEL, EXPORT_RING, EXPORT_SIGNAL,
+  EXPORT_START, EXPORT_STOP, EXPORT_UNWATCH_VIDEO, EXPORT_WATCH_VIDEO, MODULE_META, PreparedCall,
+  WORKLET_META,
 };
-use teamcraft_client_api::remote::{CallAction, CallSnapshot};
+use teamcraft_client_api::remote::{CallAction, CallActionAnswer, CallSnapshot};
 use teamcraft_core::CallKeySigner;
 use teamcraft_crypto::call_binding::{CallBindingError, CallId as CryptoCallId, SignedCallKeyBinding};
 use teamcraft_media::call_auth::{CallBindingSigner, CallKeyAuthenticator, DeviceCallKeyAuthenticator};
@@ -177,6 +178,15 @@ pub fn camera_view() -> Option<Element> {
     .and_then(|video| video.dyn_into().ok())
 }
 
+/// The microphone's level in the pre-join check (#442), from 0.0 to 1.0; 0.0 without one.
+pub fn preview_level() -> f32 {
+  current()
+    .and_then(|host| host.loaded_module())
+    .and_then(|module| module.call_sync(EXPORT_PREVIEW_LEVEL, &[]))
+    .and_then(|level| level.as_f64())
+    .map_or(0.0, |level| level as f32)
+}
+
 fn current() -> Option<Rc<WebCallHost>> {
   HOST.with(|host| host.borrow().upgrade())
 }
@@ -211,14 +221,15 @@ impl WebCallHost {
     *self.maybe_on_change.borrow_mut() = Some(on_change);
   }
 
-  /// Carries out one of the user's call actions; a failure comes back as `ActionFailure` wire text.
-  pub async fn act(self: &Rc<Self>, action: CallAction) -> Result<(), String> {
+  /// Carries out one of the user's call actions; a failure comes back as `ActionFailure` wire text,
+  /// and so does a part of it that failed without undoing it (the answer).
+  pub async fn act(self: &Rc<Self>, action: CallAction) -> Result<CallActionAnswer, String> {
     let module = self.module().await?;
     let json = serde_json::to_string(&action).map_err(|error| error.to_string())?;
     module
       .call(EXPORT_ACT, &[JsValue::from_str(&json)])
       .await
-      .map(|_| ())
+      .map(|answer| answer.as_string())
       .map_err(|failure| failure.to_wire())
   }
 

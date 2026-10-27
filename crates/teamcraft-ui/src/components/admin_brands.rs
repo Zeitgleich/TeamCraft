@@ -269,6 +269,13 @@ fn BrandEditor(
   let text_en = bind(draft, show_errors, "text_en", |d| &d.text_en, |d| &mut d.text_en);
   let text_de = bind(draft, show_errors, "text_de", |d| &d.text_de, |d| &mut d.text_de);
   let support = bind(draft, show_errors, "support", |d| &d.support, |d| &mut d.support);
+  let documentation = bind(
+    draft,
+    show_errors,
+    "documentation",
+    |d| &d.documentation,
+    |d| &mut d.documentation,
+  );
   let privacy = bind(draft, show_errors, "privacy", |d| &d.privacy, |d| &mut d.privacy);
   let terms = bind(draft, show_errors, "terms", |d| &d.terms, |d| &mut d.terms);
   let imprint = bind(draft, show_errors, "imprint", |d| &d.imprint, |d| &mut d.imprint);
@@ -425,6 +432,7 @@ fn BrandEditor(
       <fieldset class="policy-group" prop:disabled=is_read_only>
         <legend>{move || i18n.t("admin-brands-links")}</legend>
         <LinkField id="brand-link-support" label="admin-brands-link-support" bound=support />
+        <LinkField id="brand-link-documentation" label="admin-brands-link-documentation" bound=documentation />
         <LinkField id="brand-link-privacy" label="admin-brands-link-privacy" bound=privacy />
         <LinkField id="brand-link-terms" label="admin-brands-link-terms" bound=terms />
         <LinkField id="brand-link-imprint" label="admin-brands-link-imprint" bound=imprint />
@@ -869,6 +877,7 @@ struct BrandDraft {
   other_titles: BTreeMap<String, String>,
   other_texts: BTreeMap<String, String>,
   support: String,
+  documentation: String,
   privacy: String,
   terms: String,
   imprint: String,
@@ -910,6 +919,7 @@ impl BrandDraft {
       other_titles,
       other_texts,
       support: optional(&settings.links.maybe_support),
+      documentation: optional(&settings.links.maybe_documentation),
       privacy: optional(&settings.links.maybe_privacy),
       terms: optional(&settings.links.maybe_terms),
       imprint: optional(&settings.links.maybe_imprint),
@@ -939,6 +949,7 @@ impl BrandDraft {
       login_text: join_languages(&self.text_en, &self.text_de, &self.other_texts),
       links: BrandLinks {
         maybe_support: optional(&self.support),
+        maybe_documentation: optional(&self.documentation),
         maybe_privacy: optional(&self.privacy),
         maybe_terms: optional(&self.terms),
         maybe_imprint: optional(&self.imprint),
@@ -1010,6 +1021,7 @@ impl Validated for BrandDraft {
     }
     for (field, link) in [
       ("support", &self.support),
+      ("documentation", &self.documentation),
       ("privacy", &self.privacy),
       ("terms", &self.terms),
       ("imprint", &self.imprint),
@@ -1445,6 +1457,7 @@ mod tests {
       "admin-brands-text-de",
       "admin-brands-links",
       "admin-brands-link-support",
+      "admin-brands-link-documentation",
       "admin-brands-link-privacy",
       "admin-brands-link-terms",
       "admin-brands-link-imprint",

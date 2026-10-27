@@ -1,0 +1,152 @@
+/* Activity (#752): its list is a sidebar like a space's, on the sidebar's dark material. Each entry
+   says what happened and where in two lines, the start of the message below, the time last; the
+   one open beside it is marked like the current channel. Call history and last seen below. */
+.activity-home,
+.calls-view {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.activity-home {
+  justify-content: center;
+}
+
+.activity-list,
+.calls-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.activity-list {
+  padding: 0 var(--space-2);
+}
+
+.activity-item {
+  position: relative;
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  width: 100%;
+  margin: 1px 0;
+  padding: 8px 8px 8px 8px;
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--sb-muted);
+  text-align: left;
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .activity-item:hover {
+    background: var(--sb-hover);
+    color: var(--chrome-strong);
+  }
+}
+
+.activity-item.unread {
+  color: var(--chrome-strong);
+}
+
+.activity-item.current {
+  background: var(--sb-current);
+  color: var(--on-fill);
+}
+
+.activity-avatar {
+  flex: none;
+  padding-top: 1px;
+}
+
+.activity-body {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.activity-summary {
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  overflow-wrap: anywhere;
+  font-size: var(--text-sm);
+  line-height: 1.3;
+}
+
+.activity-item.unread .activity-summary {
+  font-weight: var(--weight-semibold);
+}
+
+.activity-excerpt {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--sb-muted);
+  font-size: var(--text-xs);
+  letter-spacing: var(--tracking-xs);
+}
+
+/* A thread's first message as rich text, kept to one line. */
+.activity-excerpt .md-p {
+  display: inline;
+  margin: 0;
+}
+
+.activity-item.current .activity-excerpt,
+.activity-item.current .activity-time {
+  color: color-mix(in srgb, var(--on-fill) 80%, transparent);
+}
+
+.activity-time {
+  color: var(--sb-muted);
+  font-size: var(--text-xs);
+  letter-spacing: var(--tracking-xs);
+  font-variant-numeric: tabular-nums;
+}
+
+.activity-item .unread-dot {
+  flex: none;
+  margin-top: 6px;
+  background: var(--accent);
+}
+
+.activity-item .unread-dot.mention {
+  background: var(--badge-bg);
+}
+
+/* The filters' row: the kinds, a thin rule, then "Unread" on its own. */
+.home-chips-divider {
+  flex: none;
+  width: 1px;
+  margin: 4px 2px;
+  background: rgba(255, 255, 255, 0.14);
+}
+
+/* The empty state sits in the dark sidebar: the shared card, in the sidebar's colours. */
+.activity-empty {
+  padding: var(--space-6) var(--space-3);
+  color: var(--sb-muted);
+}
+
+.activity-empty .empty-title {
+  color: var(--chrome-strong);
+}
+
+.activity-empty .empty-body {
+  color: var(--sb-muted);
+}
+
+.call-detail,
+.last-seen {
+  color: var(--text-muted);
+  font-size: var(--text-xs);
+  letter-spacing: var(--tracking-xs);
+}
+

@@ -23,6 +23,7 @@ import androidx.fragment.app.FragmentActivity
 import java.time.Duration
 import java.time.Instant
 import de.zeitgleich.teamcraft.R
+import de.zeitgleich.teamcraft.TeamCraftApplication
 import de.zeitgleich.teamcraft.notifications.LaunchToken
 import de.zeitgleich.teamcraft.security.AppLockPrefs
 import de.zeitgleich.teamcraft.security.AppLockState
@@ -32,6 +33,7 @@ import de.zeitgleich.teamcraft.ui.screens.LoadingMarkOverlay
 import de.zeitgleich.teamcraft.ui.screens.LockScreen
 import de.zeitgleich.teamcraft.ui.screens.SplashHandoff
 import de.zeitgleich.teamcraft.ui.theme.TeamCraftTheme
+import uniffi.teamcraft_ffi.AppActivity
 
 /** The system splash's assembly ends here (scripts/brand/mark_parts.py); the mark rests from then. */
 private const val SPLASH_END_MS = 1040L
@@ -144,6 +146,12 @@ class MainActivity : FragmentActivity() {
     super.onStop()
     // Not while only a configuration change (rotation) stops the activity.
     if (!isChangingConfigurations) lockState.onBackground()
+  }
+
+  /** Every touch and key press counts for presence; the core reports it at most every 30 s (#472). */
+  override fun onUserInteraction() {
+    super.onUserInteraction()
+    TeamCraftApplication.graph(this).core.reportActivity(AppActivity.INTERACTION)
   }
 
   override fun onNewIntent(intent: Intent) {

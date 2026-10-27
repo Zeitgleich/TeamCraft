@@ -17,7 +17,9 @@ use tokio::task::JoinHandle;
 use tracing::{info, warn};
 
 use crate::config::BridgeConfig;
+use crate::file_hooks::FileSettings;
 use crate::http::{HttpState, Submission, router};
+use crate::idempotency::IdempotencyStore;
 use crate::sources::SourceRegistry;
 use crate::worker::{AppSourceSettings, Worker, WorkerSettings};
 
@@ -57,7 +59,7 @@ pub async fn enroll_or_open<A: ServerApi, S: LocalStore>(
         api,
         store,
         Box::new(SystemClock),
-        ClientSettings::default(),
+        client_settings(config),
         options,
       )
       .await
@@ -65,8 +67,18 @@ pub async fn enroll_or_open<A: ServerApi, S: LocalStore>(
     info!(user_id = %client.user_id(), device_id = %client.device_id(), "enrolled");
     return Ok(client);
   }
-  Client::open(api, store, Box::new(SystemClock), ClientSettings::default())?
+  Client::open(api, store, Box::new(SystemClock), client_settings(config))?
     .context("the local database has an account but it could not be opened")
+}
+
+/// The core's defaults, with the bridge's file size limit. The bridge makes the thumbnails of
+/// pictures itself, off its loop and within its own limits (`file_hooks.rs`).
+fn client_settings(config: &BridgeConfig) -> ClientSettings {
+  ClientSettings {
+    max_upload_bytes: config.files.max_file_bytes,
+    makes_thumbnails: false,
+    ..ClientSettings::default()
+  }
 }
 
 /// The running endpoints.
@@ -75,6 +87,10 @@ pub struct Endpoints {
   stop: watch::Sender<bool>,
   tasks: Vec<JoinHandle<()>>,
 }
+
+/// Tells a worker started with [`Worker::run_until`] to stop.
+#[derive(Clone)]
+pub struct WorkerStop(watch::Sender<bool>);
 
 impl Endpoints {
   /// Stops accepting requests and waits for the ones in flight.
@@ -86,14 +102,64 @@ impl Endpoints {
   }
 }
 
+impl WorkerStop {
+  /// The handle and the future a worker stops on.
+  pub fn new() -> (Self, impl std::future::Future<Output = ()>) {
+    let (sender, mut receiver) = watch::channel(false);
+    let stopped = async move {
+      // A dropped handle never stops the worker; only `stop` does.
+      if receiver.wait_for(|stop| *stop).await.is_err() {
+        std::future::pending::<()>().await;
+      }
+    };
+    (Self(sender), stopped)
+  }
+
+  pub fn stop(&self) {
+    let _ = self.0.send(true);
+  }
+}
+
+/// Stops the endpoints and lets the requests in flight finish, the worker still running (a request
+/// with files waits for its answer), but for no longer than `drain_timeout`: then the worker stops
+/// anyway, so a producer that stalls can't hold the bridge up.
+pub async fn shut_down(endpoints: Endpoints, worker: &WorkerStop, drain_timeout: Duration) {
+  if tokio::time::timeout(drain_timeout, endpoints.shutdown())
+    .await
+    .is_err()
+  {
+    warn!(
+      ?drain_timeout,
+      "requests still running after the drain timeout; stopping without them"
+    );
+  }
+  // Once the endpoints are gone so are the worker's senders and it finishes by itself; this is for
+  // when they aren't.
+  worker.stop();
+}
+
 /// Binds every configured address and serves the endpoints on them. Failing to bind an IPv6 address
-/// is tolerated if another one worked (hosts without IPv6).
+/// is tolerated if another one worked (hosts without IPv6). Files an earlier run left in the spool
+/// directory are deleted first.
 pub async fn start_endpoints(
   config: &BridgeConfig,
   sources: SourceRegistry,
   sender: mpsc::Sender<Submission>,
 ) -> anyhow::Result<Endpoints> {
-  let state = HttpState::new(sources, sender);
+  let files = FileSettings::from_config(config);
+  // A spool others can read would expose the files; refuse to start rather than serve with it.
+  let swept = files
+    .spool
+    .prepare()
+    .with_context(|| format!("preparing the spool directory {}", config.spool_dir().display()))?;
+  if swept > 0 {
+    info!(
+      count = swept,
+      "deleted files an earlier run left in the spool directory"
+    );
+  }
+  let keys = IdempotencyStore::new(&config.idempotency);
+  let state = HttpState::new(sources, sender, files, keys);
   let (stop, stopped) = watch::channel(false);
   let mut listeners: Vec<TcpListener> = Vec::new();
   for addr in &config.listen.addrs {
@@ -131,6 +197,7 @@ pub fn worker_settings(config: &BridgeConfig) -> WorkerSettings {
     maybe_app_sources: config.app_sources.is_enabled.then_some(AppSourceSettings {
       history_pages: config.app_sources.history_pages,
     }),
+    max_file_messages: usize::try_from(config.files.max_concurrent_requests).unwrap_or(usize::MAX),
   }
 }
 
@@ -154,14 +221,15 @@ where
     "listening for webhooks and logs"
   );
   let worker = Worker::new(client, sources, receiver, worker_settings(config));
-  let work = worker.run();
+  let (stop, stopped) = WorkerStop::new();
+  let work = worker.run_until(stopped);
   tokio::pin!(work);
   tokio::select! {
     client = &mut work => return Ok(client),
     () = shutdown => {},
   }
   info!("shutting down");
-  endpoints.shutdown().await;
-  // All senders are gone now, so the worker drains its queue and finishes.
-  Ok(work.await)
+  let drain_timeout = Duration::from_secs(config.listen.drain_timeout_secs);
+  let ((), client) = tokio::join!(shut_down(endpoints, &stop, drain_timeout), work);
+  Ok(client)
 }

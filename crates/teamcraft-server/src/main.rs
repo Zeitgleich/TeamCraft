@@ -44,8 +44,8 @@ use teamcraft_server::services::permission_scheme::{self, SchemeStore};
 use teamcraft_server::services::presence::{self, refresh_presence};
 use teamcraft_server::services::session::{self, PolicyHolder};
 use teamcraft_server::services::{
-  admin, attachments, backgrounds, brands, calendar_settings, email_digest, guests, key_packages,
-  mail_settings, meeting_guests, oidc, retention, runtime_settings, urgent,
+  admin, admin_join_requests, attachments, backgrounds, brands, calendar_settings, email_digest, guests,
+  key_packages, mail_settings, meeting_guests, oidc, retention, runtime_settings, urgent,
 };
 use teamcraft_server::state::{
   AppState, MeetingMailConfig, OidcSyncSettings, PushSettings, PushTtls, RetryPolicy, Settings,
@@ -599,6 +599,11 @@ fn spawn_account_housekeeping(state: AppState) {
         Ok(0) => {},
         Ok(removed) => info!(removed, "removed long-deactivated users from all chats"),
         Err(error) => warn!(%error, "removing deactivated users from chats failed"),
+      }
+      match admin_join_requests::sweep_expired(&state).await {
+        Ok(0) => {},
+        Ok(closed) => info!(closed, "closed expired admin join requests"),
+        Err(error) => warn!(%error, "closing expired admin join requests failed"),
       }
       match admin::prune_deleted_conversations(&state, now).await {
         Ok(0) => {},

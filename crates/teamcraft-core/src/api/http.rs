@@ -22,6 +22,7 @@ use teamcraft_proto::{
   RegisterDeviceRequest, SearchUsersResponse, SendMessageRequest, SpaceId, SpaceMemberResponse,
   UpdateSpaceMemberRequest, UploadIdentityKeyRequest, UploadKeyPackagesRequest, UserId, UserSummary,
 };
+use teamcraft_proto::{AdminJoinRequestResponse, ListAdminJoinRequestsResponse};
 use teamcraft_proto::{
   AppendWorkspaceLogRequest, ListWorkspaceLogQuery, ListWorkspaceLogResponse, WorkspaceLogEntryResponse,
   WorkspaceLogKind,
@@ -55,6 +56,7 @@ use teamcraft_proto::{
 };
 use teamcraft_proto::{ListThreadsQuery, ListThreadsResponse, MessageId, SyncHeadsResponse, UnreadResponse};
 use teamcraft_proto::{NotificationSettings, TestPushResponse};
+use teamcraft_proto::{PushHealthResponse, UpdateDeviceRequest};
 use teamcraft_proto::{SetPresenceRequest, SetReadPositionRequest, UpdateConversationMemberRequest};
 
 #[cfg(target_arch = "wasm32")]
@@ -301,6 +303,16 @@ impl<T: AccessTokenSource> ServerApi for HttpServerApi<T> {
     self.get(&format!("/users/{user}/devices")).await
   }
 
+  async fn update_device(
+    &self,
+    device: DeviceId,
+    request: &UpdateDeviceRequest,
+  ) -> Result<DeviceResponse, ApiError> {
+    self
+      .send_json(Method::PATCH, &format!("/devices/{device}"), request)
+      .await
+  }
+
   async fn put_identity_key(
     &self,
     request: &UploadIdentityKeyRequest,
@@ -357,6 +369,52 @@ impl<T: AccessTokenSource> ServerApi for HttpServerApi<T> {
   async fn withdraw_device_link(&self, request_id: &str) -> Result<(), ApiError> {
     self
       .send_without_response::<()>(Method::DELETE, &format!("/device-links/{request_id}"), None)
+      .await
+  }
+
+  async fn admin_join_requests(&self) -> Result<Vec<AdminJoinRequestResponse>, ApiError> {
+    Ok(
+      self
+        .get::<ListAdminJoinRequestsResponse>("/admin-join-requests")
+        .await?
+        .requests,
+    )
+  }
+
+  async fn request_admin_join(
+    &self,
+    conversation: ConversationId,
+  ) -> Result<AdminJoinRequestResponse, ApiError> {
+    self
+      .send_json(
+        Method::POST,
+        &format!("/conversations/{conversation}/admin-join-requests"),
+        &serde_json::json!({}),
+      )
+      .await
+  }
+
+  async fn approve_admin_join(
+    &self,
+    conversation: ConversationId,
+    user: UserId,
+  ) -> Result<ConversationMemberResponse, ApiError> {
+    self
+      .send_json(
+        Method::POST,
+        &format!("/conversations/{conversation}/admin-join-requests/{user}/approve"),
+        &serde_json::json!({}),
+      )
+      .await
+  }
+
+  async fn close_admin_join(&self, conversation: ConversationId, user: UserId) -> Result<(), ApiError> {
+    self
+      .send_without_response::<()>(
+        Method::DELETE,
+        &format!("/conversations/{conversation}/admin-join-requests/{user}"),
+        None,
+      )
       .await
   }
 
@@ -908,6 +966,15 @@ impl<T: AccessTokenSource> ServerApi for HttpServerApi<T> {
     self.get("/sync/heads").await
   }
 
+  async fn read_receipts(
+    &self,
+    conversation: ConversationId,
+  ) -> Result<teamcraft_proto::ReadReceiptsResponse, ApiError> {
+    self
+      .get(&format!("/conversations/{conversation}/read-receipts"))
+      .await
+  }
+
   async fn key_bag(&self) -> Result<KeyBagResponse, ApiError> {
     self.get("/me/key-bag").await
   }
@@ -934,6 +1001,29 @@ impl<T: AccessTokenSource> ServerApi for HttpServerApi<T> {
     self
       .send_json(Method::POST, workspace_log_path(kind, true), request)
       .await
+  }
+
+  async fn list_channel_role_log(
+    &self,
+    conversation: ConversationId,
+    query: &teamcraft_proto::ListChannelRoleLogQuery,
+  ) -> Result<teamcraft_proto::ListChannelRoleLogResponse, ApiError> {
+    let parameters = query_string(&[
+      ("after", query.maybe_after.map(|version| version.to_string())),
+      ("limit", query.maybe_limit.map(|limit| limit.to_string())),
+    ]);
+    self
+      .get(&format!("/conversations/{conversation}/role-log{parameters}"))
+      .await
+  }
+
+  async fn append_channel_role_log(
+    &self,
+    conversation: ConversationId,
+    request: &teamcraft_proto::AppendChannelRoleLogRequest,
+  ) -> Result<teamcraft_proto::ChannelRoleLogEntryResponse, ApiError> {
+    let path = format!("/conversations/{conversation}/role-log");
+    self.send_json(Method::POST, &path, request).await
   }
 
   async fn create_attachment(
@@ -1118,11 +1208,7 @@ impl<T: AccessTokenSource> ServerApi for HttpServerApi<T> {
         return Err(ApiError::BlobTooLarge { max_bytes });
       }
       let mut blob = Vec::new();
-      while let Some(chunk) = response
-        .chunk()
-        .await
-        .map_err(|error| ApiError::Network(error.to_string()))?
-      {
+      while let Some(chunk) = response.chunk().await.map_err(network_error)? {
         if blob.len() as u64 + chunk.len() as u64 > max_bytes {
           return Err(ApiError::BlobTooLarge { max_bytes });
         }
@@ -1150,7 +1236,7 @@ impl<T: AccessTokenSource> ServerApi for HttpServerApi<T> {
       .bytes()
       .await
       .map(|bytes| bytes.to_vec())
-      .map_err(|error| ApiError::Network(error.to_string()))
+      .map_err(network_error)
   }
 
   async fn get_blob_capped(&self, url: &str, max_bytes: u64) -> Result<Vec<u8>, ApiError> {
@@ -1199,6 +1285,10 @@ impl<T: AccessTokenSource> ServerApi for HttpServerApi<T> {
         &serde_json::json!({}),
       )
       .await
+  }
+
+  async fn my_push_health(&self) -> Result<PushHealthResponse, ApiError> {
+    self.get("/me/push-health").await
   }
 
   async fn notification_settings(&self) -> Result<NotificationSettings, ApiError> {
@@ -1272,7 +1362,7 @@ fn gateway_base(gateway_url: &str) -> Result<String, ApiError> {
 }
 
 /// `None` if `base_url` may carry tokens: `https://`, or `http://` to a loopback address.
-fn insecure_reason(base_url: &str) -> Option<String> {
+pub(super) fn insecure_reason(base_url: &str) -> Option<String> {
   let Ok(url) = url::Url::parse(base_url) else {
     return Some(format!("{base_url:?} is not a URL"));
   };
@@ -1313,11 +1403,7 @@ impl fmt::Debug for StaticToken {
 #[cfg(not(target_arch = "wasm32"))]
 async fn read_capped(mut response: reqwest::Response, max_bytes: u64) -> Result<Vec<u8>, ApiError> {
   let mut blob = Vec::new();
-  while let Some(chunk) = response
-    .chunk()
-    .await
-    .map_err(|error| ApiError::Network(error.to_string()))?
-  {
+  while let Some(chunk) = response.chunk().await.map_err(network_error)? {
     if blob.len() as u64 + chunk.len() as u64 > max_bytes {
       return Err(ApiError::BlobTooLarge { max_bytes });
     }
@@ -1382,10 +1468,7 @@ async fn watch_progress<T>(
 /// Content-Length check before it already refuses announced oversized bodies.
 #[cfg(target_arch = "wasm32")]
 async fn read_capped(response: reqwest::Response, max_bytes: u64) -> Result<Vec<u8>, ApiError> {
-  let blob = response
-    .bytes()
-    .await
-    .map_err(|error| ApiError::Network(error.to_string()))?;
+  let blob = response.bytes().await.map_err(network_error)?;
   if blob.len() as u64 > max_bytes {
     return Err(ApiError::BlobTooLarge { max_bytes });
   }
@@ -1648,7 +1731,7 @@ fn http_client() -> reqwest::Client {
 /// reqwest races IPv6 and IPv4 itself (hyper-util's Happy Eyeballs, 300 ms; issue #420), with the
 /// connect timeout split across a family's addresses.
 #[cfg(not(target_arch = "wasm32"))]
-fn http_client_builder() -> reqwest::ClientBuilder {
+pub(super) fn http_client_builder() -> reqwest::ClientBuilder {
   let builder = reqwest::Client::builder()
     .connect_timeout(CONNECT_TIMEOUT)
     .tcp_keepalive(KEEPALIVE_INTERVAL)
@@ -1672,7 +1755,7 @@ fn http_client_builder() -> reqwest::ClientBuilder {
 /// Redirects are followed up to [`MAX_REDIRECTS`] hops, but never from `https` down to `http`: a
 /// presigned URL or a token-bearing request must not leave TLS because a server said so.
 #[cfg(not(target_arch = "wasm32"))]
-fn follow_redirect(attempt: reqwest::redirect::Attempt<'_>) -> reqwest::redirect::Action {
+pub(super) fn follow_redirect(attempt: reqwest::redirect::Attempt<'_>) -> reqwest::redirect::Action {
   if attempt.previous().len() >= MAX_REDIRECTS {
     return attempt.stop();
   }
@@ -1760,7 +1843,7 @@ fn websocket_error(error: tokio_tungstenite::tungstenite::Error) -> ApiError {
 
 async fn send(request: RequestBuilder) -> Result<Response, ApiError> {
   let (client, request) = request.build_split();
-  let request = request.map_err(|error| ApiError::Network(error.to_string()))?;
+  let request = request.map_err(network_error)?;
   let origin = request.url().origin();
   let response = client.execute(request).await.map_err(network_error)?;
   let status = response.status();
@@ -1829,8 +1912,10 @@ fn is_html(headers: &reqwest::header::HeaderMap) -> bool {
 }
 
 /// A request that got no answer: a certificate the device refuses means interception (or a server
-/// that isn't who it claims), everything else is the network.
+/// that isn't who it claims), everything else is the network. The URL is left out of the text: a
+/// presigned storage URL carries its signature, and these errors end up in logs.
 fn network_error(error: reqwest::Error) -> ApiError {
+  let error = error.without_url();
   #[cfg(not(target_arch = "wasm32"))]
   if super::tls::is_certificate_rejection(&error) {
     return ApiError::Intercepted {
@@ -1843,7 +1928,7 @@ fn network_error(error: reqwest::Error) -> ApiError {
 
 /// The error and its causes, so the details name the actual reason ("certificate expired") and not
 /// only reqwest's "error sending request".
-fn error_chain(error: &(dyn std::error::Error + 'static)) -> String {
+pub(super) fn error_chain(error: &(dyn std::error::Error + 'static)) -> String {
   let mut text = error.to_string();
   let mut maybe_source = error.source();
   while let Some(source) = maybe_source {
@@ -2028,6 +2113,31 @@ mod tests {
     assert!(matches!(result, Err(ApiError::Network(_))), "{result:?}");
   }
 
+  /// A presigned storage URL carries its signature; a failed upload's error (which ends up in logs)
+  /// must not repeat it.
+  #[cfg(not(target_arch = "wasm32"))]
+  #[tokio::test]
+  async fn a_failed_upload_does_not_repeat_the_presigned_url() {
+    let listener = loopback_listener().await;
+    let address = listener.local_addr().unwrap();
+    // Accepts and closes at once: the request fails without an answer.
+    tokio::spawn(async move {
+      while let Ok((socket, _)) = listener.accept().await {
+        drop(socket);
+      }
+    });
+    let api = HttpServerApi::new(format!("http://{address}"), StaticToken("token".into()));
+    let url = format!("http://{address}/bucket/blob?X-Amz-Credential=key&X-Amz-Signature=deadbeef");
+    let result = api.put_blob(&url, b"ciphertext".to_vec()).await;
+    let Err(ApiError::Network(message)) = result else {
+      panic!("{result:?}")
+    };
+    assert!(
+      !message.contains("deadbeef") && !message.contains("X-Amz"),
+      "{message}"
+    );
+  }
+
   #[cfg(not(target_arch = "wasm32"))]
   mod hostile_networks {
     use std::sync::Arc;
@@ -2035,6 +2145,8 @@ mod tests {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     use super::*;
+    use crate::api::connect::black_hole::{BlackHole, FixedResolver};
+    use crate::api::tls::untrusted_tls_server;
 
     /// A mandatory company proxy: the gateway goes through `CONNECT` to the server.
     #[tokio::test]
@@ -2183,29 +2295,6 @@ mod tests {
       );
     }
 
-    /// Serves TLS on localhost with a fresh self-signed certificate and answers nothing useful.
-    async fn untrusted_tls_server() -> String {
-      let certified = rcgen::generate_simple_self_signed(vec!["localhost".to_owned()]).unwrap();
-      let key = rustls::pki_types::PrivateKeyDer::Pkcs8(certified.signing_key.serialize_der().into());
-      let provider = Arc::new(rustls::crypto::aws_lc_rs::default_provider());
-      let config = rustls::ServerConfig::builder_with_provider(provider)
-        .with_safe_default_protocol_versions()
-        .unwrap()
-        .with_no_client_auth()
-        .with_single_cert(vec![certified.cert.der().clone()], key)
-        .unwrap();
-      let acceptor = tokio_rustls::TlsAcceptor::from(Arc::new(config));
-      let listener = loopback_listener().await;
-      let port = listener.local_addr().unwrap().port();
-      tokio::spawn(async move {
-        while let Ok((socket, _)) = listener.accept().await {
-          // The handshake fails on the client's side; nothing to serve.
-          let _ = acceptor.accept(socket).await;
-        }
-      });
-      format!("https://localhost:{port}")
-    }
-
     /// The 1.0.2 failure (issue #420) for REST: the server's name resolves to an IPv6 address that
     /// swallows the SYN and an IPv4 address that works. The request goes out over IPv4.
     #[tokio::test]
@@ -2226,7 +2315,7 @@ mod tests {
           let _ = socket.write_all(response.as_bytes()).await;
         }
       });
-      let Some(black_hole) = crate::api::connect::black_hole::BlackHole::ipv6(v4.port()).await else {
+      let Some(black_hole) = BlackHole::ipv6(v4.port()).await else {
         return;
       };
       let client = http_client_builder()
@@ -2244,16 +2333,6 @@ mod tests {
       assert!(response.status().is_success());
       // IPv6 was tried first and swallowed the attempt.
       assert!(started.elapsed() >= std::time::Duration::from_millis(250));
-    }
-
-    /// Resolves every name to the same addresses, in this order.
-    struct FixedResolver(Vec<std::net::SocketAddr>);
-
-    impl reqwest::dns::Resolve for FixedResolver {
-      fn resolve(&self, _name: reqwest::dns::Name) -> reqwest::dns::Resolving {
-        let addresses = self.0.clone();
-        Box::pin(async move { Ok(Box::new(addresses.into_iter()) as reqwest::dns::Addrs) })
-      }
     }
 
     /// A local `CONNECT` proxy: tunnels one connection and hands back the request head it got.

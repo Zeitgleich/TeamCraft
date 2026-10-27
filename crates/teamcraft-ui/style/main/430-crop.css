@@ -1,0 +1,194 @@
+/* Crop dialog (issue #323): above the dialog that opened it. The stage shows the picture behind a
+   square frame; outside the frame it is dimmed. Only the picture's transform changes while
+   cropping; keyboard and button steps glide (reduced motion: the durations are ~0). */
+.crop-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 70;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 16px;
+  background: rgba(8, 12, 20, 0.6);
+  overscroll-behavior: contain;
+  animation: motion-fade-in var(--dur-base) var(--ease-standard);
+}
+
+.crop-dialog {
+  width: min(440px, 100%);
+  max-height: calc(100dvh - 32px);
+}
+
+.crop-body {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 12px;
+  overflow-y: auto;
+}
+
+.crop-stage {
+  position: relative;
+  width: min(328px, 100%);
+  aspect-ratio: 1;
+  flex: none;
+  overflow: hidden;
+  border-radius: var(--radius-md);
+  background: repeating-conic-gradient(var(--surface-2) 0 25%, var(--surface) 0 50%) 0 0 / 16px 16px;
+  cursor: grab;
+  touch-action: none;
+  user-select: none;
+}
+
+.crop-stage:focus-visible {
+  outline-offset: var(--focus-offset);
+}
+
+.crop-stage.is-dragging {
+  cursor: grabbing;
+}
+
+.crop-image {
+  position: absolute;
+  top: 0;
+  left: 0;
+  max-width: none;
+  transform-origin: 0 0;
+  will-change: transform;
+  pointer-events: none;
+  -webkit-user-drag: none;
+}
+
+.crop-stage.is-animated .crop-image {
+  transition: transform var(--dur-base) var(--ease-standard);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .crop-stage.is-animated .crop-image {
+    transition: none;
+  }
+}
+
+.crop-mask {
+  position: absolute;
+  border-radius: var(--radius-lg);
+  box-shadow: 0 0 0 999px rgba(8, 12, 20, 0.62);
+  outline: 2px solid rgba(255, 255, 255, 0.9);
+  pointer-events: none;
+}
+
+.crop-stage.is-round .crop-mask {
+  border-radius: 50%;
+}
+
+/* Thirds while dragging, to line up eyes and horizons. */
+.crop-mask::before,
+.crop-mask::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  opacity: 0;
+  transition: opacity var(--dur-fast) var(--ease-standard);
+}
+
+.crop-mask::before {
+  background:
+    linear-gradient(to right, transparent calc(100% / 3 - 0.5px), rgba(255, 255, 255, 0.45) 0, rgba(255, 255, 255, 0.45) calc(100% / 3 + 0.5px), transparent 0,
+      transparent calc(200% / 3 - 0.5px), rgba(255, 255, 255, 0.45) 0, rgba(255, 255, 255, 0.45) calc(200% / 3 + 0.5px), transparent 0);
+}
+
+.crop-mask::after {
+  background:
+    linear-gradient(to bottom, transparent calc(100% / 3 - 0.5px), rgba(255, 255, 255, 0.45) 0, rgba(255, 255, 255, 0.45) calc(100% / 3 + 0.5px), transparent 0,
+      transparent calc(200% / 3 - 0.5px), rgba(255, 255, 255, 0.45) 0, rgba(255, 255, 255, 0.45) calc(200% / 3 + 0.5px), transparent 0);
+}
+
+.crop-stage.is-dragging .crop-mask::before,
+.crop-stage.is-dragging .crop-mask::after {
+  opacity: 1;
+}
+
+.crop-loading {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  color: var(--on-fill);
+  font-size: var(--text-sm);
+}
+
+.crop-help {
+  max-width: 328px;
+  margin: 0;
+  text-align: center;
+}
+
+.crop-controls {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  width: min(328px, 100%);
+}
+
+.crop-zoom {
+  flex: 1;
+  min-width: 0;
+  accent-color: var(--accent);
+}
+
+.crop-controls-gap {
+  width: 8px;
+}
+
+.crop-previews {
+  display: flex;
+  align-items: flex-end;
+  justify-content: center;
+  gap: 20px;
+  width: 100%;
+  padding-top: 12px;
+  border-top: 1px solid var(--border);
+}
+
+.crop-preview {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  margin: 0;
+}
+
+.crop-preview-frame {
+  position: relative;
+  display: block;
+  overflow: hidden;
+  background: var(--surface-2);
+  box-shadow: 0 0 0 1px var(--border);
+}
+
+.crop-preview figcaption {
+  color: var(--text-muted);
+  font-size: var(--text-2xs);
+  letter-spacing: var(--tracking-2xs);
+}
+
+.crop-apply {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.crop-apply .spinner {
+  width: 14px;
+  height: 14px;
+  border-color: color-mix(in srgb, currentColor 40%, transparent);
+  border-top-color: currentColor;
+}
+.profile-facts { display: grid; grid-template-columns: max-content 1fr; gap: .25rem .75rem; margin: .75rem 0; }
+.profile-facts dt { color: var(--text-muted); }
+.profile-facts dd { margin: 0; overflow-wrap: anywhere; }
+
