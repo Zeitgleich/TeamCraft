@@ -1,7 +1,7 @@
 //! The server entry of the mobile apps (docs/operations.md "Server address in the apps"): the
 //! checks of `teamcraft-client-api` `server_entry`, so Android and iOS decide exactly like the
-//! desktop app. The apps fetch `GET /api/v1/server-info` themselves (without following redirects)
-//! and hand the answer over.
+//! desktop app. The apps fetch `GET /api/v1/server-info` (Android through [`crate::http_fetch`])
+//! without following redirects and hand the answer over.
 
 use teamcraft_client_api::server_entry::{
   self, HttpPolicy, ServerAddressError, ServerAnswer, ServerCheckError, ServerOrigin, ServerProfile,

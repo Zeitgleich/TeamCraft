@@ -7,6 +7,8 @@
 #[cfg(not(target_arch = "wasm32"))]
 mod connect;
 pub mod fake;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod fetch;
 mod http;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod proxy;
@@ -22,6 +24,8 @@ use std::pin::Pin;
 
 use serde::{Deserialize, Serialize};
 
+#[cfg(all(not(target_arch = "wasm32"), any(test, feature = "test-support")))]
+pub use connect::black_hole;
 pub use http::{
   AccessTokenSource, HttpGateway, HttpRendezvous, HttpServerApi, StaticToken, change_web_push_subscription,
 };

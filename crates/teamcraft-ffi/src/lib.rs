@@ -10,6 +10,7 @@ mod bridge;
 mod calls;
 mod engine;
 mod error;
+mod http_fetch;
 mod markup;
 mod media_viewer;
 mod server_entry;
@@ -25,6 +26,10 @@ pub use calls::{
   IncomingCallInfo, RemoteVideoFrame, RemoteVideoTrack, VideoListener, VideoTrackInfo,
 };
 pub use error::TeamCraftError;
+pub use http_fetch::{
+  HttpFetchError, HttpFetchHeader, HttpFetchMethod, HttpFetchRedirects, HttpFetchRequest, HttpFetchResponse,
+  http_fetch,
+};
 pub use markup::{
   MarkupBlock, MarkupLine, MarkupListKind, MarkupRun, MarkupRunKind, is_long_message, message_markup,
 };

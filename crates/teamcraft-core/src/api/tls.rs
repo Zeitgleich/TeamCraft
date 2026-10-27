@@ -110,6 +110,34 @@ pub(crate) fn is_certificate_rejection(error: &(dyn std::error::Error + 'static)
   false
 }
 
+/// Serves TLS on localhost with a fresh self-signed certificate, as a TLS-inspecting proxy with a
+/// CA the device doesn't trust does, and answers nothing useful. The `https://` base URL.
+#[cfg(test)]
+pub(crate) async fn untrusted_tls_server() -> String {
+  let certified = rcgen::generate_simple_self_signed(vec!["localhost".to_owned()]).unwrap();
+  let key = rustls::pki_types::PrivateKeyDer::Pkcs8(certified.signing_key.serialize_der().into());
+  let provider = Arc::new(rustls::crypto::aws_lc_rs::default_provider());
+  let config = rustls::ServerConfig::builder_with_provider(provider)
+    .with_safe_default_protocol_versions()
+    .unwrap()
+    .with_no_client_auth()
+    .with_single_cert(vec![certified.cert.der().clone()], key)
+    .unwrap();
+  let acceptor = tokio_rustls::TlsAcceptor::from(Arc::new(config));
+  let listener = match tokio::net::TcpListener::bind("[::1]:0").await {
+    Ok(listener) => listener,
+    Err(_) => tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap(),
+  };
+  let port = listener.local_addr().unwrap().port();
+  tokio::spawn(async move {
+    while let Ok((socket, _)) = listener.accept().await {
+      // The handshake fails on the client's side; nothing to serve.
+      let _ = acceptor.accept(socket).await;
+    }
+  });
+  format!("https://localhost:{port}")
+}
+
 #[cfg(test)]
 mod tests {
   use rustls::CertificateError;
