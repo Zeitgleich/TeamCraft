@@ -23,8 +23,9 @@ mod test_dir;
 #[cfg(all(test, feature = "integration"))]
 pub(crate) mod integration_tests;
 
-use std::sync::{PoisonError, RwLock};
-use std::time::{Duration, Instant};
+use std::hash::{DefaultHasher, Hash, Hasher};
+use std::sync::{Arc, PoisonError, RwLock};
+use std::time::Duration;
 
 use base64::Engine;
 use oauth2::basic::BasicErrorResponseType;
@@ -232,9 +233,15 @@ pub enum TokenPeek {
     token: SecretString,
     valid_for: Duration,
   },
-  /// No server, nobody signed in to it, or the token has (nearly) run out: no token is sent until
-  /// the refresh loop replaced it.
+  /// No server, or nobody signed in to it.
   Unavailable,
+  /// The access token has (nearly) run out and the refresh token waits to replace it, e.g. after
+  /// a long suspend until the network is back: the session is fine, the app is just offline for
+  /// now (issue #883).
+  Refreshing,
+  /// The identity provider refused the refresh token (`invalid_grant`): the user has to sign in
+  /// again.
+  Expired,
   /// A sign-in or refresh holds the session: the caller may use the token it saw last, while that
   /// is still valid.
   Busy,
@@ -243,8 +250,34 @@ pub enum TokenPeek {
 struct Tokens {
   access: SecretString,
   refresh: Option<SecretString>,
-  expires_at: Instant,
+  /// Wall clock (Unix ms), not `Instant`: a monotonic clock stands still while the computer
+  /// sleeps, so a token that expired during a suspend would still look valid (issue #883).
+  expires_at_ms: i64,
+  /// When the loop refreshes it (Unix ms): [`REFRESH_MARGIN`] before expiry, or halfway through a
+  /// shorter lifetime, so a provider's one-minute tokens aren't refreshed every check.
+  refresh_at_ms: i64,
+  /// Obtained because the server refused the previous token: if the server refuses this one too,
+  /// its answer stands and nothing is refreshed again (issue #883).
+  is_from_refusal: bool,
 }
+
+impl Tokens {
+  /// How long the access token is still valid at `now_ms`; zero once it has run out.
+  fn remaining(&self, now_ms: i64) -> Duration {
+    Duration::from_millis(u64::try_from(self.expires_at_ms - now_ms).unwrap_or(0))
+  }
+}
+
+/// A stable fingerprint of an access token, so a caller can say which token was refused without
+/// keeping or comparing the secret itself.
+pub fn token_fingerprint(token: &str) -> u64 {
+  let mut hasher = DefaultHasher::new();
+  token.hash(&mut hasher);
+  hasher.finish()
+}
+
+/// The wall clock in Unix milliseconds; tests inject their own.
+type WallClock = Arc<dyn Fn() -> i64 + Send + Sync>;
 
 #[derive(Default)]
 struct Session {
@@ -252,32 +285,48 @@ struct Session {
   /// Set instead of `maybe_tokens` while a local account is signed in.
   maybe_local: Option<LocalSession>,
   maybe_discovery: Option<Discovery>,
+  /// The identity provider refused the refresh token since the last sign-in.
+  is_expired: bool,
 }
 
 pub struct AuthService<S: TokenStore> {
   /// `None` until the user has chosen a server.
   server: RwLock<Option<DesktopConfig>>,
-  http: reqwest::Client,
+  /// Replaced by [`AuthService::drop_connections`] after a wake-up or network change.
+  http: RwLock<reqwest::Client>,
   store: S,
   session: Mutex<Session>,
   cancel: Notify,
+  now_ms: WallClock,
 }
 
 impl<S: TokenStore> AuthService<S> {
   pub fn new(maybe_server: Option<DesktopConfig>, store: S) -> Result<Self, AuthError> {
-    let http = reqwest::Client::builder()
-      .timeout(HTTP_TIMEOUT)
-      // A redirect would carry the bearer token to wherever a hostile answer points.
-      .redirect(reqwest::redirect::Policy::none())
-      .build()
-      .map_err(|error| AuthError::Unsupported(error.to_string()))?;
     Ok(Self {
       server: RwLock::new(maybe_server),
-      http,
+      http: RwLock::new(http_client()?),
       store,
       session: Mutex::new(Session::default()),
       cancel: Notify::new(),
+      now_ms: Arc::new(local::now_ms),
     })
+  }
+
+  /// The service with an injected wall clock (tests).
+  #[cfg(test)]
+  fn with_clock(maybe_server: Option<DesktopConfig>, store: S, now_ms: WallClock) -> Self {
+    let mut service = Self::new(maybe_server, store).expect("a plain reqwest client builds");
+    service.now_ms = now_ms;
+    service
+  }
+
+  /// Forgets the pooled connections, which a suspend or a network change usually leaves dead: a
+  /// request on one would hang until the connection times out (issue #883).
+  pub fn drop_connections(&self) {
+    match http_client() {
+      Ok(client) => *self.http.write().unwrap_or_else(PoisonError::into_inner) = client,
+      Err(error) => tracing::warn!(%error, "could not rebuild the HTTP client"),
+    }
   }
 
   /// The active server, if one is chosen.
@@ -298,7 +347,7 @@ impl<S: TokenStore> AuthService<S> {
   /// changes until the user confirms; redirects are reported, never followed.
   pub async fn probe_server(&self, origin: &ServerOrigin) -> Result<CheckedServer, ServerProbeError> {
     let response = match self
-      .http
+      .http()
       .get(origin.server_info_url())
       .header(reqwest::header::ACCEPT, "application/json")
       .send()
@@ -335,7 +384,8 @@ impl<S: TokenStore> AuthService<S> {
   }
 
   /// Signs in with a stored local session or refresh token, if there is one. `Ok(false)` means
-  /// "sign in again" (also when no server is chosen yet).
+  /// "sign in" (also when no server is chosen yet); [`AuthError::Denied`] means the provider
+  /// refused the stored token, so the sign-in screen says the session expired.
   pub async fn restore(&self) -> Result<bool, AuthError> {
     let Some(server) = self.active_server() else {
       return Ok(false);
@@ -350,7 +400,11 @@ impl<S: TokenStore> AuthService<S> {
     match self.refresh_with(&mut session, &server, refresh).await {
       Ok(()) => Ok(true),
       // The provider rejected the token (expired, revoked, user disabled): forget it.
-      Err(AuthError::Denied(_) | AuthError::NotSignedIn) => {
+      Err(AuthError::Denied(reason)) => {
+        self.store.clear(&server.token_key()).await?;
+        Err(AuthError::Denied(reason))
+      },
+      Err(AuthError::NotSignedIn) => {
         self.store.clear(&server.token_key()).await?;
         Ok(false)
       },
@@ -435,7 +489,7 @@ impl<S: TokenStore> AuthService<S> {
     let body = local::login_body(login, password, maybe_totp_code)?;
     let url = format!("{}{LOCAL_LOGIN_PATH}", server.server_url.trim_end_matches('/'));
     let response = self
-      .http
+      .http()
       .post(url)
       .header(reqwest::header::CONTENT_TYPE, "application/json")
       .header(reqwest::header::ACCEPT, "application/json")
@@ -490,7 +544,7 @@ impl<S: TokenStore> AuthService<S> {
         ("client_id", server.client_id.as_str()),
         ("refresh_token", refresh.expose_secret()),
       ];
-      if let Err(error) = self.http.post(endpoint).form(&form).send().await {
+      if let Err(error) = self.http().post(endpoint).form(&form).send().await {
         // The local session is gone either way; the provider session expires on its own.
         tracing::warn!(%error, "could not end the provider session");
       }
@@ -509,7 +563,7 @@ impl<S: TokenStore> AuthService<S> {
     validate_api_path(path)?;
     let url = format!("{}{path}", self.server()?.server_url.trim_end_matches('/'));
     let response = self
-      .http
+      .http()
       .get(url)
       .header(reqwest::header::ACCEPT, "application/json")
       .send()
@@ -541,7 +595,7 @@ impl<S: TokenStore> AuthService<S> {
     }
     let url = format!("{}{path}", server_url.trim_end_matches('/'));
     let response = self
-      .http
+      .http()
       .get(url)
       .send()
       .await
@@ -594,7 +648,7 @@ impl<S: TokenStore> AuthService<S> {
     let token = self.access_token(&server).await?;
     let url = format!("{}{path}", server.server_url.trim_end_matches('/'));
     let mut request = self
-      .http
+      .http()
       .request(reqwest_method(method), url)
       .bearer_auth(token.expose_secret())
       .header(reqwest::header::ACCEPT, "application/json");
@@ -628,7 +682,7 @@ impl<S: TokenStore> AuthService<S> {
     let token = self.access_token(&server).await?;
     let url = format!("{}{path}", server.server_url.trim_end_matches('/'));
     let mut request = self
-      .http
+      .http()
       .request(reqwest_method(method), url)
       .bearer_auth(token.expose_secret());
     if let Some((content_type, bytes)) = maybe_body {
@@ -686,7 +740,10 @@ impl<S: TokenStore> AuthService<S> {
         .remaining(local::now_ms())
         .map(|valid_for| (local.token(), valid_for)),
       (None, Some(tokens)) => {
-        let valid_for = tokens.expires_at.saturating_duration_since(Instant::now());
+        let valid_for = tokens.remaining((self.now_ms)());
+        if valid_for <= TOKEN_EXPIRY_MARGIN && tokens.refresh.is_some() {
+          return TokenPeek::Refreshing;
+        }
         (valid_for > TOKEN_EXPIRY_MARGIN).then(|| {
           (
             SecretString::from(tokens.access.expose_secret().to_owned()),
@@ -694,6 +751,7 @@ impl<S: TokenStore> AuthService<S> {
           )
         })
       },
+      (None, None) if session.is_expired => return TokenPeek::Expired,
       (None, None) => None,
     };
     match maybe_token {
@@ -745,31 +803,77 @@ impl<S: TokenStore> AuthService<S> {
     }
     let needs_refresh = match &session.maybe_tokens {
       None => return Err(AuthError::NotSignedIn),
-      Some(tokens) => tokens.expires_at.saturating_duration_since(Instant::now()) <= REFRESH_MARGIN,
+      Some(tokens) => (self.now_ms)() >= tokens.refresh_at_ms,
     };
     if needs_refresh {
-      let refresh = session
-        .maybe_tokens
-        .as_ref()
-        .and_then(|tokens| {
-          tokens
-            .refresh
-            .as_ref()
-            .map(|token| SecretString::from(token.expose_secret().to_owned()))
-        })
-        .ok_or(AuthError::NotSignedIn)?;
-      if let Err(error) = self.refresh_with(&mut session, server, refresh).await {
-        if matches!(error, AuthError::Denied(_) | AuthError::NotSignedIn) {
-          session.maybe_tokens = None;
-        }
-        return Err(error);
-      }
+      self.refresh_session(&mut session, server).await?;
     }
     session
       .maybe_tokens
       .as_ref()
       .map(|tokens| SecretString::from(tokens.access.expose_secret().to_owned()))
       .ok_or(AuthError::NotSignedIn)
+  }
+
+  /// The server refused the access token with fingerprint `refused` ([`token_fingerprint`]):
+  /// refreshes once, unless another request already did (single flight: the session lock
+  /// serialises them, and a refusal of an older token only retries). A token that was itself
+  /// fetched after a refusal is not refreshed again: the server's answer stands, so a server that
+  /// refuses everything can't make the app ask the provider on every request. `Ok(true)` means a
+  /// newer token is there and the request is worth one more try; the caller retries once, never
+  /// in a loop (issue #883).
+  ///
+  /// Only a refused refresh token ([`AuthError::Denied`]) ends the session; a network failure
+  /// keeps it for the next try.
+  pub async fn refresh_rejected(&self, refused: u64) -> Result<bool, AuthError> {
+    let server = self.server()?;
+    let mut session = self.session.lock().await;
+    if self.active_server().as_ref() != Some(&server) {
+      return Err(AuthError::NotSignedIn);
+    }
+    // A local account has no refresh token: the server's answer stands.
+    let Some(tokens) = &session.maybe_tokens else {
+      return Ok(false);
+    };
+    if token_fingerprint(tokens.access.expose_secret()) != refused {
+      return Ok(true);
+    }
+    if tokens.is_from_refusal {
+      return Ok(false);
+    }
+    self.refresh_session(&mut session, &server).await?;
+    if let Some(tokens) = session.maybe_tokens.as_mut() {
+      tokens.is_from_refusal = true;
+    }
+    Ok(true)
+  }
+
+  /// Refreshes the session's tokens with its refresh token; a refused one ends the session.
+  async fn refresh_session(&self, session: &mut Session, server: &DesktopConfig) -> Result<(), AuthError> {
+    let refresh = session
+      .maybe_tokens
+      .as_ref()
+      .and_then(|tokens| {
+        tokens
+          .refresh
+          .as_ref()
+          .map(|token| SecretString::from(token.expose_secret().to_owned()))
+      })
+      .ok_or(AuthError::NotSignedIn)?;
+    let result = self.refresh_with(session, server, refresh).await;
+    if let Err(error) = &result {
+      tracing::warn!(kind = error.kind(), "token refresh failed");
+      if matches!(error, AuthError::Denied(_)) {
+        // Only the provider's refusal ends the session; no answer keeps it (issue #883). The
+        // stored token goes too, so the next start doesn't offer it again.
+        session.maybe_tokens = None;
+        session.is_expired = true;
+        if let Err(error) = self.store.clear(&server.token_key()).await {
+          tracing::warn!(%error, "could not forget the refused refresh token");
+        }
+      }
+    }
+    result
   }
 
   async fn refresh_with(
@@ -815,10 +919,16 @@ impl<S: TokenStore> AuthService<S> {
       self.store.save(&server.token_key(), refresh).await?;
     }
     let lifetime = response.expires_in().unwrap_or(Duration::from_secs(60));
+    let now_ms = (self.now_ms)();
+    let ms = |duration: Duration| i64::try_from(duration.as_millis()).unwrap_or(i64::MAX);
+    let expires_at_ms = now_ms.saturating_add(ms(lifetime));
+    session.is_expired = false;
     session.maybe_tokens = Some(Tokens {
       access: SecretString::from(response.access_token().secret().clone()),
       refresh: refresh.map(SecretString::from),
-      expires_at: Instant::now() + lifetime,
+      expires_at_ms,
+      refresh_at_ms: expires_at_ms.saturating_sub(ms(REFRESH_MARGIN.min(lifetime / 2))),
+      is_from_refusal: false,
     });
     Ok(())
   }
@@ -858,6 +968,7 @@ impl<S: TokenStore> AuthService<S> {
     }
     let mut session = self.session.lock().await;
     session.maybe_tokens = None;
+    session.is_expired = false;
     session.maybe_local = Some(granted);
     Ok(())
   }
@@ -882,7 +993,7 @@ impl<S: TokenStore> AuthService<S> {
     };
     let url = format!("{}{LOCAL_LOGOUT_PATH}", server.server_url.trim_end_matches('/'));
     if let Err(error) = self
-      .http
+      .http()
       .post(url)
       .bearer_auth(session.access.expose_secret())
       .send()
@@ -916,7 +1027,7 @@ impl<S: TokenStore> AuthService<S> {
       server.issuer.trim_end_matches('/')
     );
     let response = self
-      .http
+      .http()
       .get(url)
       .send()
       .await
@@ -959,10 +1070,24 @@ impl<S: TokenStore> AuthService<S> {
     ))
   }
 
+  /// The HTTP client of the next request (a cheap handle on the shared pool).
+  fn http(&self) -> reqwest::Client {
+    self.http.read().unwrap_or_else(PoisonError::into_inner).clone()
+  }
+
   /// HTTP client of the `oauth2` crate on top of our `reqwest` client.
   fn oauth_http(&self) -> OAuthHttp {
-    OAuthHttp(self.http.clone())
+    OAuthHttp(self.http())
   }
+}
+
+fn http_client() -> Result<reqwest::Client, AuthError> {
+  reqwest::Client::builder()
+    .timeout(HTTP_TIMEOUT)
+    // A redirect would carry the bearer token to wherever a hostile answer points.
+    .redirect(reqwest::redirect::Policy::none())
+    .build()
+    .map_err(|error| AuthError::Unsupported(error.to_string()))
 }
 
 /// What a finished browser sign-in leaves for the next one. No `Debug` with the account name.
@@ -1430,6 +1555,350 @@ mod tests {
       AuthError::LocalRefused(LocalRefusal::RateLimited).kind(),
       "rate_limited"
     );
+  }
+
+  /// Issue #883: tokens that run out while the computer sleeps, and the refresh after a refusal.
+  mod token_expiry {
+    use std::sync::atomic::{AtomicI64, AtomicU8, AtomicUsize, Ordering};
+
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::{TcpListener, TcpStream};
+
+    use super::*;
+    use crate::auth::store::MemoryStore;
+
+    const START_MS: i64 = 1_800_000_000_000;
+    const LIFETIME_MS: i64 = 300_000;
+    const HOUR_MS: i64 = 3_600_000;
+    /// The fake identity provider's token endpoint: no answer, a token, or `invalid_grant`.
+    const PROVIDER_DOWN: u8 = 0;
+    const PROVIDER_UP: u8 = 1;
+    const PROVIDER_REFUSES: u8 = 2;
+
+    /// The computer is off for 12 hours, 3 days or 30 days; it wakes up without network. The access
+    /// token is long expired: the app waits (offline, never "sign in again") until the provider can
+    /// be reached and then refreshes with the stored refresh token.
+    #[tokio::test]
+    async fn after_a_long_time_off_the_refresh_waits_for_the_network_and_succeeds() {
+      for off_ms in [12 * HOUR_MS, 3 * 24 * HOUR_MS, 30 * 24 * HOUR_MS] {
+        let provider = FakeProvider::start().await;
+        let (service, clock) = signed_in(provider.config());
+        service
+          .store
+          .save(&provider.config().token_key(), "refresh")
+          .await
+          .unwrap();
+        clock.fetch_add(off_ms, Ordering::SeqCst);
+
+        for _ in 0..3 {
+          assert!(matches!(service.bearer_token().await, Err(AuthError::Network(_))));
+          assert!(
+            matches!(service.peek_server_bearer_token(), TokenPeek::Refreshing),
+            "{off_ms} ms off: no answer is never a refusal"
+          );
+        }
+        assert!(
+          service
+            .store
+            .load(&provider.config().token_key())
+            .await
+            .unwrap()
+            .is_some()
+        );
+
+        provider.set(PROVIDER_UP);
+        assert_eq!(service.bearer_token().await.unwrap(), "fresh-access");
+        assert!(matches!(
+          service.peek_server_bearer_token(),
+          TokenPeek::Ready { .. }
+        ));
+        assert_eq!(
+          service
+            .store
+            .load(&provider.config().token_key())
+            .await
+            .unwrap()
+            .map(|token| token.expose_secret().to_owned())
+            .as_deref(),
+          Some("rotated-refresh"),
+          "the rotated refresh token is kept"
+        );
+      }
+    }
+
+    /// Only the provider's own refusal ends the session, and then once: the token is forgotten and
+    /// the session says it expired (the UI goes back to the sign-in screen with that message).
+    #[tokio::test]
+    async fn a_refused_refresh_token_ends_the_session_once() {
+      let provider = FakeProvider::start().await;
+      let (service, clock) = signed_in(provider.config());
+      service
+        .store
+        .save(&provider.config().token_key(), "refresh")
+        .await
+        .unwrap();
+      clock.fetch_add(3 * 24 * HOUR_MS, Ordering::SeqCst);
+      provider.set(PROVIDER_REFUSES);
+
+      assert!(matches!(service.bearer_token().await, Err(AuthError::Denied(_))));
+      assert!(matches!(service.peek_server_bearer_token(), TokenPeek::Expired));
+      assert!(
+        service
+          .store
+          .load(&provider.config().token_key())
+          .await
+          .unwrap()
+          .is_none()
+      );
+      let asked = provider.token_requests();
+      assert!(matches!(
+        service.bearer_token().await,
+        Err(AuthError::NotSignedIn)
+      ));
+      assert_eq!(
+        provider.token_requests(),
+        asked,
+        "a refused token is not tried again"
+      );
+    }
+
+    #[tokio::test]
+    async fn a_refused_stored_token_at_start_says_the_session_expired() {
+      let provider = FakeProvider::start().await;
+      provider.set(PROVIDER_REFUSES);
+      let store = MemoryStore::default();
+      store
+        .save(&provider.config().token_key(), "refresh")
+        .await
+        .unwrap();
+      let service = AuthService::new(Some(provider.config()), store).unwrap();
+      assert!(matches!(service.restore().await, Err(AuthError::Denied(_))));
+      assert!(
+        service
+          .store
+          .load(&provider.config().token_key())
+          .await
+          .unwrap()
+          .is_none()
+      );
+      assert!(!service.restore().await.unwrap(), "nothing stored any more");
+    }
+
+    #[tokio::test]
+    async fn a_token_that_ran_out_during_a_suspend_is_not_handed_out() {
+      let (service, clock) = signed_in(config());
+      assert!(matches!(
+        service.peek_server_bearer_token(),
+        TokenPeek::Ready { .. }
+      ));
+      // A ten-minute suspend: the wall clock moves on, a monotonic one would not have.
+      clock.fetch_add(2 * LIFETIME_MS, Ordering::SeqCst);
+      assert!(
+        matches!(service.peek_server_bearer_token(), TokenPeek::Refreshing),
+        "waiting for the refresh, not signed out"
+      );
+    }
+
+    #[tokio::test]
+    async fn a_refusal_of_an_older_token_only_retries() {
+      let (service, _clock) = signed_in(config());
+      // Another request has refreshed already: retry without asking the provider again.
+      assert!(
+        service
+          .refresh_rejected(token_fingerprint("older"))
+          .await
+          .unwrap()
+      );
+    }
+
+    /// A server that refuses every token gets one refresh, not one per request.
+    #[tokio::test]
+    async fn a_refused_fresh_token_is_not_refreshed_again() {
+      let provider = FakeProvider::start().await;
+      provider.set(PROVIDER_UP);
+      let (service, _clock) = signed_in(provider.config());
+      assert!(
+        service
+          .refresh_rejected(token_fingerprint("access"))
+          .await
+          .unwrap()
+      );
+      assert_eq!(provider.token_requests(), 1);
+      let fresh = token_fingerprint("fresh-access");
+      for _ in 0..5 {
+        assert!(
+          !service.refresh_rejected(fresh).await.unwrap(),
+          "the server's answer stands"
+        );
+      }
+      assert_eq!(provider.token_requests(), 1);
+    }
+
+    #[tokio::test]
+    async fn no_answer_from_the_provider_keeps_the_session() {
+      let mut unreachable = config();
+      // Nothing listens on port 1: the refresh gets no answer (like a suspend without network).
+      unreachable.issuer = "http://127.0.0.1:1/realms/company".into();
+      let (service, clock) = signed_in(unreachable);
+      clock.fetch_add(2 * LIFETIME_MS, Ordering::SeqCst);
+      assert!(matches!(
+        service.refresh_rejected(token_fingerprint("access")).await,
+        Err(AuthError::Network(_))
+      ));
+      assert!(matches!(service.bearer_token().await, Err(AuthError::Network(_))));
+      assert!(service.is_signed_in().await, "no answer is not a refusal");
+    }
+
+    #[tokio::test]
+    async fn a_local_account_has_nothing_to_refresh() {
+      let service = AuthService::new(Some(config()), MemoryStore::default()).unwrap();
+      service
+        .adopt_local(
+          &config(),
+          LocalSession {
+            access: SecretString::from("local".to_owned()),
+            expires_at_ms: local::now_ms() + 3_600_000,
+          },
+        )
+        .await
+        .unwrap();
+      assert!(
+        !service
+          .refresh_rejected(token_fingerprint("local"))
+          .await
+          .unwrap()
+      );
+    }
+
+    /// An identity provider on this computer: discovery, and a token endpoint whose answer the test
+    /// switches. Each connection serves one request.
+    struct FakeProvider {
+      base: String,
+      mode: Arc<AtomicU8>,
+      token_requests: Arc<AtomicUsize>,
+    }
+
+    impl FakeProvider {
+      async fn start() -> Self {
+        let listener = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+          .await
+          .unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let mode = Arc::new(AtomicU8::new(PROVIDER_DOWN));
+        let token_requests = Arc::new(AtomicUsize::new(0));
+        let (serving, answer, counted) = (base.clone(), Arc::clone(&mode), Arc::clone(&token_requests));
+        tokio::spawn(async move {
+          while let Ok((socket, _)) = listener.accept().await {
+            let (base, mode, counted) = (serving.clone(), Arc::clone(&answer), Arc::clone(&counted));
+            tokio::spawn(async move { serve(socket, &base, &mode, &counted).await });
+          }
+        });
+        Self {
+          base,
+          mode,
+          token_requests,
+        }
+      }
+
+      fn config(&self) -> DesktopConfig {
+        DesktopConfig {
+          server_url: "https://team.example.com".into(),
+          issuer: self.base.clone(),
+          client_id: "teamcraft".into(),
+          scopes: vec!["openid".into(), "offline_access".into()],
+        }
+      }
+
+      fn set(&self, mode: u8) {
+        self.mode.store(mode, Ordering::SeqCst);
+      }
+
+      fn token_requests(&self) -> usize {
+        self.token_requests.load(Ordering::SeqCst)
+      }
+    }
+
+    async fn serve(mut socket: TcpStream, base: &str, mode: &AtomicU8, counted: &AtomicUsize) {
+      let mut request = Vec::new();
+      let mut chunk = [0_u8; 4096];
+      while !request.windows(4).any(|window| window == b"\r\n\r\n") {
+        match socket.read(&mut chunk).await {
+          Ok(0) | Err(_) => return,
+          Ok(read) => request.extend_from_slice(&chunk[..read]),
+        }
+      }
+      let head = String::from_utf8_lossy(&request).into_owned();
+      let (status, body) = if head.starts_with("GET /.well-known/openid-configuration") {
+        let discovery = serde_json::json!({
+          "issuer": base,
+          "authorization_endpoint": format!("{base}/auth"),
+          "token_endpoint": format!("{base}/token"),
+        });
+        if mode.load(Ordering::SeqCst) == PROVIDER_DOWN {
+          return;
+        }
+        ("200 OK", discovery.to_string())
+      } else {
+        counted.fetch_add(1, Ordering::SeqCst);
+        match mode.load(Ordering::SeqCst) {
+          // No answer at all, like a network that is not back yet.
+          PROVIDER_DOWN => return,
+          PROVIDER_UP => (
+            "200 OK",
+            serde_json::json!({
+              "access_token": "fresh-access",
+              "token_type": "Bearer",
+              "expires_in": 300,
+              "refresh_token": "rotated-refresh",
+            })
+            .to_string(),
+          ),
+          _ => (
+            "400 Bad Request",
+            serde_json::json!({ "error": "invalid_grant", "error_description": "Token is not active" })
+              .to_string(),
+          ),
+        }
+      };
+      let response = format!(
+        "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        body.len()
+      );
+      drop(socket.write_all(response.as_bytes()).await);
+    }
+
+    /// A service signed in at [`START_MS`] with a token for [`LIFETIME_MS`], and its clock.
+    fn signed_in(server: DesktopConfig) -> (AuthService<MemoryStore>, Arc<AtomicI64>) {
+      let clock = Arc::new(AtomicI64::new(START_MS));
+      let reading = Arc::clone(&clock);
+      let service = AuthService::with_clock(
+        Some(server),
+        MemoryStore::default(),
+        Arc::new(move || reading.load(Ordering::SeqCst)),
+      );
+      let tokens = Tokens {
+        access: SecretString::from("access".to_owned()),
+        refresh: Some(SecretString::from("refresh".to_owned())),
+        expires_at_ms: START_MS + LIFETIME_MS,
+        refresh_at_ms: START_MS + LIFETIME_MS - 60_000,
+        is_from_refusal: false,
+      };
+      service
+        .session
+        .try_lock()
+        .expect("nobody else holds the new session")
+        .maybe_tokens = Some(tokens);
+      (service, clock)
+    }
+
+    fn config() -> DesktopConfig {
+      DesktopConfig {
+        server_url: "https://team.example.com".into(),
+        issuer: "https://auth.example.com/realms/company".into(),
+        client_id: "teamcraft".into(),
+        scopes: vec!["openid".into()],
+      }
+    }
   }
 
   mod local_sessions {

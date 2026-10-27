@@ -278,7 +278,7 @@ guest  = "external"
 - Guests:
   - see only conversations they are members of
   - directory search returns only people they share a conversation with
-  - cannot create channels; DMs only with people from shared conversations (toggle)
+  - cannot create channels; start no DM or group DM on their own by default (policy `guests.dm_start`: `nobody`, `shared`, `anyone`); members, admins and owners can always message them, and guests can answer
   - cannot invite others
 - The server enforces visibility; MLS enforces it cryptographically as well, because a guest's devices
   are only ever in the groups of their conversations.

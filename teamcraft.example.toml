@@ -107,10 +107,14 @@ filter = "info"
 format = "pretty"
 
 # Rules only the server enforces (PLAN.md §12, §13). Seed of Administration → Settings → server rules;
-# guest rules there and in the signed policy win over guests_dm_only_with_shared_conversations.
+# guest rules there and in the signed policy win over guests_dm_start.
 [policy]
-# Guests can only open DMs with people they share a conversation with (and vice versa).
-guests_dm_only_with_shared_conversations = true
+# Whom a guest may START a DM or group DM with: "nobody" (they only answer), "shared" (people they share a
+# conversation with) or "anyone". Members, admins and owners can always message guests.
+guests_dm_start = "nobody"
+# Deprecated, the 1.0.9 form of the above (true = "shared", false = "anyone"). Wins over guests_dm_start
+# where set; remove it and use guests_dm_start.
+# guests_dm_only_with_shared_conversations = true
 # Pending invites only apply to accounts whose provider verified the email address.
 invites_require_verified_email = true
 # IDs of spaces every new member joins on their first sign-in, and of public channels of those

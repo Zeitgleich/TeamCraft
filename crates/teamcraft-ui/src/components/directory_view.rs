@@ -205,6 +205,8 @@ fn PersonRow(user: User) -> impl IntoView {
   let is_me = id == state.me().id;
   let no_devices = user.device_setup == DeviceSetup::NoDevices;
   let direct = (!is_me).then(|| state.direct_with(&[id])).flatten();
+  // Hidden, not failing after the click: a guest who may not start conversations is offered none.
+  let can_message = crate::channel_access::can_start_direct(state, &[id]);
   view! {
     <li class="page-row person-row">
       <button class="page-row-main person-main" on:click=move |_| state.overlay.set(Overlay::UserProfile(id))>
@@ -223,9 +225,11 @@ fn PersonRow(user: User) -> impl IntoView {
       </button>
       {(!is_me).then(|| view! {
         <span class="page-row-actions">
-          <button class="icon-btn" aria-label=move || i18n.t("profile-message") title=move || i18n.t("profile-message") on:click=move |_| state.open_direct(id)>
-            <Icon name=IconName::Chat />
-          </button>
+          {can_message.then(|| view! {
+            <button class="icon-btn" aria-label=move || i18n.t("profile-message") title=move || i18n.t("profile-message") on:click=move |_| state.open_direct(id)>
+              <Icon name=IconName::Chat />
+            </button>
+          })}
           {direct.map(|conversation| view! {
             <button
               class="icon-btn"

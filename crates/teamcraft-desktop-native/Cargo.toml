@@ -48,6 +48,7 @@ thiserror.workspace = true
 tracing.workspace = true
 
 # macOS: NSWorkspaceDidWakeNotification, the notification delegate and notification attachments
+# (Network.framework's path monitor is linked directly, it has no Objective-C API)
 # through the safe-ish objc2 bindings (Zlib/Apache-2.0/MIT; already in the tree through Tauri's macOS
 # stack).
 [target.'cfg(target_os = "macos")'.dependencies]
@@ -57,6 +58,7 @@ objc2-user-notifications = { version = "0.3.2", default-features = false, featur
 objc2-app-kit = { version = "0.3.2", default-features = false, features = ["std", "NSWorkspace"] }
 objc2-foundation = { version = "0.3.2", default-features = false, features = ["std", "block2", "NSError", "NSNotification", "NSObject", "NSOperation", "NSString", "NSURL"] }
 
-# Windows: PowerRegisterSuspendResumeNotification (MIT/Apache-2.0; the version the shell uses).
+# Windows: PowerRegisterSuspendResumeNotification and NotifyNetworkConnectivityHintChange
+# (MIT/Apache-2.0; the version the shell uses).
 [target.'cfg(windows)'.dependencies]
-windows = { version = "0.62", features = ["Win32_Foundation", "Win32_System_Power", "Win32_UI_WindowsAndMessaging"] }
+windows = { version = "0.62", features = ["Win32_Foundation", "Win32_NetworkManagement_IpHelper", "Win32_Networking_WinSock", "Win32_System_Power", "Win32_UI_WindowsAndMessaging"] }

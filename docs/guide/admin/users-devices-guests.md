@@ -73,9 +73,11 @@ external meeting invitees and sign-in. Guests expire automatically (90 days by d
 is told when it happens.
 
 Rules for guests: see only what they were added to; find only people they share a conversation with;
-DMs only with shared contacts (`[policy] guests_dm_only_with_shared_conversations`), and a DM or
-group DM with a guest needs a shared conversation with every participant; history always
-from join; their organization recovery is off by default.
+start no DM or group DM on their own by default (Administration → Security → "Guests may start
+direct messages with": nobody, people they share a conversation with, or anyone; the file default is
+`[policy] guests_dm_start`); they can always answer in a conversation a member started, and members,
+admins and owners can always message a guest. A guest who tries anyway gets the message that guests
+can't start conversations; the button is not offered to them. History is always from join; their organization recovery is off by default.
 
 **Meeting guests** (no account) are separate: see [Meetings](meetings.md).
 

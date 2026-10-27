@@ -1159,10 +1159,10 @@ guest user deactivated. `validate_token` also ignores the `meeting` claim, so th
 guest login rather than a meeting-bound one.
 
 **Impact:** limited (the guest is a member of nothing, guest directory/DM restrictions apply when
-`guests_dm_only_with_shared_conversations` is on, which is the default), but a denied guest can
-reconnect to the gateway, poll lobby state, register devices/identity keys and consume resources
-until the meeting ends. If an admin later turns the DM restriction off, a denied stranger can DM
-users by ID.
+`guests_dm_start` is not `anyone`; the default is `nobody`, so a guest starts no DM), but a denied
+guest can reconnect to the gateway, poll lobby state, register devices/identity keys and consume
+resources until the meeting ends. If an admin later sets `guests_dm_start` to `anyone`, a denied
+stranger can DM users by ID.
 
 **Fix:** on deny, deactivate the guest account (or revoke the guest subject in `Revocations` and
 persist it), and reject guest tokens whose lobby entry is `denied`.

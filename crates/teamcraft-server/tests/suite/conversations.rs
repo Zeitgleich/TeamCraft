@@ -8,6 +8,7 @@ use common::*;
 use reqwest::StatusCode;
 use serde_json::json;
 use teamcraft_db::testing::sqlx;
+use teamcraft_proto::GuestDmStart;
 use teamcraft_server::testing::TestApp;
 
 macro_rules! app {
@@ -829,60 +830,193 @@ mod guests {
   }
 
   #[tokio::test]
-  async fn guests_only_open_dms_with_people_they_share_a_conversation_with() {
+  async fn members_admins_and_owners_can_always_message_guests() {
     let app = app!();
-    let alice = owner();
-    let (space, shared, _) = setup(&app).await;
-    app
-      .post(
-        &alice,
-        &format!("/spaces/{space}/invites"),
-        json!({"email": "ext@example.com", "role": "guest", "channel_ids": [shared]}),
-      )
-      .await;
-    let ext = external();
-    let (carol_id, dave_id, ext_id) = (
+    let (_, ext_id, ext2_id) = invite_two_guests(&app).await;
+    let (carol_id, dave_id) = (
       user_id(&app, &member("carol")).await,
       user_id(&app, &member("dave")).await,
-      user_id(&app, &ext).await,
     );
-
-    assert_eq!(
-      app.post(&ext, "/dms", json!({"user_id": carol_id})).await.status,
-      StatusCode::CREATED
-    );
-    assert_eq!(
-      app
-        .post(&ext, "/dms", json!({"user_id": dave_id}))
-        .await
-        .error_code(),
-      "user_not_found"
-    );
-    // The other direction is restricted as well.
-    assert_eq!(
-      app
-        .post(&member("dave"), "/dms", json!({"user_id": ext_id}))
-        .await
-        .error_code(),
-      "user_not_found"
-    );
+    // Dave shares no conversation with either guest; the default policy changes nothing for him.
+    for (who, target) in [
+      (owner(), &ext_id),
+      (admin(), &ext_id),
+      (member("carol"), &ext_id),
+      (member("dave"), &ext_id),
+      (member("dave"), &ext2_id),
+    ] {
+      let reply = app.post(&who, "/dms", json!({"user_id": target})).await;
+      assert_eq!(reply.status, StatusCode::CREATED, "{}", reply.body);
+    }
+    // Group DMs mixing members and guests.
+    let group = app
+      .post(
+        &member("dave"),
+        "/group-dms",
+        json!({"user_ids": [ext_id, carol_id, ext2_id]}),
+      )
+      .await;
+    assert_eq!(group.status, StatusCode::CREATED, "{}", group.body);
+    let group = app
+      .post(&owner(), "/group-dms", json!({"user_ids": [dave_id, ext_id]}))
+      .await;
+    assert_eq!(group.status, StatusCode::CREATED, "{}", group.body);
     app.stop().await;
   }
 
   #[tokio::test]
-  async fn the_dm_restriction_for_guests_is_a_policy_toggle() {
-    let Some(app) =
-      TestApp::start_with(|settings| settings.policy.guests_dm_only_with_shared_conversations = false).await
-    else {
-      return;
-    };
-    let guest = guest("ext");
-    let dave_id = user_id(&app, &member("dave")).await;
-    assert_eq!(
-      app.post(&guest, "/dms", json!({"user_id": dave_id})).await.status,
-      StatusCode::CREATED
-    );
+  async fn a_dm_with_a_missing_or_deactivated_person_is_not_found_for_everybody() {
+    let app = app!();
+    let (_, ext_id, _) = invite_two_guests(&app).await;
+    let done = app
+      .post(&admin(), &format!("/admin/users/{ext_id}/deactivate"), json!({}))
+      .await;
+    assert_eq!(done.status, StatusCode::NO_CONTENT, "{}", done.body);
+    for who in [owner(), admin(), member("dave")] {
+      for target in [ext_id.as_str(), "9999999999999999"] {
+        let reply = app.post(&who, "/dms", json!({"user_id": target})).await;
+        assert_eq!(reply.error_code(), "user_not_found", "{target}");
+      }
+    }
     app.stop().await;
+  }
+
+  mod guests_starting {
+    use super::*;
+
+    #[tokio::test]
+    async fn nobody_is_the_default_and_a_guest_only_answers() {
+      let app = app!();
+      invite_two_guests(&app).await;
+      let carol_id = user_id(&app, &member("carol")).await;
+      let dave_id = user_id(&app, &member("dave")).await;
+      let ext = external();
+      // Carol shares a channel with the guest: the guest sees her, so the refusal says why.
+      let refused = app.post(&ext, "/dms", json!({"user_id": carol_id})).await;
+      assert_eq!(refused.status, StatusCode::FORBIDDEN);
+      assert_eq!(refused.error_code(), "guest_dm_not_allowed");
+      // Dave is somebody the guest doesn't see: nothing says he exists.
+      let unseen = app.post(&ext, "/dms", json!({"user_id": dave_id})).await;
+      assert_eq!(unseen.status, StatusCode::NOT_FOUND);
+      assert_eq!(unseen.error_code(), "user_not_found");
+      // A group DM is no way around it.
+      let group = app
+        .post(
+          &ext,
+          "/group-dms",
+          json!({"user_ids": [carol_id, user_id(&app, &owner()).await]}),
+        )
+        .await;
+      assert_eq!(group.error_code(), "guest_dm_not_allowed", "{}", group.body);
+      app.stop().await;
+    }
+
+    #[tokio::test]
+    async fn a_guest_can_open_a_dm_a_member_started_again() {
+      let app = app!();
+      let (_, ext_id, _) = invite_two_guests(&app).await;
+      let carol_id = user_id(&app, &member("carol")).await;
+      let started = app
+        .post(&member("carol"), "/dms", json!({"user_id": ext_id}))
+        .await;
+      assert_eq!(started.status, StatusCode::CREATED, "{}", started.body);
+      // A second device of the guest that didn't sync yet asks for the same DM.
+      let again = app.post(&external(), "/dms", json!({"user_id": carol_id})).await;
+      assert!(again.status.is_success(), "{}", again.body);
+      assert_eq!(again.id(), started.id());
+      app.stop().await;
+    }
+
+    #[tokio::test]
+    async fn shared_allows_people_the_guest_shares_a_conversation_with() {
+      let Some(app) = start_with_start(GuestDmStart::Shared).await else {
+        return;
+      };
+      let (_, _, ext2_id) = invite_two_guests(&app).await;
+      let carol_id = user_id(&app, &member("carol")).await;
+      let dave_id = user_id(&app, &member("dave")).await;
+      let ext = external();
+      let shared = app.post(&ext, "/dms", json!({"user_id": carol_id})).await;
+      assert_eq!(shared.status, StatusCode::CREATED, "{}", shared.body);
+      let unseen = app.post(&ext, "/dms", json!({"user_id": dave_id})).await;
+      assert_eq!(unseen.error_code(), "user_not_found");
+      // One person in a group the guest doesn't share a conversation with is enough to refuse it.
+      let group = app
+        .post(&ext, "/group-dms", json!({"user_ids": [carol_id, dave_id]}))
+        .await;
+      assert_eq!(group.error_code(), "user_not_found");
+      // Guest to guest follows the same rule.
+      let other_guest = app.post(&ext, "/dms", json!({"user_id": ext2_id})).await;
+      assert_eq!(other_guest.error_code(), "user_not_found");
+      app.stop().await;
+    }
+
+    #[tokio::test]
+    async fn anyone_lets_a_guest_start_with_everybody() {
+      let Some(app) = start_with_start(GuestDmStart::Anyone).await else {
+        return;
+      };
+      let (_, _, ext2_id) = invite_two_guests(&app).await;
+      let dave_id = user_id(&app, &member("dave")).await;
+      let carol_id = user_id(&app, &member("carol")).await;
+      let ext = external();
+      for target in [&dave_id, &ext2_id] {
+        let reply = app.post(&ext, "/dms", json!({"user_id": target})).await;
+        assert_eq!(reply.status, StatusCode::CREATED, "{}", reply.body);
+      }
+      let group = app
+        .post(&ext, "/group-dms", json!({"user_ids": [carol_id, dave_id]}))
+        .await;
+      assert_eq!(group.status, StatusCode::CREATED, "{}", group.body);
+      app.stop().await;
+    }
+
+    #[tokio::test]
+    async fn the_1_0_9_server_file_flag_keeps_its_meaning() {
+      for (flag, start, expected) in [
+        (true, GuestDmStart::Anyone, StatusCode::NOT_FOUND),
+        (false, GuestDmStart::Nobody, StatusCode::CREATED),
+      ] {
+        let Some(app) = TestApp::start_with(|settings| {
+          settings.policy.guests_dm_start = start;
+          settings.policy.maybe_guests_dm_only_with_shared_conversations = Some(flag);
+        })
+        .await
+        else {
+          return;
+        };
+        invite_two_guests(&app).await;
+        // Dave shares nothing with the guest: `true` means "shared only", `false` "anyone".
+        let dave_id = user_id(&app, &member("dave")).await;
+        let reply = app.post(&external(), "/dms", json!({"user_id": dave_id})).await;
+        assert_eq!(reply.status, expected, "flag {flag}: {}", reply.body);
+        app.stop().await;
+      }
+    }
+
+    async fn start_with_start(start: GuestDmStart) -> Option<TestApp> {
+      TestApp::start_with(|settings| settings.policy.guests_dm_start = start).await
+    }
+  }
+
+  /// Alice's space with Carol (in the shared channel with the guest) and Dave (not), the guest
+  /// `ext` in the shared channel, and a second guest in the internal one. Returns the shared
+  /// channel and both guests' IDs.
+  async fn invite_two_guests(app: &TestApp) -> (String, String, String) {
+    let alice = owner();
+    let (space, shared, internal) = setup(app).await;
+    for (email, channel) in [("ext@example.com", &shared), ("ext2@example.com", &internal)] {
+      let invite = app
+        .post(
+          &alice,
+          &format!("/spaces/{space}/invites"),
+          json!({"email": email, "role": "guest", "channel_ids": [channel]}),
+        )
+        .await;
+      assert_eq!(invite.status, StatusCode::CREATED, "{}", invite.body);
+    }
+    let ext2 = guest("ext2").with_email("ext2@example.com", true);
+    (shared, user_id(app, &external()).await, user_id(app, &ext2).await)
   }
 
   #[tokio::test]

@@ -63,6 +63,9 @@ wire_enum! {
     CannotDeleteSelf => "cannot_delete_self",
     /// Deleting the account would leave the workspace without an active admin.
     LastAdmin => "last_admin",
+    /// A guest tried to start a direct message the instance policy doesn't allow them to start
+    /// (`guest_dm_start`, PLAN.md §12). Only given to guests about people they can already see.
+    GuestDmNotAllowed => "guest_dm_not_allowed",
     /// A channel member must belong to the channel's space first (invite them to the space).
     NotSpaceMember => "not_space_member",
     KeyPackageExhausted => "key_package_exhausted",
@@ -96,6 +99,10 @@ pub enum SignInReason {
   SessionEnded,
   /// The session policy's idle timeout or longest session ran out.
   SessionTimedOut,
+  /// The identity provider refused the app's refresh token (`invalid_grant`): it expired (idle or
+  /// session limit of the provider), was revoked, or the user was disabled there (issue #883). The
+  /// app says so itself; no server sends it.
+  SignInExpired,
   /// The token was refused without a reason (expired, invalid), or by an older server.
   #[default]
   #[serde(other)]
@@ -218,6 +225,10 @@ mod tests {
       SignInReason::Unknown
     );
     assert_eq!(
+      serde_json::to_string(&SignInReason::SignInExpired).unwrap(),
+      r#""sign_in_expired""#
+    );
+    assert_eq!(
       serde_json::from_str::<SignInReason>(r#""from_a_newer_server""#).unwrap(),
       SignInReason::Unknown
     );
@@ -274,6 +285,7 @@ mod tests {
       ErrorCode::CannotDeleteSelf,
       ErrorCode::LastAdmin,
       ErrorCode::CallDeviceLimit,
+      ErrorCode::GuestDmNotAllowed,
       ErrorCode::KeyPackageExhausted,
       ErrorCode::PayloadTooLarge,
       ErrorCode::RateLimited,

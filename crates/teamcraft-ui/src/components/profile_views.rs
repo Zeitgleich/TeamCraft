@@ -180,15 +180,24 @@ fn ProfileActions(person: User, is_me: bool) -> impl IntoView {
   }
   // A call needs the direct conversation; without one yet, "Message" creates it first.
   let maybe_direct = state.direct_with(&[user]);
+  let can_message = crate::channel_access::can_start_direct(state, &[user]);
   let can_call = maybe_direct.is_some() && !person.is_bot;
   let is_copied = RwSignal::new(false);
   let maybe_email = person.maybe_email.clone();
   view! {
     <div class="profile-actions">
-      <button type="button" class="btn btn-primary" data-autofocus on:click=move |_| { state.close_overlay(); state.open_direct(user); }>
+      <button
+        type="button"
+        class="btn btn-primary"
+        data-autofocus
+        disabled=!can_message
+        title=move || (!can_message).then(|| i18n.t("profile-message-guest-blocked"))
+        on:click=move |_| { state.close_overlay(); state.open_direct(user); }
+      >
         <Icon name=IconName::Compose />
         <span>{move || i18n.t("profile-message")}</span>
       </button>
+      {(!can_message).then(|| view! { <p class="small muted-text">{move || i18n.t("profile-message-guest-blocked")}</p> })}
       {maybe_direct.filter(|_| can_call).map(|conversation| view! {
         <button
           type="button"
@@ -549,7 +558,7 @@ pub fn UserHoverCard(
         </div>
       </div>
       <div class="hover-card-actions">
-        {(!is_me).then(|| view! {
+        {(!is_me && crate::channel_access::can_start_direct(state, &[user])).then(|| view! {
           <button class="btn btn-small btn-primary" on:click=move |_| { on_leave.run(()); state.open_direct(user); }>
             {move || i18n.t("profile-message")}
           </button>

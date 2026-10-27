@@ -343,6 +343,27 @@ Clients → client → Client scopes → `offline_access`, optional is enough) a
 time decides how long an unused device stays signed in (Realm settings → Sessions, 30 days by
 default). Without the scope a device's sign-in ends with the provider's browser session.
 
+**Devices that were off for a long time** (issue #883). A computer that was off or asleep for 12
+hours, a weekend or weeks wakes up with a long-expired access token; the app shows "offline" (never
+"sign in again"), and refreshes with its stored refresh token as soon as the network is back. Whether
+that refresh is accepted is the provider's decision:
+
+- Sessions with `offline_access` (every sign-in since #667) hold an offline token: it is accepted as
+  long as the device was off for less than the offline session idle time (Keycloak default 30 days)
+  and, if set, the offline session max. Every refresh starts the idle time anew. Set the idle time
+  longer if devices may be off longer (holidays, parental leave).
+- Sessions from before #667, or from a client without the `offline_access` scope, hold a normal
+  refresh token, which ends with the provider's browser session: Keycloak's SSO session idle (30
+  minutes by default) and SSO session max (10 hours). Such a device has to sign in again after a
+  longer pause; after that it has an offline token.
+- When the provider refuses the token (`invalid_grant`), the app forgets it and goes back to the
+  sign-in screen once, with "Your session has expired. Please sign in again." Without an answer
+  (no network, the provider down) the token is kept and tried again with a growing pause.
+
+teamcraft-deploy imports the realm with `offline_access` as an optional client scope and leaves the
+session times at Keycloak's defaults (checked in its `realm.json.j2`); an existing realm keeps
+whatever it was set to.
+
 **Several devices per account.** Every device signs in with its own provider session, and all of
 them stay signed in side by side. Signing out on one device ends that device's provider session; the
 provider's back-channel logout names it (`sid`), and the server ends only that session. A logout
@@ -362,7 +383,10 @@ and account and hands its result to everyone waiting: the browser's tabs through
 shared token vault, the desktop app in its shell (the core only reads the token), iOS across the app
 and its notification extension through a lock file in the App Group, Android in its process. A
 refresh token is only dropped when the provider answers `invalid_grant`; network errors and other
-answers (`temporarily_unavailable`, `server_error`) keep it for the next try. When the session
+answers (`temporarily_unavailable`, `server_error`) keep it for the next try. The desktop app keeps
+the access token's expiry in wall-clock time, so a token that ran out while the computer slept is
+refreshed right after wake-up, and a request the server refuses with 401 gets one refresh and one
+retry (issue #883). When the session
 really ends the apps say why: signed out at the provider or on another device (`session_ended`,
 usually a back-channel logout), or the workspace's session policy timed it out
 (`session_timed_out`, Admin → Security → session length and idle timeout).

@@ -7,9 +7,9 @@
 use serde_json::json;
 use teamcraft_db::{AppendOutcome, WorkspaceLogEntry};
 use teamcraft_proto::{
-  AppendWorkspaceLogRequest, Base64Bytes, ComplianceArchiveMode, GatewayEvent, ListWorkspaceLogQuery,
-  ListWorkspaceLogResponse, Permission, PolicyDocument, Target, WorkspaceLogEntryResponse, WorkspaceLogKind,
-  WorkspacePolicy, WorkspacePolicyResponse,
+  AppendWorkspaceLogRequest, Base64Bytes, ComplianceArchiveMode, GatewayEvent, GuestDmStart,
+  ListWorkspaceLogQuery, ListWorkspaceLogResponse, Permission, PolicyDocument, Target,
+  WorkspaceLogEntryResponse, WorkspaceLogKind, WorkspacePolicy, WorkspacePolicyResponse,
 };
 
 use super::access::require;
@@ -169,20 +169,13 @@ pub fn effective_guest_expiry_days(state: &AppState) -> u32 {
     .unwrap_or(state.settings.get().guests.default_expiry_days)
 }
 
-/// Whether guests may only open DMs with people they share a conversation with.
-pub fn effective_guest_dm_restriction(state: &AppState) -> bool {
+/// Whom guests may start a direct message with: the signed policy, else the server file.
+pub fn effective_guest_dm_start(state: &AppState) -> GuestDmStart {
   state
     .policy
     .get()
     .guests
-    .maybe_dm_only_with_shared_conversations
-    .unwrap_or(
-      state
-        .settings
-        .get()
-        .policy
-        .guests_dm_only_with_shared_conversations,
-    )
+    .effective_dm_start(state.settings.get().policy.effective_guests_dm_start())
 }
 
 /// Shortest password of a local account.

@@ -670,6 +670,11 @@ pub enum ApiError {
   Gateway(String),
   #[error("no access token: {0}")]
   Token(String),
+  /// The identity provider refused the app's refresh token (`invalid_grant`): the sign-in has
+  /// ended for good and the user has to sign in again (issue #883). Set by the app's token source,
+  /// never by a server answer.
+  #[error("the sign-in has expired at the identity provider")]
+  SignInExpired,
   #[error("not supported on this platform yet: {0}")]
   Unsupported(&'static str),
   /// A downloaded blob was larger than it may be.
@@ -743,7 +748,10 @@ impl ApiError {
   /// token won't help, the user (or the app's token refresh) has to sign in again. A deactivated
   /// account's queued work waits for a reactivation like for a new token.
   pub fn is_sign_in_required(&self) -> bool {
-    matches!(self, Self::Token(_) | Self::Status { status: 401, .. }) || self.is_account_deactivated()
+    matches!(
+      self,
+      Self::Token(_) | Self::SignInExpired | Self::Status { status: 401, .. }
+    ) || self.is_account_deactivated()
   }
 
   /// The account is deactivated (suspended): nothing works until an admin reactivates it.

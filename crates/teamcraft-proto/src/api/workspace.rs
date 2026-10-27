@@ -285,14 +285,83 @@ pub struct GuestPolicy {
     skip_serializing_if = "Option::is_none"
   )]
   pub maybe_default_expiry_days: Option<u32>,
-  /// Guests open direct messages only with people they share a conversation with. Absent: the
-  /// server file decides.
+  /// Whom a guest may start a direct message with. Absent: the older
+  /// `dm_only_with_shared_conversations` decides, and without it the server file.
+  #[serde(rename = "dm_start", default, skip_serializing_if = "Option::is_none")]
+  pub maybe_dm_start: Option<GuestDmStart>,
+  /// The 1.0.9 form of `dm_start` (`true`: [`GuestDmStart::Shared`], `false`: [`GuestDmStart::Anyone`]).
+  /// Still read from policies signed before `dm_start` existed, and written next to it as the
+  /// closest value (`nobody` as `true`) so older servers and clients stay on the safe side.
   #[serde(
     rename = "dm_only_with_shared_conversations",
     default,
     skip_serializing_if = "Option::is_none"
   )]
   pub maybe_dm_only_with_shared_conversations: Option<bool>,
+}
+
+impl GuestPolicy {
+  /// What guests may start: the explicit setting, else the 1.0.9 flag, else the server file's
+  /// default. An unknown (newer) value counts as [`GuestDmStart::Nobody`], the strictest.
+  pub fn effective_dm_start(&self, server_default: GuestDmStart) -> GuestDmStart {
+    match (&self.maybe_dm_start, self.maybe_dm_only_with_shared_conversations) {
+      (Some(GuestDmStart::Unknown(_)), _) => GuestDmStart::Nobody,
+      (Some(explicit), _) => explicit.clone(),
+      (None, Some(is_shared_only)) => GuestDmStart::from_shared_only_flag(is_shared_only),
+      (None, None) => server_default,
+    }
+  }
+
+  /// Sets `dm_start` and the 1.0.9 flag next to it; `None` clears both (the server file decides).
+  pub fn set_dm_start(&mut self, maybe_start: Option<GuestDmStart>) {
+    self.maybe_dm_only_with_shared_conversations =
+      maybe_start.as_ref().map(|start| *start != GuestDmStart::Anyone);
+    self.maybe_dm_start = maybe_start;
+  }
+}
+
+wire_enum! {
+  /// Whom a guest may start a direct or group conversation with. Members, admins and owners may
+  /// always start one with a guest; and a guest can always read and answer in a conversation
+  /// somebody else started with them (PLAN.md §12).
+  pub enum GuestDmStart {
+    /// Nobody: a guest only answers.
+    Nobody => "nobody",
+    /// People the guest already shares a conversation with.
+    Shared => "shared",
+    /// Any person the guest can find.
+    Anyone => "anyone",
+  }
+}
+
+impl GuestDmStart {
+  /// What the server file and its default give when neither the policy nor the old flag says.
+  pub const DEFAULT: Self = Self::Nobody;
+
+  /// The 1.0.9 setting `dm_only_with_shared_conversations`.
+  pub fn from_shared_only_flag(is_shared_only: bool) -> Self {
+    if is_shared_only {
+      Self::Shared
+    } else {
+      Self::Anyone
+    }
+  }
+
+  /// Whether a guest may start a conversation with a person, given whether they already share a
+  /// conversation with that person.
+  pub fn allows(&self, shares_conversation: bool) -> bool {
+    match self {
+      Self::Anyone => true,
+      Self::Shared => shares_conversation,
+      Self::Nobody | Self::Unknown(_) => false,
+    }
+  }
+}
+
+impl Default for GuestDmStart {
+  fn default() -> Self {
+    Self::DEFAULT
+  }
 }
 
 /// Rules for accounts that live in TeamCraft instead of the identity provider.
@@ -539,6 +608,92 @@ mod tests {
     assert_eq!(policy.compliance_archive.mode, ComplianceArchiveMode::Off);
     assert!(json.contains(r#""admin_self_join":"visible""#));
     assert!(policy.org_recovery.is_enabled_for_members && !policy.org_recovery.is_enabled_for_guests);
+  }
+
+  mod guest_dm_start {
+    use super::*;
+
+    #[test]
+    fn stored_1_0_9_policies_keep_their_meaning() {
+      for (json, expected) in [
+        (r#"{}"#, GuestDmStart::Nobody),
+        (
+          r#"{"dm_only_with_shared_conversations":true}"#,
+          GuestDmStart::Shared,
+        ),
+        (
+          r#"{"dm_only_with_shared_conversations":false}"#,
+          GuestDmStart::Anyone,
+        ),
+        (r#"{"dm_start":"anyone"}"#, GuestDmStart::Anyone),
+        (
+          r#"{"dm_start":"nobody","dm_only_with_shared_conversations":false}"#,
+          GuestDmStart::Nobody,
+        ),
+        (r#"{"dm_start":"mentioned_only"}"#, GuestDmStart::Nobody),
+      ] {
+        let policy: GuestPolicy = serde_json::from_str(json).unwrap();
+        assert_eq!(
+          policy.effective_dm_start(GuestDmStart::Nobody),
+          expected,
+          "{json}"
+        );
+      }
+    }
+
+    #[test]
+    fn absent_values_fall_back_to_the_server_default() {
+      let policy = GuestPolicy::default();
+      assert_eq!(
+        policy.effective_dm_start(GuestDmStart::Anyone),
+        GuestDmStart::Anyone
+      );
+    }
+
+    #[test]
+    fn unknown_values_are_kept_and_treated_as_nobody() {
+      let policy: GuestPolicy = serde_json::from_str(r#"{"dm_start":"mentioned_only"}"#).unwrap();
+      assert_eq!(
+        policy.maybe_dm_start,
+        Some(GuestDmStart::Unknown("mentioned_only".into()))
+      );
+      assert_eq!(
+        serde_json::to_string(&policy).unwrap(),
+        r#"{"allowed_email_domains":[],"dm_start":"mentioned_only"}"#
+      );
+      assert!(!GuestDmStart::Unknown("x".into()).allows(true));
+    }
+
+    #[test]
+    fn setting_it_mirrors_the_old_flag_on_the_safe_side() {
+      let mut policy = GuestPolicy::default();
+      for (start, flag) in [
+        (GuestDmStart::Nobody, true),
+        (GuestDmStart::Shared, true),
+        (GuestDmStart::Anyone, false),
+      ] {
+        policy.set_dm_start(Some(start));
+        assert_eq!(policy.maybe_dm_only_with_shared_conversations, Some(flag));
+      }
+      assert_eq!(
+        serde_json::to_string(&policy).unwrap(),
+        r#"{"allowed_email_domains":[],"dm_start":"anyone","dm_only_with_shared_conversations":false}"#
+      );
+      policy.set_dm_start(None);
+      assert_eq!(policy, GuestPolicy::default());
+    }
+
+    #[test]
+    fn what_each_value_allows() {
+      for (start, shared, other) in [
+        (GuestDmStart::Nobody, false, false),
+        (GuestDmStart::Shared, true, false),
+        (GuestDmStart::Anyone, true, true),
+      ] {
+        assert_eq!(start.allows(true), shared, "{start} shared");
+        assert_eq!(start.allows(false), other, "{start} other");
+      }
+    }
   }
 
   #[test]

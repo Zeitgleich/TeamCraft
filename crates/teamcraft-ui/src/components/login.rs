@@ -343,9 +343,16 @@ fn LoginScreen(problem: Option<LoginProblem>, control: SessionControl) -> impl I
       Some("login-core-no-token-title"),
       Some("login-core-no-token-body"),
     ),
+    Some(LoginProblem::SessionExpired) => (
+      Some("login-session-expired-title"),
+      Some("login-session-expired-body"),
+    ),
     None => (None, None),
   };
-  let tone = if problem == Some(LoginProblem::Cancelled) {
+  let tone = if matches!(
+    problem,
+    Some(LoginProblem::Cancelled | LoginProblem::SessionExpired)
+  ) {
     ProblemTone::Notice
   } else {
     ProblemTone::Error

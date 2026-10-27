@@ -98,5 +98,9 @@ cargo deny check
 - **Releases are nightly** (03:00 Berlin, `nightly-release.yml`, [docs/release.md](docs/release.md)):
   finished PRs go to `main` as soon as they are done; PR titles become the release highlights, so write them for readers, and label them (`feature`, `bug`, `security`,
   `breaking`) so the release notes group them. Don't bump the version or tag by hand for a patch.
+- **Merging:** `main` requires one check, `ci-gate` (`ci.yml`). With the `ci` label it passes only
+  when the whole CI passed; without it CI is skipped and it passes at once. So auto-merge
+  (`gh pr merge --auto --squash`) waits for CI exactly when the pull request asked for it. Admins
+  bypass the rule (batch merges); the nightly workflow marks its bump commit (docs/release.md).
 - Commit messages: imperative subject line (≤ 72 chars), body explains *why*. Sign off with
   `git commit -s` (Developer Certificate of Origin, as in CalCraft).

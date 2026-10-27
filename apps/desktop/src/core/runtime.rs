@@ -6,7 +6,7 @@ use std::path::PathBuf;
 use std::pin::Pin;
 use std::rc::Rc;
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use secrecy::ExposeSecret;
 use teamcraft_client_api::backend::ChatBackend;
@@ -45,14 +45,14 @@ use teamcraft_crypto::identity::IdentityPublicKey;
 use teamcraft_crypto::secret::{SecretBytes, SymmetricKey};
 use teamcraft_proto::DeviceLinkPlatform;
 use teamcraft_proto::{
-  BackgroundId, CallJoinTokenResponse, ClientUpdatePolicy, ConversationId, DeviceActivity,
+  BackgroundId, CallJoinTokenResponse, ClientUpdatePolicy, ConversationId, DeviceActivity, ErrorCode,
   GatewayClientMessage, GatewayEvent, MessageId, OrgBackgroundId, UserId,
 };
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::LocalSet;
 
 use super::media::{KeptKey, MediaSlot};
-use crate::auth::{AuthService, TokenPeek, TokenStore};
+use crate::auth::{AuthError, AuthService, TokenPeek, TokenStore, token_fingerprint};
 
 /// Wrong short codes allowed before a link approval is dropped.
 const MAX_APPROVAL_MISSES: u8 = 3;
@@ -95,22 +95,48 @@ pub struct CoreConfig {
 pub struct TokenCache {
   last: Arc<Mutex<Option<CachedToken>>>,
   maybe_source: Option<Arc<dyn Fn() -> TokenPeek + Send + Sync>>,
+  maybe_refresher: Option<Refresher>,
 }
+
+/// Refreshes the session after the server refused the token with the given fingerprint; see
+/// [`AuthService::refresh_rejected`].
+type Refresher = Arc<dyn Fn(u64) -> Pin<Box<dyn Future<Output = Result<bool, AuthError>>>> + Send + Sync>;
 
 struct CachedToken {
   server_url: String,
   token: String,
-  /// `None` for a token set by hand, which has no known expiry.
-  maybe_valid_until: Option<Instant>,
+  /// Wall clock (Unix ms), which goes on during a suspend, unlike `Instant` (issue #883). `None`
+  /// for a token set by hand, which has no known expiry.
+  maybe_valid_until_ms: Option<i64>,
 }
 
 impl TokenCache {
   /// Reads the current token of `service` on every request.
-  pub fn live<S: TokenStore>(service: Arc<AuthService<S>>) -> Self {
+  pub fn live<S: TokenStore + 'static>(service: Arc<AuthService<S>>) -> Self {
+    let refreshing = Arc::clone(&service);
     Self {
       last: Arc::default(),
       maybe_source: Some(Arc::new(move || service.peek_server_bearer_token())),
+      maybe_refresher: Some(Arc::new(move |refused| {
+        let service = Arc::clone(&refreshing);
+        Box::pin(async move { service.refresh_rejected(refused).await })
+      })),
     }
+  }
+
+  /// After the server refused the token with fingerprint `refused`: refreshes it once (shared by
+  /// concurrent callers, never twice for one refusal). `Ok(true)` means the request is worth
+  /// exactly one more try.
+  pub async fn refresh_rejected(&self, refused: u64) -> Result<bool, AuthError> {
+    match &self.maybe_refresher {
+      Some(refresher) => refresher(refused).await,
+      None => Ok(false),
+    }
+  }
+
+  /// The fingerprint of the token a request sent now carries, if there is one.
+  fn current_fingerprint(&self) -> Option<u64> {
+    self.current().ok().map(|(_, token)| token_fingerprint(&token))
   }
 
   /// `(server origin, access token)`, or nothing while signed out.
@@ -119,7 +145,7 @@ impl TokenCache {
     self.remember(maybe_token.map(|(server_url, token)| CachedToken {
       server_url,
       token,
-      maybe_valid_until: None,
+      maybe_valid_until_ms: None,
     }));
   }
 
@@ -132,7 +158,11 @@ impl TokenCache {
     }
   }
 
-  fn current(&self) -> Option<(String, String)> {
+  /// `(server origin, access token)`, or why there is none. A token that is being refreshed
+  /// (expired after a suspend, a refresh running or waiting for the network) is a network problem
+  /// for the core, not a sign-in problem: the gateway shows "offline" and retries, queued work
+  /// waits, and nothing says the session expired while it is fine (issue #883).
+  fn current(&self) -> Result<(String, String), ApiError> {
     match self.maybe_source.as_ref().map(|source| source()) {
       Some(TokenPeek::Ready {
         server_url,
@@ -143,24 +173,38 @@ impl TokenCache {
         self.remember(Some(CachedToken {
           server_url: server_url.clone(),
           token: token.clone(),
-          maybe_valid_until: Some(Instant::now() + valid_for),
+          maybe_valid_until_ms: Some(
+            SystemClock
+              .now_ms()
+              .saturating_add(i64::try_from(valid_for.as_millis()).unwrap_or(i64::MAX)),
+          ),
         }));
-        Some((server_url, token))
+        Ok((server_url, token))
       },
       Some(TokenPeek::Unavailable) => {
         self.remember(None);
-        None
+        Err(not_signed_in())
       },
-      Some(TokenPeek::Busy) | None => self.last.lock().ok().and_then(|slot| {
-        slot
-          .as_ref()
-          .filter(|cached| {
-            cached
-              .maybe_valid_until
-              .is_none_or(|until| until > Instant::now())
-          })
-          .map(|cached| (cached.server_url.clone(), cached.token.clone()))
-      }),
+      Some(TokenPeek::Refreshing) => Err(waiting_for_refresh()),
+      Some(TokenPeek::Expired) => {
+        self.remember(None);
+        Err(ApiError::SignInExpired)
+      },
+      Some(TokenPeek::Busy) | None => {
+        let slot = self.last.lock().map_err(|_| not_signed_in())?;
+        match slot.as_ref() {
+          Some(cached)
+            if cached
+              .maybe_valid_until_ms
+              .is_none_or(|until_ms| until_ms > SystemClock.now_ms()) =>
+          {
+            Ok((cached.server_url.clone(), cached.token.clone()))
+          },
+          // Seen before but run out: a refresh holds the session.
+          Some(_) => Err(waiting_for_refresh()),
+          None => Err(not_signed_in()),
+        }
+      },
     }
   }
 
@@ -180,13 +224,21 @@ pub struct ServerTokens {
 
 impl AccessTokenSource for ServerTokens {
   fn access_token(&self) -> Result<String, ApiError> {
-    self
-      .cache
-      .current()
-      .filter(|(server_url, _)| *server_url == self.server_url)
-      .map(|(_, token)| token)
-      .ok_or_else(|| ApiError::Token("not signed in".to_owned()))
+    let (server_url, token) = self.cache.current()?;
+    if server_url == self.server_url {
+      Ok(token)
+    } else {
+      Err(not_signed_in())
+    }
   }
+}
+
+fn not_signed_in() -> ApiError {
+  ApiError::Token("not signed in".to_owned())
+}
+
+fn waiting_for_refresh() -> ApiError {
+  ApiError::Network("waiting for a fresh access token".to_owned())
 }
 
 /// A database key that comes from the OS keystore, or a fixed one in tests.
@@ -1007,7 +1059,11 @@ impl Core {
         self.drop_abandoned_setup().await;
         let has_existing_identity = match self.api().identity_key(self.user).await {
           Ok(maybe_key) => maybe_key.is_some(),
-          Err(error @ ApiError::Token(_)) => return Err(OpenError::NoToken(error.to_string())),
+          // No token yet, one waiting for its refresh, or a refused sign-in (the UI takes it from
+          // there): opening is retried.
+          Err(error @ (ApiError::Token(_) | ApiError::Network(_) | ApiError::SignInExpired)) => {
+            return Err(OpenError::NoToken(error.to_string()));
+          },
           Err(error) => return Err(OpenError::Failed(error.to_string())),
         };
         Ok(CoreStatus::NeedsEnrollment {
@@ -1213,7 +1269,14 @@ impl Core {
       Request::LinkRequests(reply) => drop(reply.send(self.link_requests())),
       Request::LinkRequestReview { id, reply } => drop(reply.send(self.link_request_review(&id).await)),
       Request::LinkRequestReject { id, reply } => drop(reply.send(self.link_request_reject(&id).await)),
-      Request::NetworkChanged => self.connection.network_changed(SystemClock.now_ms()).await,
+      Request::NetworkChanged => {
+        // Pooled connections from before a suspend or on the old network are dead; a command on
+        // one would hang until the HTTP/2 keep-alive gives up (issue #883).
+        if let Some(client) = &self.client {
+          client.api().drop_connections();
+        }
+        self.connection.network_changed(SystemClock.now_ms()).await
+      },
       // Handled by the loop in `run`.
       Request::Shutdown => {},
       Request::Snapshot(reply) => drop(reply.send(self.snapshot())),
@@ -1760,7 +1823,7 @@ impl Core {
     let Some(client) = self.client.as_mut() else {
       return Ok(0);
     };
-    run_commands(&mut self.connection, client, commands).await
+    run_commands(&mut self.connection, client, &self.tokens, commands).await
   }
 
   async fn flush(&mut self) {
@@ -1815,6 +1878,7 @@ impl Core {
       status,
       catch_up_focus,
       on_change,
+      tokens,
       ..
     } = self
     else {
@@ -1830,7 +1894,7 @@ impl Core {
       on_change: on_change.as_ref(),
     };
     let work = Box::pin(async {
-      let ran = run_commands(connection, client, commands).await;
+      let ran = run_commands(connection, client, tokens, commands).await;
       let flushed = flush_sends_of(connection, client).await;
       (ran, flushed)
     });
@@ -2153,20 +2217,80 @@ async fn serve_reads_during<T>(
 async fn run_commands(
   connection: &mut ConnectionSupervisor<Gateway>,
   client: &mut Client<Api, Store>,
+  tokens: &TokenCache,
   commands: Vec<CoreCommand>,
 ) -> Result<usize, CoreError> {
   let count = commands.len();
   let mut maybe_failure = None;
   for command in commands {
+    let maybe_sent = tokens.current_fingerprint();
     let result = connection
-      .keep_alive(SystemClock.now_ms(), client.run_ui_command(command))
+      .keep_alive(SystemClock.now_ms(), client.run_ui_command(command.clone()))
       .await;
+    // One more try after a refused token, never more (issue #883). The refresh can wait for the
+    // session lock and the provider: heartbeats go on meanwhile.
+    let result = match result {
+      Err(error) if is_refused_token(&error) => {
+        let decision = connection
+          .keep_alive(SystemClock.now_ms(), retry_decision(tokens, maybe_sent, error))
+          .await;
+        match decision {
+          Ok(()) => {
+            connection
+              .keep_alive(SystemClock.now_ms(), client.run_ui_command(command))
+              .await
+          },
+          Err(error) => Err(error),
+        }
+      },
+      other => other,
+    };
     if let Err(error) = result {
       tracing::warn!(%error, "UI command failed");
       maybe_failure.get_or_insert(error);
     }
   }
   maybe_failure.map_or(Ok(count), Err)
+}
+
+/// The server refused the access token (401): an expired token after a suspend, which one
+/// refresh fixes (issue #883). Not when the server said why and a new token can't help: the
+/// session ended or timed out, the account is deleted or deactivated.
+fn is_refused_token(error: &CoreError) -> bool {
+  let CoreError::Api(api @ ApiError::Status { status: 401, .. }) = error else {
+    return false;
+  };
+  !matches!(
+    api.error_code(),
+    Some(
+      ErrorCode::SessionEnded
+        | ErrorCode::SessionTimedOut
+        | ErrorCode::AccountDeleted
+        | ErrorCode::AccountDeactivated
+    )
+  )
+}
+
+/// Refreshes the token once after `error` (a refused token): `Ok(())` when the command is worth
+/// one more try, otherwise the error to show. A refresh that got no answer is a network problem
+/// and says so; only a refused refresh token leaves the sign-in message.
+async fn retry_decision(
+  tokens: &TokenCache,
+  maybe_sent: Option<u64>,
+  error: CoreError,
+) -> Result<(), CoreError> {
+  let Some(sent) = maybe_sent else {
+    return Err(error);
+  };
+  match tokens.refresh_rejected(sent).await {
+    Ok(true) => Ok(()),
+    Ok(false) => Err(error),
+    Err(AuthError::Network(detail)) => Err(CoreError::Api(ApiError::Network(detail))),
+    Err(refresh) => {
+      tracing::info!(kind = refresh.kind(), "no fresh token after a refused one");
+      Err(error)
+    },
+  }
 }
 
 /// Sends the outbox with heartbeats going on; whether anything changed.
@@ -2404,10 +2528,68 @@ mod tests {
       let tokens = cache.for_server(SERVER);
 
       assert!(tokens.access_token().is_ok());
+      let error = tokens.access_token().unwrap_err();
       assert!(
-        tokens.access_token().is_err(),
-        "busy, and the token seen last has run out"
+        error.is_transient() && !error.is_sign_in_required(),
+        "busy, and the token seen last has run out: waiting for the refresh, not signed out ({error})"
       );
+    }
+
+    /// Issue #883: a refused token is refreshed and the command tried once more; a refresh without
+    /// an answer reads as a network problem, not as "sign in again".
+    #[tokio::test]
+    async fn a_refused_token_is_refreshed_once_and_no_answer_is_a_network_error() {
+      let refused = || {
+        CoreError::Api(ApiError::Status {
+          status: 401,
+          maybe_body: None,
+          maybe_retry_after: None,
+        })
+      };
+      assert!(is_refused_token(&refused()));
+      assert!(!is_refused_token(&CoreError::Api(ApiError::Token(
+        "not signed in".into()
+      ))));
+      let ended = CoreError::Api(ApiError::Status {
+        status: 401,
+        maybe_body: Some(teamcraft_proto::ErrorBody::new(ErrorCode::SessionEnded, "ended")),
+        maybe_retry_after: None,
+      });
+      assert!(
+        !is_refused_token(&ended),
+        "a new token can't undo a sign-out elsewhere"
+      );
+      assert!(!is_refused_token(&CoreError::Api(ApiError::Network(
+        "down".into()
+      ))));
+
+      let refreshed = refresher(|| Ok(true));
+      assert!(retry_decision(&refreshed, Some(0), refused()).await.is_ok());
+
+      let offline = refresher(|| Err(AuthError::Network("no route to host".into())));
+      let error = retry_decision(&offline, Some(0), refused()).await.unwrap_err();
+      assert!(matches!(error, CoreError::Api(ApiError::Network(_))), "{error}");
+
+      let denied = refresher(|| Err(AuthError::Denied("invalid_grant".into())));
+      let error = retry_decision(&denied, Some(0), refused()).await.unwrap_err();
+      assert!(
+        error.is_sign_in_required(),
+        "a refused refresh token stays a sign-in error"
+      );
+
+      let nothing = TokenCache::default();
+      assert!(retry_decision(&nothing, Some(0), refused()).await.is_err());
+      assert!(
+        retry_decision(&refreshed, None, refused()).await.is_err(),
+        "no token was sent: nothing to refresh"
+      );
+    }
+
+    fn refresher(answer: fn() -> Result<bool, AuthError>) -> TokenCache {
+      TokenCache {
+        maybe_refresher: Some(Arc::new(move |_| Box::pin(async move { answer() }))),
+        ..TokenCache::default()
+      }
     }
 
     /// Ready with a token valid for `valid_for` once, busy afterwards.
@@ -2415,6 +2597,7 @@ mod tests {
       let was_read = Arc::new(AtomicBool::new(false));
       TokenCache {
         last: Arc::default(),
+        maybe_refresher: None,
         maybe_source: Some(Arc::new(move || {
           if was_read.swap(true, Ordering::SeqCst) {
             TokenPeek::Busy

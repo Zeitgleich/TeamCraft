@@ -53,6 +53,9 @@ pub enum ApiError {
   /// Channel members must belong to the channel's space; the user is not in it (yet).
   #[error("the user is not a member of the space")]
   NotSpaceMember,
+  /// A guest tried to start a direct message that `guest_dm_start` doesn't allow.
+  #[error("guests may not start this direct message")]
+  GuestDmNotAllowed,
   /// The admin's last request to join was declined or withdrawn and would not have expired yet.
   #[error("asked to join this channel recently; ask again once that request would have expired")]
   AdminJoinRequestTooSoon,
@@ -293,6 +296,7 @@ impl ApiError {
       ) => StatusCode::UNAUTHORIZED,
       Self::Auth(AuthError::NoTeamcraftRole | AuthError::AccountDeactivated)
       | Self::Forbidden(_)
+      | Self::GuestDmNotAllowed
       | Self::MfaRequired => StatusCode::FORBIDDEN,
       Self::Auth(AuthError::KeysUnavailable(_)) => StatusCode::SERVICE_UNAVAILABLE,
       Self::NotFound { .. } => StatusCode::NOT_FOUND,
@@ -330,6 +334,7 @@ impl ApiError {
       Self::Auth(AuthError::AccountDeactivated) => ErrorCode::AccountDeactivated,
       Self::Auth(AuthError::AccountDeleted) => ErrorCode::AccountDeleted,
       Self::Forbidden(_) => ErrorCode::Forbidden,
+      Self::GuestDmNotAllowed => ErrorCode::GuestDmNotAllowed,
       Self::Auth(AuthError::KeysUnavailable(_)) => ErrorCode::Unavailable,
       Self::NotFound { code, .. } => code.clone(),
       Self::InvalidRequest(_) => ErrorCode::InvalidRequest,
@@ -576,6 +581,11 @@ mod tests {
         ErrorCode::Conflict,
       ),
       (ApiError::LastOwner, StatusCode::BAD_REQUEST, ErrorCode::LastOwner),
+      (
+        ApiError::GuestDmNotAllowed,
+        StatusCode::FORBIDDEN,
+        ErrorCode::GuestDmNotAllowed,
+      ),
       (
         ApiError::CannotDeleteSelf,
         StatusCode::CONFLICT,
