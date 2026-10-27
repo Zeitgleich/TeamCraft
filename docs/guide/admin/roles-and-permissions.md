@@ -9,7 +9,7 @@ They come from the identity provider's client roles ([Keycloak setup](keycloak.m
 | owner  | Company owner/IT lead | Everything an admin can, plus **sign** the admin roster and the workspace policy   |
 | admin  | IT admin              | Manage all spaces, channels (metadata), users, devices, bots; read the audit log   |
 | member | Employee              | Chat, create channels and group DMs, mention groups, create share links            |
-| guest  | External person       | Write and react in conversations they were added to; DMs only with shared contacts |
+| guest  | External person       | Write and react in conversations they were added to; start no conversation alone   |
 
 Inside a space there is also **space admin** (manage the space's channels and members, invite guests)
 and inside a channel **channel admin** (manage members, roles and properties, delete others' posts)

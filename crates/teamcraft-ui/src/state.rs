@@ -630,6 +630,15 @@ impl AppState {
       self.open_conversation(conversation);
       return;
     }
+    // The surfaces don't offer this to a guest who may not start it; this catches the ones that
+    // take a typed name (`/msg`) or a picker.
+    if !crate::channel_access::can_start_direct(*self, &users) {
+      crate::feedback::report_failure(crate::feedback::ActionFailure::new(
+        crate::feedback::FailureKind::Server(teamcraft_proto::ErrorCode::GuestDmNotAllowed),
+        "guests may not start this conversation",
+      ));
+      return;
+    }
     self.pending_dm.set(Some(users.clone()));
     match users.as_slice() {
       [user] => {

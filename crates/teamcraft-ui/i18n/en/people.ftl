@@ -59,6 +59,7 @@ profile-hours-invalid = Working hours need at least one day and an end after the
 profile-avatar-change = Change picture
 profile-avatar-remove = Remove picture
 profile-message = Message
+profile-message-guest-blocked = As a guest you can answer messages but not start conversations. A member can write to you first.
 profile-open = Show the profile of { $name }
 profile-call = Call
 profile-email = E-mail

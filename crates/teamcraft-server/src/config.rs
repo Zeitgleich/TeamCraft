@@ -7,7 +7,7 @@ use figment::Figment;
 use figment::providers::{Env, Format, Toml};
 use secrecy::SecretString;
 use serde::{Deserialize, Serialize};
-use teamcraft_proto::{ConversationId, SignInMethod, SpaceId};
+use teamcraft_proto::{ConversationId, GuestDmStart, SignInMethod, SpaceId};
 
 /// Prefix of environment overrides. Nested keys are separated by a double underscore:
 /// `TEAMCRAFT_OIDC__ISSUER`, `TEAMCRAFT_OIDC__ROLES__GUEST`, `TEAMCRAFT_DATABASE__URL`.
@@ -215,8 +215,14 @@ pub struct LoggingConfig {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields, default)]
 pub struct PolicyConfig {
-  /// Guests can only open DMs with people they share a conversation with.
-  pub guests_dm_only_with_shared_conversations: bool,
+  /// Whom a guest may start a direct message with when the signed policy doesn't say:
+  /// `nobody` (default), `shared` (people they share a conversation with) or `anyone`. Members,
+  /// admins and owners can always message guests.
+  pub guests_dm_start: GuestDmStart,
+  /// Deprecated, the 1.0.9 form of `guests_dm_start`: `true` is `shared`, `false` is `anyone`. Wins
+  /// over `guests_dm_start` where set, so a file that still has it keeps its meaning.
+  #[serde(rename = "guests_dm_only_with_shared_conversations")]
+  pub maybe_guests_dm_only_with_shared_conversations: Option<bool>,
   /// Pending invites only apply to accounts whose identity provider verified the email address.
   pub invites_require_verified_email: bool,
   /// Spaces (by ID) every new member joins on their first sign-in. Missing or archived ones are skipped.
@@ -1329,10 +1335,21 @@ impl Default for RoleNames {
   }
 }
 
+impl PolicyConfig {
+  /// What the server file says guests may start; the deprecated 1.0.9 flag wins where it is set.
+  pub fn effective_guests_dm_start(&self) -> GuestDmStart {
+    self.maybe_guests_dm_only_with_shared_conversations.map_or_else(
+      || self.guests_dm_start.clone(),
+      GuestDmStart::from_shared_only_flag,
+    )
+  }
+}
+
 impl Default for PolicyConfig {
   fn default() -> Self {
     Self {
-      guests_dm_only_with_shared_conversations: true,
+      guests_dm_start: GuestDmStart::DEFAULT,
+      maybe_guests_dm_only_with_shared_conversations: None,
       invites_require_verified_email: true,
       default_spaces: Vec::new(),
       default_channels: Vec::new(),
@@ -1790,8 +1807,8 @@ mod tests {
       GatewayConfig::default().max_frame_bytes
     );
     assert_eq!(
-      config.policy.guests_dm_only_with_shared_conversations,
-      PolicyConfig::default().guests_dm_only_with_shared_conversations
+      config.policy.effective_guests_dm_start(),
+      PolicyConfig::default().effective_guests_dm_start()
     );
     assert_eq!(
       config.rendezvous.max_total_bytes,

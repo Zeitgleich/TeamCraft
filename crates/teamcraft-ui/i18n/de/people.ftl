@@ -59,6 +59,7 @@ profile-hours-invalid = Arbeitszeiten brauchen mindestens einen Tag und ein Ende
 profile-avatar-change = Bild ändern
 profile-avatar-remove = Bild entfernen
 profile-message = Nachricht
+profile-message-guest-blocked = Als Gast kannst du Nachrichten beantworten, aber keine Unterhaltungen beginnen. Eine Person aus dem Team kann dir zuerst schreiben.
 profile-open = Profil von { $name } anzeigen
 profile-call = Anrufen
 profile-email = E-Mail

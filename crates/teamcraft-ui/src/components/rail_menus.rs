@@ -6,7 +6,7 @@ use leptos::html;
 use leptos::prelude::*;
 use wasm_bindgen::JsCast;
 
-use crate::channel_access::{can_create_channel_in, can_invite_to, is_guest};
+use crate::channel_access::{can_create_channel_in, can_invite_to, can_start_any_direct, is_guest};
 use crate::clock::{now_ms, tomorrow_at};
 use crate::components::icons::{Icon, IconName};
 use crate::components::sheet::MenuSurface;
@@ -90,7 +90,15 @@ pub fn RailCreateMenu() -> impl IntoView {
       </button>
     }
   };
+  // A guest who may start nothing gets no "+": an empty menu would be a button that does nothing.
+  let has_entries = Memo::new(move |_| {
+    can_start_any_direct(state)
+      || (has_meetings && !is_guest(state))
+      || can_create_channel.get()
+      || can_invite.get()
+  });
   view! {
+    <Show when=move || has_entries.get() fallback=|| ()>
     <button
       class="rail-dest rail-create"
       node_ref=anchor.button
@@ -116,7 +124,9 @@ pub fn RailCreateMenu() -> impl IntoView {
         })
       >
         <div class="rail-menu-body">
-          {item(IconName::Compose, "dm-new", Callback::new(move |()| state.overlay.set(Overlay::NewMessage)))}
+          <Show when=move || can_start_any_direct(state) fallback=|| ()>
+            {item(IconName::Compose, "dm-new", Callback::new(move |()| state.overlay.set(Overlay::NewMessage)))}
+          </Show>
           {(has_meetings && !is_guest(state))
             .then(|| item(IconName::Calendar, "meetings-schedule", Callback::new(move |()| state.overlay.set(Overlay::ScheduleMeeting))))}
           <Show when=move || can_create_channel.get() fallback=|| ()>
@@ -127,6 +137,7 @@ pub fn RailCreateMenu() -> impl IntoView {
           </Show>
         </div>
       </MenuSurface>
+    </Show>
     </Show>
   }
 }

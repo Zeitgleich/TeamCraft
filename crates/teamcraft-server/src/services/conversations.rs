@@ -7,7 +7,7 @@ use teamcraft_db::{
 };
 use teamcraft_proto::{
   ConversationId, ConversationKind, ConversationResponse, ConversationVisibility, ConvertChannelRequest,
-  CreateChannelRequest, CreateDmRequest, CreateGroupDmRequest, GatewayEvent, HistoryPolicy,
+  CreateChannelRequest, CreateDmRequest, CreateGroupDmRequest, GatewayEvent, GuestDmStart, HistoryPolicy,
   ListConversationsQuery, ListConversationsResponse, MoveChannelRequest, Permission, SpaceId, SpaceRole,
   SystemEventKind, Target, UpdateConversationRequest, UserId,
 };
@@ -569,30 +569,20 @@ async fn open_participants_conversation(
   if users.len() != others.len() || users.iter().any(|user| user.is_deactivated) {
     return Err(ApiError::user_not_found());
   }
-  // A DM involving a guest needs a conversation the guest already shares with every other
-  // participant (PLAN.md §12): in a group DM, two members who both know the guest still must not
-  // meet a guest who knows only one of them.
-  if super::workspace::effective_guest_dm_restriction(state) {
-    let guests: Vec<UserId> = users
-      .iter()
-      .filter(|user| user.kind == teamcraft_proto::UserKind::Guest)
-      .map(|user| user.id)
-      .chain(is_guest(caller).then_some(caller.user.id))
-      .collect();
-    for guest in guests {
-      let known = state.database.users_sharing_conversation(guest).await?;
-      let everybody = others.iter().copied().chain([caller.user.id]);
-      if everybody
-        .filter(|participant| *participant != guest)
-        .any(|participant| !known.contains(&participant))
-      {
-        return Err(ApiError::user_not_found());
-      }
-    }
-  }
-
   let mut participants = others;
   participants.push(caller.user.id);
+  let key = participants_key(&participants);
+  // Starting is what a guest may not do on their own (PLAN.md §12); an existing conversation is
+  // only opened again, which a retry or a second device of the guest may ask for.
+  if is_guest(caller)
+    && state
+      .database
+      .participants_conversation(Some(&key))
+      .await?
+      .is_none()
+  {
+    ensure_guest_may_start(state, caller, &participants).await?;
+  }
   let (id, is_new) = state
     .database
     .get_or_create_participants_conversation(
@@ -606,7 +596,7 @@ async fn open_participants_conversation(
         visibility: ConversationVisibility::Private,
         history_policy: HistoryPolicy::FromJoin,
         maybe_category: None,
-        maybe_participants_key: Some(participants_key(&participants)),
+        maybe_participants_key: Some(key),
         is_integration: false,
       },
       &participants,
@@ -622,6 +612,37 @@ async fn open_participants_conversation(
     value: get_conversation(state, caller, id).await?,
     is_new,
   })
+}
+
+/// A guest may start a conversation only with people `guest_dm_start` allows. Members, admins
+/// and owners are not checked at all: they can always message a guest.
+///
+/// The refusal names itself only for people the guest already sees (they share a conversation);
+/// for everybody else the answer stays `user_not_found`, so it can't be used to probe for accounts.
+async fn ensure_guest_may_start(
+  state: &AppState,
+  caller: &AuthenticatedUser,
+  participants: &[UserId],
+) -> Result<(), ApiError> {
+  let start = super::workspace::effective_guest_dm_start(state);
+  if start == GuestDmStart::Anyone {
+    return Ok(());
+  }
+  let known = state.database.users_sharing_conversation(caller.user.id).await?;
+  let mut is_refused = false;
+  for other in participants.iter().filter(|other| **other != caller.user.id) {
+    if start.allows(known.contains(other)) {
+      continue;
+    }
+    if !known.contains(other) {
+      return Err(ApiError::user_not_found());
+    }
+    is_refused = true;
+  }
+  if is_refused {
+    return Err(ApiError::GuestDmNotAllowed);
+  }
+  Ok(())
 }
 
 /// Checks the conversation is a channel that can still change (not a DM, not archived).
