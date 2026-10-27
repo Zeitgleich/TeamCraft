@@ -54,6 +54,19 @@ class SystemLineTest {
   }
 
   @Test
+  fun anAdminWhoJoinedSaysWhoApprovedTheRequest() {
+    // admin.md §2.4: by themselves (`visible`), or let in by an owner (`owner_approval`, #799).
+    assertEquals(
+      SystemLine.AdminJoined("Sam", maybeApprovedBy = null),
+      line(kind = """{"System":"Joined"}""", workspace = """{"event":"admin_joined","user":"2"}"""),
+    )
+    assertEquals(
+      SystemLine.AdminJoined("Sam", maybeApprovedBy = "Ada"),
+      line(workspace = """{"event":"admin_joined","user":"2","approved_by":"1"}"""),
+    )
+  }
+
+  @Test
   fun unknownEventsFallBackToAQuietLine() {
     assertEquals(
       SystemLine.Joined("Sam"),

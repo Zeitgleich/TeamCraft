@@ -328,6 +328,8 @@ data class BrowsableChannel(
   @SerialName("is_member") val isMember: Boolean = false,
   @SerialName("is_archived") val isArchived: Boolean = false,
   @SerialName("has_external_people") val hasExternalPeople: Boolean = false,
+  /** How the user gets in (`open`, `as_admin`, `needs_approval`, `requested`); see `ui.BrowseJoin`. */
+  val join: String = "open",
 )
 
 @Serializable

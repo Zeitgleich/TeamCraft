@@ -55,7 +55,6 @@ import androidx.compose.material3.TextField
 import androidx.compose.material3.TextFieldDefaults
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SnackbarHost
-import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
@@ -120,7 +119,9 @@ import de.zeitgleich.teamcraft.ui.shouldNotifyTyping
 import de.zeitgleich.teamcraft.ui.typingLine
 import de.zeitgleich.teamcraft.ui.entry
 import de.zeitgleich.teamcraft.ui.sensitiveClip
+import de.zeitgleich.teamcraft.ui.requestsIn
 import uniffi.teamcraft_ffi.ConnectionState
+import uniffi.teamcraft_ffi.JoinRequestItem
 import uniffi.teamcraft_ffi.emojiConvert
 import uniffi.teamcraft_ffi.emojiSuggestions
 import uniffi.teamcraft_ffi.needsChannelConfirmation
@@ -144,6 +145,8 @@ fun ConversationScreen(
   var messages by remember { mutableStateOf<List<Message>>(emptyList()) }
   var extras by remember { mutableStateOf<Map<String, MessageExtras>>(emptyMap()) }
   var pinned by remember { mutableStateOf<List<Message>>(emptyList()) }
+  // Admins asking to join this channel, when the user owns it (admin.md §2.4.1).
+  var joinRequests by remember { mutableStateOf<List<JoinRequestItem>>(emptyList()) }
   var firstUnread by remember { mutableStateOf<FirstUnread>(FirstUnread.Loading) }
   // Counts sends from this screen's composer: each one brings the newest message into view.
   var sentCount by remember { mutableIntStateOf(0) }
@@ -161,6 +164,7 @@ fun ConversationScreen(
     undecrypted = maybeWindow?.undecrypted ?: 0
     extras = viewModel.readChat { extras(conversationId, messages.map { it.id }) } ?: emptyMap()
     pinned = viewModel.readChat { query(ChatQueries.pinned(conversationId)).messages } ?: emptyList()
+    joinRequests = requestsIn(conversationId, viewModel.joinRequests.list())
   }
   FollowTransfers(extras) { extras = viewModel.readChat { extras(conversationId, messages.map { it.id }) } ?: extras }
   LaunchedEffect(conversationId, messages.size) { viewModel.markRead(conversationId) }
@@ -182,6 +186,7 @@ fun ConversationScreen(
     },
   ) {
     if (pinned.isNotEmpty()) PinnedBanner(pinned.last())
+    JoinRequestBanner(joinRequests, viewModel.joinRequests)
     // Received but not readable here yet: without this the conversation would just look empty.
     if (undecrypted > 0) {
       Text(
@@ -350,15 +355,7 @@ private fun ChatScaffold(
   topBar: @Composable () -> Unit,
   content: @Composable androidx.compose.foundation.layout.ColumnScope.() -> Unit,
 ) {
-  val snackbars = remember { SnackbarHostState() }
-  val maybeFailure by viewModel.lastFailure.collectAsState()
-  val context = LocalContext.current
-  LaunchedEffect(maybeFailure) {
-    maybeFailure?.let {
-      snackbars.showSnackbar(context.getString(it))
-      viewModel.failureShown()
-    }
-  }
+  val snackbars = rememberFailureSnackbars(viewModel)
   Scaffold(
     contentWindowInsets = ScreenInsets,
     topBar = topBar,

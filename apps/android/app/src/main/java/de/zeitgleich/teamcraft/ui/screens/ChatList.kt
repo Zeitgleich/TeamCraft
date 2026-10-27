@@ -46,6 +46,7 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SwipeToDismissBox
 import androidx.compose.material3.SwipeToDismissBoxValue
 import androidx.compose.material3.Text
@@ -128,6 +129,7 @@ import de.zeitgleich.teamcraft.ui.toggled
 import de.zeitgleich.teamcraft.ui.selectionActions
 import de.zeitgleich.teamcraft.ui.theme.LocalTeamCraftColors
 import uniffi.teamcraft_ffi.ConversationItem
+import uniffi.teamcraft_ffi.JoinRequestItem
 import uniffi.teamcraft_ffi.ConversationKind
 import uniffi.teamcraft_ffi.Presence
 
@@ -152,6 +154,8 @@ fun ChatListScreen(
 ) {
   var conversations by remember { mutableStateOf<List<ConversationItem>?>(null) }
   var previews by remember { mutableStateOf<Map<String, ChatListEntry>>(emptyMap()) }
+  // Admins' requests to join channels the user owns: on top of Activity and on its badge.
+  var joinRequests by remember { mutableStateOf<List<JoinRequestItem>>(emptyList()) }
   // Long-press starts selecting several conversations, as in WhatsApp; back or the close button ends it.
   var selection by rememberSaveable { mutableStateOf(listOf<String>()) }
   var maybeNotifying by remember { mutableStateOf<String?>(null) }
@@ -175,6 +179,7 @@ fun ChatListScreen(
     viewModel.changeCount.collect {
       val loaded = viewModel.conversations()
       conversations = loaded
+      joinRequests = viewModel.joinRequests.list()
       previews = viewModel.chatPreviews(loaded)
     }
   }
@@ -183,6 +188,8 @@ fun ChatListScreen(
   val isDark = isSystemInDarkTheme()
   val maybeLogo = remember(maybeBrand, isDark) { viewModel.brandLogo(isDark)?.asImageBitmap() }
   val selected = loaded.orEmpty().filter { it.id in selection }
+  // A decision on a request to join that didn't go through, among others.
+  val snackbars = rememberFailureSnackbars(viewModel)
   MainScaffold(
     brand = MainBrand(maybeBrand?.displayName ?: stringResource(R.string.app_name), maybeLogo),
     accountName = accountName,
@@ -218,6 +225,9 @@ fun ChatListScreen(
       NotificationPermissionCard()
     },
     isGuest = isGuest,
+    joinRequestCount = joinRequests.size,
+    joinRequests = { JoinRequestSection(joinRequests, viewModel.joinRequests) },
+    snackbarHost = { SnackbarHost(snackbars) },
   )
   // Mute or change notifications without opening the conversation.
   maybeNotifying?.let { id -> ConversationNotificationsDialog(viewModel, id) { maybeNotifying = null } }
@@ -246,14 +256,19 @@ internal fun MainScaffold(
   banners: @Composable () -> Unit = {},
   /** Guests browse no channels (as on desktop); the Spaces tab lists only their own. */
   isGuest: Boolean = false,
+  /** Admins' requests waiting for the user's decision: counted on Activity, shown on top of it. */
+  joinRequestCount: Int = 0,
+  joinRequests: @Composable () -> Unit = {},
+  snackbarHost: @Composable () -> Unit = {},
 ) {
   val hasDirect = maybeConversations.orEmpty().any { it.isDirect }
   Scaffold(
     contentWindowInsets = ScreenInsets,
     topBar = { maybeSelectionBar?.invoke() ?: BrandTopBar(brand, accountName, onSearch = onSearch, onAccount = onAccount) },
     bottomBar = {
-      if (maybeSelectionBar == null) MainNavigation(tab, maybeConversations.orEmpty(), onSelect = onTab)
+      if (maybeSelectionBar == null) MainNavigation(tab, maybeConversations.orEmpty(), joinRequestCount, onSelect = onTab)
     },
+    snackbarHost = snackbarHost,
     floatingActionButton = {
       // Only where it fits and not twice: an empty Home has the same action in its middle.
       if (maybeSelectionBar == null && tab == ChatTab.Home && hasDirect) {
@@ -270,7 +285,7 @@ internal fun MainScaffold(
       when {
         maybeConversations == null -> LoadingScreen()
         tab == ChatTab.Home -> HomeTab(maybeConversations, list, onNavigate)
-        tab == ChatTab.Activity -> ActivityTab(maybeConversations, list, onNavigate)
+        tab == ChatTab.Activity -> ActivityTab(maybeConversations, list, onNavigate, joinRequestCount, joinRequests)
         else -> SpacesTab(maybeConversations, list, onNavigate, canBrowse = !isGuest)
       }
     }
@@ -316,15 +331,24 @@ private fun HomeTab(conversations: List<ConversationItem>, list: ListState, onNa
   }
 }
 
-/** Activity: threads and saved items, then every conversation that waits for the user. */
+/**
+ * Activity: threads and saved items, then the requests to join that wait for the user's decision,
+ * then every conversation that waits for the user.
+ */
 @Composable
-private fun ActivityTab(conversations: List<ConversationItem>, list: ListState, onNavigate: (String) -> Unit) {
+private fun ActivityTab(
+  conversations: List<ConversationItem>,
+  list: ListState,
+  onNavigate: (String) -> Unit,
+  joinRequestCount: Int,
+  joinRequests: @Composable () -> Unit,
+) {
   val waiting = activityConversations(conversations, list.lastActivity)
   Column(Modifier.fillMaxSize()) {
     EntryRow(Icons.AutoMirrored.Filled.List, stringResource(R.string.threads_title)) { onNavigate("threads") }
     EntryRow(Icons.Filled.Star, stringResource(R.string.saved_title)) { onNavigate("saved") }
     HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
-    if (waiting.isEmpty()) {
+    if (waiting.isEmpty() && joinRequestCount == 0) {
       RemainingEmptyState(
         icon = Icons.Filled.Done,
         title = stringResource(R.string.activity_empty_title),
@@ -333,6 +357,7 @@ private fun ActivityTab(conversations: List<ConversationItem>, list: ListState, 
       )
     } else {
       LazyColumn(Modifier.fillMaxSize()) {
+        if (joinRequestCount > 0) item(key = "join-requests") { joinRequests() }
         conversationRows(listOf(Section(SectionTitle.Activity, waiting)), list, hasHeader = false)
       }
     }
@@ -417,7 +442,12 @@ private fun BrandTopBar(brand: MainBrand, accountName: String, onSearch: () -> U
 
 /** Home, Activity and Spaces, each with what is new in it. */
 @Composable
-private fun MainNavigation(selected: ChatTab, conversations: List<ConversationItem>, onSelect: (ChatTab) -> Unit) {
+private fun MainNavigation(
+  selected: ChatTab,
+  conversations: List<ConversationItem>,
+  joinRequestCount: Int,
+  onSelect: (ChatTab) -> Unit,
+) {
   val (direct, channels) = conversations.partition { it.isDirect }
   // In landscape the bar's items stay clear of a side cutout too (#309).
   NavigationBar(
@@ -434,7 +464,8 @@ private fun MainNavigation(selected: ChatTab, conversations: List<ConversationIt
       )
       val badge = when (tab) {
         ChatTab.Home -> tabBadge(direct)
-        ChatTab.Activity -> TabBadge(mentions = tabBadge(conversations).mentions, unread = 0)
+        // A request waits for a decision like a mention waits for an answer.
+        ChatTab.Activity -> TabBadge(mentions = tabBadge(conversations).mentions + joinRequestCount, unread = 0)
         ChatTab.Spaces -> tabBadge(channels)
       }
       // Channels and Activity count only mentions; DMs count every unread message.

@@ -23,6 +23,8 @@ object NotificationChannels {
   const val INCOMING_CALLS = "incoming_calls"
   const val CALLS = "calls"
   const val MEETINGS = "meetings"
+  /** Admins asking to join a channel the user owns (admin.md §2.4.1). */
+  const val JOIN_REQUESTS = "join_requests"
   const val OTHER = "other"
 
   private val RING_VIBRATION = longArrayOf(0, 1_000, 1_000)
@@ -35,6 +37,7 @@ object NotificationChannels {
     Channel(INCOMING_CALLS, R.string.notification_channel_incoming_calls, R.string.notification_channel_incoming_calls_description, NotificationManager.IMPORTANCE_HIGH),
     Channel(CALLS, R.string.call_channel, R.string.notification_channel_calls_description, NotificationManager.IMPORTANCE_DEFAULT),
     Channel(MEETINGS, R.string.notification_channel_meetings, R.string.notification_channel_meetings_description, NotificationManager.IMPORTANCE_HIGH),
+    Channel(JOIN_REQUESTS, R.string.notification_channel_join_requests, R.string.notification_channel_join_requests_description, NotificationManager.IMPORTANCE_DEFAULT),
     Channel(OTHER, R.string.notification_channel_other, R.string.notification_channel_other_description, NotificationManager.IMPORTANCE_LOW),
   )
 
