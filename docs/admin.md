@@ -292,7 +292,7 @@ message, would keep a real join quiet. So the line is derived where the join hap
   admin's authority, not whether members are told, so a member adding an admin while the roster
   waits for re-signing is still told. However the admin got in, the line is there: their own
   signed self-join, an owner's approval, a member's ordinary add, or another admin's signed change
-  (§2.2), which used to be silent.
+  (§2.2; for an admin, only under `visible`, issue #816), which used to be silent.
 - **Who let them in.** The line names the verified signer of the change that added the admin,
   unless that is the admin (a self-join): "approved by …" when the signer was a member of the
   channel while the verified policy says `owner_approval` (an owner's approval, whose device also

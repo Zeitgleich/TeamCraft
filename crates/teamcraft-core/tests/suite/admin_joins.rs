@@ -141,11 +141,12 @@ async fn an_admin_join_whose_message_never_arrives_is_still_shown() {
   );
 }
 
-/// Another admin's signed change brings an admin in (admin.md §2.2): the line names the admin who
-/// signed it, not the member whose device committed it, and says "added", not "approved".
+/// Another admin's signed change brings an admin in (admin.md §2.2; under `visible` only since
+/// #816): the line names the admin who signed it, not the member whose device committed it, and
+/// says "added", not "approved".
 #[tokio::test]
 async fn another_admins_addition_names_who_signed_it() {
-  let (server, mut alice, mut bob, mut carol, mut dave, channel) = setup(AdminSelfJoin::OwnerApproval).await;
+  let (server, mut alice, mut bob, mut carol, mut dave, channel) = setup(AdminSelfJoin::Visible).await;
   let (alice_id, bob_id) = (alice.client.user_id(), bob.client.user_id());
   server.set_admin(alice_id);
 
