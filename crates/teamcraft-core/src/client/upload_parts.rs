@@ -218,30 +218,42 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     sent: Result<Option<String>, ApiError>,
     file: &mut PendingFile,
   ) -> Result<PartOutcome, UploadError> {
-    if let Some(part) = target.maybe_part {
-      let etag = match sent {
-        Ok(Some(etag)) => etag,
-        Ok(None) => return Err(UploadError::Failed(TransferFailure::LocalFile)),
-        Err(error) => {
-          return Err(
-            self
-              .part_send_failure(target.attachment_id, &part, file, error)
-              .await,
-          );
-        },
-      };
-      let Some(parts) = file.maybe_parts.as_mut() else {
-        return Err(UploadError::Failed(TransferFailure::LocalFile));
-      };
-      parts.etags.push(etag);
-      parts.maybe_sending = None;
-      parts.hash_state = Base64Bytes::new(part.hash_state);
-      parts.uploaded_bytes = part.uploaded_bytes;
-      if parts.uploaded_bytes < parts.size_bytes {
-        return Ok(PartOutcome::Stored);
-      }
+    if !self.record_part(target, sent, file).await? {
+      return Ok(PartOutcome::Stored);
     }
     self.join_parts(file).await.map(PartOutcome::Uploaded)
+  }
+
+  /// Records a part the host sent (`sent` carries its `ETag`). `Ok(true)`: every part is up and
+  /// only joining them remains ([`Self::join_parts`]).
+  pub(super) async fn record_part(
+    &mut self,
+    target: PartTarget,
+    sent: Result<Option<String>, ApiError>,
+    file: &mut PendingFile,
+  ) -> Result<bool, UploadError> {
+    let Some(part) = target.maybe_part else {
+      return Ok(true);
+    };
+    let etag = match sent {
+      Ok(Some(etag)) => etag,
+      Ok(None) => return Err(UploadError::Failed(TransferFailure::LocalFile)),
+      Err(error) => {
+        return Err(
+          self
+            .part_send_failure(target.attachment_id, &part, file, error)
+            .await,
+        );
+      },
+    };
+    let Some(parts) = file.maybe_parts.as_mut() else {
+      return Err(UploadError::Failed(TransferFailure::LocalFile));
+    };
+    parts.etags.push(etag);
+    parts.maybe_sending = None;
+    parts.hash_state = Base64Bytes::new(part.hash_state);
+    parts.uploaded_bytes = part.uploaded_bytes;
+    Ok(parts.uploaded_bytes >= parts.size_bytes)
   }
 
   /// Gives up the file's upload in parts (at the server, once reachable) so the next step announces
@@ -294,7 +306,11 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
   /// A picture small enough to read whole gets the core's thumbnail and its size, like a file that
   /// goes up whole; a bigger one keeps the app's thumbnail, if any.
   async fn keep_picture_details(&self, file: &mut PendingFile) {
-    if !file.media_type.starts_with("image/") || file.size_bytes > MAX_THUMBNAIL_SOURCE_BYTES {
+    // A host that makes its own thumbnails handed them in with the file.
+    if !self.settings.makes_thumbnails
+      || !file.media_type.starts_with("image/")
+      || file.size_bytes > MAX_THUMBNAIL_SOURCE_BYTES
+    {
       return;
     }
     let Ok(content) = read_segment(&file.source, 0, file.size_bytes, file.size_bytes).await else {
@@ -347,7 +363,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
   }
 
   /// Joins the uploaded parts into the blob and makes the file's reference for its message.
-  async fn join_parts(&self, file: &mut PendingFile) -> Result<AttachmentRef, UploadError> {
+  pub(super) async fn join_parts(&self, file: &mut PendingFile) -> Result<AttachmentRef, UploadError> {
     let Some(parts) = file.maybe_parts.clone() else {
       return Err(UploadError::Failed(TransferFailure::LocalFile));
     };

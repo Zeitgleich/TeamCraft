@@ -52,6 +52,12 @@ impl RateLimiter {
     amount as f64 <= self.capacity
   }
 
+  /// Gives back what was taken for work that didn't happen (a request refused half way).
+  pub fn refund(&mut self, amount: u64, now: Instant) {
+    self.refill(now);
+    self.tokens = (self.tokens + amount as f64).min(self.capacity);
+  }
+
   /// Takes as many of `count` events as there are tokens for and returns how many were allowed.
   pub fn take_up_to(&mut self, count: u32, now: Instant) -> u32 {
     self.refill(now);
@@ -124,6 +130,17 @@ mod tests {
     assert!(limiter.try_take_amount(2_000_000, start + Duration::from_secs(10)));
     assert!(limiter.can_ever_take(6_000_000));
     assert!(!limiter.can_ever_take(6_000_001));
+  }
+
+  #[test]
+  fn a_refund_gives_back_but_never_beyond_the_capacity() {
+    let start = Instant::now();
+    let mut limiter = RateLimiter::per_minute(1000, start);
+    assert!(limiter.try_take_amount(800, start));
+    limiter.refund(800, start);
+    assert!(limiter.try_take_amount(1000, start));
+    limiter.refund(5000, start);
+    assert!(!limiter.try_take_amount(1001, start));
   }
 
   #[test]

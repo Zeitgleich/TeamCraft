@@ -46,20 +46,38 @@ addrs = ["127.0.0.1:8088", "[::1]:8088"]
 max_body_bytes = 1048576
 # Webhook requests and log lines per minute of all sources together (each source has its own limit too).
 total_rate_limit_per_minute = 12000
+# On shutdown, requests still running after this many seconds are cut off.
+drain_timeout_secs = 10
 
 # Webhooks with files (multipart/form-data, docs/bridge.md "Files"): each file is encrypted with its
-# own key and uploaded before the message is sent. The form's other fields count against
-# listen.max_body_bytes.
+# own key; the files of a message are uploaded, and completed together, before the message is sent.
+# The form's other fields count against listen.max_body_bytes.
 [files]
-# Files per message for sources that don't set their own (at most 50); 0 takes none.
+# Files per message for sources that don't set their own (at most 16); 0 takes none.
 max_files_per_message = 10
 # Largest file in bytes; the server's attachment limit applies too.
 max_file_bytes = 104857600
-# Bytes of webhooks with files per minute, all sources together.
+# Bytes of webhooks with files per minute and source (no request carries more), and of all sources
+# together. max_file_bytes <= source_bytes_per_minute <= total_bytes_per_minute.
+source_bytes_per_minute = 536870912
 total_bytes_per_minute = 1073741824
-# Where files wait while they go up (plaintext, for the bridge's user only, deleted after the
-# request). Default: "spool" next to store.path.
-# spool_dir = "/var/lib/teamcraft-bridge/spool"
+# Requests with files running at once, all sources together and per source; more get 503 before
+# their body is read.
+max_concurrent_requests = 4
+max_concurrent_requests_per_source = 2
+# A request whose body sends nothing for this many seconds is cut off (408).
+idle_timeout_secs = 30
+# Bytes in the spool directory at most, all requests together (503 beyond).
+max_spool_bytes = 2147483648
+# The server's message limit ([limits] max_ciphertext_bytes): text and files that won't fit in one
+# message are refused (413) before anything is uploaded.
+max_message_bytes = 1048576
+# Pictures larger than this get no thumbnail (decoding takes about 4 bytes a pixel).
+max_thumbnail_pixels = 16000000
+# Where files wait while they go up: plaintext, for the bridge's user only (0700, checked at start),
+# deleted after the request. Default: "spool" next to store.path; a volume of its own keeps it from
+# filling the database's.
+# spool_dir = "/var/spool/teamcraft-bridge"
 
 # Log lines are collected into one message per conversation.
 [batching]

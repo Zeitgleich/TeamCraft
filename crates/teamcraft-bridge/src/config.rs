@@ -27,6 +27,8 @@ const ENV_NESTING: &str = "__";
 /// Environment variable naming the config file; not a config key.
 pub const CONFIG_PATH_ENV: &str = "TEAMCRAFT_BRIDGE_CONFIG";
 const MIN_SOURCE_TOKEN_CHARS: usize = 16;
+/// Smallest `files.max_message_bytes` that leaves room for a text and a few files.
+const MIN_MESSAGE_BYTES: usize = 64 * 1024;
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -99,6 +101,9 @@ pub struct ListenSection {
   /// Webhook requests and log lines per minute of all sources together; more are refused or
   /// dropped like a single source's.
   pub total_rate_limit_per_minute: u32,
+  /// On shutdown, requests still running after this long are cut off (a producer that stalls
+  /// can't hold the bridge up).
+  pub drain_timeout_secs: u64,
 }
 
 /// How log lines are collected into messages.
@@ -141,8 +146,24 @@ pub struct FilesSection {
   pub max_files_per_message: u32,
   /// Largest file, in bytes. The server's attachment limit (`max_attachment_bytes`) applies too.
   pub max_file_bytes: u64,
+  /// Bytes of webhooks with files per minute and source; more get `429`. A request can't carry
+  /// more than this.
+  pub source_bytes_per_minute: u64,
   /// Bytes of webhooks with files per minute, all sources together; more get `429`.
   pub total_bytes_per_minute: u64,
+  /// Requests with files at the same time, all sources together and per source; more get `503`
+  /// before their body is read.
+  pub max_concurrent_requests: u32,
+  pub max_concurrent_requests_per_source: u32,
+  /// A request whose body sends nothing for this long is cut off (`408`).
+  pub idle_timeout_secs: u64,
+  /// Bytes in the spool directory at most, all requests together; more get `503`.
+  pub max_spool_bytes: u64,
+  /// The server's message limit (`[limits] max_ciphertext_bytes`): a message whose text and files
+  /// won't fit is refused (`413`) before anything is uploaded.
+  pub max_message_bytes: usize,
+  /// Pictures larger than this many pixels get no thumbnail (decoding takes about 4 bytes a pixel).
+  pub max_thumbnail_pixels: u64,
   /// Where files wait while they go up (plaintext, readable only by the bridge, deleted after the
   /// request). Default: `spool` next to `store.path`.
   #[serde(rename = "spool_dir")]
@@ -336,8 +357,34 @@ impl FilesSection {
         "files.max_files_per_message is at most {MAX_SOURCE_FILES_PER_MESSAGE}"
       ));
     }
-    if self.max_file_bytes == 0 || self.total_bytes_per_minute == 0 {
-      return invalid("files.max_file_bytes and files.total_bytes_per_minute must be above 0".into());
+    if self.max_file_bytes == 0 {
+      return invalid("files.max_file_bytes must be above 0".into());
+    }
+    // Every limit must let at least one file of the largest size through, or a producer gets
+    // answers that contradict each other.
+    if self.source_bytes_per_minute < self.max_file_bytes
+      || self.total_bytes_per_minute < self.source_bytes_per_minute
+      || self.max_spool_bytes < self.max_file_bytes
+    {
+      return invalid(
+        "files: max_file_bytes <= source_bytes_per_minute <= total_bytes_per_minute, and \
+         max_file_bytes <= max_spool_bytes"
+          .into(),
+      );
+    }
+    if self.max_concurrent_requests == 0
+      || self.max_concurrent_requests_per_source == 0
+      || self.max_concurrent_requests_per_source > self.max_concurrent_requests
+    {
+      return invalid("files: 0 < max_concurrent_requests_per_source <= max_concurrent_requests".into());
+    }
+    if self.idle_timeout_secs == 0 {
+      return invalid("files.idle_timeout_secs must be above 0".into());
+    }
+    if self.max_message_bytes < MIN_MESSAGE_BYTES {
+      return invalid(format!(
+        "files.max_message_bytes must be at least {MIN_MESSAGE_BYTES}"
+      ));
     }
     // The core reads the files by path, which it keeps as text.
     if self
@@ -408,6 +455,7 @@ impl Default for ListenSection {
       ],
       max_body_bytes: 1024 * 1024,
       total_rate_limit_per_minute: 12_000,
+      drain_timeout_secs: 10,
     }
   }
 }
@@ -427,7 +475,14 @@ impl Default for FilesSection {
     Self {
       max_files_per_message: 10,
       max_file_bytes: 100 * 1024 * 1024,
+      source_bytes_per_minute: 512 * 1024 * 1024,
       total_bytes_per_minute: 1024 * 1024 * 1024,
+      max_concurrent_requests: 4,
+      max_concurrent_requests_per_source: 2,
+      idle_timeout_secs: 30,
+      max_spool_bytes: 2 * 1024 * 1024 * 1024,
+      max_message_bytes: 1024 * 1024,
+      max_thumbnail_pixels: 16_000_000,
       maybe_spool_dir: None,
     }
   }
@@ -568,16 +623,38 @@ mod tests {
         (
           "too many files per message",
           with_source(
-            "name = \"b\"\ntoken = \"another-token-0123456\"\nconversation_id = \"1\"\nmax_files_per_message = 51",
+            "name = \"b\"\ntoken = \"another-token-0123456\"\nconversation_id = \"1\"\nmax_files_per_message = 17",
           ),
         ),
         (
           "too many files by default",
-          format!("{MINIMAL}\n[files]\nmax_files_per_message = 51\n"),
+          format!("{MINIMAL}\n[files]\nmax_files_per_message = 17\n"),
         ),
         (
           "no file bytes",
           format!("{MINIMAL}\n[files]\ntotal_bytes_per_minute = 0\n"),
+        ),
+        (
+          "a source budget below the largest file",
+          format!("{MINIMAL}\n[files]\nmax_file_bytes = 2000\nsource_bytes_per_minute = 1000\n"),
+        ),
+        (
+          "a source budget above the total",
+          format!("{MINIMAL}\n[files]\nsource_bytes_per_minute = 4294967296\n"),
+        ),
+        (
+          "a spool smaller than a file",
+          format!("{MINIMAL}\n[files]\nmax_spool_bytes = 1000\n"),
+        ),
+        (
+          "more per source than in all",
+          format!(
+            "{MINIMAL}\n[files]\nmax_concurrent_requests = 1\nmax_concurrent_requests_per_source = 2\n"
+          ),
+        ),
+        (
+          "no idle timeout",
+          format!("{MINIMAL}\n[files]\nidle_timeout_secs = 0\n"),
         ),
       ] {
         assert!(BridgeConfig::from_toml(&text).is_err(), "{what}");

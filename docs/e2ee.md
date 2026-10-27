@@ -2067,11 +2067,15 @@ only), so the app offers "Add source" only once a bot is in the channel.
 
 **Files of webhooks** (docs/bridge.md, "Files") are attachments of the bridge's message, encrypted
 and uploaded exactly like a client's (§4.5, `teamcraft-core` `direct_uploads`): a fresh key per
-file, the key and hash only inside the message. The bridge uploads all of a message's files before
-it sends the message, so a failed upload leaves no message whose files are missing; files already
-up stay as ciphertext without a key until retention removes them. Before their upload the files
-wait as plaintext in the bridge's spool directory, on the bridge's own host, readable by its user
-only and deleted once the request is answered.
+file, the key and hash only inside the message. The bridge sends all of a message's files and completes
+their uploads only then, all together, before it sends the message: a failed file, or a producer
+that hangs up, gives every upload of the message up, so there is neither a message whose files are
+missing nor a file without its message (only a failure while completing, a few requests at the end,
+can leave completed ciphertext whose key nobody has, until retention removes it). Before their
+upload the files wait as plaintext in the bridge's spool directory, on the bridge's own host,
+readable by its user only (`0700`, checked at start) and deleted once the request is answered. The
+bridge decodes pictures for their thumbnails itself, off its loop and within a pixel limit
+(`ClientSettings::makes_thumbnails` off for the core).
 
 ## 14. Open questions
 

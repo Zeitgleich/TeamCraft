@@ -240,9 +240,14 @@ fn bridge_config(
     interval_ms = 200
     [index]
     interval_secs = 0
+    [files]
+    spool_dir = "{spool}"
     {source}
     "#,
-    url = app.base_url
+    url = app.base_url,
+    spool = std::env::temp_dir()
+      .join(format!("teamcraft-bridge-e2e-{}", std::process::id()))
+      .display()
   ))
   .unwrap();
   config.identity.argon2_memory_kib = weak_argon2().memory_kib;

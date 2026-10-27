@@ -12,7 +12,7 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 engine=${CONTAINER_ENGINE:-podman}
 seconds=${2:-180}
-targets=(proto_requests proto_gateway bridge_ingest bridge_multipart imip workspace_log crypto_decoders)
+targets=(proto_requests proto_gateway bridge_ingest bridge_multipart thumbnail imip workspace_log crypto_decoders)
 
 if [ "${1:-}" = list ]; then printf '%s\n' "${targets[@]}"; exit 0; fi
 if [ -n "${1:-}" ] && [ "$1" != all ]; then targets=("$1"); fi
@@ -21,10 +21,16 @@ if [ -n "${1:-}" ] && [ "$1" != all ]; then targets=("$1"); fi
 
 status=0
 for target in "${targets[@]}"; do
+  # Targets whose limits only show on large inputs get room for them (and reach it soon).
+  case "$target" in
+    bridge_multipart) extra=(-max_len=65536 -len_control=10) ;;
+    thumbnail) extra=(-max_len=262144 -len_control=10) ;;
+    *) extra=() ;;
+  esac
   echo "== fuzzing $target for ${seconds}s"
   "$engine" run --rm \
     -v "$PWD:/src:Z" -v teamcraft-fuzz-target:/target -v teamcraft-fuzz-cargo:/usr/local/cargo/registry \
     teamcraft-fuzz cargo fuzz run "$target" -- -max_total_time="$seconds" -rss_limit_mb=4096 -timeout=10 \
-    || status=1
+    ${extra[@]+"${extra[@]}"} || status=1
 done
 exit $status

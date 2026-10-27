@@ -1174,11 +1174,7 @@ impl<T: AccessTokenSource> ServerApi for HttpServerApi<T> {
         return Err(ApiError::BlobTooLarge { max_bytes });
       }
       let mut blob = Vec::new();
-      while let Some(chunk) = response
-        .chunk()
-        .await
-        .map_err(|error| ApiError::Network(error.to_string()))?
-      {
+      while let Some(chunk) = response.chunk().await.map_err(network_error)? {
         if blob.len() as u64 + chunk.len() as u64 > max_bytes {
           return Err(ApiError::BlobTooLarge { max_bytes });
         }
@@ -1206,7 +1202,7 @@ impl<T: AccessTokenSource> ServerApi for HttpServerApi<T> {
       .bytes()
       .await
       .map(|bytes| bytes.to_vec())
-      .map_err(|error| ApiError::Network(error.to_string()))
+      .map_err(network_error)
   }
 
   async fn get_blob_capped(&self, url: &str, max_bytes: u64) -> Result<Vec<u8>, ApiError> {
@@ -1369,11 +1365,7 @@ impl fmt::Debug for StaticToken {
 #[cfg(not(target_arch = "wasm32"))]
 async fn read_capped(mut response: reqwest::Response, max_bytes: u64) -> Result<Vec<u8>, ApiError> {
   let mut blob = Vec::new();
-  while let Some(chunk) = response
-    .chunk()
-    .await
-    .map_err(|error| ApiError::Network(error.to_string()))?
-  {
+  while let Some(chunk) = response.chunk().await.map_err(network_error)? {
     if blob.len() as u64 + chunk.len() as u64 > max_bytes {
       return Err(ApiError::BlobTooLarge { max_bytes });
     }
@@ -1438,10 +1430,7 @@ async fn watch_progress<T>(
 /// Content-Length check before it already refuses announced oversized bodies.
 #[cfg(target_arch = "wasm32")]
 async fn read_capped(response: reqwest::Response, max_bytes: u64) -> Result<Vec<u8>, ApiError> {
-  let blob = response
-    .bytes()
-    .await
-    .map_err(|error| ApiError::Network(error.to_string()))?;
+  let blob = response.bytes().await.map_err(network_error)?;
   if blob.len() as u64 > max_bytes {
     return Err(ApiError::BlobTooLarge { max_bytes });
   }
@@ -1816,7 +1805,7 @@ fn websocket_error(error: tokio_tungstenite::tungstenite::Error) -> ApiError {
 
 async fn send(request: RequestBuilder) -> Result<Response, ApiError> {
   let (client, request) = request.build_split();
-  let request = request.map_err(|error| ApiError::Network(error.to_string()))?;
+  let request = request.map_err(network_error)?;
   let origin = request.url().origin();
   let response = client.execute(request).await.map_err(network_error)?;
   let status = response.status();
@@ -1885,8 +1874,10 @@ fn is_html(headers: &reqwest::header::HeaderMap) -> bool {
 }
 
 /// A request that got no answer: a certificate the device refuses means interception (or a server
-/// that isn't who it claims), everything else is the network.
+/// that isn't who it claims), everything else is the network. The URL is left out of the text: a
+/// presigned storage URL carries its signature, and these errors end up in logs.
 fn network_error(error: reqwest::Error) -> ApiError {
+  let error = error.without_url();
   #[cfg(not(target_arch = "wasm32"))]
   if super::tls::is_certificate_rejection(&error) {
     return ApiError::Intercepted {
@@ -2082,6 +2073,31 @@ mod tests {
     let api = HttpServerApi::new(format!("http://{address}"), StaticToken("token".into()));
     let result = api.me().await;
     assert!(matches!(result, Err(ApiError::Network(_))), "{result:?}");
+  }
+
+  /// A presigned storage URL carries its signature; a failed upload's error (which ends up in logs)
+  /// must not repeat it.
+  #[cfg(not(target_arch = "wasm32"))]
+  #[tokio::test]
+  async fn a_failed_upload_does_not_repeat_the_presigned_url() {
+    let listener = loopback_listener().await;
+    let address = listener.local_addr().unwrap();
+    // Accepts and closes at once: the request fails without an answer.
+    tokio::spawn(async move {
+      while let Ok((socket, _)) = listener.accept().await {
+        drop(socket);
+      }
+    });
+    let api = HttpServerApi::new(format!("http://{address}"), StaticToken("token".into()));
+    let url = format!("http://{address}/bucket/blob?X-Amz-Credential=key&X-Amz-Signature=deadbeef");
+    let result = api.put_blob(&url, b"ciphertext".to_vec()).await;
+    let Err(ApiError::Network(message)) = result else {
+      panic!("{result:?}")
+    };
+    assert!(
+      !message.contains("deadbeef") && !message.contains("X-Amz"),
+      "{message}"
+    );
   }
 
   #[cfg(not(target_arch = "wasm32"))]
