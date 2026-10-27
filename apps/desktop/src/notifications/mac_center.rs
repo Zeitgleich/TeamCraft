@@ -99,10 +99,12 @@ pub fn show(notification: &OsNotification) {
   content.setThreadIdentifier(&NSString::from_str(&thread));
   // A ringing call is silent (the app plays its own ringtone) and time-sensitive: it breaks through
   // a Focus that lets time-sensitive notifications through, as a phone call does. The app's own
-  // do-not-disturb already kept it from ringing (#650).
+  // do-not-disturb already kept it from ringing (#650). A message is silent when the app plays its
+  // own message sound, or none (#800).
   if notification.kind.is_ringing() {
     content.setInterruptionLevel(UNNotificationInterruptionLevel::TimeSensitive);
-  } else {
+  }
+  if !notification.is_quiet() {
     content.setSound(Some(&UNNotificationSound::defaultSound()));
   }
   if let Some(spec) = category_spec(notification) {

@@ -179,6 +179,7 @@ pub fn Shell(backend: Rc<dyn Backend>, settings: Settings) -> impl IntoView {
         maybe_body: Some(message),
         actions: Vec::new(),
         maybe_reply: None,
+        sound: Default::default(),
       };
       leptos::task::spawn_local(async move { tauri::show_notification(&shown).await });
     }

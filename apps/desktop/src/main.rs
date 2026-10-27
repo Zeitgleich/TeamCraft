@@ -23,6 +23,7 @@ mod dropped_files;
 mod external_links;
 #[cfg(target_os = "linux")]
 mod freedesktop;
+mod message_sound;
 mod notifications;
 mod ringtone;
 mod shell_prefs;
@@ -114,6 +115,7 @@ fn main() -> anyhow::Result<()> {
     .manage(notifications::ShownNotifications::default())
     .manage(call_window::CallWindowState::default())
     .manage(ringtone::RingtoneState::default())
+    .manage(message_sound::MessageSoundState::default())
     .manage(calls::push_to_talk::PushToTalkState::default())
     .manage(CoreHost::new(tokens))
     .manage(Arc::new(DroppedFilesState::default()))
@@ -279,6 +281,10 @@ fn main() -> anyhow::Result<()> {
       call_window::call_window_ready,
       call_window::call_window_action,
       ringtone::set_ringtone,
+      message_sound::message_sound_play,
+      message_sound::message_sound_pick,
+      message_sound::message_sound_status,
+      message_sound::message_sound_remove,
       attention::os_attention,
       autostart::autostart_get,
       autostart::autostart_set,

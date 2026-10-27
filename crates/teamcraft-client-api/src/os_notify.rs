@@ -36,6 +36,23 @@ pub struct OsNotification {
   /// `inline-reply`).
   #[serde(rename = "reply", default, skip_serializing_if = "Option::is_none")]
   pub maybe_reply: Option<ReplyField>,
+  /// Whether the system plays its notification sound with it (`message_sound`).
+  #[serde(default, skip_serializing_if = "NotificationSound::is_system")]
+  pub sound: NotificationSound,
+}
+
+/// Whether the system plays its own sound with a notification.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NotificationSound {
+  /// The system's notification sound, where the user's system settings allow one.
+  #[default]
+  System,
+  /// None: the app plays its own message sound, or the user chose none.
+  Silent,
+  /// A value of a newer version: the system's sound.
+  #[serde(other)]
+  Unknown,
 }
 
 /// The texts of a notification's reply field.
@@ -237,6 +254,20 @@ impl OsNotificationKind {
   }
 }
 
+impl OsNotification {
+  /// The desktop shows it without the system's sound: a ringing call (the app plays the ringtone),
+  /// or a message whose sound the app plays itself, or none.
+  pub fn is_quiet(&self) -> bool {
+    self.kind.is_ringing() || self.sound == NotificationSound::Silent
+  }
+}
+
+impl NotificationSound {
+  fn is_system(&self) -> bool {
+    matches!(self, Self::System | Self::Unknown)
+  }
+}
+
 #[cfg(test)]
 mod tests {
   use super::*;
@@ -265,6 +296,30 @@ mod tests {
       }
     );
     assert_eq!(NotificationTag::conversation(42).as_str(), "42");
+  }
+
+  #[test]
+  fn a_notification_keeps_the_system_sound_unless_told_otherwise() {
+    let older: OsNotification =
+      serde_json::from_str(r#"{"tag":"42","kind":"message","title":"Alice"}"#).unwrap();
+    assert_eq!(older.sound, NotificationSound::System);
+    assert!(!older.is_quiet());
+    assert!(!serde_json::to_string(&older).unwrap().contains("sound"));
+    let quiet = OsNotification {
+      sound: NotificationSound::Silent,
+      ..older.clone()
+    };
+    assert!(quiet.is_quiet());
+    assert!(
+      serde_json::to_string(&quiet)
+        .unwrap()
+        .contains(r#""sound":"silent""#)
+    );
+    let ringing = OsNotification {
+      kind: OsNotificationKind::IncomingCall,
+      ..older
+    };
+    assert!(ringing.is_quiet());
   }
 
   #[test]

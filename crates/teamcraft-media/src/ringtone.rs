@@ -74,7 +74,8 @@ pub fn test_sound() -> Vec<f32> {
 }
 
 /// One note: a sine carrier phase-modulated by a sine at the same frequency, with a fading index.
-fn electric_piano(frequency_hz: f32, velocity: f32) -> Vec<f32> {
+/// The message sound "Keys" plays the same voice.
+pub(crate) fn electric_piano(frequency_hz: f32, velocity: f32) -> Vec<f32> {
   let count = seconds_to_samples(NOTE_SECONDS);
   (0..count)
     .map(|index| {

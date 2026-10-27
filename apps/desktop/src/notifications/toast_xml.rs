@@ -1,5 +1,6 @@
 //! The XML of a Windows toast (the Adaptive Toast schema): title and text, buttons, an optional reply
-//! field and, for a ringing call, the incoming-call scenario without sound (the app rings itself).
+//! field and, for a ringing call, the incoming-call scenario without sound (the app rings itself). A
+//! message whose sound the app plays itself (or none, the user's choice) is silent too.
 //! Pure, so it is tested on every platform; `win_toast.rs` hands it to WinRT.
 
 use teamcraft_client_api::os_notify::{NotificationAction, OsNotification};
@@ -47,7 +48,7 @@ pub fn toast_xml(notification: &OsNotification) -> String {
     }
     xml.push_str("</actions>");
   }
-  if notification.kind.is_ringing() {
+  if notification.is_quiet() {
     xml.push_str(r#"<audio silent="true"/>"#);
   }
   xml.push_str("</toast>");
@@ -75,7 +76,7 @@ fn escape(text: &str) -> String {
 #[cfg(test)]
 mod tests {
   use teamcraft_client_api::os_notify::{
-    NotificationButton, NotificationTag, OsNotificationKind, ReplyField,
+    NotificationButton, NotificationSound, NotificationTag, OsNotificationKind, ReplyField,
   };
 
   use super::*;
@@ -95,6 +96,7 @@ mod tests {
         placeholder: "Reply…".into(),
         send_label: "Send".into(),
       }),
+      sound: NotificationSound::System,
     });
     assert_eq!(
       xml,
@@ -121,6 +123,7 @@ mod tests {
         label: "Decline".into(),
       }],
       maybe_reply: None,
+      sound: NotificationSound::System,
     });
     assert!(
       xml.starts_with(r#"<toast launch="default" activationType="foreground" scenario="incomingCall">"#)
@@ -138,9 +141,25 @@ mod tests {
       maybe_body: Some("a\u{1}b</text><action/>".into()),
       actions: Vec::new(),
       maybe_reply: None,
+      sound: NotificationSound::System,
     });
     assert!(xml.contains("<text>&lt;b&gt;&quot;Eve&quot; &amp; co&lt;/b&gt;</text>"));
     assert!(xml.contains("<text>ab&lt;/text&gt;&lt;action/&gt;</text>"));
     assert!(!xml.contains("<actions>"));
+  }
+
+  #[test]
+  fn a_message_whose_sound_the_app_plays_is_silent() {
+    let xml = toast_xml(&OsNotification {
+      tag: NotificationTag::conversation(7),
+      kind: OsNotificationKind::Message,
+      title: "Bob".into(),
+      maybe_body: None,
+      actions: Vec::new(),
+      maybe_reply: None,
+      sound: NotificationSound::Silent,
+    });
+    assert!(xml.ends_with(r#"<audio silent="true"/></toast>"#));
+    assert!(!xml.contains("scenario"));
   }
 }

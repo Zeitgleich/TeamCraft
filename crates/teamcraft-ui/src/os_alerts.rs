@@ -23,7 +23,7 @@ use teamcraft_client_api::activity::{JoinRequest, JoinRequestStanding};
 use teamcraft_client_api::call_window::{CallWindow, CallWindowTheme};
 use teamcraft_client_api::os_notify::{
   NOTIFICATION_ACTION_EVENT, NotificationAction, NotificationActionEvent, NotificationButton,
-  NotificationTag, OsNotification, OsNotificationKind, ReplyField, TagTarget,
+  NotificationSound, NotificationTag, OsNotification, OsNotificationKind, ReplyField, TagTarget,
 };
 use wasm_bindgen::JsCast;
 use wasm_bindgen::closure::Closure;
@@ -40,6 +40,7 @@ use crate::meeting_reminders::{
   DueReminder, FiredReminders, ReminderKind, ReminderSchedule, ReminderSettings,
 };
 use crate::meetings::MeetingsHub;
+use crate::message_sounds::{MessageSounds, notification_sound};
 use crate::model::{ConversationId, TimestampMs};
 use crate::notifier::{
   Decision, NotificationTitle, Notifier, ReadWatcher, all_conversations, needs_channel_confirmation,
@@ -73,7 +74,7 @@ pub struct CallAlertsCell(StoredValue<CallAlerts, LocalStorage>);
 pub fn start(state: AppState, i18n: I18n) {
   let calls = CallAlertsCell(StoredValue::new_local(CallAlerts::default()));
   provide_context(calls);
-  watch_messages(state, i18n);
+  watch_messages(state, i18n, MessageSounds::provide());
   watch_join_requests(state, i18n);
   if tauri::is_available() {
     watch_calls(state, i18n, calls);
@@ -95,8 +96,9 @@ impl CallAlertsCell {
 
 // ---- Messages -------------------------------------------------------------------------------------
 
-/// New messages, mentions and followed thread replies; withdrawn once read anywhere.
-fn watch_messages(state: AppState, i18n: I18n) {
+/// New messages, mentions and followed thread replies; withdrawn once read anywhere. Those that
+/// notify play the message sound, once for a burst (#800).
+fn watch_messages(state: AppState, i18n: I18n, sounds: MessageSounds) {
   let notifier = Notifier::default();
   let read_watcher = ReadWatcher::default();
   let settings = state.settings;
@@ -131,6 +133,11 @@ fn watch_messages(state: AppState, i18n: I18n) {
         prefs.maybe_dnd_until,
       )
     });
+    if !notifications.is_empty() {
+      let is_in_call = state.call.phase.get_untracked() == CallPhase::Active;
+      sounds.on_notifications(&prefs, is_in_call);
+    }
+    let sound = notification_sound(prefs.message_sound);
     for notification in notifications {
       let is_generic = notification.title == NotificationTitle::Generic;
       let title = match &notification.title {
@@ -160,6 +167,7 @@ fn watch_messages(state: AppState, i18n: I18n) {
           i18n.t("notify-action-mark-read"),
         )],
         maybe_reply,
+        sound,
       };
       leptos::task::spawn_local(async move { tauri::show_notification(&shown).await });
     }
@@ -250,6 +258,7 @@ fn join_request_notification(state: AppState, i18n: I18n, request: &JoinRequest)
     maybe_body: Some(i18n.t("notify-join-request-body")),
     actions,
     maybe_reply: None,
+    sound: NotificationSound::System,
   }
 }
 
@@ -525,6 +534,7 @@ fn incoming_call_notification(state: AppState, i18n: I18n, call: &IncomingCall) 
     maybe_body,
     actions,
     maybe_reply: None,
+    sound: NotificationSound::System,
   }
 }
 
@@ -567,6 +577,7 @@ fn missed_call_notification(state: AppState, i18n: I18n, call: &IncomingCall) ->
       i18n.t("notify-action-call-back"),
     )],
     maybe_reply: None,
+    sound: NotificationSound::System,
   }
 }
 
@@ -715,6 +726,7 @@ fn meeting_notification(
     maybe_body: may_name.then(|| reminder.title.clone()),
     actions: vec![button(NotificationAction::JoinMeeting, i18n.t("meetings-join"))],
     maybe_reply: None,
+    sound: NotificationSound::System,
   }
 }
 

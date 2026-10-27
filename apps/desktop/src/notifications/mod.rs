@@ -283,6 +283,7 @@ mod linux {
         .map(|reply| reply.placeholder.as_str()),
       category: category(notification.kind),
       is_ringing: notification.kind.is_ringing(),
+      is_quiet: notification.is_quiet(),
     };
     let Some(id) = probe.buses().notify(&desktop).await else {
       return false;
@@ -429,6 +430,7 @@ mod tests {
       maybe_body: Some(body.to_owned()),
       actions: Vec::new(),
       maybe_reply: None,
+      sound: Default::default(),
     }
   }
 }

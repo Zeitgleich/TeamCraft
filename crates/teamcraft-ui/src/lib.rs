@@ -61,6 +61,7 @@ pub mod meeting_reminders;
 pub mod meetings;
 pub mod mention;
 pub mod message_links;
+pub mod message_sounds;
 #[cfg(any(test, feature = "demo"))]
 pub mod mock;
 pub mod motion;

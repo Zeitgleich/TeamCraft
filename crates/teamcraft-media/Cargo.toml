@@ -50,6 +50,10 @@ web-api = ["dep:wasm-bindgen", "dep:js-sys", "dep:web-sys"]
 call-auth = ["dep:teamcraft-crypto"]
 # The UI's view of calls (`call_view`): shared by the desktop shell and the browser.
 call-view = ["dave", "dep:teamcraft-client-api"]
+# The app's own message sounds (`message_sounds`, synthesized): the desktop shell and the browser.
+message-sounds = ["dep:teamcraft-client-api"]
+# A user's own message sound file decoded on the desktop (`sound_file`: MP3, Ogg Vorbis, WAV, FLAC).
+sound-files = ["native", "message-sounds", "dep:symphonia"]
 
 pipewire = ["native", "dep:pipewire", "dep:ashpd"]
 # Cameras on macOS through AVFoundation (via nokhwa). Untested: no Mac in development so far.
@@ -122,6 +126,9 @@ tract-onnx = { version = "0.23.9", optional = true }
 opus = { version = "0.4.0", optional = true }
 # Cross-platform audio device I/O (ALSA/PipeWire, CoreAudio, WASAPI, AAudio).
 cpal = { version = "0.18.2", optional = true }
+# Decodes a user's own message sound on the desktop (#800): pure Rust, no unsafe, MPL-2.0. Only
+# the royalty-free formats and MP3; no SIMD (it would pull in an FFT library for nothing here).
+symphonia = { version = "0.6.1", optional = true, default-features = false, features = ["mp3", "ogg", "vorbis", "wav", "pcm", "adpcm", "flac"] }
 # Native call driver: async runtime, WebTransport client and the JSON signaling encoding.
 tokio = { workspace = true, optional = true }
 wtransport = { version = "0.7.2", optional = true, features = ["quinn"] }
