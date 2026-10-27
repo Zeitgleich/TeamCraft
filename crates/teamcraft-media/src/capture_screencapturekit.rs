@@ -160,12 +160,10 @@ impl ScreenCaptureKitScreen {
     }
   }
 
-  /// Hides the picker of a share that was given up while it was open. A later [`Self::pick`]
-  /// answers the abandoned one with a cancel.
+  /// Hides the picker of a share that was given up while it was open (on the main thread, where
+  /// the picker lives). A later [`Self::pick`] answers the abandoned one with a cancel.
   pub fn close_picker() {
-    if let Err(error) = SCContentSharingPicker::set_active(false) {
-      debug!(%error, "screen picker not closed");
-    }
+    SCContentSharingPicker::deactivate();
   }
 
   /// A whole display without the picker, for checks of the capture path
