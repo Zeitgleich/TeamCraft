@@ -25,6 +25,7 @@ pub mod log;
 pub mod markdown;
 pub mod media;
 pub mod media_viewer;
+pub mod message_sound;
 pub mod model;
 pub mod notify;
 pub mod oidc_login;

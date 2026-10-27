@@ -38,7 +38,8 @@ mod write_queue;
 
 #[cfg(target_arch = "wasm32")]
 pub use browser::{
-  IndexedDbRecords, IndexedDbStore, browser_database_key, vault_delete, vault_get, vault_put,
+  IndexedDbRecords, IndexedDbStore, browser_database_key, own_sound_delete, own_sound_get, own_sound_put,
+  vault_delete, vault_get, vault_put,
 };
 #[cfg(not(any(target_arch = "wasm32", target_os = "android", target_os = "ios")))]
 pub use key_source::KeyringKeySource;

@@ -324,6 +324,7 @@ mod linux {
         .map(|reply| reply.placeholder.as_str()),
       category: category(notification.kind),
       is_ringing: notification.kind.is_ringing(),
+      is_quiet: notification.is_quiet(),
       maybe_image: maybe_picture.map(|picture| HintImage {
         side: picture.side(),
         rgba: picture.rgba(),
@@ -474,6 +475,7 @@ mod tests {
       maybe_body: Some(body.to_owned()),
       actions: Vec::new(),
       maybe_reply: None,
+      sound: Default::default(),
       maybe_picture: None,
     }
   }
