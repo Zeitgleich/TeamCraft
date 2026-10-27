@@ -59,6 +59,8 @@ pub mod call_video;
 pub mod call_view;
 #[cfg(feature = "web")]
 pub mod call_web;
+#[cfg(feature = "native")]
+pub mod camera_choice;
 // Used by the nokhwa cameras (macOS, Windows); tested on every platform.
 #[cfg(feature = "native")]
 #[cfg_attr(

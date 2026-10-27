@@ -19,10 +19,11 @@ use v4l::video::Capture;
 use v4l::video::capture::Parameters;
 use v4l::{Device, Format, FourCC};
 
+use crate::camera_choice::rank_cameras;
 use crate::capture_convert::{PixelFormat, RawPicture};
 use crate::capture_negotiate::{OfferedMode, choose_mode};
 use crate::video::VideoResolution;
-use crate::video_capture::{CameraInfo, CaptureError, CaptureFormat, FrameSender, VideoCapture};
+use crate::video_capture::{CameraInfo, CameraKind, CaptureError, CaptureFormat, FrameSender, VideoCapture};
 
 /// Kernel buffers in flight.
 const BUFFER_COUNT: u32 = 4;
@@ -38,20 +39,30 @@ pub struct V4l2Camera {
   maybe_running: Option<(Arc<AtomicBool>, JoinHandle<()>)>,
 }
 
-/// Video capture devices (metadata nodes and other non-capture nodes left out).
+/// Video capture devices (metadata nodes and other non-capture nodes left out), in the order of
+/// preference (`camera_choice`: virtual cameras such as v4l2loopback last, otherwise as the device
+/// nodes come).
 pub fn list_cameras() -> Vec<CameraInfo> {
-  v4l::context::enum_devices()
+  let mut nodes = v4l::context::enum_devices();
+  // `/dev/video2` before `/dev/video10`: a stable order across restarts.
+  nodes.sort_by_key(|node| node_number(node.path()));
+  let cameras = nodes
     .into_iter()
     .filter(|node| {
       Device::with_path(node.path())
         .and_then(|device| device.query_caps())
         .is_ok_and(|caps| caps.capabilities.contains(v4l::capability::Flags::VIDEO_CAPTURE))
     })
-    .map(|node| CameraInfo {
-      id: node.path().display().to_string(),
-      name: node.name().unwrap_or_else(|| node.path().display().to_string()),
+    .map(|node| {
+      let name = node.name().unwrap_or_else(|| node.path().display().to_string());
+      CameraInfo {
+        id: node.path().display().to_string(),
+        kind: CameraKind::classify(&name, ""),
+        name,
+      }
     })
-    .collect()
+    .collect();
+  rank_cameras(cameras)
 }
 
 impl V4l2Camera {
@@ -255,8 +266,14 @@ fn device_error(path: &std::path::Path, error: &std::io::Error) -> CaptureError 
   match error.kind() {
     std::io::ErrorKind::NotFound => CaptureError::NoDevice("camera"),
     std::io::ErrorKind::PermissionDenied => CaptureError::Denied("camera"),
+    std::io::ErrorKind::ResourceBusy => CaptureError::InUse(format!("{}: {error}", path.display())),
     _ => CaptureError::Device(format!("{}: {error}", path.display())),
   }
+}
+
+/// The number of a `/dev/videoN` node; `None` for other names.
+fn node_number(path: &std::path::Path) -> Option<u32> {
+  path.file_name()?.to_str()?.strip_prefix("video")?.parse().ok()
 }
 
 #[cfg(test)]
@@ -274,5 +291,14 @@ mod tests {
       assert_eq!(pixel_format_of(fourcc_of(format)), Some(format));
     }
     assert_eq!(pixel_format_of(FourCC::new(b"H264")), None);
+  }
+
+  #[test]
+  fn device_nodes_sort_by_number() {
+    let number = |path: &str| node_number(std::path::Path::new(path));
+    assert_eq!(number("/dev/video10"), Some(10));
+    assert!(number("/dev/video2") < number("/dev/video10"));
+    // A `/dev/video` link to the first node has no number (and must not panic).
+    assert_eq!(number("/dev/video"), None);
   }
 }
