@@ -99,11 +99,12 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       return None;
     }
     let maybe_image = match meta.maybe_image_url {
-      Some(image_url) => fetcher
-        .fetch(image_url, settings.max_image_bytes)
-        .await
-        .and_then(|image| crate::thumbnail::thumbnail(&image.body, &image.content_type))
-        .map(Base64Bytes::new),
+      Some(image_url) => match fetcher.fetch(image_url, settings.max_image_bytes).await {
+        Some(image) => crate::thumbnail::make_thumbnail(&image.body, &image.content_type)
+          .await
+          .map(Base64Bytes::new),
+        None => None,
+      },
       None => None,
     };
     Some(LinkPreviewData {

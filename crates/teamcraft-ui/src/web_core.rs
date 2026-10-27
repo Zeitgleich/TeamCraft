@@ -185,6 +185,25 @@ pub fn configure(auth: Rc<dyn Authenticator>, server_url: &str) {
     server_url.to_owned()
   };
   SETUP.with(|setup| *setup.borrow_mut() = Some(Setup { auth, server_url }));
+  teamcraft_core::thumbnail::set_thumbnailer(Rc::new(thumbnail_in_chunk));
+}
+
+/// The core's thumbnails, made in the chunk with the image codecs (areas.rs), which loads with the
+/// first picture. A chunk that can't load (offline before it was cached, a deploy in between)
+/// leaves the picture without a thumbnail, like one the codecs can't read.
+fn thumbnail_in_chunk<'a>(
+  bytes: &'a [u8],
+  media_type: &'a str,
+) -> Pin<Box<dyn Future<Output = Option<Vec<u8>>> + 'a>> {
+  Box::pin(async move {
+    match crate::areas::thumbnail(bytes, media_type).await {
+      Ok(maybe_thumbnail) => maybe_thumbnail,
+      Err(error) => {
+        tracing::warn!(%error, "the image codecs did not load: the picture goes without a thumbnail");
+        None
+      },
+    }
+  })
 }
 
 /// Whether this page can run the core (the page was configured for it).
