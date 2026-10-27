@@ -18,6 +18,7 @@ pub mod custom_status;
 pub mod emoji;
 pub mod emoji_catalog;
 pub mod failure;
+pub mod join_request_alerts;
 pub mod links;
 pub mod live;
 pub mod log;
