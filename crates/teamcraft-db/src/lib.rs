@@ -11,6 +11,7 @@ mod audit;
 mod background;
 mod bot;
 mod call_history;
+mod channel_role_log;
 mod conversation;
 mod database;
 mod device;
@@ -66,6 +67,7 @@ pub use audit::{AuditEntry, AuditQuery, NewAuditEntry};
 pub use background::UserBackground;
 pub use bot::{BOT_ISSUER, StoredBot};
 pub use call_history::{MissedCall, StoredCall};
+pub use channel_role_log::ChannelRoleLogEntry;
 pub use conversation::{
   Conversation, ConversationChanges, ConversationFilter, ConversationMember, ConversationView, ImageChange,
   Membership, MembershipChanges, NewConversation, participants_key,

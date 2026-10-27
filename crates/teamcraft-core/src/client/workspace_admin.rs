@@ -394,21 +394,74 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
   }
 
   /// Gives a channel member another role (admin.md §2.3). The server checks the permission and
-  /// the invariants (a channel keeps an admin, guests stay members); the member list is read again
-  /// so the UI shows what the server stored, not what was asked for. Roles are not yet signed
-  /// assignments in the roster, so this is the server's word until they are.
+  /// the invariants (a channel keeps an admin, guests stay members) first; then this device signs
+  /// the channel's new roles, so members don't take the server's word for them (e2ee.md §4.6.1).
+  /// Somebody who can't sign in a way members accept (a role that is the server's word only, a
+  /// space admin) still changes the server's record: members see that role as not signed.
   pub async fn set_channel_role(
     &mut self,
     conversation: ConversationId,
     user: UserId,
     role: teamcraft_proto::ChannelRole,
-  ) -> Result<(), CoreError> {
+  ) -> Result<crate::client::RoleSigning, CoreError> {
     let request = teamcraft_proto::UpdateConversationMemberRequest {
-      maybe_role: Some(role),
+      maybe_role: Some(role.clone()),
       ..Default::default()
     };
     self.api.update_member(conversation, user, &request).await?;
-    self.refresh_members(conversation).await
+    self.refresh_members(conversation).await?;
+    self.sign_server_role(conversation, user, role).await
+  }
+
+  /// Signs the role the server lists for `user` (an admin confirming a role that is the server's
+  /// word only, e.g. from before signed roles). Nothing changes on the server.
+  pub async fn confirm_channel_role(
+    &mut self,
+    conversation: ConversationId,
+    user: UserId,
+  ) -> Result<crate::client::RoleSigning, CoreError> {
+    self.refresh_members(conversation).await?;
+    let role = self
+      .server_channel_role(conversation, user)?
+      .ok_or_else(|| CoreError::InvalidRequest(format!("user {user} is not a member")))?;
+    self.sign_server_role(conversation, user, role).await
+  }
+
+  /// Signs `user`'s new role. A channel nothing was signed for yet is founded by an admin the
+  /// server lists (its first admin who changes a role); its other roles stay unsigned until an
+  /// admin confirms them, so nobody vouches for the server's list unseen.
+  async fn sign_server_role(
+    &mut self,
+    conversation: ConversationId,
+    user: UserId,
+    role: teamcraft_proto::ChannelRole,
+  ) -> Result<crate::client::RoleSigning, CoreError> {
+    let me = self.account.user_id;
+    let may_found = self.server_channel_role(conversation, me)? == Some(teamcraft_proto::ChannelRole::Admin);
+    let signing = self
+      .sign_channel_roles(conversation, &[(user, role)], may_found)
+      .await?;
+    if signing == crate::client::RoleSigning::Unsigned {
+      tracing::info!(conversation_id = %conversation, "the role change is the server's word only: this user can't sign it");
+    }
+    Ok(signing)
+  }
+
+  /// The role the stored member list (the server's word) gives `user`.
+  fn server_channel_role(
+    &self,
+    conversation: ConversationId,
+    user: UserId,
+  ) -> Result<Option<teamcraft_proto::ChannelRole>, CoreError> {
+    let stored: Option<teamcraft_proto::ListConversationMembersResponse> =
+      records::get_json(&self.store, Table::Members, &conversation.to_string())?;
+    Ok(
+      stored
+        .into_iter()
+        .flat_map(|list| list.members)
+        .find(|member| member.user.id == user)
+        .map(|member| member.role),
+    )
   }
 
   /// Removes someone from the space; the server also takes them out of its channels, whose

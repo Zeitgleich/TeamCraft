@@ -1049,6 +1049,68 @@ message times. A device's own decision to commit still uses its own clock.
 only after its MLS queue was caught up, so an offline message never goes out under a key that a member
 removed meanwhile still holds.
 
+### 4.6.1 Signed channel roles
+
+A channel's roles (admin = channel owner, moderator, member; admin.md §1) are changed on the server
+like any setting, but members don't take the server's word for them (issue #380). Each channel has
+an append-only **role log** next to its messages (`/conversations/{id}/role-log`), built like the
+workspace roster (admin.md §2.3):
+
+- **Entries.** Each entry is a full snapshot of the channel's admins and moderators (members are
+  implicit), with the identity key of each as the signer's device pinned it, the channel's ID, the
+  entry's version, the hash of the last entry the signer's device accepted (`prev_hash`, zeros
+  before the first) and the signing time. It is signed by a device key like a roster entry, under
+  its own log kind (`WorkspaceLog::ChannelRoles`), so it can't be moved to another log, version or
+  channel. The server checks who may append (`manage_channel_roles` in an open channel, the
+  caller's own active device), that the document names this channel and the next version, and
+  orders the entries (`409 version_conflict` for a stale version); it never verifies signatures.
+- **Who may sign** follows the role rules of `teamcraft_proto::role_rules` (the code the UI uses;
+  the server checks the same rules with `is_allowed`), fed only with signed facts and the built-in
+  permission scheme:
+  - an owner or admin of the verified workspace roster, fresh at the entry's server time, may sign
+    any snapshot, also one built on another head than this device's (a checkpoint that re-anchors
+    a device that skipped an entry);
+  - an admin of the snapshot this device accepted last, verified against the key that snapshot
+    names for them, may sign the next snapshot built on exactly it;
+  - **the founder**: while nothing was accepted yet, an entry whose signer names themselves admin,
+    with the identity key this device pinned for them (trust on first use, like the workspace root
+    of trust). A channel's creator signs it when creating the channel; a channel from before signed
+    roles is founded by the first admin the server lists who changes or confirms a role.
+
+  Every change against the accepted snapshot must pass `check_channel_role_change`: nobody changes
+  their own role (the founder's claim aside), a snapshot keeps an admin, only `admin` and
+  `moderator` are listed. Moderators, members and anybody else sign nothing members accept. Space
+  admins and custom permission schemes aren't signed facts, so space admins' and scheme-granted
+  role changes stay the server's word (shown as not signed).
+- **Verifying.** Each device reads the log after its cursor and verifies every entry in version
+  order; an entry is accepted or skipped, never fatal. Signers build on the last entry they
+  accepted, so a junk entry (a hostile server, a modified client) can't block the log. The cursor
+  and the accepted version only move forward: a replayed entry is below the cursor, and moved to a
+  new position its signed version doesn't match. The accepted head (version and entry hash) travels
+  inside every encrypted text message of the channel; a member with another entry for the same
+  version raises an alarm, a newer one makes the device read the log again and raise an alarm if
+  it still isn't shown it, as for the roster.
+- **Using a role.** The role that counts is the signed one, capped by the server's: the server can
+  take a role away (it can withhold anything anyway) but never grant one, and an instance guest is
+  a member whatever is signed. Members' apps show a role only the server lists as "not signed";
+  admins who can sign confirm it with "Sign role". Decisions every member must make alike (issue
+  #776, the owner's approval of an admin joining a private channel) use the signed role alone
+  (`Client::verified_channel_role`) together with the MLS group's membership.
+- **Not yet decided by signed roles.** Commits still follow §4.6 as before: every member of the
+  group may sign membership changes (security review A11), since channels whose roles nobody
+  signed yet would otherwise lock their legitimate admins out, and clients without signed roles
+  would split from the others. Restricting commits to signed roles is a later step once channels
+  are signed. Integration sources still need a workspace admin (§13.1).
+
+Residual risks: the founding entry of a channel is trust on first use, so a hostile server together
+with a member of a channel from before signed roles can make that member its first signed admin
+before a real admin does (a workspace admin's checkpoint fixes it, and the real admins see the
+roles they hold shown as not signed). A demotion the server withholds is noticed only through the
+heads members exchange; channel roles have no freshness window like the roster's. A device that
+verifies a log from scratch judges a workspace admin's old entry by the roster it has now, so an
+entry by an admin who lost the role since is skipped there (and the entries built on it) until a
+workspace admin signs a checkpoint.
+
 ### 4.7 Converting a channel between private and public
 
 `PUT /api/v1/conversations/{id}/visibility` (permission `convert_channel_privacy`: channel owners, space
@@ -2113,9 +2175,10 @@ the bridge hashes the token of each request and compares it with every known has
 
 **Trust rule.** The server sees ciphertext only and can't write in the channel's group, so it can
 neither create nor alter a source. Who may manage sources is decided from signed data only: the
-verified workspace roster (admin.md §2.3). Channel roles are still the server's word (signed channel
-roles: issue #380) and count for nothing here, so a server can't promote a channel member into a
-source admin. Each member device (the bridge included) keeps a bounded ledger per channel
+verified workspace roster (admin.md §2.3). Channel roles are signed now (§4.6.1), but they don't
+count here yet: the bridge and every member would have to read each channel's role log before
+taking in an announcement, which is a follow-up of issue #380. So a server can't promote a channel
+member into a source admin. Each member device (the bridge included) keeps a bounded ledger per channel
 (`teamcraft-core::integration_sources`):
 
 - **Taking in.** A `created` or `renamed` reaches the ledger only from an admin of the verified

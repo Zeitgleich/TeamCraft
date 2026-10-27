@@ -845,6 +845,13 @@ pub enum ChatAction {
     user: UserId,
     role: crate::model::ChannelRole,
   },
+  ConfirmChannelRole {
+    conversation: ConversationId,
+    user: UserId,
+  },
+  RefreshChannelRoles {
+    conversation: ConversationId,
+  },
   RemoveSpaceMember {
     space: SpaceId,
     user: UserId,
@@ -1115,6 +1122,8 @@ impl ChatAction {
         user,
         role,
       } => backend.set_channel_role(conversation, user, role),
+      Self::ConfirmChannelRole { conversation, user } => backend.confirm_channel_role(conversation, user),
+      Self::RefreshChannelRoles { conversation } => backend.refresh_channel_roles(conversation),
       Self::RemoveSpaceMember { space, user } => backend.remove_space_member(space, user),
       Self::RevokeSpaceInvite { space, invite } => backend.revoke_space_invite(space, invite),
       Self::SaveSearch { name, query } => backend.save_search(&name, &query),
@@ -1200,6 +1209,9 @@ pub enum ChatQuery {
     conversation: ConversationId,
   },
   CanManageIntegrationSources,
+  CanSignChannelRoles {
+    conversation: ConversationId,
+  },
   SpaceInvites {
     space: SpaceId,
   },
@@ -1324,6 +1336,10 @@ pub enum ChatAnswer {
   CanManageIntegrationSources {
     #[serde(default)]
     can_manage: bool,
+  },
+  CanSignChannelRoles {
+    #[serde(default)]
+    can_sign: bool,
   },
   SpaceInvites {
     invites: Vec<crate::model::PendingInvite>,
@@ -1480,6 +1496,9 @@ impl ChatQuery {
       },
       Self::CanManageIntegrationSources => ChatAnswer::CanManageIntegrationSources {
         can_manage: backend.can_manage_integration_sources(),
+      },
+      Self::CanSignChannelRoles { conversation } => ChatAnswer::CanSignChannelRoles {
+        can_sign: backend.can_sign_channel_roles(conversation),
       },
       Self::SpaceMembers { space } => ChatAnswer::SpaceMembers {
         roster: backend.space_members(space),

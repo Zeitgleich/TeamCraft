@@ -45,6 +45,8 @@ pub enum CoreError {
   Membership(#[from] MembershipError),
   #[error("device list: {0}")]
   DeviceList(#[from] teamcraft_crypto::device_list::DeviceListError),
+  #[error("channel roles: {0}")]
+  ChannelRoles(#[from] crate::channel_roles::ChannelRoleError),
   #[error("this device is not enrolled yet")]
   NotEnrolled,
   #[error("the account already has an identity key; recover it instead of enrolling anew")]
@@ -170,6 +172,10 @@ pub enum CoreError {
   /// The app asked for something that can't be done as asked (a caller bug or stale UI state).
   #[error("invalid request: {0}")]
   InvalidRequest(String),
+  /// Writing a file on this device failed (a download into the folder or file the user picked):
+  /// the operating system's reason, without the path, which names the file.
+  #[error("writing the file on this device failed: {0}")]
+  LocalFile(#[source] std::io::Error),
   #[error("local data is unreadable: {0}")]
   Corrupt(String),
 }

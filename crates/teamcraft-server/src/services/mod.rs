@@ -14,6 +14,7 @@ pub mod calendar_settings;
 pub mod call_history;
 pub mod calls;
 pub mod channel_images;
+pub mod channel_roles;
 pub mod conversations;
 pub mod convert;
 pub mod device_links;

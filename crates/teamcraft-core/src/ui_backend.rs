@@ -350,6 +350,15 @@ pub enum CoreCommand {
     user: UserId,
     role: teamcraft_proto::ChannelRole,
   },
+  /// Signs the role the server lists for a member (e2ee.md §4.6.1).
+  ConfirmChannelRole {
+    conversation: ConversationId,
+    user: UserId,
+  },
+  /// The channel's members and signed roles, for its settings.
+  RefreshChannelRoles {
+    conversation: ConversationId,
+  },
   RemoveSpaceMember {
     space: SpaceId,
     user: UserId,
@@ -1881,12 +1890,27 @@ impl<S: LocalStore> ChatBackend for CoreChatBackend<S> {
       Table::Members,
       &conversation.to_string(),
     ));
+    let signed: crate::channel_roles::ChannelRoleState = self.read(
+      records::get_json(
+        &self.store,
+        Table::Workspace,
+        &crate::client::channel_roles_key(conversation),
+      )
+      .map(Option::unwrap_or_default),
+    );
     stored
       .into_iter()
       .flat_map(|list| list.members)
-      .map(|member| teamcraft_client_api::model::ChannelMember {
-        user: member.user.id,
-        role: member.role,
+      .map(|member| {
+        let is_guest = member.user.kind == teamcraft_proto::UserKind::Guest;
+        // The server's role, marked when no signed assignment backs it (e2ee.md §4.6.1).
+        let verified = signed.role_of(member.user.id);
+        let effective = crate::channel_roles::effective_role(&verified, &member.role, is_guest);
+        teamcraft_client_api::model::ChannelMember {
+          user: member.user.id,
+          is_role_signed: member.role == teamcraft_proto::ChannelRole::Member || effective == member.role,
+          role: member.role,
+        }
       })
       .collect()
   }
@@ -1897,6 +1921,18 @@ impl<S: LocalStore> ChatBackend for CoreChatBackend<S> {
       user,
       role,
     });
+  }
+
+  fn confirm_channel_role(&self, conversation: ConversationId, user: UserId) {
+    self.command(CoreCommand::ConfirmChannelRole { conversation, user });
+  }
+
+  fn refresh_channel_roles(&self, conversation: ConversationId) {
+    self.command(CoreCommand::RefreshChannelRoles { conversation });
+  }
+
+  fn can_sign_channel_roles(&self, conversation: ConversationId) -> bool {
+    self.ui_can_sign_channel_roles(conversation)
   }
 
   fn set_space_role(&self, space: SpaceId, user: UserId, role: SpaceRole) {

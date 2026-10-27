@@ -26,8 +26,10 @@ pub(crate) struct PinnedDirectory {
 
 /// Who may change a group's membership (e2ee.md §4.6, admin.md §2.3):
 ///
-/// - current members of the MLS group (the signed per-channel roles aren't in the roster yet, so
-///   every member counts as allowed to manage members, also to add an admin),
+/// - current members of the MLS group: channel roles are signed (e2ee.md §4.6.1,
+///   [`crate::channel_roles`]) but don't decide commits yet, so every member counts as allowed to
+///   manage members, also to add an admin, until channels from before signed roles are signed
+///   (security review A11),
 /// - workspace owners and admins from the verified roster who aren't members, for any change
 ///   except bringing an owner or admin into a conversation that isn't an open public channel:
 ///   themselves or another one alike, as the policy's `admin_self_join` says (admin.md §2.4,
