@@ -16,7 +16,9 @@ use super::sql_group::{
   Migration, MigrationKind, WriteGroup, run_migrations, sqlite_error as database_error,
 };
 use super::sqlite_wipe::wipe_free_pages;
-use super::{DatabaseKeySource, LocalStore, MediaRange, MessageFilter, StoreError, StoredMessage, Table};
+use super::{
+  DatabaseKeySource, LocalStore, MediaRange, MessageFilter, StoreError, StoredMessage, Table, WriteTally,
+};
 
 /// The layout steps of this store, in order ([`run_migrations`]). Released 1.0 databases carry
 /// version 0 (no version was set) and the tables of version 1, apart from databases older than the
@@ -29,6 +31,11 @@ pub(crate) const MIGRATIONS: &[Migration] = &[
   Migration {
     version: 2,
     kind: MigrationKind::Maintenance(wipe_free_pages),
+  },
+  // The MLS state is stored per entry (issue #424); versions before would read none of it.
+  Migration {
+    version: 3,
+    kind: MigrationKind::Marker,
   },
 ];
 /// How a message record spells the media type of a picture or a video (`AttachmentRef`, compact JSON):
@@ -399,6 +406,10 @@ impl LocalStore for SqlCipherStore {
     let Inner { connection, group } = &mut *inner;
     group.end(connection)
   }
+
+  fn write_tally(&self) -> Option<WriteTally> {
+    Some(self.lock().group.tally())
+  }
 }
 
 impl std::fmt::Debug for SqlCipherStore {
@@ -586,6 +597,68 @@ mod tests {
       .unwrap();
     assert!(matches!(store.end_writes(), Err(StoreError::GroupFailed(_))));
     assert_eq!(store.get(Table::Outbox, "1").unwrap(), None);
+    assert_eq!(
+      store.write_tally(),
+      Some(WriteTally {
+        committed: 0,
+        lost: 1
+      })
+    );
+    crate::store::write_group(&store, || store.put(Table::Outbox, "2", b"entry")).unwrap();
+    assert_eq!(
+      store.write_tally(),
+      Some(WriteTally {
+        committed: 1,
+        lost: 1
+      })
+    );
+  }
+
+  /// Issue #424: a save of the MLS state in a group SQLite rolled back (a full disk) went
+  /// through as far as the save could tell. The tally tells the next save, which writes the
+  /// whole state again: the database holds what the provider holds, also after a restart.
+  #[test]
+  fn the_mls_state_is_written_again_after_a_rolled_back_group() {
+    use openmls_traits::OpenMlsProvider as _;
+
+    use crate::mls_storage::{SavedMlsStorage, load_mls_storage, save_mls_storage};
+
+    let directory = scratch_dir();
+    let path = directory.join("store.db");
+    let key = SymmetricKey::generate(&mut OsRng);
+    let provider = openmls_rust_crypto::OpenMlsRustCrypto::default();
+    let set = |key: &[u8], maybe_value: Option<&[u8]>| {
+      let mut values = provider.storage().values.write().unwrap();
+      match maybe_value {
+        Some(value) => values.insert(key.to_vec(), value.to_vec()),
+        None => values.remove(key),
+      };
+    };
+    {
+      let store = SqlCipherStore::open(&path, &StaticKeySource::new(key.duplicate())).unwrap();
+      let saved = SavedMlsStorage::default();
+      set(b"epoch", Some(b"1"));
+      set(b"spent key package", Some(b"secret"));
+      save_mls_storage(&store, &provider, &saved).unwrap();
+
+      set(b"epoch", Some(b"2"));
+      set(b"spent key package", None);
+      store.begin_writes().unwrap();
+      save_mls_storage(&store, &provider, &saved).unwrap();
+      store.lock().connection.execute_batch("ROLLBACK").unwrap();
+      assert!(store.end_writes().is_err());
+
+      set(b"next group", Some(b"3"));
+      save_mls_storage(&store, &provider, &saved).unwrap();
+    }
+    let reopened = SqlCipherStore::open(&path, &StaticKeySource::new(key)).unwrap();
+    let (loaded, _) = load_mls_storage(&reopened).unwrap();
+    assert_eq!(
+      *loaded.storage().values.read().unwrap(),
+      *provider.storage().values.read().unwrap()
+    );
+    drop(reopened);
+    std::fs::remove_dir_all(&directory).unwrap();
   }
 
   #[test]

@@ -99,6 +99,7 @@ use crate::api::ServerApi;
 use crate::clock::Clock;
 use crate::convert;
 use crate::error::CoreError;
+use crate::mls_storage;
 use crate::records::{self, Account, PinnedIdentity, SyncState};
 use crate::store::{LocalStore, Table};
 use crate::trust::PinnedDirectory;
@@ -235,6 +236,8 @@ pub struct Client<A, S> {
   clock: Box<dyn Clock>,
   settings: ClientSettings,
   provider: OpenMlsRustCrypto,
+  /// What the store holds of the provider's storage, so a save writes only what changed.
+  saved_mls: mls_storage::SavedMlsStorage,
   account: Account,
   groups: HashMap<ConversationId, ConversationGroup>,
   sync: SyncState,
@@ -359,7 +362,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     let Some(account) = records::load_account(&store)? else {
       return Ok(None);
     };
-    let provider = records::load_mls_storage(&store)?;
+    let (provider, saved_mls) = mls_storage::load_mls_storage(&store)?;
     // The UI shows the upload limit before sending.
     records::put_json(&store, Table::Account, MAX_UPLOAD_KEY, &settings.max_upload_bytes)?;
     let sync = records::load_sync_state(&store)?;
@@ -371,6 +374,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       clock,
       settings,
       provider,
+      saved_mls,
       account,
       groups: HashMap::new(),
       sync,
@@ -590,7 +594,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       .store
       .delete(Table::SyncState, &groups::group_info_published_key(conversation))?;
     self.mls_current.remove(&conversation);
-    records::save_mls_storage(&self.store, &self.provider)
+    self.save_mls_storage()
   }
 
   /// Writes MLS state (provider storage and applied change IDs) after a group operation, as one
@@ -614,7 +618,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
   }
 
   fn write_group_state(&self, conversation: ConversationId) -> Result<(), CoreError> {
-    records::save_mls_storage(&self.store, &self.provider)?;
+    self.save_mls_storage()?;
     if let Some(group) = self.groups.get(&conversation) {
       let applied: Vec<[u8; 16]> = group.applied_changes().map(|id| *id.as_bytes()).collect();
       records::put_json(
@@ -642,6 +646,12 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       }
     }
     Ok(())
+  }
+
+  /// Writes what changed in the MLS state (the provider storage) since the last save, as one
+  /// group of writes; inside a caller's group it reaches the disk with that group.
+  pub(crate) fn save_mls_storage(&self) -> Result<(), CoreError> {
+    mls_storage::save_mls_storage(&self.store, &self.provider, &self.saved_mls)
   }
 
   /// Writes the key bag after content keys changed, and marks it for upload (together, so a bag
