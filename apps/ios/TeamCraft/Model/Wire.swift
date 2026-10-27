@@ -115,10 +115,13 @@ enum WorkspaceEvent: Decodable, Equatable, Sendable {
   /// A workspace admin joined the private channel (admin.md §2.4): by themselves, or let in by the
   /// channel owner `maybeApprovedBy` who answered their request.
   case adminJoined(user: String, maybeApprovedBy: String?)
+  /// A workspace admin joined the private channel because `by` added them without an approval to
+  /// ask for (admin.md §2.4.2).
+  case adminAdded(user: String, by: String)
   case unknown
 
   private enum CodingKeys: String, CodingKey {
-    case event, user, by, history, space, approvedBy
+    case event, user, by, history, space, approvedBy, addedBy
   }
 
   init(from decoder: Decoder) throws {
@@ -135,7 +138,11 @@ enum WorkspaceEvent: Decodable, Equatable, Sendable {
     case "moved": self = .moved(by: by, space: text(.space) ?? "")
     case "pinned": self = .pinned(by: by)
     case "admin_joined":
-      self = .adminJoined(user: text(.user) ?? "", maybeApprovedBy: text(.approvedBy).flatMap { $0.isEmpty ? nil : $0 })
+      if let addedBy = text(.addedBy), !addedBy.isEmpty {
+        self = .adminAdded(user: text(.user) ?? "", by: addedBy)
+      } else {
+        self = .adminJoined(user: text(.user) ?? "", maybeApprovedBy: text(.approvedBy).flatMap { $0.isEmpty ? nil : $0 })
+      }
     default: self = .unknown
     }
   }

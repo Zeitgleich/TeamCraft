@@ -1629,6 +1629,7 @@ ws-made-public = { $by } hat diesen Kanal öffentlich gemacht
 ws-pinned = { $by } hat eine Nachricht angeheftet
 ws-admin-joined = { $name } ist diesem Kanal als Workspace-Admin beigetreten
 ws-admin-joined-approved = { $name } ist diesem Kanal als Workspace-Admin beigetreten, zugelassen von { $by }
+ws-admin-joined-added = { $name } ist diesem Kanal als Workspace-Admin beigetreten, hinzugefügt von { $by }
 
 notif-browser = Browser-Benachrichtigungen
 notif-browser-hint = Neue Nachrichten melden, solange TeamCraft in diesem Browser geöffnet ist.

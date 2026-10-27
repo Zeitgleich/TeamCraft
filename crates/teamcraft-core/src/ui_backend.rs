@@ -30,7 +30,8 @@ use teamcraft_client_api::model::{
 use teamcraft_proto::{
   AttachmentId, ClientMessageId, ConversationKind as ConversationKindProto, ConversationResponse,
   ConversationVisibility, Id, InviteId, JoinPolicy, ListConversationMembersResponse, ListInvitesResponse,
-  MessageId, NotificationLevel, PresenceState, Snowflake, SpaceResponse, SpaceRole, UserKind, UserSummary,
+  MessageId, MlsMessageId, NotificationLevel, PresenceState, Snowflake, SpaceResponse, SpaceRole, UserKind,
+  UserSummary,
 };
 use teamcraft_proto::{BackgroundId, OrgBackgroundId};
 use teamcraft_proto::{
@@ -793,16 +794,32 @@ impl<S: LocalStore> CoreChatBackend<S> {
       .maybe_my_membership
       .as_ref()
       .and_then(|membership| membership.maybe_last_read_message_id);
+    // A line derived from a commit (issue #811) counts like a message at the commit's place: the
+    // server's read position covers it once a later message was read; one newer than all of them
+    // is read once this device marked the conversation read after it arrived.
+    let maybe_lines_read = if messages
+      .iter()
+      .any(|message| message.maybe_verified_commit.is_some())
+    {
+      self.read(lines_read_through(&self.store, response.id))
+    } else {
+      None
+    };
     messages
       .into_iter()
-      .filter(
-        |message| match (message.maybe_server_id, maybe_mark, maybe_last_read) {
+      .filter(|message| {
+        let is_read_line = message
+          .maybe_verified_commit
+          .is_some_and(|commit| maybe_lines_read.is_some_and(|read| commit <= read));
+        match (unread_position(message), maybe_mark, maybe_last_read) {
           (Some(id), Some(mark), _) => id >= mark,
-          (Some(id), None, Some(last_read)) => message.sender_user_id != self.me && id > last_read,
-          (Some(_), None, None) => message.sender_user_id != self.me,
+          (Some(id), None, Some(last_read)) => {
+            message.sender_user_id != self.me && id > last_read && !is_read_line
+          },
+          (Some(_), None, None) => message.sender_user_id != self.me && !is_read_line,
           (None, _, _) => false,
-        },
-      )
+        }
+      })
       .collect()
   }
 
@@ -1914,8 +1931,8 @@ impl<S: LocalStore> ChatBackend for CoreChatBackend<S> {
 }
 
 /// How a conversation event shows: the UI's system events where one fits ("X joined" with the added
-/// person as author); other events stay user messages without text, and the UI reads them from
-/// `MessageExtras::maybe_workspace_event`.
+/// person as author); other changes are [`MessageKind::Change`] without text, whose line the UI
+/// reads from `MessageExtras::maybe_workspace_event`. An event of a newer version stays a message.
 fn system_view(event: &ConversationEvent, sender: UserId) -> (MessageKind, UserId) {
   match event {
     ConversationEvent::Joined => (MessageKind::System(SystemEvent::Joined), sender),
@@ -1930,14 +1947,14 @@ fn system_view(event: &ConversationEvent, sender: UserId) -> (MessageKind, UserI
       MessageKind::System(SystemEvent::TopicChanged { topic: topic.clone() }),
       sender,
     ),
+    // Lines the UI reads from the extras' workspace event; the kind says so before they arrive.
     ConversationEvent::Archived
     | ConversationEvent::Unarchived
     | ConversationEvent::MadePrivate
     | ConversationEvent::MadePublic
     | ConversationEvent::Moved { .. }
-    | ConversationEvent::CallMoved { .. }
-    | ConversationEvent::AdminJoined { .. }
-    | ConversationEvent::Unknown => (MessageKind::User, sender),
+    | ConversationEvent::AdminJoined { .. } => (MessageKind::Change, sender),
+    ConversationEvent::CallMoved { .. } | ConversationEvent::Unknown => (MessageKind::User, sender),
   }
 }
 
@@ -2000,6 +2017,50 @@ pub(crate) fn newest_server_id(messages: &[StoredMessage]) -> Option<MessageId> 
     .iter()
     .filter_map(|message| message.maybe_server_id)
     .max()
+}
+
+/// The newest commit whose "joined as a workspace admin" line this device read in `conversation`
+/// (issue #811). The server's read position names messages only, so a line newer than all of them
+/// is read when the user marks the conversation read on this device.
+fn lines_read_through(
+  store: &impl LocalStore,
+  conversation: ConversationId,
+) -> Result<Option<MlsMessageId>, CoreError> {
+  records::get_json(store, Table::SyncState, &lines_read_key(conversation))
+}
+
+/// The user read `conversation`: its lines from commits up to the newest of `messages` count as
+/// read here. Never moves back.
+pub(crate) fn note_lines_read(
+  store: &impl LocalStore,
+  conversation: ConversationId,
+  messages: &[StoredMessage],
+) -> Result<(), CoreError> {
+  let Some(newest) = messages
+    .iter()
+    .filter_map(|message| message.maybe_verified_commit)
+    .max()
+  else {
+    return Ok(());
+  };
+  if lines_read_through(store, conversation)?.is_some_and(|read| read >= newest) {
+    return Ok(());
+  }
+  records::put_json(store, Table::SyncState, &lines_read_key(conversation), &newest)
+}
+
+fn lines_read_key(conversation: ConversationId) -> String {
+  format!("lines_read/{conversation}")
+}
+
+/// Where a message stands for unread counting: the server's ID, a line derived from a commit at
+/// the commit's (the same clock); an outbox message not at all.
+fn unread_position(message: &StoredMessage) -> Option<MessageId> {
+  message.maybe_server_id.or_else(|| {
+    message
+      .maybe_verified_commit
+      .map(|commit| MessageId::from_snowflake(commit.snowflake()))
+  })
 }
 
 /// The ID the UI uses: the server's, for a line derived from a commit the commit's (time-ordered
@@ -2599,6 +2660,97 @@ mod tests {
           maybe_verified_commit: None,
         })
         .unwrap();
+    }
+
+    /// Issue #811: a line derived from a commit is a change row at the commit's place, and
+    /// counts as unread like a message there (review of #815, L1).
+    mod admin_lines {
+      use super::*;
+
+      #[test]
+      fn a_line_is_a_change_row_with_the_commits_id() {
+        let (backend, conversation, _) = mention_fixture(&[]);
+        store_line(&backend, &conversation, 150, 2);
+        let all = backend.all_messages(conversation.id);
+        let row = backend.to_message(&all[0], &all);
+        assert_eq!(row.kind, MessageKind::Change);
+        assert_eq!(row.id, id::<MessageId>(150), "not shown as sending");
+      }
+
+      #[test]
+      fn a_line_after_the_read_position_is_unread_until_read_here() {
+        let (backend, mut conversation, users) = mention_fixture(&[(2, "before", &[])]);
+        let mut membership = test_membership();
+        membership.maybe_last_read_message_id = Some(id(101));
+        conversation.maybe_my_membership = Some(membership);
+        store_line(&backend, &conversation, 90, 2);
+        let unread = |backend: &CoreChatBackend<MemoryStore>| {
+          backend
+            .to_conversation(&conversation, &users, &backend.mention_preferences())
+            .unread_count
+        };
+        assert_eq!(unread(&backend), 0, "older than what was read");
+
+        store_line(&backend, &conversation, 150, 2);
+        assert_eq!(unread(&backend), 1, "newer than everything read");
+        records::put_json(
+          &backend.store,
+          Table::Conversations,
+          &conversation.id.to_string(),
+          &conversation,
+        )
+        .unwrap();
+        assert_eq!(backend.ui_first_unread(conversation.id), Some(id(150)));
+
+        let messages = backend.all_messages(conversation.id);
+        note_lines_read(&backend.store, conversation.id, &messages).unwrap();
+        assert_eq!(unread(&backend), 0, "read on this device");
+      }
+
+      #[test]
+      fn the_users_own_approval_is_not_unread() {
+        let (backend, conversation, users) = mention_fixture(&[]);
+        store_line(&backend, &conversation, 150, 1);
+        assert_eq!(
+          backend
+            .to_conversation(&conversation, &users, &backend.mention_preferences())
+            .unread_count,
+          0
+        );
+      }
+
+      /// The line of commit `commit` about user 3, written as `sender`'s.
+      fn store_line(
+        backend: &CoreChatBackend<MemoryStore>,
+        conversation: &ConversationResponse,
+        commit: i64,
+        sender: i64,
+      ) {
+        let mut bytes = [0u8; 16];
+        bytes[..8].copy_from_slice(&commit.to_be_bytes());
+        backend
+          .store
+          .upsert_message(&StoredMessage {
+            conversation_id: conversation.id,
+            client_message_id: ClientMessageId::from_bytes(bytes),
+            maybe_server_id: None,
+            sender_user_id: id(sender),
+            maybe_thread_id: None,
+            sent_at_ms: 0,
+            content: MessageContent::Event {
+              event: ConversationEvent::AdminJoined {
+                user: id(3),
+                is_approved: true,
+              },
+            },
+            is_edited: false,
+            edits: Vec::new(),
+            maybe_edit_id: None,
+            is_pinned: false,
+            maybe_verified_commit: Some(id(commit)),
+          })
+          .unwrap();
+      }
     }
   }
 

@@ -12,8 +12,9 @@ use common::{PASSPHRASE, Peer, TestClient, clock, link_device, settings, settle}
 use teamcraft_core::api::fake::{FakeGateway, FakeServer, FakeServerApi};
 use teamcraft_core::records;
 use teamcraft_core::store::{
-  LocalStore, MemoryStore, MessageContent, MessageFilter, StoreError, StoredMessage, Table,
+  ConversationEvent, LocalStore, MemoryStore, MessageContent, MessageFilter, StoreError, StoredMessage, Table,
 };
+use teamcraft_core::workspace::RosterRole;
 use teamcraft_core::{Client, LinkOffer, PendingEnrollment};
 use teamcraft_proto::{ClientMessageId, ConversationId};
 
@@ -108,6 +109,53 @@ mod kill_points {
       assert!(
         alice.texts(channel).contains(&"bob is here".to_string()),
         "kill point {kill_point}: Alice can't read Bob after his restart"
+      );
+      if !has_crashed {
+        return;
+      }
+    }
+    panic!("processing never finished within {MAX_KILL_POINTS} writes");
+  }
+
+  /// Issue #811: a crash on any write while a member's device processes an admin's addition
+  /// leaves exactly one "joined as a workspace admin" line once the commit is processed again.
+  #[tokio::test]
+  async fn a_crash_while_an_admin_joins_leaves_one_line() {
+    for kill_point in 0..MAX_KILL_POINTS {
+      let server = FakeServer::new();
+      let mut alice = Peer::enroll(&server, "Alice").await;
+      let dave = Peer::enroll(&server, "Dave").await;
+      let (mut bob, mut bob_gateway, store) = enroll_on_kill_point_store(&server, "Bob").await;
+      let (alice_id, dave_id) = (alice.client.user_id(), dave.client.user_id());
+      alice
+        .client
+        .publish_roster(&[(alice_id, RosterRole::Owner), (dave_id, RosterRole::Admin)])
+        .await
+        .unwrap();
+      let channel = alice
+        .client
+        .create_channel(alice.space().await, "private")
+        .await
+        .unwrap();
+      alice.client.add_member(channel, bob.user_id()).await.unwrap();
+      pump_until_quiet(&mut bob, &mut bob_gateway, &mut alice).await;
+
+      // Bob's device verifies Alice's commit that brings the admin in, and dies on one write.
+      store.crash_after(kill_point);
+      alice.client.add_member(channel, dave_id).await.unwrap();
+      let processed = pump_until_quiet_or_crash(&mut bob, &mut bob_gateway, &mut alice).await;
+      let has_crashed = store.has_crashed();
+      if !has_crashed {
+        processed.unwrap();
+      }
+
+      let mut reopened = reopen(&bob, store.durable());
+      let (mut gateway, _) = reopened.connect_gateway().await.unwrap();
+      pump_until_quiet(&mut reopened, &mut gateway, &mut alice).await;
+      assert_eq!(
+        admin_lines(&store.durable(), channel),
+        1,
+        "kill point {kill_point}"
       );
       if !has_crashed {
         return;
@@ -503,6 +551,23 @@ async fn linked_peer(owner: &mut Peer) -> Peer {
     client,
     gateway,
   }
+}
+
+/// How many "joined as a workspace admin" lines `store` lists in `conversation`.
+fn admin_lines(store: &MemoryStore, conversation: ConversationId) -> usize {
+  store
+    .messages(conversation, MessageFilter::TopLevel)
+    .unwrap()
+    .into_iter()
+    .filter(|message| {
+      matches!(
+        message.content,
+        MessageContent::Event {
+          event: ConversationEvent::AdminJoined { .. }
+        }
+      )
+    })
+    .count()
 }
 
 fn texts(store: &MemoryStore, conversation: ConversationId) -> Vec<String> {

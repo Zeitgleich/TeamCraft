@@ -79,6 +79,10 @@ final class SystemLineTests: XCTestCase {
     XCTAssertEqual(
       line(extras: #"{"event":"admin_joined","user":"2","approved_by":"1"}"#),
       .adminJoined(name: "Sam", maybeApprovedBy: "Ada"))
+    // Added without an approval to ask for: "added by", not "approved by" (#811).
+    XCTAssertEqual(
+      line(extras: #"{"event":"admin_joined","user":"2","added_by":"1"}"#),
+      .adminAdded(name: "Sam", by: "Ada"))
   }
 
   private func line(

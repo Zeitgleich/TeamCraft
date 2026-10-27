@@ -26,6 +26,7 @@
   <!-- System lines -->
   <string name="event_admin_joined">%1$s joined this channel as a workspace admin</string>
   <string name="event_admin_joined_approved">%1$s joined this channel as a workspace admin, approved by %2$s</string>
+  <string name="event_admin_joined_added">%1$s joined this channel as a workspace admin, added by %2$s</string>
 
   <!-- Notifications -->
   <string name="notification_channel_join_requests">Requests to join</string>

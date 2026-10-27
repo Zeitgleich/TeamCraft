@@ -892,11 +892,14 @@ mod tests {
       }
     }
 
+    /// A change (archived, an admin who joined) is read from the extras' workspace event, as the
+    /// apps do already.
     #[test]
-    fn written_messages_and_log_lines_are_no_system_events() {
+    fn written_messages_log_lines_and_changes_are_no_system_events() {
       for kind in [
         view::MessageKind::User,
         view::MessageKind::Log(view::LogLevel::Info),
+        view::MessageKind::Change,
       ] {
         let item = MessageItem::from_view(&message_of(kind), None, false);
         assert_eq!(item.maybe_system_event, None);

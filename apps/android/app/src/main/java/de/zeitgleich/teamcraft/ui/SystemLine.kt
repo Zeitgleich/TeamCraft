@@ -47,6 +47,12 @@ sealed interface SystemLine {
    */
   data class AdminJoined(val name: String, val maybeApprovedBy: String?) : SystemLine
 
+  /**
+   * A workspace admin joined the private channel because [by] added them without an approval to
+   * ask for: a member's ordinary add, or another admin's signed change (admin.md §2.4.2).
+   */
+  data class AdminAdded(val name: String, val by: String) : SystemLine
+
   /** A message without text or files of a kind this version doesn't know. */
   data object Changed : SystemLine
 }
@@ -85,6 +91,7 @@ fun SystemLine.localizedText(): String = when (this) {
   is SystemLine.AdminJoined -> maybeApprovedBy?.let { by ->
     stringResource(R.string.event_admin_joined_approved, name, by)
   } ?: stringResource(R.string.event_admin_joined, name)
+  is SystemLine.AdminAdded -> stringResource(R.string.event_admin_joined_added, name, by)
   SystemLine.Changed -> stringResource(R.string.chat_preview_event)
 }
 
@@ -118,7 +125,9 @@ private fun workspaceLine(event: JsonObject, nameOf: (String) -> String): System
     "made_public" -> SystemLine.MadePublic(by)
     "moved" -> SystemLine.Moved(by, event.text("space"))
     "pinned" -> SystemLine.Pinned(by)
-    "admin_joined" -> SystemLine.AdminJoined(
+    "admin_joined" -> event.text("added_by").takeIf { it.isNotEmpty() }?.let { addedBy ->
+      SystemLine.AdminAdded(nameOf(event.text("user")), nameOf(addedBy))
+    } ?: SystemLine.AdminJoined(
       nameOf(event.text("user")),
       event.text("approved_by").takeIf { it.isNotEmpty() }?.let(nameOf),
     )

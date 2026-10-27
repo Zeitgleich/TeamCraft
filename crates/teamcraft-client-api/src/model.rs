@@ -625,6 +625,11 @@ pub enum SystemEvent {
 pub enum MessageKind {
   User,
   System(SystemEvent),
+  /// A change to the conversation that is no join or leave (archived, made private or public,
+  /// moved, a workspace admin who joined): a line reading the workspace event of the message's
+  /// extras, whatever the join/leave setting says. Known from the message alone, so the row is a
+  /// line before its extras arrive.
+  Change,
   /// One line of an integration channel, rendered in the compact log view.
   Log(LogLevel),
 }

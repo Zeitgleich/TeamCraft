@@ -9,7 +9,7 @@ use std::collections::{HashMap, HashSet};
 use teamcraft_proto::{BackgroundId, ErrorCode, HistoryPolicy};
 
 use teamcraft_client_api::actions::{
-  FileInfo, LinkedMessage, MessageExtras, PermalinkTarget, ShareLink, ShareLinkOptions,
+  FileInfo, LinkedMessage, MessageExtras, PermalinkTarget, ShareLink, ShareLinkOptions, WorkspaceEvent,
 };
 use teamcraft_client_api::activity::{ActivityFeed, ActivityItem, ActivityKind};
 use teamcraft_client_api::calls::{CallDirection, CallHistoryItem};
@@ -214,6 +214,8 @@ struct State {
   integration_sources: Vec<(ConversationId, teamcraft_client_api::model::IntegrationSource)>,
   space_leavers: HashSet<(SpaceId, UserId)>,
   invites: Vec<(SpaceId, PendingInvite)>,
+  /// Changes to a conversation (archived, an admin who joined) that messages report.
+  workspace_events: HashMap<MessageId, WorkspaceEvent>,
 }
 
 impl MockBackend {
@@ -283,6 +285,7 @@ impl MockBackend {
           role: SpaceRole::Member,
         },
       )],
+      workspace_events: HashMap::new(),
     };
     state.seed_messages(now);
     state.refresh_space_badges();
@@ -311,6 +314,13 @@ impl MockBackend {
       state.replies.clear();
     }
     backend
+  }
+
+  /// Lets `message` report `event` in its extras from now on, as a backend whose extras arrive
+  /// after the message does.
+  #[cfg(test)]
+  pub fn set_workspace_event(&self, message: MessageId, event: WorkspaceEvent) {
+    self.state.borrow_mut().workspace_events.insert(message, event);
   }
 }
 
@@ -900,6 +910,7 @@ impl ChatBackend for MockBackend {
           .filter(|file| file.message == message)
           .cloned()
           .collect(),
+        maybe_workspace_event: state.workspace_events.get(&message).cloned(),
         ..MessageExtras::new(message)
       })
       .collect()

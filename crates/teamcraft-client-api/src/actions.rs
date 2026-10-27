@@ -641,11 +641,15 @@ pub enum WorkspaceEvent {
     by: UserId,
   },
   /// A workspace admin joined the private channel (admin.md §2.4): always shown. By themselves
-  /// (`visible`), or let in by a channel owner (`owner_approval`), named in `maybe_approved_by`.
+  /// (`visible`, neither field), let in by a channel member under `owner_approval`
+  /// (`maybe_approved_by`), or added by somebody without an approval to ask for
+  /// (`maybe_added_by`); at most one of them is set.
   AdminJoined {
     user: UserId,
     #[serde(rename = "approved_by", default, skip_serializing_if = "Option::is_none")]
     maybe_approved_by: Option<UserId>,
+    #[serde(rename = "added_by", default, skip_serializing_if = "Option::is_none")]
+    maybe_added_by: Option<UserId>,
   },
   #[serde(other)]
   Unknown,

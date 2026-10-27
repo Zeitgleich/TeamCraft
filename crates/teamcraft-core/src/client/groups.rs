@@ -1712,6 +1712,8 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       .get_mut(&conversation)
       .ok_or(CoreError::NoGroup(conversation))?;
     let before = group.members()?;
+    // The epoch the commit was made in, as this device knows it (not the server's word).
+    let epoch = group.epoch();
     let update = group.confirm_commit(&self.provider)?;
     let after = group.members()?;
     // The merged state, what it noted and the cursor past the commit go to the store together
@@ -1726,7 +1728,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
         }
       }
       // This device's own commit is as verified as one it receives (issue #811).
-      let maybe_signer = client.take_pending_signer(conversation, entry.epoch)?;
+      let maybe_signer = client.take_pending_signer(conversation, epoch)?;
       client.note_admin_joins(
         conversation,
         &JoinCommit {

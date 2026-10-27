@@ -26,6 +26,7 @@
   <!-- System lines -->
   <string name="event_admin_joined">%1$s ist diesem Kanal als Workspace-Admin beigetreten</string>
   <string name="event_admin_joined_approved">%1$s ist diesem Kanal als Workspace-Admin beigetreten, zugelassen von %2$s</string>
+  <string name="event_admin_joined_added">%1$s ist diesem Kanal als Workspace-Admin beigetreten, hinzugefügt von %2$s</string>
 
   <!-- Notifications -->
   <string name="notification_channel_join_requests">Beitrittsanfragen</string>

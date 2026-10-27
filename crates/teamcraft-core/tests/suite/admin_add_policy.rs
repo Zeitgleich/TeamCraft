@@ -15,7 +15,8 @@ use teamcraft_proto::{
 
 use crate::common::{Peer, settle};
 
-/// A line as members read it: who joined, and who let them in.
+/// A line as members read it: who joined, and who let them in ("approved by" or "added by",
+/// tests/suite/admin_joins.rs has the wording).
 type Line = (UserId, Option<UserId>);
 
 /// The values members decide on, the default first.
@@ -382,7 +383,9 @@ fn lines(peer: &Peer, channel: ConversationId) -> Vec<Line> {
       MessageContent::Event {
         event: ConversationEvent::AdminJoined { user, is_approved },
       } if message.maybe_verified_commit.is_some() => {
-        Some((user, is_approved.then_some(message.sender_user_id)))
+        // The line's author is who let the admin in; the admin's own for a self-join.
+        let by = message.sender_user_id;
+        Some((user, (is_approved || by != user).then_some(by)))
       },
       _ => None,
     })
