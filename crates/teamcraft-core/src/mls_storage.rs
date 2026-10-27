@@ -630,6 +630,44 @@ mod tests {
     }
   }
 
+  /// What a save costs besides the writes, on a state like 300 groups' (docs/performance.md):
+  /// `cargo test --release -p teamcraft-core --lib -- --ignored --nocapture measure_save`
+  #[test]
+  #[ignore = "measurement; prints the time of a save that changed one entry"]
+  fn measure_save_of_one_change() {
+    const GROUPS: usize = 300;
+    const SAVES: u32 = 600;
+    let provider = OpenMlsRustCrypto::default();
+    for group in 0..GROUPS {
+      // About 9 KB per group in a dozen entries, the tree the largest (as measured).
+      for (entry, size) in [3_000, 2_000, 1_000, 800, 600, 500, 400, 300, 200, 100, 50, 50]
+        .into_iter()
+        .enumerate()
+      {
+        set(
+          &provider,
+          format!("{entry}/{group}").as_bytes(),
+          Some(&vec![7; size]),
+        );
+      }
+    }
+    let store = MemoryStore::new();
+    let saved = SavedMlsStorage::default();
+    save_mls_storage(&store, &provider, &saved).unwrap();
+
+    let started = std::time::Instant::now();
+    for save in 0..SAVES {
+      set(&provider, b"0/0", Some(&save.to_be_bytes()));
+      save_mls_storage(&store, &provider, &saved).unwrap();
+    }
+    let per_save = started.elapsed() / SAVES;
+    println!(
+      "{} bytes in {} entries: {per_save:?} per save of one changed entry",
+      mls_storage_len(&provider),
+      GROUPS * 12
+    );
+  }
+
   type Entry = (Vec<u8>, Vec<u8>);
 
   fn entry(key: &[u8], value: &[u8]) -> Entry {

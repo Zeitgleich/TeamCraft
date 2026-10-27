@@ -38,7 +38,8 @@ mod catch_up {
     );
   }
 
-  /// The numbers of docs/performance.md, on a workspace of any size:
+  /// The numbers of docs/performance.md, on a workspace of any size, in memory or with
+  /// `MLS_STORAGE_SQLCIPHER=1` on a SQLCipher file:
   /// `MLS_STORAGE_CHANNELS=300 cargo test -p teamcraft-core --test suite -- --ignored --nocapture mls_storage`
   #[tokio::test]
   #[ignore = "measurement; prints the bytes a catch-up writes"]
@@ -47,9 +48,10 @@ mod catch_up {
       .ok()
       .and_then(|value| value.parse().ok())
       .unwrap_or(100);
-    let writes = catch_up_writes(channels).await;
+    let (store, kind) = measured_store();
+    let writes = catch_up_writes_on(channels, store).await;
     println!(
-      "catch-up of {channels} groups: {} MLS state writes, {} bytes ({} per group), \
+      "catch-up of {channels} groups ({kind}): {} MLS state writes, {} bytes ({} per group), \
        state at the end {} bytes, catch-up {:.2} s",
       writes.puts,
       writes.bytes,
@@ -214,9 +216,14 @@ struct MlsWrites {
 /// Carol comes back to `channels` channels Alice made and added her to while she was away, and
 /// catches up: what she wrote of the MLS state meanwhile.
 async fn catch_up_writes(channels: usize) -> MlsWrites {
+  catch_up_writes_on(channels, CountingStore::default()).await
+}
+
+async fn catch_up_writes_on(channels: usize, store: CountingStore) -> MlsWrites {
   let server = FakeServer::new();
   let mut alice = Peer::enroll(&server, "Alice").await;
-  let (mut carol, store) = enroll_on_counting_store(&server, "Carol").await;
+  let store = Arc::new(store);
+  let mut carol = enroll_on(&server, "Carol", store.clone()).await;
   let space = alice.space().await;
   for index in 0..channels {
     let channel = alice
@@ -280,30 +287,70 @@ async fn enroll_on_counting_store(
   name: &str,
 ) -> (Client<FakeServerApi, Arc<CountingStore>>, Arc<CountingStore>) {
   let store = Arc::new(CountingStore::default());
-  let client = PendingEnrollment::new()
+  (enroll_on(server, name, store.clone()).await, store)
+}
+
+async fn enroll_on(
+  server: &FakeServer,
+  name: &str,
+  store: Arc<CountingStore>,
+) -> Client<FakeServerApi, Arc<CountingStore>> {
+  PendingEnrollment::new()
     .complete(
       server.add_user(name),
-      store.clone(),
+      store,
       common::clock(),
       common::settings(),
       common::options(PASSPHRASE),
     )
     .await
-    .unwrap();
-  (client, store)
+    .unwrap()
 }
 
-/// A memory store that counts what is written of the MLS state.
-#[derive(Default)]
+/// The store of the measurement: SQLCipher on a file with `MLS_STORAGE_SQLCIPHER=1`, else memory.
+fn measured_store() -> (CountingStore, &'static str) {
+  #[cfg(feature = "sqlcipher")]
+  if std::env::var_os("MLS_STORAGE_SQLCIPHER").is_some() {
+    use teamcraft_core::store::{SqlCipherStore, StaticKeySource};
+    use teamcraft_crypto::secret::SymmetricKey;
+    let directory = std::env::temp_dir().join(format!(
+      "teamcraft-mls-storage-{}",
+      rand_core::RngCore::next_u64(&mut rand_core::OsRng)
+    ));
+    std::fs::create_dir_all(&directory).unwrap();
+    let key = StaticKeySource::new(SymmetricKey::generate(&mut rand_core::OsRng));
+    let store = SqlCipherStore::open(&directory.join("store.db"), &key).unwrap();
+    return (CountingStore::on(Box::new(store)), "SQLCipher file");
+  }
+  (CountingStore::default(), "memory")
+}
+
+/// A store that counts what is written of the MLS state; in memory unless made [`Self::on`]
+/// another.
 struct CountingStore {
-  inner: MemoryStore,
+  inner: Box<dyn LocalStore + Send + Sync>,
   mls_puts: AtomicUsize,
   mls_bytes: AtomicUsize,
   /// Keys of the MLS records written or deleted.
   mls_keys: Mutex<Vec<String>>,
 }
 
+impl Default for CountingStore {
+  fn default() -> Self {
+    Self::on(Box::new(MemoryStore::new()))
+  }
+}
+
 impl CountingStore {
+  fn on(inner: Box<dyn LocalStore + Send + Sync>) -> Self {
+    Self {
+      inner,
+      mls_puts: AtomicUsize::default(),
+      mls_bytes: AtomicUsize::default(),
+      mls_keys: Mutex::default(),
+    }
+  }
+
   fn reset_counts(&self) {
     self.mls_puts.store(0, Ordering::Relaxed);
     self.mls_bytes.store(0, Ordering::Relaxed);
@@ -389,5 +436,21 @@ impl LocalStore for CountingStore {
     client_message_id: ClientMessageId,
   ) -> Result<(), StoreError> {
     self.inner.delete_message(conversation, client_message_id)
+  }
+
+  fn purge_freed(&self) -> Result<(), StoreError> {
+    self.inner.purge_freed()
+  }
+
+  fn purge_freed_soon(&self) {
+    self.inner.purge_freed_soon();
+  }
+
+  fn begin_writes(&self) -> Result<(), StoreError> {
+    self.inner.begin_writes()
+  }
+
+  fn end_writes(&self) -> Result<(), StoreError> {
+    self.inner.end_writes()
   }
 }
