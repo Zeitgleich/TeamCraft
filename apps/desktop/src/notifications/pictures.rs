@@ -43,6 +43,8 @@ pub struct NotificationPictures {
   prepared: Mutex<VecDeque<(Source, Arc<PreparedPicture>)>>,
   /// Where picture files go; unset (no files) until the app's cache directory is known.
   dir: OnceLock<PathBuf>,
+  /// Windows and macOS: picture files; Linux sends the pixels in the notification itself.
+  #[cfg_attr(not(any(windows, target_os = "macos", test)), allow(dead_code))]
   next_file: AtomicU64,
 }
 
@@ -196,6 +198,7 @@ impl NotificationPictures {
     picture
   }
 
+  #[cfg_attr(not(any(windows, target_os = "macos", test)), allow(dead_code))]
   fn write_file(&self, picture: &PreparedPicture) -> Option<PathBuf> {
     let dir = self.dir.get()?;
     let number = self.next_file.fetch_add(1, Ordering::Relaxed);
@@ -228,6 +231,7 @@ impl PreparedPicture {
   }
 
   /// The picture as PNG, for a file.
+  #[cfg_attr(not(any(windows, target_os = "macos", test)), allow(dead_code))]
   pub fn png(&self) -> Option<Vec<u8>> {
     let mut png = Cursor::new(Vec::new());
     match self.image.write_to(&mut png, ImageFormat::Png) {
@@ -352,6 +356,7 @@ impl<T> OrLogged<T> for Option<Result<T, PictureError>> {
 }
 
 /// Writes `bytes` to `file` in `dir`, readable by this user only where the system has modes.
+#[cfg_attr(not(any(windows, target_os = "macos", test)), allow(dead_code))]
 fn write_private(dir: &Path, file: &Path, bytes: &[u8]) -> Result<(), PictureError> {
   use std::io::Write as _;
   std::fs::create_dir_all(dir)?;
