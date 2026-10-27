@@ -571,6 +571,22 @@ pub enum ChatAction {
   AdminJoinChannel {
     conversation: ConversationId,
   },
+  /// An admin asks the owners of a private channel to let them in (admin.md §2.4).
+  RequestAdminJoin {
+    conversation: ConversationId,
+  },
+  WithdrawAdminJoin {
+    conversation: ConversationId,
+  },
+  /// A channel owner lets an admin in who asked.
+  ApproveAdminJoin {
+    conversation: ConversationId,
+    user: UserId,
+  },
+  DeclineAdminJoin {
+    conversation: ConversationId,
+    user: UserId,
+  },
   /// An admin removes a deactivated user from all chats: signed removals per channel, then the
   /// server's step (admin.md §3.2.1).
   AdminRemoveFromAllChats {
@@ -899,6 +915,10 @@ impl ChatAction {
       } => backend.set_presence_until(presence, maybe_until),
       Self::SetCustomStatus { maybe_status } => backend.set_custom_status(maybe_status),
       Self::MarkActivityRead => backend.mark_activity_read(),
+      Self::RequestAdminJoin { conversation } => backend.request_admin_join(conversation),
+      Self::WithdrawAdminJoin { conversation } => backend.withdraw_admin_join(conversation),
+      Self::ApproveAdminJoin { conversation, user } => backend.approve_admin_join(conversation, user),
+      Self::DeclineAdminJoin { conversation, user } => backend.decline_admin_join(conversation, user),
       Self::SetLastSeenVisibility { visibility } => backend.set_last_seen_visibility(visibility),
       Self::RefreshCallHistory => backend.refresh_call_history(),
       Self::RefreshOwnDevices => backend.refresh_own_devices(),

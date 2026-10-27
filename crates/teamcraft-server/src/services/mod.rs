@@ -3,6 +3,7 @@
 pub mod access;
 pub mod accounts;
 pub mod admin;
+pub mod admin_join_requests;
 pub mod announcements;
 pub mod attachments;
 pub mod audit;

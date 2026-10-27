@@ -13439,3 +13439,117 @@ html.call-window body {
 .integration-reveal { display: grid; gap: var(--space-2); max-width: 46rem; padding: var(--space-4); border: 1px solid var(--border); border-radius: var(--radius-md); margin-bottom: var(--space-4); }
 .integration-copy-row { display: flex; gap: var(--space-2); align-items: center; }
 .integration-copy-row .input { flex: 1; min-width: 0; }
+
+/* Admins' requests to join a private channel the user owns (admin.md §2.4, issue #776): above the
+   activity entries and in the channel settings. A row says who asks, where and what approving
+   means; the decision sits right under it, Approve first. */
+.join-requests {
+  margin: 0 0 var(--space-3);
+}
+
+.join-requests-title {
+  margin: 0 0 var(--space-1);
+  font-size: var(--text-xs);
+  font-weight: var(--weight-semibold);
+  letter-spacing: var(--tracking-xs);
+  text-transform: uppercase;
+}
+
+.join-request-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.join-request {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: var(--space-2);
+  border-radius: var(--radius-sm);
+}
+
+.join-request-avatar {
+  flex: none;
+  padding-top: 1px;
+}
+
+.join-request-body {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.join-request-summary {
+  overflow-wrap: anywhere;
+  font-size: var(--text-sm);
+  font-weight: var(--weight-semibold);
+  line-height: 1.3;
+}
+
+.join-request-time,
+.join-request-hint {
+  font-size: var(--text-xs);
+  letter-spacing: var(--tracking-xs);
+}
+
+.join-request-time {
+  font-variant-numeric: tabular-nums;
+}
+
+.join-request-hint {
+  margin: 2px 0 0;
+  color: var(--text-muted);
+}
+
+.join-request-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  margin-top: var(--space-2);
+}
+
+/* In the (always dark) sidebar: muted text in its tones, a quiet secondary button on the material. */
+.activity-sidebar .join-requests {
+  padding: 0 var(--space-2);
+}
+
+.activity-sidebar .join-requests-title,
+.activity-sidebar .join-request-time,
+.activity-sidebar .join-request-hint {
+  color: var(--sb-muted);
+}
+
+.activity-sidebar .join-requests-title {
+  padding: 0 var(--space-2);
+}
+
+.activity-sidebar .join-request {
+  background: var(--sb-hover);
+  color: var(--chrome-strong);
+}
+
+.activity-sidebar .join-request + .join-request {
+  margin-top: var(--space-1);
+}
+
+.activity-sidebar .join-request .btn:not(.btn-primary) {
+  border-color: transparent;
+  background: var(--sb-hover);
+  color: var(--chrome-strong);
+}
+
+/* In the channel settings: cards above the member list. */
+.modal .join-requests {
+  padding-top: var(--space-2);
+}
+
+.modal .join-request {
+  background: var(--surface-2);
+}
+
+.modal .join-request + .join-request {
+  margin-top: var(--space-1);
+}

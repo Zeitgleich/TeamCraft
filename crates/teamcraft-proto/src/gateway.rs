@@ -11,10 +11,10 @@ use std::fmt;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-  CallId, CallRosterEntry, ConversationId, CustomStatus, DeviceActivity, DeviceId, DeviceLinkClosedReason,
-  DeviceLinkRequest, ErrorBody, LobbyState, MeetingId, MessageId, MessageResponse, MlsMessageResponse,
-  PresenceState, RecoveryRequestId, SpaceId, SystemEventResponse, ThreadId, UnixMillis, UserGroupId, UserId,
-  UserSummary, WorkspaceLogKind,
+  AdminJoinRequestChange, CallId, CallRosterEntry, ConversationId, CustomStatus, DeviceActivity, DeviceId,
+  DeviceLinkClosedReason, DeviceLinkRequest, ErrorBody, LobbyState, MeetingId, MessageId, MessageResponse,
+  MlsMessageResponse, PresenceState, RecoveryRequestId, SpaceId, SystemEventResponse, ThreadId, UnixMillis,
+  UserGroupId, UserId, UserSummary, WorkspaceLogKind,
 };
 
 /// How long a client waits before it reports that the user stopped being attentive, so the server
@@ -138,6 +138,14 @@ pub enum GatewayEvent {
   /// Someone changed their profile or avatar. Sent to people who share a conversation with them.
   ProfileUpdate {
     user_id: UserId,
+  },
+  /// An admin asked to join a private channel, or the request was decided, withdrawn or ran out
+  /// (admin.md §2.4). Sent to the channel's owners and the admin; they fetch
+  /// `GET /admin-join-requests` again.
+  AdminJoinRequestUpdate {
+    conversation_id: ConversationId,
+    user_id: UserId,
+    change: AdminJoinRequestChange,
   },
   /// A request for organization recovery was made or moved on. Sent to the admins, the person
   /// and the approvers; they fetch the request.
@@ -439,6 +447,19 @@ mod tests {
       r#"{"type":"call_move","conversation_id":"7","call_id":"8","to_conversation_id":"10","moved_by":"9"}"#
     );
     assert_eq!(serde_json::from_str::<GatewayEvent>(&json).unwrap(), event);
+  }
+
+  #[test]
+  fn admin_join_request_update_has_a_stable_wire_format() {
+    let event = GatewayEvent::AdminJoinRequestUpdate {
+      conversation_id: conversation(),
+      user_id: UserId::from_snowflake(Snowflake::new(9).unwrap()),
+      change: AdminJoinRequestChange::Requested,
+    };
+    let json =
+      r#"{"type":"admin_join_request_update","conversation_id":"7","user_id":"9","change":"requested"}"#;
+    assert_eq!(serde_json::to_string(&event).unwrap(), json);
+    assert_eq!(serde_json::from_str::<GatewayEvent>(json).unwrap(), event);
   }
 
   #[test]

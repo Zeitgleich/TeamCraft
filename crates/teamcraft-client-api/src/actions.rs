@@ -575,6 +575,8 @@ pub enum BrowseJoin {
   AsAdmin,
   /// A private channel whose owners have to approve an admin (`admin_self_join: owner_approval`).
   NeedsApproval,
+  /// Like [`Self::NeedsApproval`], and the admin asked already: the owners decide.
+  Requested,
   /// A public channel: anyone in the space joins.
   #[default]
   #[serde(other)]
@@ -638,9 +640,12 @@ pub enum WorkspaceEvent {
     message: MessageId,
     by: UserId,
   },
-  /// A workspace admin added themselves to the private channel (admin.md §2.4): always shown.
+  /// A workspace admin joined the private channel (admin.md §2.4): always shown. By themselves
+  /// (`visible`), or let in by a channel owner (`owner_approval`), named in `maybe_approved_by`.
   AdminJoined {
     user: UserId,
+    #[serde(rename = "approved_by", default, skip_serializing_if = "Option::is_none")]
+    maybe_approved_by: Option<UserId>,
   },
   #[serde(other)]
   Unknown,

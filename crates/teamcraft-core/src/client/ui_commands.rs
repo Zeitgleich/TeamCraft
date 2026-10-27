@@ -206,6 +206,14 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       } => self.move_channel(conversation, &request).await,
       CoreCommand::RefreshChannelBrowser { space } => self.refresh_channel_browser(space).await.map(|_| ()),
       CoreCommand::JoinChannel { conversation } => self.join_channel(conversation).await,
+      CoreCommand::RequestAdminJoin { conversation } => self.request_admin_join(conversation).await,
+      CoreCommand::WithdrawAdminJoin { conversation } => self.withdraw_admin_join(conversation).await,
+      CoreCommand::ApproveAdminJoin { conversation, user } => {
+        self.approve_admin_join(conversation, user).await
+      },
+      CoreCommand::DeclineAdminJoin { conversation, user } => {
+        self.decline_admin_join(conversation, user).await
+      },
       CoreCommand::JoinSpace { space } => self.join_space(space).await,
       CoreCommand::LeaveChannel { conversation } => self.leave_channel(conversation).await,
       CoreCommand::RefreshCategories { space } => self.refresh_categories(space).await.map(|_| ()),

@@ -141,6 +141,14 @@ impl ApiError {
     }
   }
 
+  /// The admin's request to join is no longer open (decided, withdrawn or expired).
+  pub fn admin_join_request_not_found() -> Self {
+    Self::NotFound {
+      code: ErrorCode::AdminJoinRequestNotFound,
+      what: "admin join request",
+    }
+  }
+
   pub fn device_not_found() -> Self {
     Self::NotFound {
       code: ErrorCode::DeviceNotFound,

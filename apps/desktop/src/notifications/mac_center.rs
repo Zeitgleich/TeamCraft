@@ -93,6 +93,7 @@ pub fn show(notification: &OsNotification) {
   let thread = match notification.tag.target() {
     TagTarget::Conversation(id) | TagTarget::Call(id) | TagTarget::MissedCall(id) => id,
     TagTarget::Meeting(id) => id,
+    TagTarget::JoinRequest { conversation, .. } => conversation,
     TagTarget::Reminder => String::new(),
   };
   content.setThreadIdentifier(&NSString::from_str(&thread));

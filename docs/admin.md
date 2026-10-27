@@ -185,17 +185,58 @@ history. That is allowed, but never silent:
   - `visible` (default) – allowed; members see the same system message as for any added member
     ("Paul joined"), marked with an admin badge. Unlike normal join/leave messages, it can't be
     hidden by the user setting,
-  - `owner_approval` – a channel owner must approve,
+  - `owner_approval` – a channel owner must approve (§2.4.1),
   - `disabled`.
 - Member clients enforce this setting themselves (it's part of the signed workspace policy), so the
   server can't bypass it.
 - **Where admins join.** The channel browser lists a space's private channels to workspace admins,
-  marked private, as the verified policy allows: "Join as admin" for `visible`, a note to ask a
-  channel admin for `owner_approval` (there is no request flow yet), nothing for `disabled`. The
-  admin's app signs the self-join; the member whose app commits it then posts the encrypted
-  "joined as a workspace admin" message (`AdminJoined`), shown to everybody whatever their
-  join/leave setting. Members' apps let the admin in only while their role is in the fresh signed
-  roster.
+  marked private, as the verified policy allows: "Join as admin" for `visible`, "Ask to join" for
+  `owner_approval` (§2.4.1), nothing for `disabled`. The admin's app signs the self-join; the
+  member whose app commits it then posts the encrypted "joined as a workspace admin" message
+  (`AdminJoined`), shown to everybody whatever their join/leave setting. Members' apps let the
+  admin in only while their role is in the fresh signed roster.
+
+#### 2.4.1 Asking the owners (`owner_approval`)
+
+Under `owner_approval` members' apps refuse an admin's own signed self-join, so the admin asks the
+channel's owners instead (issue #776). The server only stores and relays the request; what lets the
+admin in is an owner's own membership change.
+
+- **Asking.** "Ask to join" in the channel browser (or "Add myself" in Administration → Channels)
+  sends `POST /conversations/{id}/admin-join-requests`. The server takes it only from an instance
+  admin, under its copy of the policy, for an open private channel the admin isn't in, in a space
+  they belong to, that has an owner. There is one open request per admin and channel: asking again
+  answers with the open one and tells nobody again. The admin sees "Requested" with "Withdraw".
+- **Who decides.** The channel's owners (members with the channel role `admin`). The server tells
+  them (gateway `admin_join_request_update`) and their apps show the request at the top of
+  Activity, in the channel settings above the member list and as a system notification, each with
+  Approve and Decline. The badge counts it until it is decided.
+- **Approving** is the owner's app adding the admin: the server membership
+  (`POST …/admin-join-requests/{user}/approve`, only while the request is open), then the owner's
+  own MLS add with the history the signed policy shares by default, then the encrypted
+  `AdminJoined` message with "approved by", shown to everybody whatever their join/leave setting.
+  Members' apps check the add like any addition by a member. Declining
+  (`DELETE …/admin-join-requests/{user}`) closes the request; the admin can ask again.
+- **The server's word is a hint.** The owner's app offers Approve only for somebody the fresh
+  verified roster lists as an admin, and only while the verified policy says `owner_approval`;
+  for anybody else it says so and offers Decline only. A request the server makes up can at most
+  ask an owner to let a real admin of the signed roster in, whose devices are certified by their
+  pinned identity key.
+- **Expiry.** A request expires after `admin_join_request_days` (instance setting, §6.3, default 7
+  days, 1 to 90); the account housekeeping closes it and tells owners and admin. A new policy
+  without `owner_approval` closes every open request (admins join by themselves now, or not at
+  all). Requests whose channel was archived, made public or deleted, whose admin was deactivated,
+  deleted or left the space, or who is in the channel already are never listed; adding the admin any other way
+  settles their request.
+- **Offline, several devices, restarts.** Requests live in the database, so a server restart loses
+  none. Apps read the list again after every gateway connection while the verified policy asks
+  for approval (otherwise they make no request), and on every `admin_join_request_update`; an
+  owner who was away sees waiting requests when they come back. The first device or owner to
+  decide wins; the others' lists update, and a late Approve gets `admin_join_request_not_found`
+  ("decided elsewhere, withdrawn or expired") instead of adding anybody. Every decision is in the
+  audit log (`admin_join_requested`, `…_approved`, `…_declined`, `…_withdrawn`).
+- **Not yet:** the phone apps show neither the requests nor Approve and Decline, and no push wakes
+  an owner's phone for a request; owners decide on the desktop or the web.
 
 ### 2.5 Orphaned channels
 
@@ -406,6 +447,7 @@ What the server offers for the features above (all under `/api/v1`; instance adm
 | Calendar (§6.2)                          | `GET/PUT/DELETE /admin/settings/calendar`, `POST /admin/settings/calendar/test`    |
 | Instance settings (§6.3)                 | `GET/PUT /admin/settings`, `DELETE /admin/settings/{section}`                      |
 | Deactivate, reactivate, remove (§3.2.1)  | `POST /admin/users/{id}/deactivate`, `.../reactivate`, `.../remove-from-chats`      |
+| Admin join requests (§2.4.1)             | `GET /admin-join-requests`; `POST /conversations/{id}/admin-join-requests`, `POST .../{user}/approve`, `DELETE .../{user}` (owners decide, the admin withdraws) |
 | Delete an account (§3.2.1)               | `DELETE /admin/users/{id}`                                                         |
 
 Session length, idle timeout, required second factor, display name format and the privacy of names and
@@ -486,7 +528,7 @@ Groups that are stored and reset as a whole:
 
 | Group            | Values                                                                                                                                        |
 |------------------|-----------------------------------------------------------------------------------------------------------------------------------------------|
-| `server_rules`   | invites need a verified e-mail address; default spaces and channels for new members; days until deactivated users are removed from all chats  |
+| `server_rules`   | invites need a verified e-mail address; default spaces and channels for new members; days until deactivated users are removed from all chats; days until an admin's request to join a private channel expires (§2.4.1) |
 | `notifications`  | read receipt default, urgent repeat interval and count, phone push delay, desktop attention                                                   |
 | `email_digest`   | on/off, default and shortest interval, grace period, subjects and texts                                                                       |
 | `shares`         | on/off, default and longest expiry, download cap, links per user                                                                              |

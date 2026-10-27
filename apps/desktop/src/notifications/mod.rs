@@ -297,7 +297,10 @@ mod linux {
       OsNotificationKind::Message => "im.received",
       OsNotificationKind::IncomingCall => "call.incoming",
       OsNotificationKind::MissedCall => "call.unanswered",
-      OsNotificationKind::MeetingReminder | OsNotificationKind::Reminder | OsNotificationKind::Unknown => "",
+      OsNotificationKind::MeetingReminder
+      | OsNotificationKind::Reminder
+      | OsNotificationKind::JoinRequest
+      | OsNotificationKind::Unknown => "",
     }
   }
 

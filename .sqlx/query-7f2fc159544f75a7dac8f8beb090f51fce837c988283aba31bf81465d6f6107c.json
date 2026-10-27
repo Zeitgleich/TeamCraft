@@ -1,0 +1,40 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "DELETE FROM admin_join_requests\n       WHERE (conversation_id, user_id) IN (\n         SELECT conversation_id, user_id FROM admin_join_requests\n         WHERE expires_at <= now() ORDER BY expires_at LIMIT $1)\n       RETURNING conversation_id, user_id",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "conversation_id",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "admin_join_requests",
+            "name": "conversation_id"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "user_id",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "admin_join_requests",
+            "name": "user_id"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8"
+      ]
+    },
+    "nullable": [
+      false,
+      false
+    ]
+  },
+  "hash": "7f2fc159544f75a7dac8f8beb090f51fce837c988283aba31bf81465d6f6107c"
+}

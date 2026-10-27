@@ -122,6 +122,9 @@ default_channels = []
 # days to remove them from all chats automatically that long after the deactivation (their
 # devices leave every group, keys rotate). Unset (the default): never automatically.
 # remove_deactivated_after_days = 90
+# Days an admin's request to join a private channel waits for the channel's owners before it
+# expires (admin.md §2.4.1, `admin_self_join = owner_approval`), 1 to 90.
+admin_join_request_days = 7
 # Direct messages deleted with a deleted account are remembered this many days for the other
 # participants, so a device offline that long still drops them with their local history.
 deleted_conversations_kept_days = 180

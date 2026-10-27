@@ -25,7 +25,9 @@ use crate::components::icons::{Icon, IconName};
 use crate::components::image_crop_dialog::{
   CropTarget, CropUpload, ImageCropDialog, allow_image_drop, dropped_file,
 };
+use crate::components::join_requests::ChannelJoinRequests;
 use crate::components::modal::Modal;
+use crate::components::pending_button::PendingButton;
 use crate::components::roster_banner::{current_standing, unsigned_reason};
 use crate::components::section_tabs::{Section, SectionTabs};
 use crate::components::space_tile::SpaceTile;
@@ -367,10 +369,35 @@ fn BrowseRow(channel: BrowsableChannel) -> impl IntoView {
             </button>
           }
           .into_any(),
-          BrowseJoin::NeedsApproval => view! {
-            <span class="muted-text small">{move || i18n.t("browse-join-needs-approval")}</span>
-          }
-          .into_any(),
+          // The owners decide (admin.md §2.4); their apps add the admin, members see it.
+          BrowseJoin::NeedsApproval => {
+            let pending = PendingAction::new();
+            view! {
+              <PendingButton
+                pending=pending
+                class="btn btn-small btn-primary"
+                is_disabled=Signal::derive(move || current_standing(state).is_unsigned())
+                on_click=move |_| pending.run(|| state.write(|backend| backend.request_admin_join(id)))
+              >
+                <span title=move || i18n.t("browse-join-ask-hint")>{move || i18n.t("browse-join-ask")}</span>
+              </PendingButton>
+            }
+            .into_any()
+          },
+          BrowseJoin::Requested => {
+            let pending = PendingAction::new();
+            view! {
+              <span class="badge" title=move || i18n.t("browse-join-requested-hint")>{move || i18n.t("browse-join-requested")}</span>
+              <PendingButton
+                pending=pending
+                class="btn btn-small"
+                on_click=move |_| pending.run(|| state.write(|backend| backend.withdraw_admin_join(id)))
+              >
+                {move || i18n.t("browse-join-withdraw")}
+              </PendingButton>
+            }
+            .into_any()
+          },
         }
       }}
     </li>
@@ -584,6 +611,7 @@ fn ChannelMembers(conversation: ConversationId) -> impl IntoView {
       </Show>
     </div>
     <p class="hint">{move || if can_manage_roles.get() { i18n.t("channel-roles-hint") } else { i18n.t("channel-roles-read-only") }}</p>
+    <ChannelJoinRequests conversation=conversation />
     <ul class="settings-member-list">
       <For each=move || members.get() key=|user| user.id let:user>
         <ChannelMemberRow conversation=conversation user=user roles=roles access=access space_roster=space_roster admin_count=admin_count />

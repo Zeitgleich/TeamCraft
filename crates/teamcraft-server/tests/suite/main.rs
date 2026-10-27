@@ -7,6 +7,7 @@ mod common;
 
 mod admin;
 mod admin_extras;
+mod admin_join_requests;
 mod admin_settings;
 mod attachments;
 mod authz;

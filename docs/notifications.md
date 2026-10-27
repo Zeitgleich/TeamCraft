@@ -519,6 +519,11 @@ a jump to the message.
   unread entry's target the same way. The rail badge and tab counts are counts of these entries.
 - Limits: a thread the user doesn't follow (or beyond the first page of `GET /threads`) has no
   position of its own, so its entries follow the conversation's.
+- Join requests: an admin's request to join a private channel the user owns (admin.md §2.4.1)
+  waits above the entries of "All" with Approve and Decline until it is decided, withdrawn or
+  expired. It has no read state: "Mark all as read" leaves it, and the badge counts it while it
+  waits. Each device shows one system notification per request (Approve where the verified roster
+  lists the admin, and Decline), remembered across restarts and withdrawn once the request is gone.
 
 ## Call history
 

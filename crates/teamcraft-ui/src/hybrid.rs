@@ -766,6 +766,10 @@ impl<C: ChatBackend + 'static> ChatBackend for Hybrid<C> {
     self.chat.activity()
   }
 
+  fn join_requests(&self) -> Vec<teamcraft_client_api::activity::JoinRequest> {
+    self.chat.join_requests()
+  }
+
   fn mark_activity_read(&self) {
     self.chat.mark_activity_read();
   }
@@ -846,6 +850,22 @@ impl<C: ChatBackend + 'static> ChatBackend for Hybrid<C> {
 
   fn admin_add_self(&self, conversation: ConversationId) {
     self.chat.admin_add_self(conversation);
+  }
+
+  fn request_admin_join(&self, conversation: ConversationId) {
+    self.chat.request_admin_join(conversation);
+  }
+
+  fn withdraw_admin_join(&self, conversation: ConversationId) {
+    self.chat.withdraw_admin_join(conversation);
+  }
+
+  fn approve_admin_join(&self, conversation: ConversationId, user: UserId) {
+    self.chat.approve_admin_join(conversation, user);
+  }
+
+  fn decline_admin_join(&self, conversation: ConversationId, user: UserId) {
+    self.chat.decline_admin_join(conversation, user);
   }
 
   fn current_announcement(&self) -> Option<AnnouncementResponse> {
@@ -1306,7 +1326,11 @@ impl<C: ChatBackend> AdminBackend for Hybrid<C> {
         self.chat.admin_add_self(channel);
         SelfJoinOutcome::Joined
       },
-      teamcraft_proto::AdminSelfJoin::OwnerApproval => SelfJoinOutcome::ApprovalRequested,
+      // The channel's owners decide (admin.md §2.4).
+      teamcraft_proto::AdminSelfJoin::OwnerApproval => {
+        self.chat.request_admin_join(channel);
+        SelfJoinOutcome::ApprovalRequested
+      },
       teamcraft_proto::AdminSelfJoin::Disabled | teamcraft_proto::AdminSelfJoin::Unknown(_) => {
         SelfJoinOutcome::Disabled
       },

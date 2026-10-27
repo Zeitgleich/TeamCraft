@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "DELETE FROM admin_join_requests\n       WHERE conversation_id = $1 AND user_id = $2 AND expires_at <= now()",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Int8"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "0222f9c9c35499b31f683175c72e9c40e84567225c6a9ac9dcc41a064d6d4da9"
+}

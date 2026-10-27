@@ -1,6 +1,7 @@
 //! Request and response bodies of the REST API (`/api/v1`).
 
 mod admin;
+mod admin_join_requests;
 mod admin_settings;
 mod announcements;
 mod attachments;
@@ -37,6 +38,7 @@ mod users;
 mod workspace;
 
 pub use admin::*;
+pub use admin_join_requests::*;
 pub use admin_settings::*;
 pub use announcements::*;
 pub use attachments::*;

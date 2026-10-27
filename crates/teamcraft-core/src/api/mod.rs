@@ -26,16 +26,16 @@ pub use http::{
   AccessTokenSource, HttpGateway, HttpRendezvous, HttpServerApi, StaticToken, change_web_push_subscription,
 };
 use teamcraft_proto::{
-  AddConversationMemberRequest, AddSpaceMemberRequest, ClaimKeyPackagesRequest, ClaimKeyPackagesResponse,
-  ConversationId, ConversationMemberResponse, ConversationResponse, CreateChannelRequest, CreateDmRequest,
-  CreateGroupDmRequest, DeviceId, DeviceListResponse, DeviceResponse, ErrorBody, ErrorCode,
-  GatewayClientMessage, GatewayServerMessage, GetMeResponse, IdentityKeyResponse, KeyBagResponse,
-  KeyPackageStatusResponse, ListConversationMembersResponse, ListConversationsResponse, ListDevicesResponse,
-  ListMessagesQuery, ListMessagesResponse, ListMlsMessagesQuery, ListMlsMessagesResponse,
-  ListSpaceMembersResponse, ListSpacesResponse, MessageResponse, MlsMessageResponse, MoveChannelRequest,
-  PostMlsCommitRequest, PostMlsCommitResponse, PostMlsMessageRequest, PutDeviceListRequest, PutKeyBagRequest,
-  RegisterDeviceRequest, SearchUsersResponse, SendMessageRequest, SpaceId, SpaceMemberResponse,
-  UploadIdentityKeyRequest, UploadKeyPackagesRequest, UserId, UserSummary,
+  AddConversationMemberRequest, AddSpaceMemberRequest, AdminJoinRequestResponse, ClaimKeyPackagesRequest,
+  ClaimKeyPackagesResponse, ConversationId, ConversationMemberResponse, ConversationResponse,
+  CreateChannelRequest, CreateDmRequest, CreateGroupDmRequest, DeviceId, DeviceListResponse, DeviceResponse,
+  ErrorBody, ErrorCode, GatewayClientMessage, GatewayServerMessage, GetMeResponse, IdentityKeyResponse,
+  KeyBagResponse, KeyPackageStatusResponse, ListConversationMembersResponse, ListConversationsResponse,
+  ListDevicesResponse, ListMessagesQuery, ListMessagesResponse, ListMlsMessagesQuery,
+  ListMlsMessagesResponse, ListSpaceMembersResponse, ListSpacesResponse, MessageResponse, MlsMessageResponse,
+  MoveChannelRequest, PostMlsCommitRequest, PostMlsCommitResponse, PostMlsMessageRequest,
+  PutDeviceListRequest, PutKeyBagRequest, RegisterDeviceRequest, SearchUsersResponse, SendMessageRequest,
+  SpaceId, SpaceMemberResponse, UploadIdentityKeyRequest, UploadKeyPackagesRequest, UserId, UserSummary,
 };
 use teamcraft_proto::{
   AppendWorkspaceLogRequest, ListWorkspaceLogQuery, ListWorkspaceLogResponse, WorkspaceLogEntryResponse,
@@ -129,6 +129,29 @@ pub trait ServerApi {
   fn reject_device_link(&self, request_id: &str) -> impl Future<Output = Result<(), ApiError>>;
   /// The new device gives up its request.
   fn withdraw_device_link(&self, request_id: &str) -> impl Future<Output = Result<(), ApiError>>;
+
+  /// The open requests of admins to join private channels the caller owns, and the caller's own
+  /// (`GET /admin-join-requests`, admin.md §2.4).
+  fn admin_join_requests(&self) -> impl Future<Output = Result<Vec<AdminJoinRequestResponse>, ApiError>>;
+  /// The caller, a workspace admin, asks the owners of a private channel to let them in;
+  /// idempotent while a request is open.
+  fn request_admin_join(
+    &self,
+    conversation: ConversationId,
+  ) -> impl Future<Output = Result<AdminJoinRequestResponse, ApiError>>;
+  /// An owner lets the admin in: the server membership (the MLS add is the owner's commit).
+  /// Answers the membership also when the admin is in already.
+  fn approve_admin_join(
+    &self,
+    conversation: ConversationId,
+    user: UserId,
+  ) -> impl Future<Output = Result<ConversationMemberResponse, ApiError>>;
+  /// Declines a request (an owner) or withdraws one's own; idempotent.
+  fn close_admin_join(
+    &self,
+    conversation: ConversationId,
+    user: UserId,
+  ) -> impl Future<Output = Result<(), ApiError>>;
 
   fn upload_key_packages(
     &self,

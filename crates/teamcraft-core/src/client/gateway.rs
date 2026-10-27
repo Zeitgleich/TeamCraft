@@ -199,6 +199,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
           }
           self.refresh_link_requests().await;
           self.trace_lap("link requests");
+          self.refresh_admin_join_requests_after_connect().await;
           self.trace_finish("resumed");
           return Ok(GatewayStart {
             connection,
@@ -256,6 +257,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     .await?;
     self.refresh_link_requests().await;
     self.trace_lap("link requests");
+    self.refresh_admin_join_requests_after_connect().await;
     self.trace_finish("fresh");
     Ok(GatewayStart {
       connection,
@@ -600,6 +602,14 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       },
       GatewayEvent::DeviceLinkClosed { request_id, .. } => {
         self.forget_link_request(&request_id);
+        Ok(())
+      },
+      // The list is read again; the change itself is only a hint (admin.md §2.4).
+      GatewayEvent::AdminJoinRequestUpdate { .. } => {
+        if let Err(error) = self.refresh_admin_join_requests().await {
+          // Not fatal: the next connect reads the list again.
+          tracing::debug!(%error, "could not read the admin join requests");
+        }
         Ok(())
       },
       // Call roster and ringing go to the app's call handling (media runs outside the core).

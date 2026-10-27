@@ -21,6 +21,7 @@ mod group_health;
 mod groups;
 mod guest;
 mod heads;
+mod join_requests;
 mod key_history;
 mod key_packages;
 mod linking;
