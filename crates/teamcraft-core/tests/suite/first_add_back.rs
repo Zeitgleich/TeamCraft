@@ -12,7 +12,7 @@ use std::time::Duration;
 
 use common::{Peer, linked_options, settings, settle};
 use teamcraft_core::api::ServerApi;
-use teamcraft_core::api::fake::FakeServer;
+use teamcraft_core::api::fake::{FakeServer, NetworkCut};
 use teamcraft_core::store::{LocalStore, MemoryStore, Table};
 use teamcraft_core::{ClientSettings, LinkOffer, PendingEnrollment};
 use teamcraft_proto::{
@@ -80,6 +80,86 @@ mod shared_again {
       assert_has_history(&alice, device, channel).await;
     }
     assert_has_no_history(&alice, &gus, channel).await;
+  }
+
+  /// Gus, added from his join on before Uma's full-history addition, answers Uma's request: he saw
+  /// the addition, but his ring has nothing from before his own join. Alice, whose record starts
+  /// before his, follows up with the history.
+  #[tokio::test]
+  async fn an_older_member_follows_up_a_committer_without_the_history() {
+    let server = FakeServer::new();
+    let (mut alice, mut gus, channel) = channel_with_history_and(&server, settings(), quick()).await;
+    let mut uma = newcomer(&server, "Uma").await;
+    spend_regular_packages(&mut alice, &mut [&mut uma]).await;
+    add_with_lost_welcomes(&server, &mut alice, &mut [&mut uma], channel, HistoryPolicy::Full).await;
+    // Only Gus and Uma are online: Gus adds her back.
+    settle(&mut [&mut gus, &mut uma]).await;
+    assert!(uma.client.has_group(channel).unwrap());
+    assert_has_no_history(&alice, &uma, channel).await;
+
+    settle(&mut [&mut alice, &mut gus, &mut uma]).await;
+    alice.client.apply_pending_changes().await.unwrap();
+    settle(&mut [&mut alice, &mut gus, &mut uma]).await;
+
+    assert_has_history(&alice, &uma, channel).await;
+    assert_has_no_history(&alice, &gus, channel).await;
+  }
+
+  /// Uma, added from her join on and then removed, is added again with the full history; both
+  /// welcomes are lost. The second addition is what counts.
+  #[tokio::test]
+  async fn an_addition_with_the_full_history_after_a_removal_counts() {
+    let server = FakeServer::new();
+    let (mut alice, mut gus, channel) = channel_with_history(&server).await;
+    let mut uma = newcomer(&server, "Uma").await;
+    let uma_id = uma.client.user_id();
+    spend_regular_packages(&mut alice, &mut [&mut uma]).await;
+    add_with_lost_welcomes(
+      &server,
+      &mut alice,
+      &mut [&mut uma],
+      channel,
+      HistoryPolicy::FromJoin,
+    )
+    .await;
+    settle(&mut [&mut alice, &mut gus, &mut uma]).await;
+    assert_has_no_history(&alice, &uma, channel).await;
+    alice.client.remove_member(channel, uma_id).await.unwrap();
+    settle(&mut [&mut alice, &mut gus, &mut uma]).await;
+    server.advance_clock(PAST_COOLDOWN);
+
+    spend_regular_packages(&mut alice, &mut [&mut uma]).await;
+    add_with_lost_welcomes(&server, &mut alice, &mut [&mut uma], channel, HistoryPolicy::Full).await;
+    settle(&mut [&mut alice, &mut gus, &mut uma]).await;
+
+    assert_eq!(
+      rejoin_requests(&alice, &uma, channel).await.len(),
+      2,
+      "both welcomes lost"
+    );
+    assert!(uma.client.has_group(channel).unwrap());
+    assert_has_history(&alice, &uma, channel).await;
+  }
+
+  /// Uma's device read its lost welcome over the server's API while the same welcome still waited
+  /// on its gateway connection, so it asks a second time, after Alice already added it back and
+  /// sealed the history. Joining from the welcome, it reads the group's queue from the welcome on
+  /// and doesn't skip the keys that came before its second request.
+  #[tokio::test]
+  async fn a_device_that_asked_twice_still_reads_the_history() {
+    let server = FakeServer::new();
+    let (mut alice, mut gus, channel) = channel_with_history(&server).await;
+    let mut uma = newcomer(&server, "Uma").await;
+    spend_regular_packages(&mut alice, &mut [&mut uma]).await;
+    add_with_lost_welcomes(&server, &mut alice, &mut [&mut uma], channel, HistoryPolicy::Full).await;
+    uma.client.sync_welcomes().await.unwrap();
+    settle(&mut [&mut alice, &mut gus]).await;
+
+    settle(&mut [&mut alice, &mut gus, &mut uma]).await;
+
+    assert_eq!(rejoin_requests(&alice, &uma, channel).await.len(), 2);
+    assert!(uma.client.has_group(channel).unwrap());
+    assert_has_history(&alice, &uma, channel).await;
   }
 }
 
@@ -271,19 +351,96 @@ mod nothing_more {
     assert_eq!(alice.client.mls_epoch(channel).unwrap(), epoch);
     assert_eq!(commits_and_keys(&alice, channel).await, before);
   }
+
+  /// Bob adds Uma back, but his history share doesn't get out and waits. Before he sends it again,
+  /// Alice removes Uma and adds her again from her join on. Bob sends from what he knew: the epoch
+  /// conflict catches him up, and the share stops before any of it reaches Uma's new leaf (#403).
+  #[tokio::test]
+  async fn a_share_the_group_moved_past_while_sending_stops() {
+    let server = FakeServer::new();
+    let (mut alice, mut bob, channel) = channel_with_history_and_bob(&server).await;
+    let mut uma = newcomer(&server, "Uma").await;
+    let uma_id = uma.client.user_id();
+    spend_regular_packages(&mut alice, &mut [&mut uma]).await;
+    add_with_lost_welcomes(&server, &mut alice, &mut [&mut uma], channel, HistoryPolicy::Full).await;
+    settle(&mut [&mut uma]).await;
+    bob.client.sync_mls(channel).await.unwrap();
+    server.cut_next_application(bob.client.user_id(), NetworkCut::BeforeRequest);
+    bob.client.apply_pending_changes().await.unwrap();
+    assert_has_no_history(&alice, &uma, channel).await;
+
+    // Alice saw none of it.
+    alice.client.remove_member(channel, uma_id).await.unwrap();
+    server.advance_clock(Duration::from_secs(10 * 60));
+    alice
+      .client
+      .add_member_with_history(channel, uma_id, Some(HistoryPolicy::FromJoin))
+      .await
+      .unwrap();
+    bob.client.apply_pending_changes().await.unwrap();
+    settle(&mut [&mut alice, &mut bob, &mut uma]).await;
+
+    assert!(uma.client.has_group(channel).unwrap());
+    assert_eq!(
+      uma.client.mls_epoch(channel).unwrap(),
+      alice.client.mls_epoch(channel).unwrap()
+    );
+    assert_has_no_history(&alice, &uma, channel).await;
+  }
+
+  /// The server doesn't say who Uma is when Alice adds her back, so Alice can't tell whether she
+  /// may get the full history: she seals the keys of the epochs Uma's device was a member in, as
+  /// for any device added back, and nothing from before the addition.
+  #[tokio::test]
+  async fn a_user_the_server_does_not_name_gets_the_missed_keys_only() {
+    let server = FakeServer::new();
+    let (mut alice, mut gus, channel) = channel_with_history(&server).await;
+    let mut uma = newcomer(&server, "Uma").await;
+    let mut dave = Peer::enroll(&server, "Dave").await;
+    spend_regular_packages(&mut alice, &mut [&mut uma]).await;
+    add_with_lost_welcomes(&server, &mut alice, &mut [&mut uma], channel, HistoryPolicy::Full).await;
+    // A new key while Uma's device waits for her add-back: Dave from his join on.
+    alice
+      .client
+      .add_member_with_history(channel, dave.client.user_id(), Some(HistoryPolicy::FromJoin))
+      .await
+      .unwrap();
+    alice
+      .client
+      .send_text(channel, None, "while Uma waited")
+      .await
+      .unwrap();
+    // Uma's device hasn't read its welcome yet.
+    settle(&mut [&mut alice, &mut gus, &mut dave]).await;
+    server.hide_user(uma.client.user_id());
+    forget_cached_user(&alice, uma.client.user_id());
+
+    // Only Alice and Uma are online: what Uma gets comes from Alice.
+    settle(&mut [&mut alice, &mut uma]).await;
+
+    assert!(uma.client.has_group(channel).unwrap());
+    let waited = alice.content_key_of(channel, "while Uma waited").await;
+    assert!(uma.client.has_content_key(channel, &waited), "the keys it missed");
+    assert_has_no_history(&alice, &uma, channel).await;
+  }
 }
 
 /// Alice's channel with Gus, who was added from his join on, and two keys he never had: "with
-/// Carol", Carol's removal (a new key), "without Carol", Gus's addition (another new key).
+/// Carol", Carol's removal (a new key), "without Carol", Gus's addition (another new key). Alice
+/// adds devices back without waiting for her rank.
 async fn channel_with_history(server: &FakeServer) -> (Peer, Peer, ConversationId) {
-  // Alice adds devices back without waiting for her rank.
-  let quick = ClientSettings {
-    device_add_stagger: Duration::ZERO,
-    ..settings()
-  };
-  let mut alice = Peer::enroll_with_settings(server, "Alice", quick).await;
+  channel_with_history_and(server, quick(), settings()).await
+}
+
+/// [`channel_with_history`] with Alice's and Gus's client settings.
+async fn channel_with_history_and(
+  server: &FakeServer,
+  alice_settings: ClientSettings,
+  gus_settings: ClientSettings,
+) -> (Peer, Peer, ConversationId) {
+  let mut alice = Peer::enroll_with_settings(server, "Alice", alice_settings).await;
   let mut carol = Peer::enroll(server, "Carol").await;
-  let mut gus = Peer::enroll(server, "Gus").await;
+  let mut gus = Peer::enroll_with_settings(server, "Gus", gus_settings).await;
   let space = alice.space().await;
   let channel = alice.client.create_channel(space, "general").await.unwrap();
   alice
@@ -308,6 +465,40 @@ async fn channel_with_history(server: &FakeServer) -> (Peer, Peer, ConversationI
     .unwrap();
   settle(&mut [&mut alice, &mut gus]).await;
   (alice, gus, channel)
+}
+
+/// Alice's channel with Bob, a member with the full history from its start who adds devices back
+/// without waiting for his rank, and the two keys of [`channel_with_history`]: "with Carol",
+/// Carol's removal, "without Carol".
+async fn channel_with_history_and_bob(server: &FakeServer) -> (Peer, Peer, ConversationId) {
+  let mut alice = Peer::enroll(server, "Alice").await;
+  let mut bob = Peer::enroll_with_settings(server, "Bob", quick()).await;
+  let mut carol = Peer::enroll(server, "Carol").await;
+  let space = alice.space().await;
+  let channel = alice.client.create_channel(space, "general").await.unwrap();
+  alice
+    .client
+    .add_member_with_history(channel, bob.client.user_id(), Some(HistoryPolicy::Full))
+    .await
+    .unwrap();
+  alice
+    .client
+    .add_member(channel, carol.client.user_id())
+    .await
+    .unwrap();
+  settle(&mut [&mut alice, &mut bob, &mut carol]).await;
+  alice.client.send_text(channel, None, HISTORY[0]).await.unwrap();
+  settle(&mut [&mut alice, &mut bob, &mut carol]).await;
+  alice
+    .client
+    .remove_member(channel, carol.client.user_id())
+    .await
+    .unwrap();
+  settle(&mut [&mut alice, &mut bob, &mut carol]).await;
+  alice.client.send_text(channel, None, HISTORY[1]).await.unwrap();
+  settle(&mut [&mut alice, &mut bob]).await;
+  assert_has_history(&alice, &bob, channel).await;
+  (alice, bob, channel)
 }
 
 /// A user's first device, which deletes the private part of a replaced key package at once.
@@ -348,6 +539,14 @@ async fn link_newcomer_device(phone: &mut Peer) -> Peer {
     store,
     client,
     gateway,
+  }
+}
+
+/// A member that adds devices back (and follows up) without waiting for its rank.
+fn quick() -> ClientSettings {
+  ClientSettings {
+    device_add_stagger: Duration::ZERO,
+    ..settings()
   }
 }
 

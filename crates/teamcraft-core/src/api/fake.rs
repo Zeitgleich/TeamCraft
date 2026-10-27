@@ -288,6 +288,9 @@ struct State {
   queue_refused_to: HashSet<UserId>,
   /// The next identity key lookup of these users fails with a network error.
   failing_identity_lookups: HashSet<UserId>,
+  /// Users the server answers "not found" for when asked who they are
+  /// ([`FakeServer::hide_user`]).
+  hidden_users: HashSet<UserId>,
 }
 
 /// How an armed network cut ([`FakeServer::cut_network_after`]) hits the call it catches.
@@ -457,6 +460,11 @@ impl FakeServer {
     if let Some(entry) = self.lock().users.get_mut(&user) {
       entry.kind = UserKind::Guest;
     }
+  }
+
+  /// From now on the server answers "not found" when asked who `user` is (`GET /users/{id}`).
+  pub fn hide_user(&self, user: UserId) {
+    self.lock().hidden_users.insert(user);
   }
 
   /// While offline, every REST call of this user fails with a network error. Coming back online
@@ -1411,6 +1419,9 @@ impl ServerApi for FakeServerApi {
 
   async fn user(&self, user: UserId) -> Result<UserSummary, ApiError> {
     self.with(|state, _| {
+      if state.hidden_users.contains(&user) {
+        return Err(ApiError::status(404, ErrorCode::UserNotFound, "unknown user"));
+      }
       let summary = state.user(user)?;
       // Like the server: a deleted account's tombstone is shown, a deactivated one is not.
       if summary.is_deactivated && !summary.is_deleted {

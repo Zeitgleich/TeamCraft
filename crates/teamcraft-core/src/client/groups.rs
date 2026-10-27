@@ -16,10 +16,11 @@ use teamcraft_crypto::mls::{
 use teamcraft_proto::{
   AddConversationMemberRequest, Base64Bytes, ClaimKeyPackagesRequest, ConversationId, ConversationKind,
   CreateChannelRequest, CreateDmRequest, CreateGroupDmRequest, DeviceId, HistoryPolicy, Id, IdempotencyKey,
-  ListMlsMessagesQuery, ListMlsMessagesResponse, MlsMessageKind, MlsMessageResponse, MlsWelcome,
-  PostMlsCommitRequest, PostMlsMessageRequest, SpaceId, UserId,
+  ListMlsMessagesQuery, ListMlsMessagesResponse, MlsMessageId, MlsMessageKind, MlsMessageResponse,
+  MlsWelcome, PostMlsCommitRequest, PostMlsMessageRequest, SpaceId, UserId,
 };
 
+use super::key_history::{SealedShare, ShareGuard};
 use super::member_device::{GroupInfoOutcome, MemberDeviceJoin};
 use super::workspace::{PendingChange, SharedKeys};
 use super::{Client, pending_post_key};
@@ -1854,7 +1855,8 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
   /// most `max_missed_keys` keys: the history of a member added with it in `added_epoch` (e2ee.md
   /// §4.3). The other members, who may have joined from the join on, see that keys went to them,
   /// not which (#403). Nothing goes out unless this device saw the user stay a member since: a
-  /// share still pending after a removal (and maybe a new addition from the join on) is dropped.
+  /// share still pending after a removal (and maybe a new addition from the join on) is dropped,
+  /// also one the group moves past while it is being sent.
   async fn send_history(
     &mut self,
     conversation: ConversationId,
@@ -1886,8 +1888,14 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
         },
       }
     }
-    for recipient in &recipients {
-      self.seal_keys_to(conversation, &keys, recipient).await?;
+    let share = SealedShare::HistoryOf { added_epoch };
+    let mut guarded = Vec::with_capacity(recipients.len());
+    for recipient in recipients {
+      let guard = self.share_guard(conversation, GroupMember::from(&recipient), share)?;
+      guarded.push((recipient, guard));
+    }
+    for (recipient, guard) in &guarded {
+      self.seal_keys_to(conversation, &keys, recipient, guard).await?;
     }
     Ok(())
   }
@@ -1903,12 +1911,14 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
   }
 
   /// Seals `keys` to `recipient` alone, in bundles of at most `max_missed_keys` keys that name no
-  /// current key (e2ee.md §4.6).
+  /// current key (e2ee.md §4.6). `guard` is checked again before every bundle: once the share is
+  /// no longer due (the device was removed since, maybe added again), the rest is dropped.
   async fn seal_keys_to(
     &mut self,
     conversation: ConversationId,
     keys: &[ContentKey],
     recipient: &VerifiedDevice,
+    guard: &ShareGuard,
   ) -> Result<(), CoreError> {
     let chunk_len = self.settings.max_missed_keys.max(1);
     for chunk in keys.chunks(chunk_len) {
@@ -1916,7 +1926,13 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
         convert::conversation(conversation),
         chunk.iter().map(ContentKey::duplicate).collect(),
       );
-      self.send_bundle(conversation, &bundle, Some(recipient)).await?;
+      if !self
+        .send_bundle_while_due(conversation, &bundle, Some(recipient), Some(guard))
+        .await?
+      {
+        tracing::info!(conversation_id = %conversation, "dropped the rest of a sealed key share: the device left the group since");
+        return Ok(());
+      }
     }
     Ok(())
   }
@@ -1948,15 +1964,16 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       user_id: convert::user(user),
       device_id: convert::device(device),
     };
-    let keys = if self.is_owed_full_history_now(conversation, user, member).await? {
+    let (keys, share) = if self.is_owed_full_history_now(conversation, user, member).await? {
       tracing::info!(conversation_id = %conversation, device_id = %device, "sharing the history of its full-history addition with a device added back");
-      self.ring_keys(conversation)
+      (self.ring_keys(conversation), SealedShare::AdditionHistory)
     } else {
-      self.missed_keys(conversation, member)?
+      (self.missed_keys(conversation, member)?, SealedShare::MissedKeys)
     };
     if keys.is_empty() {
       return Ok(());
     }
+    let guard = self.share_guard(conversation, member, share)?;
     let directory = self.member_directory(conversation).await?;
     let Some(recipient) = self
       .group_or_error(conversation)?
@@ -1964,11 +1981,13 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     else {
       return Ok(());
     };
-    self.seal_keys_to(conversation, &keys, &recipient).await
+    self.seal_keys_to(conversation, &keys, &recipient, &guard).await
   }
 
   /// [`Self::is_owed_full_history`], and the user may still get the full history: one the server
-  /// now shows as a guest gets nothing more (its word can only lower what is shared).
+  /// now shows as a guest gets nothing more (its word can only lower what is shared). When the
+  /// server doesn't say who the user is (a refusal, not a network error), the device gets the
+  /// keys of the epochs it was a member in, like any device added back.
   async fn is_owed_full_history_now(
     &mut self,
     conversation: ConversationId,
@@ -1978,7 +1997,14 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     if !self.is_owed_full_history(conversation, member)? {
       return Ok(false);
     }
-    Ok(self.effective_history(user, HistoryShare::Full).await? == HistoryShare::Full)
+    match self.effective_history(user, HistoryShare::Full).await {
+      Ok(history) => Ok(history == HistoryShare::Full),
+      Err(error) if error.is_transient() => Err(error),
+      Err(error) => {
+        tracing::warn!(conversation_id = %conversation, %error, "could not tell whether a member may get the full history; sharing only the keys it missed");
+        Ok(false)
+      },
+    }
   }
 
   /// Applies a content key bundle a member sent to the whole group in `epoch`: only its current
@@ -2157,9 +2183,30 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     bundle: &ContentKeyBundle,
     maybe_recipient: Option<&VerifiedDevice>,
   ) -> Result<(), CoreError> {
+    self
+      .send_bundle_while_due(conversation, bundle, maybe_recipient, None)
+      .await
+      .map(|_| ())
+  }
+
+  /// [`Self::send_bundle`]; with `maybe_guard`, the share is checked again before every try, after
+  /// the group caught up with another member's commits: `Ok(false)` once it is no longer due, and
+  /// nothing went out (#403, #400).
+  async fn send_bundle_while_due(
+    &mut self,
+    conversation: ConversationId,
+    bundle: &ContentKeyBundle,
+    maybe_recipient: Option<&VerifiedDevice>,
+    maybe_guard: Option<&ShareGuard>,
+  ) -> Result<bool, CoreError> {
     let attempts = self.settings.max_commit_attempts.max(1);
     for _ in 0..attempts {
       self.resolve_pending_commit(conversation).await?;
+      if let Some(guard) = maybe_guard
+        && !self.is_share_still_due(conversation, guard)?
+      {
+        return Ok(false);
+      }
       let group = self
         .groups
         .get_mut(&conversation)
@@ -2178,7 +2225,10 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       };
       self.persist_group(conversation)?;
       match self.api.post_mls_message(conversation, &request).await {
-        Ok(stored) => return self.advance_cursor(conversation, &stored),
+        Ok(stored) => {
+          self.advance_cursor(conversation, &stored)?;
+          return Ok(true);
+        },
         Err(error) if error.is_epoch_conflict() => self.sync_mls(conversation).await?,
         Err(error) => return Err(error.into()),
       }
@@ -2267,8 +2317,10 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
           )?;
           client.welcome_handled(welcome)?;
           client.remember_member_keys(conversation, &directory, welcome.id.snowflake().unix_millis())?;
-          // Everything up to the welcome belongs to epochs before we joined.
-          client.advance_cursor(conversation, welcome)
+          // Everything up to the welcome belongs to epochs before we joined; everything after it
+          // is this group's, also what this device passed over without a group (its own requests,
+          // entries it couldn't read), which may have moved the cursor past the keys sealed to it.
+          client.set_cursor(conversation, welcome.id)
         })?;
         self.note_dm_welcome_joined(conversation)?;
         if let Ok(response) = self.api.conversation(conversation).await {
@@ -3009,6 +3061,13 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     if *cursor < message.id {
       *cursor = message.id;
     }
+    self.persist_sync()
+  }
+
+  /// Puts the group's queue cursor right after `id`, also back: the group just joined starts
+  /// there.
+  fn set_cursor(&mut self, conversation: ConversationId, id: MlsMessageId) -> Result<(), CoreError> {
+    self.sync.mls_cursors.insert(conversation, id);
     self.persist_sync()
   }
 }
