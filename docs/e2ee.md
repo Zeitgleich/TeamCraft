@@ -1157,11 +1157,35 @@ workspace roster (admin.md §2.3):
   admins who can sign confirm it with "Sign role". Decisions every member must make alike (issue
   #776, the owner's approval of an admin joining a private channel) use the signed role alone
   (`Client::verified_channel_role`) together with the MLS group's membership.
-- **Not yet decided by signed roles.** Commits still follow §4.6 as before: every member of the
-  group may sign membership changes (security review A11), since channels whose roles nobody
-  signed yet would otherwise lock their legitimate admins out, and clients without signed roles
-  would split from the others. Restricting commits to signed roles is a later step once channels
-  are signed. Integration sources still need a workspace admin (§13.1).
+- **Admin joining under `owner_approval` (issue #776, stage 2 of #380).** An admin of the signed
+  roster who is not in a private channel asks its owners (admin.md §2.4.1). The approving owner's
+  app reads the role log (`sync_channel_roles`) and approves only if `verified_channel_role` makes
+  the owner an `admin`; otherwise it shows "your owner role isn't signed" and offers Decline only.
+  Members' apps judge the commit the same way (`WorkspaceAuthority`): in a private channel whose
+  role log has an accepted entry, while the verified policy says `owner_approval`, an
+  `AddUser` of a fresh-roster admin is authorized only if the committer is in the signed snapshot as
+  `admin`. The committer's signed role comes from the device's own verified state, never from the
+  server's member list; the device reads the log before judging a commit under this policy (one
+  request per commit, nothing otherwise). Removals, other additions and every other policy are
+  unchanged.
+- **Migration (compatibility step).** The rule is a stricter merge rule, so it is switched on per
+  channel by data, not by version: only a channel with an accepted role entry uses it. A channel
+  nobody signed yet keeps "every member may commit" (§4.6), so no approval is refused for lack of
+  a signature and clients without this rule in the group keep merging what newer clients merge.
+  A channel becomes signed when it is created by this version, or when an admin it lists changes
+  or confirms a role (founding, above); its owners then sign their own role once. Residual: an
+  owner of a signed channel whose role is the server's word only (for example a co-owner who uses
+  an older client, which can't sign) who approves from an older client makes newer clients refuse
+  that one commit, and the admin stays out until a signed admin signs the co-owner's role or the
+  co-owner updates; the older client never gets a wrong view of the group beyond that commit.
+- **Not yet decided by signed roles.** Other commits still follow §4.6: every member of the group
+  may sign membership changes (security review A11), since custom permission schemes and space
+  admins are not signed facts and would be locked out. Integration sources still need a workspace
+  admin (§13.1). Both are tracked as follow-ups of #380 (restricting commits further, signed
+  channel admins as source admins; a withheld demotion is tracked there as well).
+- **Workspace admins and channel admins.** `role_rules` lets a workspace admin of the fresh roster
+  sign any snapshot, so a workspace admin can appoint a channel admin who then approves a workspace
+  admin's join. This is kept on purpose: orphaned channels need it (admin.md §2.5); a policy switch for it is tracked as a follow-up.
 
 Residual risks: the founding entry of a channel is trust on first use, so a hostile server together
 with a member of a channel from before signed roles can make that member its first signed admin

@@ -12,6 +12,7 @@ use teamcraft_core::store::{
   ConversationEvent, LocalStore, MessageContent, MessageFilter, StoredMessage, Table,
 };
 use teamcraft_core::workspace::RosterRole;
+use teamcraft_core::{CoreError, JoinRequestRefusal};
 use teamcraft_proto::{
   AdminSelfJoin, ClientMessageId, ConversationId, HistoryPolicy, UserId, WorkspacePolicy,
 };
@@ -496,6 +497,68 @@ async fn the_shared_history_changes_nothing_about_the_line() {
   assert_eq!(lines(&dave, channel), vec![(bob_id, By::Approved(carol_id))]);
 }
 
+/// Issue #380: members take in an admin only from a signed channel admin, so an owner the server
+/// alone lists can't approve; once a signed admin confirms the role, approving works and every
+/// member takes the add in.
+#[tokio::test]
+async fn an_owner_only_the_server_lists_cannot_approve_until_a_signed_admin_confirms() {
+  let (server, mut alice, mut bob, mut carol, mut dave, channel) = setup(AdminSelfJoin::OwnerApproval).await;
+  let (bob_id, dave_id) = (bob.client.user_id(), dave.client.user_id());
+  server.set_channel_role_unsigned(channel, dave_id, teamcraft_proto::ChannelRole::Admin);
+  bob.client.request_admin_join(channel).await.unwrap();
+  settle(&mut [&mut alice, &mut bob, &mut carol, &mut dave]).await;
+
+  let refused = dave.client.approve_admin_join(channel, bob_id).await;
+  assert!(
+    matches!(
+      refused,
+      Err(CoreError::JoinRequestNotApprovable(
+        JoinRequestRefusal::OwnerRoleNotSigned
+      ))
+    ),
+    "{refused:?}"
+  );
+  settle(&mut [&mut alice, &mut bob, &mut carol, &mut dave]).await;
+  assert!(!bob.client.has_group(channel).unwrap());
+
+  carol.client.confirm_channel_role(channel, dave_id).await.unwrap();
+  dave.client.approve_admin_join(channel, bob_id).await.unwrap();
+  settle(&mut [&mut alice, &mut bob, &mut carol, &mut dave]).await;
+  assert!(bob.client.has_group(channel).unwrap());
+  assert_eq!(lines(&carol, channel), vec![(bob_id, By::Approved(dave_id))]);
+}
+
+/// Migration: a channel from before signed roles has no signed admin, so nobody approves until an
+/// admin the server lists signs their own role (founding the log); the other members then take the
+/// add in. Nothing was locked out for good, and the channel's other roles stay as they were.
+#[tokio::test]
+async fn a_channel_from_before_signed_roles_approves_once_its_owner_signed() {
+  let (server, mut alice, mut bob, mut carol, mut dave, channel) =
+    setup_in(AdminSelfJoin::OwnerApproval, HistoryPolicy::FromJoin, true).await;
+  let (bob_id, carol_id) = (bob.client.user_id(), carol.client.user_id());
+  server.set_role_log_lacking(false);
+  bob.client.request_admin_join(channel).await.unwrap();
+  settle(&mut [&mut alice, &mut bob, &mut carol, &mut dave]).await;
+  assert!(!carol.client.channel_role_state(channel).unwrap().is_signed());
+
+  assert!(matches!(
+    carol.client.approve_admin_join(channel, bob_id).await,
+    Err(CoreError::JoinRequestNotApprovable(
+      JoinRequestRefusal::OwnerRoleNotSigned
+    ))
+  ));
+
+  carol
+    .client
+    .confirm_channel_role(channel, carol_id)
+    .await
+    .unwrap();
+  carol.client.approve_admin_join(channel, bob_id).await.unwrap();
+  settle(&mut [&mut alice, &mut bob, &mut carol, &mut dave]).await;
+  assert!(bob.client.has_group(channel).unwrap());
+  assert_eq!(lines(&dave, channel), vec![(bob_id, By::Approved(carol_id))]);
+}
+
 /// The lines `peer` lists in `channel`, oldest first. Each one stems from a commit.
 fn lines(peer: &Peer, channel: ConversationId) -> Vec<Line> {
   peer
@@ -677,6 +740,16 @@ async fn setup_with(
   admin_self_join: AdminSelfJoin,
   history_default: HistoryPolicy,
 ) -> (FakeServer, Peer, Peer, Peer, Peer, ConversationId) {
+  setup_in(admin_self_join, history_default, false).await
+}
+
+/// [`setup_with`]; `is_from_before_signed_roles` makes the channel on an older server, without a
+/// role log.
+async fn setup_in(
+  admin_self_join: AdminSelfJoin,
+  history_default: HistoryPolicy,
+  is_from_before_signed_roles: bool,
+) -> (FakeServer, Peer, Peer, Peer, Peer, ConversationId) {
   let server = FakeServer::new();
   let mut alice = Peer::enroll(&server, "Alice").await;
   let mut bob = Peer::enroll(&server, "Bob").await;
@@ -699,6 +772,7 @@ async fn setup_with(
     .unwrap();
   server.set_admin(bob_id);
   settle(&mut [&mut alice, &mut bob, &mut carol, &mut dave]).await;
+  server.set_role_log_lacking(is_from_before_signed_roles);
   let channel = carol
     .client
     .create_channel(carol.space().await, "private")

@@ -11,7 +11,7 @@ use std::collections::HashSet;
 
 use teamcraft_client_api::activity::{JoinRequest, JoinRequestStanding};
 use teamcraft_client_api::model::{ConversationId, UserId};
-use teamcraft_proto::{AdminJoinRequestResponse, AdminSelfJoin};
+use teamcraft_proto::{AdminJoinRequestResponse, AdminSelfJoin, ChannelRole};
 
 use crate::client::is_open_private_channel;
 use crate::read_state;
@@ -48,6 +48,7 @@ impl<S: LocalStore> CoreChatBackend<S> {
       &workspace,
       is_roster_fresh,
       |conversation| channels.contains(&conversation),
+      |conversation| self.is_my_role_signed_admin(conversation),
     )
   }
 
@@ -62,6 +63,20 @@ impl<S: LocalStore> CoreChatBackend<S> {
       .collect()
   }
 
+  /// Whether the channel's signed roles make this user an admin: only then members take in the
+  /// admin this user approves (e2ee.md §4.6.1). The server's member list doesn't count.
+  fn is_my_role_signed_admin(&self, conversation: ConversationId) -> bool {
+    let state: crate::channel_roles::ChannelRoleState = self.read(
+      records::get_json(
+        self.store_ref(),
+        Table::Workspace,
+        &crate::client::channel_roles_key(conversation),
+      )
+      .map(Option::unwrap_or_default),
+    );
+    state.role_of(self.me_id()) == ChannelRole::Admin
+  }
+
   fn verified_workspace(&self) -> WorkspaceState {
     self.read(
       records::get_json(self.store_ref(), Table::Workspace, crate::client::WORKSPACE_KEY)
@@ -72,7 +87,8 @@ impl<S: LocalStore> CoreChatBackend<S> {
 
 /// The requests of others (the server lists the user's own too) for conversations
 /// `is_my_private_channel` accepts (private, unarchived channels the user is in), each with what
-/// the owner may do. None while the verified policy doesn't ask for an owner's approval: then they
+/// the owner may do (`is_signed_admin`: whether this user's role in the channel is a signed admin).
+/// None while the verified policy doesn't ask for an owner's approval: then they
 /// are moot, and the server closes them anyway.
 pub fn requests_to_decide(
   me: UserId,
@@ -80,6 +96,7 @@ pub fn requests_to_decide(
   workspace: &WorkspaceState,
   is_roster_fresh: bool,
   is_my_private_channel: impl Fn(ConversationId) -> bool,
+  is_signed_admin: impl Fn(ConversationId) -> bool,
 ) -> Vec<JoinRequest> {
   if workspace.policy.admin_self_join != AdminSelfJoin::OwnerApproval {
     return Vec::new();
@@ -94,10 +111,12 @@ pub fn requests_to_decide(
       maybe_username: request.user.maybe_username.clone(),
       requested_at: request.requested_at.0,
       expires_at: request.expires_at.0,
-      standing: if is_roster_fresh && workspace.is_admin(request.user.id) {
+      standing: if !is_roster_fresh || !workspace.is_admin(request.user.id) {
+        JoinRequestStanding::NotAnAdmin
+      } else if is_signed_admin(request.conversation_id) {
         JoinRequestStanding::Approvable
       } else {
-        JoinRequestStanding::NotAnAdmin
+        JoinRequestStanding::OwnerRoleNotSigned
       },
     })
     .collect()
@@ -178,6 +197,20 @@ mod tests {
     }
   }
 
+  /// An owner whom only the server lists can't approve: members would refuse the add (issue #380).
+  #[test]
+  fn an_owner_without_a_signed_admin_role_can_only_decline() {
+    let shown = requests_to_decide(
+      user(ME),
+      &[request(ADMIN, CHANNEL)],
+      &workspace(AdminSelfJoin::OwnerApproval),
+      true,
+      |id| id == conversation(CHANNEL),
+      |_| false,
+    );
+    assert_eq!(shown[0].standing, JoinRequestStanding::OwnerRoleNotSigned);
+  }
+
   /// [`requests_to_decide`] for `me`, where only [`CHANNEL`] is one of the user's private channels.
   fn decide(
     me: u64,
@@ -185,9 +218,14 @@ mod tests {
     self_join: AdminSelfJoin,
     is_roster_fresh: bool,
   ) -> Vec<JoinRequest> {
-    requests_to_decide(user(me), requests, &workspace(self_join), is_roster_fresh, |id| {
-      id == conversation(CHANNEL)
-    })
+    requests_to_decide(
+      user(me),
+      requests,
+      &workspace(self_join),
+      is_roster_fresh,
+      |id| id == conversation(CHANNEL),
+      |_| true,
+    )
   }
 
   fn workspace(self_join: AdminSelfJoin) -> WorkspaceState {

@@ -97,6 +97,7 @@ fn JoinRequestRow(request: JoinRequest, names_channel: bool) -> impl IntoView {
     }
   };
   let is_approvable = request.standing == JoinRequestStanding::Approvable;
+  let is_owner_unsigned = request.standing == JoinRequestStanding::OwnerRoleNotSigned;
   let relative = format_relative(request.requested_at, now_ms(), locale);
   let absolute = format_date_time(request.requested_at, locale);
   let approving = PendingAction::new();
@@ -124,6 +125,7 @@ fn JoinRequestRow(request: JoinRequest, names_channel: bool) -> impl IntoView {
         <time class="join-request-time" title=absolute>{relative}</time>
         <p class="join-request-hint">
           {move || match (is_approvable, shares_history.get()) {
+            (false, _) if is_owner_unsigned => i18n.t("join-request-owner-not-signed"),
             (false, _) => i18n.t("join-request-not-admin"),
             (true, false) => i18n.t("join-request-hint"),
             (true, true) => i18n.t("join-request-hint-history"),

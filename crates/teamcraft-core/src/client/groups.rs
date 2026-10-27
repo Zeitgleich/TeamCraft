@@ -1280,6 +1280,9 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       // Another commit won the epoch.
       self.discard_pending_commit(conversation)?;
     }
+    if message.kind == MlsMessageKind::Commit {
+      self.refresh_channel_roles_for_commit(conversation).await;
+    }
     let authority = self.group_authority(conversation, at_ms)?;
     let group = self
       .groups
@@ -2717,8 +2720,12 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       tracing::warn!("the signed roster is stale; admins have no authority until an owner re-signs it");
       Vec::new()
     };
+    // Signed channel roles, once the channel has any (e2ee.md §4.6.1); never the server's list.
+    let role_state = self.channel_role_state(conversation)?;
+    let maybe_signed_admins = role_state.is_signed().then(|| role_state.admins());
     let mut authority = WorkspaceAuthority::new(members, admins, workspace.policy.admin_self_join.clone())
       .with_guests(guests)
+      .with_signed_channel_admins(maybe_signed_admins)
       .for_public_channel(is_public_channel)
       .like_before_v1_0_9(self.is_checking_as_before_v1_0_9);
     if is_meeting_chat {

@@ -202,6 +202,11 @@ pub enum JoinRequestRefusal {
   /// Not a private, unarchived channel this device knows: a DM, a meeting chat, or unknown.
   #[error("only requests to join a private channel are approved")]
   NotAPrivateChannel,
+  /// This device's verified channel roles don't make the approving owner an admin of the channel:
+  /// members refuse an admin's addition by anybody else (issue #380, e2ee.md §4.6.1). A signed
+  /// admin or a workspace admin signs the role first.
+  #[error("this user's owner role in the channel isn't signed")]
+  OwnerRoleNotSigned,
 }
 
 impl CoreError {

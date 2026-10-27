@@ -287,7 +287,9 @@ fn join_request_item(
     expires_at_ms: request.expires_at,
     standing: match request.standing {
       Standing::Approvable => JoinRequestStanding::Approvable,
-      Standing::NotAnAdmin => JoinRequestStanding::NotAnAdmin,
+      // The apps decline-only both; a text of its own for the unsigned owner role comes with
+      // their next release (no new variant for the shells to switch over yet).
+      Standing::NotAnAdmin | Standing::OwnerRoleNotSigned => JoinRequestStanding::NotAnAdmin,
     },
     notification_tag: join_request_alerts::tag(request).as_str().to_owned(),
   }
