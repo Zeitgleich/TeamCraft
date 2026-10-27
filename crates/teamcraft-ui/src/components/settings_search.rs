@@ -81,7 +81,8 @@ const ENTRIES: &[(SettingsTab, &str)] = &[
   (SettingsTab::Devices, "settings-device-others"),
   (SettingsTab::Devices, "settings-device-link"),
   (SettingsTab::Devices, "settings-device-sign-out-others"),
-  (SettingsTab::Security, "recovery-title"),
+  (SettingsTab::Security, "security-backup-title"),
+  (SettingsTab::Security, "security-recovery-row"),
   (SettingsTab::Security, "security-verify"),
   (SettingsTab::Security, "security-my-key"),
   (SettingsTab::Security, "privacy-read-receipts"),
@@ -90,6 +91,8 @@ const ENTRIES: &[(SettingsTab, &str)] = &[
   (SettingsTab::Security, "privacy-away"),
   (SettingsTab::About, "settings-help-version"),
   (SettingsTab::About, "settings-help-copy-debug"),
+  (SettingsTab::About, "settings-help-server"),
+  (SettingsTab::About, "settings-help-links"),
   (SettingsTab::About, "settings-updates"),
   (SettingsTab::About, "about-title"),
 ];

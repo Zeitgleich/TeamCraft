@@ -168,6 +168,15 @@ pub enum CoreCommand {
   RevokeOwnDevice {
     device: teamcraft_proto::DeviceId,
   },
+  /// Renames one of this user's devices.
+  RenameOwnDevice {
+    device: teamcraft_proto::DeviceId,
+    name: String,
+  },
+  /// A test push to one of this user's devices.
+  TestPushOwnDevice {
+    device: teamcraft_proto::DeviceId,
+  },
   /// Files of outbox messages are waiting for upload.
   UploadFiles,
   /// Outbox messages wait for their link previews.
@@ -1377,6 +1386,14 @@ impl<S: LocalStore> ChatBackend for CoreChatBackend<S> {
 
   fn revoke_own_device(&self, device: teamcraft_proto::DeviceId) {
     self.command(CoreCommand::RevokeOwnDevice { device });
+  }
+
+  fn rename_own_device(&self, device: teamcraft_proto::DeviceId, name: String) {
+    self.command(CoreCommand::RenameOwnDevice { device, name });
+  }
+
+  fn test_push_own_device(&self, device: teamcraft_proto::DeviceId) {
+    self.command(CoreCommand::TestPushOwnDevice { device });
   }
 
   fn mark_unread(&self, conversation: ConversationId, from: MessageId) {

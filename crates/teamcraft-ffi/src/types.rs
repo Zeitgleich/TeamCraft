@@ -242,10 +242,12 @@ pub struct BrandAccent {
   pub maybe_accent_soft: Option<String>,
 }
 
-/// The brand's legal and support links; https only.
+/// The brand's legal, support and documentation links; https only.
 #[derive(Clone, Debug, Default, PartialEq, Eq, uniffi::Record)]
 pub struct BrandLinks {
   pub maybe_support: Option<String>,
+  /// The instance's user documentation (Help & about, issue #410).
+  pub maybe_documentation: Option<String>,
   pub maybe_privacy: Option<String>,
   pub maybe_terms: Option<String>,
   pub maybe_imprint: Option<String>,

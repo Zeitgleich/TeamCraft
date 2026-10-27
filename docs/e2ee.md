@@ -85,6 +85,13 @@ key only keeps the passwords out of database dumps and backups ([admin.md](admin
   removal backoff, `removal_attempts` times, then dropped. A full resync (gateway events missed)
   does the same check once against the groups it holds. The revoked device's leaves carry the
   user's ID, so the removal is the user's own change, as from the revoking device.
+- **Verification state in the settings** (issue #409). Settings > Devices marks each of the user's
+  devices from what this device verified, never from the server's list alone: *verified* when its
+  certificate opens with the user's identity key and the newest signed device list names it with
+  that key; *being set up* when the certificate is the user's but the list doesn't name it yet;
+  *not verified* when nothing the identity key signed vouches for it (a device the server added on its
+  own). Device names are the user's: the server shows them to the user and admins only, colleagues'
+  clients get the keys with an empty name.
 - MLS ciphersuite: `MLS_128_DHKEMX25519_CHACHA20POLY1305_SHA256_Ed25519` (matches the device keys).
   The device key signs both MLS messages and TeamCraft structures; every TeamCraft signature and AEAD
   input is prefixed with a length-prefixed `TeamCraft-v1 …` label, so it can't collide with MLS's
@@ -1428,6 +1435,11 @@ restored together with them on a new device.
   leaves a tombstone with its left time for the usual 90 days, so the same absence isn't taken
   back from another device's local records or an older key bag (possibly without its return); a
   later removal of the device counts as before.
+- **When the recovery passphrase was last set** (issue #410): the device that sets it (enrollment,
+  a change, a recovery) records its clock's time; merging keeps the later one. Settings > Security
+  shows it next to the backup's state, which each device reads from what it already knows: whether a
+  key bag is stored, uploads still pending, and which wraps exist (passphrase, passkey,
+  organization). The server learns nothing new.
 - **The activity feed has no read mark of its own** (issue #534): an entry is read when the read
   position of its target (conversation or thread) is at or after it, and those positions sync
   through the server like any other. The older `activity_read` field is still merged (the later one

@@ -243,6 +243,9 @@ pub struct SecuritySnapshot {
   /// older shell) allows them, as the server's default does. The server enforces it either way.
   #[serde(rename = "presence_policy", default, skip_serializing_if = "Option::is_none")]
   pub maybe_presence_policy: Option<teamcraft_proto::PresencePolicy>,
+  /// The key backup as this device knows it (issue #410); `None` from an older shell.
+  #[serde(rename = "backup", default, skip_serializing_if = "Option::is_none")]
+  pub maybe_backup: Option<crate::security::KeyBackupState>,
 }
 
 /// What this device pinned for one contact, and a different key the server has shown since.
@@ -515,6 +518,16 @@ pub enum ChatAction {
   },
   /// Sign out one of this user's other devices.
   RevokeOwnDevice {
+    device: DeviceId,
+  },
+  /// Rename one of this user's devices (issue #409).
+  RenameOwnDevice {
+    device: DeviceId,
+    name: String,
+  },
+  /// Ask the server to send a test push to one of this user's devices; the outcome shows in the
+  /// device list.
+  TestPushOwnDevice {
     device: DeviceId,
   },
   /// Founds a new channel (and its encryption group) in a space.
@@ -957,6 +970,8 @@ impl ChatAction {
       Self::RefreshOwnDevices => backend.refresh_own_devices(),
       Self::RefreshReadReceipts { conversation } => backend.refresh_read_receipts(conversation),
       Self::RevokeOwnDevice { device } => backend.revoke_own_device(device),
+      Self::RenameOwnDevice { device, name } => backend.rename_own_device(device, name),
+      Self::TestPushOwnDevice { device } => backend.test_push_own_device(device),
       Self::SetThreadFollowed {
         conversation,
         thread,
@@ -1858,6 +1873,55 @@ mod tests {
       })
       .expect("serialize"),
       r#"{"action":"set_background_effect","effect":"blur_light"}"#
+    );
+  }
+
+  #[test]
+  fn own_device_actions_have_stable_wire_names() {
+    let device: DeviceId = crate::model::id_from_raw(7);
+    let rename = ChatAction::RenameOwnDevice {
+      device,
+      name: "Work laptop".into(),
+    };
+    let json = serde_json::to_string(&rename).expect("serialize");
+    assert_eq!(
+      json,
+      r#"{"action":"rename_own_device","device":"7","name":"Work laptop"}"#
+    );
+    assert_eq!(serde_json::from_str::<ChatAction>(&json).expect("parse"), rename);
+    assert_eq!(
+      serde_json::to_string(&ChatAction::TestPushOwnDevice { device }).expect("serialize"),
+      r#"{"action":"test_push_own_device","device":"7"}"#
+    );
+  }
+
+  #[test]
+  fn the_backup_state_is_optional_in_the_security_snapshot() {
+    let older: SecuritySnapshot =
+      serde_json::from_str(r#"{"my_fingerprint":"ab","contacts":[]}"#).expect("parse");
+    assert_eq!(older.maybe_backup, None);
+    let snapshot = SecuritySnapshot {
+      maybe_backup: Some(crate::security::KeyBackupState {
+        is_stored: true,
+        has_pending_upload: false,
+        recovery: vec![crate::security::RecoveryMethod::Passphrase],
+        maybe_passphrase_set_at: Some(1_000),
+      }),
+      ..SecuritySnapshot::default()
+    };
+    let json = serde_json::to_value(&snapshot).expect("serialize");
+    assert_eq!(
+      json["backup"],
+      serde_json::json!({"is_stored": true, "has_pending_upload": false, "recovery": ["passphrase"], "passphrase_set_at": 1000})
+    );
+    let newer: crate::security::KeyBackupState =
+      serde_json::from_str(r#"{"is_stored":true,"recovery":["passphrase","hardware_key"]}"#).expect("parse");
+    assert_eq!(
+      newer.recovery,
+      [
+        crate::security::RecoveryMethod::Passphrase,
+        crate::security::RecoveryMethod::Unknown
+      ]
     );
   }
 

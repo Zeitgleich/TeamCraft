@@ -52,6 +52,7 @@ use teamcraft_proto::{
 use teamcraft_proto::{CreateDeviceLinkRequest, DeviceLinkClosedReason, DeviceLinkRequest};
 use teamcraft_proto::{CreateInstantMeetingRequest, MeetingKind, MeetingResponse, MeetingStatus};
 use teamcraft_proto::{DeviceListResponse, PutDeviceListRequest};
+use teamcraft_proto::{DevicePushHealth, PushDeliveryCounts, PushHealthResponse, UpdateDeviceRequest};
 use teamcraft_proto::{ErrorBody, RendezvousClientMessage, RendezvousServerMessage};
 use teamcraft_proto::{
   GatewayInfoResponse, GatewayLimits, GatewayTokenKey, PushGatewayBinding, PushGatewayResponse, PushProvider,
@@ -1594,13 +1595,48 @@ impl ServerApi for FakeServerApi {
   }
 
   async fn list_user_devices(&self, user: UserId) -> Result<ListDevicesResponse, ApiError> {
-    self.with(|state, _| {
+    self.with(|state, me| {
       Ok(ListDevicesResponse {
         devices: state
           .devices_of(user)
-          .map(|device| device.response.clone())
+          .map(|device| {
+            // Like the server: other users get the keys, not the name or the push service.
+            if user == me {
+              device.response.clone()
+            } else {
+              DeviceResponse {
+                name: String::new(),
+                maybe_push_provider: None,
+                ..device.response.clone()
+              }
+            }
+          })
           .collect(),
       })
+    })
+  }
+
+  async fn update_device(
+    &self,
+    device: DeviceId,
+    request: &UpdateDeviceRequest,
+  ) -> Result<DeviceResponse, ApiError> {
+    self.with(|state, me| {
+      state.ensure_own_device(me, device)?;
+      let name = request.name.trim();
+      if name.is_empty() {
+        return Err(ApiError::status(
+          400,
+          ErrorCode::InvalidRequest,
+          "empty device name",
+        ));
+      }
+      let stored = state
+        .devices
+        .get_mut(&device)
+        .ok_or_else(|| ApiError::status(404, ErrorCode::DeviceNotFound, "unknown device"))?;
+      stored.response.name = name.to_owned();
+      Ok(stored.response.clone())
     })
   }
 
@@ -4406,6 +4442,30 @@ impl ServerApi for FakeServerApi {
         maybe_provider,
         sent_at: UnixMillis(0),
       })
+    })
+  }
+
+  async fn my_push_health(&self) -> Result<PushHealthResponse, ApiError> {
+    self.with(|state, me| {
+      let devices = state
+        .devices_of(me)
+        .map(|device| {
+          let maybe_provider = state
+            .push_registrations
+            .get(&device.response.id)
+            .map(|registration| registration.provider.clone());
+          DevicePushHealth {
+            device_id: device.response.id,
+            counts: PushDeliveryCounts {
+              sent: u64::from(maybe_provider.is_some()),
+              maybe_last_sent_at: maybe_provider.as_ref().map(|_| UnixMillis(1_000)),
+              ..PushDeliveryCounts::default()
+            },
+            maybe_provider,
+          }
+        })
+        .collect();
+      Ok(PushHealthResponse { devices })
     })
   }
 

@@ -160,6 +160,8 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
         self.revoke_device(device).await?;
         self.refresh_own_devices().await
       },
+      CoreCommand::RenameOwnDevice { device, name } => self.rename_own_device(device, &name).await,
+      CoreCommand::TestPushOwnDevice { device } => self.test_push_own_device(device).await,
       CoreCommand::UploadFiles => self.upload_pending().await.map(|_| ()),
       CoreCommand::GeneratePreviews => self.generate_pending_previews().await.map(|_| ()),
       CoreCommand::DownloadFile {

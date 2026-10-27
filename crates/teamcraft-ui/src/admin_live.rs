@@ -31,7 +31,7 @@ use teamcraft_proto::{
 
 use crate::admin::{
   AdminChannel, AdminLoad, AdminSpace, AdminSpaceChanges, AdminUser, AuditAction, AuditEntry, AuditFilter,
-  DeviceInfo, Retention, SettingsTestKind,
+  DeviceInfo, DeviceVerification, Retention, SettingsTestKind,
 };
 use crate::auth::{ApiMethod, Authenticator, BinaryBody};
 use crate::model::{
@@ -1123,6 +1123,9 @@ fn user_from_wire(
         platform: String::new(),
         last_seen: device.maybe_last_seen_at.unwrap_or(device.created_at).0,
         is_current: false,
+        // Admins see the server's list; verifying is for the user's own devices.
+        verification: DeviceVerification::Unknown,
+        maybe_push: None,
       })
       .collect(),
     last_seen: summary.maybe_last_seen_at.unwrap_or(summary.created_at).0,

@@ -12002,6 +12002,127 @@ select.tv-level { min-width: 0; }
   overflow-wrap: anywhere;
 }
 
+/* Devices: what this device verified, the push state and the actions (issue #409). */
+.set-device-check {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  font-size: var(--text-sm);
+  line-height: 1.4;
+}
+
+.set-device-check svg {
+  flex: none;
+  width: 14px;
+  height: 14px;
+}
+
+.set-device-check.is-verified {
+  color: var(--accent-strong);
+}
+
+.set-device-check.is-pending {
+  color: var(--text-muted);
+}
+
+.set-device-check.is-unverified {
+  color: var(--danger);
+  font-weight: 500;
+}
+
+.set-device-test.is-warn {
+  color: var(--warn-text);
+}
+
+.set-device-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: var(--space-2);
+}
+
+.set-device-rename {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2);
+  width: 100%;
+  animation: motion-fade-in var(--dur-fast) var(--ease-standard);
+}
+
+.set-device-rename .input {
+  flex: 1 1 14rem;
+  min-width: 0;
+}
+
+/* Security: the key backup in plain words (issue #410). */
+.set-backup {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  padding: var(--space-3) var(--space-4);
+  border-bottom: 1px solid var(--border);
+}
+
+.set-backup-icon {
+  flex: none;
+  display: inline-grid;
+  place-items: center;
+  width: 36px;
+  height: 36px;
+  border-radius: 50%;
+  background: var(--surface-2);
+}
+
+.set-backup.is-ok .set-backup-icon {
+  color: var(--online);
+  background: color-mix(in srgb, var(--online) 12%, var(--surface));
+}
+
+.set-backup.is-warn .set-backup-icon {
+  color: var(--away);
+  background: color-mix(in srgb, var(--away) 14%, var(--surface));
+}
+
+/* Help & about: the instance's links. */
+.set-links {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.set-links > li + li {
+  border-top: 1px solid var(--border);
+}
+
+.set-link {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+  padding: var(--space-3) var(--space-4);
+  color: var(--text);
+  text-decoration: none;
+}
+
+.set-link:hover,
+.set-link:focus-visible {
+  background: var(--surface-2);
+}
+
+.set-link svg {
+  flex: none;
+  width: 16px;
+  height: 16px;
+  color: var(--text-muted);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .set-device-rename {
+    animation: none;
+  }
+}
+
 /* An inline confirm step for destructive actions. */
 .set-confirm {
   display: flex;

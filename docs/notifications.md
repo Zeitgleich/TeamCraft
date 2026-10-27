@@ -481,6 +481,10 @@ read without bringing the window up).
 - `GET /api/v1/admin/users/{id}/push-health`: per device the provider and counts since the server
   started (sent, failed, suppressed by DND, held for an attentive desktop, dismissals) with the time of
   the last success and failure. Counts only: no message, conversation or token.
+- `GET /api/v1/me/push-health`: the same for the caller's own devices. Settings > Devices shows per
+  device the push service and when the last push went out, and sends a test push to any of them
+  (issue #409). The counts live in the server process, so after a restart a device shows no push until
+  the next one.
 
 ### What only real devices can show
 

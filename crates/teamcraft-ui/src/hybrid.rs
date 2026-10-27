@@ -1565,6 +1565,19 @@ impl<C: ChatBackend> SecurityBackend for Hybrid<C> {
     self.chat.refresh_own_devices();
   }
 
+  fn rename_my_device(&self, device: DeviceId, name: String) {
+    self.chat.rename_own_device(device, name);
+  }
+
+  fn test_push_my_device(&self, device: DeviceId) {
+    self.chat.test_push_own_device(device);
+  }
+
+  /// `None` while the core has not reported it (or there is no core).
+  fn key_backup(&self) -> Option<teamcraft_client_api::security::KeyBackupState> {
+    self.chat.security_keys().maybe_backup
+  }
+
   fn key_change(&self, conversation: ConversationId) -> Option<KeyChange> {
     let keys = self.chat.security_keys();
     let members = self.chat.conversation(conversation)?.member_ids;

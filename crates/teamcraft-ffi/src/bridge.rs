@@ -293,6 +293,13 @@ impl Engine {
         )
       },
       maybe_presence_policy: teamcraft_core::workspace::presence_policy(self.store.as_ref()),
+      maybe_backup: teamcraft_core::ui_snapshot::key_backup_state(self.store.as_ref()).unwrap_or_else(
+        |error| {
+          // The app then shows the backup as unknown; the rest of the snapshot still counts.
+          tracing::warn!(%error, "the key backup state is unreadable");
+          None
+        },
+      ),
     })
   }
 }

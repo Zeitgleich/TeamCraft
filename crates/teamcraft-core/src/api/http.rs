@@ -56,6 +56,7 @@ use teamcraft_proto::{
 };
 use teamcraft_proto::{ListThreadsQuery, ListThreadsResponse, MessageId, SyncHeadsResponse, UnreadResponse};
 use teamcraft_proto::{NotificationSettings, TestPushResponse};
+use teamcraft_proto::{PushHealthResponse, UpdateDeviceRequest};
 use teamcraft_proto::{SetPresenceRequest, SetReadPositionRequest, UpdateConversationMemberRequest};
 
 #[cfg(target_arch = "wasm32")]
@@ -300,6 +301,16 @@ impl<T: AccessTokenSource> ServerApi for HttpServerApi<T> {
 
   async fn list_user_devices(&self, user: UserId) -> Result<ListDevicesResponse, ApiError> {
     self.get(&format!("/users/{user}/devices")).await
+  }
+
+  async fn update_device(
+    &self,
+    device: DeviceId,
+    request: &UpdateDeviceRequest,
+  ) -> Result<DeviceResponse, ApiError> {
+    self
+      .send_json(Method::PATCH, &format!("/devices/{device}"), request)
+      .await
   }
 
   async fn put_identity_key(
@@ -1274,6 +1285,10 @@ impl<T: AccessTokenSource> ServerApi for HttpServerApi<T> {
         &serde_json::json!({}),
       )
       .await
+  }
+
+  async fn my_push_health(&self) -> Result<PushHealthResponse, ApiError> {
+    self.get("/me/push-health").await
   }
 
   async fn notification_settings(&self) -> Result<NotificationSettings, ApiError> {

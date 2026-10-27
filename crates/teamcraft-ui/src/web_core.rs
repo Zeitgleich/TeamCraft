@@ -1965,6 +1965,11 @@ impl Core {
       maybe_push_content: Some(teamcraft_core::push_preview::push_content_mode(client.store())),
       maybe_owners: client.owner_roster_status(),
       maybe_presence_policy: teamcraft_core::workspace::presence_policy(client.store()),
+      maybe_backup: teamcraft_core::ui_snapshot::key_backup_state(client.store()).unwrap_or_else(|error| {
+        // The settings then show the backup as unknown; the rest of the snapshot still counts.
+        tracing::warn!(%error, "the key backup state is unreadable");
+        None
+      }),
     })
   }
 
