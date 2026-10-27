@@ -1408,6 +1408,14 @@ impl ChatBackend for RemoteChat {
     self.act(ChatAction::RevokeOwnDevice { device });
   }
 
+  fn rename_own_device(&self, device: teamcraft_proto::DeviceId, name: String) {
+    self.act(ChatAction::RenameOwnDevice { device, name });
+  }
+
+  fn test_push_own_device(&self, device: teamcraft_proto::DeviceId) {
+    self.act(ChatAction::TestPushOwnDevice { device });
+  }
+
   fn security_keys(&self) -> teamcraft_client_api::remote::SecuritySnapshot {
     self.mirror.borrow().snapshot.security.clone()
   }

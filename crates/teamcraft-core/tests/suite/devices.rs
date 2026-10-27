@@ -277,6 +277,159 @@ mod read_state_events {
   }
 }
 
+/// The user's own devices in the settings (issue #409) and the key backup state (issue #410).
+#[cfg(feature = "ui")]
+mod own_devices {
+  use teamcraft_client_api::security::RecoveryMethod;
+  use teamcraft_core::client::OwnDeviceCheck;
+  use teamcraft_core::client::devices::{OWN_DEVICES_KEY, OwnDevicesRecord};
+  use teamcraft_core::records;
+  use teamcraft_core::ui_snapshot::key_backup_state;
+  use teamcraft_proto::{PushProvider, RegisterPushRequest, TestPushOutcome};
+
+  use super::*;
+
+  const START_MS: i64 = 1_800_000_000_000;
+
+  #[tokio::test]
+  async fn the_users_devices_are_verified_and_one_the_server_made_up_is_not() {
+    let server = FakeServer::new();
+    let clock = Arc::new(ManualClock::new(START_MS));
+    let mut alice = enroll(&server, "Alice", &clock).await;
+    let laptop = link_new_device(&mut alice, &clock).await;
+    // Only the server's word: a device with a certificate the identity key never signed.
+    let made_up = alice
+      .api
+      .register_device(&RegisterDeviceRequest {
+        name: "Made up".into(),
+        public_key: Base64Bytes::new(vec![1; 32]),
+        cross_signature: Base64Bytes::new(vec![2; 64]),
+      })
+      .await
+      .unwrap();
+    // A real certificate of the user, copied onto another device the server lists.
+    let listed = alice.api.list_user_devices(alice.client.user_id()).await.unwrap();
+    let laptop_entry = listed
+      .devices
+      .iter()
+      .find(|device| device.id == laptop.device_id())
+      .unwrap();
+    let copied = alice
+      .api
+      .register_device(&RegisterDeviceRequest {
+        name: "Copied".into(),
+        public_key: laptop_entry.public_key.clone(),
+        cross_signature: laptop_entry.cross_signature.clone(),
+      })
+      .await
+      .unwrap();
+
+    alice.client.refresh_own_devices().await.unwrap();
+    let record = own_devices(&alice);
+    assert_eq!(record.devices.len(), 4);
+    assert_eq!(state_of(&record, copied.id), OwnDeviceCheck::Unverified);
+    assert_eq!(
+      state_of(&record, alice.client.device_id()),
+      OwnDeviceCheck::Verified
+    );
+    assert_eq!(state_of(&record, laptop.device_id()), OwnDeviceCheck::Verified);
+    assert_eq!(state_of(&record, made_up.id), OwnDeviceCheck::Unverified);
+  }
+
+  #[tokio::test]
+  async fn a_renamed_device_and_a_test_push_show_in_the_list() {
+    let server = FakeServer::new();
+    let clock = Arc::new(ManualClock::new(START_MS));
+    let mut alice = enroll(&server, "Alice", &clock).await;
+    let me = alice.client.device_id();
+
+    alice
+      .client
+      .rename_own_device(me, "  Work laptop ")
+      .await
+      .unwrap();
+    let record = own_devices(&alice);
+    assert_eq!(record.devices[0].name, "Work laptop");
+    let push = record.maybe_push.as_ref().unwrap();
+    assert_eq!(push[0].maybe_provider, None);
+
+    alice
+      .api
+      .register_push(
+        me,
+        &RegisterPushRequest {
+          provider: PushProvider::Fcm,
+          token: "device-token".into(),
+          push_key: Base64Bytes::new(vec![7; 32]),
+        },
+      )
+      .await
+      .unwrap();
+    alice.client.test_push_own_device(me).await.unwrap();
+    let record = own_devices(&alice);
+    assert_eq!(record.tests.len(), 1);
+    assert_eq!(
+      (record.tests[0].device, &record.tests[0].outcome),
+      (me, &TestPushOutcome::Sent)
+    );
+    let push = record.maybe_push.as_ref().unwrap();
+    assert_eq!(push[0].maybe_provider, Some(PushProvider::Fcm));
+    // The outcome stays when the list is read again.
+    alice.client.refresh_own_devices().await.unwrap();
+    assert_eq!(own_devices(&alice).tests, record.tests);
+  }
+
+  #[tokio::test]
+  async fn the_backup_state_names_the_passphrase_and_when_it_was_last_set() {
+    let server = FakeServer::new();
+    let clock = Arc::new(ManualClock::new(START_MS));
+    let mut alice = enroll(&server, "Alice", &clock).await;
+    let state = key_backup_state(alice.client.store()).unwrap().unwrap();
+    assert!(state.is_stored);
+    assert_eq!(state.recovery, [RecoveryMethod::Passphrase]);
+    assert_eq!(state.maybe_passphrase_set_at, Some(START_MS));
+
+    clock.advance(60_000);
+    alice
+      .client
+      .upload_key_bag_with(
+        &SecretBytes::new(b"a newer passphrase".to_vec()),
+        options(PASSPHRASE).argon2,
+      )
+      .await
+      .unwrap();
+    let state = key_backup_state(alice.client.store()).unwrap().unwrap();
+    assert_eq!(state.maybe_passphrase_set_at, Some(START_MS + 60_000));
+    assert!(!state.has_pending_upload, "uploaded with the new wrap");
+
+    // The user's other device learns it with the key bag.
+    let mut laptop = link_new_device(&mut alice, &clock).await;
+    laptop.sync_account_data().await.unwrap();
+    let on_laptop = key_backup_state(laptop.store()).unwrap().unwrap();
+    assert_eq!(on_laptop.maybe_passphrase_set_at, Some(START_MS + 60_000));
+  }
+
+  #[test]
+  fn without_known_wraps_the_state_is_unknown() {
+    assert_eq!(key_backup_state(&MemoryStore::new()).unwrap(), None);
+  }
+
+  fn own_devices(peer: &Peer) -> OwnDevicesRecord {
+    records::get_json(peer.store.as_ref(), Table::SyncState, OWN_DEVICES_KEY)
+      .unwrap()
+      .unwrap()
+  }
+
+  fn state_of(record: &OwnDevicesRecord, device: teamcraft_proto::DeviceId) -> OwnDeviceCheck {
+    record
+      .verification
+      .iter()
+      .find(|(id, _)| *id == device)
+      .map(|(_, state)| *state)
+      .unwrap()
+  }
+}
+
 async fn enroll(server: &FakeServer, name: &str, clock: &Arc<ManualClock>) -> Peer {
   let api = server.add_user(name);
   let store = Arc::new(MemoryStore::new());
