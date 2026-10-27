@@ -524,6 +524,8 @@ a jump to the message.
   expired. It has no read state: "Mark all as read" leaves it, and the badge counts it while it
   waits. Each device shows one system notification per request (Approve where the verified roster
   lists the admin, and Decline), remembered across restarts and withdrawn once the request is gone.
+  Approve in the notification shares only what is posted from then on and says so; sharing the
+  earlier history is a choice in Activity or the channel settings.
 
 ## Call history
 
