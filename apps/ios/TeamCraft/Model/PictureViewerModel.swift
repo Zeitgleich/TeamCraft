@@ -18,9 +18,16 @@ enum OriginalDownloadSetting: String, CaseIterable, Identifiable {
   case never
 
   static let key = "original_download"
+  /// Unless the user chose otherwise: Wi-Fi only, so opening pictures never spends mobile data unasked.
+  static let fallback = OriginalDownloadSetting.unmeteredOnly
 
   static var current: OriginalDownloadSetting {
-    UserDefaults.standard.string(forKey: key).flatMap(OriginalDownloadSetting.init(rawValue:)) ?? .always
+    stored(UserDefaults.standard.string(forKey: key))
+  }
+
+  /// The stored choice; nothing (or something unknown) is the fallback. An explicit choice is kept.
+  static func stored(_ maybeRaw: String?) -> OriginalDownloadSetting {
+    maybeRaw.flatMap(OriginalDownloadSetting.init(rawValue:)) ?? fallback
   }
 
   var id: String { rawValue }

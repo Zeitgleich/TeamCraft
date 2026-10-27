@@ -34,6 +34,9 @@ class MediaPrefs private constructor(private val context: Context) {
   }
 }
 
-/** The stored choice; nothing (or something unknown) is the default, as on desktop and web: always. */
+/**
+ * The stored choice. Nothing stored (or something unknown) is the default, Wi-Fi only: opening
+ * pictures never spends mobile data unasked. An explicit choice is kept as it is.
+ */
 internal fun originalDownloadOf(maybeStored: String?): OriginalDownload =
-  OriginalDownload.entries.firstOrNull { it.name == maybeStored } ?: OriginalDownload.ALWAYS
+  OriginalDownload.entries.firstOrNull { it.name == maybeStored } ?: OriginalDownload.UNMETERED_ONLY
