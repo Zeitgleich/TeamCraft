@@ -42,6 +42,10 @@ is loopback by default; if you open it, use a firewall or TLS proxy.
 Log lines are batched into one message per second (or 64 KB). Sources have a rate limit (600/min by
 default); alert levels and `danger` webhook attachments can @mention people.
 
+A producer that retries webhooks should send an `Idempotency-Key` header (one random value per
+message, the same with every attempt): a retry after a lost answer is then answered without posting
+twice. Keys are kept for 10 minutes, in memory (docs/bridge.md, "Retries").
+
 ## Operations
 
 | Task               | How                                                                           |

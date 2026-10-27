@@ -19,6 +19,7 @@ use tracing::{info, warn};
 use crate::config::BridgeConfig;
 use crate::file_hooks::FileSettings;
 use crate::http::{HttpState, Submission, router};
+use crate::idempotency::IdempotencyStore;
 use crate::sources::SourceRegistry;
 use crate::worker::{AppSourceSettings, Worker, WorkerSettings};
 
@@ -157,7 +158,8 @@ pub async fn start_endpoints(
       "deleted files an earlier run left in the spool directory"
     );
   }
-  let state = HttpState::new(sources, sender, files);
+  let keys = IdempotencyStore::new(&config.idempotency);
+  let state = HttpState::new(sources, sender, files, keys);
   let (stop, stopped) = watch::channel(false);
   let mut listeners: Vec<TcpListener> = Vec::new();
   for addr in &config.listen.addrs {
