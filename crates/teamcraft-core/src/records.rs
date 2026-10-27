@@ -209,6 +209,16 @@ pub fn stored_device_id(store: &impl LocalStore) -> Result<Option<DeviceId>, Cor
   Ok(get_json::<DeviceOnly>(store, Table::Account, ACCOUNT_KEY)?.map(|record| record.device_id))
 }
 
+/// The account's user ID alone, like [`stored_device_id`]: the service worker finds the account's
+/// media cache by it.
+pub fn account_user_id(store: &impl LocalStore) -> Result<Option<UserId>, CoreError> {
+  #[derive(Deserialize)]
+  struct UserOnly {
+    user_id: UserId,
+  }
+  Ok(get_json::<UserOnly>(store, Table::Account, ACCOUNT_KEY)?.map(|record| record.user_id))
+}
+
 pub fn load_account(store: &impl LocalStore) -> Result<Option<Account>, CoreError> {
   let Some(record) = get_json::<AccountRecord>(store, Table::Account, ACCOUNT_KEY)? else {
     return Ok(None);
@@ -673,6 +683,12 @@ mod tests {
     save_account(&store, &account).unwrap();
     let loaded = load_account(&store).unwrap().unwrap();
     assert_eq!(loaded.user_id, account.user_id);
+    assert_eq!(account_user_id(&store).unwrap(), Some(account.user_id));
+    assert_eq!(
+      account_user_id(&MemoryStore::new()).unwrap(),
+      None,
+      "no account yet"
+    );
     assert_eq!(loaded.device.public_keys(), account.device.public_keys());
     assert_eq!(loaded.identity_public_key(), account.identity_public_key());
     assert_eq!(loaded.certificate, account.certificate);

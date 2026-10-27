@@ -13,14 +13,17 @@ pub mod downloads;
 pub mod error;
 pub mod integration_sources;
 pub mod link_preview;
-// The keys come from the UI contract (client-api), which the hosts of a UI build in.
-#[cfg(feature = "ui")]
+// The keys come from the UI contract (client-api), which the hosts of a UI build in; the service
+// worker reads pictures for its notifications.
+#[cfg(any(feature = "ui", feature = "service-worker"))]
 pub mod media_cache;
 pub mod notify_rules;
 pub mod picked_files;
 pub mod platform;
 pub mod prefetch;
 pub mod push_guard;
+#[cfg(any(feature = "ui", feature = "service-worker"))]
+pub mod push_picture;
 pub mod push_preview;
 pub mod push_subscription;
 pub mod push_text;

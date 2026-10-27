@@ -22,8 +22,9 @@ sealed-sqlite = ["dep:rusqlite", "rusqlite/bundled"]
 # Adapter implementing the UI's backend traits (crates/teamcraft-client-api).
 ui = ["dep:teamcraft-client-api"]
 # The Web Push service worker's entry points (`handlePush`, `handleNotificationClick`), exported
-# with wasm-bindgen for web/service-worker.js. Only has an effect on wasm32.
-service-worker = []
+# with wasm-bindgen for web/service-worker.js. Only has an effect on wasm32. The worker reads the
+# notification's picture from the media cache, whose keys are the UI contract's (#543).
+service-worker = ["dep:teamcraft-client-api"]
 # Tests against the running dev stack (README.md): server on 8081, Keycloak on 8080.
 integration = []
 # Test kits for other crates' tests (`api::black_hole`: Happy Eyeballs with a black-holed IPv6).
