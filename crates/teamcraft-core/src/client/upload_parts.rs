@@ -316,7 +316,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     let Ok(content) = read_segment(&file.source, 0, file.size_bytes, file.size_bytes).await else {
       return;
     };
-    if let Some(thumbnail) = crate::thumbnail::thumbnail(&content, &file.media_type) {
+    if let Some(thumbnail) = crate::thumbnail::make_thumbnail(&content, &file.media_type).await {
       file.maybe_thumbnail = Some(Base64Bytes::new(thumbnail));
     }
     file.maybe_dimensions = file.maybe_dimensions.or_else(|| {

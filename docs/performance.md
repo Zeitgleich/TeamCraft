@@ -598,8 +598,10 @@ The app is split into wasm chunks (`crates/teamcraft-ui/src/areas.rs`, built by
   what a guest downloads doesn't.
 - **Areas loaded when first used:** the administration console, settings, the lightbox, the
   workspace dialogs (spaces, channels, invitations), the call screens, meetings, the directory and
-  search. `lazy_area` shows a spinner when a chunk takes a moment and an error with a retry when it
-  can't load.
+  search; since 1.0.8 also the account menu, the dialogs a first visit doesn't open, the Saved,
+  Files and Calls pages, Activity, a conversation's members and pins, an integration channel's log
+  view and the image codecs that make thumbnails (below). `lazy_area` shows a spinner when a chunk
+  takes a moment and an error with a retry when it can't load.
 - Code several modules share goes into shared chunks (one per combination of modules), so each file
   is downloaded once.
 - The call engine (`teamcraft-web-calls`, #330) stays a module of its own that loads in the
@@ -631,6 +633,45 @@ or a contact) moved into areas. Release `trunk build` in the local CI image, gzi
 | Signed-in app  | 1,999,066 B         | 1,936,659 B | −62,407 B |
 | Service worker | 375,193 B           | 375,193 B   | 0 B       |
 | Total          | 4,730,565 B         | 4,670,704 B | −59,861 B |
+
+Over the budget again after 1.0.8 (CI: 4,809,730 B). The growth had no single cause: the 1.0.8 features (sync
+heads, the persistent media cache, one active tab, permission gating, desktop file menus and drops)
+added about 0.4 MB of first-visit code before wasm-opt, spread over the core and the shell. No
+debug code or new dependency came with them. Three kinds of code a first visit doesn't need were in
+it, and moved out:
+
+- **The image codecs** (`image`, zune-jpeg, png, image-webp, gif and the encoders, about 0.5 MB
+  before wasm-opt): `thumbnail.rs` makes thumbnails of sent pictures, and `image_dimensions` read the
+  header through `ImageReader::into_decoder`, a `dyn ImageDecoder` whose vtables link every
+  decoder's whole decoding. Now `image_dimensions` calls the format's decoder directly (headers
+  only; a test checks it reads the same sizes as before), and in the browser the engine makes
+  thumbnails through `make_thumbnail`, which the web app answers from the `images` chunk the first
+  time a picture needs one (`web_core.rs`). Natively nothing changed.
+- **`lazy_area`'s own views** were generic over each caller's closure, so every split point copied
+  the placeholder and the error view into the signed-in app (about 0.25 MB before wasm-opt for the
+  34 callers on `a6323ac5`, more with every new area). They are built once now; a caller only boxes
+  its loader.
+- **More areas:** the account menu and the custom status (`account`), a person's profile, a new
+  direct message, linking and approving a device, "calls unavailable" (`dialogs`), the Saved, Files
+  and Calls pages and a conversation's members and pins (`places`), Activity (`activity`), an
+  integration channel's log view (`log`) and a channel's preview before joining (`workspace`).
+
+Release `trunk build` on macOS (trunk 0.22.0, Rust 1.99.1, wasm-opt 131, the CI job's commands; the
+before is 128 B from CI's), gzip -9:
+
+| Web wasm       | Before (`a6323ac5`) | After       | Delta      |
+|----------------|---------------------|-------------|------------|
+| App            | 2,416,993 B         | 2,287,481 B | −129,512 B |
+| Signed-in app  | 2,016,805 B         | 1,900,122 B | −116,683 B |
+| Service worker | 375,804 B           | 375,804 B   | 0 B        |
+| Total          | 4,809,602 B         | 4,563,407 B | −246,195 B |
+
+By step, measured one after the other: the areas −59 kB and −33 kB, `lazy_area` −26 kB, the image
+codecs −128 kB. A guest's first visit went from 2.79 MB to 2.66 MB. Still in the first visit and the
+next candidates: the admin console's data layer (`admin_live.rs`, about 0.1 MB before wasm-opt),
+which the shell reaches through the backend's vtable and uses for an admin's permission scheme
+outside the console, and the image headers `image_dimensions` reads (about 0.15 MB before
+wasm-opt).
 
 Release `trunk build` in the CI image (Rust 1.99.1, trunk 0.22.0, wasm-opt 131), `main` c55b2e58:
 
@@ -683,7 +724,8 @@ there is no cheap megabyte left. What would make the first visit smaller:
 
 - **Split the bundle:** done (#334, above).
 - **Thumbnails through the browser** (`createImageBitmap` and `OffscreenCanvas`) instead of the
-  `image` decoders on wasm: about 0.35 MB.
+  `image` decoders on wasm: about 0.35 MB. Since 1.0.8 the codecs load only with the first picture
+  (above), so this would now save a lazily loaded chunk, not first-visit bytes.
 - **Leaner deserializers** for the largest wire enums: `ChatAction` alone is 129 kB, decoded from a
   `serde_json::Value`. Internally tagged enums go through serde's buffering `Content`, which adds
   0.25 MB.

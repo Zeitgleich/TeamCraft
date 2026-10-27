@@ -3,11 +3,29 @@
 //!
 //! A thumbnail is a JPEG, or a PNG when the picture has transparency. Receivers read the format
 //! from the bytes (older clients made PNGs only), so either works everywhere.
+//!
+//! In the browser the image codecs are a large part of the web app that a first visit doesn't need
+//! (docs/performance.md, "Web bundle size"): the engine makes thumbnails through
+//! [`make_thumbnail`], which there hands the work to the app's `Thumbnailer`, and the app loads
+//! the codecs the first time a picture needs one. [`image_dimensions`] reads headers only, so it
+//! stays small enough for every page.
 
+#[cfg(target_arch = "wasm32")]
+use std::cell::RefCell;
+#[cfg(target_arch = "wasm32")]
+use std::future::Future;
 use std::io::Cursor;
+#[cfg(target_arch = "wasm32")]
+use std::pin::Pin;
+#[cfg(target_arch = "wasm32")]
+use std::rc::Rc;
 
-use image::codecs::jpeg::JpegEncoder;
-use image::codecs::png::{CompressionType, FilterType as PngFilter, PngEncoder};
+use image::codecs::bmp::BmpDecoder;
+use image::codecs::gif::GifDecoder;
+use image::codecs::ico::IcoDecoder;
+use image::codecs::jpeg::{JpegDecoder, JpegEncoder};
+use image::codecs::png::{CompressionType, FilterType as PngFilter, PngDecoder, PngEncoder};
+use image::codecs::webp::WebPDecoder;
 use image::metadata::Orientation;
 use image::{DynamicImage, ImageDecoder, ImageFormat, ImageReader, Limits};
 
@@ -34,6 +52,18 @@ const PNG_STEPS: [u32; 3] = [THUMBNAIL_SIZE, 480, 320];
 const MAX_PIXELS: u64 = 40_000_000;
 /// Memory the decoder may allocate.
 const MAX_DECODER_BYTES: u64 = 256 * 1024 * 1024;
+
+#[cfg(target_arch = "wasm32")]
+thread_local! {
+  /// The browser's thumbnailer, installed by the web app (see [`set_thumbnailer`]).
+  static THUMBNAILER: RefCell<Option<Thumbnailer>> = const { RefCell::new(None) };
+}
+
+/// Makes [`thumbnail`]s in the browser: the web app's, which loads the image codecs when first
+/// needed (see [`make_thumbnail`]).
+#[cfg(target_arch = "wasm32")]
+pub type Thumbnailer =
+  Rc<dyn for<'a> Fn(&'a [u8], &'a str) -> Pin<Box<dyn Future<Output = Option<Vec<u8>>> + 'a>>>;
 
 /// A thumbnail of an image file, upright and at most [`THUMBNAIL_SIZE`] pixels on its longer side,
 /// or `None` for anything that isn't a decodable image (or can't be made small enough).
@@ -65,6 +95,31 @@ pub fn thumbnail_within(bytes: &[u8], media_type: &str, max_pixels: u64) -> Opti
       .filter_map(|&(side, quality)| encode_jpeg(&fitted(&image, side), quality))
       .find(|jpeg| jpeg.len() <= MAX_THUMBNAIL_BYTES)
   }
+}
+
+/// [`thumbnail`] as the platform makes it: right here natively; in the browser by the
+/// `Thumbnailer` the web app installed (`set_thumbnailer`), so the codecs load only once a picture
+/// needs them. Without one a picture gets no thumbnail, like a file that isn't a picture.
+pub async fn make_thumbnail(bytes: &[u8], media_type: &str) -> Option<Vec<u8>> {
+  #[cfg(target_arch = "wasm32")]
+  {
+    // Not a picture: no reason to load the codecs.
+    if !essence(media_type).starts_with("image/") {
+      return None;
+    }
+    let thumbnailer = THUMBNAILER.with(|slot| slot.borrow().clone())?;
+    thumbnailer(bytes, media_type).await
+  }
+  #[cfg(not(target_arch = "wasm32"))]
+  {
+    thumbnail(bytes, media_type)
+  }
+}
+
+/// Installs the browser's [`Thumbnailer`] for [`make_thumbnail`]; the web app does when it starts.
+#[cfg(target_arch = "wasm32")]
+pub fn set_thumbnailer(thumbnailer: Thumbnailer) {
+  THUMBNAILER.with(|slot| *slot.borrow_mut() = Some(thumbnailer));
 }
 
 /// A media type without parameters, trimmed and lowercase: senders write whatever they like.
@@ -212,11 +267,28 @@ pub fn image_dimensions(bytes: &[u8], media_type: &str) -> Option<(u32, u32)> {
   if !essence(media_type).starts_with("image/") {
     return None;
   }
-  let mut decoder = ImageReader::new(Cursor::new(bytes))
+  // The format's decoder called directly, as `ImageReader::into_decoder` makes it (the same
+  // decoders, limits and orientation): that one is a `dyn ImageDecoder`, which would link every
+  // decoder's whole decoding into each page of the browser, where only the thumbnails need it.
+  let format = ImageReader::new(Cursor::new(bytes))
     .with_guessed_format()
     .ok()?
-    .into_decoder()
-    .ok()?;
+    .format()?;
+  let reader = Cursor::new(bytes);
+  match format {
+    ImageFormat::Png => upright_size(PngDecoder::with_limits(reader, Limits::default()).ok()?),
+    ImageFormat::Jpeg => upright_size(JpegDecoder::new(reader).ok()?),
+    ImageFormat::Gif => upright_size(GifDecoder::new(reader).ok()?),
+    ImageFormat::WebP => upright_size(WebPDecoder::new(reader).ok()?),
+    ImageFormat::Bmp => upright_size(BmpDecoder::new(reader).ok()?),
+    ImageFormat::Ico => upright_size(IcoDecoder::new(reader).ok()?),
+    _ => None,
+  }
+}
+
+/// Width and height from a decoder's header, turned upright; `None` for an empty picture.
+fn upright_size(mut decoder: impl ImageDecoder) -> Option<(u32, u32)> {
+  decoder.set_limits(Limits::default()).ok()?;
   let (width, height) = decoder.dimensions();
   let is_sideways = matches!(
     decoder.orientation().ok()?,
@@ -357,6 +429,55 @@ mod tests {
       Some((1000, 500))
     );
     assert_eq!(image_dimensions(b"%PDF-1.7", "application/pdf"), None);
+  }
+
+  #[test]
+  fn natively_the_engine_makes_thumbnails_right_here() {
+    use futures_util::FutureExt;
+    let picture = ImageBuffer::from_fn(1000, 500, |x, _| Rgb([(x % 256) as u8, 40, 80]));
+    let jpeg = encoded(&picture, ImageFormat::Jpeg);
+    let made = make_thumbnail(&jpeg, "image/jpeg").now_or_never();
+    assert_eq!(made, Some(thumbnail(&jpeg, "image/jpeg")));
+    assert!(made.flatten().is_some());
+    assert_eq!(
+      make_thumbnail(b"%PDF-1.7", "application/pdf").now_or_never(),
+      Some(None)
+    );
+  }
+
+  /// The decoders called directly read the same sizes as `ImageReader::into_decoder` (what this
+  /// function used before the web app split its codecs off), for every format and for junk.
+  #[test]
+  fn dimensions_match_the_generic_decoder_for_every_format() {
+    let opaque = ImageBuffer::from_fn(30, 20, |x, y| Rgb([x as u8, y as u8, 7]));
+    let translucent = ImageBuffer::from_fn(30, 20, |x, _| Rgba([x as u8, 9, 9, 128]));
+    let png = encoded(&translucent, ImageFormat::Png);
+    let samples = [
+      (png.clone(), "image/png"),
+      (encoded(&opaque, ImageFormat::Jpeg), "image/jpeg"),
+      (
+        with_exif_orientation(&encoded(&opaque, ImageFormat::Jpeg), 6),
+        "image/jpeg",
+      ),
+      (encoded(&translucent, ImageFormat::Gif), "image/gif"),
+      (encoded(&translucent, ImageFormat::WebP), "image/webp"),
+      (encoded(&opaque, ImageFormat::Bmp), "image/bmp"),
+      (encoded(&translucent, ImageFormat::Ico), "image/x-icon"),
+      (png[..png.len() / 2].to_vec(), "image/png"),
+      (png[..24].to_vec(), "image/png"),
+      (b"not really a png".to_vec(), "image/png"),
+      (Vec::new(), "image/png"),
+    ];
+    for (bytes, media_type) in samples {
+      let generic = generic_dimensions(&bytes);
+      assert_eq!(
+        image_dimensions(&bytes, media_type),
+        generic,
+        "{media_type}, {} bytes",
+        bytes.len()
+      );
+    }
+    assert_eq!(generic_dimensions(&png), Some((30, 20)));
   }
 
   #[test]
@@ -540,6 +661,29 @@ mod tests {
       }
     }
     !crc
+  }
+
+  /// [`image_dimensions`] through `ImageReader::into_decoder`, as it read them before.
+  fn generic_dimensions(bytes: &[u8]) -> Option<(u32, u32)> {
+    let mut decoder = ImageReader::new(Cursor::new(bytes))
+      .with_guessed_format()
+      .ok()?
+      .into_decoder()
+      .ok()?;
+    let (width, height) = decoder.dimensions();
+    let is_sideways = matches!(
+      decoder.orientation().ok()?,
+      Orientation::Rotate90
+        | Orientation::Rotate270
+        | Orientation::Rotate90FlipH
+        | Orientation::Rotate270FlipH
+    );
+    let (width, height) = if is_sideways {
+      (height, width)
+    } else {
+      (width, height)
+    };
+    (width > 0 && height > 0).then_some((width, height))
   }
 
   fn dimensions(bytes: &[u8]) -> (u32, u32) {

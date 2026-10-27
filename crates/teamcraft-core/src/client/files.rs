@@ -716,7 +716,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       .await
       .map_err(|()| UploadError::Failed(TransferFailure::LocalFile))?;
     let maybe_made = if self.settings.makes_thumbnails {
-      crate::thumbnail::thumbnail(&content, &file.media_type)
+      crate::thumbnail::make_thumbnail(&content, &file.media_type).await
     } else {
       None
     };

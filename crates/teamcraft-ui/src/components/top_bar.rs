@@ -1,11 +1,11 @@
 use leptos::prelude::*;
 
+use crate::areas::{self, Place, lazy_area};
 use crate::brand::Brand;
 use crate::components::avatar::{Avatar, AvatarSize};
 use crate::components::brand_logo::BrandLogo;
 use crate::components::channel_glyph::ChannelGlyph;
 use crate::components::icons::{Icon, IconName};
-use crate::components::status_menu::StatusMenu;
 use crate::components::window_controls::{ClickOrDrag, window_drag_handler};
 use crate::i18n::use_i18n;
 use crate::keys::{QUICK_SWITCHER, ShortcutKeys};
@@ -82,7 +82,7 @@ pub fn TopBar() -> impl IntoView {
           </button>
           // On phones the menu opens from the bottom navigation instead (app.rs).
           <Show when=move || menu_open() && !state.is_compact() fallback=|| ()>
-            <StatusMenu />
+            {lazy_area(Place::Overlay, || areas::status_menu(()))}
           </Show>
         </div>
       </div>

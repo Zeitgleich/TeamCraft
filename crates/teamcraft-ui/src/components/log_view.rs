@@ -10,6 +10,7 @@ use leptos::html;
 use leptos::prelude::*;
 use teamcraft_client_api::log::{LogEntry, LogFilter, log_entries};
 
+use crate::areas::{self, Place, lazy_area};
 use crate::backend::Backend;
 use crate::clock::format_time_seconds;
 use crate::components::message_list::MessageList;
@@ -65,7 +66,7 @@ pub struct ScanEntry {
 }
 
 /// The message feed of a conversation: plain for most channels; integration channels get the log
-/// toolbar and, when filtering, the filtered log.
+/// toolbar and, when filtering, the filtered log, in a chunk of their own (areas.rs).
 #[component]
 pub fn ChannelFeed(conversation: ConversationId) -> impl IntoView {
   let state = use_app_state();
@@ -75,6 +76,12 @@ pub fn ChannelFeed(conversation: ConversationId) -> impl IntoView {
   if !is_integration {
     return view! { <MessageList conversation=conversation /> }.into_any();
   }
+  lazy_area(Place::Pane, move || areas::integration_feed(conversation))
+}
+
+/// The feed of an integration channel: the log toolbar, then the log, the filtered log or the chat.
+#[component]
+pub fn IntegrationFeed(conversation: ConversationId) -> impl IntoView {
   let mode = RwSignal::new(load_mode(conversation));
   let filter = RwSignal::new(LogFilter::default());
   let follow = RwSignal::new(true);
