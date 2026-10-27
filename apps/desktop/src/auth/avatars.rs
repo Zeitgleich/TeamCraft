@@ -59,7 +59,7 @@ impl<S: TokenStore> AuthService<S> {
     let url = presigned_url(&location.download_url, reach)?;
     let max_bytes = location.size_bytes.min(MAX_AVATAR_BYTES);
     let content_type = location.content_type.as_str();
-    let (status, body) = get_object(self.object_client(reach)?, url, max_bytes, content_type).await?;
+    let (status, body) = get_object(&self.object_client(reach)?, url, max_bytes, content_type).await?;
     if !(200..300).contains(&status) {
       return Ok(empty_bytes(status));
     }
@@ -94,7 +94,7 @@ impl<S: TokenStore> AuthService<S> {
     }
     let upload: CreateAvatarUploadResponse = parse(&answer.body)?;
     let url = presigned_url(&upload.upload_url, reach)?;
-    let status = put_object(self.object_client(reach)?, url, content_type.as_str(), bytes).await?;
+    let status = put_object(&self.object_client(reach)?, url, content_type.as_str(), bytes).await?;
     if !(200..300).contains(&status) {
       return Ok(ApiResponse {
         status,
@@ -128,10 +128,10 @@ impl<S: TokenStore> AuthService<S> {
 
   /// The shell's client, or for [`StorageReach::PublicOnly`] one that only connects to public
   /// addresses (a public name may still resolve to a private one).
-  fn object_client(&self, reach: StorageReach) -> Result<&reqwest::Client, AuthError> {
+  fn object_client(&self, reach: StorageReach) -> Result<reqwest::Client, AuthError> {
     match reach {
-      StorageReach::Anywhere | StorageReach::ThisComputer => Ok(&self.http),
-      StorageReach::PublicOnly => public_client(),
+      StorageReach::Anywhere | StorageReach::ThisComputer => Ok(self.http()),
+      StorageReach::PublicOnly => public_client().cloned(),
     }
   }
 }

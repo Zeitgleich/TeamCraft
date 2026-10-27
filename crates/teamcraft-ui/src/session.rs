@@ -87,6 +87,9 @@ pub enum LoginProblem {
   /// The client core has been waiting for an access token for a while; it keeps trying, and the user
   /// can try again or sign out.
   CoreNotSignedIn,
+  /// The identity provider no longer accepts the stored sign-in (`invalid_grant`: its idle or
+  /// session limit ran out, it was revoked): sign in again (issue #883).
+  SessionExpired,
   Cancelled,
   /// Anything else; the text is meant for logs and a "details" line, not as the main message.
   Failed(String),
@@ -165,6 +168,10 @@ impl SessionControl {
           // A sign-out in a tab closed before it finished may have left a cache behind (#749).
           crate::persisted_media::sweep_signed_out().await;
         },
+        // The provider refused the stored sign-in: say so instead of a bare sign-in screen.
+        Err(AuthError::Denied(_)) => control
+          .state
+          .set_if_alive(SessionState::SignedOut(Some(LoginProblem::SessionExpired))),
         Err(error) => control
           .state
           .set_if_alive(SessionState::SignedOut(Some(problem_from_auth(&error)))),
@@ -298,6 +305,16 @@ impl SessionControl {
   }
 
   pub fn sign_out(&self) {
+    self.sign_out_with(None);
+  }
+
+  /// The identity provider refused the sign-in while the app ran: like [`Self::sign_out`], and the
+  /// sign-in screen says the session expired.
+  pub fn end_expired_session(&self) {
+    self.sign_out_with(Some(LoginProblem::SessionExpired));
+  }
+
+  fn sign_out_with(&self, maybe_problem: Option<LoginProblem>) {
     let control = *self;
     let maybe_user = control.state.with_untracked(SessionState::maybe_user);
     control.core_round.update(|round| *round = round.wrapping_add(1));
@@ -312,7 +329,7 @@ impl SessionControl {
       if let Err(error) = control.authenticator().logout().await {
         tracing::warn!(%error, "sign-out did not finish cleanly");
       }
-      control.state.set_if_alive(SessionState::SignedOut(None));
+      control.state.set_if_alive(SessionState::SignedOut(maybe_problem));
     });
   }
 

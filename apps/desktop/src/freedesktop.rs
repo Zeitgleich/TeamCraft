@@ -34,6 +34,12 @@ const IMAGE_CHANNELS: i32 = 4;
 const LOGIND: &str = "org.freedesktop.login1";
 const LOGIND_MANAGER: &str = "org.freedesktop.login1.Manager";
 
+const NETWORK_MANAGER: &str = "org.freedesktop.NetworkManager";
+const NETWORK_MANAGER_PATH: &str = "/org/freedesktop/NetworkManager";
+/// `NM_STATE_CONNECTED_SITE`: a default route exists. `CONNECTED_GLOBAL` (70) is above it; it needs
+/// NetworkManager's connectivity check, which not every distribution enables.
+const NM_STATE_CONNECTED_SITE: u32 = 60;
+
 /// The StatusNotifier (appindicator) watcher; panels that show tray icons register with it as hosts.
 const STATUS_NOTIFIER_WATCHER: &str = "org.kde.StatusNotifierWatcher";
 const STATUS_NOTIFIER_WATCHER_PATH: &str = "/StatusNotifierWatcher";
@@ -290,6 +296,53 @@ impl Buses {
         on_wake();
       }
     }
+  }
+
+  /// Calls `on_up` every time NetworkManager reports the network back up (`StateChanged` to
+  /// connected), for as long as the system bus lives (issue #883: after a wake-up the network often
+  /// comes back seconds later). Returns `false` at once when there is no NetworkManager, so the
+  /// caller can fall back to probing.
+  pub async fn watch_network_up(&self, on_up: impl Fn() + Send + 'static) -> bool {
+    let Some(system) = self.system().await else {
+      return false;
+    };
+    let Some(initial) = call::<OwnedValue, _>(
+      system,
+      NETWORK_MANAGER,
+      NETWORK_MANAGER_PATH,
+      "org.freedesktop.DBus.Properties",
+      "Get",
+      &(NETWORK_MANAGER, "State"),
+    )
+    .await
+    .and_then(|value| u32::try_from(value).ok()) else {
+      tracing::debug!("no NetworkManager; probing for the network instead");
+      return false;
+    };
+    let rule = zbus::MatchRule::builder()
+      .msg_type(zbus::message::Type::Signal)
+      .sender(NETWORK_MANAGER)
+      .and_then(|builder| builder.path(NETWORK_MANAGER_PATH))
+      .and_then(|builder| builder.interface(NETWORK_MANAGER))
+      .and_then(|builder| builder.member("StateChanged"))
+      .map(|builder| builder.build());
+    let Ok(rule) = rule else {
+      return false;
+    };
+    let Ok(mut stream) = zbus::MessageStream::for_match_rule(rule, system, None).await else {
+      tracing::debug!("cannot watch NetworkManager");
+      return false;
+    };
+    let mut previous = initial;
+    while let Some(Ok(message)) = stream.next().await {
+      if let Ok(state) = message.body().deserialize::<u32>() {
+        if is_network_back(previous, state) {
+          on_up();
+        }
+        previous = state;
+      }
+    }
+    true
   }
 
   /// Whether a panel shows StatusNotifier icons: the watcher runs and a host is registered with it.
@@ -555,6 +608,12 @@ async fn logind_locked_hint(system: &Connection) -> bool {
 }
 
 /// One method call with a timeout; any failure (service missing, refused, wrong type) is `None`.
+/// A NetworkManager state change that brings the network (back) up: from below connected to
+/// connected, or from site-only to global connectivity (the captive-portal check passed).
+fn is_network_back(previous: u32, state: u32) -> bool {
+  state >= NM_STATE_CONNECTED_SITE && state > previous
+}
+
 async fn call<T, B>(
   connection: &Connection,
   service: &str,
@@ -581,6 +640,18 @@ where
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  /// NetworkManager states: 20 disconnected, 40 connecting, 50 local, 60 site, 70 global.
+  #[test]
+  fn only_a_state_that_brings_the_network_up_counts() {
+    assert!(is_network_back(20, 70));
+    assert!(is_network_back(40, 60));
+    assert!(is_network_back(60, 70), "the connectivity check passed");
+    assert!(!is_network_back(20, 40), "still connecting");
+    assert!(!is_network_back(70, 70));
+    assert!(!is_network_back(70, 60), "lost global connectivity");
+    assert!(!is_network_back(70, 20));
+  }
 
   #[test]
   fn buttons_follow_the_click_action_and_the_reply_field_needs_the_capability() {

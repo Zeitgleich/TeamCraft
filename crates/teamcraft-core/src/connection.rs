@@ -282,6 +282,7 @@ impl<G: GatewayConnection> ConnectionSupervisor<G> {
         tracing::warn!(%error, "the gateway refused the access token");
         self.maybe_refused_token = token_fingerprint(client);
         let reason = match &error {
+          CoreError::Api(ApiError::SignInExpired) => SignInReason::SignInExpired,
           CoreError::Api(api) => api
             .error_code()
             .map(SignInReason::from_error_code)

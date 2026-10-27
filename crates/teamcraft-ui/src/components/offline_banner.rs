@@ -96,6 +96,16 @@ pub fn OfflineBanner() -> impl IntoView {
         .is_some_and(|shown| shown != Some(state))
       {
         connection.set_if_alive(Some(state));
+        // The identity provider refused the sign-in for good: back to the sign-in screen, which
+        // says why (issue #883). Nothing the user could do here would help.
+        if state
+          == (CoreConnection::SignInRequired {
+            reason: SignInReason::SignInExpired,
+          })
+          && let Some(control) = maybe_session
+        {
+          control.end_expired_session();
+        }
       }
     });
   };
@@ -171,7 +181,7 @@ fn ConnectionNotice(notice: Notice, maybe_session: Option<SessionControl>) -> im
     Notice::SignInRequired(reason) => i18n.t(match reason {
       SignInReason::SessionEnded => "connection-banner-session-ended",
       SignInReason::SessionTimedOut => "connection-banner-session-timed-out",
-      SignInReason::Unknown => "connection-banner-sign-in",
+      SignInReason::SignInExpired | SignInReason::Unknown => "connection-banner-sign-in",
     }),
   };
   let action = match notice {
