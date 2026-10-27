@@ -668,7 +668,8 @@ its own. See [admin.md](admin.md) §2.
   each device notes this per member device and drops it with the leaf), the change wasn't signed
   by the user it added (only a member who chooses to share history adds somebody with it, §4.7),
   the user stayed a member since (as for a history share still pending), and the server doesn't
-  show the user as a guest by now (its word can only lower what is shared). Nothing else unlocks
+  show the user as a guest by now (its word can only lower what is shared); when the server
+  refuses to say who the user is, the device gets the missed keys only. Nothing else unlocks
   it: the add-back only names the device, so neither the device nor the server can ask for more
   than the merged addition shared, and a replayed or old request (above) at most adds the device
   back again. Whether the device ever opened its welcome can't be told (a device that only reads
@@ -684,7 +685,15 @@ its own. See [admin.md](admin.md) §2.
   leaf added, or the committer added back, which starts its own record afresh), this member
   sends its own keys too, ranked among the members whose record starts before the committer's
   (online users first, then the oldest record, `device_add_stagger` per rank), unless a member
-  that joined no later than itself sent them first. Each device
+  that joined no later than itself sent them first. Members can't see what a sealed bundle
+  holds, so in a group with members on clients before #400 a follow-up with the history of an
+  addition is also dropped when such a member sent only the missed keys first; the history then
+  waits until somebody adds the user again with it. Every bundle of a sealed share (keys a
+  device added back missed, the history of an addition or of a new member, §4.3) goes out only
+  while it is still due: a member that has to catch up with other commits while sending (an
+  epoch conflict) checks again that the device still has the leaf it had when the share was
+  decided and is still owed what is sent, so a removal, maybe followed by a new addition from
+  the join on, stops the rest. Each device
   keeps the epochs of at most `max_missed_keys` keys (the newest, and its current key), since no
   more are ever sent. Clients before this version ignore the sealed bundles.
 - Commits with other proposal types (PSK, re-init, external init, group context changes), from
@@ -813,7 +822,10 @@ the request, by the server times of the commit and the request (#149); a member 
 that commit hasn't seen it and may answer once. A malicious member can thus delay a device's return
 by up to one cooldown (30 minutes): an add-back that doesn't work for the device still starts it.
 The
-cursor stays before the later entries, so nothing after the welcome is lost. The keys of the epochs
+cursor stays before the later entries, so nothing after the welcome is lost. A device that joins
+from a welcome reads the group's queue from the welcome on, also the entries it passed over while
+it had no group (its own requests, others' entries it couldn't read), so a request it posted again
+meanwhile doesn't make it skip keys sealed to it before that request. The keys of the epochs
 it missed are sealed to it after the commit (above, "Keys a device added back missed"); the user's
 key bag may hold them too.
 
