@@ -74,6 +74,8 @@ wire_enum! {
     CallLocked => "call_locked",
     /// The meeting host removed this user from the call.
     RemovedFromCall => "removed_from_call",
+    /// The account already has the most devices one call allows (`max_devices_per_user_per_call`).
+    CallDeviceLimit => "call_device_limit",
     ProtocolViolation => "protocol_violation",
     InvalidKeyPackage => "invalid_key_package",
     /// The request arrived on a host name that is not configured (docs/branding.md §3).
@@ -271,6 +273,7 @@ mod tests {
       ErrorCode::LastOwner,
       ErrorCode::CannotDeleteSelf,
       ErrorCode::LastAdmin,
+      ErrorCode::CallDeviceLimit,
       ErrorCode::KeyPackageExhausted,
       ErrorCode::PayloadTooLarge,
       ErrorCode::RateLimited,

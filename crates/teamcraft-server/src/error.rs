@@ -66,6 +66,9 @@ pub enum ApiError {
   /// Too many requests; retry after this many seconds.
   #[error("too many requests, retry in {retry_after_secs} seconds")]
   RateLimited { retry_after_secs: u64 },
+  /// The account already has the most devices one call allows.
+  #[error("the account already has {max_devices} devices in this call")]
+  CallDeviceLimit { max_devices: usize },
   /// A needed backend (e.g. attachment storage) is not configured or not reachable.
   #[error("unavailable: {0}")]
   Unavailable(String),
@@ -298,6 +301,7 @@ impl ApiError {
       },
       Self::Conflict(_)
       | Self::AdminJoinRequestTooSoon
+      | Self::CallDeviceLimit { .. }
       | Self::CannotDeleteSelf
       | Self::LastAdmin
       | Self::KeyPackageExhausted
@@ -339,6 +343,7 @@ impl ApiError {
       Self::LastAdmin => ErrorCode::LastAdmin,
       Self::NotSpaceMember => ErrorCode::NotSpaceMember,
       Self::AdminJoinRequestTooSoon => ErrorCode::AdminJoinRequestTooSoon,
+      Self::CallDeviceLimit { .. } => ErrorCode::CallDeviceLimit,
       Self::KeyPackageExhausted => ErrorCode::KeyPackageExhausted,
       Self::InvalidKeyPackage(_) => ErrorCode::InvalidKeyPackage,
       Self::EpochConflict { .. } => ErrorCode::EpochConflict,
@@ -586,6 +591,11 @@ mod tests {
         ApiError::AdminJoinRequestTooSoon,
         StatusCode::CONFLICT,
         ErrorCode::AdminJoinRequestTooSoon,
+      ),
+      (
+        ApiError::CallDeviceLimit { max_devices: 3 },
+        StatusCode::CONFLICT,
+        ErrorCode::CallDeviceLimit,
       ),
       (
         ApiError::admin_join_request_not_found(),

@@ -583,6 +583,9 @@ is_enabled = true
 # roster_grace_secs = 60
 # Once the SFU has sent a roster, none for this long ends every call (the SFU is gone or cut off).
 # roster_timeout_secs = 120
+# Devices of one account that may be in the same call at once; a further device gets no join token
+# (call_device_limit). Set the SFU to the same value (TEAMCRAFT_SFU_MAX_DEVICES_PER_USER_PER_CALL).
+# max_devices_per_user_per_call = 3
 
 # E-mail the server sends on its own: invitations, activations, digests and meeting invitations. The mail
 # server and the texts are the seed of Administration → Mail and → Settings; what an admin sets there

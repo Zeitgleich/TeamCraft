@@ -1224,6 +1224,11 @@ pub struct CallsConfig {
   /// (`TEAMCRAFT_SFU_ROSTER_INTERVAL_SECS`, default 30).
   #[serde(default = "default_roster_timeout_secs")]
   pub roster_timeout_secs: u64,
+  /// Devices of one account that may be in the same call at once; a further device gets no join
+  /// token (`call_device_limit`). Every device is a member of the call's media encryption group.
+  /// Configure the SFU with the same value (`TEAMCRAFT_SFU_MAX_DEVICES_PER_USER_PER_CALL`).
+  #[serde(default = "default_max_devices_per_user_per_call")]
+  pub max_devices_per_user_per_call: usize,
 }
 
 /// Device-linking relay at /api/v1/rendezvous.
@@ -1579,6 +1584,10 @@ fn default_roster_grace_secs() -> u64 {
 
 fn default_roster_timeout_secs() -> u64 {
   120
+}
+
+fn default_max_devices_per_user_per_call() -> usize {
+  3
 }
 
 fn default_call_idle_secs() -> u64 {

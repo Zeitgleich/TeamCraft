@@ -61,6 +61,7 @@ pub struct CallService {
   token_ttl: Duration,
   call_idle_timeout: Duration,
   ring_timeout: Duration,
+  max_devices_per_user: usize,
   /// Token the SFU reports participants with; `None` disables the reports.
   maybe_sfu_token: Option<Vec<u8>>,
   active: Mutex<HashMap<ConversationId, ActiveCall>>,
@@ -228,6 +229,7 @@ impl CallService {
       token_ttl: Duration::from_secs(config.join_token_ttl_secs),
       call_idle_timeout: Duration::from_secs(config.call_idle_secs),
       ring_timeout: Duration::from_secs(config.ring_timeout_secs),
+      max_devices_per_user: config.max_devices_per_user_per_call,
       maybe_sfu_token: config
         .maybe_sfu_registration_token
         .as_ref()
@@ -877,6 +879,30 @@ impl CallService {
       .is_some_and(|call| call.participants.iter().any(|entry| entry.device_id == device_id))
   }
 
+  /// Whether the device may join the conversation's call: it is in the roster already (it
+  /// rejoins), or the account has fewer than `max_devices_per_user_per_call` devices there.
+  pub fn has_room_for_device(
+    &self,
+    conversation_id: ConversationId,
+    user: UserId,
+    device_id: DeviceId,
+  ) -> bool {
+    let active = self.lock();
+    let Some(call) = active.get(&conversation_id) else {
+      return true;
+    };
+    let mut devices_of_user = 0;
+    for entry in &call.participants {
+      if entry.device_id == device_id {
+        return true;
+      }
+      if entry.user_id == user {
+        devices_of_user += 1;
+      }
+    }
+    devices_of_user < self.max_devices_per_user
+  }
+
   /// Whether a device of the user is in the roster of a running call.
   pub fn is_in_call(&self, user: UserId) -> bool {
     self
@@ -954,6 +980,11 @@ pub async fn create_join_token(
 
   if access.view.conversation.kind == ConversationKind::Meeting {
     check_meeting_admission(state, calls, caller, conversation_id, request.device_id).await?;
+  }
+  if !calls.has_room_for_device(conversation_id, caller.user.id, request.device_id) {
+    return Err(ApiError::CallDeviceLimit {
+      max_devices: calls.max_devices_per_user,
+    });
   }
   adopt_before_first_token(state, calls, conversation_id).await;
   let call_id = calls.call_for(conversation_id, Instant::now(), || state.next_id())?;
@@ -1684,6 +1715,37 @@ MCowBQYDK2VwAyEA8YVjY2Zv9XPhv003tFAgzW7J6gfDn+ICj5xCB2LXMVg=
     }
 
     #[test]
+    fn an_account_gets_no_device_in_a_call_beyond_the_limit() {
+      let service = service();
+      service.call_for(id(1), Instant::now(), || Ok(id(100))).unwrap();
+      assert!(
+        service.has_room_for_device(id(1), id(4), id(50)),
+        "a call without participants"
+      );
+      for device in 50..53 {
+        service.participant_joined(id(1), entry(4, device), false, UnixMillis(0));
+      }
+      service.participant_joined(id(1), entry(5, 60), false, UnixMillis(0));
+
+      assert!(
+        !service.has_room_for_device(id(1), id(4), id(53)),
+        "a fourth device"
+      );
+      assert!(
+        service.has_room_for_device(id(1), id(4), id(51)),
+        "a device in the call rejoins"
+      );
+      assert!(
+        service.has_room_for_device(id(1), id(5), id(61)),
+        "the limit is per account"
+      );
+      assert!(
+        service.has_room_for_device(id(2), id(4), id(53)),
+        "another conversation"
+      );
+    }
+
+    #[test]
     fn idle_call_is_replaced() {
       let service = service();
       let start = Instant::now();
@@ -2254,6 +2316,7 @@ MCowBQYDK2VwAyEA8YVjY2Zv9XPhv003tFAgzW7J6gfDn+ICj5xCB2LXMVg=
       maybe_sfu_certificate_sha256: None,
       roster_grace_secs: 60,
       roster_timeout_secs: 120,
+      max_devices_per_user_per_call: 3,
     }
   }
 
