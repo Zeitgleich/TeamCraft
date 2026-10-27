@@ -258,11 +258,13 @@ impl TeamCraft {
 
   /// Existing device: the user typed the short code the new device shows; sends the keys if it is
   /// right. A wrong code is `LinkCodeRejected` (try again); after the last try it is
-  /// `LinkAttemptEnded`.
+  /// `LinkAttemptEnded`. Returns once the new device confirmed the keys (up to a minute if it went
+  /// away); syncing and the other calls go on meanwhile (issue #415).
   pub async fn confirm_device_link(&self, typed_code: String) -> Result<(), TeamCraftError> {
-    self
+    let receipt = self
       .call(move |engine| Box::pin(engine.confirm_device_link(typed_code)))
-      .await
+      .await?;
+    receipt.await.map_err(|_| TeamCraftError::EngineStopped)?
   }
 
   /// New devices of this account that ask to be linked (e2ee.md §5). Read it when the app is told
@@ -290,10 +292,19 @@ impl TeamCraft {
   }
 
   /// Existing device: the user left the comparison without confirming; nothing is sent and
-  /// syncing resumes.
+  /// syncing resumes. A confirmation still waiting for the new device ends as cancelled.
   pub async fn cancel_device_link_approval(&self) -> Result<(), TeamCraftError> {
     self
       .call(|engine| Box::pin(engine.cancel_device_link_approval()))
+      .await
+  }
+
+  /// Sign-out before this device is set up (issue #415): drops the keys an unfinished setup kept
+  /// and asks the server to revoke the device it registered, waiting a few seconds at most. Call it
+  /// before the session ends; it changes nothing on a device that is set up.
+  pub async fn forget_unfinished_setup(&self) -> Result<(), TeamCraftError> {
+    self
+      .call(|engine| Box::pin(engine.forget_unfinished_setup()))
       .await
   }
 
@@ -796,6 +807,7 @@ pub fn login_brand(response_json: String, server_url: String, language: String) 
     maybe_text: brand.login_text(&language).map(str::to_owned),
     links: BrandLinks {
       maybe_support: brand.links.maybe_support.clone(),
+      maybe_documentation: brand.links.maybe_documentation.clone(),
       maybe_privacy: brand.links.maybe_privacy.clone(),
       maybe_terms: brand.links.maybe_terms.clone(),
       maybe_imprint: brand.links.maybe_imprint.clone(),
@@ -1038,6 +1050,65 @@ mod tests {
         TeamCraft::new(config, Arc::new(NoTokens), Arc::new(Quiet)),
         Err(TeamCraftError::InvalidInput(_))
       ));
+    }
+  }
+
+  /// Issue #415: reading the account state drops the key pair of a setup given up on, but not
+  /// while a link runs on this device.
+  mod abandoned_setup {
+    use teamcraft_core::records::{self, PendingDevice};
+    use teamcraft_crypto::identity::DeviceKeyPair;
+    use teamcraft_proto::{Id as _, Snowflake};
+
+    use super::*;
+
+    #[tokio::test]
+    async fn is_dropped_when_the_state_is_read_unless_a_link_runs() {
+      let directory = TestDir::new("abandoned");
+      let store = SealedSqliteStore::open(
+        &directory.store(),
+        &StaticKeySource::new(SymmetricKey::from_bytes(KEY)),
+      )
+      .unwrap();
+      let user = teamcraft_proto::UserId::from_snowflake(Snowflake::new(5).unwrap());
+      let pending = PendingDevice {
+        user_id: user,
+        identity_public_key: [1; 32],
+        device: DeviceKeyPair::generate(
+          teamcraft_crypto::ids::UserId::new(5),
+          teamcraft_crypto::ids::DeviceId::new(0),
+          &mut rand_core::OsRng,
+        ),
+      };
+      // Stored long before the expiry ran out.
+      records::save_pending_device(&store, &pending, 0).unwrap();
+      drop(store);
+
+      let core = open(&directory, KEY).unwrap();
+      core
+        .start_device_link("Phone".into(), LinkPlatform::Android)
+        .await
+        .unwrap();
+      // Signed out here: the state can't be read from the server, but the check ran before.
+      assert!(core.account_state().await.is_err());
+      assert!(has_pending_device(&directory), "kept while the link runs");
+      drop(core);
+
+      let core = open(&directory, KEY).unwrap();
+      assert!(core.account_state().await.is_err());
+      assert!(
+        !has_pending_device(&directory),
+        "dropped; its device is revoked once signed in"
+      );
+    }
+
+    fn has_pending_device(directory: &TestDir) -> bool {
+      let store = SealedSqliteStore::open(
+        &directory.store(),
+        &StaticKeySource::new(SymmetricKey::from_bytes(KEY)),
+      )
+      .unwrap();
+      store.get(Table::Account, "pending_device").unwrap().is_some()
     }
   }
 

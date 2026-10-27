@@ -16,6 +16,7 @@ pub mod live;
 mod permission;
 mod rendezvous;
 mod role;
+pub mod role_rules;
 mod wire_enum;
 
 pub use api::*;

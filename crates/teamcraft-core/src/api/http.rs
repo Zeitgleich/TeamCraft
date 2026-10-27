@@ -56,6 +56,7 @@ use teamcraft_proto::{
 };
 use teamcraft_proto::{ListThreadsQuery, ListThreadsResponse, MessageId, SyncHeadsResponse, UnreadResponse};
 use teamcraft_proto::{NotificationSettings, TestPushResponse};
+use teamcraft_proto::{PushHealthResponse, UpdateDeviceRequest};
 use teamcraft_proto::{SetPresenceRequest, SetReadPositionRequest, UpdateConversationMemberRequest};
 
 #[cfg(target_arch = "wasm32")]
@@ -300,6 +301,16 @@ impl<T: AccessTokenSource> ServerApi for HttpServerApi<T> {
 
   async fn list_user_devices(&self, user: UserId) -> Result<ListDevicesResponse, ApiError> {
     self.get(&format!("/users/{user}/devices")).await
+  }
+
+  async fn update_device(
+    &self,
+    device: DeviceId,
+    request: &UpdateDeviceRequest,
+  ) -> Result<DeviceResponse, ApiError> {
+    self
+      .send_json(Method::PATCH, &format!("/devices/{device}"), request)
+      .await
   }
 
   async fn put_identity_key(
@@ -992,6 +1003,29 @@ impl<T: AccessTokenSource> ServerApi for HttpServerApi<T> {
       .await
   }
 
+  async fn list_channel_role_log(
+    &self,
+    conversation: ConversationId,
+    query: &teamcraft_proto::ListChannelRoleLogQuery,
+  ) -> Result<teamcraft_proto::ListChannelRoleLogResponse, ApiError> {
+    let parameters = query_string(&[
+      ("after", query.maybe_after.map(|version| version.to_string())),
+      ("limit", query.maybe_limit.map(|limit| limit.to_string())),
+    ]);
+    self
+      .get(&format!("/conversations/{conversation}/role-log{parameters}"))
+      .await
+  }
+
+  async fn append_channel_role_log(
+    &self,
+    conversation: ConversationId,
+    request: &teamcraft_proto::AppendChannelRoleLogRequest,
+  ) -> Result<teamcraft_proto::ChannelRoleLogEntryResponse, ApiError> {
+    let path = format!("/conversations/{conversation}/role-log");
+    self.send_json(Method::POST, &path, request).await
+  }
+
   async fn create_attachment(
     &self,
     request: &CreateAttachmentRequest,
@@ -1251,6 +1285,10 @@ impl<T: AccessTokenSource> ServerApi for HttpServerApi<T> {
         &serde_json::json!({}),
       )
       .await
+  }
+
+  async fn my_push_health(&self) -> Result<PushHealthResponse, ApiError> {
+    self.get("/me/push-health").await
   }
 
   async fn notification_settings(&self) -> Result<NotificationSettings, ApiError> {

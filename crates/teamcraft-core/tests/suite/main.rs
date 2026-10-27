@@ -5,6 +5,7 @@
 // web_service_worker.rs.
 #![cfg(not(target_arch = "wasm32"))]
 
+mod abandoned_setup;
 mod account_data;
 mod activity;
 mod admin_add_policy;
@@ -12,6 +13,7 @@ mod admin_joins;
 mod backgrounds;
 mod calls;
 mod catch_up;
+mod channel_roles;
 mod chat_actions;
 #[path = "../common/mod.rs"]
 mod common;
@@ -46,6 +48,7 @@ mod removal_followups;
 mod runner;
 mod search;
 mod sending;
+mod server_changes;
 mod snapshot_cache;
 mod store_integrity;
 mod sync_engine;

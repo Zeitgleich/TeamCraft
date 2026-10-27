@@ -52,6 +52,7 @@ use teamcraft_proto::{
 use teamcraft_proto::{CreateDeviceLinkRequest, DeviceLinkClosedReason, DeviceLinkRequest};
 use teamcraft_proto::{CreateInstantMeetingRequest, MeetingKind, MeetingResponse, MeetingStatus};
 use teamcraft_proto::{DeviceListResponse, PutDeviceListRequest};
+use teamcraft_proto::{DevicePushHealth, PushDeliveryCounts, PushHealthResponse, UpdateDeviceRequest};
 use teamcraft_proto::{ErrorBody, RendezvousClientMessage, RendezvousServerMessage};
 use teamcraft_proto::{
   GatewayInfoResponse, GatewayLimits, GatewayTokenKey, PushGatewayBinding, PushGatewayResponse, PushProvider,
@@ -109,6 +110,8 @@ struct State {
   /// `GET /sync/heads` answers a bare 404, like a server from before the endpoint (issue #714):
   /// a full sync then reads everything.
   lacks_sync_heads: bool,
+  /// `…/role-log` answers 404, like a server from before signed channel roles (issue #380).
+  lacks_role_log: bool,
   directory_searches: u64,
   /// Conversations whose history answers 403 (a removal the list doesn't show yet, a policy).
   forbidden_histories: HashSet<ConversationId>,
@@ -156,6 +159,8 @@ struct State {
   heartbeats: u64,
   /// `set_activity` frames per user, in order (presence after an away timeout, issue #472).
   activity_reports: HashMap<UserId, Vec<DeviceActivity>>,
+  /// `typing` frames per user, in order: the conversations typed in.
+  typing_reports: HashMap<UserId, Vec<ConversationId>>,
   /// What `GET /unread` answers per user; without an entry nothing is unread.
   unread: HashMap<UserId, UnreadResponse>,
   /// A malicious server: the next registered device gets this ID instead of a fresh one.
@@ -244,6 +249,10 @@ struct State {
   conversation_list_delays: HashMap<UserId, std::time::Duration>,
   /// Users whose member lists answer only after this long.
   member_list_delays: HashMap<UserId, std::time::Duration>,
+  /// Users whose reads of a user's registered devices answer only after this long.
+  user_device_delays: HashMap<UserId, std::time::Duration>,
+  /// Users whose reads of a user's registered devices are refused (403).
+  user_device_refusals: HashSet<UserId>,
   /// The gateway's heartbeat timeout on a clock of the test's ([`FakeServer::enforce_heartbeat_timeout`]).
   maybe_heartbeat_timeout: Option<(Arc<dyn Clock + Send + Sync>, i64)>,
   /// When each gateway connection last sent a frame, while the timeout is enforced.
@@ -385,6 +394,8 @@ struct Conversation {
   pinned: HashSet<MessageId>,
   /// The newest MLS group information and the epoch it is for.
   maybe_group_info: Option<(u64, Base64Bytes)>,
+  /// The signed channel role log (issue #380), oldest first.
+  role_log: Vec<teamcraft_proto::ChannelRoleLogEntryResponse>,
 }
 
 struct Session {
@@ -602,9 +613,31 @@ impl FakeServer {
     self.lock().member_list_delays.insert(user, delay);
   }
 
+  /// The user's reads of registered devices (`GET /users/{id}/devices`) answer only after `delay`.
+  pub fn delay_user_devices(&self, user: UserId, delay: std::time::Duration) {
+    self.lock().user_device_delays.insert(user, delay);
+  }
+
+  /// While set, the user's reads of registered devices are refused with 403, a refusal that a
+  /// retry doesn't change.
+  pub fn refuse_user_devices(&self, user: UserId, is_refusing: bool) {
+    let mut state = self.lock();
+    if is_refusing {
+      state.user_device_refusals.insert(user);
+    } else {
+      state.user_device_refusals.remove(&user);
+    }
+  }
+
   /// Answers `GET /sync/heads` with a bare 404 from now on, like an older server (issue #714).
   pub fn stop_serving_sync_heads(&self) {
     self.lock().lacks_sync_heads = true;
+  }
+
+  /// Answers the channel role log with 404 while `is_lacking`, like a server from before signed
+  /// channel roles (issue #380).
+  pub fn set_role_log_lacking(&self, is_lacking: bool) {
+    self.lock().lacks_role_log = is_lacking;
   }
 
   /// The user's `GET /conversations` answers only after `delay` (a long full sync).
@@ -625,6 +658,11 @@ impl FakeServer {
       .get(&user)
       .cloned()
       .unwrap_or_default()
+  }
+
+  /// The conversations of the `typing` frames `user`'s devices sent so far, in order.
+  pub fn typing_reports(&self, user: UserId) -> Vec<ConversationId> {
+    self.lock().typing_reports.get(&user).cloned().unwrap_or_default()
   }
 
   /// While set, a captive portal answers this user's REST calls (hotel Wi-Fi before signing in).
@@ -834,6 +872,50 @@ impl FakeServer {
     }
     state.publish(members, &GatewayEvent::ConversationUpdate { conversation_id: id });
     id
+  }
+
+  /// An entry the server puts into a channel's role log without any check: a hostile server, or
+  /// a client that skipped them. Returns its version.
+  pub fn plant_role_log_entry(
+    &self,
+    conversation: ConversationId,
+    payload: Vec<u8>,
+    signature: Vec<u8>,
+  ) -> u64 {
+    let mut state = self.lock();
+    let created_at = UnixMillis(state.next_id::<UserId>().snowflake().unix_millis());
+    let Some(entry) = state.conversations.get_mut(&conversation) else {
+      return 0;
+    };
+    let version = entry.role_log.len() as u64 + 1;
+    entry.role_log.push(teamcraft_proto::ChannelRoleLogEntryResponse {
+      version,
+      payload: Base64Bytes::new(payload),
+      signature: Base64Bytes::new(signature),
+      maybe_signer_device_id: None,
+      created_at,
+    });
+    version
+  }
+
+  /// The channel's role log as stored.
+  pub fn role_log(&self, conversation: ConversationId) -> Vec<teamcraft_proto::ChannelRoleLogEntryResponse> {
+    self
+      .lock()
+      .conversations
+      .get(&conversation)
+      .map(|entry| entry.role_log.clone())
+      .unwrap_or_default()
+  }
+
+  /// Sets a member's role on the server alone, as an older client or a hostile server would: no
+  /// signed entry goes with it.
+  pub fn set_channel_role_unsigned(&self, conversation: ConversationId, user: UserId, role: ChannelRole) {
+    if let Some(entry) = self.lock().conversations.get_mut(&conversation)
+      && let Some(held) = entry.members.get_mut(&user)
+    {
+      held.0 = role;
+    }
   }
 
   /// Group information the server holds for the conversation's current epoch although no member
@@ -1068,6 +1150,11 @@ impl FakeServer {
 
   pub fn device_list_of(&self, user: UserId) -> Option<DeviceListResponse> {
     self.lock().device_lists.get(&user).cloned()
+  }
+
+  /// Forgets the user's signed device list, as a server that lost it (or never kept one) would.
+  pub fn forget_device_list(&self, user: UserId) {
+    self.lock().device_lists.remove(&user);
   }
 
   /// Replaces a stored organization background, as a compromised server could.
@@ -1533,13 +1620,55 @@ impl ServerApi for FakeServerApi {
   }
 
   async fn list_user_devices(&self, user: UserId) -> Result<ListDevicesResponse, ApiError> {
-    self.with(|state, _| {
+    let maybe_delay = self.server.lock().user_device_delays.get(&self.user).copied();
+    if let Some(delay) = maybe_delay {
+      crate::platform::sleep(delay).await;
+    }
+    self.with(|state, me| {
+      if state.user_device_refusals.contains(&me) {
+        return Err(ApiError::status(403, ErrorCode::Forbidden, "not allowed"));
+      }
       Ok(ListDevicesResponse {
         devices: state
           .devices_of(user)
-          .map(|device| device.response.clone())
+          .map(|device| {
+            // Like the server: other users get the keys, not the name or the push service.
+            if user == me {
+              device.response.clone()
+            } else {
+              DeviceResponse {
+                name: String::new(),
+                maybe_push_provider: None,
+                ..device.response.clone()
+              }
+            }
+          })
           .collect(),
       })
+    })
+  }
+
+  async fn update_device(
+    &self,
+    device: DeviceId,
+    request: &UpdateDeviceRequest,
+  ) -> Result<DeviceResponse, ApiError> {
+    self.with(|state, me| {
+      state.ensure_own_device(me, device)?;
+      let name = request.name.trim();
+      if name.is_empty() {
+        return Err(ApiError::status(
+          400,
+          ErrorCode::InvalidRequest,
+          "empty device name",
+        ));
+      }
+      let stored = state
+        .devices
+        .get_mut(&device)
+        .ok_or_else(|| ApiError::status(404, ErrorCode::DeviceNotFound, "unknown device"))?;
+      stored.response.name = name.to_owned();
+      Ok(stored.response.clone())
     })
   }
 
@@ -3644,6 +3773,112 @@ impl ServerApi for FakeServerApi {
     })
   }
 
+  async fn list_channel_role_log(
+    &self,
+    conversation: ConversationId,
+    query: &teamcraft_proto::ListChannelRoleLogQuery,
+  ) -> Result<teamcraft_proto::ListChannelRoleLogResponse, ApiError> {
+    self.with(|state, me| {
+      if state.lacks_role_log {
+        return Err(ApiError::Status {
+          status: 404,
+          maybe_body: None,
+          maybe_retry_after: None,
+        });
+      }
+      let entry = state.actor_conversation_mut(conversation, me)?;
+      let after = query.maybe_after.unwrap_or(0);
+      let limit = query
+        .maybe_limit
+        .map_or(PAGE_SIZE, |limit| limit as usize)
+        .clamp(1, PAGE_SIZE);
+      let mut entries: Vec<_> = entry
+        .role_log
+        .iter()
+        .filter(|entry| entry.version > after)
+        .cloned()
+        .collect();
+      let has_more = entries.len() > limit;
+      entries.truncate(limit);
+      Ok(teamcraft_proto::ListChannelRoleLogResponse { entries, has_more })
+    })
+  }
+
+  async fn append_channel_role_log(
+    &self,
+    conversation: ConversationId,
+    request: &teamcraft_proto::AppendChannelRoleLogRequest,
+  ) -> Result<teamcraft_proto::ChannelRoleLogEntryResponse, ApiError> {
+    self.with(|state, me| {
+      if state.lacks_role_log {
+        return Err(ApiError::Status {
+          status: 404,
+          maybe_body: None,
+          maybe_retry_after: None,
+        });
+      }
+      state.ensure_own_device(me, request.signer_device_id)?;
+      let is_instance_admin = state.admins.contains(&me);
+      let created_at = UnixMillis(state.next_id::<UserId>().snowflake().unix_millis());
+      let entry = state.actor_conversation_mut(conversation, me)?;
+      // Like the server: open channels only, by channel admins and workspace admins; the payload
+      // names this channel and the next version. Signatures are the clients' business.
+      if entry.response.kind != ConversationKind::Channel || entry.response.is_archived {
+        return Err(ApiError::status(
+          400,
+          ErrorCode::InvalidRequest,
+          "not an open channel",
+        ));
+      }
+      let is_channel_admin = entry
+        .members
+        .get(&me)
+        .is_some_and(|(own, _)| *own == ChannelRole::Admin);
+      if !is_channel_admin && !is_instance_admin {
+        return Err(ApiError::status(
+          403,
+          ErrorCode::Forbidden,
+          "missing permission manage_channel_roles",
+        ));
+      }
+      let document: teamcraft_proto::ChannelRolesDocument =
+        serde_json::from_slice(request.payload.as_slice())
+          .map_err(|error| ApiError::status(400, ErrorCode::InvalidRequest, error.to_string()))?;
+      let current = entry.role_log.len() as u64;
+      if document.conversation_id != conversation || document.version != request.expected_version + 1 {
+        return Err(ApiError::status(
+          400,
+          ErrorCode::InvalidRequest,
+          "the document names another channel or version",
+        ));
+      }
+      if request.expected_version != current {
+        return Err(ApiError::status(
+          409,
+          ErrorCode::VersionConflict,
+          format!("stored version is {current}"),
+        ));
+      }
+      let appended = teamcraft_proto::ChannelRoleLogEntryResponse {
+        version: current + 1,
+        payload: request.payload.clone(),
+        signature: request.signature.clone(),
+        maybe_signer_device_id: Some(request.signer_device_id),
+        created_at,
+      };
+      entry.role_log.push(appended.clone());
+      let members: Vec<UserId> = entry.members.keys().copied().collect();
+      state.publish(
+        members,
+        &GatewayEvent::ChannelRolesUpdate {
+          conversation_id: conversation,
+          version: appended.version,
+        },
+      );
+      Ok(appended)
+    })
+  }
+
   async fn create_attachment(
     &self,
     request: &CreateAttachmentRequest,
@@ -4242,6 +4477,30 @@ impl ServerApi for FakeServerApi {
     })
   }
 
+  async fn my_push_health(&self) -> Result<PushHealthResponse, ApiError> {
+    self.with(|state, me| {
+      let devices = state
+        .devices_of(me)
+        .map(|device| {
+          let maybe_provider = state
+            .push_registrations
+            .get(&device.response.id)
+            .map(|registration| registration.provider.clone());
+          DevicePushHealth {
+            device_id: device.response.id,
+            counts: PushDeliveryCounts {
+              sent: u64::from(maybe_provider.is_some()),
+              maybe_last_sent_at: maybe_provider.as_ref().map(|_| UnixMillis(1_000)),
+              ..PushDeliveryCounts::default()
+            },
+            maybe_provider,
+          }
+        })
+        .collect();
+      Ok(PushHealthResponse { devices })
+    })
+  }
+
   async fn notification_settings(&self) -> Result<NotificationSettings, ApiError> {
     self.with(|state, me| {
       Ok(
@@ -4406,6 +4665,11 @@ impl GatewayConnection for FakeGateway {
         let _ = sender.unbounded_send(GatewayServerMessage::HeartbeatAck);
       },
       GatewayClientMessage::Typing { conversation_id } => {
+        state
+          .typing_reports
+          .entry(self.user)
+          .or_default()
+          .push(*conversation_id);
         // Members only, like the server; the typist doesn't get their own event.
         let others: Vec<UserId> = state
           .conversations
@@ -4939,6 +5203,7 @@ impl State {
         thread_read_positions: HashMap::new(),
         pinned: HashSet::new(),
         maybe_group_info: None,
+        role_log: Vec::new(),
       },
     );
     id

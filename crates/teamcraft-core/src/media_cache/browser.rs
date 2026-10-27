@@ -19,8 +19,8 @@ use super::{
   CacheIndex, CachePolicy, CachedMedia, MAX_ENTRY_BYTES, MAX_SEALED_BYTES, MediaCacheError, MediaKey,
   MediaSealer, is_too_old,
 };
-use crate::store::browser::idb::{self, RECORDS};
-use crate::store::{StoreError, browser_database_key};
+use crate::store::browser::idb::{self, OpenMode, RECORDS};
+use crate::store::{StoreError, browser_database_key, browser_database_key_without_upgrade};
 
 const DATA_PREFIX: &str = "d:";
 const META_PREFIX: &str = "m:";
@@ -39,10 +39,24 @@ pub struct BrowserMediaCache {
 }
 
 impl BrowserMediaCache {
-  /// Opens the IndexedDB database `name`, creating it and its key on first use.
+  /// Opens the IndexedDB database `name`, creating it and its key on first use (a page: upgrades
+  /// the database to this version).
   pub async fn open(name: &str) -> Result<Self, MediaCacheError> {
-    let key = browser_database_key(name).await?;
-    let database = idb::open_database(name).await?;
+    Self::open_with(name, OpenMode::Upgrade).await
+  }
+
+  /// [`Self::open`] for the service worker: at whatever version the database has, never upgrading
+  /// it (e2ee.md §9.4).
+  pub async fn open_without_upgrade(name: &str) -> Result<Self, MediaCacheError> {
+    Self::open_with(name, OpenMode::AsIs).await
+  }
+
+  async fn open_with(name: &str, mode: OpenMode) -> Result<Self, MediaCacheError> {
+    let key = match mode {
+      OpenMode::Upgrade => browser_database_key(name).await?,
+      OpenMode::AsIs => browser_database_key_without_upgrade(name).await?,
+    };
+    let database = idb::open_database_with(name, mode).await?;
     let index = read_index(&database).await?;
     let on_version_change = Closure::<dyn FnMut(web_sys::Event)>::new({
       let database = database.clone();

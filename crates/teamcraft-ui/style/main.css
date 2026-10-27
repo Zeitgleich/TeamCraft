@@ -4915,6 +4915,64 @@ ol.md-list {
   color: #b9c3d6;
 }
 
+/* The camera menu of the call (#819): the cameras as a short list, the one in use checked. */
+.camera-popover {
+  width: min(340px, calc(100% - 32px));
+}
+
+.camera-options {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.camera-option {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 40px;
+  padding: 8px 10px;
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--call-text);
+  text-align: left;
+  transition: background-color 120ms ease-out;
+}
+
+.camera-option:active {
+  background: var(--call-border);
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .camera-option:hover:not(:active) {
+    background: rgba(255, 255, 255, 0.06);
+  }
+}
+
+.camera-option.chosen {
+  font-weight: var(--weight-semibold);
+}
+
+.camera-option-name {
+  flex: 1;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.camera-option .icon {
+  flex: none;
+  width: 18px;
+  height: 18px;
+  color: var(--accent);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .camera-option {
+    transition: none;
+  }
+}
+
 .system-effects-hint {
   display: flex;
   align-items: center;
@@ -6960,6 +7018,107 @@ html.call-window body {
   text-align: right;
 }
 
+/* "Alice is typing…" (#733). A zero-height anchor after the messages holds it, so it takes no room
+   and nothing moves when someone starts or stops typing: the line sits in the space the list keeps
+   under its newest message. Over messages scrolled beneath it, the surface fades in under the text
+   (a scroll edge, not a divider). It only fades: it comes and goes every few seconds, and any
+   movement there would pull the eye from the conversation. */
+.typing-anchor {
+  position: relative;
+  flex: none;
+  height: 0;
+  z-index: 4;
+}
+
+.typing-line {
+  position: absolute;
+  right: 0;
+  bottom: 0;
+  left: 0;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 20px 0;
+  background: linear-gradient(to top, var(--surface) 75%, transparent);
+  color: var(--text-muted);
+  font-size: var(--text-xs);
+  letter-spacing: var(--tracking-xs);
+  line-height: 1rem;
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity var(--dur-exit) var(--ease-exit);
+}
+
+.typing-line.is-visible {
+  opacity: 1;
+  transition: opacity var(--dur-base) var(--ease-out);
+}
+
+/* A thread keeps the same room under its newest reply as the conversation's list, for the line. */
+.thread-panel .panel-scroll {
+  padding-bottom: var(--space-3);
+}
+
+/* While the list is scrolled up, its "jump to the latest" bar takes the bottom edge. */
+.message-list-wrap:has(> .jump-latest) + .typing-anchor .typing-line {
+  bottom: 30px;
+}
+
+.typing-text {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.typing-dots {
+  flex: none;
+  display: inline-flex;
+  gap: 3px;
+}
+
+.typing-dots span {
+  width: 4px;
+  height: 4px;
+  border-radius: 50%;
+  background: currentColor;
+  opacity: 0.35;
+}
+
+/* The dots pulse one after the other, only while the line shows. */
+.typing-line.is-visible .typing-dots span {
+  animation: typing-dot 1.2s var(--ease-standard) infinite;
+}
+
+.typing-line.is-visible .typing-dots span:nth-child(2) {
+  animation-delay: 0.15s;
+}
+
+.typing-line.is-visible .typing-dots span:nth-child(3) {
+  animation-delay: 0.3s;
+}
+
+@keyframes typing-dot {
+  0%,
+  60%,
+  100% {
+    opacity: 0.35;
+    transform: none;
+  }
+
+  30% {
+    opacity: 1;
+    transform: translateY(-1px);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .typing-line.is-visible .typing-dots span {
+    animation: none;
+    opacity: 0.7;
+  }
+}
+
 /* ---- Meetings ---- */
 
 .meetings-view {
@@ -7359,6 +7518,141 @@ html.call-window body {
 .pdf-text { position: absolute; inset: 0; overflow: clip; line-height: 1; text-size-adjust: none; forced-color-adjust: none; transform-origin: 0 0; }
 .pdf-text :is(span, br) { position: absolute; color: transparent; white-space: pre; cursor: text; transform-origin: 0 0; }
 .pdf-text ::selection { background: color-mix(in srgb, var(--accent) 35%, transparent); }
+/* The text viewer of file previews (#821): monospace rows one text line high (the virtual list's
+   arithmetic rests on it), line numbers drawn from `data-n` so they are never selected or copied,
+   and the sixteen terminal colours as tokens that read on light and dark. */
+.modal.file-preview.is-text { width: min(1200px, 100%); }
+.preview-status-title { margin: 0; font-weight: var(--weight-semibold); font-size: var(--text-md); }
+.tv {
+  --tv-line: calc(var(--text-sm) * 1.6);
+  --ansi-0: #24292f; --ansi-1: #c4262e; --ansi-2: #116329; --ansi-3: #7d4e00;
+  --ansi-4: #0550ae; --ansi-5: #8250df; --ansi-6: #1b7c83; --ansi-7: #6e7781;
+  --ansi-8: #57606a; --ansi-9: #a40e26; --ansi-10: #1a7f37; --ansi-11: #633c01;
+  --ansi-12: #0969da; --ansi-13: #8250df; --ansi-14: #1b7c83; --ansi-15: #8c959f;
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) .tv {
+    --ansi-0: #8b949e; --ansi-1: #ff7b72; --ansi-2: #3fb950; --ansi-3: #d29922;
+    --ansi-4: #58a6ff; --ansi-5: #bc8cff; --ansi-6: #39c5cf; --ansi-7: #b1bac4;
+    --ansi-8: #6e7681; --ansi-9: #ffa198; --ansi-10: #56d364; --ansi-11: #e3b341;
+    --ansi-12: #79c0ff; --ansi-13: #d2a8ff; --ansi-14: #56d4dd; --ansi-15: #f0f6fc;
+  }
+}
+:root[data-theme="dark"] .tv {
+  --ansi-0: #8b949e; --ansi-1: #ff7b72; --ansi-2: #3fb950; --ansi-3: #d29922;
+  --ansi-4: #58a6ff; --ansi-5: #bc8cff; --ansi-6: #39c5cf; --ansi-7: #b1bac4;
+  --ansi-8: #6e7681; --ansi-9: #ffa198; --ansi-10: #56d364; --ansi-11: #e3b341;
+  --ansi-12: #79c0ff; --ansi-13: #d2a8ff; --ansi-14: #56d4dd; --ansi-15: #f0f6fc;
+}
+.tv-tools { flex: none; display: flex; align-items: center; flex-wrap: wrap; gap: 8px; padding: 6px 12px; border-bottom: 1px solid var(--border); }
+.tv-find { position: relative; display: flex; align-items: center; gap: 2px; flex: 1 1 280px; min-width: 0; }
+.tv-find-icon { position: absolute; left: 9px; width: 15px; height: 15px; color: var(--text-muted); z-index: 1; pointer-events: none; }
+.tv-find-input { flex: 1; min-width: 0; padding-left: 30px; }
+.tv-find-count { flex: none; min-width: 5.5em; padding: 0 4px; color: var(--text-muted); font-size: var(--text-xs); letter-spacing: var(--tracking-xs); font-variant-numeric: tabular-nums; text-align: end; }
+.icon.is-flipped { transform: rotate(180deg); }
+.tv-go-to { display: flex; align-items: center; gap: 6px; color: var(--text-muted); font-size: var(--text-xs); letter-spacing: var(--tracking-xs); font-variant-numeric: tabular-nums; }
+.tv-go-to-input { width: 6.5em; }
+select.tv-level { min-width: 0; }
+/* At phone width the level filter shares a row with "go to line". */
+@media (max-width: 600px) { select.tv-level { flex: 1 1 8rem; } }
+.tv-toggles { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; margin-left: auto; }
+.tv-toggles [aria-pressed="true"] { background: var(--accent-soft); color: var(--accent-strong); }
+.tv-toggles [aria-busy="true"] { cursor: progress; }
+.tv-scroller {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  overscroll-behavior: contain;
+  background: var(--surface);
+  font-family: var(--font-mono);
+  font-size: var(--text-sm);
+  line-height: var(--tv-line);
+  tab-size: 4;
+  outline-offset: -2px;
+}
+.tv-canvas { position: relative; min-width: 100%; }
+.tv-scroller:not(.is-wrapped) .tv-canvas { min-width: max(100%, calc((var(--tv-digits) + 3.5 + var(--tv-columns)) * 1ch)); }
+.tv-window { position: absolute; top: 0; right: 0; left: 0; }
+.tv-row {
+  display: grid;
+  grid-template-columns: calc((var(--tv-digits) + 2.5) * 1ch) minmax(0, 1fr);
+  min-height: var(--tv-line);
+  padding-right: 1ch;
+  color: var(--text);
+  white-space: pre;
+}
+.tv-scroller.is-wrapped .tv-row { white-space: pre-wrap; word-break: break-all; overflow-wrap: anywhere; }
+/* The line number stays at the left edge while the text scrolls sideways. */
+.tv-row::before {
+  content: attr(data-n);
+  position: sticky;
+  left: 0;
+  z-index: 1;
+  padding: 0 1.5ch 0 1ch;
+  background: var(--surface);
+  color: var(--text-muted);
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+  user-select: none;
+}
+.tv-row.is-target, .tv-row.is-target::before { background: var(--accent-soft); }
+.tv-row.is-target::before { color: var(--accent-strong); }
+.tv-row.level-debug .tv-text { color: var(--text-muted); }
+.tv-row.level-error .tv-text { color: var(--lvl-error); }
+.tv-level { font-weight: var(--weight-bold); }
+.level-debug .tv-level { color: var(--lvl-debug); }
+.level-info .tv-level { color: var(--lvl-info); }
+.level-warn .tv-level { color: var(--lvl-warn); }
+.level-error .tv-level { color: var(--lvl-error); }
+.tv-time { color: var(--text-muted); }
+.tv-match { border-radius: 2px; background: var(--mention-bg); color: var(--mention-text); }
+.tv-match.is-current { background: var(--accent); color: var(--on-accent); }
+.tv-probe { position: absolute; top: 0; left: 0; visibility: hidden; white-space: pre; pointer-events: none; }
+.tv-empty { margin: 0; padding: 32px 16px; color: var(--text-muted); font-family: var(--font-ui); text-align: center; }
+.ansi-fg-0 { color: var(--ansi-0); }
+.ansi-fg-1 { color: var(--ansi-1); }
+.ansi-fg-2 { color: var(--ansi-2); }
+.ansi-fg-3 { color: var(--ansi-3); }
+.ansi-fg-4 { color: var(--ansi-4); }
+.ansi-fg-5 { color: var(--ansi-5); }
+.ansi-fg-6 { color: var(--ansi-6); }
+.ansi-fg-7 { color: var(--ansi-7); }
+.ansi-fg-8 { color: var(--ansi-8); }
+.ansi-fg-9 { color: var(--ansi-9); }
+.ansi-fg-10 { color: var(--ansi-10); }
+.ansi-fg-11 { color: var(--ansi-11); }
+.ansi-fg-12 { color: var(--ansi-12); }
+.ansi-fg-13 { color: var(--ansi-13); }
+.ansi-fg-14 { color: var(--ansi-14); }
+.ansi-fg-15 { color: var(--ansi-15); }
+.ansi-bg-0 { background: color-mix(in srgb, var(--ansi-0) 28%, transparent); }
+.ansi-bg-1 { background: color-mix(in srgb, var(--ansi-1) 28%, transparent); }
+.ansi-bg-2 { background: color-mix(in srgb, var(--ansi-2) 28%, transparent); }
+.ansi-bg-3 { background: color-mix(in srgb, var(--ansi-3) 28%, transparent); }
+.ansi-bg-4 { background: color-mix(in srgb, var(--ansi-4) 28%, transparent); }
+.ansi-bg-5 { background: color-mix(in srgb, var(--ansi-5) 28%, transparent); }
+.ansi-bg-6 { background: color-mix(in srgb, var(--ansi-6) 28%, transparent); }
+.ansi-bg-7 { background: color-mix(in srgb, var(--ansi-7) 28%, transparent); }
+.ansi-bg-8 { background: color-mix(in srgb, var(--ansi-8) 28%, transparent); }
+.ansi-bg-9 { background: color-mix(in srgb, var(--ansi-9) 28%, transparent); }
+.ansi-bg-10 { background: color-mix(in srgb, var(--ansi-10) 28%, transparent); }
+.ansi-bg-11 { background: color-mix(in srgb, var(--ansi-11) 28%, transparent); }
+.ansi-bg-12 { background: color-mix(in srgb, var(--ansi-12) 28%, transparent); }
+.ansi-bg-13 { background: color-mix(in srgb, var(--ansi-13) 28%, transparent); }
+.ansi-bg-14 { background: color-mix(in srgb, var(--ansi-14) 28%, transparent); }
+.ansi-bg-15 { background: color-mix(in srgb, var(--ansi-15) 28%, transparent); }
+.ansi-fg-inverse { color: var(--surface); }
+.ansi-bg-inverse { background: var(--text); }
+.ansi-bold { font-weight: var(--weight-bold); }
+.ansi-dim { opacity: .65; }
+.ansi-italic { font-style: italic; }
+.ansi-underline { text-decoration: underline; }
+.ansi-strike { text-decoration: line-through; }
 .file-error { color: var(--danger); font-size: var(--text-2xs); letter-spacing: var(--tracking-2xs); }
 /* A file going up or down: bar, how far ("37 %", "12 MB / 48 MB") and, for uploads, cancel */
 .file-transfer { display: flex; align-items: center; gap: 8px; margin-top: 4px; }
@@ -11706,6 +12000,127 @@ html.call-window body {
 .set-device-name {
   font-weight: 500;
   overflow-wrap: anywhere;
+}
+
+/* Devices: what this device verified, the push state and the actions (issue #409). */
+.set-device-check {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  font-size: var(--text-sm);
+  line-height: 1.4;
+}
+
+.set-device-check svg {
+  flex: none;
+  width: 14px;
+  height: 14px;
+}
+
+.set-device-check.is-verified {
+  color: var(--accent-strong);
+}
+
+.set-device-check.is-pending {
+  color: var(--text-muted);
+}
+
+.set-device-check.is-unverified {
+  color: var(--danger);
+  font-weight: 500;
+}
+
+.set-device-test.is-warn {
+  color: var(--warn-text);
+}
+
+.set-device-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: var(--space-2);
+}
+
+.set-device-rename {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2);
+  width: 100%;
+  animation: motion-fade-in var(--dur-fast) var(--ease-standard);
+}
+
+.set-device-rename .input {
+  flex: 1 1 14rem;
+  min-width: 0;
+}
+
+/* Security: the key backup in plain words (issue #410). */
+.set-backup {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  padding: var(--space-3) var(--space-4);
+  border-bottom: 1px solid var(--border);
+}
+
+.set-backup-icon {
+  flex: none;
+  display: inline-grid;
+  place-items: center;
+  width: 36px;
+  height: 36px;
+  border-radius: 50%;
+  background: var(--surface-2);
+}
+
+.set-backup.is-ok .set-backup-icon {
+  color: var(--online);
+  background: color-mix(in srgb, var(--online) 12%, var(--surface));
+}
+
+.set-backup.is-warn .set-backup-icon {
+  color: var(--away);
+  background: color-mix(in srgb, var(--away) 14%, var(--surface));
+}
+
+/* Help & about: the instance's links. */
+.set-links {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.set-links > li + li {
+  border-top: 1px solid var(--border);
+}
+
+.set-link {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+  padding: var(--space-3) var(--space-4);
+  color: var(--text);
+  text-decoration: none;
+}
+
+.set-link:hover,
+.set-link:focus-visible {
+  background: var(--surface-2);
+}
+
+.set-link svg {
+  flex: none;
+  width: 16px;
+  height: 16px;
+  color: var(--text-muted);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .set-device-rename {
+    animation: none;
+  }
 }
 
 /* An inline confirm step for destructive actions. */

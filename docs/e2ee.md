@@ -85,6 +85,13 @@ key only keeps the passwords out of database dumps and backups ([admin.md](admin
   removal backoff, `removal_attempts` times, then dropped. A full resync (gateway events missed)
   does the same check once against the groups it holds. The revoked device's leaves carry the
   user's ID, so the removal is the user's own change, as from the revoking device.
+- **Verification state in the settings** (issue #409). Settings > Devices marks each of the user's
+  devices from what this device verified, never from the server's list alone: *verified* when its
+  certificate opens with the user's identity key and the newest signed device list names it with
+  that key; *being set up* when the certificate is the user's but the list doesn't name it yet;
+  *not verified* when nothing the identity key signed vouches for it (a device the server added on its
+  own). Device names are the user's: the server shows them to the user and admins only, colleagues'
+  clients get the keys with an empty name.
 - MLS ciphersuite: `MLS_128_DHKEMX25519_CHACHA20POLY1305_SHA256_Ed25519` (matches the device keys).
   The device key signs both MLS messages and TeamCraft structures; every TeamCraft signature and AEAD
   input is prefixed with a length-prefixed `TeamCraft-v1 …` label, so it can't collide with MLS's
@@ -163,6 +170,39 @@ restart) finishes the job (`teamcraft-core::client::enroll`):
 A device that finds no key bag on the server for an account it already uses refuses to upload one
 with no wraps (`KeyBagMissing`): such a bag could never be recovered. The user sets a recovery
 passphrase again instead.
+
+**A setup nobody finishes (issue #415).** The key pair of step 1 waits for a retry. When the user
+gives up instead, it is dropped (`teamcraft-core::client::abandoned`):
+
+- **On sign-out** before the device is set up, at once, together with the keys of a link (§5).
+- **After `unfinished_enrollment_expiry`** (a client setting, default one day from when the key pair
+  was stored), checked when the app starts or shows the setup screen while the device is not set
+  up. A record of an older version has no time, and a time in the future comes from a clock that
+  was wrong: both count from the first check on. The key pair stays while the enrollment can still
+  finish: an account is stored, the keys of a link wait to be enrolled (§5), or an enrollment or a
+  link runs on this device right now.
+
+In one group of writes (§9.5) the key pair is deleted, and its public key goes on a list of
+registrations to revoke together with the identity key that certified it. The SQLite stores then
+overwrite their freed pages and log (`purge_freed`), so the private key can't be read back from the
+files. IndexedDB can't promise that: the deleted record's sealed blob may stay in the browser's
+files until it compacts them, encrypted with the store's key. A crash leaves either the key pair or
+the entry on the list, never neither.
+
+The server then revokes the device the key pair registered, if any, so an abandoned setup doesn't
+keep a slot of the user's device limit. A registration is revoked only when no enrolled device can
+be using it: the identity that certified it isn't the account's (enrollment reuses only a
+registration of its own identity, step 1), or the device list the account's identity signed doesn't
+name it. The client checks that list against the identity key: its own once enrolled, before that
+the server's only where it is the key the entry was certified with. Without a list that verifies,
+nothing is revoked. So a copy of the store taken while the setup was unfinished (a restored backup)
+never revokes the device the original finished enrolling with the same key pair; and the client
+never revokes its own device. Offline, the entry stays and is revoked on the next start, the next
+sign-out, or by the upkeep of the client the user enrolls later. A refusal for good gives the entry
+up (the device stays in the user's device list, where the user can remove it); one that blocks the
+whole list (reading the devices) waits an hour before the next try, doubling up to a day. Sign-out
+waits at most a few seconds for the server. The key pair was never trusted anywhere (no signed
+device list names it), so a late revocation is housekeeping, not a security boundary.
 
 **The first owner.** The first roster entry makes its signer the workspace root of trust (admin.md
 §2.3); an owner who can't recover their identity could never sign the roster or policy again. The
@@ -349,6 +389,12 @@ flag. Reactions are encrypted messages, so not even reaction counts are visible.
 
 Encrypted: text, attachments, attachment names, reactions, edits, polls, link previews, drafts.
 
+Typing indicators are plaintext metadata too: a `typing` gateway frame tells the server that a user
+types in a conversation (never what), and it forwards that to the other members (gateway.md). Clients
+send at most one every 3 s while there is text in the composer, and none when the user turned "Show
+when I'm typing" off (a preference of each device, on by default). Nothing about typing is stored, on
+the server or the clients.
+
 Directory data, not encrypted: the server has to show and route by it, so it holds it in plain text
 like the identity provider does. Space names, descriptions, colors and **pictures**; channel names,
 topics and **pictures**; people's profiles and avatars. A space or channel picture is uploaded to the
@@ -442,18 +488,32 @@ shows only the resulting PNG. Thumbnails of SVG are drawn by the sender's browse
 `resvg` on native platforms, with no DTD, no resources loaded and limits on size, element count and
 `<use>` expansion (`teamcraft-core` `svg_thumbnail`).
 
-#### 4.5.0 Previews of Markdown, HTML and PDF files
+#### 4.5.0 Previews of files
 
-A received `.md`, `.html` or `.pdf` file (by media type, or by extension when the type is generic) can be
-opened as a formatted preview in the app, up to 10 MiB (larger files are only downloaded). The preview works
-from the file the client core already downloaded and decrypted; nothing leaves the client. The file is
-untrusted, so each kind is shown in a way that can't run its code or reach the app:
+A received `.md`, `.html` or `.pdf` file, or a text file (`.txt`, `.log`, `.json`, `.csv`, `.yaml`, `.toml`,
+`.xml`, `.ini`, `.conf`, any `text/*` type; by media type, or by extension when the type is generic), can be
+opened as a preview in the app, up to a size the user chooses (`PreviewLimit`, 2 to 50 MiB, default 10 MiB;
+a larger file shows its size and the download, and is not loaded). The preview works from the file the client
+core already downloaded and decrypted, in memory; nothing leaves the client. The file is untrusted, so each
+kind is shown in a way that can't run its code or reach the app:
 
 | Kind     | Shown as                                                                                       |
 |----------|------------------------------------------------------------------------------------------------|
 | Markdown | the app's own renderer (the message subset: a tree of elements, no HTML string); "show source" |
 | HTML     | a sandboxed frame, see below; "show source"                                                    |
 | PDF      | the vendored PDF.js, see below                                                                 |
+| Text     | plain text in the text viewer, see below                                                       |
+
+**Text.** Text nodes only (`crates/teamcraft-ui/src/text_preview`): nothing in the file is read as HTML or
+Markdown, and addresses in it stay text (no link is made, nothing is fetched). The bytes are read as UTF-8,
+UTF-16 or, when clearly text in no Unicode encoding, Windows-1252; a file with NUL bytes or many control
+characters is binary and not shown. Terminal escape sequences in logs are never acted on: SGR colours become
+one of sixteen colours of the stylesheet, every other sequence (cursor moves, titles, OSC 8 hyperlinks,
+device controls) is removed, and an unterminated one hides nothing beyond its line. JSON is formatted only on
+request, after `serde_json` accepted it, by re-indenting its tokens, with nesting (128 levels) and the
+formatted size (64 MiB) bounded so a small hostile file can't blow up. Only the rows in view
+are in the page, at most a million lines are indexed, and finding is capped (10,000 matches), so a large
+file can't exhaust the page.
 
 **HTML.** An `<iframe sandbox="" srcdoc="…">` with the strictest sandbox (no `allow-scripts`, no
 `allow-same-origin`: an opaque origin that reaches nothing of the app, its storage or its tokens; no forms,
@@ -1050,6 +1110,68 @@ message times. A device's own decision to commit still uses its own clock.
 only after its MLS queue was caught up, so an offline message never goes out under a key that a member
 removed meanwhile still holds.
 
+### 4.6.1 Signed channel roles
+
+A channel's roles (admin = channel owner, moderator, member; admin.md §1) are changed on the server
+like any setting, but members don't take the server's word for them (issue #380). Each channel has
+an append-only **role log** next to its messages (`/conversations/{id}/role-log`), built like the
+workspace roster (admin.md §2.3):
+
+- **Entries.** Each entry is a full snapshot of the channel's admins and moderators (members are
+  implicit), with the identity key of each as the signer's device pinned it, the channel's ID, the
+  entry's version, the hash of the last entry the signer's device accepted (`prev_hash`, zeros
+  before the first) and the signing time. It is signed by a device key like a roster entry, under
+  its own log kind (`WorkspaceLog::ChannelRoles`), so it can't be moved to another log, version or
+  channel. The server checks who may append (`manage_channel_roles` in an open channel, the
+  caller's own active device), that the document names this channel and the next version, and
+  orders the entries (`409 version_conflict` for a stale version); it never verifies signatures.
+- **Who may sign** follows the role rules of `teamcraft_proto::role_rules` (the code the UI uses;
+  the server checks the same rules with `is_allowed`), fed only with signed facts and the built-in
+  permission scheme:
+  - an owner or admin of the verified workspace roster, fresh at the entry's server time, may sign
+    any snapshot, also one built on another head than this device's (a checkpoint that re-anchors
+    a device that skipped an entry);
+  - an admin of the snapshot this device accepted last, verified against the key that snapshot
+    names for them, may sign the next snapshot built on exactly it;
+  - **the founder**: while nothing was accepted yet, an entry whose signer names themselves admin,
+    with the identity key this device pinned for them (trust on first use, like the workspace root
+    of trust). A channel's creator signs it when creating the channel; a channel from before signed
+    roles is founded by the first admin the server lists who changes or confirms a role.
+
+  Every change against the accepted snapshot must pass `check_channel_role_change`: nobody changes
+  their own role (the founder's claim aside), a snapshot keeps an admin, only `admin` and
+  `moderator` are listed. Moderators, members and anybody else sign nothing members accept. Space
+  admins and custom permission schemes aren't signed facts, so space admins' and scheme-granted
+  role changes stay the server's word (shown as not signed).
+- **Verifying.** Each device reads the log after its cursor and verifies every entry in version
+  order; an entry is accepted or skipped, never fatal. Signers build on the last entry they
+  accepted, so a junk entry (a hostile server, a modified client) can't block the log. The cursor
+  and the accepted version only move forward: a replayed entry is below the cursor, and moved to a
+  new position its signed version doesn't match. The accepted head (version and entry hash) travels
+  inside every encrypted text message of the channel; a member with another entry for the same
+  version raises an alarm, a newer one makes the device read the log again and raise an alarm if
+  it still isn't shown it, as for the roster.
+- **Using a role.** The role that counts is the signed one, capped by the server's: the server can
+  take a role away (it can withhold anything anyway) but never grant one, and an instance guest is
+  a member whatever is signed. Members' apps show a role only the server lists as "not signed";
+  admins who can sign confirm it with "Sign role". Decisions every member must make alike (issue
+  #776, the owner's approval of an admin joining a private channel) use the signed role alone
+  (`Client::verified_channel_role`) together with the MLS group's membership.
+- **Not yet decided by signed roles.** Commits still follow §4.6 as before: every member of the
+  group may sign membership changes (security review A11), since channels whose roles nobody
+  signed yet would otherwise lock their legitimate admins out, and clients without signed roles
+  would split from the others. Restricting commits to signed roles is a later step once channels
+  are signed. Integration sources still need a workspace admin (§13.1).
+
+Residual risks: the founding entry of a channel is trust on first use, so a hostile server together
+with a member of a channel from before signed roles can make that member its first signed admin
+before a real admin does (a workspace admin's checkpoint fixes it, and the real admins see the
+roles they hold shown as not signed). A demotion the server withholds is noticed only through the
+heads members exchange; channel roles have no freshness window like the roster's. A device that
+verifies a log from scratch judges a workspace admin's old entry by the roster it has now, so an
+entry by an admin who lost the role since is skipped there (and the entries built on it) until a
+workspace admin signs a checkpoint.
+
 ### 4.7 Converting a channel between private and public
 
 `PUT /api/v1/conversations/{id}/visibility` (permission `convert_channel_privacy`: channel owners, space
@@ -1082,7 +1204,8 @@ encryption, and what does and does not hold:
 - Guests stay what they were: they can't join public channels on their own and are always `from_join`.
 - Integration channels (bridge output) stay private; archived channels are converted after unarchiving.
 - Members get a `privacy_changed` system event, the audit log records `conversation_visibility_changed`
-  with the old and new value (metadata only).
+  with the old and new value (metadata only). The line members' apps show ("This channel was made
+  public") comes from the server's record of the channel, not from a member's message (§4.9).
 - *Later:* a signed per-channel history record (like the roster) would let clients trust "this channel
   shares its past with newcomers" without the server's word.
 
@@ -1101,9 +1224,72 @@ are**, and nobody is added or removed. Consequences:
 - The space's permission scheme and its retention defaults apply from the move on; a channel's own
   retention setting stays.
 - A move is announced as a `moved` system event (metadata) and, by the client of the person who moved it,
-  as an encrypted `moved` group message naming the new space.
+  as an encrypted `moved` group message naming the new space. Members' apps show the line from the
+  server's record of the channel; the message only names the mover (§4.9).
 - The new space's admins manage the channel from then on (its scheme applies), like any channel of that
   space.
+
+### 4.9 Lines about channel changes (issue #818)
+
+Whether a channel is archived, public or listed in a space is the **server's record**: no MLS commit
+carries it, and nothing signs it until channel properties are signed (a follow-up of the signed
+channel roles, issues #380, #801). The lines "… archived this channel", "… made this channel
+private / public" and "… moved this channel to …" used to come from the encrypted message of whoever
+made the change. Its sender is authenticated, its content wasn't checked against anything: a member
+could post "Carol archived this channel" without anything happening, and a member who did it could
+leave the message out. So the line now comes from where the change is, and says whose word it is:
+
+- **The line is the server's statement.** Every member's device compares the server's record of a
+  channel with the one it held whenever it stores a new one: the refetch after a gateway
+  `conversation_update`, a sync's conversation list, the server's answer to its own change. Each
+  difference in `is_archived`, public or not, and space is a line, in that order, worded as what the
+  server says: "This channel was archived", "This channel was moved to Project B" (the space's name
+  as this device knows it). Only channels; a record the device sees for the first time tells
+  nothing (nothing it saw changed), so a device that joins later, or was away while a change was
+  undone again, shows no line for it.
+- **Who made it, only when that member says so and it fits.** Whoever makes the change still sends
+  the encrypted `archived` / `unarchived` / `made_private` / `made_public` / `moved` message (older
+  versions show it). This version keeps every such message hidden; one names who made the change
+  ("Carol archived this channel") on the line it matches: the same kind (for a move, the same space
+  unless one side doesn't know its name), sent after every message the device held when it saw the
+  change, and no later than `change_announcement_window` (10 minutes by default, on the server's
+  clock) after the server's newest message then (the sync's head for the conversation, else the
+  newest the device held). The earliest line still unnamed takes it, and moves back to the
+  message's place if that is earlier (a change caught up after a while away), never later. A second
+  member's message that fits a named line leaves it naming nobody: two members claimed the change.
+  A user's own change names them on the device that made it ("You archived
+  this channel"), whatever others claim, and only for what their request asked for: a difference
+  in the server's answer that somebody else made meanwhile names nobody, and the device announces
+  only what it changed. A message that matches nothing (a made-up change, a different kind, too
+  early or too late) shows nothing at all, rather than a neutral "Carol says …": it would still
+  read as a system line, and the change, if there was one, is on the record's line already.
+- **Where and how often.** The line is stored like a message, marked as derived from the server's
+  record (`server_change`, only ever set by the device itself), with no server ID. It sits after
+  everything the device knew of the conversation when it saw the change (the server's newest
+  message for a sync, else the newest message held) at the last ID of that millisecond, which no
+  message gets unless one server instance hands out 4096 IDs in one millisecond, and a second line
+  of the same record at the next millisecond's; once a message names who made it and is older, at
+  that message. Its ID comes from that first place. The record and its lines are written in one
+  group of writes, so a crash keeps both (the change was told) or neither (the next refetch or sync
+  sees it again): refetches, syncs and reconnects tell a change once. An announcement and the name it puts on a
+  line reach the disk together too. As for the admin-join line (admin.md §2.4.2) no message
+  replaces, edits, deletes or pins it, and a message the server gives the same ID doesn't take its
+  row. The time shown is when the device learned of it (at least its place's); once named, the
+  message's.
+- **Unread** like the admin-join line: like a message at its place, from anybody but the user
+  (their own change isn't unread to them); a line newer than every message is read when the user
+  reads the conversation on this device.
+- **Older versions.** 1.0.8 clients send the same messages, which name them here; this version still
+  sends them, so 1.0.8 shows its changes as before. Messages stored before the update are hidden
+  after it, and their changes have no line (they happened before this device compared records).
+
+What still rests on the server: whether and when a channel changed, and the space's name, are its
+word. A server can report a change that didn't happen or hold one back, and nothing a member sends
+makes a line or keeps one away. A name on a line is always a member's own encrypted claim of that
+kind of change; a server that numbers messages could at most hand a device such a claim it never
+saw before (an older one, re-timed into the window), or drop the real one so that a member's
+competing claim is the only one that fits. A member racing the real announcement with their own
+only makes the line name nobody. Signed channel properties would close this.
 
 ## 5. Adding a device (Threema/WhatsApp style)
 
@@ -1185,15 +1371,24 @@ Implemented as (`teamcraft-crypto::rendezvous`, `teamcraft-core` linking):
   transfer frame, a closed relay or 60 seconds without a receipt fail on the existing device, and the
   new device fails because the transfer never arrives (the relay closes when the existing device
   gives up). A lost receipt makes the existing device report a failure although the new device has
-  the keys; linking again is harmless. Before it sends `received`, the new device stores the backup
-  key and the encrypted key bag in its local store, as a record next to the account protected the
-  same way (§9; on the web the write is issued at once instead of after the batching delay). If the
+  the keys; linking again is harmless. The wait for the receipt holds the relay, not the client
+  (`LinkReceipt`, issue #415): the apps send the keys from their core loop and wait on a task of
+  their own (web, desktop and the mobile engine alike), so syncing, sending and reading go on
+  meanwhile, and the user's confirmation call answers with the outcome. Content keys the existing
+  device learns in that window (up to 60 s after the key bag was snapshotted for the transfer)
+  reach the new device like any other change: through the next key bag upload, which the new device
+  merges when it syncs. Closing the dialog cancels the wait (the relay closes; the keys were sent
+  already), and so does stopping the app. Before it
+  sends `received`, the new device stores the backup key and the encrypted key bag in its local
+  store, as a record next to the account protected the same way (§9; on the web the write is issued
+  at once instead of after the batching delay). If the
   app stops before the account is stored, the next start finishes the enrollment with them, so the
   existing device's success is never a lie the user has to undo by linking again. The record goes
   with the account write that completes enrollment (one group of writes, §9.5), when the user
-  cancels linking or signs out before the device is set up (with the pending device key pair), or
-  when it can't work any more (the key bag no longer opens, the record is unreadable, another
-  account signed in). The new device then enrolls (§3.2) and joins the user's
+  cancels linking or signs out before the device is set up (with the pending device key pair, whose
+  registration is then revoked, §3.2), or when it can't work any more (the key bag no longer opens,
+  the record is unreadable, another account signed in). While it is there, the pending device key
+  pair is never dropped for its age. The new device then enrolls (§3.2) and joins the user's
   groups on its own (§4.6, "A further device joins on its own"); where it can't yet, an existing
   member adds it when it comes online. It reads the history the key bag opens at once.
 
@@ -1346,6 +1541,11 @@ restored together with them on a new device.
   leaves a tombstone with its left time for the usual 90 days, so the same absence isn't taken
   back from another device's local records or an older key bag (possibly without its return); a
   later removal of the device counts as before.
+- **When the recovery passphrase was last set** (issue #410): the device that sets it (enrollment,
+  a change, a recovery) records its clock's time; merging keeps the later one. Settings > Security
+  shows it next to the backup's state, which each device reads from what it already knows: whether a
+  key bag is stored, uploads still pending, and which wraps exist (passphrase, passkey,
+  organization). The server learns nothing new.
 - **The activity feed has no read mark of its own** (issue #534): an entry is read when the read
   position of its target (conversation or thread) is at or after it, and those positions sync
   through the server like any other. The older `activity_read` field is still merged (the later one
@@ -1960,6 +2160,17 @@ start and remain visible while the server or its object storage is unavailable.
   name, and every `teamcraft-media-*` database the browser lists (`indexedDB.databases()`), also at
   a start while signed out.
 - An entry that doesn't open (tampered with, another key) is deleted and counts as missing.
+- **Notification pictures (#543).** System notifications show the sender's avatar or the channel's
+  or space's picture from this cache, never a rendition. The OS shows them in other processes, so
+  they leave the seal there: Linux gets the pixels over D-Bus (`image-data`, no file); Windows and
+  macOS get a small PNG (128 px) in the app's cache directory (mode 0600 where the system has modes),
+  one per picture on Windows (the toast reads it again from the Action Center) and a copy per
+  notification on macOS (the notification center moves it into its own store). These files are
+  deleted at sign-out, at start and, on Windows, when the picture is no longer among the last 32
+  shown. The browser's service worker reads the cache like the page, with the account's wrapped key,
+  and hands the picture to the browser as a `data:` URL. Pictures go only with names: a
+  notification the workspace policy or the device setting keeps to "New message" has none
+  (notifications.md, "Desktop notifications").
 - The mobile apps don't use it: Android keeps avatars in its own file cache and opens pictures from
   the decrypted downloads (§4.5).
 
@@ -2100,9 +2311,10 @@ the bridge hashes the token of each request and compares it with every known has
 
 **Trust rule.** The server sees ciphertext only and can't write in the channel's group, so it can
 neither create nor alter a source. Who may manage sources is decided from signed data only: the
-verified workspace roster (admin.md §2.3). Channel roles are still the server's word (signed channel
-roles: issue #380) and count for nothing here, so a server can't promote a channel member into a
-source admin. Each member device (the bridge included) keeps a bounded ledger per channel
+verified workspace roster (admin.md §2.3). Channel roles are signed now (§4.6.1), but they don't
+count here yet: the bridge and every member would have to read each channel's role log before
+taking in an announcement, which is a follow-up of issue #380. So a server can't promote a channel
+member into a source admin. Each member device (the bridge included) keeps a bounded ledger per channel
 (`teamcraft-core::integration_sources`):
 
 - **Taking in.** A `created` or `renamed` reaches the ledger only from an admin of the verified

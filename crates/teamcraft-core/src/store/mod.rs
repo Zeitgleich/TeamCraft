@@ -131,13 +131,14 @@ pub enum Table {
   AnnouncedPresence,
 }
 
-/// A decrypted (or own, not yet sent) message, or a line this device derived from a verified MLS
-/// commit ([`Self::maybe_verified_commit`]).
+/// A decrypted (or own, not yet sent) message, or a line this device derived itself: from a
+/// verified MLS commit ([`Self::maybe_verified_commit`]) or from the server's record of the
+/// conversation ([`Self::maybe_server_change`]).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StoredMessage {
   pub conversation_id: ConversationId,
   pub client_message_id: ClientMessageId,
-  /// Absent while the message waits in the outbox, and on a line derived from a commit.
+  /// Absent while the message waits in the outbox, and on a line this device derived.
   #[serde(rename = "server_id", default, skip_serializing_if = "Option::is_none")]
   pub maybe_server_id: Option<MessageId>,
   pub sender_user_id: UserId,
@@ -162,6 +163,64 @@ pub struct StoredMessage {
   /// sits at the commit's place among the messages, and messages can't replace or change it.
   #[serde(rename = "verified_commit", default, skip_serializing_if = "Option::is_none")]
   pub maybe_verified_commit: Option<MlsMessageId>,
+  /// What makes this a line about a change the server reports of the conversation (archived,
+  /// restored, made private or public, moved; issue #818), derived by this device from the
+  /// server's record as it saw it change. Like [`Self::maybe_verified_commit`] only this device
+  /// sets it, so no member's message makes or hides such a line; a member's announcement of the
+  /// change can only name who made it ([`ServerChange::actor`]).
+  #[serde(rename = "server_change", default, skip_serializing_if = "Option::is_none")]
+  pub maybe_server_change: Option<ServerChange>,
+}
+
+/// Where a line about a change the server reports stands, and whom it names (issue #818).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ServerChange {
+  /// The line's place among the messages, on the server's clock: right after everything this
+  /// device knew of the conversation when it saw the change, or, once a member's announcement
+  /// names who made it, the announcement's.
+  pub at: MessageId,
+  /// The newest message this device held of the conversation when it saw the change: only an
+  /// announcement sent after it can name who made the change.
+  pub seen_after: MessageId,
+  /// The server's newest message of the conversation as far as this device knew when it saw the
+  /// change (the sync's head, else [`Self::seen_after`]): an announcement sent longer than the
+  /// configured window after it names nobody.
+  pub seen_until: MessageId,
+  /// Whom the line names.
+  #[serde(default)]
+  pub actor: ChangeActor,
+}
+
+/// Who made a change the server reports, as far as this device can tell. The line's sender
+/// ([`StoredMessage::sender_user_id`]) is that person when the actor [`Self::is_named`], and
+/// [`nobody`] otherwise.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ChangeActor {
+  /// This device made the change itself, so the user did; announcements don't change that.
+  ThisDevice,
+  /// The sender announced the change in this message, which matched it.
+  Announced { announcement: ClientMessageId },
+  /// Different members announced the change: nobody is named, and no later announcement is.
+  Contested,
+  /// Nobody is named: no member's announcement matched the change (yet). Also what a record of a
+  /// newer version reads as.
+  #[default]
+  #[serde(other)]
+  Nobody,
+}
+
+impl ChangeActor {
+  /// Whether the line names its sender as who made the change.
+  pub fn is_named(&self) -> bool {
+    matches!(self, Self::ThisDevice | Self::Announced { .. })
+  }
+}
+
+/// The sender of a line that names nobody: no user has this ID (the smallest, older than anything
+/// the server generates).
+pub fn nobody() -> UserId {
+  teamcraft_proto::Id::from_snowflake(teamcraft_proto::Snowflake::ZERO)
 }
 
 /// A text that an edit replaced.
@@ -259,11 +318,17 @@ pub enum ConversationEvent {
   TopicChanged {
     topic: String,
   },
+  // The next five are the server's record of the channel (issue #818): shown only as a line each
+  // member's device derives from that record as it sees it change
+  // ([`StoredMessage::maybe_server_change`]). As messages they are still sent by whoever made the
+  // change, for older versions; this version keeps them hidden, and a matching one names who made
+  // the change.
   Archived,
   Unarchived,
   MadePrivate,
   MadePublic,
-  /// The channel moved to another space (named here as the mover saw it).
+  /// The channel moved to another space (named here as the mover saw it; a line names it as this
+  /// device knows the space).
   Moved {
     #[serde(default)]
     space: String,
@@ -321,6 +386,14 @@ pub struct MessageMeta {
   /// The sender's verified workspace head, added when the message is sent (security review A6).
   #[serde(rename = "workspace_head", default, skip_serializing_if = "Option::is_none")]
   pub maybe_workspace_head: Option<Box<crate::workspace::WorkspaceHead>>,
+  /// The sender's verified head of the channel's signed roles (e2ee.md §4.6.1), added when the
+  /// message is sent, so members notice a server showing them different role logs.
+  #[serde(
+    rename = "channel_roles_head",
+    default,
+    skip_serializing_if = "Option::is_none"
+  )]
+  pub maybe_channel_roles_head: Option<Box<crate::channel_roles::ChannelRolesHead>>,
 }
 
 /// The quoted message: the reference, plus enough to show it where it isn't loaded.
@@ -734,18 +807,58 @@ impl MessageContent {
   }
 }
 
+impl ConversationEvent {
+  /// A change the server records of the channel itself (issue #818): archived, restored, made
+  /// private or public, moved to another space.
+  pub fn is_server_change(&self) -> bool {
+    matches!(
+      self,
+      Self::Archived | Self::Unarchived | Self::MadePrivate | Self::MadePublic | Self::Moved { .. }
+    )
+  }
+}
+
 fn is_false(value: &bool) -> bool {
   !*value
 }
 
 impl StoredMessage {
-  /// Display order: server messages by ID, a line derived from a commit by the commit's ID (both
-  /// the server's time-ordered IDs); pending ones after all of them, by time written.
+  /// Display order: server messages by ID, a line this device derived at its place
+  /// ([`Self::line_position`], the same time-ordered IDs); pending ones after all of them, by time
+  /// written.
   pub fn sort_key(&self) -> (u8, i64) {
-    match (self.maybe_server_id, self.maybe_verified_commit) {
+    match (self.maybe_server_id, self.line_position()) {
       (Some(id), _) => (0, teamcraft_proto::Id::snowflake(id).get()),
-      (None, Some(commit)) => (0, teamcraft_proto::Id::snowflake(commit).get()),
+      (None, Some(at)) => (0, teamcraft_proto::Id::snowflake(at).get()),
       (None, None) => (1, self.sent_at_ms),
+    }
+  }
+
+  /// A line this device derived itself, from a verified commit (issue #811) or from the server's
+  /// record of the conversation (issue #818): no message of the server's, and no message replaces
+  /// or changes it.
+  pub fn is_local_line(&self) -> bool {
+    self.maybe_verified_commit.is_some() || self.maybe_server_change.is_some()
+  }
+
+  /// Where a line this device derived sits among the messages (on the server's clock, like their
+  /// IDs): at the commit it comes from, or where [`ServerChange::at`] puts it. `None` for messages.
+  pub fn line_position(&self) -> Option<MessageId> {
+    match (&self.maybe_verified_commit, &self.maybe_server_change) {
+      (Some(commit), _) => Some(teamcraft_proto::Id::from_snowflake(
+        teamcraft_proto::Id::snowflake(*commit),
+      )),
+      (None, Some(change)) => Some(change.at),
+      (None, None) => None,
+    }
+  }
+
+  /// Who made the change an event tells of: for a line about a change the server reports, the
+  /// person its actor names, if any ([`ChangeActor`]); for anything else its sender.
+  pub fn maybe_actor(&self) -> Option<UserId> {
+    match &self.maybe_server_change {
+      Some(change) if !change.actor.is_named() => None,
+      _ => Some(self.sender_user_id),
     }
   }
 
@@ -755,12 +868,15 @@ impl StoredMessage {
 
   /// Reactions, edits, deletes and pins act on other messages and aren't listed themselves. Nor
   /// is a message saying that an admin joined: only the line this device derived from the commit
-  /// shows that (issue #811), so a member can't make it up by sending one.
+  /// shows that (issue #811), so a member can't make it up by sending one. The same goes for a
+  /// message saying that the channel was archived, restored, made private or public, or moved:
+  /// only the line this device derived from the server's record shows that (issue #818).
   pub fn is_hidden(&self) -> bool {
     match &self.content {
       MessageContent::Event {
         event: ConversationEvent::AdminJoined { .. },
       } => self.maybe_verified_commit.is_none(),
+      MessageContent::Event { event } if event.is_server_change() => self.maybe_server_change.is_none(),
       content => matches!(
         content,
         MessageContent::Reaction { .. }
@@ -941,6 +1057,49 @@ pub(crate) mod tests {
     groups_of_writes_nest_and_are_read_at_once(store);
     media_messages_are_paged_from_a_message_outwards(store);
     admin_joins_show_only_as_lines_from_commits(store);
+    server_changes_show_only_as_lines(store);
+  }
+
+  /// Issue #818: a line about a change the server reports sits where it was put (or moved to) and
+  /// is listed; a member's message saying the same is kept but never listed.
+  fn server_changes_show_only_as_lines(store: &impl LocalStore) {
+    let conversation = id(40);
+    let archived = MessageContent::Event {
+      event: ConversationEvent::Archived,
+    };
+    let before = message(conversation, 1, Some(100), None, 1_000);
+    let after = message(conversation, 2, Some(300), None, 3_000);
+    let mut line = message(conversation, 3, None, None, 2_000);
+    line.content = archived.clone();
+    line.maybe_server_change = Some(ServerChange {
+      at: id(200),
+      seen_after: id(100),
+      seen_until: id(100),
+      actor: ChangeActor::Nobody,
+    });
+    let mut announced = message(conversation, 4, Some(250), None, 2_500);
+    announced.content = archived;
+    for stored in [&after, &announced, &line, &before] {
+      store.upsert_message(stored).unwrap();
+    }
+
+    let top: Vec<_> = store
+      .messages(conversation, MessageFilter::TopLevel)
+      .unwrap()
+      .into_iter()
+      .map(|m| m.client_message_id)
+      .collect();
+    assert_eq!(
+      top,
+      vec![
+        before.client_message_id,
+        line.client_message_id,
+        after.client_message_id
+      ]
+    );
+    assert_eq!(store.messages(conversation, MessageFilter::All).unwrap().len(), 4);
+    assert_eq!(store.message_by_server_id(conversation, id(200)).unwrap(), None);
+    store.delete_messages(conversation).unwrap();
   }
 
   /// Issue #811: the line derived from a commit sits at the commit's place and is listed; a message
@@ -1224,6 +1383,7 @@ pub(crate) mod tests {
       maybe_edit_id: None,
       is_pinned: false,
       maybe_verified_commit: None,
+      maybe_server_change: None,
     }
   }
 

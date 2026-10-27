@@ -73,6 +73,7 @@ use teamcraft_proto::{
 };
 use teamcraft_proto::{ListThreadsQuery, ListThreadsResponse, MessageId, SyncHeadsResponse, UnreadResponse};
 use teamcraft_proto::{NotificationSettings, TestPushResponse};
+use teamcraft_proto::{PushHealthResponse, UpdateDeviceRequest};
 use teamcraft_proto::{RendezvousClientMessage, RendezvousServerMessage};
 use teamcraft_proto::{SetPresenceRequest, SetReadPositionRequest, UpdateConversationMemberRequest};
 #[cfg(not(target_arch = "wasm32"))]
@@ -106,6 +107,12 @@ pub trait ServerApi {
     request: &RegisterDeviceRequest,
   ) -> impl Future<Output = Result<DeviceResponse, ApiError>>;
   fn list_user_devices(&self, user: UserId) -> impl Future<Output = Result<ListDevicesResponse, ApiError>>;
+  /// Renames one of the user's devices (`PATCH /devices/{id}`).
+  fn update_device(
+    &self,
+    device: DeviceId,
+    request: &UpdateDeviceRequest,
+  ) -> impl Future<Output = Result<DeviceResponse, ApiError>>;
   fn put_identity_key(
     &self,
     request: &UploadIdentityKeyRequest,
@@ -454,6 +461,19 @@ pub trait ServerApi {
     request: &AppendWorkspaceLogRequest,
   ) -> impl Future<Output = Result<WorkspaceLogEntryResponse, ApiError>>;
 
+  /// Entries of a channel's signed role log after `query.maybe_after`, oldest first (issue #380).
+  fn list_channel_role_log(
+    &self,
+    conversation: ConversationId,
+    query: &teamcraft_proto::ListChannelRoleLogQuery,
+  ) -> impl Future<Output = Result<teamcraft_proto::ListChannelRoleLogResponse, ApiError>>;
+  /// Appends an entry to a channel's role log (needs `manage_channel_roles`).
+  fn append_channel_role_log(
+    &self,
+    conversation: ConversationId,
+    request: &teamcraft_proto::AppendChannelRoleLogRequest,
+  ) -> impl Future<Output = Result<teamcraft_proto::ChannelRoleLogEntryResponse, ApiError>>;
+
   /// Announces an attachment upload; returns the presigned upload URL.
   fn create_attachment(
     &self,
@@ -552,6 +572,8 @@ pub trait ServerApi {
   fn unregister_push(&self, device: DeviceId) -> impl Future<Output = Result<(), ApiError>>;
   /// Asks the server to send a test wake-up to the device (`POST /devices/{id}/push/test`).
   fn send_test_push(&self, device: DeviceId) -> impl Future<Output = Result<TestPushResponse, ApiError>>;
+  /// Push service and delivery counts of the user's own devices (`GET /me/push-health`).
+  fn my_push_health(&self) -> impl Future<Output = Result<PushHealthResponse, ApiError>>;
   /// The user's notification settings (`GET /me/notification-settings`).
   fn notification_settings(&self) -> impl Future<Output = Result<NotificationSettings, ApiError>>;
   /// How the server reaches its push gateway (`GET /push/gateway`), for sealing device tokens.

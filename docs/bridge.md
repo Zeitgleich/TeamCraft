@@ -301,9 +301,10 @@ reads them from the channel itself (e2ee.md §13.1):
    and a revoked source never comes back. The list shows the sources in force with who added them
    and when; to replace a leaked URL, revoke the source and add a new one.
 
-Who may: **workspace admins** of the verified roster (admin.md §2.3). Channel roles aren't signed
-yet (issue #380), so the bridge doesn't take the server's word for them, and the app offers "Add
-source" only to workspace admins. The creator must also be a member of the channel, and stay an
+Who may: **workspace admins** of the verified roster (admin.md §2.3). Channel roles are signed
+now (e2ee.md §4.6.1), but the bridge doesn't read the channels' role logs yet (a follow-up of issue
+#380), so channel admins don't count here and the app offers "Add source" only to workspace
+admins. The creator must also be a member of the channel, and stay an
 admin: a creator who loses the role or leaves takes their sources out of force. Admins and the
 source's creator may revoke; changes from anybody else are ignored before they are stored. The
 server only carries ciphertext, so it can neither add nor change a source. It can withhold

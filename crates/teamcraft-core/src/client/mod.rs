@@ -4,6 +4,7 @@
 //! [`ServerApi`] and keeps the store current. UIs read the store (see [`crate::view`]); every
 //! network-facing operation is an `async` method here.
 
+mod abandoned;
 mod account;
 mod actions;
 mod admin_joins;
@@ -12,6 +13,7 @@ mod attested;
 mod backgrounds;
 mod calls;
 mod catch_up;
+mod channel_roles;
 mod custom_status;
 pub mod devices;
 pub mod direct_uploads;
@@ -39,6 +41,7 @@ mod read_ahead;
 mod removal;
 #[cfg(not(target_arch = "wasm32"))]
 mod segments;
+mod server_changes;
 mod sources;
 mod sync;
 mod sync_trace;
@@ -52,7 +55,11 @@ pub(crate) use workspace::WORKSPACE_KEY;
 
 use std::collections::{BTreeMap, HashMap};
 
+pub use abandoned::SIGN_OUT_REVOKE_PATIENCE;
 pub use account::stored_account_data;
+pub use devices::OwnDeviceCheck;
+#[cfg(feature = "ui")]
+pub(crate) use enroll::{WRAPPED_KEYS_KEY, decode_wrapped_keys};
 /// Where the engine records its upload limit for the UI.
 pub const MAX_UPLOAD_KEY: &str = "max_upload_bytes";
 pub use actions::{OutgoingText, REPLY_EXCERPT_CHARS, forward_content, reply_ref};
@@ -61,6 +68,9 @@ pub use attested::{AttestationSettings, JwksSource};
 pub use calls::{CallEventSink, CallKeySigner, CallMoveRecord, CallPreparation, call_move_announcement};
 pub(crate) use catch_up::CATCHING_UP_PREFIX;
 pub use catch_up::{CatchUpFocus, is_catching_up};
+pub use channel_roles::RoleSigning;
+#[cfg(feature = "ui")]
+pub(crate) use channel_roles::channel_roles_key;
 pub use enroll::{EnrollmentOptions, EnrollmentSecret, OrgRecoveryUnlock, PendingEnrollment};
 pub use gateway::{
   DEFAULT_HANDSHAKE_TIMEOUT, GatewayOutcome, GatewayStart, GatewayTiming, HeldFrames, HeldLimits, KeptAlive,
@@ -74,7 +84,8 @@ pub use groups::{DmSetupStatus, dm_setup_status};
 pub use guest::{GuestAdmission, GuestLinkMaterial, guest_link_fragment};
 pub use join_requests::is_open_private_channel;
 pub use linking::{
-  LinkAnnouncement, LinkApproval, LinkOffer, LinkRequestInfo, LinkRequestList, LinkedSecrets, NewDeviceLink,
+  LinkAnnouncement, LinkApproval, LinkOffer, LinkReceipt, LinkRequestInfo, LinkRequestList, LinkedSecrets,
+  NewDeviceLink, ReceiptCancel,
 };
 pub use member_device::{GroupAccess, is_waiting_for_device};
 pub use messaging::FlushReport;
@@ -82,7 +93,6 @@ pub(crate) use messaging::{REMOVED_SENDER_GRACE_MS, decrypt_content};
 #[cfg(feature = "ui")]
 pub(crate) use messaging::{apply_control, bookmarks_key};
 pub(crate) use notifications::registered_push_token;
-pub use notifications::{TYPING_TIMEOUT_MS, TypingState};
 use openmls_rust_crypto::OpenMlsRustCrypto;
 pub use org_recovery::{SealedShare, recovery_request};
 pub use pending_actions::{PendingAction, PendingActionSettings, StatusChange};
@@ -156,6 +166,11 @@ pub struct ClientSettings {
   /// times): each answer costs a commit, and a broken or malicious device could ask far more often
   /// than `rejoin_retry` (issue #149).
   pub rejoin_cooldown: std::time::Duration,
+  /// How long after this device saw a change the server reports of a channel (archived, made
+  /// private, ...) a member's encrypted announcement of it may come and still name who made it
+  /// (issue #818), measured on the server's clock from the newest message known then. Later
+  /// announcements name nobody; the line is there either way.
+  pub change_announcement_window: std::time::Duration,
   /// Removal records whose absence ended before the workspace's retention limit are dropped
   /// (issue #186); this much later, to spare messages still on the way.
   pub removed_sender_retention_leeway: std::time::Duration,
@@ -220,6 +235,10 @@ pub struct ClientSettings {
   /// its loop and with its own limits (the integration bridge), turns this off and hands its own
   /// thumbnail in; the core then reads only the picture's header for its size.
   pub makes_thumbnails: bool,
+  /// An enrollment whose device key pair was stored this long ago and that nothing can finish any
+  /// more counts as given up (issue #415): the key pair is dropped and the device it registered is
+  /// revoked. Not while the keys of a link wait to be enrolled.
+  pub unfinished_enrollment_expiry: std::time::Duration,
 }
 
 impl ClientSettings {
@@ -241,7 +260,7 @@ pub struct Client<A, S> {
   account: Account,
   groups: HashMap<ConversationId, ConversationGroup>,
   sync: SyncState,
-  typing: notifications::TypingState,
+  typing: crate::typing::TypingState,
   /// Refusals of earlier user actions found by a background flush, for the host to show
   /// ([`Client::take_background_failures`]).
   background_failures: Vec<CoreError>,
@@ -320,6 +339,7 @@ impl Default for ClientSettings {
       rejoin_retry_max: std::time::Duration::from_secs(24 * 60 * 60),
       pending_addition_expiry: std::time::Duration::from_secs(90 * 24 * 60 * 60),
       rejoin_cooldown: std::time::Duration::from_secs(30 * 60),
+      change_announcement_window: std::time::Duration::from_secs(10 * 60),
       removed_sender_retention_leeway: std::time::Duration::from_secs(24 * 60 * 60),
       dm_welcome_timeout: std::time::Duration::from_secs(2 * 60),
       removal_retry: std::time::Duration::from_secs(60 * 60),
@@ -347,6 +367,8 @@ impl Default for ClientSettings {
       catch_up_concurrency: 6,
       creates_notes_to_self: false,
       makes_thumbnails: true,
+      // A day: a user who comes back to a failed setup soon picks up its registration.
+      unfinished_enrollment_expiry: std::time::Duration::from_secs(24 * 60 * 60),
     }
   }
 }

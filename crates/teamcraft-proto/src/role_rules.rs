@@ -1,13 +1,14 @@
 //! What the signed-in user may do in a channel, and who may give a channel member which role
-//! (admin.md §1, §2.3). The UI uses it to offer only what will work and the core to refuse early;
-//! the server enforces the same rules with the same permission scheme ([`teamcraft_proto::is_allowed`])
-//! and stays the last word on what is stored.
+//! (admin.md §1, §2.3). The UI uses it to offer only what will work, the core to refuse early and to
+//! verify signed channel role assignments (issue #380); the server enforces the same rules with the
+//! same permission scheme ([`crate::is_allowed`]) and stays the last word on what is stored.
 //!
 //! One helper, [`can_in_channel`], answers "may I do X in channel Y" for every channel setting
 //! (roles, picture, ...), so the UI gates are the server's rules and not copies of them.
 
 use serde::{Deserialize, Serialize};
-use teamcraft_proto::{
+
+use crate::{
   ChannelContext, ChannelModeration, ChannelRole, ConversationVisibility, Permission, PermissionScheme,
   PermissionSchemeResponse, Role, SchemeRole, SpaceContext, SpaceRole, Target, is_allowed,
 };
@@ -27,8 +28,8 @@ pub struct RoleActor {
   /// Decides whether a space admin outside the channel can reach it.
   pub visibility: ConversationVisibility,
   pub is_archived: bool,
-  /// What the server says the actor may do in the channel
-  /// ([`crate::model::Conversation::maybe_permissions`]). When known it decides, so a space's own
+  /// What the server says the actor may do in the channel (the client's
+  /// `Conversation::maybe_permissions`). When known it decides, so a space's own
   /// scheme and the channel's moderation count as the server counts them; `None`: the rules below
   /// with the built-in scheme.
   pub maybe_granted: Option<Vec<Permission>>,
@@ -204,7 +205,7 @@ mod tests {
     #[test]
     fn the_spaces_own_scheme_decides_not_the_built_in_one() {
       let response = PermissionSchemeResponse {
-        roles: vec![teamcraft_proto::SchemeRoleResponse {
+        roles: vec![crate::SchemeRoleResponse {
           role: SchemeRole::ChannelAdmin,
           granted: vec![Permission::ManageMembers],
           overrides: Vec::new(),

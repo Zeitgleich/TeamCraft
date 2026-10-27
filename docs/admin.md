@@ -113,7 +113,13 @@ could add itself to every channel.
 - **Fork detection.** Members send their verified roster and policy heads inside their encrypted
   messages. A colleague with a different entry for the same version, or with entries this client
   isn't shown, raises an alarm.
-- Space admin and channel owner assignments are signed by an admin or a higher role.
+- Space admin and channel owner assignments are signed by an admin or a higher role. Channel roles
+  (admin = owner, moderator) are a signed log per channel (e2ee.md §4.6.1): each entry is signed by
+  a workspace admin or owner of the fresh roster, or by a channel admin of the previous signed
+  entry, under the same role rules the UI and the server use; a channel's creator signs the first
+  entry. Roles only the server lists (channels from before, space admins' changes, older clients)
+  are shown as not signed and count for nothing that needs a signed role; an admin who can sign
+  confirms them in the channel's members section. Space roles are not signed yet.
 - Member clients only commit membership changes that are signed by someone allowed to make them
   (admin, space admin, channel owner, or a member with `manage_members`). Unsigned or wrongly signed
   proposals are rejected and reported.
@@ -346,7 +352,9 @@ message, would keep a real join quiet. So the line is derived where the join hap
 ### 2.5 Orphaned channels
 
 When the last owner of a private channel leaves the company, an admin assigns a new owner from the
-remaining members. The admin doesn't need to be a member for that.
+remaining members. The admin doesn't need to be a member for that. A workspace admin's signature is
+what makes the new owner count on members' apps (e2ee.md §4.6.1); the console's assignment doesn't
+sign it yet (a follow-up of issue #380), so until then the new owner's role shows as not signed.
 
 ## 3. Admin features
 
@@ -526,7 +534,11 @@ themselves and the server can't relax it.
 Every admin action, recovery, device change and role change is logged with actor, target and time.
 
 - Admins see the full log.
-- Members see admin actions affecting their conversations as system messages.
+- Members see admin actions affecting their conversations as system messages. Archiving,
+  converting and moving a channel show as lines each member's device derives from the server's
+  record of the channel ("This channel was archived"); the member who made the change is named only
+  when their own encrypted announcement matches it (e2ee.md §4.9, issue #818). Until channel
+  properties are signed, the change itself is the server's word.
 - Users see actions affecting themselves (device removed, recovery started) in their security settings.
 - The log contains metadata only, never message content.
 

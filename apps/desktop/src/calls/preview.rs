@@ -87,14 +87,17 @@ impl Preview {
 impl CameraCheck {
   /// Starts `capture` and hands each frame to `filter` (effects, then the self view). `on_state`
   /// hears when the first picture passed, or that none came in time or the camera stopped.
-  /// Blocking: the capture may take a moment to start.
+  /// Blocking: the capture may take a moment to start. A camera that doesn't start fails with
+  /// `ActionFailure` wire text.
   pub(super) fn start(
     mut capture: Box<dyn VideoCapture>,
     filter: FrameFilter,
     on_state: impl Fn(PreviewCamera) + Send + 'static,
   ) -> Result<Self, String> {
     let (frames_tx, frames) = frame_queue();
-    capture.start(frames_tx).map_err(|error| error.to_string())?;
+    capture
+      .start(frames_tx)
+      .map_err(|error| super::video::camera_failure_wire(&error))?;
     let (stop, stop_rx) = std_mpsc::channel();
     let thread = std::thread::Builder::new()
       .name("teamcraft-camera-check".into())
@@ -342,7 +345,13 @@ mod tests {
     #[test]
     fn a_capture_that_does_not_start_is_an_error() {
       let result = CameraCheck::start(Box::new(RefusingCapture), Box::new(|frame| frame), |_| {});
-      assert!(result.is_err());
+      let Err(wire) = result else {
+        panic!("the check started");
+      };
+      assert_eq!(
+        ActionFailure::from_wire(&wire).kind,
+        FailureKind::Call(CallFailure::CameraDenied)
+      );
     }
 
     /// A camera check around [`pump`] without a capture: the test feeds the queue.

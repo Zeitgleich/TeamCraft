@@ -223,6 +223,9 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     // A repeated create (idempotency key) returns the channel we already founded.
     if !self.has_group(conversation.id)? {
       self.found_group(conversation.id)?;
+      // The creator is the channel's first admin, signed so members don't take the server's word
+      // for it (e2ee.md §4.6.1).
+      self.found_channel_roles(conversation.id).await;
     }
     Ok(conversation.id)
   }
@@ -2364,11 +2367,9 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
         })?;
         self.note_dm_welcome_joined(conversation)?;
         if let Ok(response) = self.api.conversation(conversation).await {
-          records::put_json(
-            &self.store,
-            Table::Conversations,
-            &conversation.to_string(),
+          self.store_conversation(
             &response,
+            super::server_changes::Observed::FromServer { maybe_head: None },
           )?;
         }
         self.sync_mls(conversation).await

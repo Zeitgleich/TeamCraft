@@ -5,6 +5,7 @@
 pub mod account_data;
 pub mod api;
 pub mod attestation;
+pub mod channel_roles;
 pub mod client;
 pub mod clock;
 pub mod connection;
@@ -13,8 +14,9 @@ pub mod downloads;
 pub mod error;
 pub mod integration_sources;
 pub mod link_preview;
-// The keys come from the UI contract (client-api), which the hosts of a UI build in.
-#[cfg(feature = "ui")]
+// The keys come from the UI contract (client-api), which the hosts of a UI build in; the service
+// worker reads pictures for its notifications.
+#[cfg(any(feature = "ui", feature = "service-worker"))]
 pub mod media_cache;
 pub mod mls_storage;
 pub mod notify_rules;
@@ -22,6 +24,8 @@ pub mod picked_files;
 pub mod platform;
 pub mod prefetch;
 pub mod push_guard;
+#[cfg(any(feature = "ui", feature = "service-worker"))]
+pub mod push_picture;
 pub mod push_preview;
 pub mod push_subscription;
 pub mod push_text;
@@ -36,6 +40,7 @@ pub mod store;
 pub mod svg_thumbnail;
 pub mod thumbnail;
 pub mod transfers;
+pub mod typing;
 #[cfg(feature = "ui")]
 mod ui_actions;
 #[cfg(feature = "ui")]
@@ -66,6 +71,7 @@ pub use client::{
   AttestationSettings, CallEventSink, CallKeySigner, CallPreparation, Client, ClientSettings,
   EnrollmentOptions, EnrollmentSecret, FlushReport, GatewayOutcome, GroupAccess, HistoryScan, JwksSource,
   LinkAnnouncement, LinkOffer, LinkRequestInfo, LinkRequestList, MAX_VIEWER_BYTES, OrgRecoveryUnlock,
-  PendingEnrollment, SyncPhase, TypingState,
+  PendingEnrollment, SyncPhase,
 };
 pub use error::{CoreError, JoinRequestRefusal, UnreadableStore};
+pub use typing::TypingState;

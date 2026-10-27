@@ -385,6 +385,150 @@
         }
       }
     },
+    "backup_title": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Key backup"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Schlüssel-Backup"
+          }
+        }
+      }
+    },
+    "backup_ok": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Your keys are backed up"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Deine Schlüssel sind gesichert"
+          }
+        }
+      }
+    },
+    "backup_missing": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Your keys aren’t backed up yet"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Deine Schlüssel sind noch nicht gesichert"
+          }
+        }
+      }
+    },
+    "backup_no_recovery": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Recovery isn’t set up"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Wiederherstellung ist nicht eingerichtet"
+          }
+        }
+      }
+    },
+    "backup_missing_hint": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Without a backup, a new device can’t read your earlier messages. Set a recovery passphrase on the desktop or web app to create one."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Ohne Backup kann ein neues Gerät deine früheren Nachrichten nicht lesen. Lege in der Desktop- oder Web-App eine Wiederherstellungs-Passphrase fest, um eines anzulegen."
+          }
+        }
+      }
+    },
+    "backup_no_recovery_hint": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "If you lose all your devices, you can’t read your messages again. Set a recovery passphrase on the desktop or web app."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Wenn du alle deine Geräte verlierst, kannst du deine Nachrichten nicht mehr lesen. Lege in der Desktop- oder Web-App eine Wiederherstellungs-Passphrase fest."
+          }
+        }
+      }
+    },
+    "backup_passphrase": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Your recovery passphrase protects it."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Deine Wiederherstellungs-Passphrase schützt es."
+          }
+        }
+      }
+    },
+    "backup_passphrase_set": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Your recovery passphrase protects it. You set it on %@."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Deine Wiederherstellungs-Passphrase schützt es. Du hast sie am %@ festgelegt."
+          }
+        }
+      }
+    },
+    "backup_organization": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Your organization can also restore it if you lose all your devices."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Deine Organisation kann es auch wiederherstellen, wenn du alle deine Geräte verlierst."
+          }
+        }
+      }
+    },
     "call_add_people": {
       "localizations": {
         "en": {
@@ -1301,6 +1445,102 @@
           "stringUnit": {
             "state": "translated",
             "value": "%@ hat diesen Kanal in einen anderen Bereich verschoben"
+          }
+        }
+      }
+    },
+    "event_archived_unattributed": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "This channel was archived"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Dieser Kanal wurde archiviert"
+          }
+        }
+      }
+    },
+    "event_unarchived_unattributed": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "This channel was restored"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Dieser Kanal wurde wiederhergestellt"
+          }
+        }
+      }
+    },
+    "event_made_private_unattributed": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "This channel was made private"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Dieser Kanal wurde privat gemacht"
+          }
+        }
+      }
+    },
+    "event_made_public_unattributed": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "This channel was made public"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Dieser Kanal wurde öffentlich gemacht"
+          }
+        }
+      }
+    },
+    "event_moved_unattributed %@": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "This channel was moved to %@"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Dieser Kanal wurde in %@ verschoben"
+          }
+        }
+      }
+    },
+    "event_moved_unnamed_unattributed": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "This channel was moved to another space"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Dieser Kanal wurde in einen anderen Bereich verschoben"
           }
         }
       }

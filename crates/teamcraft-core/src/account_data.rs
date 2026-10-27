@@ -66,6 +66,15 @@ pub struct AccountData {
   /// The workspace's first owner, as the first of the user's devices verified it.
   #[serde(rename = "workspace_root", default, skip_serializing_if = "Option::is_none")]
   pub maybe_workspace_root: Option<PinnedKey>,
+  /// When one of the user's devices last set the recovery passphrase (its clock), for the security
+  /// settings (issue #410). Merging keeps the later time; an older app drops the field on upload,
+  /// and the next newer device puts it back.
+  #[serde(
+    rename = "recovery_passphrase_set_at",
+    default,
+    skip_serializing_if = "Option::is_none"
+  )]
+  pub maybe_recovery_passphrase_set_at: Option<i64>,
 }
 
 /// When a device last left a conversation, and when it was last added back, in server times.
@@ -224,6 +233,9 @@ impl AccountData {
     if self.maybe_workspace_root.is_none() {
       self.maybe_workspace_root = other.maybe_workspace_root.clone();
     }
+    self.maybe_recovery_passphrase_set_at = self
+      .maybe_recovery_passphrase_set_at
+      .max(other.maybe_recovery_passphrase_set_at);
     self.forget_tombstones(now_ms);
   }
 
@@ -766,6 +778,32 @@ mod tests {
     assert_eq!(merged_on_phone, merged_on_laptop);
     assert_eq!(merged_on_phone.activity_read_at_ms(), 900);
     assert_eq!(AccountData::default().activity_read_at_ms(), 0);
+  }
+
+  #[test]
+  fn the_later_passphrase_change_wins_and_survives_an_older_app() {
+    let phone = AccountData {
+      maybe_recovery_passphrase_set_at: Some(5_000),
+      ..AccountData::default()
+    };
+    let laptop = AccountData {
+      maybe_recovery_passphrase_set_at: Some(9_000),
+      ..AccountData::default()
+    };
+    let mut merged = phone.clone();
+    merged.merge(&laptop, 10_000);
+    assert_eq!(merged.maybe_recovery_passphrase_set_at, Some(9_000));
+    // An older app uploads the account data without the field.
+    let mut older_upload: serde_json::Value = serde_json::from_slice(&merged.to_bytes().unwrap()).unwrap();
+    older_upload
+      .as_object_mut()
+      .unwrap()
+      .remove("recovery_passphrase_set_at");
+    let older = AccountData::from_bytes(&serde_json::to_vec(&older_upload).unwrap()).unwrap();
+    assert_eq!(older.maybe_recovery_passphrase_set_at, None);
+    let mut kept = laptop.clone();
+    kept.merge(&older, 10_000);
+    assert_eq!(kept.maybe_recovery_passphrase_set_at, Some(9_000));
   }
 
   #[test]

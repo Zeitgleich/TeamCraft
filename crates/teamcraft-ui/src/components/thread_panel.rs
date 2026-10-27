@@ -6,6 +6,7 @@ use crate::components::icons::{Icon, IconName};
 use crate::components::message_list::handle_list_keys;
 use crate::components::message_row::MessageRow;
 use crate::components::message_toolbar::{MessageToolbar, ToolbarHost};
+use crate::components::typing_indicator::TypingIndicator;
 use crate::i18n::use_i18n;
 use crate::model::{Conversation, ConversationId, ConversationKind, Message, ThreadId};
 use crate::state::{SidePanel, use_app_state};
@@ -112,6 +113,7 @@ pub fn ThreadPanel(
         }}
         <MessageToolbar host=toolbar />
       </div>
+      <TypingIndicator conversation=conversation />
       <DropStrip zone=zone />
       <Composer
         conversation=conversation

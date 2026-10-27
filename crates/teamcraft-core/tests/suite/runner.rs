@@ -199,6 +199,43 @@ async fn activity_reported_offline_goes_out_with_the_next_connection() {
   assert_eq!(server.activity_reports(me), [DeviceActivity::Idle]);
 }
 
+/// Issue #733: typing goes out at most once per interval, and is dropped while offline (a late
+/// indicator would be wrong), not queued like the activity.
+#[cfg(feature = "ui")]
+#[tokio::test]
+async fn typing_goes_out_once_per_interval_and_never_late() {
+  use teamcraft_core::ui_backend::CoreCommand;
+
+  let server = FakeServer::new();
+  let api = server.add_user("Frank");
+  let me = api.user_id();
+  let mut client = enrolled(api.clone()).await;
+  let space = api.list_spaces().await.unwrap().spaces[0].id;
+  let channel = client.create_channel(space, "general").await.unwrap();
+  let other = client.create_channel(space, "random").await.unwrap();
+  let typing = |conversation| RunnerCommand::Ui(CoreCommand::Typing { conversation });
+
+  // Handled in order after connecting, all within the interval.
+  let (runner, handle) = SyncRunner::new(client, RunnerSettings::default(), Box::new(|| {}));
+  assert!(handle.send(typing(channel)));
+  assert!(handle.send(typing(channel)));
+  assert!(handle.send(typing(other)));
+  assert!(handle.send(RunnerCommand::Stop));
+  let client = runner.run().await;
+  assert_eq!(server.typing_reports(me), [channel, other]);
+
+  server.set_offline(me, true);
+  let (runner, handle) = SyncRunner::new(client, RunnerSettings::default(), Box::new(|| {}));
+  assert!(handle.send(typing(channel)));
+  assert!(handle.send(RunnerCommand::Stop));
+  let client = runner.run().await;
+  server.set_offline(me, false);
+  let (runner, handle) = SyncRunner::new(client, RunnerSettings::default(), Box::new(|| {}));
+  assert!(handle.send(RunnerCommand::Stop));
+  runner.run().await;
+  assert_eq!(server.typing_reports(me), [channel, other]);
+}
+
 #[tokio::test]
 async fn dropping_every_handle_stops_the_runner() {
   let server = FakeServer::new();

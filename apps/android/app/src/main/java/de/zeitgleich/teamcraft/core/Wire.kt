@@ -129,7 +129,24 @@ data class Message(
 data class SecuritySnapshot(
   @SerialName("my_fingerprint") val myFingerprint: String = "",
   val contacts: List<ContactKeys> = emptyList(),
+  /** The key backup as this device knows it (issue #410); absent before the first key bag sync. */
+  val backup: KeyBackup? = null,
 )
+
+/** Facts about the key backup; the settings put them into words. */
+@Serializable
+data class KeyBackup(
+  /** The encrypted key bag is on the server. */
+  @SerialName("is_stored") val isStored: Boolean = false,
+  @SerialName("has_pending_upload") val hasPendingUpload: Boolean = false,
+  /** `passphrase`, `passkey`, `organization`; unknown values are skipped. */
+  val recovery: List<String> = emptyList(),
+  /** When the recovery passphrase was last set (epoch milliseconds), if a device recorded it. */
+  @SerialName("passphrase_set_at") val passphraseSetAt: Long? = null,
+) {
+  val hasPassphrase: Boolean get() = "passphrase" in recovery
+  val hasOrganization: Boolean get() = "organization" in recovery
+}
 
 @Serializable
 data class ContactKeys(

@@ -93,6 +93,104 @@ mod certificate {
   }
 }
 
+/// Renaming a device and who sees device names (issue #409).
+mod names {
+  use super::*;
+
+  #[tokio::test]
+  async fn the_owner_renames_a_device_and_the_name_is_trimmed() {
+    let app = app!();
+    let carol = member("carol");
+    let device = register_device(&app, &carol).await;
+
+    let reply = app
+      .patch(
+        &carol,
+        &format!("/devices/{device}"),
+        json!({"name": "  Work laptop  "}),
+      )
+      .await;
+    assert_eq!(reply.status, StatusCode::OK, "{}", reply.body);
+    assert_eq!(reply.body["id"], device.as_str());
+    assert_eq!(reply.body["name"], "Work laptop");
+    let listed = app.get(&carol, "/devices").await;
+    assert_eq!(listed.body["devices"][0]["name"], "Work laptop");
+    app.stop().await;
+  }
+
+  #[tokio::test]
+  async fn only_the_owner_renames_and_the_name_must_be_sane() {
+    let app = app!();
+    let (carol, dave) = (member("carol"), member("dave"));
+    let device = register_device(&app, &carol).await;
+    let path = format!("/devices/{device}");
+
+    assert_eq!(
+      app
+        .patch(&dave, &path, json!({"name": "Mine now"}))
+        .await
+        .error_code(),
+      "device_not_found"
+    );
+    for bad in [
+      json!({"name": "   "}),
+      json!({"name": "a\u{7}b"}),
+      json!({"name": "x".repeat(1000)}),
+    ] {
+      assert_eq!(
+        app.patch(&carol, &path, bad.clone()).await.status,
+        StatusCode::BAD_REQUEST,
+        "{bad}"
+      );
+    }
+    app.delete(&carol, &path).await;
+    assert_eq!(
+      app
+        .patch(&carol, &path, json!({"name": "Gone"}))
+        .await
+        .error_code(),
+      "device_not_found"
+    );
+    app.stop().await;
+  }
+
+  #[tokio::test]
+  async fn colleagues_get_the_keys_of_a_device_but_not_its_name_or_push_service() {
+    let app = app!();
+    let (carol, dave) = (member("carol"), member("dave"));
+    let carol_id = user_id(&app, &carol).await;
+    let device = register_device(&app, &carol).await;
+    app
+      .patch(
+        &carol,
+        &format!("/devices/{device}"),
+        json!({"name": "Carol's phone"}),
+      )
+      .await;
+    app
+      .put(
+        &carol,
+        &format!("/devices/{device}/push"),
+        json!({"provider": "fcm", "token": "fcm-token", "push_key": "MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY="}),
+      )
+      .await;
+
+    let theirs = app.get(&dave, &format!("/users/{carol_id}/devices")).await;
+    assert_eq!(theirs.status, StatusCode::OK, "{}", theirs.body);
+    let seen = &theirs.body["devices"][0];
+    assert_eq!(seen["id"], device.as_str());
+    assert_eq!(seen["name"], "");
+    assert!(seen.get("push_provider").is_none(), "{seen}");
+    assert_eq!(seen["public_key"], "cHVibGlj");
+    assert!(!theirs.body.to_string().contains("Carol's phone"));
+
+    let own = app.get(&carol, &format!("/users/{carol_id}/devices")).await;
+    assert_eq!(own.body["devices"][0]["name"], "Carol's phone");
+    assert_eq!(own.body["devices"][0]["push_provider"], "fcm");
+    app.stop().await;
+  }
+}
+
 mod claim_filters {
   use super::*;
 

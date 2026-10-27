@@ -37,7 +37,10 @@ use teamcraft_client_api::remote::{
 use teamcraft_client_api::snapshot_changes::{SnapshotChanges, SnapshotCursor};
 use teamcraft_core::api::{AccessTokenSource, ApiError, HttpServerApi, ServerApi};
 use teamcraft_core::client::files::BlobUpload;
-use teamcraft_core::client::{CatchUpFocus, LinkAnnouncement, LinkApproval, LinkedSecrets, NewDeviceLink};
+use teamcraft_core::client::{
+  CatchUpFocus, LinkAnnouncement, LinkApproval, LinkReceipt, LinkedSecrets, NewDeviceLink, ReceiptCancel,
+  SIGN_OUT_REVOKE_PATIENCE,
+};
 use teamcraft_core::clock::{Clock, SystemClock};
 use teamcraft_core::connection::{ConnectionSettings, ConnectionStatus, ConnectionSupervisor};
 use teamcraft_core::downloads::{Downloads, Finished};
@@ -46,6 +49,7 @@ use teamcraft_core::push_text::{NAME_PLACEHOLDER, NotificationLabels};
 use teamcraft_core::records;
 use teamcraft_core::store::{IndexedDbStore, StoreError, TrackedStore, browser_database_key};
 use teamcraft_core::transfers::Transfers;
+use teamcraft_core::typing::TypingAnnouncer;
 use teamcraft_core::ui_backend::{CoreChatBackend, CoreCommand};
 use teamcraft_core::ui_snapshot::SnapshotCache;
 use teamcraft_core::upkeep::{self, Upkeep, UploadMode};
@@ -1045,12 +1049,17 @@ struct Core {
   link_failure: LinkStatus,
   approval: Option<LinkApproval<<Api as ServerApi>::Rendezvous>>,
   approval_misses: u8,
+  /// Stops the wait for the receipt of the keys this device sent, which runs on a task of its own
+  /// (issue #415).
+  maybe_receipt: Option<ReceiptCancel>,
   /// The last attention report, repeated after a reconnect (the server forgets it with the
   /// connection).
   maybe_attention: Option<bool>,
   /// Whether this device last said it is idle, repeated after a reconnect: a resumed session keeps
   /// what the server last knew, which may be an away timeout that ended meanwhile.
   is_idle: bool,
+  /// The user's own typing, sent on the gateway at most every few seconds (#733).
+  typing: TypingAnnouncer,
   /// Whether IndexedDB keeps up with the cache, as of the last flush.
   store_health: StoreHealth,
   /// The flush [`Self::check_store`] waits for, while IndexedDB is still writing.
@@ -1115,8 +1124,10 @@ impl Core {
       link_failure: LinkStatus::Idle,
       approval: None,
       approval_misses: 0,
+      maybe_receipt: None,
       maybe_attention: None,
       is_idle: false,
+      typing: TypingAnnouncer::default(),
       store_health: StoreHealth::Saved,
       maybe_flush: None,
       maybe_push_check_at_ms: None,
@@ -1257,6 +1268,11 @@ impl Core {
       Some(_) => deadline.min(now_ms().saturating_add(millis(TRANSFER_PROGRESS))),
       None => deadline,
     };
+    // Someone stopped typing: no event says so, the indicator runs out ([`Self::on_tick`]).
+    let deadline = match self.client.as_ref().and_then(Client::typing_change_at_ms) {
+      Some(typing_change) => deadline.min(typing_change),
+      None => deadline,
+    };
     let until_tick_ms = deadline.saturating_sub(now_ms()).max(0);
     let Self {
       connection,
@@ -1338,6 +1354,7 @@ impl Core {
         if let Some(client) = self.resume_link(store).await? {
           return Ok(self.adopt(client));
         }
+        self.drop_abandoned_setup().await;
         Ok(CoreStatus::NeedsEnrollment {
           has_existing_identity: self.has_existing_identity().await?,
           was_data_lost: load_string(&self.store_ready_key()).is_some(),
@@ -1403,17 +1420,35 @@ impl Core {
   }
 
   /// Another device may have enrolled the account since the database was opened; the enrollment
-  /// screen must then offer recovery and linking instead of a new identity.
+  /// screen must then offer recovery and linking instead of a new identity. A page left on that
+  /// screen also drops a setup given up on meanwhile.
   async fn refresh_enrollment_hint(&mut self) {
     if self.client.is_none()
       && self.link.is_none()
       && let CoreStatus::NeedsEnrollment { was_data_lost, .. } = self.status
-      && let Ok(has_existing_identity) = self.has_existing_identity().await
     {
-      self.status = CoreStatus::NeedsEnrollment {
-        has_existing_identity,
-        was_data_lost,
-      };
+      self.drop_abandoned_setup().await;
+      if let Ok(has_existing_identity) = self.has_existing_identity().await {
+        self.status = CoreStatus::NeedsEnrollment {
+          has_existing_identity,
+          was_data_lost,
+        };
+      }
+    }
+  }
+
+  /// Drops the device key pair of a setup the user gave up on and revokes its registration (issue
+  /// #415). Called only while this device is not set up and no link runs: enrolling runs to its end
+  /// inside one request, so nothing else is in progress then. A failure (offline) is retried on the
+  /// next start or status request.
+  async fn drop_abandoned_setup(&self) {
+    let Some(store) = &self.store else { return };
+    if self.link.is_some() {
+      return;
+    }
+    let settings = ClientSettings::default();
+    if let Err(error) = PendingEnrollment::drop_abandoned(&self.api(), store, &SystemClock, &settings).await {
+      tracing::info!(%error, "could not revoke the device of a setup that was given up yet");
     }
   }
 
@@ -1423,6 +1458,7 @@ impl Core {
     };
     self.backend = Some(
       CoreChatBackend::new(client.store().clone(), client.user_id(), Box::new(SystemClock))
+        .with_typing(client.typing_state())
         .with_transfers(client.transfers()),
     );
     self.catch_up_focus = client.catch_up_focus();
@@ -1540,12 +1576,15 @@ impl Core {
         if self.client.is_none()
           && let Some(store) = &self.store
         {
-          // Flushed: the core stops right after, and queued writes would be lost with it.
-          let forgotten = match records::forget_unfinished_enrollment(store) {
-            Ok(()) => store.inner().flush().await.map_err(CoreError::from),
-            Err(error) => Err(error),
-          };
-          if let Err(error) = forgotten {
+          self.link = None;
+          // The keys go at once; the server gets a few seconds to revoke the device they registered
+          // (issue #415), the next start of this account does it otherwise. Flushed: the core stops
+          // right after, and queued writes would be lost with it.
+          let forgotten =
+            PendingEnrollment::forget_unfinished(&self.api(), store, &SystemClock, SIGN_OUT_REVOKE_PATIENCE)
+              .await;
+          let flushed = store.inner().flush().await.map_err(CoreError::from);
+          if let Err(error) = forgotten.and(flushed) {
             tracing::warn!(%error, "could not drop the keys of an unfinished setup");
           }
         }
@@ -1553,10 +1592,15 @@ impl Core {
         let _ = reply.send(());
       },
       Request::ApprovalStart { code, reply } => drop(reply.send(self.approval_start(&code).await)),
-      Request::ApprovalConfirm { short_code, reply } => {
-        drop(reply.send(self.approval_confirm(&short_code).await));
+      Request::ApprovalConfirm { short_code, reply } => match self.approval_confirm(&short_code).await {
+        Ok(receipt) => self.wait_for_receipt(receipt, reply),
+        Err(message) => drop(reply.send(Err(message))),
       },
-      Request::ApprovalCancel => self.approval = None,
+      Request::ApprovalCancel => {
+        self.approval = None;
+        // A receipt still awaited: its wait ends, and the waiting call hears that it was cancelled.
+        self.maybe_receipt = None;
+      },
       Request::LinkAnnounce(reply) => drop(reply.send(self.link_announce().await)),
       Request::LinkRequests(reply) => drop(reply.send(self.link_requests())),
       Request::LinkRequestReview { id, reply } => drop(reply.send(self.link_request_review(&id).await)),
@@ -1618,6 +1662,12 @@ impl Core {
         drop(reply.send(result));
       },
       Request::Action(action, reply) => {
+        // Typing changes nothing shown: it goes out at once, and the UI is not told of a change.
+        if let Some(conversation) = action.typing_conversation() {
+          self.announce_typing(conversation).await;
+          drop(reply.send(Ok(())));
+          return;
+        }
         let result = self.action(*action).await;
         notify_changed();
         drop(reply.send(result));
@@ -1866,8 +1916,12 @@ impl Core {
   }
 
   /// Compares what the user typed with the short code of the handshake; only a match hands over the
-  /// keys. A few wrong guesses end the attempt, so the code cannot be guessed by trial.
-  async fn approval_confirm(&mut self, typed: &str) -> Result<(), String> {
+  /// keys. A few wrong guesses end the attempt, so the code cannot be guessed by trial. The new
+  /// device's receipt is still to come.
+  async fn approval_confirm(
+    &mut self,
+    typed: &str,
+  ) -> Result<LinkReceipt<<Api as ServerApi>::Rendezvous>, String> {
     let approval = self
       .approval
       .as_ref()
@@ -1887,9 +1941,30 @@ impl Core {
       .ok_or("there is no device waiting for approval")?;
     let client = self.client.as_mut().ok_or_else(not_set_up)?;
     client
-      .complete_link_approval(approval)
+      .send_link_transfer(approval)
       .await
       .map_err(describe_failure)
+  }
+
+  /// Waits for the new device's receipt on a task of its own (issue #415): it can take up to a minute
+  /// when the new device went away, and the loop answers everything else meanwhile. `reply` gets
+  /// the outcome, so the dialog shows its progress until then. One receipt is awaited at a time; a
+  /// wait still running for an earlier link ends as cancelled.
+  fn wait_for_receipt(
+    &mut self,
+    receipt: LinkReceipt<<Api as ServerApi>::Rendezvous>,
+    reply: oneshot::Sender<Result<(), String>>,
+  ) {
+    let (waiting, cancel) = receipt.detach();
+    self.maybe_receipt = Some(cancel);
+    wasm_bindgen_futures::spawn_local(async move {
+      let outcome = waiting.await.map_err(describe_failure);
+      if let Err(message) = &outcome {
+        tracing::info!(%message, "the device link was not confirmed");
+      }
+      // The dialog may have closed meanwhile; nobody is left to tell then.
+      drop(reply.send(outcome));
+    });
   }
 
   fn snapshot(&mut self) -> Result<ChatSnapshot, String> {
@@ -1949,6 +2024,11 @@ impl Core {
       maybe_push_content: Some(teamcraft_core::push_preview::push_content_mode(client.store())),
       maybe_owners: client.owner_roster_status(),
       maybe_presence_policy: teamcraft_core::workspace::presence_policy(client.store()),
+      maybe_backup: teamcraft_core::ui_snapshot::key_backup_state(client.store()).unwrap_or_else(|error| {
+        // The settings then show the backup as unknown; the rest of the snapshot still counts.
+        tracing::warn!(%error, "the key backup state is unreadable");
+        None
+      }),
     })
   }
 
@@ -2425,6 +2505,10 @@ impl Core {
     if self.client.is_some() {
       self.connection.on_tick(now).await;
     }
+    // The UI reads who types again once an indicator ran out.
+    if self.client.as_ref().is_some_and(Client::drop_expired_typing) {
+      notify_changed();
+    }
     if now < self.next_tick_ms {
       // Woken for the connection only.
       return;
@@ -2439,6 +2523,16 @@ impl Core {
     // The upkeep may resync many conversations; heartbeats go on meanwhile.
     if self.connection.keep_alive(now, self.upkeep.tick(client)).await {
       notify_changed();
+    }
+  }
+
+  /// Tells the other members that the user types (throttled; dropped while offline).
+  async fn announce_typing(&mut self, conversation: ConversationId) {
+    if self.client.is_some() {
+      self
+        .typing
+        .announce(&mut self.connection, conversation, now_ms())
+        .await;
     }
   }
 
@@ -2592,6 +2686,11 @@ impl SyncReads<'_> {
         self.has_queued_sends.set(true);
         drop(reply.send(Ok(())));
         notify_changed();
+        return None;
+      },
+      // Typing arriving during a sync would go out late: dropped.
+      Request::Action(action, reply) if action.typing_conversation().is_some() => {
+        drop(reply.send(Ok(())));
         return None;
       },
       Request::Focus(conversation) => {

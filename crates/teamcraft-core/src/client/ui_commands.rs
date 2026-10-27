@@ -160,6 +160,8 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
         self.revoke_device(device).await?;
         self.refresh_own_devices().await
       },
+      CoreCommand::RenameOwnDevice { device, name } => self.rename_own_device(device, &name).await,
+      CoreCommand::TestPushOwnDevice { device } => self.test_push_own_device(device).await,
       CoreCommand::UploadFiles => self.upload_pending().await.map(|_| ()),
       CoreCommand::GeneratePreviews => self.generate_pending_previews().await.map(|_| ()),
       CoreCommand::DownloadFile {
@@ -324,7 +326,20 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
         conversation,
         user,
         role,
-      } => self.set_channel_role(conversation, user, role).await,
+      } => self.set_channel_role(conversation, user, role).await.map(|_| ()),
+      // Asked for explicitly: a role this user can't sign is a failure the user sees, not silence.
+      CoreCommand::ConfirmChannelRole { conversation, user } => {
+        match self.confirm_channel_role(conversation, user).await? {
+          super::RoleSigning::Signed => Ok(()),
+          super::RoleSigning::Unsigned => Err(CoreError::InvalidRequest(
+            "this role can't be signed in a way the channel's members accept".into(),
+          )),
+        }
+      },
+      CoreCommand::RefreshChannelRoles { conversation } => {
+        self.refresh_members(conversation).await?;
+        self.sync_channel_roles(conversation).await
+      },
       CoreCommand::RemoveSpaceMember { space, user } => self.remove_space_member(space, user).await,
       CoreCommand::RevokeSpaceInvite { space, invite } => self.revoke_space_invite(space, invite).await,
       CoreCommand::AddSpaceMembers {

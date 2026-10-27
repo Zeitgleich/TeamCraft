@@ -39,8 +39,8 @@ use crate::admin_live::AdminLive;
 use crate::auth::Authenticator;
 use crate::backend::{AdminBackend, CallBackend, ChatBackend, SearchBackend, SecurityBackend};
 use crate::calls::{
-  ActiveCall, BackgroundEffect, BackgroundImageInfo, CallPreview, CallRequest, HuddleInfo, IncomingCall,
-  JoinMedia, MediaDevices, Participant, PreviewCamera,
+  ActiveCall, BackgroundEffect, BackgroundImageInfo, CallPreview, CallRequest, CameraFallback, HuddleInfo,
+  IncomingCall, JoinMedia, MediaDevices, Participant, PreviewCamera,
 };
 use crate::clock::now_ms;
 use crate::i18n::translate_current;
@@ -705,6 +705,18 @@ impl<C: ChatBackend + 'static> ChatBackend for Hybrid<C> {
     self.chat.channel_roles(conversation)
   }
 
+  fn can_sign_channel_roles(&self, conversation: ConversationId) -> bool {
+    self.chat.can_sign_channel_roles(conversation)
+  }
+
+  fn confirm_channel_role(&self, conversation: ConversationId, user: UserId) {
+    self.chat.confirm_channel_role(conversation, user);
+  }
+
+  fn refresh_channel_roles(&self, conversation: ConversationId) {
+    self.chat.refresh_channel_roles(conversation);
+  }
+
   fn set_channel_role(
     &self,
     conversation: ConversationId,
@@ -887,6 +899,14 @@ impl<C: ChatBackend + 'static> ChatBackend for Hybrid<C> {
       .maybe_live
       .as_ref()
       .map_or_else(Vec::new, |live| live.seen_by(conversation, message))
+  }
+
+  fn typing_users(&self, conversation: ConversationId) -> Vec<UserId> {
+    self.chat.typing_users(conversation)
+  }
+
+  fn notify_typing(&self, conversation: ConversationId) {
+    self.chat.notify_typing(conversation);
   }
 }
 
@@ -1071,6 +1091,10 @@ impl<C: ChatBackend> CallBackend for Hybrid<C> {
     if let Some(calls) = &self.maybe_calls {
       calls.act(CallAction::SelectCamera { maybe_device });
     }
+  }
+
+  fn camera_fallback(&self) -> Option<CameraFallback> {
+    self.maybe_calls.as_ref().and_then(RemoteCalls::camera_fallback)
   }
 
   fn set_background_effect(&self, effect: BackgroundEffect) {
@@ -1539,6 +1563,19 @@ impl<C: ChatBackend> SecurityBackend for Hybrid<C> {
 
   fn refresh_my_devices(&self) {
     self.chat.refresh_own_devices();
+  }
+
+  fn rename_my_device(&self, device: DeviceId, name: String) {
+    self.chat.rename_own_device(device, name);
+  }
+
+  fn test_push_my_device(&self, device: DeviceId) {
+    self.chat.test_push_own_device(device);
+  }
+
+  /// `None` while the core has not reported it (or there is no core).
+  fn key_backup(&self) -> Option<teamcraft_client_api::security::KeyBackupState> {
+    self.chat.security_keys().maybe_backup
   }
 
   fn key_change(&self, conversation: ConversationId) -> Option<KeyChange> {

@@ -193,6 +193,15 @@
   <string name="key_changes_title">Changed security codes</string>
   <string name="key_changes_new">New code: %1$s</string>
   <string name="key_changes_accept">I compared it, trust the new code</string>
+  <string name="backup_title">Key backup</string>
+  <string name="backup_ok">Your keys are backed up</string>
+  <string name="backup_missing">Your keys aren\'t backed up yet</string>
+  <string name="backup_no_recovery">Recovery isn\'t set up</string>
+  <string name="backup_missing_hint">Without a backup, a new device can\'t read your earlier messages. Set a recovery passphrase to create one.</string>
+  <string name="backup_no_recovery_hint">If you lose all your devices, you can\'t read your messages again. Set a recovery passphrase.</string>
+  <string name="backup_passphrase">Your recovery passphrase protects it.</string>
+  <string name="backup_passphrase_set">Your recovery passphrase protects it. You set it on %1$s.</string>
+  <string name="backup_organization">Your organization can also restore it if you lose all your devices.</string>
   <string name="change_passphrase_title">Recovery passphrase</string>
   <string name="change_passphrase_button">Change passphrase</string>
   <string name="change_passphrase_done">Your key backup now uses the new passphrase.</string>
@@ -210,6 +219,13 @@
   <string name="event_pinned">%1$s pinned a message</string>
   <string name="event_moved">%1$s moved this channel to %2$s</string>
   <string name="event_moved_unnamed">%1$s moved this channel to another space</string>
+  <!-- The server reports the change; no member's announcement named who made it (issue #818). -->
+  <string name="event_archived_unattributed">This channel was archived</string>
+  <string name="event_unarchived_unattributed">This channel was restored</string>
+  <string name="event_private_unattributed">This channel was made private</string>
+  <string name="event_public_unattributed">This channel was made public</string>
+  <string name="event_moved_unattributed">This channel was moved to %1$s</string>
+  <string name="event_moved_unnamed_unattributed">This channel was moved to another space</string>
   <string name="org_recovery_instead">Recover through my organization</string>
   <string name="org_recovery_title">Recover through your organization</string>
   <string name="org_recovery_hint">Read this code to an admin of your organization by phone or in person. Two admins approve the recovery.</string>

@@ -2,7 +2,7 @@ use teamcraft_db::NewDevice;
 use teamcraft_proto::ChangeWebPushSubscriptionRequest;
 use teamcraft_proto::{
   DeviceId, DeviceResponse, GatewayEvent, ListDevicesResponse, PushProvider, RegisterDeviceRequest,
-  RegisterPushRequest, SetDeviceCertificateRequest, UserId,
+  RegisterPushRequest, SetDeviceCertificateRequest, UpdateDeviceRequest, UserId,
 };
 
 use crate::auth::AuthError;
@@ -90,6 +90,27 @@ pub async fn set_device_certificate(
   devices
     .iter()
     .find(|d| d.id == device)
+    .map(device_response)
+    .ok_or_else(ApiError::device_not_found)
+}
+
+/// Renames one of the caller's devices (issue #409). Only the caller and admins see the name.
+pub async fn update_device(
+  state: &AppState,
+  caller: &AuthenticatedUser,
+  device: DeviceId,
+  request: UpdateDeviceRequest,
+) -> Result<DeviceResponse, ApiError> {
+  let name = validate_name(
+    &request.name,
+    "device name",
+    state.settings.get().limits.max_name_length,
+  )?;
+  state
+    .database
+    .rename_device(caller.user.id, device, &name)
+    .await?
+    .as_ref()
     .map(device_response)
     .ok_or_else(ApiError::device_not_found)
 }

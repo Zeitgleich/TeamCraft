@@ -58,9 +58,18 @@ pub struct RegisterDeviceRequest {
   pub cross_signature: Base64Bytes,
 }
 
+/// `PATCH /api/v1/devices/{id}`: renames one of the caller's devices. The name is for the user
+/// (and admins): other users' clients get the device's keys, never its name.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct UpdateDeviceRequest {
+  pub name: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 pub struct DeviceResponse {
   pub id: DeviceId,
+  /// What the user calls the device. Empty in another user's device list: device names can be
+  /// personal ("Anna's phone"), and other clients only need the keys.
   pub name: String,
   pub public_key: Base64Bytes,
   /// The identity key's signature over the device key; clients verify it, the server doesn't.

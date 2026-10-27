@@ -10,21 +10,24 @@ use teamcraft_proto::{
   PermissionScheme, PermissionSchemeResponse, PushProvider, PushProviderState, PushProviderStatus, Role,
   RuntimeSettingsKey, RuntimeSettingsResponse, RuntimeSettingsSection, SchemeChange, SchemeOverride,
   SchemeRole, SchemeRoleResponse, SendTestMailRequest, SessionPolicy, SetAnnouncementRequest,
-  SettingsTestResponse, SfuStatus, StorageStatus, UnixMillis, UpdateBrandRequest,
+  SettingsTestResponse, SfuStatus, StorageStatus, TestPushOutcome, UnixMillis, UpdateBrandRequest,
   UpdateCalendarSettingsRequest, UpdateMailSettingsRequest, WorkspacePolicy,
 };
 
 use super::{MockBackend, dm_first, id_from_raw};
 use crate::admin::{
-  AdminChannel, AdminSpace, AdminUser, AuditAction, AuditEntry, AuditFilter, DeviceInfo, GuestInfo,
-  OwnerRosterStatus, OwnerSigning, Retention, SelfJoinOutcome, SettingsTestKind,
+  AdminChannel, AdminSpace, AdminUser, AuditAction, AuditEntry, AuditFilter, DeviceInfo, DevicePushStatus,
+  DeviceVerification, GuestInfo, OwnerRosterStatus, OwnerSigning, Retention, SelfJoinOutcome,
+  SettingsTestKind,
 };
 use crate::backend::{AdminBackend, CallBackend, SecurityBackend};
 use crate::calls::{HuddleInfo, MediaDevice, MediaDevices, Participant};
 use crate::model::{
   ConversationId, ConversationKind, DeviceId, PresenceStatus, SpaceId, TimestampMs, UserId, raw_id,
 };
-use crate::security::{ContactVerification, KeyChange, demo_fingerprint, demo_safety_number};
+use crate::security::{
+  ContactVerification, KeyBackupState, KeyChange, RecoveryMethod, demo_fingerprint, demo_safety_number,
+};
 
 const MINUTE: i64 = 60_000;
 const HOUR: i64 = 60 * MINUTE;
@@ -45,6 +48,8 @@ pub(super) struct OpsState {
   next_audit_id: u64,
   acknowledged_key_changes: Vec<ConversationId>,
   verified_contacts: Vec<UserId>,
+  /// How the last test push to each of the demo user's devices went.
+  push_tests: HashMap<DeviceId, TestPushOutcome>,
   settings: super::settings_data::SettingsMock,
 }
 
@@ -64,6 +69,7 @@ impl OpsState {
       acknowledged_key_changes: Vec::new(),
       // Sam was compared in person already.
       verified_contacts: vec![id_from_raw(2)],
+      push_tests: HashMap::new(),
       settings: super::settings_data::SettingsMock::new(now),
     }
   }
@@ -648,18 +654,60 @@ impl AdminBackend for MockBackend {
 }
 
 impl SecurityBackend for MockBackend {
+  /// The admin console's devices of the demo user, with what the user's own list adds: both are
+  /// verified, the phone gets pushes.
   fn my_devices(&self) -> Vec<DeviceInfo> {
     let ops = self.ops.borrow();
-    ops
+    let mut devices = ops
       .users
       .iter()
       .find(|entry| entry.user.id == id_from_raw::<UserId>(1))
       .map(|entry| entry.devices.clone())
-      .unwrap_or_default()
+      .unwrap_or_default();
+    for device in &mut devices {
+      device.verification = DeviceVerification::Verified;
+      device.maybe_push = Some(DevicePushStatus {
+        maybe_provider: device.platform.contains("iOS").then_some(PushProvider::Apns),
+        maybe_last_sent_at: device.platform.contains("iOS").then_some(self.now - 20 * MINUTE),
+        maybe_last_failed_at: None,
+        maybe_test: ops.push_tests.get(&device.id).cloned(),
+      });
+    }
+    devices
   }
 
   fn remove_my_device(&self, device: DeviceId) {
     self.remove_device(id_from_raw(1), device);
+  }
+
+  fn rename_my_device(&self, device: DeviceId, name: String) {
+    let mut ops = self.ops.borrow_mut();
+    let maybe_entry = ops
+      .users
+      .iter_mut()
+      .find(|entry| entry.user.id == id_from_raw::<UserId>(1));
+    if let Some(found) =
+      maybe_entry.and_then(|entry| entry.devices.iter_mut().find(|known| known.id == device))
+    {
+      found.name = name.trim().to_owned();
+    }
+  }
+
+  fn test_push_my_device(&self, device: DeviceId) {
+    self
+      .ops
+      .borrow_mut()
+      .push_tests
+      .insert(device, TestPushOutcome::Sent);
+  }
+
+  fn key_backup(&self) -> Option<KeyBackupState> {
+    Some(KeyBackupState {
+      is_stored: true,
+      has_pending_upload: false,
+      recovery: vec![RecoveryMethod::Passphrase, RecoveryMethod::Organization],
+      maybe_passphrase_set_at: Some(self.now - 40 * DAY),
+    })
   }
 
   fn key_change(&self, conversation: ConversationId) -> Option<KeyChange> {
@@ -972,6 +1020,8 @@ fn demo_admin_users(now: TimestampMs, users: &[crate::model::User]) -> Vec<Admin
     platform: platform.into(),
     last_seen: now - seen,
     is_current: current,
+    verification: DeviceVerification::Unknown,
+    maybe_push: None,
   };
   users
     .iter()
