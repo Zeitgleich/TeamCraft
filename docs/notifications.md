@@ -401,7 +401,8 @@ conversation instead. Join on meeting reminders needs a server push for reminder
 sound (the default, as before), none, one of the app's own sounds or the user's own file. The app's
 sounds (Chime, Ping, Pop, Marimba, Knock, Keys and a playful "Uh-oh!") are synthesized like the
 ringtone (`teamcraft_media::message_sounds`; the "uh-oh" is two sung vowels by formant synthesis), so
-there are no sound files and nothing to license; no sound is copied from another product. A sound
+there are no sound files and nothing to license; no sound is copied from another product. In a
+browser the synthesis is a chunk of its own that loads with the first sound. A sound
 plays for the message notifications the rules above let through, so a muted conversation, the level
 and do-not-disturb keep it quiet, as does the desktop's own do-not-disturb where the OS tells (GNOME,
 KDE; macOS Focus and Windows' do-not-disturb aren't readable, as for the ringtone); not during a

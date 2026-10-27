@@ -600,8 +600,9 @@ The app is split into wasm chunks (`crates/teamcraft-ui/src/areas.rs`, built by
   workspace dialogs (spaces, channels, invitations), the call screens, meetings, the directory and
   search; since 1.0.8 also the account menu, the dialogs a first visit doesn't open, the Saved,
   Files and Calls pages, Activity, a conversation's members and pins, an integration channel's log
-  view and the image codecs that make thumbnails (below). `lazy_area` shows a spinner when a chunk
-  takes a moment and an error with a retry when it can't load.
+  view and the image codecs that make thumbnails (below); since 1.0.9 the synthesis of the message
+  sounds (`sounds`, #800), with the first sound. `lazy_area` shows a spinner when a chunk takes a
+  moment and an error with a retry when it can't load.
 - Code several modules share goes into shared chunks (one per combination of modules), so each file
   is downloaded once.
 - The call engine (`teamcraft-web-calls`, #330) stays a module of its own that loads in the

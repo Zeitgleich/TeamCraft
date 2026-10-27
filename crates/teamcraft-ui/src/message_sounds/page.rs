@@ -178,19 +178,29 @@ async fn samples_for(sound: MessageSound, limits: OwnSoundLimits) -> (Rc<Vec<f32
     // settings mention.
     MessageSound::OwnFile => match own(limits).await.result {
       Ok(own) => (own.samples, SoundPlayed::Played),
-      Err(OwnSoundStatus::NotPicked) => (built_in(BuiltInSound::DEFAULT), SoundPlayed::Played),
-      Err(_) => (built_in(BuiltInSound::DEFAULT), SoundPlayed::FellBack),
+      Err(OwnSoundStatus::NotPicked) => (built_in(BuiltInSound::DEFAULT).await, SoundPlayed::Played),
+      Err(_) => (built_in(BuiltInSound::DEFAULT).await, SoundPlayed::FellBack),
     },
-    MessageSound::BuiltIn(sound) => (built_in(sound), SoundPlayed::Played),
+    MessageSound::BuiltIn(sound) => (built_in(sound).await, SoundPlayed::Played),
     MessageSound::System | MessageSound::Silent => (Rc::new(Vec::new()), SoundPlayed::Quiet),
   }
 }
 
-fn built_in(sound: BuiltInSound) -> Rc<Vec<f32>> {
+/// One of the app's sounds, synthesized once. The synthesis is in a chunk of its own that loads
+/// with the first sound (`areas::message_sound`); while it can't load (offline before the chunks
+/// were fetched) there is no sound, and the notification shows as usual.
+async fn built_in(sound: BuiltInSound) -> Rc<Vec<f32>> {
   if let Some(samples) = CACHE.with(|cache| cache.borrow().built_in.get(&sound).cloned()) {
     return samples;
   }
-  let samples = Rc::new(message_sounds::synthesize(sound));
+  let samples = match crate::areas::message_sound(sound).await {
+    Ok(samples) => Rc::new(samples),
+    Err(error) => {
+      tracing::warn!(%error, "the message sounds did not load");
+      return Rc::new(Vec::new());
+    },
+  };
+  // async-ok: a thread-local, not a signal.
   CACHE.with(|cache| cache.borrow_mut().built_in.insert(sound, samples.clone()));
   samples
 }
