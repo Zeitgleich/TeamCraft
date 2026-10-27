@@ -43,7 +43,8 @@ journalctl -f | curl -T - -H 'Content-Type: text/plain' http://127.0.0.1:8088/in
 - **Rate limits** per source (token bucket, default 600 per minute): webhooks over the limit get
   `429` with `Retry-After`; log lines over it are dropped and reported in the channel
   ("dropped N lines from nas-logs"), the response says how many were accepted. Webhooks with files
-  also count their bytes against the bridge-wide `files.total_bytes_per_minute` (see "Files").
+  also count their bytes, per source and against the bridge-wide `files.total_bytes_per_minute`
+  (see "Files").
 - **Alerts** can @mention people: a webhook with `"mention": true` (an extension), webhook
   attachments with `color: "danger"` (if the source enables `danger_is_alert`), and log lines whose
   level is in `alert_levels`. The mentioned user IDs travel as message metadata, so they are notified
@@ -106,58 +107,90 @@ curl --fail-with-body -F "text=Build ${CI_PIPELINE_ID}: artefacts" "${args[@]}" 
 
 What happens:
 
+- Before a byte of the body is read, the request needs a place: one of
+  `files.max_concurrent_requests`, one of its source's, and one in the worker's queue. Without one
+  it gets `503 bridge_busy` at once.
 - The form is read as it arrives. Each file is written to the spool directory (the server needs a
   file's size before its upload starts, and a form doesn't say it); the limits below apply while it
-  arrives, so a file over one is refused before the rest is read.
+  arrives, so a file over one is refused before the rest is read. Every piece is paid from the
+  source's share of file bytes and from the bridge's total; a file costs at least 64 KiB. A request
+  that is refused, or whose producer hangs up, before its upload begins gets its bytes back.
+- Pictures (up to 32 MiB and `files.max_thumbnail_pixels`) get a thumbnail and their size, decoded
+  one at a time off the endpoint's threads; a picture the decoder chokes on goes without.
 - The bridge then encrypts each file like a client upload (e2ee.md §4.5): a fresh key per file,
   files larger than 8 MiB in parts through presigned part URLs, read and encrypted one part at a
-  time, so memory stays at a part however large the file. Pictures get a thumbnail and their size.
-  Then it sends **one** message with all files into the source's channel.
-- The answer comes once every file is up and the message is in the encrypted outbox: `200 ok`. A
-  failed upload answers `413`, `502` or `503` (see "Answers") and sends nothing, so there is never a
-  message with files missing; retry the request. Files that were up already stay on the server as
-  ciphertext whose key nobody has, until the channel's retention removes them.
-- One message's files upload at a time, beside logs and other webhooks; up to 32 more wait in line.
-  A request whose producer hangs up before its files are up is dropped.
+  time, so memory stays at a part however large the file. The uploads are **completed only once
+  every file of the message is up**, and then it sends **one** message with all of them into the
+  source's channel.
+- The answer comes once the message is in the encrypted outbox: `200 ok`. A failed upload answers
+  `413`, `502` or `503` (see "Answers") and sends nothing; since nothing was completed, every file
+  is given up and the server frees it. Retry the request. Only a failure while completing (a few
+  short requests at the end) can leave completed files without their message.
+- A message is accepted only for a channel the bot can write in, and only if its text and files fit
+  the server's message limit; otherwise nothing is uploaded.
+- One message's files upload at a time, beside logs and other webhooks; the others wait in line. A
+  request whose producer hangs up is dropped, and its uploads are given up.
 - The spool directory holds the plaintext only for the time of a request, readable by the bridge's
-  user alone (`0600` in a `0700` directory), and is emptied whatever the answer; files a stopped
-  bridge left there are deleted at the next start.
+  user alone (`0600` in a `0700` directory; at start a wider mode is narrowed, and a link or another
+  user's directory stops the bridge), and is emptied whatever the answer; files a stopped bridge
+  left there are deleted at the next start.
 
-Limits:
+Limits (`max_file_bytes` <= `source_bytes_per_minute` <= `total_bytes_per_minute`, and
+`max_file_bytes` <= `max_spool_bytes`, or the configuration is refused):
 
-| Setting                        | Default                      | What                                                                                                                                                                |
-|--------------------------------|------------------------------|---------------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| `files.max_file_bytes`         | 100 MiB                      | Largest file. The server's attachment limit (`max_attachment_bytes`, encrypted size) applies too                                                                    |
-| `files.max_files_per_message`  | 10                           | Files per message for sources that don't set their own (`max_files_per_message` of a `[[sources]]` block or of an app source's options, at most 50); `0` takes none |
-| `files.total_bytes_per_minute` | 1 GiB                        | Bytes of webhooks with files per minute, all sources together; part of the bridge-wide rate limit                                                                   |
-| `listen.max_body_bytes`        | 1 MiB                        | The form's fields besides files together (the message), at most 32 of them                                                                                          |
-| `files.spool_dir`              | `spool` next to the database | Where files wait while they go up                                                                                                                                   |
+| Setting                                    | Default                      | What                                                                                                                                                                |
+|--------------------------------------------|------------------------------|---------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `files.max_file_bytes`                     | 100 MiB                      | Largest file. The server's attachment limit (`max_attachment_bytes`, encrypted size) applies too                                                                    |
+| `files.max_files_per_message`              | 10                           | Files per message for sources that don't set their own (`max_files_per_message` of a `[[sources]]` block or of an app source's options); at most 16, `0` takes none |
+| `files.source_bytes_per_minute`            | 512 MiB                      | Bytes of webhooks with files per minute and source; no request carries more                                                                                         |
+| `files.total_bytes_per_minute`             | 1 GiB                        | The same for all sources together                                                                                                                                   |
+| `files.max_concurrent_requests`            | 4                            | Requests with files running at once, all sources together                                                                                                           |
+| `files.max_concurrent_requests_per_source` | 2                            | The same per source                                                                                                                                                 |
+| `files.idle_timeout_secs`                  | 30                           | A body that sends nothing for this long is cut off                                                                                                                  |
+| `files.max_spool_bytes`                    | 2 GiB                        | Bytes in the spool directory, all requests together                                                                                                                 |
+| `files.max_message_bytes`                  | 1 MiB                        | The server's message limit (`[limits] max_ciphertext_bytes`); text and files that won't fit are refused before any upload                                           |
+| `files.max_thumbnail_pixels`               | 16 MP                        | Larger pictures get no thumbnail                                                                                                                                    |
+| `listen.max_body_bytes`                    | 1 MiB                        | The form's fields besides files together (the message), at most 32 of them                                                                                          |
+| `listen.drain_timeout_secs`                | 10                           | On shutdown, requests still running after this long are cut off                                                                                                     |
+| `files.spool_dir`                          | `spool` next to the database | Where files wait while they go up; the container image uses `/var/spool/teamcraft-bridge`, a volume of its own                                                      |
 
-A reverse proxy in front of the bridge (the deployment's, "Where producers reach the bridge") must
-let bodies of that size through.
+A message's files are unfinished uploads until all are up; the server allows 20 per account by
+default (`max_pending_attachments_per_user`), which is why a message carries at most 16.
+
+**Reverse proxy.** A proxy in front of the bridge (the deployment's, "Where producers reach the
+bridge") must let bodies of that size through and pass them on as they arrive. With nginx:
+`client_max_body_size` at least `files.source_bytes_per_minute`, `proxy_request_buffering off` (or
+the proxy holds the whole body on its disk first, and the bridge's limits and timeouts see only its
+pace), `client_body_timeout` about `files.idle_timeout_secs`, and `proxy_read_timeout` long enough
+for the uploads to the server.
 
 ## Answers
 
 `200` with `ok` for an accepted request (`/ingest` says how many lines it took), `404` without a
-body for an unknown token. Every other refusal is JSON with a stable `error_code`:
+body for an unknown token. Every other refusal is JSON with a stable `error_code`, and every `429`
+and `503` says in `Retry-After` when to try again:
 `{"error_code": "too_many_files", "message": "more than 10 files"}`.
 
 | Status | `error_code`         | When                                                                                                                              |
 |--------|----------------------|-----------------------------------------------------------------------------------------------------------------------------------|
 | 400    | `invalid_payload`    | The message JSON or text is invalid or empty (a message with files needs no text)                                                 |
 | 400    | `invalid_multipart`  | The form is malformed: no or a wrong boundary, broken part headers, cut off                                                       |
+| 408    | `request_timeout`    | The body sent nothing for `files.idle_timeout_secs`                                                                               |
 | 413    | `file_too_large`     | A file is larger than `files.max_file_bytes`, or the server refused its size (its limit, or the bot's attachment storage is full) |
 | 413    | `too_many_files`     | More files than the source takes                                                                                                  |
 | 413    | `payload_too_large`  | The fields besides files, or a body without files, are larger than `listen.max_body_bytes`                                        |
 | 413    | `too_many_fields`    | More than 32 fields besides files                                                                                                 |
-| 413    | `request_too_large`  | The request (`Content-Length`) is larger than `files.total_bytes_per_minute`: it can never pass                                   |
-| 429    | `rate_limited`       | Requests over the source's or the bridge's limit; `Retry-After` says when to try again                                            |
-| 429    | `file_rate_limited`  | File bytes over `files.total_bytes_per_minute`; `Retry-After` says when the request fits                                          |
-| 500    | `spool_failed`       | A file could not be written to or read from the spool directory (a full disk)                                                     |
+| 413    | `request_too_large`  | The request is larger than `files.source_bytes_per_minute` (by its `Content-Length`, or once read that far): it can never pass    |
+| 413    | `message_too_large`  | The text and the files (with room for the pictures' thumbnails) won't fit into one message (`files.max_message_bytes`)            |
+| 429    | `rate_limited`       | Requests over the source's or the bridge's limit                                                                                  |
+| 429    | `file_rate_limited`  | File bytes over the source's share or the bridge's total; the request got its bytes back                                          |
+| 500    | `spool_failed`       | A file could not be written to or read from the spool directory                                                                   |
 | 500    | `internal_error`     | The files are up, but the bridge's database could not keep the message                                                            |
 | 502    | `upload_failed`      | The server or the storage refused or failed an upload                                                                             |
+| 503    | `bridge_busy`        | As many requests with files run as may (in all or for the source); refused before the body is read                                |
+| 503    | `spool_full`         | The spool holds `files.max_spool_bytes`                                                                                           |
+| 503    | `channel_not_ready`  | The bot can't write in the channel yet (its welcome is on the way); nothing was uploaded                                          |
 | 503    | `server_unreachable` | The server can't be reached                                                                                                       |
-| 503    | `bridge_busy`        | Too many requests wait already (32 messages with files, or the send queue is full)                                                |
 | 503    | `shutting_down`      | The bridge is stopping                                                                                                            |
 
 ## Setup
@@ -255,13 +288,15 @@ token that outlives its revocation. Everything is audited.
 Each release publishes `ghcr.io/zeitgleich/teamcraft-bridge:X.Y.Z` (multi-arch, signed, like the
 server image; docs/release.md), built from `containers/teamcraft-bridge.Containerfile` (see
 `containers/README.md`). The deployment playbook runs it with `teamcraft_bridge_enabled`. Mount the configuration
-and the secrets, keep a volume at `/var/lib/teamcraft-bridge` for the database, publish the port on
+and the secrets, keep a volume at `/var/lib/teamcraft-bridge` for the database and one at
+`/var/spool/teamcraft-bridge` for the files of webhooks while they upload, publish the port on
 loopback only: `-p 127.0.0.1:8088:8088`.
 
 ## Limits of the current version
 
 - Files come only as uploads in a form ("Files"); file links in a webhook's JSON (Slack `files`)
-  are ignored. An upload that fails is not resumed: the producer sends the request again.
+  are ignored. An upload that fails is not resumed: the producer sends the request again. There is
+  no idempotency key yet, so a retry after a lost answer can post the message twice.
 - The app has no field for a source's files per message yet; app sources take the bridge's
   `files.max_files_per_message` unless their options say otherwise.
 - `[[sources]]` in the configuration file are read at start; changing one needs a restart. Sources

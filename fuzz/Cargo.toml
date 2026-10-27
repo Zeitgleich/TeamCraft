@@ -58,6 +58,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "thumbnail"
+path = "fuzz_targets/thumbnail.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "imip"
 path = "fuzz_targets/imip.rs"
 test = false

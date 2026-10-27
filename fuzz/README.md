@@ -16,6 +16,7 @@ fuzz/run.sh imip 600          # one target for ten minutes (needs rootless podma
 | `proto_gateway`    | gateway frames in both directions, events, rendezvous frames and the main response types                         |
 | `bridge_ingest`    | Slack/Mattermost webhook bodies (JSON and form), plain/NDJSON log lines, Slack markup, then batching             |
 | `bridge_multipart` | webhooks with files (`multipart/form-data`) cut at random points: same outcome, bounded buffer, limits held      |
+| `thumbnail`        | untrusted pictures of every format apps and the bridge decode for thumbnails, within the bridge's pixel limit    |
 | `imip`             | received iMIP REPLY text; rendering events from arbitrary strings (CR/LF injection, line folding)                |
 | `workspace_log`    | signed workspace log entries (random payloads and signatures must fail verification) and the roster/policy chain |
 | `crypto_decoders`  | binary decoders of messages, key bags, wrapped backup keys, membership changes, certificates, call bindings      |
