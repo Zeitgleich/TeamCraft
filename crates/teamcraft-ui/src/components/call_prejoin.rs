@@ -22,6 +22,8 @@ const METER_BARS: usize = 14;
 const METER_TICK_MS: u64 = 120;
 /// How long the speaker button says "playing": the test sound (1.4 s) and a little start-up.
 const SPEAKER_TEST_MS: u64 = 1800;
+/// The camera field, which "Choose camera" on a camera error focuses.
+const CAMERA_FIELD_ID: &str = "prejoin-camera";
 
 /// Lobby before a call: check camera, microphone and speaker, pick a background, then join.
 #[component]
@@ -67,11 +69,10 @@ pub fn PreJoinScreen(request: CallRequest) -> impl IntoView {
   ];
   on_cleanup(move || refresh_on_return.into_iter().for_each(|handle| handle.remove()));
 
-  // Remember the first device of each kind when nothing was chosen before.
+  // Show the first device of each kind when nothing was chosen before: the one the system uses.
   Effect::new(move |_| {
     let devices = devices.get();
     for (signal, list) in [
-      (call.camera_id, &devices.cameras),
       (call.microphone_id, &devices.microphones),
       (call.speaker_id, &devices.speakers),
     ] {
@@ -81,7 +82,25 @@ pub fn PreJoinScreen(request: CallRequest) -> impl IntoView {
         signal.set(first.id.clone());
       }
     }
+    // The desktop lists the camera it opens by default first (#819); telling it again would only
+    // restart the check's camera.
+    if call.camera_id.get_untracked().is_empty()
+      && let Some(first) = devices.cameras.first()
+    {
+      call.show_camera_in_use(first.id.clone());
+    }
   });
+  // "Choose camera" on a camera error: the camera field takes the focus.
+  Effect::new(move |_| {
+    if call.is_camera_menu_open.get() {
+      call.is_camera_menu_open.set(false);
+      focus_camera_field();
+    }
+  });
+  let pick_camera = move |id: String| {
+    call.choose_camera(id.clone());
+    state.settings.prefs.update(|prefs| prefs.calls.camera_id = id);
+  };
   keep_off_while_unavailable(camera, call.is_camera_on, move |is_on| call.set_camera(is_on));
   keep_off_while_unavailable(microphone, call.is_mic_on, move |is_on| call.set_muted(!is_on));
 
@@ -207,7 +226,11 @@ pub fn PreJoinScreen(request: CallRequest) -> impl IntoView {
               class="round-btn"
               aria-label=move || i18n.t("control-camera-flip")
               title=move || i18n.t("control-camera-flip")
-              on:click=move |_| devices.with_untracked(|devices| call.flip_camera(&devices.cameras))
+              on:click=move |_| {
+                devices.with_untracked(|devices| call.flip_camera(&devices.cameras));
+                let id = call.camera_id.get_untracked();
+                state.settings.prefs.update(|prefs| prefs.calls.camera_id = id);
+              }
             >
               <Icon name=IconName::SwitchCamera />
             </button>
@@ -240,8 +263,8 @@ pub fn PreJoinScreen(request: CallRequest) -> impl IntoView {
           }}
         </p>
         <div class="field">
-          <label for="prejoin-camera">{move || i18n.t("prejoin-camera")}</label>
-          <DeviceSelect id="prejoin-camera" kind=InputKind::Camera offer=camera selected=call.camera_id on_pick=Callback::new(move |id: String| call.emit(CallEvent::CameraDevice(id))) />
+          <label for=CAMERA_FIELD_ID>{move || i18n.t("prejoin-camera")}</label>
+          <DeviceSelect id=CAMERA_FIELD_ID kind=InputKind::Camera offer=camera selected=call.camera_id on_pick=Callback::new(pick_camera) />
         </div>
         <div class="field">
           <label for="prejoin-mic">{move || i18n.t("prejoin-microphone")}</label>
@@ -411,6 +434,19 @@ fn DeviceSelect(
         },
       }}
     </select>
+  }
+}
+
+fn focus_camera_field() {
+  use wasm_bindgen::JsCast;
+
+  let maybe_field = web_sys::window()
+    .and_then(|window| window.document())
+    .and_then(|document| document.get_element_by_id(CAMERA_FIELD_ID))
+    .and_then(|element| element.dyn_into::<web_sys::HtmlElement>().ok());
+  if let Some(field) = maybe_field {
+    // Focusing can only fail for an element that went away meanwhile.
+    drop(field.focus());
   }
 }
 

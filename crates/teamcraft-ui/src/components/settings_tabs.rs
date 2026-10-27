@@ -642,17 +642,44 @@ fn DeviceRow(
   view! { <SelectRow label=label options=options value=value on_change=on_change is_raw_labels=true /> }
 }
 
-/// Applies call preferences to the running call session (start state, effect, mirror, devices).
-pub fn apply_call_prefs(call: crate::calls::CallState, calls: &CallPrefs) {
-  call.is_mic_on.set(!calls.start_muted);
-  call.is_camera_on.set(!calls.start_camera_off);
-  call.mirror_self_view.set(calls.mirror_self_view);
-  call.effect.set(effect_from_slug(&calls.background));
-  call.camera_id.set(calls.camera_id.clone());
-  call.microphone_id.set(calls.microphone_id.clone());
-  call.speaker_id.set(calls.speaker_id.clone());
-  call.share_sound.set(calls.share_sound);
-  call.screen_mode.set(calls.screen_mode);
+/// Applies call preferences to the call session (start state, effect, mirror, devices): all of
+/// them first (`maybe_previous` is `None`), then only the ones that changed. A setting saved during
+/// a call (a camera picked in the call, the share options) must not reset the microphone, the
+/// camera or the device the call uses now.
+pub fn apply_call_prefs(
+  call: crate::calls::CallState,
+  maybe_previous: Option<&CallPrefs>,
+  calls: &CallPrefs,
+) {
+  let is_new =
+    |same: fn(&CallPrefs, &CallPrefs) -> bool| maybe_previous.is_none_or(|previous| !same(previous, calls));
+  if is_new(|a, b| a.start_muted == b.start_muted) {
+    call.is_mic_on.set(!calls.start_muted);
+  }
+  if is_new(|a, b| a.start_camera_off == b.start_camera_off) {
+    call.is_camera_on.set(!calls.start_camera_off);
+  }
+  if is_new(|a, b| a.mirror_self_view == b.mirror_self_view) {
+    call.mirror_self_view.set(calls.mirror_self_view);
+  }
+  if is_new(|a, b| a.background == b.background) {
+    call.effect.set(effect_from_slug(&calls.background));
+  }
+  if is_new(|a, b| a.camera_id == b.camera_id) {
+    call.camera_id.set(calls.camera_id.clone());
+  }
+  if is_new(|a, b| a.microphone_id == b.microphone_id) {
+    call.microphone_id.set(calls.microphone_id.clone());
+  }
+  if is_new(|a, b| a.speaker_id == b.speaker_id) {
+    call.speaker_id.set(calls.speaker_id.clone());
+  }
+  if is_new(|a, b| a.share_sound == b.share_sound) {
+    call.share_sound.set(calls.share_sound);
+  }
+  if is_new(|a, b| a.screen_mode == b.screen_mode) {
+    call.screen_mode.set(calls.screen_mode);
+  }
 }
 
 /// Help & about: versions, debug info for a support request, updates (desktop) and notices.
@@ -796,5 +823,29 @@ mod tests {
     assert!(info.starts_with("TeamCraft 1.0.3\n"));
     assert!(info.contains("Platform: Linux"));
     assert!(info.contains("Language: de"));
+  }
+
+  /// #819: a camera picked in the call is saved in the preferences; that must not unmute the
+  /// microphone or turn the camera back to the start setting.
+  #[test]
+  fn saving_one_call_setting_leaves_the_others_as_the_call_has_them() {
+    let owner = leptos::prelude::Owner::new();
+    owner.with(|| {
+      let call = crate::calls::CallState::new();
+      let saved = CallPrefs::default();
+      apply_call_prefs(call, None, &saved);
+      assert!(call.is_mic_on.get_untracked());
+      // In the call: muted, camera off, a camera that stood in for the chosen one.
+      call.is_mic_on.set(false);
+      call.is_camera_on.set(false);
+      let picked = CallPrefs {
+        camera_id: "built-in".into(),
+        ..saved.clone()
+      };
+      apply_call_prefs(call, Some(&saved), &picked);
+      assert_eq!(call.camera_id.get_untracked(), "built-in");
+      assert!(!call.is_mic_on.get_untracked(), "still muted");
+      assert!(!call.is_camera_on.get_untracked(), "camera still off");
+    });
   }
 }

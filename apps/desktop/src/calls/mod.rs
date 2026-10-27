@@ -27,7 +27,8 @@ use std::sync::{Arc, Mutex, PoisonError};
 use teamcraft_client_api::call_view::CallView;
 use teamcraft_client_api::calls::{
   ActiveCall, BackgroundEffect as UiBackgroundEffect, CallEndReason, CallPreview, CallRequest,
-  CallStatusSounds, DevicePresence, MediaDevice, MediaDevices, PreviewCamera, PushToTalk, ScreenShareSound,
+  CallStatusSounds, CameraFallback, DevicePresence, MediaDevice, MediaDevices, PreviewCamera, PushToTalk,
+  ScreenShareSound,
 };
 use teamcraft_client_api::failure::{ActionFailure, CallFailure, FailureKind};
 use teamcraft_client_api::remote::CallSnapshot;
@@ -45,10 +46,11 @@ use teamcraft_media::call_native::{
 use teamcraft_media::call_resilience::{JoinTicket, JoinTicketError, certificate_hash_from_hex};
 use teamcraft_media::call_video::ReceivedVideoFrame;
 use teamcraft_media::call_view::{CallRoster, status_cues};
+use teamcraft_media::camera_choice::CameraReport;
 use teamcraft_media::effects::{BackgroundImage, EffectHandle};
 use teamcraft_media::ringtone;
 use teamcraft_media::system_audio::SystemAudioCapture;
-use teamcraft_media::video_capture::CaptureError;
+use teamcraft_media::video_capture::{CameraInfo, CaptureError};
 use teamcraft_media::video_pipeline::{VideoSendConfig, VideoStartError, preferred_encoders};
 use teamcraft_proto::{
   AudioCodec, ConversationId, DeviceId, GatewayEvent, MediaCapabilities, MediaStreamId, ScreenContentMode,
@@ -103,7 +105,13 @@ struct CallState {
   devices: MediaDevices,
   microphone: AudioDeviceChoice,
   speakers: AudioDeviceChoice,
+  /// The chosen camera (`None`: the default, `camera_choice`'s order). A camera that stood in for
+  /// the chosen one replaces it for the rest of the session, so the iPhone isn't asked again.
   maybe_camera: Option<String>,
+  /// The camera that delivers, while the call's camera or the pre-join check runs.
+  maybe_camera_in_use: Option<String>,
+  /// The camera that stood in for the chosen one at the last start (#819).
+  maybe_camera_fallback: Option<CameraFallback>,
   background: UiBackgroundEffect,
   /// The picture when `background` is one ([`UiBackgroundEffect::Custom`] or
   /// [`UiBackgroundEffect::Org`]).
@@ -225,6 +233,7 @@ impl CallHost {
       push_to_talk: state.push_to_talk.clone(),
       maybe_end_reason: state.view.maybe_end_reason,
       preview_camera: state.preview_camera,
+      maybe_camera_fallback: state.maybe_camera_fallback.clone(),
     }
   }
 
@@ -237,13 +246,7 @@ impl CallHost {
       .await
       .map_err(|error| error.to_string())?;
     let mut devices = MediaDevices::listed(
-      cameras
-        .into_iter()
-        .map(|camera| MediaDevice {
-          id: camera.id,
-          label: camera.name,
-        })
-        .collect(),
+      cameras.iter().map(camera_device).collect(),
       inputs
         .map_err(|error| error.to_string())?
         .iter()
@@ -537,12 +540,15 @@ impl CallHost {
     if !is_on {
       self.control(Control::StopVideo(VideoTrackKind::Camera)).await;
       self.update_active(|active| active.is_camera_on = false);
-      lock(&self.state).maybe_effect_handle = None;
+      let mut state = lock(&self.state);
+      state.maybe_effect_handle = None;
+      state.maybe_camera_in_use = None;
       return Ok(());
     }
     self.ensure_video_codec().await?;
     let OpenedCamera {
       capture,
+      report,
       maybe_filter,
       maybe_handle,
     } = self.open_camera().await?;
@@ -560,6 +566,7 @@ impl CallHost {
     if self.is_camera_on() {
       lock(&self.state).maybe_effect_handle = maybe_handle;
     }
+    self.note_camera_in_use(&report);
     self.changed();
     Ok(())
   }
@@ -569,9 +576,22 @@ impl CallHost {
     lock(&self.state).background
   }
 
-  /// Remembers the camera and restarts a running one (or the pre-join check's) with it.
+  /// Remembers the camera and restarts a running one (or the pre-join check's) with it. The same
+  /// choice again, or the camera that already delivers (the default the UI names, a camera that
+  /// stood in), restarts nothing.
   pub async fn select_camera(&self, maybe_device: Option<String>) -> Result<(), String> {
-    lock(&self.state).maybe_camera = maybe_device;
+    let maybe_device = maybe_device.filter(|id| !id.is_empty());
+    {
+      let mut state = lock(&self.state);
+      if state.maybe_camera == maybe_device {
+        return Ok(());
+      }
+      let is_in_use = maybe_device.is_some() && state.maybe_camera_in_use == maybe_device;
+      state.maybe_camera = maybe_device;
+      if is_in_use {
+        return Ok(());
+      }
+    }
     if self.is_camera_on() {
       self.set_camera(true).await?;
     }
@@ -718,6 +738,8 @@ impl CallHost {
   /// Opens the chosen camera with the background effects in front of it, as the call sends it
   /// and the pre-join check shows it (blocking work on a blocking thread; the portal may ask).
   async fn open_camera(&self) -> Result<OpenedCamera, String> {
+    // Which camera delivers is known again once this one started.
+    lock(&self.state).maybe_camera_in_use = None;
     let is_required = lock(&self.state).is_background_required;
     if is_required && !matches!(lock(&self.state).background, UiBackgroundEffect::Org(_)) {
       return Err("the organization requires one of its backgrounds for the camera".into());
@@ -731,10 +753,10 @@ impl CallHost {
       )
     };
     let maybe_model = self.maybe_segmentation_model.clone();
-    let (capture, maybe_effects) = tokio::task::spawn_blocking(move || {
-      let capture = video::open_camera(maybe_camera.as_deref())?;
+    let ((capture, report), maybe_effects) = tokio::task::spawn_blocking(move || {
+      let opened = video::open_camera(maybe_camera.as_deref())?;
       Ok::<_, String>((
-        capture,
+        opened,
         video::effects_filter(background, maybe_custom.as_ref(), maybe_model.as_deref()),
       ))
     })
@@ -753,6 +775,7 @@ impl CallHost {
     };
     Ok(OpenedCamera {
       capture,
+      report,
       maybe_filter,
       maybe_handle,
     })
@@ -774,6 +797,7 @@ impl CallHost {
       lock(&state).preview_camera = camera;
       notify();
     };
+    let report = opened.report.clone();
     let started = tokio::task::spawn_blocking(move || CameraCheck::start(opened.capture, filter, on_state))
       .await
       .map_err(|error| error.to_string())?;
@@ -781,11 +805,14 @@ impl CallHost {
       Ok(check) => {
         preview.maybe_camera = Some(check);
         lock(&self.state).maybe_preview_effect = opened.maybe_handle;
+        self.note_camera_in_use(&report);
+        self.changed();
         Ok(())
       },
+      // Already the UI's wire text.
       Err(error) => {
         self.set_preview_camera(PreviewCamera::Failed);
-        Err(video::camera_failure_wire(error))
+        Err(error)
       },
     }
   }
@@ -793,8 +820,31 @@ impl CallHost {
   /// Ends the check's camera and waits until it is released: a join may open it next.
   async fn stop_preview_camera(&self, preview: &mut Preview) {
     preview.stop_camera().await;
-    lock(&self.state).maybe_preview_effect = None;
+    {
+      let mut state = lock(&self.state);
+      state.maybe_preview_effect = None;
+      state.maybe_camera_in_use = None;
+    }
     self.set_preview_camera(PreviewCamera::Off);
+  }
+
+  /// Notes which camera delivers. One that stood in for the chosen camera (#819) becomes the
+  /// choice for the rest of the session, so turning the camera off and on doesn't ask the iPhone
+  /// again; the UI learns about the switch from the snapshot.
+  fn note_camera_in_use(&self, report: &CameraReport) {
+    let Some(used) = report.get() else {
+      return;
+    };
+    let mut state = lock(&self.state);
+    state.maybe_camera_in_use = Some(used.camera.id.clone());
+    state.maybe_camera_fallback = None;
+    if let Some(failed) = used.maybe_replaced {
+      state.maybe_camera = Some(used.camera.id.clone());
+      state.maybe_camera_fallback = Some(CameraFallback {
+        used: camera_device(&used.camera),
+        failed: camera_device(&failed),
+      });
+    }
   }
 
   async fn start_preview_microphone(&self, preview: &mut Preview) -> Result<(), String> {
@@ -1112,6 +1162,7 @@ fn set_video_flag(state: &Mutex<CallState>, kind: &VideoTrackKind, is_on: bool) 
   let mut state = lock(state);
   if *kind == VideoTrackKind::Camera && !is_on {
     state.maybe_effect_handle = None;
+    state.maybe_camera_in_use = None;
   }
   if let Some(active) = state.view.maybe_active.as_mut() {
     match kind {
@@ -1173,6 +1224,13 @@ fn media_device(info: &AudioDeviceInfo) -> MediaDevice {
   MediaDevice {
     id: info.id.to_string(),
     label: info.name.clone(),
+  }
+}
+
+fn camera_device(camera: &CameraInfo) -> MediaDevice {
+  MediaDevice {
+    id: camera.id.clone(),
+    label: camera.name.clone(),
   }
 }
 

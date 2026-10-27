@@ -4915,6 +4915,64 @@ ol.md-list {
   color: #b9c3d6;
 }
 
+/* The camera menu of the call (#819): the cameras as a short list, the one in use checked. */
+.camera-popover {
+  width: min(340px, calc(100% - 32px));
+}
+
+.camera-options {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.camera-option {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 40px;
+  padding: 8px 10px;
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--call-text);
+  text-align: left;
+  transition: background-color 120ms ease-out;
+}
+
+.camera-option:active {
+  background: var(--call-border);
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .camera-option:hover:not(:active) {
+    background: rgba(255, 255, 255, 0.06);
+  }
+}
+
+.camera-option.chosen {
+  font-weight: var(--weight-semibold);
+}
+
+.camera-option-name {
+  flex: 1;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.camera-option .icon {
+  flex: none;
+  width: 18px;
+  height: 18px;
+  color: var(--accent);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .camera-option {
+    transition: none;
+  }
+}
+
 .system-effects-hint {
   display: flex;
   align-items: center;

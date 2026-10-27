@@ -16,8 +16,9 @@ use crate::admin::DeviceInfo;
 use crate::backend::{ChatBackend, LoadingList, SearchBackend};
 use crate::calls::{
   ActiveCall, BackgroundEffect, BackgroundImageInfo, CallEndReason, CallHistoryItem, CallMoveOffer,
-  CallPreview, CallRequest, CallStatusSounds, IncomingCall, JoinMedia, MediaDevices, OrgBackgroundRule,
-  OrgBackgrounds, PreviewCamera, PushToTalk, RemoteVideoTrack, RunningCall, ScreenContentMode,
+  CallPreview, CallRequest, CallStatusSounds, CameraFallback, IncomingCall, JoinMedia, MediaDevices,
+  OrgBackgroundRule, OrgBackgrounds, PreviewCamera, PushToTalk, RemoteVideoTrack, RunningCall,
+  ScreenContentMode,
 };
 use crate::live::LiveSnapshot;
 use crate::model::{
@@ -60,6 +61,9 @@ pub struct CallSnapshot {
   /// The pre-join check's camera (#442).
   #[serde(default)]
   pub preview_camera: PreviewCamera,
+  /// The camera that stood in when the chosen one didn't open, at the last camera start (#819).
+  #[serde(default)]
+  pub maybe_camera_fallback: Option<CameraFallback>,
 }
 
 /// Something the user did in or about a call.

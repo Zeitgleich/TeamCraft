@@ -302,6 +302,17 @@ pub struct MediaDevice {
   pub label: String,
 }
 
+/// A camera this device opened in place of the chosen (or default) one, which didn't open: declined
+/// on the iPhone, in use by another app, or no mode it could be set to (#819). The choice itself
+/// stays; the next start tries it again.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CameraFallback {
+  /// The camera that delivers now.
+  pub used: MediaDevice,
+  /// The camera that didn't open.
+  pub failed: MediaDevice,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct MediaDevices {
   pub cameras: Vec<MediaDevice>,

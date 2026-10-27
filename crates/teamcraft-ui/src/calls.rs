@@ -81,6 +81,11 @@ pub struct CallState {
   pub is_deafened: RwSignal<bool>,
   /// An announced move of this call into a meeting room the user hasn't followed yet.
   pub move_offer: RwSignal<Option<MoveOffer>>,
+  /// Asks for the camera choice: the call screen's camera menu, or the pre-join screen's camera
+  /// field (the "Choose camera" of a camera error, #819).
+  pub is_camera_menu_open: RwSignal<bool>,
+  /// The camera the backend was told about or uses on its own ([`CallState::send_camera_choice`]).
+  sent_camera: StoredValue<String>,
   /// Carries the user's actions to the call backend; set once by the shell.
   handler: StoredValue<Option<CallHandler>, LocalStorage>,
 }
@@ -107,6 +112,8 @@ impl CallState {
       has_hand_raised: RwSignal::new(false),
       is_deafened: RwSignal::new(false),
       move_offer: RwSignal::new(None),
+      is_camera_menu_open: RwSignal::new(false),
+      sent_camera: StoredValue::new(String::new()),
       handler: StoredValue::new_local(None),
     }
   }
@@ -148,9 +155,35 @@ impl CallState {
   /// running camera restarts on it. Nothing to switch to with fewer than two.
   pub fn flip_camera(&self, cameras: &[MediaDevice]) {
     if let Some(next) = next_camera(cameras, &self.camera_id.get_untracked()) {
-      self.camera_id.set(next.id.clone());
-      self.emit(CallEvent::CameraDevice(next.id.clone()));
+      self.choose_camera(next.id.clone());
     }
+  }
+
+  /// The user picked this camera: the running camera (or the pre-join check's) restarts on it.
+  /// Remembering it is the caller's part (the preferences).
+  pub fn choose_camera(&self, id: String) {
+    self.camera_id.set(id);
+    self.send_camera_choice();
+  }
+
+  /// Shows `id` as the camera without telling the backend, which uses it already: its default
+  /// (the first one listed) or a camera that stood in for the chosen one (#819).
+  pub fn show_camera_in_use(&self, id: String) {
+    self.sent_camera.set_value(id.clone());
+    self.camera_id.set(id);
+  }
+
+  /// Tells the backend the chosen camera unless it knows it already, so a choice reaches it once:
+  /// the remembered one at start, a pick, a change in the settings.
+  pub fn send_camera_choice(&self) {
+    let Some(id) = self.camera_id.try_get_untracked() else {
+      return;
+    };
+    if id.is_empty() || self.sent_camera.try_with_value(|sent| *sent == id) != Some(false) {
+      return;
+    }
+    self.sent_camera.set_value(id.clone());
+    self.emit(CallEvent::CameraDevice(id));
   }
 
   fn emit_in_call(&self, event: CallEvent) {
@@ -363,6 +396,43 @@ mod tests {
         media: JoinMedia::default(),
       };
       assert_eq!(*events.borrow(), vec![joined]);
+    });
+  }
+
+  /// #819: a camera choice reaches the backend once, also when a setting and a pick both carry it,
+  /// and a camera the backend already uses (its default, a stand-in) isn't sent back to it.
+  #[test]
+  fn a_camera_choice_reaches_the_backend_once() {
+    let owner = Owner::new();
+    owner.with(|| {
+      let call = CallState::new();
+      let events = Rc::new(RefCell::new(Vec::new()));
+      let seen = events.clone();
+      call.set_handler(move |event| seen.borrow_mut().push(event));
+
+      // The remembered choice at start (the preferences set the signal).
+      call.camera_id.set("iphone".into());
+      call.send_camera_choice();
+      call.send_camera_choice();
+      assert_eq!(*events.borrow(), vec![CallEvent::CameraDevice("iphone".into())]);
+
+      // The iPhone declined, the built-in camera stood in: shown, not sent back.
+      events.borrow_mut().clear();
+      call.show_camera_in_use("built-in".into());
+      call.send_camera_choice();
+      assert!(events.borrow().is_empty());
+      assert_eq!(call.camera_id.get_untracked(), "built-in");
+
+      // Picking the iPhone again tries it again.
+      call.choose_camera("iphone".into());
+      call.send_camera_choice();
+      assert_eq!(*events.borrow(), vec![CallEvent::CameraDevice("iphone".into())]);
+
+      // Nothing chosen: nothing to send.
+      events.borrow_mut().clear();
+      call.camera_id.set(String::new());
+      call.send_camera_choice();
+      assert!(events.borrow().is_empty());
     });
   }
 

@@ -868,6 +868,8 @@ impl Host {
         push_to_talk: state.push_to_talk.clone(),
         maybe_end_reason: state.view.maybe_end_reason,
         preview_camera: state.preview_camera,
+        // The browser opens the camera the user picks or none: no fallback here.
+        maybe_camera_fallback: None,
       }
     };
     let Ok(json) = serde_json::to_string(&snapshot) else {
