@@ -95,5 +95,8 @@ cargo deny check
   builds and passes `cargo fmt --check` and `clippy`.
 - `main` only receives **squash merges** of reviewed branches; the squash commit message summarizes
   the feature (subject ≤ 72 chars, body explains what and why).
+- **Releases are nightly** (03:00 Berlin, `nightly-release.yml`, [docs/release.md](docs/release.md)):
+  finished PRs go to `main` as soon as they are done; PR titles become the release highlights, so write them for readers, and label them (`feature`, `bug`, `security`,
+  `breaking`) so the release notes group them. Don't bump the version or tag by hand for a patch.
 - Commit messages: imperative subject line (≤ 72 chars), body explains *why*. Sign off with
   `git commit -s` (Developer Certificate of Origin, as in CalCraft).

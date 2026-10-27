@@ -72,6 +72,9 @@ version as the final 1.0.0 and as each other: reinstall once with `sudo dnf rein
 
 ## Release procedure
 
+Releases are made by [the nightly workflow](#nightly-releases); this is the manual procedure for
+candidates, prereleases and special cases.
+
 1. **Main is green.** Never tag a commit whose CI failed.
 2. **Branch** `release/vX.Y.Z` and set the version in the places above (`cargo update --workspace
    --offline` updates `Cargo.lock`); `scripts/check-versions.sh` must pass.
@@ -152,6 +155,41 @@ without the Android files, so the job starts both again. The SDK install inside 
 (`apps/android/scripts/build.sh`) checks every package and retries a corrupt download up to four
 times; the SDK isn't cached between runs (it is large, and the cache space is shared with the Rust
 jobs).
+
+## Nightly releases
+
+Normal case: pull requests are merged into `main` as soon as they are done, and
+`nightly-release.yml` releases `main` every night at 03:00 (Europe/Berlin). The steps of
+[Release procedure](#release-procedure) are only done by hand for a candidate or a prerelease.
+
+| Situation                                                       | Result                                                                                |
+|-----------------------------------------------------------------|---------------------------------------------------------------------------------------|
+| No commit since the last release tag, or only docs / Markdown   | nothing (notice in the run)                                                           |
+| CI of `main` is not green for the newest code change           | run fails, nothing tagged; fix `main`, then run the workflow again                    |
+| The last tag has no published release                           | run fails: re-run it (`gh workflow run release.yml --ref vX.Y.Z -f publish=true`)    |
+| Tree version equals the last tag                                | patch bump commit on `main` (`scripts/bump-version.sh`), tag, release `X.Y.(Z+1)`      |
+| A pull request raised the tree's version above the last tag     | the tree is released as it is (minor / major releases: bump in a pull request)         |
+| Tree version is a prerelease (`-beta.N`)                        | run fails; release by hand                                                            |
+
+The bump commit (`Release X.Y.Z`, signed off by `github-actions[bot]`) is pushed to `main` directly
+and carries no skip marker. The annotated tag's message is the highlights
+(`scripts/nightly-notes.py`): the title of every merged pull request (newest first, at most 15, then
+"and N more"; `security` and `breaking` ones first), and the `breaking` ones again under
+`### Breaking`. Write pull request titles for readers; `skip-release-notes` leaves one out. Labels
+(`feature`, `bug`, ...) group the generated list: that list is "What's changed" ([Release notes](#release-notes)).
+
+Pushes made with `GITHUB_TOKEN` start no workflows, so the nightly run starts `release.yml` itself
+with `workflow_dispatch` on the tag (`publish: true`). After the images, desktop packages and web
+client are built, its `publish` job publishes the release and starts `packages.yml` (update
+manifests, APT/RPM) and `google-play.yml`, which `release: published` would not do for a token
+publish. If the Android build failed, the release is published without it; re-running
+`android-release` attaches the files and starts both again.
+
+Run it by hand: *Actions → Nightly release → Run workflow* (`dry_run` prints the version and
+highlights and pushes nothing). To skip a night, disable the workflow; to hold a change back, don't
+merge it. A broken release is not moved: the next night's run releases the fix as a new patch version,
+or run it by hand right after merging the fix. Deploying ([step 8](#release-procedure)) stays a
+manual decision.
 
 ## Release notes
 
@@ -352,5 +390,5 @@ scripts/render-release-notes.py --version 1.0.0 --tag v1.0.0 --repo Zeitgleich/T
 scripts/play-release-notes.py --version 1.0.0 --tag v1.0.0 --repo Zeitgleich/TeamCraft --locales en-US --out-dir /tmp/whatsnew
 ```
 
-A tag push is the only trigger of `release.yml`; to try it without a release, push a candidate tag
-(above) or a tag to a fork. `desktop-release.yml` alone can be run by hand from the Actions UI.
+`release.yml` runs on a tag push or by `workflow_dispatch` on a tag ref; to try it without a release,
+push a candidate tag (above) or a tag to a fork. `desktop-release.yml` alone can be run by hand from the Actions UI.

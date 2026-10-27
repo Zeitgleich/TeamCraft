@@ -1,0 +1,151 @@
+# Nightly release (docs/release.md, "Nightly releases"): every night at 03:00 (Berlin) the state of
+# `main` is released if it changed since the last release.
+#
+# - No commit since the last release tag, or only docs: nothing happens.
+# - CI of main must be green for the newest code change; else the run fails and nothing is tagged.
+# - The version is the next patch (1.0.8 -> 1.0.9) in a bump commit on main
+#   (scripts/bump-version.sh). When a pull request already raised the tree's version above the last
+#   tag (a minor or major release), that version is released as it is.
+# - The tag's message holds the highlights (scripts/nightly-notes.py), then release.yml is started
+#   on the tag with `publish`: the same pipeline as a hand-made release, published automatically
+#   once built (the Android files join when they are done).
+#
+# Pushes and releases made with GITHUB_TOKEN don't start other workflows, which is why release.yml
+# is started explicitly (workflow_dispatch on the tag) and publishes + starts the package site and
+# Google Play itself.
+name: Nightly release
+
+on:
+  schedule:
+    - cron: "0 3 * * *"
+      timezone: Europe/Berlin
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: Decide and print what would be released; push and tag nothing
+        type: boolean
+        default: false
+
+# Never two nightly runs at once; a manual run waits for the scheduled one.
+concurrency:
+  group: nightly-release
+  cancel-in-progress: false
+
+permissions: {}
+
+jobs:
+  release:
+    name: Tag and release
+    runs-on: ubuntu-latest
+    permissions:
+      # Pushes the bump commit and the tag; starts release.yml; reads CI runs and pull requests.
+      contents: write
+      actions: write
+      pull-requests: read
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      DRY_RUN: ${{ inputs.dry_run }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # The whole history and all tags: what changed since the last release.
+          fetch-depth: 0
+          ref: ${{ github.event.repository.default_branch }}
+      - name: What changed since the last release
+        id: changes
+        run: |
+          last_tag="$(git tag --list 'v*' --sort=-v:refname | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | head -n 1)"
+          [ -n "$last_tag" ] || { echo "::error::no release tag found"; exit 1; }
+          # A tag without a published release is a release that broke: a human looks at it first
+          # (re-run release.yml for the tag, or fix and release a new patch version).
+          is_draft="$(gh release view "$last_tag" --json isDraft --jq .isDraft 2>/dev/null || echo missing)"
+          if [ "$is_draft" != false ]; then
+            echo "::error::$last_tag has no published release ($is_draft). Fix it first: gh workflow run release.yml --ref $last_tag -f publish=true"
+            exit 1
+          fi
+          echo "last_tag=$last_tag" >> "$GITHUB_OUTPUT"
+          # Docs and Markdown don't make a release (CI skips them as well).
+          code_changes="$(git diff --name-only "$last_tag..HEAD" -- . ':!docs' ':!*.md')"
+          if [ -z "$code_changes" ]; then
+            echo "::notice::no code changes since $last_tag; nothing to release"
+            echo "release=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "release=true" >> "$GITHUB_OUTPUT"
+          echo "$(git rev-list --count "$last_tag..HEAD") commits since $last_tag"
+          git log -1 --format='code_sha=%H' "$last_tag..HEAD" -- . ':!docs' ':!*.md' >> "$GITHUB_OUTPUT"
+      # The newest code change must be covered by a green CI run on main: a run of that commit or of
+      # a later one (a later commit contains the earlier one). Anything else stops the release.
+      - name: CI of main is green
+        if: steps.changes.outputs.release == 'true'
+        env:
+          CODE_SHA: ${{ steps.changes.outputs.code_sha }}
+        run: |
+          runs="$(gh run list --workflow ci.yml --branch main --event push --limit 50 \
+            --json headSha,status,conclusion --jq '.[] | [.headSha, .status, .conclusion] | @tsv')"
+          verdict=""
+          while IFS=$'\t' read -r sha status conclusion; do
+            [ -n "$sha" ] || continue
+            # Newest first: the first run that contains the code change decides.
+            if git merge-base --is-ancestor "$CODE_SHA" "$sha" 2>/dev/null; then
+              verdict="$status/$conclusion ($sha)"
+              [ "$status" = completed ] && [ "$conclusion" = success ] && { echo "CI green: $verdict"; exit 0; }
+              break
+            fi
+          done <<< "$runs"
+          echo "::error::CI of main is not green for ${CODE_SHA}: ${verdict:-no run found}. Fix or re-run CI (gh workflow run ci.yml --ref main), then run this workflow again."
+          exit 1
+      - name: Version
+        if: steps.changes.outputs.release == 'true'
+        id: version
+        env:
+          LAST_TAG: ${{ steps.changes.outputs.last_tag }}
+        run: |
+          tree="$(scripts/check-versions.sh)"
+          [[ "$tree" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] \
+            || { echo "::error::the tree has the prerelease version $tree; release it by hand (docs/release.md)"; exit 1; }
+          last="${LAST_TAG#v}"
+          highest="$(printf '%s\n%s\n' "$last" "$tree" | sort -V | tail -n 1)"
+          if [ "$tree" = "$last" ]; then
+            IFS=. read -r major minor patch <<< "$last"
+            next="$major.$minor.$((patch + 1))"
+            echo "bump=true" >> "$GITHUB_OUTPUT"
+          elif [ "$highest" = "$tree" ]; then
+            # A pull request raised the version (minor/major release): release the tree as it is.
+            next="$tree"
+            echo "bump=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "::error::the tree's version $tree is older than the last release $last"
+            exit 1
+          fi
+          echo "version=$next" >> "$GITHUB_OUTPUT"
+          echo "::notice::releasing v$next (after $LAST_TAG)"
+      - name: Bump, tag and push
+        if: steps.changes.outputs.release == 'true'
+        env:
+          LAST_TAG: ${{ steps.changes.outputs.last_tag }}
+          VERSION: ${{ steps.version.outputs.version }}
+          BUMP: ${{ steps.version.outputs.bump }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          scripts/nightly-notes.py --since "$LAST_TAG" > highlights.md
+          cat highlights.md
+          if [ "$DRY_RUN" = true ]; then
+            echo "::notice::dry run: would release v$VERSION"
+            exit 0
+          fi
+          if [ "$BUMP" = true ]; then
+            scripts/bump-version.sh "$VERSION"
+            # No skip marker in this message: GitHub would skip the release for a tag on it.
+            git commit -s -a -m "Release $VERSION" -m "Version bump of the nightly release (docs/release.md)."
+            git push origin "HEAD:${DEFAULT_BRANCH}"
+          fi
+          # Annotated: the message becomes the release highlights. The tagged commit is the one pushed.
+          git tag --cleanup=whitespace -a -F highlights.md "v$VERSION"
+          git push origin "v$VERSION"
+          # Not started by the tag push (GITHUB_TOKEN): start it on the tag; `publish` publishes the
+          # release when it is built and starts the package site and Google Play.
+          gh workflow run release.yml --ref "v$VERSION" -f publish=true
