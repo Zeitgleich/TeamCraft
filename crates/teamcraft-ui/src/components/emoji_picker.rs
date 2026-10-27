@@ -13,7 +13,8 @@ use crate::state::use_app_state;
 
 /// Emoji per row of the grid; ↑/↓ move by this many.
 const COLUMNS: usize = 8;
-/// The picker's size in rem (main.css `.emoji-picker`): it grows with the text size.
+/// The picker's size in rem (`.emoji-picker`, style/main/550-emoji-picker.css): it grows with the
+/// text size.
 const PICKER_WIDTH_REM: f64 = 20.25;
 const PICKER_HEIGHT_REM: f64 = 18.75;
 /// Space kept between the picker and the window edge.

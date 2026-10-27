@@ -1,6 +1,6 @@
 /* Package site landing page (scripts/package-site-page.py). Self-contained: no external fonts or
    requests, works under a CSP without inline styles. Colours come from the app's tokens
-   (crates/teamcraft-ui/style/main.css); tokens first, then layout, then sections. */
+   (crates/teamcraft-ui/style/main/000-tokens.css); tokens first, then layout, then sections. */
 
 @font-face {
   font-family: "Inter";

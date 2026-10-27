@@ -1,0 +1,40 @@
+/* Toolbar of integration channels: Log/Chat switch, level and text filter, follow. */
+.log-toolbar {
+  flex: none;
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 6px 16px;
+  border-bottom: 1px solid var(--border);
+}
+
+.log-mode {
+  display: flex;
+  gap: 4px;
+}
+
+.log-mode [aria-pressed="true"] {
+  background: var(--accent-soft);
+  color: var(--accent-strong);
+}
+
+.log-filter-text {
+  flex: 1 1 160px;
+  min-width: 120px;
+}
+
+.log-follow {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: var(--text-sm);
+}
+
+.log-notice {
+  margin: 0;
+  padding: 4px 16px;
+  color: var(--text-muted);
+  font-size: var(--text-sm);
+}
+

@@ -630,8 +630,8 @@ mod tests {
 
     #[test]
     fn every_key_is_translated() {
-      let en = include_str!("../../i18n/en.ftl");
-      let de = include_str!("../../i18n/de.ftl");
+      let en = crate::i18n::joined_source(crate::i18n::Locale::En);
+      let de = crate::i18n::joined_source(crate::i18n::Locale::De);
       let offers = [InputOffer::Missing, InputOffer::Blocked];
       let kinds = [InputKind::Camera, InputKind::Microphone];
       let keys = offers
@@ -651,10 +651,10 @@ mod tests {
           "call-title-huddle-unnamed",
         ]);
       for key in keys {
-        for (name, source) in [("en", en), ("de", de)] {
+        for (name, source) in [("en", &en), ("de", &de)] {
           assert!(
             source.contains(&format!("\n{key} =")),
-            "{key} missing in {name}.ftl"
+            "{key} missing in i18n/{name}"
           );
         }
       }

@@ -1,0 +1,358 @@
+/* ---- Message list ---- */
+
+.message-list-wrap {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.message-list {
+  /* The shared message toolbar is positioned in its scroll coordinates. */
+  position: relative;
+  flex: 1;
+  min-height: 0;
+  min-width: 0;
+  overflow-y: auto;
+  overflow-anchor: none;
+  overscroll-behavior: contain;
+  outline-offset: -2px;
+  /* Breathing room between the newest message and the composer. */
+  padding-bottom: var(--space-3);
+}
+
+.row {
+  min-width: 0;
+}
+
+.date-divider {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 14px 16px 6px;
+  color: var(--text-muted);
+  font-size: var(--text-xs);
+  letter-spacing: var(--tracking-xs);
+  font-weight: var(--weight-semibold);
+}
+
+/* A day label that opens the jump menu (issue #300). */
+.date-pill {
+  padding: 3px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-pill);
+  background: var(--surface);
+  color: inherit;
+  font: inherit;
+  letter-spacing: inherit;
+  transition: background var(--dur-fast) var(--ease-standard), border-color var(--dur-fast) var(--ease-standard);
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .date-pill:hover {
+    border-color: var(--text-muted);
+    background: var(--surface-2);
+  }
+}
+
+.date-pill:active {
+  background: var(--surface-2);
+}
+
+.date-pill:focus-visible {
+  outline: var(--focus-width) solid var(--focus);
+  outline-offset: 2px;
+}
+
+.date-divider::before,
+.date-divider::after {
+  content: "";
+  flex: 1;
+  height: 1px;
+  background: var(--border);
+}
+
+/* "New messages": where the unread messages began when the conversation was opened. */
+.new-divider {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 16px 4px;
+  color: var(--danger);
+  font-size: var(--text-xs);
+  letter-spacing: var(--tracking-xs);
+  font-weight: var(--weight-bold);
+}
+
+.new-divider::before,
+.new-divider::after {
+  content: "";
+  flex: 1;
+  height: 1px;
+  background: currentColor;
+  opacity: 0.6;
+}
+
+.new-divider::after {
+  flex: 0 0 24px;
+}
+
+.msg {
+  position: relative;
+  outline-offset: -2px;
+}
+
+/* Deleted with an undo window still open. */
+.msg[hidden] {
+  display: none;
+}
+
+.msg-user {
+  display: flex;
+  gap: 10px;
+  padding: 6px 16px;
+}
+
+.msg-user:focus-within,
+.msg-user:focus,
+.msg-user.msg-active {
+  background: var(--surface-2);
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .msg-user:hover {
+    background: var(--surface-2);
+  }
+}
+
+.msg-grouped {
+  padding-top: 1px;
+  padding-bottom: 1px;
+}
+
+.msg-gutter {
+  flex: none;
+  width: 38px;
+}
+
+.hover-time {
+  display: block;
+  visibility: hidden;
+  padding-top: 3px;
+  font-size: var(--text-xs);
+  letter-spacing: var(--tracking-xs);
+  text-align: center;
+  color: var(--text-muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.msg-user:focus .hover-time,
+.msg-user.msg-active .hover-time {
+  visibility: visible;
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .msg-user:hover .hover-time {
+    visibility: visible;
+  }
+}
+
+.msg-main {
+  flex: 1;
+  min-width: 0;
+}
+
+.msg-header {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.msg-author {
+  padding: 0;
+  border: 0;
+  background: none;
+  color: inherit;
+  font: inherit;
+  font-weight: var(--weight-bold);
+  cursor: pointer;
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .msg-author:hover {
+    text-decoration: underline;
+  }
+}
+
+.msg-time,
+.edited,
+.system-time {
+  font-size: var(--text-xs);
+  letter-spacing: var(--tracking-xs);
+  color: var(--text-muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.edited {
+  margin-left: 6px;
+}
+
+.msg-body > .md-p:has(+ .edited) {
+  display: inline;
+}
+
+.msg-body {
+  overflow-wrap: anywhere;
+}
+
+.md-p + .md-p,
+.md-p + .md-code,
+.md-code + .md-p {
+  margin-top: 4px;
+}
+
+.md-code {
+  margin: 4px 0 0;
+  padding: 8px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--code-bg);
+  font: var(--text-xs)/1.5 var(--font-mono);
+  overflow-x: auto;
+}
+
+.md-inline-code {
+  padding: 1px 5px;
+  border-radius: var(--radius-xs);
+  background: var(--code-bg);
+  font: 0.9em var(--font-mono);
+}
+
+.md-link {
+  color: var(--accent-strong);
+}
+
+.mention {
+  padding: 0 3px;
+  border-radius: 3px;
+  background: var(--accent-soft);
+  color: var(--accent-strong);
+}
+
+.mention-me {
+  background: var(--mention-bg);
+  color: var(--mention-text);
+}
+
+.reactions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-top: 4px;
+}
+
+.reaction {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  min-height: 24px;
+  padding: 0 8px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--surface);
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .reaction:not(:disabled):hover {
+    border-color: var(--text-muted);
+  }
+}
+
+/* Counts for people who may not react (issue #691): readable, not pressable. */
+.reaction:disabled {
+  cursor: default;
+  opacity: 1;
+  color: inherit;
+}
+
+.reaction-mine {
+  background: var(--accent-soft);
+  border-color: var(--accent);
+}
+
+.reaction-count {
+  font-size: var(--text-xs);
+  letter-spacing: var(--tracking-xs);
+  font-variant-numeric: tabular-nums;
+}
+
+.reply-count {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 4px;
+  padding: 2px 6px;
+  margin-left: -6px;
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--accent-strong);
+  font-weight: var(--weight-semibold);
+  font-size: var(--text-xs);
+  letter-spacing: var(--tracking-xs);
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .reply-count:hover {
+    background: var(--accent-soft);
+  }
+}
+
+.reply-count .icon {
+  width: 14px;
+  height: 14px;
+}
+
+/* One toolbar per message list, moved onto the hovered or focused message (#320). */
+.msg-toolbar {
+  position: absolute;
+  right: 16px;
+  z-index: 5;
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  padding: 2px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+  /* The same frame as the picture toolbar (.media-toolbar). */
+  box-shadow: var(--shadow-card);
+}
+
+.msg-toolbar .icon-btn.is-on {
+  color: var(--accent);
+}
+
+.msg-toolbar-sep {
+  width: 1px;
+  height: 18px;
+  margin: 0 2px;
+  background: var(--border);
+}
+
+.msg-toolbar .msg-menu {
+  max-height: calc(100vh - 16px);
+  overflow-y: auto;
+}
+
+.menu-shortcut {
+  margin-inline-start: auto;
+  padding: 0 var(--space-1);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-xs);
+  color: var(--text-muted);
+  font: var(--text-xs) / 16px var(--font-ui);
+}
+

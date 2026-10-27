@@ -1,0 +1,62 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+  <string name="composer_hint">Write a message</string>
+  <string name="send">Send</string>
+  <string name="thread_title">Thread</string>
+  <string name="reply_in_thread">Reply in thread</string>
+  <string name="pending">Sending…</string>
+  <string name="edited">(edited)</string>
+  <string name="read_only_channel">You can\'t post in this channel.</string>
+  <plurals name="replies">
+    <item quantity="one">%d reply</item>
+    <item quantity="other">%d replies</item>
+  </plurals>
+  <string name="attach">Attach files</string>
+  <string name="send_options">Send options</string>
+  <string name="action_reply">Reply</string>
+  <string name="action_edit">Edit</string>
+  <string name="action_delete">Delete for everyone</string>
+  <string name="action_forward">Forward</string>
+  <string name="action_pin">Pin</string>
+  <string name="action_unpin">Unpin</string>
+  <string name="action_save">Save</string>
+  <string name="action_unsave">Remove from saved items</string>
+  <string name="action_acknowledge">Confirm read</string>
+  <string name="action_copy_link">Copy link</string>
+  <string name="action_copy_text">Copy text</string>
+  <string name="action_mark_unread">Mark unread from here</string>
+  <string name="edit_history">Earlier versions</string>
+  <string name="message_deleted">This message was deleted.</string>
+  <string name="forwarded_from">Forwarded from %1$s</string>
+  <string name="replying_to">Replying to %1$s</string>
+  <string name="new_messages">New messages</string>
+  <string name="file_failed">The file couldn\'t be sent or loaded.</string>
+  <string name="file_cancel_upload">Cancel</string>
+  <string name="file_upload_retrying">Retrying…</string>
+  <string name="file_upload_stalled">Upload failed. The message waits for the file.</string>
+  <string name="file_upload_storage_unavailable">The file storage is unavailable right now. Try again in a moment.</string>
+  <string name="priority_normal">Normal priority</string>
+  <string name="priority_important">Important</string>
+  <string name="priority_urgent">Urgent</string>
+  <string name="option_acknowledge">Ask to confirm reading</string>
+  <string name="option_silent">Send silently</string>
+  <string name="option_also_to_channel">Also send to the channel</string>
+  <string name="thread_follow">Follow</string>
+  <string name="thread_unfollow">Unfollow</string>
+  <string name="threads_title">Threads</string>
+  <string name="threads_empty">You don\'t follow any threads yet.</string>
+  <string name="unread_count">%1$d unread</string>
+  <string name="saved_title">Saved and mentions</string>
+  <string name="saved_items">Saved</string>
+  <string name="mentions">Mentions</string>
+  <string name="saved_empty">Long-press a message and choose Save to keep it here.</string>
+  <string name="mentions_empty">Nobody mentioned you yet.</string>
+  <plurals name="acknowledged_by">
+    <item quantity="one">Confirmed by %d person</item>
+    <item quantity="other">Confirmed by %d people</item>
+  </plurals>
+  <plurals name="messages_undecrypted">
+    <item quantity="one">%1$d message can\'t be read on this device yet. It appears once its keys arrive from another member\'s device.</item>
+    <item quantity="other">%1$d messages can\'t be read on this device yet. They appear once their keys arrive from another member\'s device.</item>
+  </plurals>
+</resources>

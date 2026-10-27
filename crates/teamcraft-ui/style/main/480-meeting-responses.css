@@ -1,0 +1,18 @@
+/* Meeting responses and host controls */
+.host-controls { margin-top: .5rem; padding: .5rem; border: 1px solid var(--border); border-radius: var(--radius-sm); }
+.host-buttons { display: flex; gap: .35rem; flex-wrap: wrap; }
+.host-participants { list-style: none; margin: .5rem 0 0; padding: 0; }
+.host-participants li { display: flex; align-items: center; justify-content: space-between; padding: .15rem 0; }
+.rsvp-list h4 { margin: .5rem 0 .15rem; }
+.rsvp-list ul { margin: 0; padding-inline-start: 1.2rem; }
+.call-host { position: absolute; inset-inline-end: 1rem; top: 3.5rem; z-index: 5; }
+.in-meeting-badge { color: var(--accent); font-size: var(--text-xs); letter-spacing: var(--tracking-xs); }
+
+.bookmark-edit-list { list-style: none; margin: 0 0 .5rem; padding: 0; }
+.bookmark-row { display: flex; gap: .35rem; align-items: center; margin-bottom: .35rem; }
+.bookmark-row .emoji-input { width: 3.5rem; text-align: center; }
+
+.history-versions { list-style: none; margin: 0; padding: 0 1rem 1rem; }
+.history-versions h3 { font-size: var(--text-xs); letter-spacing: var(--tracking-xs); color: var(--text-muted); margin: .75rem 0 .15rem; }
+.diff-added { background: rgba(46, 160, 67, .25); border-radius: 2px; }
+.diff-removed { background: rgba(248, 81, 73, .25); text-decoration: line-through; border-radius: 2px; }

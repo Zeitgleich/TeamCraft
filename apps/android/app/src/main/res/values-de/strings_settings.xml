@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+  <string name="presence_title">Status</string>
+  <string name="presence_online">Online</string>
+  <string name="presence_away">Abwesend</string>
+  <string name="presence_dnd">Nicht stören</string>
+  <string name="presence_offline">Offline erscheinen</string>
+  <string name="notifications_conversation">Benachrichtigungen</string>
+  <string name="notify_all">Alle Nachrichten</string>
+  <string name="notify_mentions">Nur Erwähnungen und Direktnachrichten</string>
+  <string name="notify_none">Keine</string>
+  <string name="notify_mute">Stummschalten</string>
+  <string name="read_receipts">Lesebestätigungen senden</string>
+  <string name="auto_follow_threads">Threads folgen, in denen ich erwähnt werde</string>
+  <string name="custom_status_title">Eigener Status</string>
+  <string name="custom_status_hint">Was machst du gerade?</string>
+  <string name="custom_status_set">Bis heute Abend setzen</string>
+  <string name="custom_status_clear">Entfernen</string>
+</resources>

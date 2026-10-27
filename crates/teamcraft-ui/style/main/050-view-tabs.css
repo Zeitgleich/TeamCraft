@@ -1,0 +1,165 @@
+/* Underlined tabs of a view (Activity, a conversation's Messages and Files). The underline is the
+   list's sliding `.tab-indicator` (see "Motion"). */
+.view-tabs {
+  position: relative;
+  isolation: isolate;
+  display: flex;
+  gap: var(--space-1);
+  padding: 0 var(--space-4);
+  border-bottom: 1px solid var(--border);
+}
+
+.view-tabs [role="tab"] {
+  position: relative;
+  height: 36px;
+  padding: 0 var(--space-3);
+  border: 0;
+  border-radius: var(--radius-sm) var(--radius-sm) 0 0;
+  background: transparent;
+  color: var(--text-muted);
+  font-size: var(--text-sm);
+  font-weight: var(--weight-semibold);
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .view-tabs [role="tab"]:hover {
+    color: var(--text);
+    background: var(--surface-2);
+  }
+}
+
+.view-tabs [role="tab"][aria-selected="true"] {
+  color: var(--accent-strong);
+}
+
+.panel-header:has(+ .view-tabs) {
+  border-bottom: 0;
+}
+
+/* Toggle buttons (Activity's "Unread"). */
+.btn[aria-pressed="true"] {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+  color: var(--accent-strong);
+}
+
+/* In the channel header the tabs are the second row (#580): they scroll sideways, with the edges
+   fading out, instead of wrapping or squeezing the first row. The row's padding keeps the fade off
+   the tabs at rest. */
+.view-tabs.header-tabs {
+  flex: 1;
+  min-width: 0;
+  padding: 0 var(--space-4);
+  border-bottom: 0;
+  overflow-x: auto;
+  overscroll-behavior-x: contain;
+  scrollbar-width: none;
+  -webkit-mask-image: linear-gradient(to right, transparent, #000 var(--space-4), #000 calc(100% - var(--space-4)), transparent);
+  mask-image: linear-gradient(to right, transparent, #000 var(--space-4), #000 calc(100% - var(--space-4)), transparent);
+}
+
+.view-tabs.header-tabs::-webkit-scrollbar {
+  display: none;
+}
+
+.view-tabs.header-tabs [role="tab"] {
+  flex: none;
+  height: 36px;
+  white-space: nowrap;
+}
+
+/* Inside the scroller the underline sits on its bottom edge, not below it. */
+.view-tabs.header-tabs > .tab-indicator {
+  bottom: 0;
+}
+
+/* A conversation's messages tab: feed, seen line and composer, laid out as before the tabs. */
+.channel-messages {
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+/* A conversation's files tab. */
+.channel-files {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  animation: motion-view-in var(--dur-fast) var(--ease-standard);
+}
+
+.channel-files .files-list {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+  gap: var(--space-3);
+  padding: var(--space-4);
+}
+
+.channel-files .file-card {
+  max-width: none;
+}
+
+/* The tab's Files / Links switch and the links list. */
+.channel-files .shared-kind {
+  margin: var(--space-4) var(--space-4) 0;
+  width: fit-content;
+}
+
+.links-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  margin: 0;
+  padding: var(--space-4);
+  list-style: none;
+}
+
+.link-row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  padding: var(--space-2) var(--space-3);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--surface);
+}
+
+.link-row-icon {
+  flex: none;
+  color: var(--text-muted);
+}
+
+.link-row-text {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.link-row-title,
+.link-row-url,
+.link-row-meta {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.link-row-title {
+  font-weight: var(--weight-semibold);
+}
+
+.link-row-url,
+.link-row-meta {
+  color: var(--text-muted);
+  font-size: var(--text-xs);
+  letter-spacing: var(--tracking-xs);
+}
+
+.links-more {
+  display: flex;
+  justify-content: center;
+  padding: 0 var(--space-4) var(--space-4);
+}
+

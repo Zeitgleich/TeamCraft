@@ -385,4 +385,5 @@ python3 scripts/brand/mark_parts.py
 
 The product's accent colour is the mark's blue: `#005dfc` in the light theme (5.3:1 with white
 text), `#5c9dff` with `#04122e` text in the dark theme (6.8:1). It is the default of `--accent`
-(`style/main.css`) and of the Android and iOS themes; a brand's own colours override it (§2).
+(`crates/teamcraft-ui/style/main/000-tokens.css`) and of the Android and iOS themes; a brand's own
+colours override it (§2).

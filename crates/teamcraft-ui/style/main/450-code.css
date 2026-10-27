@@ -1,0 +1,10 @@
+/* Syntax highlighting (code blocks) */
+.md-code .tok-keyword { color: var(--tok-keyword, #7444cf); font-weight: var(--weight-semibold); }
+.md-code .tok-string { color: var(--tok-string, #0a7d3a); }
+.md-code .tok-comment { color: var(--tok-comment, #6e7781); font-style: italic; }
+.md-code .tok-number { color: var(--tok-number, #a35200); }
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) .md-code { --tok-keyword: #d2a8ff; --tok-string: #7ee787; --tok-comment: #8b949e; --tok-number: #ffa657; }
+}
+:root[data-theme="dark"] .md-code { --tok-keyword: #d2a8ff; --tok-string: #7ee787; --tok-comment: #8b949e; --tok-number: #ffa657; }
+

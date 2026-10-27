@@ -1,0 +1,58 @@
+/* ---- Getting started (empty workspace or space) ---- */
+
+.getting-started {
+  max-width: 560px;
+  margin: 48px auto;
+  padding: 0 24px;
+  overflow-y: auto;
+}
+
+.getting-started h1 {
+  margin: 0 0 6px;
+  font-size: var(--text-2xl);
+  letter-spacing: var(--tracking-2xl);
+  line-height: var(--leading-2xl);
+}
+
+.start-steps {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin: 24px 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.start-step {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  width: 100%;
+  padding: 14px 16px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+  color: var(--text);
+  text-align: left;
+  cursor: pointer;
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .start-step:hover {
+    background: var(--surface-2);
+  }
+}
+
+.start-step > .icon {
+  flex: none;
+  width: 24px;
+  height: 24px;
+  color: var(--accent);
+}
+
+.start-step-text {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+

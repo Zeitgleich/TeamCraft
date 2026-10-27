@@ -21,4 +21,10 @@
   <string name="dm_start_group">Start group</string>
   <string name="clear">Clear</string>
   <string name="presence_peer_offline">Offline</string>
+  <string name="chats_title">Chats</string>
+  <string name="favorites">Favorites</string>
+  <string name="direct_messages">Direct messages</string>
+  <string name="no_conversations">No conversations yet.</string>
+  <string name="favorite_add">Add to favorites</string>
+  <string name="favorite_remove">Remove from favorites</string>
 </resources>
