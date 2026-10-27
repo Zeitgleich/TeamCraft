@@ -1177,7 +1177,8 @@ impl Core {
           // The keys go at once; the server gets a few seconds to revoke the device they registered
           // (issue #415), the next start of this account does it otherwise.
           let forgotten =
-            PendingEnrollment::forget_unfinished(&self.api(), store, SIGN_OUT_REVOKE_PATIENCE).await;
+            PendingEnrollment::forget_unfinished(&self.api(), store, &SystemClock, SIGN_OUT_REVOKE_PATIENCE)
+              .await;
           if let Err(error) = forgotten {
             tracing::warn!(%error, "could not drop the keys of an unfinished setup");
           }

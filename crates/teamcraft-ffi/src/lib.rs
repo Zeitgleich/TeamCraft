@@ -1021,6 +1021,65 @@ mod tests {
     }
   }
 
+  /// Issue #415: reading the account state drops the key pair of a setup given up on, but not
+  /// while a link runs on this device.
+  mod abandoned_setup {
+    use teamcraft_core::records::{self, PendingDevice};
+    use teamcraft_crypto::identity::DeviceKeyPair;
+    use teamcraft_proto::{Id as _, Snowflake};
+
+    use super::*;
+
+    #[tokio::test]
+    async fn is_dropped_when_the_state_is_read_unless_a_link_runs() {
+      let directory = TestDir::new("abandoned");
+      let store = SealedSqliteStore::open(
+        &directory.store(),
+        &StaticKeySource::new(SymmetricKey::from_bytes(KEY)),
+      )
+      .unwrap();
+      let user = teamcraft_proto::UserId::from_snowflake(Snowflake::new(5).unwrap());
+      let pending = PendingDevice {
+        user_id: user,
+        identity_public_key: [1; 32],
+        device: DeviceKeyPair::generate(
+          teamcraft_crypto::ids::UserId::new(5),
+          teamcraft_crypto::ids::DeviceId::new(0),
+          &mut rand_core::OsRng,
+        ),
+      };
+      // Stored long before the expiry ran out.
+      records::save_pending_device(&store, &pending, 0).unwrap();
+      drop(store);
+
+      let core = open(&directory, KEY).unwrap();
+      core
+        .start_device_link("Phone".into(), LinkPlatform::Android)
+        .await
+        .unwrap();
+      // Signed out here: the state can't be read from the server, but the check ran before.
+      assert!(core.account_state().await.is_err());
+      assert!(has_pending_device(&directory), "kept while the link runs");
+      drop(core);
+
+      let core = open(&directory, KEY).unwrap();
+      assert!(core.account_state().await.is_err());
+      assert!(
+        !has_pending_device(&directory),
+        "dropped; its device is revoked once signed in"
+      );
+    }
+
+    fn has_pending_device(directory: &TestDir) -> bool {
+      let store = SealedSqliteStore::open(
+        &directory.store(),
+        &StaticKeySource::new(SymmetricKey::from_bytes(KEY)),
+      )
+      .unwrap();
+      store.get(Table::Account, "pending_device").unwrap().is_some()
+    }
+  }
+
   fn open(directory: &TestDir, key: impl Into<Vec<u8>>) -> Result<Arc<TeamCraft>, TeamCraftError> {
     TeamCraft::new(config(directory, key.into()), Arc::new(NoTokens), Arc::new(Quiet))
   }

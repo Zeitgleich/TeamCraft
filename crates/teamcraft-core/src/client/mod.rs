@@ -54,7 +54,7 @@ pub(crate) use workspace::WORKSPACE_KEY;
 
 use std::collections::{BTreeMap, HashMap};
 
-pub use abandoned::{SIGN_OUT_REVOKE_PATIENCE, revoke_abandoned_devices};
+pub use abandoned::SIGN_OUT_REVOKE_PATIENCE;
 pub use account::stored_account_data;
 /// Where the engine records its upload limit for the UI.
 pub const MAX_UPLOAD_KEY: &str = "max_upload_bytes";

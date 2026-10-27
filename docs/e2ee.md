@@ -170,20 +170,32 @@ gives up instead, it is dropped (`teamcraft-core::client::abandoned`):
 - **On sign-out** before the device is set up, at once, together with the keys of a link (§5).
 - **After `unfinished_enrollment_expiry`** (a client setting, default one day from when the key pair
   was stored), checked when the app starts or shows the setup screen while the device is not set
-  up. A record of an older version has no time; it gets the whole expiry from the first check on.
-  The key pair stays while the enrollment can still finish: an account is stored, the keys of a
-  link wait to be enrolled (§5), or an enrollment or a link runs on this device right now.
+  up. A record of an older version has no time, and a time in the future comes from a clock that
+  was wrong: both count from the first check on. The key pair stays while the enrollment can still
+  finish: an account is stored, the keys of a link wait to be enrolled (§5), or an enrollment or a
+  link runs on this device right now.
 
-In one group of writes (§9.5) the key pair is deleted and its public key is put on a list of
-registrations to revoke; the SQLite stores then overwrite their freed pages and log (`purge_freed`),
-so the private key can't be read back from the files. A crash leaves either the key pair or the
-entry on the list, never neither. The server then revokes the device the key pair registered, if any, so an
-abandoned setup doesn't keep a slot of the user's device limit. Offline, the entry stays and is
-revoked on the next start, the next sign-out, or by the upkeep of the client the user enrolls
-later; a refusal for good gives the entry up (the device stays in the user's device list, where the
-user can remove it), and the client never revokes its own device. Sign-out waits at most a few
-seconds for the server. The key pair was never trusted anywhere (no signed device list names it),
-so a late revocation is housekeeping, not a security boundary.
+In one group of writes (§9.5) the key pair is deleted, and its public key goes on a list of
+registrations to revoke together with the identity key that certified it. The SQLite stores then
+overwrite their freed pages and log (`purge_freed`), so the private key can't be read back from the
+files. IndexedDB can't promise that: the deleted record's sealed blob may stay in the browser's
+files until it compacts them, encrypted with the store's key. A crash leaves either the key pair or
+the entry on the list, never neither.
+
+The server then revokes the device the key pair registered, if any, so an abandoned setup doesn't
+keep a slot of the user's device limit. A registration is revoked only when no enrolled device can
+be using it: the identity that certified it isn't the account's (enrollment reuses only a
+registration of its own identity, step 1), or the device list the account's identity signed doesn't
+name it. The client checks that list against the identity key: its own once enrolled, before that
+the server's only where it is the key the entry was certified with. Without a list that verifies,
+nothing is revoked. So a copy of the store taken while the setup was unfinished (a restored backup)
+never revokes the device the original finished enrolling with the same key pair; and the client
+never revokes its own device. Offline, the entry stays and is revoked on the next start, the next
+sign-out, or by the upkeep of the client the user enrolls later. A refusal for good gives the entry
+up (the device stays in the user's device list, where the user can remove it); one that blocks the
+whole list (reading the devices) waits an hour before the next try, doubling up to a day. Sign-out
+waits at most a few seconds for the server. The key pair was never trusted anywhere (no signed
+device list names it), so a late revocation is housekeeping, not a security boundary.
 
 **The first owner.** The first roster entry makes its signer the workspace root of trust (admin.md
 §2.3); an owner who can't recover their identity could never sign the roster or policy again. The
@@ -1270,8 +1282,11 @@ Implemented as (`teamcraft-crypto::rendezvous`, `teamcraft-core` linking):
   the keys; linking again is harmless. The wait for the receipt holds the relay, not the client
   (`LinkReceipt`, issue #415): the apps send the keys from their core loop and wait on a task of
   their own (web, desktop and the mobile engine alike), so syncing, sending and reading go on
-  meanwhile, and the user's confirmation call answers with the outcome. Closing the dialog cancels
-  the wait (the relay closes; the keys were sent already), and so does stopping the app. Before it
+  meanwhile, and the user's confirmation call answers with the outcome. Content keys the existing
+  device learns in that window (up to 60 s after the key bag was snapshotted for the transfer)
+  reach the new device like any other change: through the next key bag upload, which the new device
+  merges when it syncs. Closing the dialog cancels the wait (the relay closes; the keys were sent
+  already), and so does stopping the app. Before it
   sends `received`, the new device stores the backup key and the encrypted key bag in its local
   store, as a record next to the account protected the same way (§9; on the web the write is issued
   at once instead of after the batching delay). If the

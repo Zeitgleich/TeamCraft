@@ -480,7 +480,8 @@ impl Engine {
     self.maybe_link_offer = None;
     self.maybe_link_announcement = None;
     self.maybe_new_link = None;
-    PendingEnrollment::forget_unfinished(&self.api(), &self.store, SIGN_OUT_REVOKE_PATIENCE).await?;
+    PendingEnrollment::forget_unfinished(&self.api(), &self.store, &SystemClock, SIGN_OUT_REVOKE_PATIENCE)
+      .await?;
     Ok(())
   }
 

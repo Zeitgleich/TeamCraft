@@ -1571,7 +1571,8 @@ impl Core {
           // (issue #415), the next start of this account does it otherwise. Flushed: the core stops
           // right after, and queued writes would be lost with it.
           let forgotten =
-            PendingEnrollment::forget_unfinished(&self.api(), store, SIGN_OUT_REVOKE_PATIENCE).await;
+            PendingEnrollment::forget_unfinished(&self.api(), store, &SystemClock, SIGN_OUT_REVOKE_PATIENCE)
+              .await;
           let flushed = store.inner().flush().await.map_err(CoreError::from);
           if let Err(error) = forgotten.and(flushed) {
             tracing::warn!(%error, "could not drop the keys of an unfinished setup");
