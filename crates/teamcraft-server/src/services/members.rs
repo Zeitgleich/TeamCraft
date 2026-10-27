@@ -148,7 +148,8 @@ pub async fn add_member(
     Some(user.id),
   )
   .await;
-  admin_join_requests::resolve_on_join(state, caller.user.id, id, user.id).await?;
+  // Best effort: the membership is in; a request left open is listed no more and expires.
+  admin_join_requests::resolve_on_join(state, caller.user.id, id, user.id).await;
   Ok(ConversationMemberResponse {
     user: user_summary(state, &user),
     role,
@@ -401,7 +402,8 @@ async fn announce_added(
   announce_added_user(state, id, &caller.user).await
 }
 
-async fn announce_added_user(
+/// Tells the conversation's members (and the new one) that `user` is in.
+pub(crate) async fn announce_added_user(
   state: &AppState,
   id: ConversationId,
   user: &teamcraft_db::User,

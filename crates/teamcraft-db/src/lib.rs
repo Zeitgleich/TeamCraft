@@ -56,7 +56,10 @@ pub use admin::{
   AdminConversationFilter, AdminConversationRow, AdminDeviceRow, AdminSpaceRow, AdminUserRow, ChatRemoval,
   ChatRemovalEffects, Deactivation, PushDeviceCount, StorageTotals, UserStatusFilter,
 };
-pub use admin_join_request::{AdminJoinRequest, AdminJoinRequestOutcome};
+pub use admin_join_request::{
+  AdminJoinApproval, AdminJoinRequest, AdminJoinRequestClosing, AdminJoinRequestOutcome,
+  RemovedAdminJoinRequest,
+};
 pub use announcement::{NewAnnouncement, StoredAnnouncement};
 pub use attachment::{Attachment, NewAttachment, RemovedAttachment};
 pub use audit::{AuditEntry, AuditQuery, NewAuditEntry};

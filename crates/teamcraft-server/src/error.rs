@@ -53,6 +53,9 @@ pub enum ApiError {
   /// Channel members must belong to the channel's space; the user is not in it (yet).
   #[error("the user is not a member of the space")]
   NotSpaceMember,
+  /// The admin's last request to join was declined or withdrawn and would not have expired yet.
+  #[error("asked to join this channel recently; ask again once that request would have expired")]
+  AdminJoinRequestTooSoon,
   #[error("the user has no key package left")]
   KeyPackageExhausted,
   /// An uploaded key package doesn't parse, isn't validly signed, or is (nearly) expired.
@@ -294,6 +297,7 @@ impl ApiError {
         StatusCode::BAD_REQUEST
       },
       Self::Conflict(_)
+      | Self::AdminJoinRequestTooSoon
       | Self::CannotDeleteSelf
       | Self::LastAdmin
       | Self::KeyPackageExhausted
@@ -334,6 +338,7 @@ impl ApiError {
       Self::CannotDeleteSelf => ErrorCode::CannotDeleteSelf,
       Self::LastAdmin => ErrorCode::LastAdmin,
       Self::NotSpaceMember => ErrorCode::NotSpaceMember,
+      Self::AdminJoinRequestTooSoon => ErrorCode::AdminJoinRequestTooSoon,
       Self::KeyPackageExhausted => ErrorCode::KeyPackageExhausted,
       Self::InvalidKeyPackage(_) => ErrorCode::InvalidKeyPackage,
       Self::EpochConflict { .. } => ErrorCode::EpochConflict,
@@ -576,6 +581,16 @@ mod tests {
         ApiError::NotSpaceMember,
         StatusCode::BAD_REQUEST,
         ErrorCode::NotSpaceMember,
+      ),
+      (
+        ApiError::AdminJoinRequestTooSoon,
+        StatusCode::CONFLICT,
+        ErrorCode::AdminJoinRequestTooSoon,
+      ),
+      (
+        ApiError::admin_join_request_not_found(),
+        StatusCode::NOT_FOUND,
+        ErrorCode::AdminJoinRequestNotFound,
       ),
       (
         ApiError::PayloadTooLarge("x".into()),
