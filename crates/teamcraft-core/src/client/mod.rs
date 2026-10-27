@@ -298,6 +298,8 @@ pub struct Client<A, S> {
   /// When this process last heard from the gateway (any frame): a reconnect soon after reads its
   /// once-per-connection data while the server answers `resume`.
   maybe_last_heard_ms: Option<i64>,
+  /// Tests of mixed versions only ([`Client::check_membership_as_before_v1_0_9`]).
+  is_checking_as_before_v1_0_9: bool,
 }
 
 impl Default for ClientSettings {
@@ -396,6 +398,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       maybe_heads: None,
       read_ahead: Default::default(),
       maybe_last_heard_ms: None,
+      is_checking_as_before_v1_0_9: false,
     };
     // A catch-up the app was closed during left its marks; the next one sets them again.
     catch_up::clear_marks(&client.store)?;
@@ -467,6 +470,15 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
           .get(teamcraft_crypto::content_key::ContentKeyId::from_bytes(id))
           .is_some()
       })
+  }
+
+  /// From now on this device checks membership changes, its own commits and other members', as
+  /// clients before v1.0.9 did: an admin outside a group could bring another admin in whatever
+  /// `admin_self_join` said (issue #816). Only for tests of how this version takes the commits of
+  /// such members.
+  #[doc(hidden)]
+  pub fn check_membership_as_before_v1_0_9(&mut self) {
+    self.is_checking_as_before_v1_0_9 = true;
   }
 
   /// Users whose identity key changed since it was pinned (e2ee.md §1: "security key changed").
