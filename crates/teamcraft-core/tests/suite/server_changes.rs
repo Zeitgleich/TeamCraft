@@ -308,6 +308,54 @@ mod forgery {
     );
   }
 
+  /// A line caught up after a while away moves back to the claim that named somebody, and shares
+  /// that hidden message's row ID; contested later, its row still says what the line says, also
+  /// when the claim's ID sorts first.
+  #[cfg(feature = "ui")]
+  #[tokio::test]
+  async fn a_line_moved_back_to_a_claim_keeps_its_own_text() {
+    let (_server, mut carol, mut dave, mut erin, channel) = setup().await;
+    // While Erin's device is away: the server archives the channel, Dave and Carol both claim it,
+    // Dave's message under the smallest ID there is.
+    carol
+      .api
+      .update_conversation(
+        channel,
+        &UpdateConversationRequest {
+          maybe_is_archived: Some(true),
+          ..UpdateConversationRequest::default()
+        },
+      )
+      .await
+      .unwrap();
+    enqueue_as(
+      &dave,
+      channel,
+      ClientMessageId::from_bytes([0; 16]),
+      MessageContent::Event {
+        event: ConversationEvent::Archived,
+      },
+    );
+    dave.client.flush_outbox().await.unwrap();
+    announce(&mut carol, channel, ConversationEvent::Archived).await;
+    settle(&mut [&mut carol, &mut dave]).await;
+    erin.client.full_sync().await.unwrap();
+    settle(&mut [&mut carol, &mut dave, &mut erin]).await;
+
+    let line = line_message(&erin, channel);
+    let claim = erin
+      .store
+      .message(channel, ClientMessageId::from_bytes([0; 16]))
+      .unwrap()
+      .unwrap();
+    assert_eq!(line.line_position(), claim.maybe_server_id, "at Dave's claim");
+    assert_eq!(lines(&erin, channel), vec![(ConversationEvent::Archived, None)]);
+    assert_eq!(
+      shown(&erin, channel),
+      vec![WorkspaceEvent::Archived { maybe_by: None }]
+    );
+  }
+
   /// An announcement long after the change can't claim it.
   #[tokio::test]
   async fn a_late_claim_names_nobody() {

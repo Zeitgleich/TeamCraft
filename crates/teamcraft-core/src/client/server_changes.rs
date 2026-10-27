@@ -264,15 +264,14 @@ pub(crate) fn note_announcement(
 }
 
 /// Whether an announcement of `event` sent as `sent` fits `line`, a line about a change the server
-/// reports that an announcement may still name somebody on.
+/// reports. Whom the line names already decides what the announcement does to it
+/// ([`note_announcement`]).
 fn fits(line: &StoredMessage, event: &ConversationEvent, sent: MessageId, window_ms: i64) -> bool {
   let (Some(change), MessageContent::Event { event: shown }) = (&line.maybe_server_change, &line.content)
   else {
     return false;
   };
-  let is_open = matches!(change.actor, ChangeActor::Nobody | ChangeActor::Announced { .. });
-  is_open
-    && is_same_change(shown, event)
+  is_same_change(shown, event)
     && sent > change.seen_after
     && sent.snowflake().unix_millis()
       <= change
