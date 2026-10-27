@@ -1450,10 +1450,17 @@ fn stall_key(reason: FileFailure, place: StallPlace) -> &'static str {
   }
 }
 
+/// Why a download or save failed, in words: where it broke and what helps, never only "failed"
+/// (issue #807).
 fn failure_key(reason: FileFailure) -> &'static str {
   match reason {
     FileFailure::TooLarge => "file-too-large",
-    _ => "file-failed",
+    FileFailure::Network => "file-download-network",
+    FileFailure::StorageUnavailable => "file-download-storage-unavailable",
+    FileFailure::Missing => "file-download-missing",
+    FileFailure::Intercepted => "file-download-intercepted",
+    FileFailure::Corrupted => "file-download-corrupted",
+    FileFailure::LocalFile => "file-save-unwritable",
   }
 }
 
@@ -1470,6 +1477,32 @@ pub(crate) fn blob_url(bytes: &[u8], media_type: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
   use super::*;
+  use crate::i18n::{Locale, translate};
+
+  /// A failed download names where it broke, in every language, instead of one "Transfer failed"
+  /// for everything (issue #807).
+  #[test]
+  fn each_download_failure_has_its_own_words() {
+    let reasons = [
+      FileFailure::TooLarge,
+      FileFailure::Network,
+      FileFailure::Corrupted,
+      FileFailure::LocalFile,
+      FileFailure::StorageUnavailable,
+      FileFailure::Missing,
+      FileFailure::Intercepted,
+    ];
+    let keys: Vec<&str> = reasons.into_iter().map(failure_key).collect();
+    let mut distinct = keys.clone();
+    distinct.sort_unstable();
+    distinct.dedup();
+    assert_eq!(distinct.len(), keys.len(), "{keys:?}");
+    for key in keys {
+      for locale in [Locale::En, Locale::De] {
+        assert_ne!(translate(locale, key, None), key, "{locale:?} lacks {key}");
+      }
+    }
+  }
 
   #[test]
   fn a_stalled_upload_says_when_the_storage_is_down() {

@@ -343,6 +343,10 @@ pub enum FileFailure {
   /// The file storage (or the server) answered "unavailable": an outage a later retry gets
   /// through (#742).
   StorageUnavailable,
+  /// The server doesn't have the file (any more), or doesn't give it to this user.
+  Missing,
+  /// A captive portal answered, or the connection's certificate isn't trusted.
+  Intercepted,
 }
 
 /// The sender's preview of a link, inside the encrypted message (e2ee.md §12).
