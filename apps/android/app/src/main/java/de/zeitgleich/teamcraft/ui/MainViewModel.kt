@@ -694,8 +694,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
   private fun checkAnswer(origin: String, answer: ServerInfoAnswer): CheckedServer =
     checkServerInfo(
       origin = origin,
-      // HttpURLConnection reports -1 for an answer that isn't HTTP; the core rejects that as well.
-      status = answer.status.coerceIn(0, UShort.MAX_VALUE.toInt()).toUShort(),
+      status = answer.status.toUShort(),
       contentType = answer.maybeContentType,
       body = answer.body,
       clientVersion = BuildConfig.VERSION_NAME,
