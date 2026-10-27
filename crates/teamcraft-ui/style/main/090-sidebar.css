@@ -1,0 +1,151 @@
+/* ---- Sidebar ---- */
+
+.sidebar {
+  flex: none;
+  width: var(--sidebar-w);
+  background: var(--sb-bg);
+  color: var(--chrome-text);
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.sidebar-head {
+  padding: 12px 16px 8px;
+}
+
+.space-name {
+  font-size: var(--text-lg);
+  letter-spacing: var(--tracking-lg);
+  font-weight: var(--weight-bold);
+  color: var(--chrome-strong);
+}
+
+.sidebar-scroll {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding-bottom: 16px;
+  overscroll-behavior: contain;
+}
+
+.sb-section-head {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  width: 100%;
+  padding: 14px 12px 4px 10px;
+  border: 0;
+  background: none;
+  color: var(--sb-muted);
+  font-size: var(--text-xs);
+  font-weight: var(--weight-bold);
+  letter-spacing: 0.02em;
+  text-align: left;
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .sb-section-head:hover {
+    color: var(--chrome-strong);
+  }
+}
+
+.sb-section-head .badge-count {
+  margin-left: auto;
+}
+
+.sb-section-head .badge-count + .badge-count {
+  margin-left: 4px;
+}
+
+.sb-section-head .chevron {
+  width: 14px;
+  height: 14px;
+}
+
+.sb-section-head[aria-expanded="false"] .chevron {
+  transform: rotate(-90deg);
+}
+
+.sb-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: calc(100% - 16px);
+  margin: 0 8px;
+  min-height: 32px;
+  padding: 0 8px;
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--sb-muted);
+  text-align: left;
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .sb-item:hover {
+    background: var(--sb-hover);
+    color: var(--chrome-strong);
+  }
+}
+
+.sb-item.unread {
+  color: var(--chrome-strong);
+  font-weight: var(--weight-bold);
+}
+
+/* Muted: a dimmer colour that still reads at 4.5:1, plus the bell-off icon (not opacity). */
+.sb-item.muted {
+  color: var(--sb-dim);
+}
+
+.sb-muted-icon {
+  display: inline-grid;
+  place-items: center;
+}
+
+.sb-muted-icon .icon {
+  width: 14px;
+  height: 14px;
+}
+
+.sb-item.current {
+  background: var(--sb-current);
+  color: var(--on-fill);
+}
+
+.sb-name {
+  flex: 1;
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.sb-status {
+  font-size: var(--text-sm);
+}
+
+/* Still catching up after being away (issue #247): a still mark, no animation while it waits. */
+.sb-catching-up {
+  display: inline-grid;
+  place-items: center;
+  opacity: 0.6;
+}
+
+.sb-threads {
+  width: calc(100% - 16px);
+}
+
+.dm-dot {
+  display: inline-grid;
+  place-items: center;
+  width: 18px;
+}
+
+.sidebar :focus-visible,
+.space-rail :focus-visible,
+.top-bar :focus-visible {
+  outline-color: var(--chrome-strong);
+}
+

@@ -1,0 +1,62 @@
+/* ---- Increase contrast and forced colours (issues #361, #362) ---- */
+
+/* "Increase contrast": edges and secondary text take the strong values. Listed with the dark
+   selectors so it also wins over the dark blocks above. */
+@media (prefers-contrast: more) {
+  :root,
+  :root:not([data-theme="light"]) {
+    --border: var(--border-strong);
+    --text-muted: var(--text);
+    /* Muted channels keep only their bell-off icon. */
+    --sb-dim: var(--sb-muted);
+  }
+}
+
+/* Windows High Contrast and other forced palettes drop every box-shadow and background image, so
+   rings are outlines (above) and the few things drawn only with fills get a system colour. */
+@media (forced-colors: active) {
+  :focus-visible {
+    outline-color: Highlight;
+  }
+
+  .badge-count,
+  .unread-dot,
+  .dot-unread {
+    forced-color-adjust: none;
+  }
+
+  /* The switch is drawn from fills only: draw it in system colours ourselves. */
+  .switch-row input[role="switch"],
+  .switch-row input[role="switch"]::after {
+    forced-color-adjust: none;
+  }
+
+  .switch-row input[role="switch"] {
+    border: 1px solid CanvasText;
+    background: Canvas;
+  }
+
+  .switch-row input[role="switch"]::after {
+    top: 1px;
+    left: 1px;
+    background: CanvasText;
+  }
+
+  .switch-row input[role="switch"]:checked {
+    border-color: Highlight;
+    background: Highlight;
+  }
+
+  .switch-row input[role="switch"]:checked::after {
+    background: HighlightText;
+  }
+}
+
+/* Compact toasts come from the top, so they leave upwards; reduced motion only fades (#359, #364). */
+:root[data-layout="compact"] .motion-ghost.is-leaving.toast { animation-name: motion-toast-out-top; }
+@keyframes motion-toast-out-top { to { opacity: 0; transform: translateY(-8px) scale(0.98); } }
+@media (prefers-reduced-motion: reduce) {
+  :root[data-layout="compact"] .toast:not(.is-leaving) { animation-name: motion-fade-in; }
+  :root[data-layout="compact"] .motion-ghost.is-leaving.toast { animation-name: motion-fade-out; }
+}
+

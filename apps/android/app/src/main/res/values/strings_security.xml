@@ -2,4 +2,21 @@
 <resources>
   <string name="link_copy_code">Copy code</string>
   <string name="secure_screen">Block screenshots and previews of chats and calls</string>
+  <string name="fingerprint_title">Your security code</string>
+  <string name="fingerprint_hint">Compare it with your contacts to verify end-to-end encryption.</string>
+  <string name="key_changes_title">Changed security codes</string>
+  <string name="key_changes_new">New code: %1$s</string>
+  <string name="key_changes_accept">I compared it, trust the new code</string>
+  <string name="backup_title">Key backup</string>
+  <string name="backup_ok">Your keys are backed up</string>
+  <string name="backup_missing">Your keys aren\'t backed up yet</string>
+  <string name="backup_no_recovery">Recovery isn\'t set up</string>
+  <string name="backup_missing_hint">Without a backup, a new device can\'t read your earlier messages. Set a recovery passphrase to create one.</string>
+  <string name="backup_no_recovery_hint">If you lose all your devices, you can\'t read your messages again. Set a recovery passphrase.</string>
+  <string name="backup_passphrase">Your recovery passphrase protects it.</string>
+  <string name="backup_passphrase_set">Your recovery passphrase protects it. You set it on %1$s.</string>
+  <string name="backup_organization">Your organization can also restore it if you lose all your devices.</string>
+  <string name="change_passphrase_title">Recovery passphrase</string>
+  <string name="change_passphrase_button">Change passphrase</string>
+  <string name="change_passphrase_done">Your key backup now uses the new passphrase.</string>
 </resources>
