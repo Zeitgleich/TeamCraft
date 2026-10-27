@@ -417,7 +417,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       )?))
     };
     // The private parts must be stored before the public parts become claimable.
-    records::save_mls_storage(&self.store, &self.provider)?;
+    self.save_mls_storage()?;
     let request = UploadKeyPackagesRequest {
       key_packages,
       maybe_last_resort,

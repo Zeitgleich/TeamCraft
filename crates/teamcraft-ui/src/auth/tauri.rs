@@ -889,6 +889,17 @@ async fn show_page_notification(notification: &OsNotification) -> Result<(), Act
     ));
   }
   let options = page_notification_options(notification);
+  // The sender's or channel's picture (#543), from the media cache; a picture that can't be read
+  // leaves the browser's default icon.
+  if let Some(picture) = &notification.maybe_picture
+    && let Some(icon) = crate::notification_pictures::icon_url(picture).await
+  {
+    drop(js_sys::Reflect::set(
+      &options,
+      &JsValue::from_str("icon"),
+      &JsValue::from_str(&icon),
+    ));
+  }
   if show_through_worker(&notification.title, &options).await {
     return Ok(());
   }

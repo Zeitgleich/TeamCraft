@@ -4,13 +4,14 @@
 //! [`LocalStore`] is synchronous, IndexedDB is not. Opening reads every record; writes are queued
 //! and issued together in one transaction a moment later ([`BATCH_DELAY`], or at once when much is
 //! queued or on [`IndexedDbStore::flush`]). Of several writes of one record in that time only the
-//! last is issued: a catch-up rewrites some records (the MLS state) after every group it processes,
-//! and one transaction per write left the browser writing for minutes after the catch-up was done
+//! last is issued: a catch-up rewrites some records after every group it processes, and one
+//! transaction per write left the browser writing for minutes after the catch-up was done
 //! (docs/performance.md). Records are sealed only when their batch is issued, so a replaced write
-//! costs no encryption either, and a batch holding a large record (the MLS state, megabytes on a
-//! big workspace) waits [`LARGE_BATCH_EXTRA`] longer to take the next rewrite of it along (issue
-//! #326: sealing it after every group a catch-up joined blocked the page). IndexedDB runs read-write transactions on the same object store in the
-//! order they were created, so the database follows the cache in order.
+//! costs no encryption either, and a batch holding a large record waits [`LARGE_BATCH_EXTRA`]
+//! longer to take the next rewrite of it along (issue #326: the MLS state was one record of
+//! megabytes, sealed after every group a catch-up joined; since #424 it is one record per entry).
+//! IndexedDB runs read-write transactions on the same object store in the order they were created,
+//! so the database follows the cache in order.
 //! [`IndexedDbStore::flush`] waits until everything written so far is committed.
 //!
 //! Durability: a batch is one transaction, so what survives a page that dies is always a prefix of

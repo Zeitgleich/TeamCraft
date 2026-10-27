@@ -901,6 +901,16 @@ impl ChatAction {
     matches!(self, Self::SendMessage { .. } | Self::PostMessage { .. })
   }
 
+  /// The conversation of a typing announcement. It is passing and changes nothing stored or shown:
+  /// the host sends it on the open gateway connection right away, tells the UI of no change, and
+  /// drops it while offline or busy connecting (a late indicator would be wrong).
+  pub fn typing_conversation(&self) -> Option<ConversationId> {
+    match self {
+      Self::Typing { conversation } => Some(*conversation),
+      _ => None,
+    }
+  }
+
   /// Runs the action on a backend. The original actions are left to the host, which handles
   /// some of them itself (enrollment state, admin flows); returns them back.
   pub fn apply_to(self, backend: &(impl ChatBackend + SearchBackend)) -> Option<Self> {
@@ -1610,6 +1620,12 @@ mod tests {
         conversation: id_from_raw(7)
       }
     );
+    // Hosts send it at once instead of running it as a command.
+    assert_eq!(typing.typing_conversation(), Some(id_from_raw(7)));
+    let mark_read = ChatAction::MarkRead {
+      conversation: id_from_raw(7),
+    };
+    assert_eq!(mark_read.typing_conversation(), None);
     let query: ChatQuery =
       serde_json::from_str(r#"{"kind":"typing_users","conversation":"7"}"#).expect("parse");
     assert_eq!(

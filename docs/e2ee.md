@@ -312,8 +312,9 @@ for months must keep fresh ones on the server:
   memory before it goes, and so is every old copy of the MLS storage in the store's cache. The
   local database zeroes freed pages (SQLite `secure_delete`), and the native store truncates its
   write-ahead log after a deletion, and after saves of the MLS storage at most every 30 seconds
-  (a checkpoint costs two or three syncs and the snapshot is saved for every processed message;
-  measured with the snapshot's own write: about 20 ms per save at 64 KiB, 320 ms at 1 MiB). What the
+  (a checkpoint costs two or three syncs and the MLS storage is saved for every processed
+  message; measured when the storage was one record: about 20 ms per save at 64 KiB, 320 ms at
+  1 MiB; since #424 a save writes only the entries that changed, §9.5). What the
   interval keeps back is cleared when the app stops (goes to the background) or closes the store;
   a checkpoint that cannot finish (another reader holds the log) stays due and is retried, and never
   fails the write. Inside a group of writes (§9.5) the purge waits for the commit. So old storage
@@ -347,6 +348,12 @@ and client message ID, thread ID, `content_key_id`, size, **list of mentioned us
 flag. Reactions are encrypted messages, so not even reaction counts are visible.
 
 Encrypted: text, attachments, attachment names, reactions, edits, polls, link previews, drafts.
+
+Typing indicators are plaintext metadata too: a `typing` gateway frame tells the server that a user
+types in a conversation (never what), and it forwards that to the other members (gateway.md). Clients
+send at most one every 3 s while there is text in the composer, and none when the user turned "Show
+when I'm typing" off (a preference of each device, on by default). Nothing about typing is stored, on
+the server or the clients.
 
 Directory data, not encrypted: the server has to show and route by it, so it holds it in plain text
 like the identity provider does. Space names, descriptions, colors and **pictures**; channel names,
@@ -1957,6 +1964,27 @@ If SQLite rolls a group's transaction back by itself (a full disk), the group's 
 refused instead of being committed one by one. Where order alone is enough (content keys are written before
 the MLS state that consumed the epoch), reprocessing an entry after a crash is idempotent.
 
+**MLS state (issue #424).** The openmls provider storage (every group's tree, context, epoch and
+message secrets; key package private keys) is a map from storage key to value; each entry is one
+record of the `mls_storage` table (`entry/` and the storage key in base64url). A save writes the
+entries that changed since the last save and deletes the ones openmls dropped, as one group of
+writes, inside the caller's group where there is one (the cursor past a processed entry, the
+applied changes): after a crash the store holds the state before or after the save, never a group
+half old, half new (kill-point tests in `store_integrity.rs`). Joining a group or processing a
+message writes that group's few changed entries, whatever the number of groups; before, the whole
+storage was one record rewritten after every change, which made a catch-up of many new groups
+quadratic (0.8 GB written for 300 groups, docs/performance.md). The client remembers what the
+store holds (`SavedMlsStorage`) to find the changes without reading the store. A store that can
+lose writes it accepted counts its committed and rolled-back groups (`LocalStore::write_tally`,
+the SQLite stores): after a lost group the next save writes every entry again and deletes every key
+that may still be on disk, the deletes of groups not yet known to be committed included (the sealed
+store's cache keeps a rolled-back group, so its listing no longer shows them). The browser store
+never loses an accepted write while the page runs (§9.4). A deleted group leaves no entry, the
+previous epoch's leaf keys included, which openmls 0.9 leaves behind after a commit that removed
+the device. Versions before 1.0.9 kept the whole storage as one record (`provider`); opening the
+store moves it to entries in one group of writes that removes the old record last, so until that
+group is on disk the old record is what a start reads, and an interrupted move is done again from it.
+
 **Layout versions.** The SQLite stores keep their layout version in `PRAGMA user_version`. Each store
 has a list of numbered steps (forward-only, never edited once released); opening runs the missing
 ones, each in its own transaction together with setting its version, so a crash or a failed step
@@ -1964,8 +1992,11 @@ leaves the database at the last step that completed. Upkeep that can't run in a 
 one-time wipe of free pages, version 2, issue #391) runs after the earlier steps committed and
 counts as done only once it succeeded; a failure (a full disk) is tried again on the next start.
 Released 1.0 databases carry version 0 and the layout of version 1. A newer layout is refused
-without touching it.
-IndexedDB versions its object stores itself and refuses a newer database (`VersionError`). Databases
+without touching it. Version 3 changes no table but marks the MLS state stored per entry, which an
+older version would read as no MLS state at all; it is set without upkeep, so a failed wipe before
+it is still retried and the marker waits for it.
+IndexedDB versions its object stores itself and refuses a newer database (`VersionError`); version 2
+is the same marker (an older page that still holds the database closes it on `versionchange`). Databases
 written by every release are kept as fixtures (`crates/teamcraft-core/tests/fixtures/store/`) and
 opened by every later version in CI. Records inside the store stay JSON with defaults for new
 fields and an `Unknown` catch-all, so newer records are read or skipped, not misread.
@@ -2035,6 +2066,17 @@ start and remain visible while the server or its object storage is unavailable.
   name, and every `teamcraft-media-*` database the browser lists (`indexedDB.databases()`), also at
   a start while signed out.
 - An entry that doesn't open (tampered with, another key) is deleted and counts as missing.
+- **Notification pictures (#543).** System notifications show the sender's avatar or the channel's
+  or space's picture from this cache, never a rendition. The OS shows them in other processes, so
+  they leave the seal there: Linux gets the pixels over D-Bus (`image-data`, no file); Windows and
+  macOS get a small PNG (128 px) in the app's cache directory (mode 0600 where the system has modes),
+  one per picture on Windows (the toast reads it again from the Action Center) and a copy per
+  notification on macOS (the notification center moves it into its own store). These files are
+  deleted at sign-out, at start and, on Windows, when the picture is no longer among the last 32
+  shown. The browser's service worker reads the cache like the page, with the account's wrapped key,
+  and hands the picture to the browser as a `data:` URL. Pictures go only with names: a
+  notification the workspace policy or the device setting keeps to "New message" has none
+  (notifications.md, "Desktop notifications").
 - The mobile apps don't use it: Android keeps avatars in its own file cache and opens pictures from
   the decrypted downloads (§4.5).
 

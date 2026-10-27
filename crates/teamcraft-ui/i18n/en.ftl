@@ -1112,6 +1112,9 @@ enroll-failed = The keys could not be created.
 enroll-recover-failed = The passphrase did not unlock your keys, or the server could not be reached.
 
 message-seen-by = Seen by { $names }
+typing-one = { $name } is typing…
+typing-two = { $first } and { $second } are typing…
+typing-several = Several people are typing…
 
 notif-preview = Show message text in desktop notifications
 notif-preview-hint = Off: notifications only say who wrote and where.
@@ -2822,7 +2825,7 @@ notif-phone = Phone and other devices
 notif-phone-hint = Push notifications for your phone, held back while you are at the desktop.
 notif-per-conversation-filter = Filter conversations
 notif-per-conversation-none = No conversation matches.
-privacy-typing-hint = People in the conversation see that you are writing.
+privacy-typing-hint = People in the conversation see that you are writing, not what. The server sees who writes where.
 calls-noise-hint = Filters typing, fans and other background noise.
 calls-echo-hint = Stops others from hearing themselves through your speakers.
 security-status-ok = Your messages are end-to-end encrypted

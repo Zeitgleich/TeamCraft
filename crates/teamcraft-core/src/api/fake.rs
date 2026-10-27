@@ -158,6 +158,8 @@ struct State {
   heartbeats: u64,
   /// `set_activity` frames per user, in order (presence after an away timeout, issue #472).
   activity_reports: HashMap<UserId, Vec<DeviceActivity>>,
+  /// `typing` frames per user, in order: the conversations typed in.
+  typing_reports: HashMap<UserId, Vec<ConversationId>>,
   /// What `GET /unread` answers per user; without an entry nothing is unread.
   unread: HashMap<UserId, UnreadResponse>,
   /// A malicious server: the next registered device gets this ID instead of a fresh one.
@@ -635,6 +637,11 @@ impl FakeServer {
       .get(&user)
       .cloned()
       .unwrap_or_default()
+  }
+
+  /// The conversations of the `typing` frames `user`'s devices sent so far, in order.
+  pub fn typing_reports(&self, user: UserId) -> Vec<ConversationId> {
+    self.lock().typing_reports.get(&user).cloned().unwrap_or_default()
   }
 
   /// While set, a captive portal answers this user's REST calls (hotel Wi-Fi before signing in).
@@ -4566,6 +4573,11 @@ impl GatewayConnection for FakeGateway {
         let _ = sender.unbounded_send(GatewayServerMessage::HeartbeatAck);
       },
       GatewayClientMessage::Typing { conversation_id } => {
+        state
+          .typing_reports
+          .entry(self.user)
+          .or_default()
+          .push(*conversation_id);
         // Members only, like the server; the typist doesn't get their own event.
         let others: Vec<UserId> = state
           .conversations

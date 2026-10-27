@@ -187,6 +187,56 @@ fn removed_member_cannot_read_new_messages() {
   ));
 }
 
+/// Issue #424: a device removed from a group deletes all of the group's storage entries, the leaf
+/// keys of the epoch before its removal included.
+#[test]
+fn a_removed_member_deletes_every_entry_of_the_group() {
+  let mut world = World::new();
+  let add_bob = world.signed_change(ALICE, add(BOB, HistoryShare::Full));
+  let output = world.commit_change(&add_bob, &[world.bob.key_package()]);
+  world.carol_processes(&output.commit).unwrap();
+  let mut bob_group = world.bob_joins(&output);
+  let remove_bob = world.signed_change(
+    ALICE,
+    MembershipAction::RemoveUser {
+      user_id: UserId::new(BOB),
+    },
+  );
+  let output = world.commit_change(&remove_bob, &[]);
+  let event = bob_group
+    .process_message(
+      &world.bob.provider,
+      &output.commit,
+      &world.directory,
+      &world.authority,
+    )
+    .unwrap();
+  assert!(matches!(event, GroupEvent::MembershipChanged(update) if update.is_self_removed));
+  let group_entries = |provider: &DefaultMlsProvider| {
+    // openmls_memory_storage keys a group's entries with its ID as a JSON array of bytes.
+    let id = group_id(CONVERSATION);
+    let marker: Vec<String> = id.as_slice().iter().map(u8::to_string).collect();
+    let marker = format!("[{}]", marker.join(","));
+    provider
+      .storage()
+      .values
+      .read()
+      .unwrap()
+      .keys()
+      .filter(|key| {
+        key
+          .windows(marker.len())
+          .any(|window| window == marker.as_bytes())
+      })
+      .count()
+  };
+  assert!(group_entries(&world.bob.provider) > 0);
+
+  bob_group.delete(&world.bob.provider).unwrap();
+
+  assert_eq!(group_entries(&world.bob.provider), 0);
+}
+
 #[test]
 fn epoch_keys_differ_per_epoch_and_conversation() {
   let mut world = World::new();

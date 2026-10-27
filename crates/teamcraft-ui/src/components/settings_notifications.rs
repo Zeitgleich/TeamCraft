@@ -7,6 +7,7 @@ use teamcraft_client_api::os_notify::{NotificationTag, OsNotification, OsNotific
 use teamcraft_proto::DndWindow;
 
 use crate::auth::tauri;
+use crate::call_alerts::may_name_names;
 use crate::clock::local_time_zone;
 use crate::components::icons::{Icon, IconName};
 use crate::components::notification_prompt;
@@ -19,6 +20,8 @@ use crate::components::settings_rows::{
 use crate::feedback::PendingAction;
 use crate::i18n::use_i18n;
 use crate::model::{Conversation, User, UserId};
+use crate::notification_pictures::picture_of;
+use crate::notifier::PictureSubject;
 use crate::notify_sync::{
   MAX_DND_ALLOWED_USERS, MAX_DND_WINDOWS, format_minutes, is_valid_window, parse_minutes,
 };
@@ -270,6 +273,12 @@ fn ThisDeviceCard() -> impl IntoView {
     });
   };
   let send_test = move |_| {
+    // The user's own picture, as a direct message shows its sender's (#543), where names may show.
+    let maybe_picture = state.read(|backend| {
+      may_name_names(&backend.push_content_mode())
+        .then(|| picture_of(backend, PictureSubject::Person(backend.me().id)))
+        .flatten()
+    });
     let notification = OsNotification {
       tag: NotificationTag::reminder(TEST_TAG),
       kind: OsNotificationKind::Reminder,
@@ -277,6 +286,7 @@ fn ThisDeviceCard() -> impl IntoView {
       maybe_body: Some(i18n.t("notif-test-body")),
       actions: Vec::new(),
       maybe_reply: None,
+      maybe_picture,
     };
     testing.spawn(async move {
       tauri::try_show_notification(&notification).await?;

@@ -1338,6 +1338,26 @@ impl ChatBackend for RemoteChat {
     self.act(ChatAction::AcceptCallMove { from, to });
   }
 
+  /// Asked again whenever the core changed: a `typing_start` is a change, and so is an indicator
+  /// running out (the core wakes up for it).
+  fn typing_users(&self, conversation: ConversationId) -> Vec<UserId> {
+    match self.ask(ChatQuery::TypingUsers { conversation }) {
+      Some(ChatAnswer::Users { users }) => users,
+      _ => Vec::new(),
+    }
+  }
+
+  /// Not an [`Self::act`]: typing changes nothing to read again, and a failure is nothing for the
+  /// user to act on (the indicator is passing; the next keystrokes announce it again).
+  fn notify_typing(&self, conversation: ConversationId) {
+    spawn_local(async move {
+      let action = ChatAction::Typing { conversation };
+      if let Err(error) = call::<()>("core_action", &json!({ "action": action })).await {
+        tracing::debug!(%error, "typing not announced");
+      }
+    });
+  }
+
   fn has_external_people(&self, conversation: ConversationId) -> bool {
     matches!(
       self.ask(ChatQuery::HasExternalPeople { conversation }),
