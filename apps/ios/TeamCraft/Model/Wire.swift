@@ -185,6 +185,30 @@ struct ChatAnswer: Decodable, Sendable {
   let channels: [BrowsableChannel]?
 }
 
+/// The key backup part of the core's chat snapshot (issue #410): facts the settings put into words.
+struct BackupSnapshot: Decodable, Sendable {
+  struct Security: Decodable, Sendable {
+    let backup: KeyBackup?
+  }
+
+  struct KeyBackup: Decodable, Equatable, Sendable {
+    /// The encrypted key bag is on the server.
+    let isStored: Bool
+    /// `passphrase`, `passkey`, `organization`; unknown values are ignored.
+    let recovery: [String]?
+    /// When the recovery passphrase was last set (epoch milliseconds), if a device recorded it.
+    let passphraseSetAt: Int64?
+
+    var hasPassphrase: Bool { recovery?.contains("passphrase") == true }
+    var hasOrganization: Bool { recovery?.contains("organization") == true }
+    var passphraseSetDate: Date? {
+      passphraseSetAt.map { Date(timeIntervalSince1970: TimeInterval($0) / 1000) }
+    }
+  }
+
+  let security: Security?
+}
+
 /// The people part of the core's chat snapshot: who can be mentioned, and the former accounts that
 /// only name their old messages.
 struct PeopleSnapshot: Decodable, Sendable {
