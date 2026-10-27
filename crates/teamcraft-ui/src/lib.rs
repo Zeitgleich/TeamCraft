@@ -152,39 +152,41 @@ fn register_service_worker() {
 
 #[cfg(test)]
 mod tests {
-  /// An unclosed block swallows every rule after it without any error from the build.
+  /// An unclosed block swallows every rule after it without any error from the build, in the joined
+  /// stylesheet also those of the next files: every area file closes its own blocks.
   #[test]
   fn stylesheet_blocks_are_balanced() {
-    let css = include_str!("../style/main.css");
-    let mut depth = 0_i32;
-    let mut line = 1;
-    let mut in_comment = false;
-    let mut chars = css.chars().peekable();
-    while let Some(character) = chars.next() {
-      match character {
-        '\n' => line += 1,
-        '/' if !in_comment && chars.peek() == Some(&'*') => in_comment = true,
-        '*' if in_comment && chars.peek() == Some(&'/') => in_comment = false,
-        '{' if !in_comment => depth += 1,
-        '}' if !in_comment => depth -= 1,
-        _ => {},
+    for (name, css) in stylesheet_files() {
+      let mut depth = 0_i32;
+      let mut line = 1;
+      let mut in_comment = false;
+      let mut chars = css.chars().peekable();
+      while let Some(character) = chars.next() {
+        match character {
+          '\n' => line += 1,
+          '/' if !in_comment && chars.peek() == Some(&'*') => in_comment = true,
+          '*' if in_comment && chars.peek() == Some(&'/') => in_comment = false,
+          '{' if !in_comment => depth += 1,
+          '}' if !in_comment => depth -= 1,
+          _ => {},
+        }
+        // More closing than opening braces so far: a stray `}`.
+        assert!(depth >= 0, "unexpected `}}` at {name}:{line}");
       }
-      // More closing than opening braces so far: a stray `}`.
-      assert!(depth >= 0, "unexpected `}}` at line {line}");
+      assert_eq!(depth, 0, "unclosed block in {name}");
     }
-    assert_eq!(depth, 0, "unclosed block in style/main.css");
   }
 
   /// The shell is a grid of three rows: banners, top bar, body. A banner placed directly in the grid
   /// takes the top bar's row and pushes the top bar over the channel header.
   #[test]
   fn shell_grid_has_a_row_for_banners_top_bar_and_body() {
-    let css = include_str!("../style/main.css");
+    let css: String = stylesheet_files().into_iter().map(|(_, css)| css).collect();
     let app_rule = css
       .split("\n.app {")
       .nth(1)
       .and_then(|rest| rest.split('}').next())
-      .expect("style/main.css has an .app rule");
+      .expect("the stylesheet has an .app rule");
     let rows = app_rule
       .lines()
       .find_map(|line| line.trim().strip_prefix("grid-template-rows:"))
@@ -223,5 +225,28 @@ mod tests {
         "{banner} is inside .app-banners"
       );
     }
+  }
+
+  /// The stylesheet's area files (`style/main/*.css`) in the order the build joins them
+  /// (scripts/bundle-css.sh): by name.
+  fn stylesheet_files() -> Vec<(String, String)> {
+    let directory = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("style/main");
+    let mut files: Vec<(String, String)> = std::fs::read_dir(&directory)
+      .expect("style/main is there")
+      .map(|entry| entry.expect("a readable entry").path())
+      .filter(|path| path.extension().is_some_and(|extension| extension == "css"))
+      .map(|path| {
+        let name = path.file_name().unwrap_or_default().to_string_lossy();
+        let css = std::fs::read_to_string(&path).expect("a readable stylesheet");
+        (format!("style/main/{name}"), css)
+      })
+      .collect();
+    files.sort();
+    assert!(
+      files.len() > 10,
+      "found the area files in {}",
+      directory.display()
+    );
+    files
   }
 }

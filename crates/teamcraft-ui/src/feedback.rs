@@ -426,8 +426,8 @@ mod tests {
 
     #[test]
     fn every_message_key_is_translated() {
-      let en = include_str!("../i18n/en.ftl");
-      let de = include_str!("../i18n/de.ftl");
+      let en = crate::i18n::joined_source(crate::i18n::Locale::En);
+      let de = crate::i18n::joined_source(crate::i18n::Locale::De);
       let kinds = [
         FailureKind::Network,
         FailureKind::Other,
@@ -449,10 +449,10 @@ mod tests {
       ];
       for kind in kinds {
         let key = failure_message_key(&ActionFailure::new(kind, "x"));
-        for (name, source) in [("en", en), ("de", de)] {
+        for (name, source) in [("en", &en), ("de", &de)] {
           assert!(
             source.contains(&format!("\n{key} =")),
-            "{key} missing in {name}.ftl"
+            "{key} missing in i18n/{name}"
           );
         }
       }

@@ -1,6 +1,6 @@
 #!/bin/sh
 # Run by build-app.sh (Trunk post_build hook) once init.js exists: puts the loading screen's
-# texts (the `loader-*` messages of every i18n/*.ftl) into init.js as `globalThis.teamcraftLoaderTexts`,
+# texts (the `loader-*` messages of every i18n/<language>/*.ftl) into init.js as `globalThis.teamcraftLoaderTexts`,
 # where loader.js picks them by language. Not into loader.js itself: index.html pins that file by its
 # integrity value.
 set -eu
@@ -16,17 +16,15 @@ python="$(command -v python3 || command -v python)"
 import glob, json, os, re, sys
 init_path, i18n = sys.argv[1:3]
 texts = {}
-for path in sorted(glob.glob(os.path.join(i18n, "*.ftl"))):
-    language = os.path.splitext(os.path.basename(path))[0]
-    messages = {}
+# One directory per language, one file per area of the app (#614).
+for path in sorted(glob.glob(os.path.join(i18n, "*", "*.ftl"))):
+    language = os.path.basename(os.path.dirname(path))
     for line in open(path, encoding="utf-8"):
         match = re.match(r"^(loader-[a-z-]+)\s*=\s*(.+?)\s*$", line)
         if match:
-            messages[match.group(1)] = match.group(2)
-    if messages:
-        texts[language] = messages
+            texts.setdefault(language, {})[match.group(1)] = match.group(2)
 if "en" not in texts:
-    raise SystemExit("finish-loader: i18n/en.ftl has no loader-* messages")
+    raise SystemExit("finish-loader: i18n/en has no loader-* messages")
 init = open(init_path, encoding="utf-8").read()
 if "teamcraftLoaderTexts" in init:
     raise SystemExit("finish-loader: init.js already has the texts")

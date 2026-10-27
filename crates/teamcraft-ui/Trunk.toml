@@ -12,6 +12,13 @@ open = false
 [[proxy]]
 backend = "http://127.0.0.1:8081/api/"
 
+# The stylesheet: its area files (style/main/*.css) joined into gen/main.css, which index.html
+# links, before Trunk reads index.html (#614).
+[[hooks]]
+stage = "pre_build"
+command = "sh"
+command_arguments = ["scripts/bundle-css.sh"]
+
 # The app itself: built, split into lazily loaded chunks and started by init.js (the server's
 # Content-Security-Policy forbids inline scripts); the same hook then fills in the loading screen's
 # generated values (scripts/finish-loader.sh). Hooks of one stage run at the same time, so steps that
@@ -28,4 +35,5 @@ command = "sh"
 command_arguments = ["scripts/finish-sw.sh"]
 
 [watch]
-ignore = ["dist"]
+# gen/ is written by the pre_build hook; watching it would rebuild in a loop.
+ignore = ["dist", "gen"]

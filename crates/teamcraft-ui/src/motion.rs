@@ -1,4 +1,5 @@
-//! Motion helpers for what CSS can't do alone (style/main.css has the tokens and the keyframes).
+//! Motion helpers for what CSS can't do alone (the stylesheet has the tokens and the keyframes:
+//! style/main/000-tokens.css, 680-motion.css).
 //!
 //! Entrances are plain CSS animations that run when an element mounts. Exits need the element to
 //! stay a moment after the view dropped it: [`use_leave_ghost`] leaves an inert copy in its place
@@ -49,7 +50,7 @@ pub fn prefers_reduced_motion() -> bool {
 }
 
 /// Which side of its trigger a self-placed popover opens on, so it grows out of (and shrinks back
-/// into) the edge that touches the trigger (`.opens-up` in style/main.css, #359).
+/// into) the edge that touches the trigger (`.opens-up` in style/main/680-motion.css, #359).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum PopoverSide {
   #[default]
