@@ -147,10 +147,7 @@ pub fn FilePreview(conversation: ConversationId, key: MediaKey) -> impl IntoView
   });
   let name = file.file_name.clone();
   let size = format_bytes(file.size_bytes);
-  let too_large = i18n.t_with(
-    "preview-too-large",
-    &[("size", &size), ("limit", &format_bytes(limit.bytes()))],
-  );
+  let too_large = i18n.t_with("preview-too-large", &[("size", &size), ("limit", &limit.label())]);
   let viewer_name = StoredValue::new(name.clone());
   let toggles_source = kind.has_source();
   let body = move || {

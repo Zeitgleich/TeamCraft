@@ -7391,12 +7391,15 @@ html.call-window body {
 }
 .tv-tools { flex: none; display: flex; align-items: center; flex-wrap: wrap; gap: 8px; padding: 6px 12px; border-bottom: 1px solid var(--border); }
 .tv-find { position: relative; display: flex; align-items: center; gap: 2px; flex: 1 1 280px; min-width: 0; }
-.tv-find-icon { position: absolute; left: 9px; width: 15px; height: 15px; color: var(--text-muted); pointer-events: none; }
+.tv-find-icon { position: absolute; left: 9px; width: 15px; height: 15px; color: var(--text-muted); z-index: 1; pointer-events: none; }
 .tv-find-input { flex: 1; min-width: 0; padding-left: 30px; }
 .tv-find-count { flex: none; min-width: 5.5em; padding: 0 4px; color: var(--text-muted); font-size: var(--text-xs); letter-spacing: var(--tracking-xs); font-variant-numeric: tabular-nums; text-align: end; }
 .icon.is-flipped { transform: rotate(180deg); }
 .tv-go-to { display: flex; align-items: center; gap: 6px; color: var(--text-muted); font-size: var(--text-xs); letter-spacing: var(--tracking-xs); font-variant-numeric: tabular-nums; }
 .tv-go-to-input { width: 6.5em; }
+select.tv-level { min-width: 0; }
+/* At phone width the level filter shares a row with "go to line". */
+@media (max-width: 600px) { select.tv-level { flex: 1 1 8rem; } }
 .tv-toggles { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; margin-left: auto; }
 .tv-toggles [aria-pressed="true"] { background: var(--accent-soft); color: var(--accent-strong); }
 .tv-toggles [aria-busy="true"] { cursor: progress; }
@@ -7414,11 +7417,11 @@ html.call-window body {
   outline-offset: -2px;
 }
 .tv-canvas { position: relative; min-width: 100%; }
-.tv-scroller:not(.is-wrapped) .tv-canvas { min-width: max(100%, calc((var(--tv-digits) + 2.5 + var(--tv-columns)) * 1ch)); }
+.tv-scroller:not(.is-wrapped) .tv-canvas { min-width: max(100%, calc((var(--tv-digits) + 3.5 + var(--tv-columns)) * 1ch)); }
 .tv-window { position: absolute; top: 0; right: 0; left: 0; }
 .tv-row {
   display: grid;
-  grid-template-columns: calc((var(--tv-digits) + 1.5) * 1ch) minmax(0, 1fr);
+  grid-template-columns: calc((var(--tv-digits) + 2.5) * 1ch) minmax(0, 1fr);
   min-height: var(--tv-line);
   padding-right: 1ch;
   color: var(--text);
@@ -7431,7 +7434,7 @@ html.call-window body {
   position: sticky;
   left: 0;
   z-index: 1;
-  padding-right: 1.5ch;
+  padding: 0 1.5ch 0 1ch;
   background: var(--surface);
   color: var(--text-muted);
   font-variant-numeric: tabular-nums;

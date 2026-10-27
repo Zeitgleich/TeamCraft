@@ -45,9 +45,11 @@ const DEBOUNCE_FROM_BYTES: usize = 1024 * 1024;
 const FIND_PAUSE: Duration = Duration::from_millis(150);
 /// The longest query; a find field is no place for a paragraph.
 const MAX_QUERY_CHARS: usize = 200;
-/// Columns that are not text in a row, besides the line number's digits: the gap after the number
-/// and the padding at the end (the stylesheet's `.tv-row`, in `ch`).
-const ROW_CHROME_COLUMNS: f64 = 2.5;
+/// Columns that are not text in a row, besides the line number's digits: the gutter's padding
+/// around the number ([`GUTTER_PADDING_COLUMNS`]) and the padding at the end (the stylesheet's `.tv-row`).
+const ROW_CHROME_COLUMNS: f64 = GUTTER_PADDING_COLUMNS + 1.0;
+/// The gutter's padding around the line number, in `ch` (the stylesheet's `.tv-row::before`).
+const GUTTER_PADDING_COLUMNS: f64 = 2.5;
 
 /// What the viewer shows.
 #[derive(Clone)]
@@ -504,7 +506,7 @@ fn text_pane(state: AppState, i18n: I18n, prepared: &Prepared, name: String) -> 
   view! {
     <div class="tv">
       <div class="tv-tools" role="toolbar" aria-label=move || i18n.t("text-preview-tools")>
-        <form class="tv-find" role="search" on:submit=move |ev| ev.prevent_default()>
+        <div class="tv-find" role="search">
           <Icon name=IconName::Search class="tv-find-icon" />
           <input
             class="input tv-find-input"
@@ -539,7 +541,7 @@ fn text_pane(state: AppState, i18n: I18n, prepared: &Prepared, name: String) -> 
           >
             <Icon name=IconName::ChevronDown />
           </button>
-        </form>
+        </div>
         <label class="tv-go-to">
           <span class="visually-hidden">{move || i18n.t("text-preview-go-to-line")}</span>
           <input
@@ -554,15 +556,12 @@ fn text_pane(state: AppState, i18n: I18n, prepared: &Prepared, name: String) -> 
           <span class="tv-line-count" aria-hidden="true">{move || format!("/ {}", line_count())}</span>
         </label>
         {is_log.then(|| view! {
-          <label class="tv-level">
-            <span class="visually-hidden">{move || i18n.t("text-preview-level")}</span>
-            <select class="input" on:change=on_level>
-              {level_option(LogLevel::Debug, "text-preview-level-all")}
-              {level_option(LogLevel::Info, "text-preview-level-info")}
-              {level_option(LogLevel::Warn, "text-preview-level-warn")}
-              {level_option(LogLevel::Error, "text-preview-level-error")}
-            </select>
-          </label>
+          <select class="input tv-level" aria-label=move || i18n.t("text-preview-level") on:change=on_level>
+            {level_option(LogLevel::Debug, "text-preview-level-all")}
+            {level_option(LogLevel::Info, "text-preview-level-info")}
+            {level_option(LogLevel::Warn, "text-preview-level-warn")}
+            {level_option(LogLevel::Error, "text-preview-level-error")}
+          </select>
         })}
         <div class="tv-toggles">
           <button class="btn btn-small" aria-pressed=move || is_wrapped.get().to_string() on:click=toggle_wrap>
@@ -734,7 +733,7 @@ impl ViewState {
       }
     });
     if wrap_columns.is_none() {
-      let gutter_px = (f64::from(digit_count(self.line_count())) + 1.5) * sizes.char_px;
+      let gutter_px = (f64::from(digit_count(self.line_count())) + GUTTER_PADDING_COLUMNS) * sizes.char_px;
       let x = f64::from(column) * sizes.char_px;
       let left = f64::from(element.scroll_left());
       let visible = sizes.width_px - gutter_px;

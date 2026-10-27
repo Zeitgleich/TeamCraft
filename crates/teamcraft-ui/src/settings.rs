@@ -249,6 +249,11 @@ impl PreviewLimit {
     }
   }
 
+  /// The limit as the settings name it ("10 MB"), in whole MiB like `format_bytes`'s "MB".
+  pub fn label(self) -> String {
+    format!("{} MB", self.bytes() / (1024 * 1024))
+  }
+
   /// Whether a file of `size_bytes` opens as a preview; the limit itself does.
   pub fn allows(self, size_bytes: u64) -> bool {
     size_bytes <= self.bytes()
@@ -504,6 +509,7 @@ mod tests {
       let limit = PreviewLimit::DEFAULT;
       assert_eq!(limit.bytes(), 10 * 1024 * 1024);
       assert!(limit.allows(limit.bytes()));
+      assert_eq!(limit.label(), "10 MB");
       assert!(!limit.allows(limit.bytes() + 1));
     }
 
