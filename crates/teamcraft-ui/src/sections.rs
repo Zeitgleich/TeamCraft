@@ -302,6 +302,37 @@ pub fn badge_count(conversations: &[Conversation]) -> u32 {
     .sum()
 }
 
+/// The number next to a conversation's name in the sidebar (#891).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RowBadge {
+  pub count: u32,
+  pub tone: RowBadgeTone,
+}
+
+/// How loud a [`RowBadge`] is.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RowBadgeTone {
+  /// Red: unread messages in a conversation that notifies, or a mention in a muted one.
+  Red,
+  /// Grey: unread messages in a muted conversation.
+  Quiet,
+}
+
+/// What a sidebar row shows next to its name: the number of unread messages, red. A muted
+/// conversation never gets the red count of its plain unread messages: it shows them grey, and
+/// only a mention makes it red again, counting the mentions (docs/notifications.md).
+pub fn row_badge(unread_count: u32, mention_count: u32, is_muted: bool) -> Option<RowBadge> {
+  let (count, tone) = if is_muted && mention_count > 0 {
+    (mention_count, RowBadgeTone::Red)
+  } else if is_muted {
+    (unread_count, RowBadgeTone::Quiet)
+  } else {
+    // A mention is an unread message; a count that lags behind it doesn't hide it.
+    (unread_count.max(mention_count), RowBadgeTone::Red)
+  };
+  (count > 0).then_some(RowBadge { count, tone })
+}
+
 /// Puts the favorites of `list` into the user's own order (IDs in `order` first, in that order; the
 /// rest after them as they were). Other conversations keep their places.
 pub fn apply_favorite_order(list: &mut [Conversation], order: &[ConversationId]) {
@@ -430,6 +461,58 @@ mod tests {
         maybe_read_through: None,
         is_unread,
       }
+    }
+  }
+
+  mod row_badge {
+    use super::*;
+
+    #[test]
+    fn a_conversation_that_notifies_shows_its_unread_count_in_red() {
+      let red = |count| {
+        Some(RowBadge {
+          count,
+          tone: RowBadgeTone::Red,
+        })
+      };
+      assert_eq!(row_badge(0, 0, false), None);
+      assert_eq!(row_badge(1, 0, false), red(1));
+      assert_eq!(row_badge(99, 0, false), red(99));
+      assert_eq!(
+        row_badge(100, 0, false),
+        red(100),
+        "the badge caps the text, not the count"
+      );
+      assert_eq!(
+        row_badge(5, 2, false),
+        red(5),
+        "mentions are part of the unread messages"
+      );
+      assert_eq!(
+        row_badge(0, 2, false),
+        red(2),
+        "a mention is never hidden by a lagging count"
+      );
+    }
+
+    #[test]
+    fn a_muted_conversation_is_grey_until_somebody_mentions_you() {
+      assert_eq!(row_badge(0, 0, true), None);
+      assert_eq!(
+        row_badge(7, 0, true),
+        Some(RowBadge {
+          count: 7,
+          tone: RowBadgeTone::Quiet
+        })
+      );
+      assert_eq!(
+        row_badge(7, 1, true),
+        Some(RowBadge {
+          count: 1,
+          tone: RowBadgeTone::Red
+        }),
+        "a muted conversation counts only its mentions in red"
+      );
     }
   }
 
