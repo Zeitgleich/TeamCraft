@@ -39,8 +39,8 @@ use crate::admin_live::AdminLive;
 use crate::auth::Authenticator;
 use crate::backend::{AdminBackend, CallBackend, ChatBackend, SearchBackend, SecurityBackend};
 use crate::calls::{
-  ActiveCall, BackgroundEffect, BackgroundImageInfo, CallPreview, CallRequest, HuddleInfo, IncomingCall,
-  JoinMedia, MediaDevices, Participant, PreviewCamera,
+  ActiveCall, BackgroundEffect, BackgroundImageInfo, CallPreview, CallRequest, CameraFallback, HuddleInfo,
+  IncomingCall, JoinMedia, MediaDevices, Participant, PreviewCamera,
 };
 use crate::clock::now_ms;
 use crate::i18n::translate_current;
@@ -1083,6 +1083,10 @@ impl<C: ChatBackend> CallBackend for Hybrid<C> {
     if let Some(calls) = &self.maybe_calls {
       calls.act(CallAction::SelectCamera { maybe_device });
     }
+  }
+
+  fn camera_fallback(&self) -> Option<CameraFallback> {
+    self.maybe_calls.as_ref().and_then(RemoteCalls::camera_fallback)
   }
 
   fn set_background_effect(&self, effect: BackgroundEffect) {

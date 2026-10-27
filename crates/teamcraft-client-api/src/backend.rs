@@ -30,7 +30,9 @@ use crate::calls::{
   CallStatusSounds, CallsUnavailableReason, HuddleInfo, IncomingCall, MediaDevices, Participant,
   RemoteVideoTrack, ScreenContentMode,
 };
-use crate::calls::{CallPreview, JoinMedia, OrgBackgroundRule, OrgBackgrounds, PreviewCamera};
+use crate::calls::{
+  CallPreview, CameraFallback, JoinMedia, OrgBackgroundRule, OrgBackgrounds, PreviewCamera,
+};
 use crate::model::{
   Conversation, ConversationId, CustomStatus, DeviceId, MembershipIssue, Message, MessageId, PresenceStatus,
   Space, SpaceId, ThreadId, ThreadSummary, TimestampMs, User, UserId,
@@ -724,6 +726,10 @@ pub trait CallBackend {
   fn test_speakers(&self, _maybe_device: Option<String>) {}
   fn set_call_camera(&self, _is_on: bool) {}
   fn select_camera(&self, _maybe_device: Option<String>) {}
+  /// The camera that stood in for the chosen one at the last camera start, if one did (#819).
+  fn camera_fallback(&self) -> Option<CameraFallback> {
+    None
+  }
   fn set_background_effect(&self, _effect: BackgroundEffect) {}
   /// Opens the system's video effects panel (macOS); nothing elsewhere.
   fn open_system_video_effects(&self) {}

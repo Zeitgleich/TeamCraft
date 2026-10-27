@@ -15,8 +15,8 @@ use std::rc::Rc;
 use leptos::task::spawn_local;
 use serde_json::json;
 use teamcraft_client_api::calls::{
-  ActiveCall, CallPreview, CallRequest, HuddleInfo, IncomingCall, JoinMedia, MediaDevices, Participant,
-  PreviewCamera, RemoteVideoTrack,
+  ActiveCall, CallPreview, CallRequest, CameraFallback, HuddleInfo, IncomingCall, JoinMedia, MediaDevices,
+  Participant, PreviewCamera, RemoteVideoTrack,
 };
 use teamcraft_client_api::failure::ActionFailure;
 use teamcraft_client_api::model::{ConversationId, UserId};
@@ -245,6 +245,10 @@ impl RemoteCalls {
     self.snapshot.borrow().preview_camera
   }
 
+  pub fn camera_fallback(&self) -> Option<CameraFallback> {
+    self.snapshot.borrow().maybe_camera_fallback.clone()
+  }
+
   /// The pre-join check's microphone level: the shell's newest reading, or the page's meter.
   pub fn preview_level(&self) -> f32 {
     match &self.link {
@@ -373,6 +377,7 @@ mod tests {
       push_to_talk: Default::default(),
       maybe_end_reason: None,
       preview_camera: PreviewCamera::Off,
+      maybe_camera_fallback: None,
     };
     assert_eq!(roster_of(&snapshot, conversation), vec![carol, dave]);
     assert!(roster_of(&snapshot, id_from_raw(8)).is_empty());

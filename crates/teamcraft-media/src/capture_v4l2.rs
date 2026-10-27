@@ -44,7 +44,9 @@ pub struct V4l2Camera {
 /// nodes come).
 pub fn list_cameras() -> Vec<CameraInfo> {
   let mut nodes = v4l::context::enum_devices();
-  // `/dev/video2` before `/dev/video10`: a stable order across restarts.
+  // `/dev/video2` before `/dev/video10`: a stable order across restarts. A node without a number
+  // (a `/dev/video` link) is left out: v4l can't name it, and its target is listed anyway.
+  nodes.retain(|node| node_number(node.path()).is_some());
   nodes.sort_by_key(|node| node_number(node.path()));
   let cameras = nodes
     .into_iter()
