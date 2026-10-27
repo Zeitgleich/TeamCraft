@@ -419,22 +419,25 @@ fn MessageSoundCard(#[prop(into)] is_off: Signal<bool>) -> impl IntoView {
   };
   let file_hint = Signal::derive(move || {
     let limits = limits.get();
-    let status = match (maybe_refusal.get(), sounds.own_status.get()) {
-      (Some(reason), _) => refusal_text(i18n, reason, limits),
-      (None, Some(OwnSoundStatus::Ready(info))) => i18n.t_with(
+    // A refusal says what to choose instead; the rules would only repeat it.
+    if let Some(reason) = maybe_refusal.get() {
+      return refusal_text(i18n, reason, limits);
+    }
+    let status = match sounds.own_status.get() {
+      Some(OwnSoundStatus::Ready(info)) => i18n.t_with(
         "notif-own-sound-current",
         &[
           ("name", &info.file_name),
           ("seconds", &format!("{:.1}", f64::from(info.play_ms) / 1000.0)),
         ],
       ),
-      (None, Some(OwnSoundStatus::Unavailable)) => i18n.t("notif-own-sound-unavailable"),
-      (None, Some(OwnSoundStatus::NotPicked) | None) => i18n.t("notif-own-sound-none"),
+      Some(OwnSoundStatus::Unavailable) => i18n.t("notif-own-sound-unavailable"),
+      Some(OwnSoundStatus::NotPicked) | None => i18n.t("notif-own-sound-none"),
     };
     let rules = i18n.t_with(
       "notif-own-sound-limits",
       &[
-        ("size", &format_bytes(limits.max_bytes())),
+        ("size", &file_size(limits.max_bytes())),
         ("seconds", &limits.max_play().as_secs().to_string()),
       ],
     );
@@ -528,10 +531,21 @@ fn refusal_text(i18n: I18n, reason: OwnSoundRefusal, limits: OwnSoundLimits) -> 
   match reason {
     OwnSoundRefusal::TooLarge => i18n.t_with(
       "notif-own-sound-too-large",
-      &[("size", &format_bytes(limits.max_bytes()))],
+      &[("size", &file_size(limits.max_bytes()))],
     ),
     OwnSoundRefusal::NotAudio => i18n.t("notif-own-sound-not-audio"),
     OwnSoundRefusal::Unreadable | OwnSoundRefusal::Unknown => i18n.t("notif-own-sound-unreadable"),
+  }
+}
+
+/// A size limit as people read it: whole megabytes without a decimal ("1 MB"), anything else as
+/// the file views show sizes.
+fn file_size(bytes: u64) -> String {
+  const MIB: u64 = 1024 * 1024;
+  if bytes >= MIB && bytes.is_multiple_of(MIB) {
+    format!("{} MB", bytes / MIB)
+  } else {
+    format_bytes(bytes)
   }
 }
 
@@ -989,6 +1003,13 @@ mod tests {
     set_enabled(&mut notes, true);
     assert_eq!(notes.desktop, NotifyLevel::All);
     assert_eq!(notes.push, NotificationPrefs::default().push);
+  }
+
+  #[test]
+  fn size_limits_read_as_whole_megabytes_where_they_are() {
+    assert_eq!(file_size(1024 * 1024), "1 MB");
+    assert_eq!(file_size(16 * 1024 * 1024), "16 MB");
+    assert_eq!(file_size(512 * 1024), "512.0 KB");
   }
 
   #[test]

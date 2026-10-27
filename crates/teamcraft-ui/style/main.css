@@ -11318,6 +11318,11 @@ html.call-window body {
   max-width: 220px;
 }
 
+/* Nothing to play (the system's sound, none): the button says so by fading back. */
+.set-sound-picker .btn:disabled {
+  opacity: 0.45;
+}
+
 /* The switch: the thumb slides, the track fills; both follow the reduced-motion durations. */
 .set-switch {
   appearance: none;
