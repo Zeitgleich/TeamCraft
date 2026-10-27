@@ -304,6 +304,39 @@ impl<S: LocalStore> CoreChatBackend<S> {
       .is_some_and(|authority| authority.may_manage(self.me_id()))
   }
 
+  /// Whether this user signs the channel's roles in a way members accept: an admin of the fresh
+  /// workspace roster, a signed channel admin, or, while nothing is signed, an admin the server
+  /// lists, who founds the log (e2ee.md §4.6.1).
+  pub(crate) fn ui_can_sign_channel_roles(&self, conversation: ConversationId) -> bool {
+    let members: Option<teamcraft_proto::ListConversationMembersResponse> = self.read(records::get_json(
+      self.store_ref(),
+      Table::Members,
+      &conversation.to_string(),
+    ));
+    let is_listed_admin = members
+      .into_iter()
+      .flat_map(|list| list.members)
+      .any(|member| member.user.id == self.me_id() && member.role == teamcraft_proto::ChannelRole::Admin);
+    let workspace: crate::workspace::WorkspaceState = self.read(
+      records::get_json(self.store_ref(), Table::Workspace, crate::client::WORKSPACE_KEY)
+        .map(Option::unwrap_or_default),
+    );
+    let signed: crate::channel_roles::ChannelRoleState = self.read(
+      records::get_json(
+        self.store_ref(),
+        Table::Workspace,
+        &crate::client::channel_roles_key(conversation),
+      )
+      .map(Option::unwrap_or_default),
+    );
+    let max_age_ms =
+      i64::try_from(crate::ClientSettings::default().workspace_max_age.as_millis()).unwrap_or(i64::MAX);
+    signed
+      .signing_authorities(self.me_id(), &workspace, self.now_ms(), max_age_ms)
+      .into_iter()
+      .any(|authority| authority != crate::channel_roles::SignerAuthority::Founder || is_listed_admin)
+  }
+
   fn source_authority(&self) -> Option<SourceAuthority> {
     let workspace: crate::workspace::WorkspaceState = self.read(
       records::get_json(self.store_ref(), Table::Workspace, crate::client::WORKSPACE_KEY)

@@ -454,6 +454,19 @@ pub trait ServerApi {
     request: &AppendWorkspaceLogRequest,
   ) -> impl Future<Output = Result<WorkspaceLogEntryResponse, ApiError>>;
 
+  /// Entries of a channel's signed role log after `query.maybe_after`, oldest first (issue #380).
+  fn list_channel_role_log(
+    &self,
+    conversation: ConversationId,
+    query: &teamcraft_proto::ListChannelRoleLogQuery,
+  ) -> impl Future<Output = Result<teamcraft_proto::ListChannelRoleLogResponse, ApiError>>;
+  /// Appends an entry to a channel's role log (needs `manage_channel_roles`).
+  fn append_channel_role_log(
+    &self,
+    conversation: ConversationId,
+    request: &teamcraft_proto::AppendChannelRoleLogRequest,
+  ) -> impl Future<Output = Result<teamcraft_proto::ChannelRoleLogEntryResponse, ApiError>>;
+
   /// Announces an attachment upload; returns the presigned upload URL.
   fn create_attachment(
     &self,

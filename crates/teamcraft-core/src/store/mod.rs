@@ -310,6 +310,14 @@ pub struct MessageMeta {
   /// The sender's verified workspace head, added when the message is sent (security review A6).
   #[serde(rename = "workspace_head", default, skip_serializing_if = "Option::is_none")]
   pub maybe_workspace_head: Option<Box<crate::workspace::WorkspaceHead>>,
+  /// The sender's verified head of the channel's signed roles (e2ee.md §4.6.1), added when the
+  /// message is sent, so members notice a server showing them different role logs.
+  #[serde(
+    rename = "channel_roles_head",
+    default,
+    skip_serializing_if = "Option::is_none"
+  )]
+  pub maybe_channel_roles_head: Option<Box<crate::channel_roles::ChannelRolesHead>>,
 }
 
 /// The quoted message: the reference, plus enough to show it where it isn't loaded.

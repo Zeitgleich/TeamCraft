@@ -120,6 +120,12 @@ pub enum GatewayEvent {
     kind: WorkspaceLogKind,
     version: u64,
   },
+  /// A channel's signed role log has a new entry (issue #380); fetch entries after the known
+  /// version. Sent to the channel's members.
+  ChannelRolesUpdate {
+    conversation_id: ConversationId,
+    version: u64,
+  },
   /// A meeting was created, changed, cancelled or answered; refetch `GET /meetings/{id}`. Sent to
   /// the organizer and the invited users.
   MeetingUpdate {
@@ -382,6 +388,20 @@ mod tests {
     };
     let json = serde_json::to_string(&event).unwrap();
     assert_eq!(json, r#"{"type":"conversation_delete","conversation_id":"7"}"#);
+    assert_eq!(serde_json::from_str::<GatewayEvent>(&json).unwrap(), event);
+  }
+
+  #[test]
+  fn channel_roles_update_has_a_stable_wire_format() {
+    let event = GatewayEvent::ChannelRolesUpdate {
+      conversation_id: conversation(),
+      version: 3,
+    };
+    let json = serde_json::to_string(&event).unwrap();
+    assert_eq!(
+      json,
+      r#"{"type":"channel_roles_update","conversation_id":"7","version":3}"#
+    );
     assert_eq!(serde_json::from_str::<GatewayEvent>(&json).unwrap(), event);
   }
 

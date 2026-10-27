@@ -992,6 +992,29 @@ impl<T: AccessTokenSource> ServerApi for HttpServerApi<T> {
       .await
   }
 
+  async fn list_channel_role_log(
+    &self,
+    conversation: ConversationId,
+    query: &teamcraft_proto::ListChannelRoleLogQuery,
+  ) -> Result<teamcraft_proto::ListChannelRoleLogResponse, ApiError> {
+    let parameters = query_string(&[
+      ("after", query.maybe_after.map(|version| version.to_string())),
+      ("limit", query.maybe_limit.map(|limit| limit.to_string())),
+    ]);
+    self
+      .get(&format!("/conversations/{conversation}/role-log{parameters}"))
+      .await
+  }
+
+  async fn append_channel_role_log(
+    &self,
+    conversation: ConversationId,
+    request: &teamcraft_proto::AppendChannelRoleLogRequest,
+  ) -> Result<teamcraft_proto::ChannelRoleLogEntryResponse, ApiError> {
+    let path = format!("/conversations/{conversation}/role-log");
+    self.send_json(Method::POST, &path, request).await
+  }
+
   async fn create_attachment(
     &self,
     request: &CreateAttachmentRequest,

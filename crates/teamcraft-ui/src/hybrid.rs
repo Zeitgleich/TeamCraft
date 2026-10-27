@@ -705,6 +705,18 @@ impl<C: ChatBackend + 'static> ChatBackend for Hybrid<C> {
     self.chat.channel_roles(conversation)
   }
 
+  fn can_sign_channel_roles(&self, conversation: ConversationId) -> bool {
+    self.chat.can_sign_channel_roles(conversation)
+  }
+
+  fn confirm_channel_role(&self, conversation: ConversationId, user: UserId) {
+    self.chat.confirm_channel_role(conversation, user);
+  }
+
+  fn refresh_channel_roles(&self, conversation: ConversationId) {
+    self.chat.refresh_channel_roles(conversation);
+  }
+
   fn set_channel_role(
     &self,
     conversation: ConversationId,

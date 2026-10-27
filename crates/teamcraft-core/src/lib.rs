@@ -5,6 +5,7 @@
 pub mod account_data;
 pub mod api;
 pub mod attestation;
+pub mod channel_roles;
 pub mod client;
 pub mod clock;
 pub mod connection;

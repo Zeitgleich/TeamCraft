@@ -1253,6 +1253,21 @@ impl ChatBackend for RemoteChat {
     }
   }
 
+  fn can_sign_channel_roles(&self, conversation: ConversationId) -> bool {
+    matches!(
+      self.ask(ChatQuery::CanSignChannelRoles { conversation }),
+      Some(ChatAnswer::CanSignChannelRoles { can_sign: true })
+    )
+  }
+
+  fn confirm_channel_role(&self, conversation: ConversationId, user: UserId) {
+    self.act(ChatAction::ConfirmChannelRole { conversation, user });
+  }
+
+  fn refresh_channel_roles(&self, conversation: ConversationId) {
+    self.act(ChatAction::RefreshChannelRoles { conversation });
+  }
+
   fn set_channel_role(
     &self,
     conversation: ConversationId,

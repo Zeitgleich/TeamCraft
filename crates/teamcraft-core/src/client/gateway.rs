@@ -531,6 +531,9 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       | GatewayEvent::SpaceMemberAdd { .. }
       | GatewayEvent::SpaceMemberRemove { .. } => self.refresh_spaces().await,
       GatewayEvent::WorkspaceUpdate { .. } => self.sync_workspace_and_recovery().await,
+      GatewayEvent::ChannelRolesUpdate { conversation_id, .. } => {
+        self.sync_channel_roles(conversation_id).await
+      },
       // The user's own device that revoked it signs the removal (`Client::revoke_device`); the
       // user's other devices finish it if the signed device list says so (#232).
       GatewayEvent::DeviceRemove { user_id, device_id } => {

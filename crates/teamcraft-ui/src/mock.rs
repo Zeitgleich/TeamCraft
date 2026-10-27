@@ -610,6 +610,7 @@ impl ChatBackend for MockBackend {
           } else {
             ChannelRole::Member
           }),
+        is_role_signed: true,
       })
       .collect()
   }
