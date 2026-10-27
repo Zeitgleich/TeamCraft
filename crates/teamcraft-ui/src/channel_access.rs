@@ -41,6 +41,23 @@ pub fn can_start_direct(state: AppState, users: &[UserId]) -> bool {
   may_start_direct(true, state.direct_with(users).is_some(), &start)
 }
 
+/// Whether the user may start conversations at all, for the "new message" entry points that name
+/// nobody yet (rail "+", the pencil next to "Chats", the empty states). A guest under
+/// `guests.dm_start = nobody` is offered none; `can_start_direct` still decides per person.
+pub fn can_start_any_direct(state: AppState) -> bool {
+  if !is_guest(state) {
+    return true;
+  }
+  let start = state.read(|backend| {
+    backend
+      .workspace_policy()
+      .1
+      .guests
+      .effective_dm_start(GuestDmStart::DEFAULT)
+  });
+  start.allows(true)
+}
+
 /// The rule of [`can_start_direct`] without the UI state.
 fn may_start_direct(is_guest: bool, has_conversation: bool, start: &GuestDmStart) -> bool {
   !is_guest || has_conversation || start.allows(true)
@@ -253,6 +270,8 @@ mod tests {
       );
       // A guest can always open a conversation somebody started with them.
       assert!(may_start_direct(true, true, &start), "{start} existing");
+      // Without a person named, the entry points follow the same rule as a guest's first message.
+      assert_eq!(start.allows(true), may_guest_start, "{start} entry points");
     }
   }
 }

@@ -4,7 +4,7 @@
 
 use leptos::prelude::*;
 
-use crate::channel_access::can_invite_to;
+use crate::channel_access::{can_invite_to, can_start_any_direct};
 use crate::components::avatar::{Avatar, AvatarSize};
 use crate::components::channel_view::shown_name;
 use crate::components::huddle_bar::CallPill;
@@ -64,14 +64,16 @@ pub fn HomeSidebar() -> impl IntoView {
         >
           <Icon name=IconName::More />
         </button>
-        <button
-          class="icon-btn"
-          aria-label=move || i18n.t("dm-new")
-          title=move || i18n.t("dm-new")
-          on:click=move |_| state.overlay.set(Overlay::NewMessage)
-        >
-          <Icon name=IconName::Compose />
-        </button>
+        <Show when=move || can_start_any_direct(state) fallback=|| ()>
+          <button
+            class="icon-btn"
+            aria-label=move || i18n.t("dm-new")
+            title=move || i18n.t("dm-new")
+            on:click=move |_| state.overlay.set(Overlay::NewMessage)
+          >
+            <Icon name=IconName::Compose />
+          </button>
+        </Show>
       </div>
       <Show when=move || show_options.get() fallback=|| ()>
         <DirectOptions />
@@ -370,9 +372,11 @@ fn DirectEmpty() -> impl IntoView {
   view! {
     <div class="sb-empty">
       <p>{move || i18n.t("dm-empty")}</p>
-      <button class="btn btn-primary" on:click=move |_| state.overlay.set(Overlay::NewMessage)>
-        {move || i18n.t("dm-new")}
-      </button>
+      <Show when=move || can_start_any_direct(state) fallback=|| ()>
+        <button class="btn btn-primary" on:click=move |_| state.overlay.set(Overlay::NewMessage)>
+          {move || i18n.t("dm-new")}
+        </button>
+      </Show>
     </div>
   }
 }
@@ -387,9 +391,11 @@ pub fn HomeStart() -> impl IntoView {
       <Icon name=IconName::Chat class="dm-home-icon" />
       <h1 id="dm-home-title">{move || i18n.t("chats-title")}</h1>
       <p>{move || i18n.t("dm-home-hint")}</p>
-      <button class="btn btn-primary" on:click=move |_| state.overlay.set(Overlay::NewMessage)>
-        {move || i18n.t("dm-new")}
-      </button>
+      <Show when=move || can_start_any_direct(state) fallback=|| ()>
+        <button class="btn btn-primary" on:click=move |_| state.overlay.set(Overlay::NewMessage)>
+          {move || i18n.t("dm-new")}
+        </button>
+      </Show>
       <SetupChecklist />
     </section>
   }
