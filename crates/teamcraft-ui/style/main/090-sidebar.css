@@ -109,6 +109,12 @@
   height: 14px;
 }
 
+/* A stable width for the count ("1" up to "99+"), so the name doesn't shift when it changes (#891). */
+.sb-item .badge-count {
+  flex: none;
+  min-width: 1.75rem;
+}
+
 .sb-item.current {
   background: var(--sb-current);
   color: var(--on-fill);

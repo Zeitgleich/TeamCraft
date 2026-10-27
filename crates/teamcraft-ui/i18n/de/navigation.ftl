@@ -59,7 +59,14 @@ sidebar-integrations = Integrationen
 sidebar-direct-messages = Direktnachrichten
 sidebar-deactivated-accounts = Deaktivierte Konten
 sidebar-item-mentions = { $name }, { $count } Erwähnungen
-sidebar-item-unread = { $name }, ungelesene Nachrichten
+sidebar-item-unread = { $name }, { $count ->
+    [one] 1 ungelesene Nachricht
+   *[other] { $count } ungelesene Nachrichten
+  }
+sidebar-item-unread-mentions = { $name }, { $unread } ungelesene Nachrichten, { $count ->
+    [one] 1 Erwähnung
+   *[other] { $count } Erwähnungen
+  }
 sidebar-item-muted = Benachrichtigungen stummgeschaltet
 sidebar-item-muted-label = { $label }, Benachrichtigungen stummgeschaltet
 sidebar-item-catching-up = { $name }, wird nachgeladen

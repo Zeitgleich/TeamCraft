@@ -317,6 +317,37 @@ mod tests {
   }
 
   #[test]
+  fn sidebar_rows_say_how_many_messages_are_unread() {
+    let say = |locale, key, count: i64, unread: &str| {
+      let mut args = FluentArgs::new();
+      args.set("name", "Team");
+      args.set("unread", unread);
+      args.set("count", count);
+      translate(locale, key, Some(&args))
+    };
+    assert_eq!(
+      say(Locale::En, "sidebar-item-unread", 1, ""),
+      "Team, 1 unread message"
+    );
+    assert_eq!(
+      say(Locale::En, "sidebar-item-unread", 120, ""),
+      "Team, 120 unread messages"
+    );
+    assert_eq!(
+      say(Locale::En, "sidebar-item-unread-mentions", 2, "5"),
+      "Team, 5 unread messages, 2 mentions"
+    );
+    assert_eq!(
+      say(Locale::De, "sidebar-item-unread", 1, ""),
+      "Team, 1 ungelesene Nachricht"
+    );
+    assert_eq!(
+      say(Locale::De, "sidebar-item-unread-mentions", 1, "3"),
+      "Team, 3 ungelesene Nachrichten, 1 Erwähnung"
+    );
+  }
+
+  #[test]
   fn unknown_key_falls_back_to_the_key() {
     assert_eq!(translate(Locale::De, "no-such-key", None), "no-such-key");
   }

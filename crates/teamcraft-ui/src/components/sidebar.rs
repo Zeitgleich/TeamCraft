@@ -8,6 +8,7 @@ use wasm_bindgen::JsCast;
 use crate::channel_access::{can_create_channel_in, can_invite_to, is_guest};
 use crate::components::avatar::PresenceDot;
 use crate::components::channel_glyph::ChannelGlyph;
+use crate::components::count_badge::{BadgeTone, CountBadge};
 use crate::components::huddle_bar::CallPill;
 use crate::components::icons::{Icon, IconName};
 use crate::components::space_tile::SpaceTile;
@@ -16,7 +17,8 @@ use crate::meetings::MeetingsHub;
 use crate::model::{Conversation, ConversationId, ConversationKind, PresenceStatus, SpaceId};
 use crate::reactive::{items_by_key, keyed_item};
 use crate::sections::{
-  GroupedSidebar, Section, SectionKind, SpaceGroup, badge_count, build_grouped, build_sections, move_favorite,
+  GroupedSidebar, RowBadgeTone, Section, SectionKind, SpaceGroup, badge_count, build_grouped, build_sections,
+  move_favorite, row_badge,
 };
 use crate::settings::{load_json, store_json};
 use crate::state::{MainView, Overlay, use_app_state};
@@ -795,6 +797,9 @@ fn focus_sidebar_item(conversation: ConversationId) {
   }
 }
 
+/// The largest unread count a sidebar row shows; above it the badge says "99+" (#891).
+const SIDEBAR_BADGE_CAP: u32 = 99;
+
 /// One conversation of the sidebar. Built once per row; what it shows follows `conversation`, so a
 /// new count or presence changes the badge or the dot, not the whole row (issue #687).
 #[component]
@@ -807,6 +812,13 @@ pub fn SidebarItem(#[prop(into)] conversation: Signal<Conversation>) -> impl Int
   let is_muted = Memo::new(move |_| conversation.with(|conv| conv.is_muted));
   let is_unread = Memo::new(move |_| conversation.with(|conv| conv.unread_count > 0 && !conv.is_muted));
   let mentions = Memo::new(move |_| conversation.with(|conv| conv.mention_count));
+  let unread = Memo::new(move |_| conversation.with(|conv| conv.unread_count));
+  let badge = Memo::new(move |_| row_badge(unread.get(), mentions.get(), is_muted.get()));
+  let badge_count = Signal::derive(move || badge.get().map_or(0, |badge| badge.count));
+  let badge_tone = Signal::derive(move || match badge.get().map(|badge| badge.tone) {
+    Some(RowBadgeTone::Quiet) => BadgeTone::Unread,
+    _ => BadgeTone::Mention,
+  });
   let is_catching_up = Memo::new(move |_| conversation.with(|conv| conv.is_catching_up));
   let name = Memo::new(move |_| conversation.with(|conv| conv.name.clone()));
   let me = state.me().id;
@@ -867,15 +879,23 @@ pub fn SidebarItem(#[prop(into)] conversation: Signal<Conversation>) -> impl Int
   let label = move || {
     let aria_name = name.get();
     let mentions = mentions.get();
+    let unread = unread.get();
     let label = if is_catching_up.get() {
       i18n.t_with("sidebar-item-catching-up", &[("name", &aria_name)])
+    } else if mentions > 0 && !is_muted.get() && unread > mentions {
+      // More unread messages than mentions, so the unread count is always plural.
+      i18n.t_count_with(
+        "sidebar-item-unread-mentions",
+        mentions as usize,
+        &[("name", &aria_name), ("unread", &unread.to_string())],
+      )
     } else if mentions > 0 {
       i18n.t_with(
         "sidebar-item-mentions",
         &[("name", &aria_name), ("count", &mentions.to_string())],
       )
-    } else if is_unread.get() {
-      i18n.t_with("sidebar-item-unread", &[("name", &aria_name)])
+    } else if unread > 0 {
+      i18n.t_count_with("sidebar-item-unread", unread as usize, &[("name", &aria_name)])
     } else {
       aria_name
     };
@@ -913,10 +933,7 @@ pub fn SidebarItem(#[prop(into)] conversation: Signal<Conversation>) -> impl Int
       }}
       {move || is_muted.get().then(|| view! { <span class="sb-muted-icon" title=i18n.t("sidebar-item-muted")><Icon name=IconName::BellOff /></span> })}
       {move || is_catching_up.get().then(|| view! { <span class="sb-catching-up" aria-hidden="true" title=i18n.t("catching-up")><Icon name=IconName::Clock /></span> })}
-      {move || {
-        let mentions = mentions.get();
-        (mentions > 0).then(|| view! { <span class="badge-count" aria-hidden="true">{mentions}</span> })
-      }}
+      <CountBadge count=badge_count tone=badge_tone is_decorative=true maybe_cap=SIDEBAR_BADGE_CAP />
     </button>
   }
 }

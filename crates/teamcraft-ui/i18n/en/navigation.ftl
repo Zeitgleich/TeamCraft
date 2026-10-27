@@ -59,7 +59,14 @@ sidebar-integrations = Integrations
 sidebar-direct-messages = Direct messages
 sidebar-deactivated-accounts = Deactivated accounts
 sidebar-item-mentions = { $name }, { $count } mentions
-sidebar-item-unread = { $name }, unread messages
+sidebar-item-unread = { $name }, { $count ->
+    [one] 1 unread message
+   *[other] { $count } unread messages
+  }
+sidebar-item-unread-mentions = { $name }, { $unread } unread messages, { $count ->
+    [one] 1 mention
+   *[other] { $count } mentions
+  }
 sidebar-item-muted = Notifications muted
 sidebar-item-muted-label = { $label }, notifications muted
 sidebar-item-catching-up = { $name }, catching up
