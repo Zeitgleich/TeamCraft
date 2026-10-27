@@ -2420,6 +2420,7 @@ admin-brands-text-en = Text (Englisch)
 admin-brands-text-de = Text (Deutsch)
 admin-brands-links = Links
 admin-brands-link-support = Support
+admin-brands-link-documentation = Dokumentation
 admin-brands-link-privacy = Datenschutz
 admin-brands-link-terms = Nutzungsbedingungen
 admin-brands-link-imprint = Impressum

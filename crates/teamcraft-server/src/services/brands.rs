@@ -507,6 +507,7 @@ fn apply_settings(
   config.login_title = non_empty_map(settings.login_title);
   config.login_text = non_empty_map(settings.login_text);
   config.maybe_support_url = non_empty(settings.links.maybe_support);
+  config.maybe_documentation_url = non_empty(settings.links.maybe_documentation);
   config.maybe_privacy_url = non_empty(settings.links.maybe_privacy);
   config.maybe_terms_url = non_empty(settings.links.maybe_terms);
   config.maybe_imprint_url = non_empty(settings.links.maybe_imprint);
@@ -532,6 +533,7 @@ fn settings_of(config: &BrandConfig) -> BrandSettings {
     login_text: config.login_text.clone(),
     links: BrandLinks {
       maybe_support: config.maybe_support_url.clone(),
+      maybe_documentation: config.maybe_documentation_url.clone(),
       maybe_privacy: config.maybe_privacy_url.clone(),
       maybe_terms: config.maybe_terms_url.clone(),
       maybe_imprint: config.maybe_imprint_url.clone(),
@@ -651,6 +653,7 @@ mod tests {
       login_title: BTreeMap::from([("en".into(), "Hi".into()), ("de".into(), " ".into())]),
       links: BrandLinks {
         maybe_support: Some("https://support.example.com".into()),
+        maybe_documentation: Some("https://docs.example.com".into()),
         ..BrandLinks::default()
       },
       ..BrandSettings::default()
@@ -670,6 +673,10 @@ mod tests {
     assert_eq!(
       settings_of(&config).links.maybe_support.as_deref(),
       Some("https://support.example.com")
+    );
+    assert_eq!(
+      settings_of(&config).links.maybe_documentation.as_deref(),
+      Some("https://docs.example.com")
     );
   }
 

@@ -882,6 +882,9 @@ pub struct BrandConfig {
   pub maybe_sso_label: Option<String>,
   #[serde(rename = "support_url", skip_serializing_if = "Option::is_none")]
   pub maybe_support_url: Option<String>,
+  /// The user documentation, linked under Settings > Help & about. Default: none.
+  #[serde(rename = "documentation_url", skip_serializing_if = "Option::is_none")]
+  pub maybe_documentation_url: Option<String>,
   #[serde(rename = "privacy_url", skip_serializing_if = "Option::is_none")]
   pub maybe_privacy_url: Option<String>,
   #[serde(rename = "terms_url", skip_serializing_if = "Option::is_none")]
