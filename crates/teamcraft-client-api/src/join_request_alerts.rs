@@ -1,11 +1,12 @@
-//! System notifications for admins' requests to join a channel the user owns (admin.md §2.4): one
-//! per request, once per device, withdrawn when the request is gone (decided anywhere, withdrawn or
-//! expired). The requests themselves come from the activity feed.
+//! System notifications for admins' requests to join a channel the user owns (admin.md §2.4.1):
+//! one per request, once per device, withdrawn when the request is gone (decided anywhere,
+//! withdrawn or expired). The requests come from the backend (`ChatBackend::join_requests`); the
+//! desktop, the web and the mobile apps keep what they notified about with this.
 
 use std::collections::BTreeSet;
 
-use teamcraft_client_api::activity::JoinRequest;
-use teamcraft_client_api::os_notify::NotificationTag;
+use crate::activity::JoinRequest;
+use crate::os_notify::NotificationTag;
 
 /// The requests this device notified about, by request (a new request of the same admin for the
 /// same channel is a new one). Stored per user, so a restart doesn't notify again.
@@ -75,8 +76,8 @@ fn tag_of(key: &str) -> Option<NotificationTag> {
 
 #[cfg(test)]
 mod tests {
-  use teamcraft_client_api::activity::JoinRequestStanding;
-  use teamcraft_client_api::model::id_from_raw;
+  use crate::activity::JoinRequestStanding;
+  use crate::model::id_from_raw;
 
   use super::*;
 

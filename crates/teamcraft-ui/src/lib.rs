@@ -44,7 +44,9 @@ pub mod hybrid;
 pub mod i18n;
 pub mod image_crop;
 pub mod integrations;
-pub mod join_request_alerts;
+/// Which admin join requests to notify about; shared with the mobile apps through
+/// teamcraft-client-api.
+pub use teamcraft_client_api::join_request_alerts;
 pub mod keys;
 pub mod large_files;
 pub mod last_place;

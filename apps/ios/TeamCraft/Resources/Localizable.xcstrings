@@ -8304,6 +8304,454 @@
           }
         }
       }
+    },
+    "join_requests_title": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Requests to join"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Beitrittsanfragen"
+          }
+        }
+      }
+    },
+    "join_request_summary %@ %@": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%1$@ asks to join %2$@ as a workspace admin"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%1$@ möchte %2$@ als Workspace-Admin beitreten"
+          }
+        }
+      }
+    },
+    "join_request_summary_here %@": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%@ asks to join as a workspace admin"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%@ möchte als Workspace-Admin beitreten"
+          }
+        }
+      }
+    },
+    "join_request_hint": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Approving lets them read what is posted from now on, as joining by themselves would. Everybody in the channel sees that a workspace admin joined."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Wenn du zustimmst, kann die Person lesen, was ab jetzt geschrieben wird, wie bei einem Beitritt aus eigener Kraft. Alle im Kanal sehen, dass ein Workspace-Admin beigetreten ist."
+          }
+        }
+      }
+    },
+    "join_request_not_admin": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "The signed roster on this device doesn’t list them as a workspace admin, so you can only decline."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Die signierte Rollenliste auf diesem Gerät führt die Person nicht als Workspace-Admin, du kannst nur ablehnen."
+          }
+        }
+      }
+    },
+    "join_request_approve": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Approve"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Zustimmen"
+          }
+        }
+      }
+    },
+    "join_request_decline": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Decline"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Ablehnen"
+          }
+        }
+      }
+    },
+    "join_request_gone": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "This request is no longer open: it was decided on another device or by another owner, withdrawn, or it expired."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Diese Anfrage ist nicht mehr offen: Sie wurde auf einem anderen Gerät oder von einem anderen Eigentümer entschieden, zurückgezogen oder ist abgelaufen."
+          }
+        }
+      }
+    },
+    "join_ask_not_admin": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "This device doesn’t have a current signed roster that lists you as a workspace admin yet. Try again in a moment."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Auf diesem Gerät gibt es noch keine aktuelle signierte Rollenliste, die dich als Workspace-Admin führt. Versuche es gleich noch einmal."
+          }
+        }
+      }
+    },
+    "join_request_failed": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Your decision didn’t go through. Try again, or open TeamCraft."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Deine Entscheidung ist nicht angekommen. Versuche es noch einmal oder öffne TeamCraft."
+          }
+        }
+      }
+    },
+    "join_request_note_title": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Request to join"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Beitrittsanfrage"
+          }
+        }
+      }
+    },
+    "browse_private": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Private channel"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Privater Kanal"
+          }
+        }
+      }
+    },
+    "browse_join_ask": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Ask to join"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Beitritt anfragen"
+          }
+        }
+      }
+    },
+    "browse_join_requested": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Requested"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Angefragt"
+          }
+        }
+      }
+    },
+    "browse_join_requested_hint": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "The channel’s owners decide. The request expires if nobody does."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Die Eigentümer des Kanals entscheiden. Die Anfrage läuft ab, wenn niemand entscheidet."
+          }
+        }
+      }
+    },
+    "browse_join_withdraw": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Withdraw"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Zurückziehen"
+          }
+        }
+      }
+    },
+    "browse_join_admin_elsewhere": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Join as admin on desktop or web"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Als Admin am Desktop oder im Web beitreten"
+          }
+        }
+      }
+    },
+    "event_admin_joined %@": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%@ joined this channel as a workspace admin"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%@ ist diesem Kanal als Workspace-Admin beigetreten"
+          }
+        }
+      }
+    },
+    "event_admin_joined_approved %@ %@": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%1$@ joined this channel as a workspace admin, approved by %2$@"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%1$@ ist diesem Kanal als Workspace-Admin beigetreten, zugelassen von %2$@"
+          }
+        }
+      }
+    },
+    "join_request_notification_title %@ %@": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%1$@ asks to join %2$@"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%1$@ möchte %2$@ beitreten"
+          }
+        }
+      }
+    },
+    "join_request_notification_title_unnamed %@": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%@ asks to join a channel"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%@ möchte einem Kanal beitreten"
+          }
+        }
+      }
+    },
+    "join_request_notification_text": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "As a workspace admin. Approve shares only what is posted from now on; to share the earlier history, approve in the app."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Als Workspace-Admin. Zustimmen teilt nur, was ab jetzt geschrieben wird; um den bisherigen Verlauf zu teilen, stimme in der App zu."
+          }
+        }
+      }
+    },
+    "join_request_notification_hidden_title": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Request to join"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Beitrittsanfrage"
+          }
+        }
+      }
+    },
+    "join_request_notification_hidden_text": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "A workspace admin asks to join a channel you own."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Ein Workspace-Admin möchte einem deiner Kanäle beitreten."
+          }
+        }
+      }
+    },
+    "join_request_hint_history": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Approving lets them read the earlier history too. Everybody in the channel sees that a workspace admin joined."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Wenn du zustimmst, kann die Person auch den bisherigen Verlauf lesen. Alle im Kanal sehen, dass ein Workspace-Admin beigetreten ist."
+          }
+        }
+      }
+    },
+    "join_request_share_history": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Also share the earlier history"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Auch den bisherigen Verlauf teilen"
+          }
+        }
+      }
+    },
+    "join_ask_too_soon": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "You asked to join this channel recently, and that request was declined or withdrawn. You can ask again once it would have expired."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Du hast kürzlich angefragt, diesem Kanal beizutreten, und die Anfrage wurde abgelehnt oder zurückgezogen. Du kannst erneut anfragen, sobald sie abgelaufen wäre."
+          }
+        }
+      }
+    },
+    "join_request_not_approvable": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "This device can’t approve this request: the signed policy no longer asks for an owner’s approval, or it isn’t a private channel you are in."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Dieses Gerät kann die Anfrage nicht annehmen: Die signierte Richtlinie verlangt keine Zustimmung eines Eigentümers mehr, oder es ist kein privater Kanal, in dem du bist."
+          }
+        }
+      }
     }
   },
   "version": "1.0"

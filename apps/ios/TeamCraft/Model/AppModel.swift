@@ -96,6 +96,13 @@ final class AppModel {
   private(set) var linkPrompts: [LinkPrompt] = []
   /// The request or scanned code this device is typing the confirmation for (see `LinkReview`).
   private(set) var maybeLinkReview: LinkReview?
+  /// Admins' requests to join channels the user owns, oldest first (issue #799); read on every
+  /// change (`AppModel+JoinRequests`).
+  var joinRequests: [JoinRequestItem] = []
+  /// Requests (`JoinRequests.key`) and channels (ID) whose action runs: their buttons wait.
+  var pendingJoinKeys: Set<String> = []
+  /// Why the last action on a request didn't go through; the screen showing it clears it.
+  var joinNote: JoinNote?
 
   let calls = CallManager()
   /// The server's brand for the confirmation and sign-in screens.
@@ -783,6 +790,7 @@ final class AppModel {
       Task { [weak self] in await self?.pushUpkeep() }
     }
     Task { [weak self] in await self?.refreshLinkRequests() }
+    Task { [weak self] in await self?.refreshJoinRequests() }
     guard maybeReconcile == nil else { return }
     maybeReconcile = Task { [weak self] in
       // Coalesces a burst of changes (a sync delivers many) into one pass.

@@ -112,10 +112,13 @@ enum WorkspaceEvent: Decodable, Equatable, Sendable {
   /// To the space named `space`; empty if the mover's device didn't know its name.
   case moved(by: String, space: String)
   case pinned(by: String)
+  /// A workspace admin joined the private channel (admin.md §2.4): by themselves, or let in by the
+  /// channel owner `maybeApprovedBy` who answered their request.
+  case adminJoined(user: String, maybeApprovedBy: String?)
   case unknown
 
   private enum CodingKeys: String, CodingKey {
-    case event, user, by, history, space
+    case event, user, by, history, space, approvedBy
   }
 
   init(from decoder: Decoder) throws {
@@ -131,6 +134,8 @@ enum WorkspaceEvent: Decodable, Equatable, Sendable {
     case "made_public": self = .madePublic(by: by)
     case "moved": self = .moved(by: by, space: text(.space) ?? "")
     case "pinned": self = .pinned(by: by)
+    case "admin_joined":
+      self = .adminJoined(user: text(.user) ?? "", maybeApprovedBy: text(.approvedBy).flatMap { $0.isEmpty ? nil : $0 })
     default: self = .unknown
     }
   }

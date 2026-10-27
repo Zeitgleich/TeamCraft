@@ -21,6 +21,7 @@ import androidx.compose.runtime.mutableStateMapOf
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.getAndUpdate
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.map
@@ -120,6 +121,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
   /** The last action that failed, as a message to show once. */
   val lastFailure: StateFlow<Int?> = failures
+
+  /** Admins' requests to join private channels: the owner's decisions and the admin's own (#799). */
+  val joinRequests = JoinRequestActions(graph.core, viewModelScope) { failures.value = it }
 
   @Volatile private var maybeBrandStore: BrandStore? = null
   private val brand = MutableStateFlow<LoginBrand?>(null)
@@ -438,9 +442,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
   suspend fun resolvePermalink(link: String): PermalinkTarget? =
     readChat { query(ChatQueries.resolvePermalink(link)).maybeTarget }
 
-  fun failureShown() {
-    failures.value = null
-  }
+  /** The failure to show, taken so that only one screen shows it; `null` when another took it. */
+  fun takeFailure(): Int? = failures.getAndUpdate { null }
 
   /** Runs a read; `null` when the core can't answer (not enrolled, gone). */
   suspend fun <T> readChat(block: suspend ChatClient.() -> T): T? =

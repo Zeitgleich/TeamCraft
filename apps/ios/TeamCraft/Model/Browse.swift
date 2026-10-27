@@ -92,6 +92,11 @@ struct BrowsableChannel: Decodable, Identifiable, Sendable {
   let topic: String?
   let isMember: Bool
   let isArchived: Bool?
+  /// How the user gets in (`open`, `as_admin`, `needs_approval`, `requested`); absent from older
+  /// cores, which listed public channels only.
+  let join: String?
 
   var id: String { conversation }
+  /// `nil` for a way in this version doesn't know: nothing to press.
+  var maybeJoin: BrowseJoin? { BrowseJoin(wire: join) }
 }

@@ -17,6 +17,9 @@ enum SystemLine: Equatable {
   case pinned(by: String)
   /// To the space `space`; empty if the mover's device didn't know its name.
   case moved(by: String, space: String)
+  /// A workspace admin joined the private channel: by themselves, or let in by the channel owner
+  /// `maybeApprovedBy` (admin.md §2.4).
+  case adminJoined(name: String, maybeApprovedBy: String?)
   /// A message without text or files of a kind this version doesn't know.
   case changed
 
@@ -53,6 +56,8 @@ enum SystemLine: Equatable {
     case .pinned(let by): return String(localized: "event_pinned \(by)")
     case .moved(let by, let space) where space.isEmpty: return String(localized: "event_moved_unnamed \(by)")
     case .moved(let by, let space): return String(localized: "event_moved \(by) \(space)")
+    case .adminJoined(let name, nil): return String(localized: "event_admin_joined \(name)")
+    case .adminJoined(let name, let by?): return String(localized: "event_admin_joined_approved \(name) \(by)")
     case .changed: return String(localized: "chat_preview_event")
     }
   }
@@ -77,6 +82,8 @@ enum SystemLine: Equatable {
     case .madePublic(let by): self = .madePublic(by: nameOf(by))
     case .moved(let by, let space): self = .moved(by: nameOf(by), space: space)
     case .pinned(let by): self = .pinned(by: nameOf(by))
+    case .adminJoined(let user, let maybeApprovedBy):
+      self = .adminJoined(name: nameOf(user), maybeApprovedBy: maybeApprovedBy.map(nameOf))
     case .unknown: return nil
     }
   }
