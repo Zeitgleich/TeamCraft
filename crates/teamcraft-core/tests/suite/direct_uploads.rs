@@ -45,7 +45,7 @@ async fn files_go_up_first_and_arrive_with_their_message() {
   ];
   let mut attachments = Vec::new();
   for upload in &mut uploads {
-    attachments.push(upload_whole(&mut alice, upload).await.unwrap());
+    attachments.push(upload_whole(&mut alice, upload).await);
   }
   assert_eq!(server.part_upload_count(), 2, "the large file went up in parts");
   assert!(
@@ -95,7 +95,7 @@ async fn a_picture_gets_its_thumbnail_and_size() {
   let (_server, mut alice, _bob, channel) = channel_with_two().await;
   let png = png(40, 20);
   let mut upload = direct(channel, bytes_source(&png), "graph.png", "image/png", png.len());
-  let attachment = upload_whole(&mut alice, &mut upload).await.unwrap();
+  let attachment = upload_whole(&mut alice, &mut upload).await;
   assert!(attachment.maybe_thumbnail.is_some());
   let dimensions = attachment.maybe_dimensions.unwrap();
   assert_eq!((dimensions.width, dimensions.height), (40, 20));
@@ -176,7 +176,7 @@ async fn nothing_is_completed_before_every_file_is_up_so_a_failure_leaves_nothin
     "video/mp4",
     large.len(),
   );
-  send_all(&mut alice, &mut first).await.unwrap();
+  assert!(send_all(&mut alice, &mut first).await);
   let mut step = alice.client.start_direct_upload(&mut second).await.unwrap();
   let sent = step.sent().await;
   alice
@@ -187,7 +187,7 @@ async fn nothing_is_completed_before_every_file_is_up_so_a_failure_leaves_nothin
 
   // The second file fails half way: both are given up, and the server keeps neither.
   server.refuse_blob_uploads(alice.client.user_id(), true);
-  assert!(send_all(&mut alice, &mut second).await.is_err());
+  assert!(!send_all(&mut alice, &mut second).await);
   alice.client.abandon_direct_upload(&first).await;
   alice.client.abandon_direct_upload(&second).await;
   assert_eq!(server.abandoned_attachments().len(), 2);
@@ -209,7 +209,7 @@ async fn a_host_that_makes_its_own_thumbnails_hands_them_in() {
     .unwrap();
   let png = png(40, 20);
   let mut plain = direct(channel, bytes_source(&png), "graph.png", "image/png", png.len());
-  let attachment = upload_whole(&mut alice, &mut plain).await.unwrap();
+  let attachment = upload_whole(&mut alice, &mut plain).await;
   assert!(attachment.maybe_thumbnail.is_none(), "the core decoded nothing");
   let dimensions = attachment.maybe_dimensions.unwrap();
   assert_eq!(
@@ -220,7 +220,7 @@ async fn a_host_that_makes_its_own_thumbnails_hands_them_in() {
 
   let mut handed = direct(channel, bytes_source(&png), "graph.png", "image/png", png.len())
     .with_picture(Some(b"preview".to_vec()), Some((40, 20)));
-  let attachment = upload_whole(&mut alice, &mut handed).await.unwrap();
+  let attachment = upload_whole(&mut alice, &mut handed).await;
   assert_eq!(
     attachment.maybe_thumbnail.unwrap(),
     Base64Bytes::new(b"preview".to_vec())
@@ -250,21 +250,23 @@ fn the_message_estimate_counts_text_files_and_their_thumbnails() {
 }
 
 /// Drives the upload's steps until the file is up, then completes it.
-async fn upload_whole(
-  peer: &mut Peer,
-  upload: &mut DirectUpload,
-) -> Result<AttachmentRef, DirectUploadError> {
-  send_all(peer, upload).await?;
-  peer.client.complete_direct_upload(upload).await
+async fn upload_whole(peer: &mut Peer, upload: &mut DirectUpload) -> AttachmentRef {
+  assert!(send_all(peer, upload).await, "every byte went up");
+  peer.client.complete_direct_upload(upload).await.unwrap()
 }
 
-/// Drives the upload's steps until every byte is up.
-async fn send_all(peer: &mut Peer, upload: &mut DirectUpload) -> Result<(), DirectUploadError> {
+/// Drives the upload's steps until every byte is up; `false` when a step failed. (No `Result`:
+/// the core's errors are too large for clippy to let a private helper return them.)
+async fn send_all(peer: &mut Peer, upload: &mut DirectUpload) -> bool {
   loop {
-    let mut step = peer.client.start_direct_upload(upload).await?;
+    let Ok(mut step) = peer.client.start_direct_upload(upload).await else {
+      return false;
+    };
     let sent = step.sent().await;
-    if peer.client.finish_direct_upload(upload, step, sent).await? == DirectUploadProgress::AllSent {
-      return Ok(());
+    match peer.client.finish_direct_upload(upload, step, sent).await {
+      Ok(DirectUploadProgress::AllSent) => return true,
+      Ok(DirectUploadProgress::MoreToSend) => {},
+      Err(_) => return false,
     }
   }
 }
