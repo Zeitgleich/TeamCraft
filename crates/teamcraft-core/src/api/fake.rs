@@ -188,8 +188,9 @@ struct State {
   relays: HashMap<String, Relay>,
   /// Open device link requests by relay ID (the server keeps them next to the relays).
   link_requests: HashMap<String, FakeLinkRequest>,
-  /// Open requests of admins to join a private channel, with when they were made (admin.md §2.4).
-  admin_join_requests: BTreeMap<(ConversationId, UserId), i64>,
+  /// Requests of admins to join a private channel (admin.md §2.4.1), kept after a decision like
+  /// the server keeps them until they expire.
+  admin_join_requests: BTreeMap<(ConversationId, UserId), FakeJoinRequest>,
   /// Relayed binary frames still to be lost on the way (a flaky connection during linking).
   relay_frames_to_lose: u32,
   /// Like the server: a repeated idempotency key returns the first space / channel.
@@ -742,6 +743,23 @@ impl FakeServer {
   /// The server's clock now (the system clock plus [`FakeServer::advance_clock`]).
   pub fn server_now_ms(&self) -> i64 {
     self.lock().now_ms()
+  }
+
+  /// A malicious server makes up a request of `user` to join `conversation`, whatever it is, shows
+  /// it to `recipients` (and tells them) and lets any of them "approve" it.
+  pub fn plant_admin_join_request(&self, conversation: ConversationId, user: UserId, recipients: &[UserId]) {
+    let mut state = self.lock();
+    let mut request = FakeJoinRequest::open(state.now_ms());
+    request.planted_for = recipients.iter().copied().collect();
+    state.admin_join_requests.insert((conversation, user), request);
+    state.publish(
+      recipients.iter().copied(),
+      &GatewayEvent::AdminJoinRequestUpdate {
+        conversation_id: conversation,
+        user_id: user,
+        change: AdminJoinRequestChange::Requested,
+      },
+    );
   }
 
   /// From now on `PUT /me/status` answers 403, as with custom statuses switched off.
@@ -1671,14 +1689,17 @@ impl ServerApi for FakeServerApi {
   async fn admin_join_requests(&self) -> Result<Vec<AdminJoinRequestResponse>, ApiError> {
     self.with(|state, me| {
       let mut requests = Vec::new();
-      for ((conversation, user), requested_at) in &state.admin_join_requests {
-        let entry = state.conversation(*conversation)?;
+      for ((conversation, user), request) in &state.admin_join_requests {
+        let Some(entry) = state.conversations.get(conversation) else {
+          continue;
+        };
         let is_owner = entry
           .members
           .get(&me)
           .is_some_and(|(role, _)| *role == ChannelRole::Admin);
-        if (*user == me || is_owner) && !entry.members.contains_key(user) {
-          requests.push(state.admin_join_response(*conversation, *user, *requested_at)?);
+        let is_shown = *user == me || is_owner || request.planted_for.contains(&me);
+        if request.state == FakeJoinState::Open && is_shown && !entry.members.contains_key(user) {
+          requests.push(state.admin_join_response(*conversation, *user, request.requested_at)?);
         }
       }
       Ok(requests)
@@ -1697,13 +1718,23 @@ impl ServerApi for FakeServerApi {
       if entry.response.visibility != ConversationVisibility::Private || entry.members.contains_key(&me) {
         return Err(ApiError::status(409, ErrorCode::Conflict, "nothing to ask for"));
       }
-      let now = state.now_ms();
       let key = (conversation, me);
-      let is_new = !state.admin_join_requests.contains_key(&key);
-      let requested_at = *state.admin_join_requests.entry(key).or_insert(now);
-      if is_new {
-        state.publish_admin_join(conversation, me, AdminJoinRequestChange::Requested);
+      match state.admin_join_requests.get(&key).map(|request| request.state) {
+        Some(FakeJoinState::Open) => {},
+        Some(FakeJoinState::Declined | FakeJoinState::Withdrawn) => {
+          return Err(ApiError::status(
+            409,
+            ErrorCode::AdminJoinRequestTooSoon,
+            "asked recently",
+          ));
+        },
+        Some(FakeJoinState::Approved) | None => {
+          let request = FakeJoinRequest::open(state.now_ms());
+          state.admin_join_requests.insert(key, request);
+          state.publish_admin_join(conversation, me, AdminJoinRequestChange::Requested);
+        },
       }
+      let requested_at = state.admin_join_requests[&key].requested_at;
       state.admin_join_response(conversation, me, requested_at)
     })
   }
@@ -1714,49 +1745,69 @@ impl ServerApi for FakeServerApi {
     user: UserId,
   ) -> Result<ConversationMemberResponse, ApiError> {
     self.with(|state, me| {
-      state.require_channel_owner(conversation, me)?;
-      let summary = state.user(user)?.clone();
-      if state.conversation(conversation)?.members.contains_key(&user) {
-        return Ok(ConversationMemberResponse {
-          user: summary,
-          role: ChannelRole::Member,
-        });
+      let key = (conversation, user);
+      let is_planted_for_me = state
+        .admin_join_requests
+        .get(&key)
+        .is_some_and(|request| request.planted_for.contains(&me));
+      // A planted request: the malicious server lets anybody "approve" it.
+      if !is_planted_for_me {
+        state.require_channel_owner(conversation, me)?;
       }
-      if state.admin_join_requests.remove(&(conversation, user)).is_none() {
-        return Err(ApiError::status(
-          404,
-          ErrorCode::AdminJoinRequestNotFound,
-          "no open request",
-        ));
+      let summary = state.user(user)?.clone();
+      let answer = ConversationMemberResponse {
+        user: summary.clone(),
+        role: ChannelRole::Member,
+      };
+      match state.admin_join_requests.get_mut(&key) {
+        Some(request) if request.state == FakeJoinState::Open => {
+          request.state = FakeJoinState::Approved;
+          request.maybe_decided_by = Some(me);
+        },
+        // This owner's retry: answered again, nothing changes.
+        Some(request) if request.state == FakeJoinState::Approved && request.maybe_decided_by == Some(me) => {
+          return Ok(answer);
+        },
+        _ => {
+          return Err(ApiError::status(
+            404,
+            ErrorCode::AdminJoinRequestNotFound,
+            "no open request",
+          ));
+        },
       }
       let floor = state.peek_id();
       let entry = state.conversation_mut(conversation)?;
-      entry.members.insert(user, (ChannelRole::Member, floor));
-      let members: Vec<UserId> = entry.members.keys().copied().collect();
-      state.publish(
-        members,
-        &GatewayEvent::MembershipAdd {
-          conversation_id: conversation,
-          user: summary.clone(),
-        },
-      );
+      if entry.members.insert(user, (ChannelRole::Member, floor)).is_none() {
+        let members: Vec<UserId> = entry.members.keys().copied().collect();
+        state.publish(
+          members,
+          &GatewayEvent::MembershipAdd {
+            conversation_id: conversation,
+            user: summary,
+          },
+        );
+      }
       state.publish_admin_join(conversation, user, AdminJoinRequestChange::Approved);
-      Ok(ConversationMemberResponse {
-        user: summary,
-        role: ChannelRole::Member,
-      })
+      Ok(answer)
     })
   }
 
   async fn close_admin_join(&self, conversation: ConversationId, user: UserId) -> Result<(), ApiError> {
     self.with(|state, me| {
-      let change = if user == me {
-        AdminJoinRequestChange::Withdrawn
+      let (closed, change) = if user == me {
+        (FakeJoinState::Withdrawn, AdminJoinRequestChange::Withdrawn)
       } else {
         state.require_channel_owner(conversation, me)?;
-        AdminJoinRequestChange::Declined
+        (FakeJoinState::Declined, AdminJoinRequestChange::Declined)
       };
-      if state.admin_join_requests.remove(&(conversation, user)).is_some() {
+      if let Some(request) = state
+        .admin_join_requests
+        .get_mut(&(conversation, user))
+        .filter(|request| request.state == FakeJoinState::Open)
+      {
+        request.state = closed;
+        request.maybe_decided_by = Some(me);
         state.publish_admin_join(conversation, user, change);
       }
       Ok(())
@@ -5071,6 +5122,35 @@ fn stored_key_package(
     bytes: bytes.clone(),
     expires_at_ms: now_ms.saturating_add(left_ms),
   })
+}
+
+/// An admin's request to join, as the fake server keeps it.
+#[derive(Clone, Debug)]
+struct FakeJoinRequest {
+  requested_at: i64,
+  state: FakeJoinState,
+  maybe_decided_by: Option<UserId>,
+  /// Made up by a "malicious" server for these users ([`FakeServer::plant_admin_join_request`]).
+  planted_for: HashSet<UserId>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum FakeJoinState {
+  Open,
+  Approved,
+  Declined,
+  Withdrawn,
+}
+
+impl FakeJoinRequest {
+  fn open(requested_at: i64) -> Self {
+    Self {
+      requested_at,
+      state: FakeJoinState::Open,
+      maybe_decided_by: None,
+      planted_for: HashSet::new(),
+    }
+  }
 }
 
 const PENDING_PREFIX: &str = "pending-";

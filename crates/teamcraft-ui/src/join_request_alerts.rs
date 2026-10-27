@@ -111,6 +111,7 @@ mod tests {
       conversation: id_from_raw(conversation),
       user: id_from_raw(user),
       user_name: "Admin A".into(),
+      maybe_username: None,
       requested_at,
       expires_at: requested_at + 1_000,
       standing: JoinRequestStanding::Approvable,

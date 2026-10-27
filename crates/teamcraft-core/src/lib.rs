@@ -67,4 +67,4 @@ pub use client::{
   LinkAnnouncement, LinkOffer, LinkRequestInfo, LinkRequestList, MAX_VIEWER_BYTES, OrgRecoveryUnlock,
   PendingEnrollment, SyncPhase, TypingState,
 };
-pub use error::{CoreError, UnreadableStore};
+pub use error::{CoreError, JoinRequestRefusal, UnreadableStore};

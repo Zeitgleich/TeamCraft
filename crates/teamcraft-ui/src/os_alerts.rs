@@ -245,11 +245,19 @@ fn join_request_notification(state: AppState, i18n: I18n, request: &JoinRequest)
     kind: OsNotificationKind::JoinRequest,
     title: i18n.t_with(
       "notify-join-request",
-      &[("name", &request.user_name), ("channel", &channel)],
+      &[("name", &named(request)), ("channel", &channel)],
     ),
     maybe_body: Some(i18n.t("notify-join-request-body")),
     actions,
     maybe_reply: None,
+  }
+}
+
+/// The admin's name with the username, so two people with one name differ.
+fn named(request: &JoinRequest) -> String {
+  match &request.maybe_username {
+    Some(username) => format!("{} (@{username})", request.user_name),
+    None => request.user_name.clone(),
   }
 }
 
@@ -267,7 +275,10 @@ fn on_join_request_action(state: AppState, conversation: &str, user: &str, actio
   });
   match (action, maybe_request) {
     (NotificationAction::Approve, Some(request)) if request.standing == JoinRequestStanding::Approvable => {
-      state.write(|backend| backend.approve_admin_join(conversation, user));
+      // One click shares no more than a self-join would: history from the join on.
+      state.write(|backend| {
+        backend.approve_admin_join(conversation, user, teamcraft_proto::HistoryPolicy::FromJoin)
+      });
     },
     (NotificationAction::Decline, Some(_)) => {
       state.write(|backend| backend.decline_admin_join(conversation, user));

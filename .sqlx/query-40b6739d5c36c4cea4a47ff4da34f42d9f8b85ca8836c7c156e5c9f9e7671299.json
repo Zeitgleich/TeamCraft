@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "DELETE FROM admin_join_requests RETURNING conversation_id, user_id",
+  "query": "DELETE FROM admin_join_requests\n         WHERE (conversation_id, user_id) IN (\n           SELECT conversation_id, user_id FROM admin_join_requests\n           WHERE expires_at <= now() ORDER BY expires_at LIMIT $1)\n         RETURNING conversation_id, user_id, state = 'open' AS \"was_open!\"",
   "describe": {
     "columns": [
       {
@@ -24,15 +24,24 @@
             "name": "user_id"
           }
         }
+      },
+      {
+        "ordinal": 2,
+        "name": "was_open!",
+        "type_info": "Bool",
+        "origin": "Expression"
       }
     ],
     "parameters": {
-      "Left": []
+      "Left": [
+        "Int8"
+      ]
     },
     "nullable": [
       false,
-      false
+      false,
+      null
     ]
   },
-  "hash": "b0b776bdc6f0e95ef4b6a0b30fa195a6c44ef204e0882fac67194a9300939de3"
+  "hash": "40b6739d5c36c4cea4a47ff4da34f42d9f8b85ca8836c7c156e5c9f9e7671299"
 }

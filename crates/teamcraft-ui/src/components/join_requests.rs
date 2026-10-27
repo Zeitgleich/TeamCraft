@@ -16,6 +16,7 @@ use crate::feedback::PendingAction;
 use crate::i18n::use_i18n;
 use crate::model::ConversationId;
 use crate::state::use_app_state;
+use teamcraft_proto::HistoryPolicy;
 
 /// The requests waiting for the user, above the activity entries; nothing when there are none.
 #[component]
@@ -65,8 +66,10 @@ pub fn ChannelJoinRequests(conversation: ConversationId) -> impl IntoView {
   }
 }
 
-/// Who asks, where and when, what approving means, and the two decisions. A request that only the
-/// server calls an admin's can only be declined.
+/// Who asks (with the username, so two people with one name differ), where and when, what approving
+/// shares, and the two decisions. Approving shares what a self-join gets, the history from now on;
+/// the earlier history only when the owner ticks it. A request that only the server calls an
+/// admin's can only be declined.
 #[component]
 fn JoinRequestRow(request: JoinRequest, names_channel: bool) -> impl IntoView {
   let state = use_app_state();
@@ -74,10 +77,14 @@ fn JoinRequestRow(request: JoinRequest, names_channel: bool) -> impl IntoView {
   let locale = i18n.locale().tag();
   let (conversation, user) = (request.conversation, request.user);
   let maybe_user = state.read(|backend| backend.user(user));
-  let name = maybe_user
+  let display_name = maybe_user
     .as_ref()
     .map(|known| known.display_name.clone())
     .unwrap_or_else(|| request.user_name.clone());
+  let name = match &request.maybe_username {
+    Some(username) => format!("{display_name} (@{username})"),
+    None => display_name,
+  };
   let channel = state
     .read(|backend| backend.conversation(conversation))
     .map(|info| format!("#{}", info.name))
@@ -95,6 +102,14 @@ fn JoinRequestRow(request: JoinRequest, names_channel: bool) -> impl IntoView {
   let approving = PendingAction::new();
   let declining = PendingAction::new();
   let is_busy = Signal::derive(move || approving.is_pending() || declining.is_pending());
+  let shares_history = RwSignal::new(false);
+  let history = move || {
+    if shares_history.get_untracked() {
+      HistoryPolicy::Full
+    } else {
+      HistoryPolicy::FromJoin
+    }
+  };
 
   view! {
     <li class="join-request">
@@ -108,15 +123,33 @@ fn JoinRequestRow(request: JoinRequest, names_channel: bool) -> impl IntoView {
         <span class="join-request-summary" translate="no">{summary}</span>
         <time class="join-request-time" title=absolute>{relative}</time>
         <p class="join-request-hint">
-          {move || if is_approvable { i18n.t("join-request-hint") } else { i18n.t("join-request-not-admin") }}
+          {move || match (is_approvable, shares_history.get()) {
+            (false, _) => i18n.t("join-request-not-admin"),
+            (true, false) => i18n.t("join-request-hint"),
+            (true, true) => i18n.t("join-request-hint-history"),
+          }}
         </p>
+        {is_approvable.then(|| view! {
+          <label class="check-row join-request-history">
+            <input
+              type="checkbox"
+              prop:checked=move || shares_history.get()
+              prop:disabled=move || is_busy.get()
+              on:change=move |ev| shares_history.set(event_target_checked(&ev))
+            />
+            <span>{move || i18n.t("join-request-share-history")}</span>
+          </label>
+        })}
         <div class="join-request-actions">
           {is_approvable.then(|| view! {
             <PendingButton
               pending=approving
               class="btn btn-small btn-primary"
               is_disabled=is_busy
-              on_click=move |_| approving.run(|| state.write(|backend| backend.approve_admin_join(conversation, user)))
+              on_click=move |_| {
+                let history = history();
+                approving.run(|| state.write(|backend| backend.approve_admin_join(conversation, user, history)));
+              }
             >
               {move || i18n.t("join-request-approve")}
             </PendingButton>

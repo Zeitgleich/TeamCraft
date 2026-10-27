@@ -116,6 +116,10 @@ pub enum CoreError {
   NotAnOwner,
   #[error("user {0} isn't an admin in the signed roster")]
   NotAnAdmin(UserId),
+  /// An admin's request to join can't be approved on this device (admin.md §2.4.1): this device's
+  /// own state disagrees with the server's request. The message starts with a stable code.
+  #[error("join_request_not_approvable: {0}")]
+  JoinRequestNotApprovable(JoinRequestRefusal),
   #[error("user {0} has no identity key yet (never enrolled)")]
   UnknownIdentity(UserId),
   /// The signed roster holds this user with an identity key this device can't use, and the new
@@ -177,6 +181,17 @@ pub enum UnreadableStore {
   Damaged,
   /// A newer version of the app changed its layout.
   NewerVersion,
+}
+
+/// Why this device doesn't approve an admin's request to join (admin.md §2.4.1).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
+pub enum JoinRequestRefusal {
+  /// The verified policy doesn't ask for an owner's approval (any more).
+  #[error("the verified policy doesn't ask for an owner's approval")]
+  PolicyWithoutApproval,
+  /// Not a private, unarchived channel this device knows: a DM, a meeting chat, or unknown.
+  #[error("only requests to join a private channel are approved")]
+  NotAPrivateChannel,
 }
 
 impl CoreError {

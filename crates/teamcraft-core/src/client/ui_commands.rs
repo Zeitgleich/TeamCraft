@@ -208,9 +208,11 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       CoreCommand::JoinChannel { conversation } => self.join_channel(conversation).await,
       CoreCommand::RequestAdminJoin { conversation } => self.request_admin_join(conversation).await,
       CoreCommand::WithdrawAdminJoin { conversation } => self.withdraw_admin_join(conversation).await,
-      CoreCommand::ApproveAdminJoin { conversation, user } => {
-        self.approve_admin_join(conversation, user).await
-      },
+      CoreCommand::ApproveAdminJoin {
+        conversation,
+        user,
+        history,
+      } => self.approve_admin_join_sharing(conversation, user, history).await,
       CoreCommand::DeclineAdminJoin { conversation, user } => {
         self.decline_admin_join(conversation, user).await
       },

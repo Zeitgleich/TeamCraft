@@ -178,8 +178,9 @@ signature (freshness above).
 
 ### 2.4 Admins joining private channels
 
-An admin could add *themselves* to a private channel and then, with full history policy, read its
-history. That is allowed, but never silent:
+An admin could add *themselves* to a private channel and read what is posted there from then on. A
+self-join asks only for the history from the join on: members' apps refuse a signed self-add that
+asks for more, whatever the workspace default (e2ee.md §4.7). That is allowed, but never silent:
 
 - Per instance setting `admin_self_join` for private channels:
   - `visible` (default) – allowed; members see the same system message as for any added member
@@ -207,36 +208,57 @@ admin in is an owner's own membership change.
   admin, under its copy of the policy, for an open private channel the admin isn't in, in a space
   they belong to, that has an owner. There is one open request per admin and channel: asking again
   answers with the open one and tells nobody again. The admin sees "Requested" with "Withdraw".
-- **Who decides.** The channel's owners (members with the channel role `admin`). The server tells
+  After a decline or a withdrawal the admin can ask again only once that request would have
+  expired (`admin_join_request_too_soon`), so asking and withdrawing can't notify the owners over
+  and over.
+- **Who decides.** The channel's owners: members with the channel role `admin`. That role is the
+  server's record until channel roles are signed (issue #380), so the server decides who is asked
+  and who may approve; what an approval can do is limited by the checks below. The server tells
   them (gateway `admin_join_request_update`) and their apps show the request at the top of
   Activity, in the channel settings above the member list and as a system notification, each with
-  Approve and Decline. The badge counts it until it is decided.
-- **Approving** is the owner's app adding the admin: the server membership
-  (`POST …/admin-join-requests/{user}/approve`, only while the request is open), then the owner's
-  own MLS add with the history the signed policy shares by default, then the encrypted
-  `AdminJoined` message with "approved by", shown to everybody whatever their join/leave setting.
-  Members' apps check the add like any addition by a member. Declining
-  (`DELETE …/admin-join-requests/{user}`) closes the request; the admin can ask again.
-- **The server's word is a hint.** The owner's app offers Approve only for somebody the fresh
-  verified roster lists as an admin, and only while the verified policy says `owner_approval`;
-  for anybody else it says so and offers Decline only. A request the server makes up can at most
-  ask an owner to let a real admin of the signed roster in, whose devices are certified by their
-  pinned identity key.
+  Approve and Decline and the admin's name with their username. The badge counts it until it is
+  decided.
+- **Approving** is the owner's app adding the admin. The server approves the request and adds the
+  membership in one transaction (`POST …/admin-join-requests/{user}/approve`, only while the
+  request is open and the person who asked is still an instance admin, by their last sign-in), so
+  of several owners or devices exactly one approves and a decline or an expiry at the same moment
+  wins completely or not at all; only the approving owner's retry is answered again, everybody
+  else gets `admin_join_request_not_found`. Then the owner's own MLS add and the encrypted
+  `AdminJoined` message with "approved by", shown to everybody whatever their join/leave setting,
+  sent only when this commit put the admin's devices in (a second approval announces nothing).
+  Members' apps check the add like any addition by a member.
+- **History.** Approving shares what a self-join gets, the history from the join on (e2ee.md
+  §4.7). The earlier history only when the owner ticks "Also share the earlier history" in
+  Activity or the channel settings; Approve in a notification never shares it, and its text says
+  so.
+- **Declining** (`DELETE …/admin-join-requests/{user}`) closes the request; the admin can ask again
+  once it would have expired.
+- **The server's word is a hint.** The owner's app shows and approves a request only if its own
+  state agrees: the verified policy says `owner_approval`, the conversation is a private,
+  unarchived channel the owner is in (a request for a DM, a meeting chat or an unknown
+  conversation is neither shown nor approved) and the owner's device is in its group. Approve is
+  offered only for somebody the fresh verified roster lists as an admin; for anybody else the app
+  says so and offers Decline only. A request the server makes up can at most ask an owner to let a
+  real admin of the signed roster into one of the owner's private channels, with the history from
+  the join on, and the admin's devices are certified by their pinned identity key.
 - **Expiry.** A request expires after `admin_join_request_days` (instance setting, §6.3, default 7
-  days, 1 to 90); the account housekeeping closes it and tells owners and admin. A new policy
-  without `owner_approval` closes every open request (admins join by themselves now, or not at
-  all). Requests whose channel was archived, made public or deleted, whose admin was deactivated,
-  deleted or left the space, or who is in the channel already are never listed; adding the admin any other way
-  settles their request.
+  days, 1 to 90, also when the configuration file says otherwise); the account housekeeping
+  deletes it and tells owners and admin. A new policy without `owner_approval` deletes every
+  request (admins join by themselves now, or not at all). Requests whose channel was archived,
+  made public or deleted, whose admin was deactivated, deleted, left the space or lost the admin
+  role, or who is in the channel already are never listed; adding the admin any other way settles
+  their request.
 - **Offline, several devices, restarts.** Requests live in the database, so a server restart loses
   none. Apps read the list again after every gateway connection while the verified policy asks
   for approval (otherwise they make no request), and on every `admin_join_request_update`; an
-  owner who was away sees waiting requests when they come back. The first device or owner to
-  decide wins; the others' lists update, and a late Approve gets `admin_join_request_not_found`
-  ("decided elsewhere, withdrawn or expired") instead of adding anybody. Every decision is in the
-  audit log (`admin_join_requested`, `…_approved`, `…_declined`, `…_withdrawn`).
+  owner who was away sees waiting requests when they come back. Telling people and the audit log
+  follow the stored decision as best effort: a failure there is logged and never undoes or
+  strands it. Every step is in the audit log (`admin_join_requested`, `…_approved`, `…_declined`,
+  `…_withdrawn`, `…_expired` with the reason, also for a policy change).
 - **Not yet:** the phone apps show neither the requests nor Approve and Decline, and no push wakes
-  an owner's phone for a request; owners decide on the desktop or the web.
+  an owner's phone for a request; owners decide on the desktop or the web. The `AdminJoined`
+  message is the approving owner's application message, not checked against the commit (as for
+  self-joins).
 
 ### 2.5 Orphaned channels
 

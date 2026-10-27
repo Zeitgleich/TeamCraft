@@ -1452,8 +1452,17 @@ impl ChatBackend for RemoteChat {
     self.act(ChatAction::WithdrawAdminJoin { conversation });
   }
 
-  fn approve_admin_join(&self, conversation: ConversationId, user: UserId) {
-    self.act(ChatAction::ApproveAdminJoin { conversation, user });
+  fn approve_admin_join(
+    &self,
+    conversation: ConversationId,
+    user: UserId,
+    history: teamcraft_proto::HistoryPolicy,
+  ) {
+    self.act(ChatAction::ApproveAdminJoin {
+      conversation,
+      user,
+      history,
+    });
   }
 
   fn decline_admin_join(&self, conversation: ConversationId, user: UserId) {

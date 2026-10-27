@@ -594,11 +594,70 @@ async fn admin_self_join_follows_the_signed_policy() {
   }
 }
 
+/// #775: under `visible` with the default policy (full history for roster members) an admin's
+/// self-join signed full history, which every committer refuses (a self-add may only ask for the
+/// history from the join on, e2ee.md §4.7): the admin stayed out for good.
+#[tokio::test]
+async fn an_admin_joins_by_themselves_under_the_default_full_history() {
+  let server = FakeServer::new();
+  let mut alice = Peer::enroll(&server, "Alice").await;
+  let mut bob = Peer::enroll(&server, "Bob").await;
+  let mut carol = Peer::enroll(&server, "Carol").await;
+  let (alice_id, bob_id) = (alice.client.user_id(), bob.client.user_id());
+  alice
+    .client
+    .publish_roster(&[(alice_id, RosterRole::Owner), (bob_id, RosterRole::Admin)])
+    .await
+    .unwrap();
+  alice
+    .client
+    .publish_policy(WorkspacePolicy {
+      admin_self_join: AdminSelfJoin::Visible,
+      history_default: HistoryPolicy::Full,
+      ..WorkspacePolicy::default()
+    })
+    .await
+    .unwrap();
+  server.set_admin(bob_id);
+  settle(&mut [&mut alice, &mut bob, &mut carol]).await;
+  let channel = carol
+    .client
+    .create_channel(carol.space().await, "private")
+    .await
+    .unwrap();
+  carol
+    .client
+    .send_text(channel, None, "before the admin came")
+    .await
+    .unwrap();
+  settle(&mut [&mut alice, &mut bob, &mut carol]).await;
+
+  bob.client.admin_add_member(channel, bob_id).await.unwrap();
+  settle(&mut [&mut alice, &mut bob, &mut carol]).await;
+  assert!(
+    bob.client.has_group(channel).unwrap(),
+    "the self-join went through"
+  );
+  carol
+    .client
+    .send_text(channel, None, "after the admin came")
+    .await
+    .unwrap();
+  settle(&mut [&mut alice, &mut bob, &mut carol]).await;
+  bob.client.load_older_messages(channel).await.unwrap();
+  assert_eq!(
+    bob.texts(channel),
+    vec!["after the admin came"],
+    "a self-join reads from the join on"
+  );
+}
+
 /// Issue #776 (admin.md §2.4): under `owner_approval` the admin asks, a channel owner's client
 /// adds them with its own commit and tells everybody; the server's request is only a hint.
 mod owner_approval {
   use teamcraft_core::read_state;
   use teamcraft_core::store::{ConversationEvent, MessageContent, MessageFilter};
+  use teamcraft_core::{CoreError, JoinRequestRefusal};
 
   use super::*;
 
@@ -618,6 +677,15 @@ mod owner_approval {
       read_state::admin_join_requests(&alice.store).unwrap().is_empty(),
       "not her channel"
     );
+    #[cfg(feature = "ui")]
+    {
+      let shown = shown(&carol);
+      assert_eq!(shown.len(), 1, "the owner's app offers it");
+      assert_eq!(
+        shown[0].standing,
+        teamcraft_client_api::activity::JoinRequestStanding::Approvable
+      );
+    }
 
     carol.client.approve_admin_join(channel, bob_id).await.unwrap();
     settle(&mut [&mut alice, &mut bob, &mut carol]).await;
@@ -647,6 +715,120 @@ mod owner_approval {
       );
     }
     drop(server);
+  }
+
+  /// Review M2: an approval that went through already (a retry, another device) neither adds the
+  /// admin again nor announces the join twice, and a decline afterwards changes nothing.
+  #[tokio::test]
+  async fn a_second_approval_neither_adds_nor_announces_again() {
+    let (_server, mut alice, mut bob, mut carol, channel) = setup().await;
+    let bob_id = bob.client.user_id();
+    bob.client.request_admin_join(channel).await.unwrap();
+    settle(&mut [&mut alice, &mut bob, &mut carol]).await;
+
+    carol.client.approve_admin_join(channel, bob_id).await.unwrap();
+    settle(&mut [&mut alice, &mut bob, &mut carol]).await;
+    // The answer of the first one was lost: the owner approves again.
+    carol.client.approve_admin_join(channel, bob_id).await.unwrap();
+    carol.client.decline_admin_join(channel, bob_id).await.unwrap();
+    settle(&mut [&mut alice, &mut bob, &mut carol]).await;
+    assert!(bob.client.has_group(channel).unwrap(), "the approval stands");
+    for peer in [&carol, &bob] {
+      assert_eq!(admin_joins(peer, channel), 1, "{}", peer.name);
+    }
+  }
+
+  /// Review L4: approving shares what a self-join would get, the history from the join on, unless
+  /// the owner explicitly shares the earlier history.
+  #[tokio::test]
+  async fn approving_shares_the_earlier_history_only_when_the_owner_chooses() {
+    let (server, mut alice, mut bob, mut carol, channel) = setup_with(HistoryPolicy::Full).await;
+    let bob_id = bob.client.user_id();
+    carol.client.send_text(channel, None, "before").await.unwrap();
+    bob.client.request_admin_join(channel).await.unwrap();
+    settle(&mut [&mut alice, &mut bob, &mut carol]).await;
+    carol.client.approve_admin_join(channel, bob_id).await.unwrap();
+    settle(&mut [&mut alice, &mut bob, &mut carol]).await;
+    bob.client.load_older_messages(channel).await.unwrap();
+    assert!(bob.texts(channel).is_empty(), "nothing from before the join");
+
+    let other = carol
+      .client
+      .create_channel(carol.space().await, "other")
+      .await
+      .unwrap();
+    carol.client.send_text(other, None, "earlier").await.unwrap();
+    bob.client.request_admin_join(other).await.unwrap();
+    settle(&mut [&mut alice, &mut bob, &mut carol]).await;
+    carol
+      .client
+      .approve_admin_join_sharing(other, bob_id, HistoryPolicy::Full)
+      .await
+      .unwrap();
+    settle(&mut [&mut alice, &mut bob, &mut carol]).await;
+    bob.client.load_older_messages(other).await.unwrap();
+    assert_eq!(bob.texts(other), vec!["earlier"], "the owner chose to share it");
+    drop(server);
+  }
+
+  /// Review M1: a request the server makes up for a DM is not shown, and approving it anyway adds
+  /// nobody.
+  #[tokio::test]
+  async fn a_made_up_request_for_a_dm_is_neither_shown_nor_approved() {
+    let (server, mut alice, mut bob, mut carol, _channel) = setup().await;
+    let (alice_id, bob_id) = (alice.client.user_id(), bob.client.user_id());
+    let dm = carol.client.open_dm(alice_id).await.unwrap();
+    settle(&mut [&mut alice, &mut bob, &mut carol]).await;
+
+    server.plant_admin_join_request(dm, bob_id, &[alice_id]);
+    settle(&mut [&mut alice, &mut bob, &mut carol]).await;
+    assert_eq!(
+      read_state::admin_join_requests(&alice.store).unwrap().len(),
+      1,
+      "the server's list has it"
+    );
+    #[cfg(feature = "ui")]
+    assert!(shown(&alice).is_empty(), "the app doesn't show it");
+    let refused = alice.client.approve_admin_join(dm, bob_id).await;
+    assert!(
+      matches!(
+        refused,
+        Err(CoreError::JoinRequestNotApprovable(
+          JoinRequestRefusal::NotAPrivateChannel
+        ))
+      ),
+      "{refused:?}"
+    );
+    settle(&mut [&mut alice, &mut bob, &mut carol]).await;
+    assert!(!bob.client.has_group(dm).unwrap());
+  }
+
+  /// Review L1: the owner's app approves only while the policy it verified asks for approval.
+  #[tokio::test]
+  async fn approving_needs_the_verified_policy_to_ask_for_it() {
+    let (_server, mut alice, mut bob, mut carol, channel) = setup().await;
+    let bob_id = bob.client.user_id();
+    bob.client.request_admin_join(channel).await.unwrap();
+    alice
+      .client
+      .publish_policy(policy(AdminSelfJoin::Disabled))
+      .await
+      .unwrap();
+    settle(&mut [&mut alice, &mut bob, &mut carol]).await;
+    let refused = carol.client.approve_admin_join(channel, bob_id).await;
+    assert!(
+      matches!(
+        refused,
+        Err(CoreError::JoinRequestNotApprovable(
+          JoinRequestRefusal::PolicyWithoutApproval
+        ))
+      ),
+      "{refused:?}"
+    );
+    #[cfg(feature = "ui")]
+    assert!(shown(&carol).is_empty());
+    settle(&mut [&mut alice, &mut bob, &mut carol]).await;
+    assert!(!bob.client.has_group(channel).unwrap());
   }
 
   #[tokio::test]
@@ -703,9 +885,40 @@ mod owner_approval {
     assert!(!bob.client.has_group(channel).unwrap());
   }
 
+  /// The requests `peer`'s app shows to decide on.
+  #[cfg(feature = "ui")]
+  fn shown(peer: &Peer) -> Vec<teamcraft_client_api::activity::JoinRequest> {
+    use teamcraft_client_api::backend::ChatBackend;
+    common::backend_of(peer).join_requests()
+  }
+
+  /// How often the visible "joined as a workspace admin" message is in `peer`'s copy of `channel`.
+  fn admin_joins(peer: &Peer, channel: teamcraft_proto::ConversationId) -> usize {
+    peer
+      .store
+      .messages(channel, MessageFilter::TopLevel)
+      .unwrap()
+      .into_iter()
+      .filter(|message| {
+        matches!(
+          &message.content,
+          MessageContent::Event {
+            event: ConversationEvent::AdminJoined { .. }
+          }
+        )
+      })
+      .count()
+  }
+
   /// Alice owns the workspace, Bob is a signed admin, Carol founds (owns) a private channel; the
   /// policy asks for an owner's approval.
   async fn setup() -> (FakeServer, Peer, Peer, Peer, teamcraft_proto::ConversationId) {
+    setup_with(HistoryPolicy::FromJoin).await
+  }
+
+  async fn setup_with(
+    history_default: HistoryPolicy,
+  ) -> (FakeServer, Peer, Peer, Peer, teamcraft_proto::ConversationId) {
     let server = FakeServer::new();
     let mut alice = Peer::enroll(&server, "Alice").await;
     let mut bob = Peer::enroll(&server, "Bob").await;
@@ -718,7 +931,10 @@ mod owner_approval {
       .unwrap();
     alice
       .client
-      .publish_policy(policy(AdminSelfJoin::OwnerApproval))
+      .publish_policy(WorkspacePolicy {
+        history_default,
+        ..policy(AdminSelfJoin::OwnerApproval)
+      })
       .await
       .unwrap();
     server.set_admin(bob_id);
