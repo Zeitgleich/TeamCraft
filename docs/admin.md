@@ -255,10 +255,21 @@ admin in is an owner's own membership change.
   follow the stored decision as best effort: a failure there is logged and never undoes or
   strands it. Every step is in the audit log (`admin_join_requested`, `…_approved`, `…_declined`,
   `…_withdrawn`, `…_expired` with the reason, also for a policy change).
-- **Not yet:** the phone apps show neither the requests nor Approve and Decline, and no push wakes
-  an owner's phone for a request; owners decide on the desktop or the web. The `AdminJoined`
-  message is the approving owner's application message, not checked against the commit (as for
-  self-joins).
+- **On the phones** (issue #799) owners see the requests at the top of Activity (Android; on iOS
+  above the channels of the Spaces list, whose tab counts them) and above the messages of the
+  channel itself, with the admin's name and username and the same rules: Approve only for an admin
+  of the fresh verified roster (otherwise Decline only, with the reason), the history from the join
+  on unless the owner ticks "Also share the earlier history". While the app runs, a new request
+  shows a notification with Approve and Decline (Decline only for somebody the roster doesn't
+  list; neither names nor actions behind the app lock or while notifications show nothing), once
+  per request and device and withdrawn when the request is gone; its Approve never shares the
+  earlier history, and its text says so. A decision from the notification that doesn't go through
+  shows the notification again with why. Admins ask, see "Requested" and withdraw in the channel
+  browser; joining without asking (`visible`) stays on desktop and web.
+- **Not yet:** no push wakes an owner's phone for a request (wake-ups name messages and calls
+  only; a request kind is a follow-up); a phone that was closed sees the waiting requests when it
+  connects again. The `AdminJoined` message is the approving owner's application message, not
+  checked against the commit (as for self-joins).
 
 ### 2.5 Orphaned channels
 
