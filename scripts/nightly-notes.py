@@ -7,7 +7,8 @@ The pull requests squash-merged since the tag (subject ends in "(#N)") are looke
 Every pull request becomes a bullet with its title, except those labelled `skip-release-notes` and
 Dependabot's; `security` and `breaking` ones come first and `breaking` ones are repeated under
 "### Breaking" (which operators must act on). At most MAX_BULLETS are listed, the rest is counted.
-Commits without a pull request (no "(#N)") are not listed. The grouped full list is GitHub's
+A "(#N)" at the end of a line of a commit message counts, so a squashed integration branch lists
+its pull requests. Commits without one are not listed. The grouped full list is GitHub's
 generated "What's changed" in the release notes.
 """
 import argparse
@@ -17,7 +18,7 @@ import subprocess
 import sys
 
 MAX_BULLETS = 15
-PR_NUMBER = re.compile(r"\(#(\d+)\)\s*$")
+PR_NUMBER = re.compile(r"\(#(\d+)\)\s*$", re.M)
 TRAILING_NUMBER = re.compile(r"\s*\(#\d+\)\s*$")  # the title may already end in its number
 MAINTENANCE = "- Fixes and improvements; see *What's changed* below."
 
@@ -28,8 +29,10 @@ def main() -> int:
     parser.add_argument("--until", default="HEAD")
     args = parser.parse_args()
 
-    subjects = run(["git", "log", "--format=%s", f"{args.since}..{args.until}"]).splitlines()
-    numbers = [m.group(1) for s in subjects if (m := PR_NUMBER.search(s))]
+    # Subjects and bodies: a squash commit that collects several pull requests (an integration
+    # branch) lists them in its body, one "(#N)" per line.
+    messages = run(["git", "log", "--format=%B", f"{args.since}..{args.until}"])
+    numbers = PR_NUMBER.findall(messages)
 
     entries: list[tuple[int, str]] = []  # (sort rank, bullet)
     breaking: list[str] = []
