@@ -348,6 +348,12 @@ flag. Reactions are encrypted messages, so not even reaction counts are visible.
 
 Encrypted: text, attachments, attachment names, reactions, edits, polls, link previews, drafts.
 
+Typing indicators are plaintext metadata too: a `typing` gateway frame tells the server that a user
+types in a conversation (never what), and it forwards that to the other members (gateway.md). Clients
+send at most one every 3 s while there is text in the composer, and none when the user turned "Show
+when I'm typing" off (a preference of each device, on by default). Nothing about typing is stored, on
+the server or the clients.
+
 Directory data, not encrypted: the server has to show and route by it, so it holds it in plain text
 like the identity provider does. Space names, descriptions, colors and **pictures**; channel names,
 topics and **pictures**; people's profiles and avatars. A space or channel picture is uploaded to the

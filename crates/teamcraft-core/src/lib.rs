@@ -36,6 +36,7 @@ pub mod store;
 pub mod svg_thumbnail;
 pub mod thumbnail;
 pub mod transfers;
+pub mod typing;
 #[cfg(feature = "ui")]
 mod ui_actions;
 #[cfg(feature = "ui")]
@@ -66,6 +67,7 @@ pub use client::{
   AttestationSettings, CallEventSink, CallKeySigner, CallPreparation, Client, ClientSettings,
   EnrollmentOptions, EnrollmentSecret, FlushReport, GatewayOutcome, GroupAccess, HistoryScan, JwksSource,
   LinkAnnouncement, LinkOffer, LinkRequestInfo, LinkRequestList, MAX_VIEWER_BYTES, OrgRecoveryUnlock,
-  PendingEnrollment, SyncPhase, TypingState,
+  PendingEnrollment, SyncPhase,
 };
 pub use error::{CoreError, JoinRequestRefusal, UnreadableStore};
+pub use typing::TypingState;
