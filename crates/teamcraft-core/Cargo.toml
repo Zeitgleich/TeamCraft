@@ -26,6 +26,8 @@ ui = ["dep:teamcraft-client-api"]
 service-worker = []
 # Tests against the running dev stack (README.md): server on 8081, Keycloak on 8080.
 integration = []
+# Test kits for other crates' tests (`api::black_hole`: Happy Eyeballs with a black-holed IPv6).
+test-support = []
 
 [dependencies]
 teamcraft-proto.workspace = true

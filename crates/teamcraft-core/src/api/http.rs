@@ -1281,7 +1281,7 @@ fn gateway_base(gateway_url: &str) -> Result<String, ApiError> {
 }
 
 /// `None` if `base_url` may carry tokens: `https://`, or `http://` to a loopback address.
-fn insecure_reason(base_url: &str) -> Option<String> {
+pub(super) fn insecure_reason(base_url: &str) -> Option<String> {
   let Ok(url) = url::Url::parse(base_url) else {
     return Some(format!("{base_url:?} is not a URL"));
   };
@@ -1657,7 +1657,7 @@ fn http_client() -> reqwest::Client {
 /// reqwest races IPv6 and IPv4 itself (hyper-util's Happy Eyeballs, 300 ms; issue #420), with the
 /// connect timeout split across a family's addresses.
 #[cfg(not(target_arch = "wasm32"))]
-fn http_client_builder() -> reqwest::ClientBuilder {
+pub(super) fn http_client_builder() -> reqwest::ClientBuilder {
   let builder = reqwest::Client::builder()
     .connect_timeout(CONNECT_TIMEOUT)
     .tcp_keepalive(KEEPALIVE_INTERVAL)
@@ -1681,7 +1681,7 @@ fn http_client_builder() -> reqwest::ClientBuilder {
 /// Redirects are followed up to [`MAX_REDIRECTS`] hops, but never from `https` down to `http`: a
 /// presigned URL or a token-bearing request must not leave TLS because a server said so.
 #[cfg(not(target_arch = "wasm32"))]
-fn follow_redirect(attempt: reqwest::redirect::Attempt<'_>) -> reqwest::redirect::Action {
+pub(super) fn follow_redirect(attempt: reqwest::redirect::Attempt<'_>) -> reqwest::redirect::Action {
   if attempt.previous().len() >= MAX_REDIRECTS {
     return attempt.stop();
   }
@@ -1852,7 +1852,7 @@ fn network_error(error: reqwest::Error) -> ApiError {
 
 /// The error and its causes, so the details name the actual reason ("certificate expired") and not
 /// only reqwest's "error sending request".
-fn error_chain(error: &(dyn std::error::Error + 'static)) -> String {
+pub(super) fn error_chain(error: &(dyn std::error::Error + 'static)) -> String {
   let mut text = error.to_string();
   let mut maybe_source = error.source();
   while let Some(source) = maybe_source {
@@ -2044,6 +2044,8 @@ mod tests {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     use super::*;
+    use crate::api::connect::black_hole::{BlackHole, FixedResolver};
+    use crate::api::tls::untrusted_tls_server;
 
     /// A mandatory company proxy: the gateway goes through `CONNECT` to the server.
     #[tokio::test]
@@ -2192,29 +2194,6 @@ mod tests {
       );
     }
 
-    /// Serves TLS on localhost with a fresh self-signed certificate and answers nothing useful.
-    async fn untrusted_tls_server() -> String {
-      let certified = rcgen::generate_simple_self_signed(vec!["localhost".to_owned()]).unwrap();
-      let key = rustls::pki_types::PrivateKeyDer::Pkcs8(certified.signing_key.serialize_der().into());
-      let provider = Arc::new(rustls::crypto::aws_lc_rs::default_provider());
-      let config = rustls::ServerConfig::builder_with_provider(provider)
-        .with_safe_default_protocol_versions()
-        .unwrap()
-        .with_no_client_auth()
-        .with_single_cert(vec![certified.cert.der().clone()], key)
-        .unwrap();
-      let acceptor = tokio_rustls::TlsAcceptor::from(Arc::new(config));
-      let listener = loopback_listener().await;
-      let port = listener.local_addr().unwrap().port();
-      tokio::spawn(async move {
-        while let Ok((socket, _)) = listener.accept().await {
-          // The handshake fails on the client's side; nothing to serve.
-          let _ = acceptor.accept(socket).await;
-        }
-      });
-      format!("https://localhost:{port}")
-    }
-
     /// The 1.0.2 failure (issue #420) for REST: the server's name resolves to an IPv6 address that
     /// swallows the SYN and an IPv4 address that works. The request goes out over IPv4.
     #[tokio::test]
@@ -2235,7 +2214,7 @@ mod tests {
           let _ = socket.write_all(response.as_bytes()).await;
         }
       });
-      let Some(black_hole) = crate::api::connect::black_hole::BlackHole::ipv6(v4.port()).await else {
+      let Some(black_hole) = BlackHole::ipv6(v4.port()).await else {
         return;
       };
       let client = http_client_builder()
@@ -2253,16 +2232,6 @@ mod tests {
       assert!(response.status().is_success());
       // IPv6 was tried first and swallowed the attempt.
       assert!(started.elapsed() >= std::time::Duration::from_millis(250));
-    }
-
-    /// Resolves every name to the same addresses, in this order.
-    struct FixedResolver(Vec<std::net::SocketAddr>);
-
-    impl reqwest::dns::Resolve for FixedResolver {
-      fn resolve(&self, _name: reqwest::dns::Name) -> reqwest::dns::Resolving {
-        let addresses = self.0.clone();
-        Box::pin(async move { Ok(Box::new(addresses.into_iter()) as reqwest::dns::Addrs) })
-      }
     }
 
     /// A local `CONNECT` proxy: tunnels one connection and hands back the request head it got.
