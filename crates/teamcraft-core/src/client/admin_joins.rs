@@ -11,8 +11,8 @@ use std::collections::BTreeSet;
 use serde::{Deserialize, Serialize};
 use teamcraft_crypto::mls::GroupMember;
 use teamcraft_proto::{
-  ClientMessageId, ConversationId, ConversationKind, ConversationResponse, ConversationVisibility, Id,
-  MlsMessageId, UserId,
+  AdminSelfJoin, ClientMessageId, ConversationId, ConversationKind, ConversationResponse,
+  ConversationVisibility, Id, MlsMessageId, UserId,
 };
 
 use super::Client;
@@ -48,10 +48,8 @@ struct PendingSigner {
 impl<A: ServerApi, S: LocalStore> Client<A, S> {
   /// Writes the line for every user `commit` brought into the conversation's group (none of their
   /// devices was in it before) whom the verified roster lists as an admin, unless the conversation
-  /// is no channel or a channel open to everybody. The line names who let them in: the verified
-  /// signer of the addition, a channel owner who approved (`owner_approval`) or a member who added
-  /// them; nobody for the admin's own signed self-join (`visible`). Its ID comes from the commit,
-  /// so a commit processed again after a restart writes it once.
+  /// is no channel or a channel open to everybody. The line names who let them in ([`LetInBy`]).
+  /// Its ID comes from the commit, so a commit processed again after a restart writes it once.
   pub(crate) fn note_admin_joins(
     &mut self,
     conversation: ConversationId,
@@ -62,22 +60,24 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       return Ok(());
     }
     let workspace = self.workspace()?;
+    let asks_for_approval = workspace.policy.admin_self_join == AdminSelfJoin::OwnerApproval;
     for user in joined.into_iter().filter(|user| workspace.is_admin(*user)) {
-      let maybe_approved_by = commit.maybe_signer.filter(|signer| *signer != user);
+      let (sender, is_approved) = match let_in_by(user, commit, asks_for_approval) {
+        // The admin's own line, as for their own join.
+        LetInBy::Nobody => (user, false),
+        // Who let them in is the line's author, as for the message older versions send.
+        LetInBy::Approval(by) => (by, true),
+        LetInBy::Addition(by) => (by, false),
+      };
       self.store.upsert_message(&StoredMessage {
         conversation_id: conversation,
         client_message_id: line_id(commit.id, user),
         maybe_server_id: None,
-        // Who approved is the line's author, as for the message older versions send; a self-join
-        // is the admin's own.
-        sender_user_id: maybe_approved_by.unwrap_or(user),
+        sender_user_id: sender,
         maybe_thread_id: None,
         sent_at_ms: commit.id.snowflake().unix_millis(),
         content: MessageContent::Event {
-          event: ConversationEvent::AdminJoined {
-            user,
-            is_approved: maybe_approved_by.is_some(),
-          },
+          event: ConversationEvent::AdminJoined { user, is_approved },
         },
         is_edited: false,
         edits: Vec::new(),
@@ -121,18 +121,56 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     )
   }
 
-  /// Whether an admin who joins `conversation` is told: a channel that isn't open to everybody, as
-  /// this device knows it (its visibility is the server's word, as for the members' check of a
-  /// self-join, admin.md §2.4). Not a DM, a group DM or a meeting chat: admins have no way into
-  /// those of their own. A conversation this device has no record of is told.
+  /// Whether an admin who joins `conversation` is told ([`is_told_in`]), by the record this device
+  /// keeps of it.
   fn tells_admin_joins(&self, conversation: ConversationId) -> Result<bool, CoreError> {
     let maybe_response: Option<ConversationResponse> =
       records::get_json(&self.store, Table::Conversations, &conversation.to_string())?;
-    Ok(maybe_response.is_none_or(|response| {
-      response.kind == ConversationKind::Channel
-        && !(response.visibility == ConversationVisibility::Public && !response.is_archived)
-    }))
+    Ok(is_told_in(maybe_response.as_ref()))
   }
+}
+
+/// Who let an admin in, as the line says it (admin.md §2.4.2).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum LetInBy {
+  /// Their own signed self-join, or a commit of this device whose signer it can't tell.
+  Nobody,
+  /// A member of the channel, while the verified policy has members approve admins
+  /// (`owner_approval`): "approved by".
+  Approval(UserId),
+  /// Anybody else who signed the addition: a member without an approval to give, or another admin
+  /// (admin.md §2.2): "added by".
+  Addition(UserId),
+}
+
+/// Who let `user` in with `commit`: the verified signer of the addition, unless that is `user`.
+fn let_in_by(user: UserId, commit: &JoinCommit<'_>, asks_for_approval: bool) -> LetInBy {
+  match commit.maybe_signer {
+    None => LetInBy::Nobody,
+    Some(signer) if signer == user => LetInBy::Nobody,
+    Some(signer) => {
+      let was_member = commit
+        .before
+        .iter()
+        .any(|member| member.user_id == convert::user(signer));
+      if asks_for_approval && was_member {
+        LetInBy::Approval(signer)
+      } else {
+        LetInBy::Addition(signer)
+      }
+    },
+  }
+}
+
+/// Whether an admin who joins a conversation is told: a channel that isn't open to everybody, as
+/// `maybe_response` (this device's record) says (its visibility is the server's word, as for the
+/// members' check of a self-join, admin.md §2.4). Not a DM, a group DM or a meeting chat: admins
+/// have no way into those of their own. A conversation this device has no record of is told.
+fn is_told_in(maybe_response: Option<&ConversationResponse>) -> bool {
+  maybe_response.is_none_or(|response| {
+    response.kind == ConversationKind::Channel
+      && !(response.visibility == ConversationVisibility::Public && !response.is_archived)
+  })
 }
 
 /// Where [`PendingSigner`] is kept.
@@ -194,6 +232,89 @@ mod tests {
     assert_eq!(line_id(commit, user(3)), line_id(commit, user(3)));
     assert_ne!(line_id(commit, user(3)), line_id(commit, user(4)));
     assert_ne!(line_id(commit, user(3)), line_id(other, user(3)));
+  }
+
+  /// Only channels not open to everybody; nothing known of the conversation is told too.
+  #[test]
+  fn admin_joins_are_told_in_closed_channels() {
+    use ConversationKind::{Channel, Dm, Group, Meeting};
+    use ConversationVisibility::{Private, Public};
+
+    let cases = [
+      (Channel, Private, false, true),
+      (Channel, Private, true, true),
+      (Channel, Public, true, true),
+      (Channel, Public, false, false),
+      (Dm, Private, false, false),
+      (Group, Private, false, false),
+      (Meeting, Private, false, false),
+    ];
+    for (kind, visibility, is_archived, is_told) in cases {
+      let response = conversation(kind.clone(), visibility.clone(), is_archived);
+      assert_eq!(
+        is_told_in(Some(&response)),
+        is_told,
+        "{kind:?} {visibility:?} archived {is_archived}"
+      );
+    }
+    assert!(is_told_in(None), "a conversation this device has no record of");
+  }
+
+  /// The signer names who let the admin in; "approved" only for a member while admins need an
+  /// approval.
+  #[test]
+  fn the_signer_lets_the_admin_in() {
+    let (carol, dave, admin) = (user(1), user(2), user(3));
+    let before = [member(1, 10)];
+    let after = [member(1, 10), member(3, 30)];
+    let commit = |maybe_signer| JoinCommit {
+      id: MlsMessageId::from_snowflake(Snowflake::new(500).unwrap()),
+      before: &before,
+      after: &after,
+      maybe_signer,
+    };
+    assert_eq!(let_in_by(admin, &commit(Some(admin)), true), LetInBy::Nobody);
+    assert_eq!(let_in_by(admin, &commit(None), true), LetInBy::Nobody);
+    assert_eq!(
+      let_in_by(admin, &commit(Some(carol)), true),
+      LetInBy::Approval(carol)
+    );
+    assert_eq!(
+      let_in_by(admin, &commit(Some(carol)), false),
+      LetInBy::Addition(carol)
+    );
+    // Dave signed without being in the channel: another admin's change (admin.md §2.2).
+    assert_eq!(
+      let_in_by(admin, &commit(Some(dave)), true),
+      LetInBy::Addition(dave)
+    );
+  }
+
+  fn conversation(
+    kind: ConversationKind,
+    visibility: ConversationVisibility,
+    is_archived: bool,
+  ) -> ConversationResponse {
+    ConversationResponse {
+      id: ConversationId::from_snowflake(Snowflake::new(9).unwrap()),
+      maybe_space_id: None,
+      kind,
+      maybe_name: None,
+      maybe_topic: None,
+      maybe_description: None,
+      visibility,
+      history_policy: teamcraft_proto::HistoryPolicy::FromJoin,
+      maybe_category_id: None,
+      is_archived,
+      moderation: Default::default(),
+      is_integration: false,
+      contains_guests: false,
+      maybe_organizer_user_id: None,
+      maybe_my_permissions: None,
+      maybe_my_membership: None,
+      participants: Vec::new(),
+      maybe_image: None,
+    }
   }
 
   fn member(raw_user: i64, raw_device: i64) -> GroupMember {

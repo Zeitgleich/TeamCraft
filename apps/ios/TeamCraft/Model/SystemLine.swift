@@ -20,6 +20,9 @@ enum SystemLine: Equatable {
   /// A workspace admin joined the private channel: by themselves, or let in by the channel owner
   /// `maybeApprovedBy` (admin.md §2.4).
   case adminJoined(name: String, maybeApprovedBy: String?)
+  /// A workspace admin joined because `by` added them without an approval to ask for (admin.md
+  /// §2.4.2).
+  case adminAdded(name: String, by: String)
   /// A message without text or files of a kind this version doesn't know.
   case changed
 
@@ -58,6 +61,7 @@ enum SystemLine: Equatable {
     case .moved(let by, let space): return String(localized: "event_moved \(by) \(space)")
     case .adminJoined(let name, nil): return String(localized: "event_admin_joined \(name)")
     case .adminJoined(let name, let by?): return String(localized: "event_admin_joined_approved \(name) \(by)")
+    case .adminAdded(let name, let by): return String(localized: "event_admin_joined_added \(name) \(by)")
     case .changed: return String(localized: "chat_preview_event")
     }
   }
@@ -84,6 +88,7 @@ enum SystemLine: Equatable {
     case .pinned(let by): self = .pinned(by: nameOf(by))
     case .adminJoined(let user, let maybeApprovedBy):
       self = .adminJoined(name: nameOf(user), maybeApprovedBy: maybeApprovedBy.map(nameOf))
+    case .adminAdded(let user, let by): self = .adminAdded(name: nameOf(user), by: nameOf(by))
     case .unknown: return nil
     }
   }

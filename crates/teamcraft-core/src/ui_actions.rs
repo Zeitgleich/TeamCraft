@@ -410,10 +410,8 @@ impl<S: LocalStore> CoreChatBackend<S> {
       .conversations_raw()
       .into_iter()
       .find(|candidate| candidate.id == conversation)?;
-    self
-      .unread_messages(&response)
-      .first()
-      .and_then(|stored| stored.maybe_server_id)
+    // A line derived from a commit can be the first unread one: its row goes by the commit's ID.
+    self.unread_messages(&response).first().map(ui_message_id)
   }
 
   pub(crate) fn ui_message_extras(
@@ -611,10 +609,12 @@ fn workspace_event(event: &ConversationEvent, actor: UserId) -> Option<Workspace
       user: *user,
       by: actor,
     },
+    // Only the line derived from the commit shows (issue #811): its author is who let the admin
+    // in, or the admin for their own self-join.
     ConversationEvent::AdminJoined { user, is_approved } => WorkspaceEvent::AdminJoined {
       user: *user,
-      // Who approved is who sent it: a member can't name somebody else.
       maybe_approved_by: is_approved.then_some(actor),
+      maybe_added_by: (!is_approved && actor != *user).then_some(actor),
     },
     ConversationEvent::Archived => WorkspaceEvent::Archived { by: actor },
     ConversationEvent::Unarchived => WorkspaceEvent::Unarchived { by: actor },

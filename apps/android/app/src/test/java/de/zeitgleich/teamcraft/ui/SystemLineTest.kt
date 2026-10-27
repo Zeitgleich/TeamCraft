@@ -64,6 +64,11 @@ class SystemLineTest {
       SystemLine.AdminJoined("Sam", maybeApprovedBy = "Ada"),
       line(workspace = """{"event":"admin_joined","user":"2","approved_by":"1"}"""),
     )
+    // Added without an approval to ask for: "added by", not "approved by" (#811).
+    assertEquals(
+      SystemLine.AdminAdded("Sam", by = "Ada"),
+      line(kind = "\"Change\"", workspace = """{"event":"admin_joined","user":"2","added_by":"1"}"""),
+    )
   }
 
   @Test

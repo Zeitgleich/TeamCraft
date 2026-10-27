@@ -36,9 +36,11 @@ and **Instance** (below).
 
 ### admin_self_join
 
-- `visible`: allowed. Members see "Admin joined" with an admin badge that users cannot hide.
+- `visible`: allowed. Members see "… joined this channel as a workspace admin", which users cannot
+  hide; their apps work it out from the membership change itself.
 - `disabled`: refused by member clients.
-- `owner_approval`: **not implemented**; clients refuse self-joins because there is no approval flow.
+- `owner_approval`: members' clients refuse the admin's own self-join; the admin asks, and a channel
+  owner lets them in. Members see "… joined this channel as a workspace admin, approved by …".
 
 Member clients enforce this themselves, so the server cannot bypass it.
 

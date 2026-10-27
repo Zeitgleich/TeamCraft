@@ -78,12 +78,12 @@ pub fn MessageRow(
       let author = state.read(|backend| backend.user(message.author));
       system_line(&message, event, author, locale).into_any()
     },
-    MessageKind::User => match workspace_line(&message) {
-      Some(line) => line.into_any(),
-      None => {
-        let is_grouped = is_grouped(&message, maybe_prev.as_ref());
-        user_message(message, is_grouped, in_thread, motion).into_any()
-      },
+    // Decided by the kind, not the extras: a backend that loads them later (the desktop app's)
+    // shows the line as soon as they arrive.
+    MessageKind::Change => workspace_text_line(workspace_text(&message)).into_any(),
+    MessageKind::User => {
+      let is_grouped = is_grouped(&message, maybe_prev.as_ref());
+      user_message(message, is_grouped, in_thread, motion).into_any()
     },
   };
   view! {
@@ -202,17 +202,6 @@ fn system_line(
         })
     }}
   }
-}
-
-/// A change to the conversation that the core sends as a message without text (archived, made
-/// private, moved, a workspace admin who joined): the line its workspace event reads, whatever the
-/// join/leave setting says. `None` for a message somebody wrote.
-fn workspace_line(message: &Message) -> Option<impl IntoView + use<>> {
-  if !message.body.is_empty() {
-    return None;
-  }
-  let text = workspace_text(message);
-  text.get_untracked().is_some().then(|| workspace_text_line(text))
 }
 
 /// The text of `message`'s workspace event (i18n key and arguments), with the names the backend
@@ -1040,15 +1029,21 @@ fn workspace_event_text(
     WorkspaceEvent::Pinned { by, .. } => ("ws-pinned", vec![("by", name_of(*by))]),
     WorkspaceEvent::AdminJoined {
       user,
-      maybe_approved_by: None,
-    } => ("ws-admin-joined", vec![("name", name_of(*user))]),
-    WorkspaceEvent::AdminJoined {
-      user,
       maybe_approved_by: Some(by),
+      ..
     } => (
       "ws-admin-joined-approved",
       vec![("name", name_of(*user)), ("by", name_of(*by))],
     ),
+    WorkspaceEvent::AdminJoined {
+      user,
+      maybe_added_by: Some(by),
+      ..
+    } => (
+      "ws-admin-joined-added",
+      vec![("name", name_of(*user)), ("by", name_of(*by))],
+    ),
+    WorkspaceEvent::AdminJoined { user, .. } => ("ws-admin-joined", vec![("name", name_of(*user))]),
     WorkspaceEvent::Moved { by, space } if space.is_empty() => {
       ("ws-moved-unnamed", vec![("by", name_of(*by))])
     },
@@ -1057,12 +1052,11 @@ fn workspace_event_text(
   })
 }
 
-/// Whether `message` goes under the header of the one before. Not under a line without text (a
-/// workspace event, [`workspace_line`]): that has no header.
+/// Whether `message` goes under the header of the one before: only a message people wrote has
+/// one (not a line of a change, [`MessageKind::Change`]).
 fn is_grouped(message: &Message, maybe_prev: Option<&Message>) -> bool {
   let Some(prev) = maybe_prev else { return false };
   matches!(prev.kind, MessageKind::User)
-    && !prev.body.is_empty()
     && prev.author == message.author
     && message.sent_at - prev.sent_at < GROUP_WINDOW_MS
     && local_day(prev.sent_at) == local_day(message.sent_at)
@@ -1090,14 +1084,62 @@ mod tests {
     assert!(!is_grouped(&first, None));
   }
 
-  /// A workspace event's line (archived, an admin who joined) has no header to go under.
+  /// The line of a change (archived, an admin who joined) has no header to go under; a message
+  /// without text (a deleted one) still has one.
   #[test]
-  fn nothing_is_grouped_under_a_line_without_text() {
+  fn nothing_is_grouped_under_the_line_of_a_change() {
     let line = Message {
+      kind: MessageKind::Change,
       body: String::new(),
       ..message(1, 1, 0)
     };
     assert!(!is_grouped(&message(2, 1, 60_000), Some(&line)));
+    let without_text = Message {
+      body: String::new(),
+      ..message(3, 1, 0)
+    };
+    assert!(is_grouped(&message(4, 1, 60_000), Some(&without_text)));
+  }
+
+  /// Review of #815 (M1): the desktop app's backend answers extras later than the message. The row
+  /// of a change is a line by its kind, and reads its text once the extras arrive.
+  #[test]
+  fn a_change_reads_its_line_once_the_extras_arrive() {
+    use std::rc::Rc;
+
+    use crate::backend::Backend;
+    use crate::mock::MockBackend;
+    use crate::settings::Settings;
+    use crate::state::AppState;
+
+    let mock = Rc::new(MockBackend::new(0));
+    let backend: Rc<dyn Backend> = mock.clone();
+    let state = AppState::new(backend, Settings::for_tests(), None);
+    let owner = Owner::new();
+    owner.with(|| {
+      provide_context(state);
+      let change = Message {
+        kind: MessageKind::Change,
+        body: String::new(),
+        ..message(77_001, 1, 0)
+      };
+      let text = workspace_text(&change);
+      assert_eq!(text.get_untracked(), None, "no extras yet");
+
+      mock.set_workspace_event(
+        change.id,
+        WorkspaceEvent::AdminJoined {
+          user: id_from_raw::<UserId>(2),
+          maybe_approved_by: None,
+          maybe_added_by: Some(id_from_raw::<UserId>(1)),
+        },
+      );
+      state.backend_changed();
+      assert_eq!(
+        text.get_untracked().map(|(key, _)| key),
+        Some("ws-admin-joined-added")
+      );
+    });
   }
 
   #[test]
@@ -1135,6 +1177,7 @@ mod tests {
     let approved = WorkspaceEvent::AdminJoined {
       user,
       maybe_approved_by: Some(by),
+      maybe_added_by: None,
     };
     assert_eq!(
       workspace_event_text(&approved, name_of),
@@ -1142,6 +1185,28 @@ mod tests {
         "ws-admin-joined-approved",
         vec![("name", "Sam".to_owned()), ("by", "Ada".to_owned())]
       ))
+    );
+    // Review of #815 (L2): no "approved" where nobody asked.
+    let added = WorkspaceEvent::AdminJoined {
+      user,
+      maybe_approved_by: None,
+      maybe_added_by: Some(by),
+    };
+    assert_eq!(
+      workspace_event_text(&added, name_of),
+      Some((
+        "ws-admin-joined-added",
+        vec![("name", "Sam".to_owned()), ("by", "Ada".to_owned())]
+      ))
+    );
+    let own = WorkspaceEvent::AdminJoined {
+      user,
+      maybe_approved_by: None,
+      maybe_added_by: None,
+    };
+    assert_eq!(
+      workspace_event_text(&own, name_of),
+      Some(("ws-admin-joined", vec![("name", "Sam".to_owned())]))
     );
   }
 

@@ -1629,6 +1629,7 @@ ws-made-public = { $by } made this channel public
 ws-pinned = { $by } pinned a message
 ws-admin-joined = { $name } joined this channel as a workspace admin
 ws-admin-joined-approved = { $name } joined this channel as a workspace admin, approved by { $by }
+ws-admin-joined-added = { $name } joined this channel as a workspace admin, added by { $by }
 
 notif-browser = Browser notifications
 notif-browser-hint = Show a notification for new messages while TeamCraft is open in this browser.

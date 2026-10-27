@@ -8,7 +8,7 @@ use crate::api::ServerApi;
 use crate::error::CoreError;
 use crate::records;
 use crate::store::{LocalStore, MessageFilter, Table};
-use crate::ui_backend::{CoreCommand, history_jump_key, newest_server_id};
+use crate::ui_backend::{CoreCommand, history_jump_key, newest_server_id, note_lines_read};
 
 impl<A: ServerApi, S: LocalStore> Client<A, S> {
   pub async fn run_ui_command(&mut self, command: CoreCommand) -> Result<(), CoreError> {
@@ -31,7 +31,9 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
         self.update_account_data(|data, now| data.clear_unread_mark(conversation, now))?;
         // The badge clears now; the server's `unread_update` confirms it.
         crate::read_state::note_unread(&self.store, conversation, 0, 0)?;
-        let maybe_latest = newest_server_id(&self.store.messages(conversation, MessageFilter::All)?);
+        let messages = self.store.messages(conversation, MessageFilter::All)?;
+        note_lines_read(&self.store, conversation, &messages)?;
+        let maybe_latest = newest_server_id(&messages);
         match maybe_latest {
           // Queued: offline, it reaches the server (and the other devices) once back.
           Some(message) => {

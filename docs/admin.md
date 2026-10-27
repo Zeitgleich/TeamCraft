@@ -194,9 +194,9 @@ asks for more, whatever the workspace default (e2ee.md §4.7). That is allowed, 
   `owner_approval` (§2.4.1), nothing for `disabled`. The admin's app signs the self-join. Members'
   apps let the admin in only while their role is in the fresh signed roster.
 - **How members are told** (§2.4.2): each member's device writes the line "… joined this channel as
-  a workspace admin" (with "approved by …" when somebody else let them in) itself, from the MLS
-  commit that added the admin, once it verified that commit; shown whatever the join/leave
-  setting. No message makes or suppresses it.
+  a workspace admin" (with "approved by …" or "added by …" when somebody else let them in) itself,
+  from the MLS commit that added the admin, once it verified that commit; shown whatever the
+  join/leave setting. No message makes or suppresses it.
 
 #### 2.4.1 Asking the owners (`owner_approval`)
 
@@ -283,25 +283,38 @@ message, would keep a real join quiet. So the line is derived where the join hap
   (not a further device or a device added back), whom the verified roster lists as an owner or
   admin, gets the line, in a channel that isn't open to everybody as the device knows it (a
   private channel, or an archived public one; not a DM, group DM or meeting chat, where admins
-  have no way in of their own). The channel's visibility is the server's word here as in the
-  members' check of a self-join (`visible` doesn't apply to an open public channel); the roster's
-  freshness decides an admin's authority, not whether members are told, so a member adding an
-  admin while the roster waits for re-signing is still told. However the admin got in, the line
-  is there: their own signed self-join, an owner's approval, a member's ordinary add, or another
-  admin's signed change (§2.2), which used to be silent.
-- **Who let them in.** "approved by" names the verified signer of the change that added the admin,
-  unless that is the admin (a self-join): the owner who approved, whose device also committed it,
-  the member who added them, or the admin who signed the change. A device's own commit keeps its
-  signer next to the pending commit, so a commit whose answer was lost and that is merged from the
-  queue later names the same person; one staged by an older version names nobody.
+  have no way in of their own). The roster is the one the device holds when it processes the
+  commit, as for the commit's own check: a device that catches up late may tell about somebody
+  who was an admin then and isn't any more, or the other way round. The channel's visibility and
+  kind are the server's word here as in the members' check of a self-join (`visible` doesn't
+  apply to an open public channel), so a server that calls a private channel public keeps the
+  line away, as it turns the self-join into an ordinary join. The roster's freshness decides an
+  admin's authority, not whether members are told, so a member adding an admin while the roster
+  waits for re-signing is still told. However the admin got in, the line is there: their own
+  signed self-join, an owner's approval, a member's ordinary add, or another admin's signed change
+  (§2.2), which used to be silent.
+- **Who let them in.** The line names the verified signer of the change that added the admin,
+  unless that is the admin (a self-join): "approved by …" when the signer was a member of the
+  channel while the verified policy says `owner_approval` (an owner's approval, whose device also
+  commits it), "added by …" otherwise (a member's ordinary add under `visible` or `disabled`, or
+  another admin who signed the change and only had a member's device commit it). A device's own
+  commit keeps its signer, with the epoch the device made it in, next to the pending commit, so a
+  commit whose answer was lost and that is merged from the queue later names the same person; a
+  kept signer of another epoch, or a commit staged by an older version, names nobody.
 - **Where.** The line sits at the commit's place in the conversation (the commit's ID is the
   server's time-ordered ID, like a message's), is stored like a message but marked as derived
-  from that commit, and is no message of the server's (no read position, paging cursor, permalink
-  or unread count uses it). Its ID comes from the commit and the admin, so processing the commit
-  again after a restart writes it once, on every device of every member, the committer's
-  included. That ID is known to whoever saw the commit, so a message with it is never stored over
-  the line, and no edit, delete or pin changes it. The apps' row of the line goes by the commit's
-  ID; a message the server gives the same ID doesn't take the line's place there either.
+  from that commit, and is no message of the server's (no read position, paging cursor or
+  permalink uses it). Its ID comes from the commit and the admin, so processing the commit again
+  after a restart writes it once, on every device of every member, the committer's included.
+  That ID is known to whoever saw the commit, so a message with it is never stored over the line,
+  and no edit, delete or pin changes it. The apps' row of the line goes by the commit's ID; a
+  message the server gives the same ID doesn't take the line's place there either. The apps know
+  it is a line from the message alone (the UI's `MessageKind::Change`), before its text arrives.
+- **Unread.** The line counts as unread like a message at the commit's place, from anybody but
+  the user (an owner's own approval isn't unread to them): the server's read position covers it
+  once a later message was read. A line newer than every message is read when the user reads the
+  conversation on this device; another device of theirs shows it unread until they read it there
+  too (the server's read position names messages only).
 - **Who doesn't see it.** The admin's own devices join by the welcome and see no commit: they show
   no line. A member who joins later doesn't see lines from before their time either.
 - **Older versions.** The committer still sends the encrypted `AdminJoined` message (members'

@@ -19,7 +19,18 @@ use teamcraft_proto::{
 use crate::common::{self, Peer, settle};
 
 /// A line as members read it: who joined, and who let them in.
-type Line = (UserId, Option<UserId>);
+type Line = (UserId, By);
+
+/// Who let the admin in, as the line says it.
+#[derive(Debug, PartialEq, Eq)]
+enum By {
+  /// Their own join: no name.
+  Nobody,
+  /// "approved by": a member while admins need an owner's approval.
+  Approved(UserId),
+  /// "added by": anybody else who signed the addition.
+  Added(UserId),
+}
 
 #[tokio::test]
 async fn members_see_an_admins_own_join_once_from_the_commit() {
@@ -35,7 +46,7 @@ async fn members_see_an_admins_own_join_once_from_the_commit() {
   );
   // One of Carol's and Dave's devices committed it, the other one verified the commit.
   for peer in [&carol, &dave] {
-    assert_eq!(lines(peer, channel), vec![(bob_id, None)], "{}", peer.name);
+    assert_eq!(lines(peer, channel), vec![(bob_id, By::Nobody)], "{}", peer.name);
     // Still sent for older versions; hidden here.
     assert_eq!(announcements(peer, channel), 1, "{}", peer.name);
   }
@@ -46,7 +57,8 @@ async fn members_see_an_admins_own_join_once_from_the_commit() {
     shown(&dave, channel),
     vec![WorkspaceEvent::AdminJoined {
       user: bob_id,
-      maybe_approved_by: None
+      maybe_approved_by: None,
+      maybe_added_by: None
     }]
   );
 }
@@ -65,7 +77,7 @@ async fn members_see_which_owner_let_the_admin_in() {
   for peer in [&carol, &dave] {
     assert_eq!(
       lines(peer, channel),
-      vec![(bob_id, Some(carol_id))],
+      vec![(bob_id, By::Approved(carol_id))],
       "{}",
       peer.name
     );
@@ -76,7 +88,8 @@ async fn members_see_which_owner_let_the_admin_in() {
     shown(&dave, channel),
     vec![WorkspaceEvent::AdminJoined {
       user: bob_id,
-      maybe_approved_by: Some(carol_id)
+      maybe_approved_by: Some(carol_id),
+      maybe_added_by: None
     }]
   );
 }
@@ -101,7 +114,7 @@ async fn a_made_up_admin_join_shows_nothing() {
   settle(&mut [&mut alice, &mut bob, &mut carol, &mut dave]).await;
   forge_admin_join(&mut dave, channel, bob_id).await;
   settle(&mut [&mut alice, &mut bob, &mut carol, &mut dave]).await;
-  assert_eq!(lines(&carol, channel), vec![(bob_id, None)]);
+  assert_eq!(lines(&carol, channel), vec![(bob_id, By::Nobody)]);
 }
 
 /// A server that keeps the message from the members, or a committer that stopped before sending
@@ -119,12 +132,96 @@ async fn an_admin_join_whose_message_never_arrives_is_still_shown() {
 
   assert!(bob.client.has_group(channel).unwrap());
   for peer in [&carol, &dave] {
-    assert_eq!(lines(peer, channel), vec![(bob_id, None)], "{}", peer.name);
+    assert_eq!(lines(peer, channel), vec![(bob_id, By::Nobody)], "{}", peer.name);
   }
   assert_eq!(
     announcements(&carol, channel) + announcements(&dave, channel),
     1,
     "only the committer's own copy of the message"
+  );
+}
+
+/// Another admin's signed change brings an admin in (admin.md §2.2): the line names the admin who
+/// signed it, not the member whose device committed it, and says "added", not "approved".
+#[tokio::test]
+async fn another_admins_addition_names_who_signed_it() {
+  let (server, mut alice, mut bob, mut carol, mut dave, channel) = setup(AdminSelfJoin::OwnerApproval).await;
+  let (alice_id, bob_id) = (alice.client.user_id(), bob.client.user_id());
+  server.set_admin(alice_id);
+
+  alice.client.admin_add_member(channel, bob_id).await.unwrap();
+  settle(&mut [&mut alice, &mut bob, &mut carol, &mut dave]).await;
+
+  assert!(bob.client.has_group(channel).unwrap());
+  assert!(!alice.client.has_group(channel).unwrap(), "she only signed it");
+  for peer in [&carol, &dave] {
+    assert_eq!(
+      lines(peer, channel),
+      vec![(bob_id, By::Added(alice_id))],
+      "{}",
+      peer.name
+    );
+  }
+}
+
+/// Direct messages and group DMs have no admin way in: adding an admin there is no admin's join.
+#[tokio::test]
+async fn no_line_in_direct_conversations() {
+  let (_server, mut alice, mut bob, mut carol, mut dave, _channel) = setup(AdminSelfJoin::Visible).await;
+  let (bob_id, dave_id) = (bob.client.user_id(), dave.client.user_id());
+
+  let group = carol.client.open_group_dm(&[dave_id, bob_id]).await.unwrap();
+  let direct = carol.client.open_dm(bob_id).await.unwrap();
+  settle(&mut [&mut alice, &mut bob, &mut carol, &mut dave]).await;
+
+  assert!(bob.client.has_group(group).unwrap() && bob.client.has_group(direct).unwrap());
+  for peer in [&carol, &dave] {
+    assert!(lines(peer, group).is_empty(), "{}: group DM", peer.name);
+  }
+  assert!(lines(&carol, direct).is_empty(), "DM");
+}
+
+/// A signer kept for a commit of another epoch (left behind by a crash) names nobody: the line
+/// then says only that the admin joined.
+#[tokio::test]
+async fn a_signer_kept_for_another_commit_names_nobody() {
+  #[derive(serde::Serialize)]
+  struct Kept {
+    epoch: u64,
+    signer: UserId,
+  }
+
+  let (server, mut alice, mut bob, mut carol, mut dave, channel) = setup(AdminSelfJoin::OwnerApproval).await;
+  let (bob_id, carol_id) = (bob.client.user_id(), carol.client.user_id());
+  bob.client.request_admin_join(channel).await.unwrap();
+  settle(&mut [&mut alice, &mut bob, &mut carol, &mut dave]).await;
+  server.lose_next_commit_answer(carol_id);
+  carol
+    .client
+    .approve_admin_join(channel, bob_id)
+    .await
+    .unwrap_err();
+  let epoch = carol.client.mls_epoch(channel).unwrap().unwrap();
+
+  // What a crashed earlier commit left (the store's own record of a pending commit's signer).
+  records::put_json(
+    &*carol.store,
+    Table::AppliedChanges,
+    &format!("pending_signer/{channel}"),
+    &Kept {
+      epoch: epoch + 7,
+      signer: dave.client.user_id(),
+    },
+  )
+  .unwrap();
+  settle(&mut [&mut alice, &mut bob, &mut carol, &mut dave]).await;
+
+  assert!(bob.client.has_group(channel).unwrap());
+  assert_eq!(lines(&carol, channel), vec![(bob_id, By::Nobody)]);
+  assert_eq!(
+    lines(&dave, channel),
+    vec![(bob_id, By::Approved(carol_id))],
+    "verified by the others"
   );
 }
 
@@ -150,7 +247,7 @@ async fn the_owner_is_named_when_the_commit_answer_was_lost() {
   for peer in [&carol, &dave] {
     assert_eq!(
       lines(peer, channel),
-      vec![(bob_id, Some(carol_id))],
+      vec![(bob_id, By::Approved(carol_id))],
       "{}",
       peer.name
     );
@@ -196,7 +293,7 @@ async fn nobody_deletes_the_line() {
   settle(&mut [&mut alice, &mut bob, &mut carol, &mut dave]).await;
 
   assert_eq!(line_message(&dave, channel), line);
-  assert_eq!(lines(&dave, channel), vec![(bob_id, Some(carol_id))]);
+  assert_eq!(lines(&dave, channel), vec![(bob_id, By::Approved(carol_id))]);
 }
 
 /// A message sent under the line's ID doesn't take its place.
@@ -225,7 +322,7 @@ async fn nobody_replaces_the_line() {
   settle(&mut [&mut alice, &mut bob, &mut carol, &mut dave]).await;
 
   assert_eq!(line_message(&dave, channel), line);
-  assert_eq!(lines(&dave, channel), vec![(bob_id, Some(carol_id))]);
+  assert_eq!(lines(&dave, channel), vec![(bob_id, By::Approved(carol_id))]);
   assert!(dave.texts(channel).is_empty());
 }
 
@@ -262,7 +359,8 @@ async fn a_message_under_the_commits_id_hides_no_line() {
   assert_eq!(dave.texts(channel), vec!["same place"]);
   assert!(shown(&dave, channel).contains(&WorkspaceEvent::AdminJoined {
     user: bob_id,
-    maybe_approved_by: Some(carol_id)
+    maybe_approved_by: Some(carol_id),
+    maybe_added_by: None
   }));
 }
 
@@ -310,7 +408,7 @@ async fn only_admins_joining_a_closed_channel_are_told() {
   for peer in [&carol, &dave] {
     assert_eq!(
       lines(peer, channel),
-      vec![(bob_id, Some(carol_id))],
+      vec![(bob_id, By::Added(carol_id))],
       "{}",
       peer.name
     );
@@ -365,7 +463,7 @@ async fn every_device_shows_the_line_once() {
   for peer in [&carol, &carol_laptop, &dave] {
     assert_eq!(
       lines(peer, channel),
-      vec![(bob_id, Some(carol_id))],
+      vec![(bob_id, By::Approved(carol_id))],
       "{}",
       peer.name
     );
@@ -394,7 +492,7 @@ async fn the_shared_history_changes_nothing_about_the_line() {
   bob.client.load_older_messages(channel).await.unwrap();
 
   assert_eq!(bob.texts(channel), vec!["earlier"], "the owner shared it");
-  assert_eq!(lines(&dave, channel), vec![(bob_id, Some(carol_id))]);
+  assert_eq!(lines(&dave, channel), vec![(bob_id, By::Approved(carol_id))]);
 }
 
 /// The lines `peer` lists in `channel`, oldest first. Each one stems from a commit.
@@ -413,7 +511,12 @@ fn lines(peer: &Peer, channel: ConversationId) -> Vec<Line> {
           "{}: a listed message",
           peer.name
         );
-        Some((user, is_approved.then_some(message.sender_user_id)))
+        let by = match (is_approved, message.sender_user_id) {
+          (true, approver) => By::Approved(approver),
+          (false, author) if author == user => By::Nobody,
+          (false, adder) => By::Added(adder),
+        };
+        Some((user, by))
       },
       _ => None,
     })

@@ -8593,6 +8593,22 @@
         }
       }
     },
+    "event_admin_joined_added %@ %@": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%1$@ joined this channel as a workspace admin, added by %2$@"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%1$@ ist diesem Kanal als Workspace-Admin beigetreten, hinzugefügt von %2$@"
+          }
+        }
+      }
+    },
     "event_admin_joined_approved %@ %@": {
       "localizations": {
         "en": {
