@@ -220,16 +220,22 @@ pub(super) fn open_screen(
 }
 
 /// What the user picks in the system's picker each time (a window, an application or a display;
-/// never TeamCraft's own windows). The first share asks for the Screen Recording permission. Runs on a blocking thread: the picker waits for the
-/// user.
+/// never TeamCraft's own windows, left out by the app's bundle id). The picker grants the capture
+/// of what was picked: no Screen Recording permission is asked for here (it applies only after an
+/// app restart, issue #683). Runs on a blocking thread: the picker waits for the user.
 #[cfg(target_os = "macos")]
 pub(super) fn open_screen(
   _maybe_restore_token: Option<&str>,
   mode: ScreenContentMode,
 ) -> Result<(Box<dyn VideoCapture>, Option<String>), CaptureError> {
+  use objc2_foundation::NSBundle;
   use teamcraft_media::capture_screencapturekit::ScreenCaptureKitScreen;
 
-  ScreenCaptureKitScreen::pick(screen_format(mode))
+  // `None` when not run from the app bundle (development).
+  let maybe_bundle_id = NSBundle::mainBundle()
+    .bundleIdentifier()
+    .map(|bundle_id| bundle_id.to_string());
+  ScreenCaptureKitScreen::pick(screen_format(mode), maybe_bundle_id.as_deref())
     .map(|capture| (Box::new(capture) as Box<dyn VideoCapture>, None))
 }
 
