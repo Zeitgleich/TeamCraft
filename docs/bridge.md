@@ -82,7 +82,9 @@ curl --fail-with-body \
 a file and cuts it at `;`.
 
 GitHub Actions, the test report of a failed run (`TEAMCRAFT_HOOK` is a repository secret with the
-source's URL; `--retry` repeats the request on `429`, `502` and `503` and honours `Retry-After`):
+source's URL; `--retry` repeats the request on a timeout, `429`, `502`, `503` and the like and
+honours `Retry-After`; the `Idempotency-Key` keeps a repeat after a lost answer from posting twice,
+see "Retries"):
 
 ```yaml
 - name: Report to TeamCraft
@@ -91,8 +93,9 @@ source's URL; `--retry` repeats the request on `429`, `502` and `503` and honour
     run_url="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
     payload=$(jq -n --arg text "${GITHUB_WORKFLOW} failed on ${GITHUB_REF_NAME}: ${run_url}" \
       '{text: $text, username: "GitHub Actions", mention: true}')
-    curl --fail-with-body --retry 3 --form-string "payload_json=${payload}" \
-      -F "file=@target/test-report.html" "$TEAMCRAFT_HOOK"
+    curl --fail-with-body --retry 3 --max-time 600 \
+      -H "Idempotency-Key: ${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-${GITHUB_JOB}-report" \
+      --form-string "payload_json=${payload}" -F "file=@target/test-report.html" "$TEAMCRAFT_HOOK"
   env:
     TEAMCRAFT_HOOK: ${{ secrets.TEAMCRAFT_HOOK }}
 ```
@@ -164,34 +167,96 @@ the proxy holds the whole body on its disk first, and the bridge's limits and ti
 pace), `client_body_timeout` about `files.idle_timeout_secs`, and `proxy_read_timeout` long enough
 for the uploads to the server.
 
+## Retries
+
+A producer that loses the answer (the connection dropped, its timeout ran out) can't tell whether
+the bridge posted the message, and its retry would post it again. A webhook with an
+`Idempotency-Key` header avoids that: the bridge remembers the key of a request it accepted, and
+answers a repeat with the same key and the same message `200 ok` again, with
+`Idempotent-Replayed: true`, without posting anything. It is the header of the IETF draft
+(`draft-ietf-httpapi-idempotency-key-header`), as Stripe and others take it; Slack's, Mattermost's
+and Discord's webhooks have no equivalent. Both kinds of webhook take it, JSON and forms with
+files.
+
+```sh
+# One key per message: made once, sent with every attempt.
+key=$(uuidgen)
+curl --fail-with-body --retry 5 --retry-all-errors --max-time 60 \
+  -H "Idempotency-Key: ${key}" \
+  -d '{"text":"Backup of nas finished","username":"backup"}' \
+  http://127.0.0.1:8088/hooks/<token>
+
+# With files, the same.
+curl --fail-with-body --retry 5 --retry-all-errors -H "Idempotency-Key: ${key}-report" \
+  -F 'text=Nightly tests failed' -F 'file=@report.pdf' http://127.0.0.1:8088/hooks/<token>
+```
+
+With a key, `--retry-all-errors` is safe: curl then also repeats a request whose connection dropped
+after the bridge took it, and the bridge answers that from memory (it repeats refusals like `400`
+too, which change nothing). In GitHub Actions, `${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-<step>` makes
+a good key (see the example under "Files"): stable over curl's retries, new when the run is re-run.
+
+- **Per source.** A key is 1 to 255 printable ASCII characters (a UUID is ideal; the draft's quoted
+  form `"..."` is the same key). An empty or longer one, other characters, or the header twice get
+  `400 invalid_idempotency_key`. Keys are never logged.
+- **The same message** is what the request would post: the text as rendered (from JSON, `payload=`
+  or a form), whether it is an alert, and each file's name, type and bytes; not the raw body. JSON
+  written differently, or a form with another boundary (curl picks a new one each run), is the same
+  message. The same key with another message gets `422 idempotency_key_reused` and posts nothing.
+- **Only accepted requests count.** A refused one (any `4xx` or `5xx`) posted nothing, so its retry
+  with the same key runs again: a `503 bridge_busy` retried after `Retry-After` is taken then.
+- **A repeat while the first request still runs** (its files still uploading) waits for it, holding
+  its places like any request with files: once the first is accepted, the repeat gets its `200`;
+  if the first fails or its producer hangs up before its upload, the repeat runs itself. A message
+  the bridge sends after its producer hung up keeps its key all the same. A repeat is read and paid
+  like any request (its file bytes come back), so it can be refused like one.
+- **For a window.** A key is remembered for `idempotency.window_secs` from the answer on; retries
+  should end well within it. All sources together keep at most `idempotency.max_keys` keys in
+  `idempotency.max_bytes`; beyond, the source that holds the most loses its oldest keys first,
+  before their window ends.
+- **In memory only.** A restarted bridge has forgotten every key, so a retry across a restart can
+  post twice.
+- `/ingest` takes no key: log lines are a stream, and lines sent again are taken again.
+- Keys are per source, so only the holder of a source's URL could test a guessed key against a
+  guessed message (`200` or `422`); random keys leave nothing to guess.
+
+| Setting                   | Default | What                                                                      |
+|---------------------------|---------|---------------------------------------------------------------------------|
+| `idempotency.window_secs` | 600     | How long the key of an accepted request is remembered, from its answer on |
+| `idempotency.max_keys`    | 10000   | Keys remembered, all sources together                                     |
+| `idempotency.max_bytes`   | 4 MiB   | Their memory; each key counts its length and 128 bytes                    |
+
 ## Answers
 
-`200` with `ok` for an accepted request (`/ingest` says how many lines it took), `404` without a
-body for an unknown token. Every other refusal is JSON with a stable `error_code`, and every `429`
-and `503` says in `Retry-After` when to try again:
+`200` with `ok` for an accepted request (`/ingest` says how many lines it took; a repeat of an
+accepted webhook with the same `Idempotency-Key` adds `Idempotent-Replayed: true`), `404` without a
+body for an unknown token, before anything else is looked at or read. Every other refusal is JSON
+with a stable `error_code`, and every `429` and `503` says in `Retry-After` when to try again:
 `{"error_code": "too_many_files", "message": "more than 10 files"}`.
 
-| Status | `error_code`         | When                                                                                                                              |
-|--------|----------------------|-----------------------------------------------------------------------------------------------------------------------------------|
-| 400    | `invalid_payload`    | The message JSON or text is invalid or empty (a message with files needs no text)                                                 |
-| 400    | `invalid_multipart`  | The form is malformed: no or a wrong boundary, broken part headers, cut off                                                       |
-| 408    | `request_timeout`    | The body sent nothing for `files.idle_timeout_secs`                                                                               |
-| 413    | `file_too_large`     | A file is larger than `files.max_file_bytes`, or the server refused its size (its limit, or the bot's attachment storage is full) |
-| 413    | `too_many_files`     | More files than the source takes                                                                                                  |
-| 413    | `payload_too_large`  | The fields besides files, or a body without files, are larger than `listen.max_body_bytes`                                        |
-| 413    | `too_many_fields`    | More than 32 fields besides files                                                                                                 |
-| 413    | `request_too_large`  | The request is larger than `files.source_bytes_per_minute` (by its `Content-Length`, or once read that far): it can never pass    |
-| 413    | `message_too_large`  | The text and the files (with room for the pictures' thumbnails) won't fit into one message (`files.max_message_bytes`)            |
-| 429    | `rate_limited`       | Requests over the source's or the bridge's limit                                                                                  |
-| 429    | `file_rate_limited`  | File bytes over the source's share or the bridge's total; the request got its bytes back                                          |
-| 500    | `spool_failed`       | A file could not be written to or read from the spool directory                                                                   |
-| 500    | `internal_error`     | The files are up, but the bridge's database could not keep the message                                                            |
-| 502    | `upload_failed`      | The server or the storage refused or failed an upload                                                                             |
-| 503    | `bridge_busy`        | As many requests with files run as may (in all or for the source); refused before the body is read                                |
-| 503    | `spool_full`         | The spool holds `files.max_spool_bytes`                                                                                           |
-| 503    | `channel_not_ready`  | The bot can't write in the channel yet (its welcome is on the way); nothing was uploaded                                          |
-| 503    | `server_unreachable` | The server can't be reached                                                                                                       |
-| 503    | `shutting_down`      | The bridge is stopping                                                                                                            |
+| Status | `error_code`              | When                                                                                                                              |
+|--------|---------------------------|-----------------------------------------------------------------------------------------------------------------------------------|
+| 400    | `invalid_payload`         | The message JSON or text is invalid or empty (a message with files needs no text)                                                 |
+| 400    | `invalid_idempotency_key` | The `Idempotency-Key` header is empty, longer than 255 bytes, not printable ASCII, or sent twice                                  |
+| 400    | `invalid_multipart`       | The form is malformed: no or a wrong boundary, broken part headers, cut off                                                       |
+| 408    | `request_timeout`         | The body sent nothing for `files.idle_timeout_secs`                                                                               |
+| 413    | `file_too_large`          | A file is larger than `files.max_file_bytes`, or the server refused its size (its limit, or the bot's attachment storage is full) |
+| 413    | `too_many_files`          | More files than the source takes                                                                                                  |
+| 413    | `payload_too_large`       | The fields besides files, or a body without files, are larger than `listen.max_body_bytes`                                        |
+| 413    | `too_many_fields`         | More than 32 fields besides files                                                                                                 |
+| 413    | `request_too_large`       | The request is larger than `files.source_bytes_per_minute` (by its `Content-Length`, or once read that far): it can never pass    |
+| 413    | `message_too_large`       | The text and the files (with room for the pictures' thumbnails) won't fit into one message (`files.max_message_bytes`)            |
+| 422    | `idempotency_key_reused`  | The `Idempotency-Key` was used for another message within `idempotency.window_secs` ("Retries")                                   |
+| 429    | `rate_limited`            | Requests over the source's or the bridge's limit                                                                                  |
+| 429    | `file_rate_limited`       | File bytes over the source's share or the bridge's total; the request got its bytes back                                          |
+| 500    | `spool_failed`            | A file could not be written to or read from the spool directory                                                                   |
+| 500    | `internal_error`          | The files are up, but the bridge's database could not keep the message                                                            |
+| 502    | `upload_failed`           | The server or the storage refused or failed an upload                                                                             |
+| 503    | `bridge_busy`             | As many requests with files run as may (in all or for the source); refused before the body is read                                |
+| 503    | `spool_full`              | The spool holds `files.max_spool_bytes`                                                                                           |
+| 503    | `channel_not_ready`       | The bot can't write in the channel yet (its welcome is on the way); nothing was uploaded                                          |
+| 503    | `server_unreachable`      | The server can't be reached                                                                                                       |
+| 503    | `shutting_down`           | The bridge is stopping                                                                                                            |
 
 ## Setup
 
@@ -295,8 +360,9 @@ loopback only: `-p 127.0.0.1:8088:8088`.
 ## Limits of the current version
 
 - Files come only as uploads in a form ("Files"); file links in a webhook's JSON (Slack `files`)
-  are ignored. An upload that fails is not resumed: the producer sends the request again. There is
-  no idempotency key yet, so a retry after a lost answer can post the message twice.
+  are ignored. An upload that fails is not resumed: the producer sends the request again.
+- Idempotency keys live in memory: a retry across a restart of the bridge can post the message
+  twice ("Retries").
 - The app has no field for a source's files per message yet; app sources take the bridge's
   `files.max_files_per_message` unless their options say otherwise.
 - `[[sources]]` in the configuration file are read at start; changing one needs a restart. Sources

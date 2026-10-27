@@ -7,6 +7,7 @@
 
 mod account_data;
 mod activity;
+mod admin_add_policy;
 mod admin_joins;
 mod backgrounds;
 mod calls;

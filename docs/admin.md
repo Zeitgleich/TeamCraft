@@ -189,6 +189,27 @@ asks for more, whatever the workspace default (e2ee.md §4.7). That is allowed, 
   - `disabled`.
 - Member clients enforce this setting themselves (it's part of the signed workspace policy), so the
   server can't bypass it.
+- **Nor can another admin** (issue #816). The setting is about admins getting in without the
+  members, so members' apps hold every signed addition of an owner or admin by an admin who isn't
+  in the channel to it, not only the admin's own: under `owner_approval` and `disabled` they
+  refuse it, and two admins can't add each other around it. An addition signed by a member is an
+  ordinary one under every setting, also of an admin; the approving owner of §2.4.1 is such a
+  member. Admins outside the channel still add everybody else (§2.2). Like the self-join, this is
+  about channels the members' apps know as private or archived (the server's word, §2.4.2); in an
+  open public channel admins join like anybody.
+- **What members' apps can check.** That whoever signed an addition is in the channel's MLS group,
+  verified; not that they may add people there. Which members may (`manage_members`, the channel's
+  owners) is the server's record until channel roles are signed (issues #380, #801), so a hostile
+  server can let any member add an admin. And an admin outside the channel can still add somebody
+  who isn't an admin (§2.2), who can then add an admin as a member: each step is a signed addition
+  members verify, and the line of §2.4.2 names who let the admin in, but neither is refused.
+- **Members on older versions.** Clients before 1.0.9 still commit another admin's addition of an
+  admin whatever the setting says. A member on 1.0.9 or later refuses that commit like any it
+  can't verify, falls out of the group, asks to be added back and is added back into it, with the
+  admin in (e2ee.md §4.6, "Falling out and coming back"); it shows no line for that join, since it
+  never merged the commit. The group doesn't split, but the setting holds in a channel only once
+  none of its members' devices runs an older version. The server doesn't refuse the membership
+  either (it checks only an admin's own join, security review D11).
 - **Where admins join.** The channel browser lists a space's private channels to workspace admins,
   marked private, as the verified policy allows: "Join as admin" for `visible`, "Ask to join" for
   `owner_approval` (§2.4.1), nothing for `disabled`. The admin's app signs the self-join. Members'

@@ -12,6 +12,7 @@ pub mod call_binding;
 pub mod change_digest;
 pub mod content_key;
 pub mod device_list;
+pub mod fingerprint;
 pub mod guest_link;
 pub mod identity;
 pub mod ids;

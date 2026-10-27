@@ -20,6 +20,7 @@ use teamcraft_proto::{
 };
 
 use crate::batch::{BatchLimits, Mentions};
+use crate::idempotency::{ENTRY_OVERHEAD_BYTES, MAX_IDEMPOTENCY_KEY_BYTES};
 use crate::render::LogRules;
 
 const ENV_PREFIX: &str = "TEAMCRAFT_BRIDGE_";
@@ -47,6 +48,8 @@ pub struct BridgeConfig {
   pub app_sources: AppSourcesSection,
   #[serde(default)]
   pub files: FilesSection,
+  #[serde(default)]
+  pub idempotency: IdempotencySection,
   /// Optional: sources written into this file. Sources added in the app need none.
   #[serde(default)]
   pub sources: Vec<SourceConfig>,
@@ -170,6 +173,20 @@ pub struct FilesSection {
   pub maybe_spool_dir: Option<PathBuf>,
 }
 
+/// Idempotency keys of webhooks (docs/bridge.md, "Retries"): a producer's retry with the key of a
+/// request the bridge accepted is answered without posting again. Kept in memory only.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct IdempotencySection {
+  /// How long the key of an accepted request is remembered, from its answer on.
+  pub window_secs: u64,
+  /// Keys remembered at most, all sources together; beyond, the oldest are forgotten first (of
+  /// the source that holds the most).
+  pub max_keys: usize,
+  /// Their memory at most: each key counts its length and 128 bytes besides.
+  pub max_bytes: usize,
+}
+
 /// One producer: a token that selects a conversation, with its limits and alert rules.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -288,6 +305,7 @@ impl BridgeConfig {
       }
     }
     self.files.validate()?;
+    self.idempotency.validate()?;
     if self.batching.max_bytes < self.batching.max_line_bytes + 16 {
       return invalid("batching.max_bytes must exceed batching.max_line_bytes".into());
     }
@@ -398,6 +416,27 @@ impl FilesSection {
   }
 }
 
+impl IdempotencySection {
+  fn validate(&self) -> Result<(), ConfigError> {
+    if self.window_secs == 0 || self.max_keys == 0 {
+      return Err(ConfigError::Invalid(
+        "idempotency.window_secs and idempotency.max_keys must be above 0".into(),
+      ));
+    }
+    if self.max_bytes < MAX_IDEMPOTENCY_KEY_BYTES + ENTRY_OVERHEAD_BYTES {
+      return Err(ConfigError::Invalid(format!(
+        "idempotency.max_bytes must hold at least one key ({} bytes)",
+        MAX_IDEMPOTENCY_KEY_BYTES + ENTRY_OVERHEAD_BYTES
+      )));
+    }
+    Ok(())
+  }
+
+  pub fn window(&self) -> Duration {
+    Duration::from_secs(self.window_secs)
+  }
+}
+
 impl SourceConfig {
   pub fn mentions(&self) -> Mentions {
     Mentions {
@@ -488,6 +527,16 @@ impl Default for FilesSection {
   }
 }
 
+impl Default for IdempotencySection {
+  fn default() -> Self {
+    Self {
+      window_secs: 600,
+      max_keys: 10_000,
+      max_bytes: 4 * 1024 * 1024,
+    }
+  }
+}
+
 impl Default for AppSourcesSection {
   fn default() -> Self {
     Self {
@@ -542,6 +591,8 @@ mod tests {
       assert_eq!(config.files.max_files_per_message, 10);
       assert_eq!(config.sources[0].maybe_max_files_per_message, None);
       assert_eq!(config.spool_dir(), Path::new("spool"), "next to the database");
+      assert_eq!(config.idempotency.window(), Duration::from_secs(600));
+      assert_eq!(config.idempotency.max_keys, 10_000);
     }
 
     #[test]
@@ -655,6 +706,14 @@ mod tests {
         (
           "no idle timeout",
           format!("{MINIMAL}\n[files]\nidle_timeout_secs = 0\n"),
+        ),
+        (
+          "no idempotency window",
+          format!("{MINIMAL}\n[idempotency]\nwindow_secs = 0\n"),
+        ),
+        (
+          "no room for a key",
+          format!("{MINIMAL}\n[idempotency]\nmax_bytes = 200\n"),
         ),
       ] {
         assert!(BridgeConfig::from_toml(&text).is_err(), "{what}");

@@ -2718,7 +2718,8 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     };
     let mut authority = WorkspaceAuthority::new(members, admins, workspace.policy.admin_self_join.clone())
       .with_guests(guests)
-      .for_public_channel(is_public_channel);
+      .for_public_channel(is_public_channel)
+      .like_before_v1_0_9(self.is_checking_as_before_v1_0_9);
     if is_meeting_chat {
       // In a meeting chat only the roster's members manage others: a guest the server calls a
       // member still doesn't (the organizer is in the roster like any member).

@@ -44,6 +44,12 @@ and **Instance** (below).
 
 Member clients enforce this themselves, so the server cannot bypass it.
 
+The setting also covers admins bringing each other in: an admin who isn't a member of a private
+channel can't add another admin there under `owner_approval` or `disabled` either, from version
+1.0.9 on. Members can still add admins (that is how an owner approves). As long as a member of the
+channel uses an older version, that member's app can still let such an addition through; update
+all apps for the setting to hold.
+
 ### Organization recovery
 
 Lets two admins (configurable) unwrap a user's key backup into a one-time request key when the user

@@ -11,6 +11,7 @@
 
 use std::collections::VecDeque;
 use std::sync::Arc;
+use std::time::Instant;
 
 use teamcraft_core::Client;
 use teamcraft_core::api::{ApiError, ServerApi};
@@ -22,6 +23,7 @@ use teamcraft_core::store::{AttachmentRef, LocalStore};
 use tokio::sync::oneshot;
 use tracing::{debug, warn};
 
+use crate::idempotency::KeyGuard;
 use crate::sources::{FileCharge, Source};
 use crate::spool::SpooledFile;
 
@@ -37,7 +39,16 @@ pub struct FilesMessage {
   /// What the request took from the byte budgets.
   pub charge: FileCharge,
   /// The endpoint waits for this answer; it is gone when the producer hung up.
-  pub reply: oneshot::Sender<Result<(), FilesFailure>>,
+  pub reply: FilesReply,
+}
+
+/// The answer to a message with files, and the idempotency key of its request: the key is kept when
+/// the answer says the message was sent, also to a producer that no longer waits (its retry must
+/// not post it again), and freed with any other answer or none, since nothing was posted then.
+#[derive(Debug)]
+pub struct FilesReply {
+  sender: oneshot::Sender<Result<(), FilesFailure>>,
+  maybe_key: Option<KeyGuard>,
 }
 
 /// Why the files of a message did not go up.
@@ -67,7 +78,7 @@ pub struct UploadedMessage {
   pub text: String,
   pub is_alert: bool,
   pub attachments: Vec<AttachmentRef>,
-  pub reply: oneshot::Sender<Result<(), FilesFailure>>,
+  pub reply: FilesReply,
 }
 
 /// The messages with files: the one uploading and the ones waiting.
@@ -88,6 +99,27 @@ struct ActiveJob {
   maybe_step: Option<DirectUploadStep>,
   /// Files whose bytes are all up, waiting to be completed together.
   sent: Vec<(usize, DirectUpload)>,
+}
+
+impl FilesReply {
+  pub fn new(sender: oneshot::Sender<Result<(), FilesFailure>>, maybe_key: Option<KeyGuard>) -> Self {
+    Self { sender, maybe_key }
+  }
+
+  /// Answers the producer, keeping the key if the message was sent. `Err` gives the answer back
+  /// when the producer no longer waits.
+  pub fn send(self, answer: Result<(), FilesFailure>) -> Result<(), Result<(), FilesFailure>> {
+    let Self { sender, maybe_key } = self;
+    if let (Ok(()), Some(key)) = (&answer, maybe_key) {
+      key.accept(Instant::now());
+    }
+    sender.send(answer)
+  }
+
+  /// Whether the producer hung up.
+  pub fn is_closed(&self) -> bool {
+    self.sender.is_closed()
+  }
 }
 
 impl FileJobs {
@@ -349,6 +381,7 @@ mod tests {
   use super::*;
   use crate::app::{WorkerStop, shut_down, start_endpoints, worker_settings};
   use crate::config::BridgeConfig;
+  use crate::idempotency::{IDEMPOTENCY_KEY_HEADER, IDEMPOTENT_REPLAYED_HEADER};
   use crate::multipart::tests::form;
   use crate::sources::SourceRegistry;
   use crate::spool::SpoolDir;
@@ -385,6 +418,46 @@ mod tests {
     assert_eq!(notes.expose_secret(), b"all green");
     let build = alice.open_attachment(&files[1]).await.unwrap();
     assert_eq!(build.expose_secret(), large.as_slice());
+  }
+
+  #[tokio::test]
+  async fn a_retried_webhook_with_files_is_sent_once() {
+    let (server, mut alice, mut gateway, bot, channel) = channel_with_bot().await;
+    let body = form(&[
+      ("text", None, None, b"Nightly report".as_slice()),
+      ("file", Some("report.txt"), Some("text/plain"), b"all green"),
+    ]);
+    // The retry comes from a new process: another boundary, the same key and content.
+    let retry = String::from_utf8(body.clone())
+      .unwrap()
+      .replace("--XyZ", "--Retry")
+      .into_bytes();
+    let answers = run_bridge_requests(
+      bot,
+      channel,
+      vec![
+        (FORM_TYPE.to_owned(), Some("nightly-1"), body),
+        (
+          "multipart/form-data; boundary=Retry".to_owned(),
+          Some("nightly-1"),
+          retry,
+        ),
+      ],
+    )
+    .await;
+    let ok = |is_replayed| (reqwest::StatusCode::OK, "ok".to_owned(), is_replayed);
+    assert_eq!(answers, [ok(false), ok(true)]);
+    let (text, files) = received_files(&mut alice, &mut gateway, channel).await;
+    assert_eq!((text.as_str(), files.len()), ("Nightly report", 1));
+    assert_eq!(
+      texts(&alice, channel)
+        .iter()
+        .filter(|text| *text == "Nightly report")
+        .count(),
+      1,
+      "one message"
+    );
+    assert_eq!(server.attachment_count(), 1, "the file went up once");
   }
 
   #[tokio::test]
@@ -467,6 +540,66 @@ mod tests {
     }
   }
 
+  mod replies {
+    use axum::http::{HeaderMap, HeaderValue};
+    use teamcraft_crypto::fingerprint::Fingerprint;
+
+    use super::*;
+    use crate::config::IdempotencySection;
+    use crate::idempotency::{IdempotencyKey, IdempotencyStore, KeyGuard, KeyUse};
+    use crate::sources::SourceKey;
+
+    #[test]
+    fn a_sent_message_keeps_its_key_even_when_nobody_waits_and_any_other_end_frees_it() {
+      let store = IdempotencyStore::new(&IdempotencySection::default());
+      let source = SourceKey::Static("ci".into());
+      let message = Fingerprint::of(b"the message");
+
+      // Sent after the producer hung up: its retry must not post it again.
+      let (sender, answer) = oneshot::channel();
+      drop(answer);
+      let reply = FilesReply::new(sender, Some(run(&store, &source, "sent", message)));
+      assert!(reply.is_closed());
+      assert!(reply.send(Ok(())).is_err(), "nobody waits");
+      assert!(matches!(
+        store.try_claim(&source, &key("sent"), message, Instant::now()),
+        Ok(KeyUse::Replay)
+      ));
+
+      // Failed, or dropped unanswered (given up): nothing was posted, the key is free.
+      let (sender, _answer) = oneshot::channel();
+      let failed = FilesReply::new(sender, Some(run(&store, &source, "failed", message)));
+      failed.send(Err(FilesFailure::Failed)).unwrap();
+      let (sender, _answer) = oneshot::channel();
+      drop(FilesReply::new(
+        sender,
+        Some(run(&store, &source, "dropped", message)),
+      ));
+      for free in ["failed", "dropped"] {
+        assert!(
+          matches!(
+            store.try_claim(&source, &key(free), message, Instant::now()),
+            Ok(KeyUse::Run(_))
+          ),
+          "{free}"
+        );
+      }
+    }
+
+    fn run(store: &IdempotencyStore, source: &SourceKey, name: &str, message: Fingerprint) -> KeyGuard {
+      match store.try_claim(source, &key(name), message, Instant::now()) {
+        Ok(KeyUse::Run(guard)) => guard,
+        other => panic!("not a free key: {other:?}"),
+      }
+    }
+
+    fn key(name: &str) -> IdempotencyKey {
+      let mut headers = HeaderMap::new();
+      headers.insert("idempotency-key", HeaderValue::from_str(name).unwrap());
+      IdempotencyKey::from_headers(&headers).unwrap().unwrap()
+    }
+  }
+
   #[tokio::test]
   async fn a_stalled_producer_does_not_hold_up_the_shutdown() {
     let (_server, _alice, _gateway, bot, channel) = channel_with_bot().await;
@@ -515,7 +648,7 @@ mod tests {
       is_alert: false,
       files,
       charge: FileCharge::new(registry.clone(), source.clone()),
-      reply,
+      reply: FilesReply::new(reply, None),
     };
     (message, answer)
   }
@@ -566,6 +699,18 @@ mod tests {
     channel: ConversationId,
     body: Vec<u8>,
   ) -> (reqwest::StatusCode, String) {
+    let request = (FORM_TYPE.to_owned(), None, body);
+    let (status, answer, _) = run_bridge_requests(bot, channel, vec![request]).await.remove(0);
+    (status, answer)
+  }
+
+  /// [`run_bridge`] for several requests one after another, each with its content type and maybe
+  /// an `Idempotency-Key`; with each answer, whether it was given from memory.
+  async fn run_bridge_requests(
+    bot: TestClient,
+    channel: ConversationId,
+    requests: Vec<(String, Option<&str>, Vec<u8>)>,
+  ) -> Vec<(reqwest::StatusCode, String, bool)> {
     let spool = std::env::temp_dir().join(format!("teamcraft-bridge-jobs-{}-{channel}", std::process::id()));
     let config = BridgeConfig::from_toml(&format!(
       r#"
@@ -597,21 +742,25 @@ mod tests {
     };
     let worker = Worker::new(bot, sources, receiver, settings);
     let script = async {
-      let response = reqwest::Client::new()
-        .post(url)
-        .header("content-type", FORM_TYPE)
-        .body(body)
-        .send()
-        .await
-        .unwrap();
-      let answer = (response.status(), response.text().await.unwrap());
+      let mut answers = Vec::new();
+      for (content_type, maybe_key, body) in requests {
+        let mut request = reqwest::Client::new()
+          .post(&url)
+          .header("content-type", content_type);
+        if let Some(key) = maybe_key {
+          request = request.header(IDEMPOTENCY_KEY_HEADER, key);
+        }
+        let response = request.body(body).send().await.unwrap();
+        let is_replayed = response.headers().contains_key(IDEMPOTENT_REPLAYED_HEADER);
+        answers.push((response.status(), response.text().await.unwrap(), is_replayed));
+      }
       endpoints.shutdown().await;
-      answer
+      answers
     };
-    let (_, answer) = tokio::join!(worker.run(), script);
+    let (_, answers) = tokio::join!(worker.run(), script);
     let is_spool_empty = std::fs::read_dir(&spool).map_or(true, |mut entries| entries.next().is_none());
     assert!(is_spool_empty, "the spooled files are deleted");
-    answer
+    answers
   }
 
   /// The text and the files of the first message with files that reaches `client`.
