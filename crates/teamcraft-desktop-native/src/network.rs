@@ -70,8 +70,8 @@ mod imp {
 
   /// `nw_path_status_satisfied`: the path can be used.
   const NW_PATH_STATUS_SATISFIED: i32 = 1;
-  /// `QOS_CLASS_UTILITY`: path updates are not latency-critical for the UI.
-  const QOS_CLASS_UTILITY: isize = 0x11;
+  /// The serial queue's label: path updates arrive one after the other, in order.
+  const QUEUE_LABEL: &std::ffi::CStr = c"de.zeitgleich.teamcraft.network";
 
   // Network.framework and libdispatch (libSystem); the objects are opaque OS objects.
   #[link(name = "Network", kind = "framework")]
@@ -86,7 +86,8 @@ mod imp {
 
   #[allow(unsafe_code)]
   unsafe extern "C" {
-    fn dispatch_get_global_queue(identifier: isize, flags: usize) -> *mut c_void;
+    /// A null `attr` (`DISPATCH_QUEUE_SERIAL`) makes a serial queue.
+    fn dispatch_queue_create(label: *const std::ffi::c_char, attr: *const c_void) -> *mut c_void;
   }
 
   pub fn watch_network_up(watcher: Watcher) -> Result<(), NetworkWatchError> {
@@ -109,12 +110,15 @@ mod imp {
         tracing::error!("network callback panicked");
       }
     });
-    // SAFETY: `monitor` is a fresh, non-null path monitor; the global queue is a static system
-    // object; the monitor copies the handler block before returning. The monitor is never
-    // cancelled or released: it lives for the rest of the process, like the resume observer.
+    // SAFETY: `QUEUE_LABEL` is a NUL-terminated static string and a null attribute asks for a
+    // serial queue, so updates never run concurrently or out of order. `monitor` is a fresh,
+    // non-null path monitor; the monitor retains the queue and copies the handler block before
+    // returning. Neither is ever cancelled or released: they live for the rest of the process,
+    // like the resume observer.
     #[allow(unsafe_code)]
     unsafe {
-      nw_path_monitor_set_queue(monitor, dispatch_get_global_queue(QOS_CLASS_UTILITY, 0));
+      let queue = dispatch_queue_create(QUEUE_LABEL.as_ptr(), std::ptr::null());
+      nw_path_monitor_set_queue(monitor, queue);
       nw_path_monitor_set_update_handler(monitor, &handler);
       nw_path_monitor_start(monitor);
     }
@@ -155,6 +159,10 @@ mod imp {
     if status == ERROR_SUCCESS {
       Ok(())
     } else {
+      // SAFETY: the registration failed, so the system holds no reference to `context`: it is
+      // still ours alone and was made by `Box::into_raw` above.
+      #[allow(unsafe_code)]
+      drop(unsafe { Box::from_raw(context) });
       Err(NetworkWatchError::Register { code: status.0 })
     }
   }

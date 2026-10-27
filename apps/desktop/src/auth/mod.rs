@@ -23,6 +23,7 @@ mod test_dir;
 #[cfg(all(test, feature = "integration"))]
 pub(crate) mod integration_tests;
 
+use std::hash::{DefaultHasher, Hash, Hasher};
 use std::sync::{Arc, PoisonError, RwLock};
 use std::time::Duration;
 
@@ -252,8 +253,12 @@ struct Tokens {
   /// Wall clock (Unix ms), not `Instant`: a monotonic clock stands still while the computer
   /// sleeps, so a token that expired during a suspend would still look valid (issue #883).
   expires_at_ms: i64,
-  /// When this token was obtained (Unix ms): a request sent before that carried an older token.
-  obtained_at_ms: i64,
+  /// When the loop refreshes it (Unix ms): [`REFRESH_MARGIN`] before expiry, or halfway through a
+  /// shorter lifetime, so a provider's one-minute tokens aren't refreshed every check.
+  refresh_at_ms: i64,
+  /// Obtained because the server refused the previous token: if the server refuses this one too,
+  /// its answer stands and nothing is refreshed again (issue #883).
+  is_from_refusal: bool,
 }
 
 impl Tokens {
@@ -261,6 +266,14 @@ impl Tokens {
   fn remaining(&self, now_ms: i64) -> Duration {
     Duration::from_millis(u64::try_from(self.expires_at_ms - now_ms).unwrap_or(0))
   }
+}
+
+/// A stable fingerprint of an access token, so a caller can say which token was refused without
+/// keeping or comparing the secret itself.
+pub fn token_fingerprint(token: &str) -> u64 {
+  let mut hasher = DefaultHasher::new();
+  token.hash(&mut hasher);
+  hasher.finish()
 }
 
 /// The wall clock in Unix milliseconds; tests inject their own.
@@ -790,7 +803,7 @@ impl<S: TokenStore> AuthService<S> {
     }
     let needs_refresh = match &session.maybe_tokens {
       None => return Err(AuthError::NotSignedIn),
-      Some(tokens) => tokens.remaining((self.now_ms)()) <= REFRESH_MARGIN,
+      Some(tokens) => (self.now_ms)() >= tokens.refresh_at_ms,
     };
     if needs_refresh {
       self.refresh_session(&mut session, server).await?;
@@ -802,14 +815,17 @@ impl<S: TokenStore> AuthService<S> {
       .ok_or(AuthError::NotSignedIn)
   }
 
-  /// The server refused an access token that a request sent at `sent_at_ms` (Unix ms) carried:
-  /// refreshes once, unless another request already did since then (single flight: the session
-  /// lock serialises them). `Ok(true)` means a newer token is there and the request is worth one
-  /// more try; the caller retries once, never in a loop (issue #883).
+  /// The server refused the access token with fingerprint `refused` ([`token_fingerprint`]):
+  /// refreshes once, unless another request already did (single flight: the session lock
+  /// serialises them, and a refusal of an older token only retries). A token that was itself
+  /// fetched after a refusal is not refreshed again: the server's answer stands, so a server that
+  /// refuses everything can't make the app ask the provider on every request. `Ok(true)` means a
+  /// newer token is there and the request is worth one more try; the caller retries once, never
+  /// in a loop (issue #883).
   ///
   /// Only a refused refresh token ([`AuthError::Denied`]) ends the session; a network failure
   /// keeps it for the next try.
-  pub async fn refresh_rejected(&self, sent_at_ms: i64) -> Result<bool, AuthError> {
+  pub async fn refresh_rejected(&self, refused: u64) -> Result<bool, AuthError> {
     let server = self.server()?;
     let mut session = self.session.lock().await;
     if self.active_server().as_ref() != Some(&server) {
@@ -819,10 +835,16 @@ impl<S: TokenStore> AuthService<S> {
     let Some(tokens) = &session.maybe_tokens else {
       return Ok(false);
     };
-    if tokens.obtained_at_ms > sent_at_ms {
+    if token_fingerprint(tokens.access.expose_secret()) != refused {
       return Ok(true);
     }
+    if tokens.is_from_refusal {
+      return Ok(false);
+    }
     self.refresh_session(&mut session, &server).await?;
+    if let Some(tokens) = session.maybe_tokens.as_mut() {
+      tokens.is_from_refusal = true;
+    }
     Ok(true)
   }
 
@@ -898,12 +920,15 @@ impl<S: TokenStore> AuthService<S> {
     }
     let lifetime = response.expires_in().unwrap_or(Duration::from_secs(60));
     let now_ms = (self.now_ms)();
+    let ms = |duration: Duration| i64::try_from(duration.as_millis()).unwrap_or(i64::MAX);
+    let expires_at_ms = now_ms.saturating_add(ms(lifetime));
     session.is_expired = false;
     session.maybe_tokens = Some(Tokens {
       access: SecretString::from(response.access_token().secret().clone()),
       refresh: refresh.map(SecretString::from),
-      expires_at_ms: now_ms.saturating_add(i64::try_from(lifetime.as_millis()).unwrap_or(i64::MAX)),
-      obtained_at_ms: now_ms,
+      expires_at_ms,
+      refresh_at_ms: expires_at_ms.saturating_sub(ms(REFRESH_MARGIN.min(lifetime / 2))),
+      is_from_refusal: false,
     });
     Ok(())
   }
@@ -1675,11 +1700,38 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_refresh_after_a_refusal_happens_once_for_requests_sent_before_it() {
+    async fn a_refusal_of_an_older_token_only_retries() {
       let (service, _clock) = signed_in(config());
-      // The token was obtained at START_MS; a request sent earlier carried an older one, so another
-      // request has refreshed already: retry without asking the provider again.
-      assert!(service.refresh_rejected(START_MS - 1).await.unwrap());
+      // Another request has refreshed already: retry without asking the provider again.
+      assert!(
+        service
+          .refresh_rejected(token_fingerprint("older"))
+          .await
+          .unwrap()
+      );
+    }
+
+    /// A server that refuses every token gets one refresh, not one per request.
+    #[tokio::test]
+    async fn a_refused_fresh_token_is_not_refreshed_again() {
+      let provider = FakeProvider::start().await;
+      provider.set(PROVIDER_UP);
+      let (service, _clock) = signed_in(provider.config());
+      assert!(
+        service
+          .refresh_rejected(token_fingerprint("access"))
+          .await
+          .unwrap()
+      );
+      assert_eq!(provider.token_requests(), 1);
+      let fresh = token_fingerprint("fresh-access");
+      for _ in 0..5 {
+        assert!(
+          !service.refresh_rejected(fresh).await.unwrap(),
+          "the server's answer stands"
+        );
+      }
+      assert_eq!(provider.token_requests(), 1);
     }
 
     #[tokio::test]
@@ -1690,7 +1742,7 @@ mod tests {
       let (service, clock) = signed_in(unreachable);
       clock.fetch_add(2 * LIFETIME_MS, Ordering::SeqCst);
       assert!(matches!(
-        service.refresh_rejected(START_MS).await,
+        service.refresh_rejected(token_fingerprint("access")).await,
         Err(AuthError::Network(_))
       ));
       assert!(matches!(service.bearer_token().await, Err(AuthError::Network(_))));
@@ -1710,7 +1762,12 @@ mod tests {
         )
         .await
         .unwrap();
-      assert!(!service.refresh_rejected(local::now_ms()).await.unwrap());
+      assert!(
+        !service
+          .refresh_rejected(token_fingerprint("local"))
+          .await
+          .unwrap()
+      );
     }
 
     /// An identity provider on this computer: discovery, and a token endpoint whose answer the test
@@ -1823,7 +1880,8 @@ mod tests {
         access: SecretString::from("access".to_owned()),
         refresh: Some(SecretString::from("refresh".to_owned())),
         expires_at_ms: START_MS + LIFETIME_MS,
-        obtained_at_ms: START_MS,
+        refresh_at_ms: START_MS + LIFETIME_MS - 60_000,
+        is_from_refusal: false,
       };
       service
         .session

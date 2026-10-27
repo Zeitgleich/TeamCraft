@@ -45,14 +45,14 @@ use teamcraft_crypto::identity::IdentityPublicKey;
 use teamcraft_crypto::secret::{SecretBytes, SymmetricKey};
 use teamcraft_proto::DeviceLinkPlatform;
 use teamcraft_proto::{
-  BackgroundId, CallJoinTokenResponse, ClientUpdatePolicy, ConversationId, DeviceActivity,
+  BackgroundId, CallJoinTokenResponse, ClientUpdatePolicy, ConversationId, DeviceActivity, ErrorCode,
   GatewayClientMessage, GatewayEvent, MessageId, OrgBackgroundId, UserId,
 };
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::LocalSet;
 
 use super::media::{KeptKey, MediaSlot};
-use crate::auth::{AuthError, AuthService, TokenPeek, TokenStore};
+use crate::auth::{AuthError, AuthService, TokenPeek, TokenStore, token_fingerprint};
 
 /// Wrong short codes allowed before a link approval is dropped.
 const MAX_APPROVAL_MISSES: u8 = 3;
@@ -98,9 +98,9 @@ pub struct TokenCache {
   maybe_refresher: Option<Refresher>,
 }
 
-/// Refreshes the session after the server refused a token sent at the given time (Unix ms); see
+/// Refreshes the session after the server refused the token with the given fingerprint; see
 /// [`AuthService::refresh_rejected`].
-type Refresher = Arc<dyn Fn(i64) -> Pin<Box<dyn Future<Output = Result<bool, AuthError>>>> + Send + Sync>;
+type Refresher = Arc<dyn Fn(u64) -> Pin<Box<dyn Future<Output = Result<bool, AuthError>>>> + Send + Sync>;
 
 struct CachedToken {
   server_url: String,
@@ -117,20 +117,26 @@ impl TokenCache {
     Self {
       last: Arc::default(),
       maybe_source: Some(Arc::new(move || service.peek_server_bearer_token())),
-      maybe_refresher: Some(Arc::new(move |sent_at_ms| {
+      maybe_refresher: Some(Arc::new(move |refused| {
         let service = Arc::clone(&refreshing);
-        Box::pin(async move { service.refresh_rejected(sent_at_ms).await })
+        Box::pin(async move { service.refresh_rejected(refused).await })
       })),
     }
   }
 
-  /// After the server refused the token of a request sent at `sent_at_ms`: refreshes it once
-  /// (shared by concurrent callers). `Ok(true)` means the request is worth exactly one more try.
-  pub async fn refresh_rejected(&self, sent_at_ms: i64) -> Result<bool, AuthError> {
+  /// After the server refused the token with fingerprint `refused`: refreshes it once (shared by
+  /// concurrent callers, never twice for one refusal). `Ok(true)` means the request is worth
+  /// exactly one more try.
+  pub async fn refresh_rejected(&self, refused: u64) -> Result<bool, AuthError> {
     match &self.maybe_refresher {
-      Some(refresher) => refresher(sent_at_ms).await,
+      Some(refresher) => refresher(refused).await,
       None => Ok(false),
     }
+  }
+
+  /// The fingerprint of the token a request sent now carries, if there is one.
+  fn current_fingerprint(&self) -> Option<u64> {
+    self.current().ok().map(|(_, token)| token_fingerprint(&token))
   }
 
   /// `(server origin, access token)`, or nothing while signed out.
@@ -1053,8 +1059,9 @@ impl Core {
         self.drop_abandoned_setup().await;
         let has_existing_identity = match self.api().identity_key(self.user).await {
           Ok(maybe_key) => maybe_key.is_some(),
-          // No token yet, or one waiting for its refresh: opening is retried.
-          Err(error @ (ApiError::Token(_) | ApiError::Network(_))) => {
+          // No token yet, one waiting for its refresh, or a refused sign-in (the UI takes it from
+          // there): opening is retried.
+          Err(error @ (ApiError::Token(_) | ApiError::Network(_) | ApiError::SignInExpired)) => {
             return Err(OpenError::NoToken(error.to_string()));
           },
           Err(error) => return Err(OpenError::Failed(error.to_string())),
@@ -2216,19 +2223,25 @@ async fn run_commands(
   let count = commands.len();
   let mut maybe_failure = None;
   for command in commands {
-    let sent_at_ms = SystemClock.now_ms();
+    let maybe_sent = tokens.current_fingerprint();
     let result = connection
-      .keep_alive(sent_at_ms, client.run_ui_command(command.clone()))
+      .keep_alive(SystemClock.now_ms(), client.run_ui_command(command.clone()))
       .await;
-    // One more try after a refused token, never more (issue #883).
+    // One more try after a refused token, never more (issue #883). The refresh can wait for the
+    // session lock and the provider: heartbeats go on meanwhile.
     let result = match result {
-      Err(error) if is_refused_token(&error) => match retry_decision(tokens, sent_at_ms, error).await {
-        Ok(()) => {
-          connection
-            .keep_alive(SystemClock.now_ms(), client.run_ui_command(command))
-            .await
-        },
-        Err(error) => Err(error),
+      Err(error) if is_refused_token(&error) => {
+        let decision = connection
+          .keep_alive(SystemClock.now_ms(), retry_decision(tokens, maybe_sent, error))
+          .await;
+        match decision {
+          Ok(()) => {
+            connection
+              .keep_alive(SystemClock.now_ms(), client.run_ui_command(command))
+              .await
+          },
+          Err(error) => Err(error),
+        }
       },
       other => other,
     };
@@ -2240,20 +2253,36 @@ async fn run_commands(
   maybe_failure.map_or(Ok(count), Err)
 }
 
-/// The server refused the access token, or there was none: an expired token after a suspend,
-/// which one refresh fixes (issue #883). A deactivated account is not a token problem.
+/// The server refused the access token (401): an expired token after a suspend, which one
+/// refresh fixes (issue #883). Not when the server said why and a new token can't help: the
+/// session ended or timed out, the account is deleted or deactivated.
 fn is_refused_token(error: &CoreError) -> bool {
-  match error {
-    CoreError::Api(api) => api.is_sign_in_required() && !api.is_account_deactivated(),
-    _ => false,
-  }
+  let CoreError::Api(api @ ApiError::Status { status: 401, .. }) = error else {
+    return false;
+  };
+  !matches!(
+    api.error_code(),
+    Some(
+      ErrorCode::SessionEnded
+        | ErrorCode::SessionTimedOut
+        | ErrorCode::AccountDeleted
+        | ErrorCode::AccountDeactivated
+    )
+  )
 }
 
 /// Refreshes the token once after `error` (a refused token): `Ok(())` when the command is worth
 /// one more try, otherwise the error to show. A refresh that got no answer is a network problem
 /// and says so; only a refused refresh token leaves the sign-in message.
-async fn retry_decision(tokens: &TokenCache, sent_at_ms: i64, error: CoreError) -> Result<(), CoreError> {
-  match tokens.refresh_rejected(sent_at_ms).await {
+async fn retry_decision(
+  tokens: &TokenCache,
+  maybe_sent: Option<u64>,
+  error: CoreError,
+) -> Result<(), CoreError> {
+  let Some(sent) = maybe_sent else {
+    return Err(error);
+  };
+  match tokens.refresh_rejected(sent).await {
     Ok(true) => Ok(()),
     Ok(false) => Err(error),
     Err(AuthError::Network(detail)) => Err(CoreError::Api(ApiError::Network(detail))),
@@ -2518,29 +2547,42 @@ mod tests {
         })
       };
       assert!(is_refused_token(&refused()));
-      assert!(is_refused_token(&CoreError::Api(ApiError::Token(
+      assert!(!is_refused_token(&CoreError::Api(ApiError::Token(
         "not signed in".into()
       ))));
+      let ended = CoreError::Api(ApiError::Status {
+        status: 401,
+        maybe_body: Some(teamcraft_proto::ErrorBody::new(ErrorCode::SessionEnded, "ended")),
+        maybe_retry_after: None,
+      });
+      assert!(
+        !is_refused_token(&ended),
+        "a new token can't undo a sign-out elsewhere"
+      );
       assert!(!is_refused_token(&CoreError::Api(ApiError::Network(
         "down".into()
       ))));
 
       let refreshed = refresher(|| Ok(true));
-      assert!(retry_decision(&refreshed, 0, refused()).await.is_ok());
+      assert!(retry_decision(&refreshed, Some(0), refused()).await.is_ok());
 
       let offline = refresher(|| Err(AuthError::Network("no route to host".into())));
-      let error = retry_decision(&offline, 0, refused()).await.unwrap_err();
+      let error = retry_decision(&offline, Some(0), refused()).await.unwrap_err();
       assert!(matches!(error, CoreError::Api(ApiError::Network(_))), "{error}");
 
       let denied = refresher(|| Err(AuthError::Denied("invalid_grant".into())));
-      let error = retry_decision(&denied, 0, refused()).await.unwrap_err();
+      let error = retry_decision(&denied, Some(0), refused()).await.unwrap_err();
       assert!(
         error.is_sign_in_required(),
         "a refused refresh token stays a sign-in error"
       );
 
       let nothing = TokenCache::default();
-      assert!(retry_decision(&nothing, 0, refused()).await.is_err());
+      assert!(retry_decision(&nothing, Some(0), refused()).await.is_err());
+      assert!(
+        retry_decision(&refreshed, None, refused()).await.is_err(),
+        "no token was sent: nothing to refresh"
+      );
     }
 
     fn refresher(answer: fn() -> Result<bool, AuthError>) -> TokenCache {

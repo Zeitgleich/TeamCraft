@@ -333,8 +333,24 @@ impl Buses {
       tracing::debug!("cannot watch NetworkManager");
       return false;
     };
+    // The bus daemon's match rule filters broadcasts by sender, but another local process could
+    // send the signal to us directly: only NetworkManager's own connection counts.
+    let Some(mut owner) = network_manager_owner(system).await else {
+      return false;
+    };
     let mut previous = initial;
     while let Some(Ok(message)) = stream.next().await {
+      let header = message.header();
+      let Some(sender) = header.sender().map(|sender| sender.as_str().to_owned()) else {
+        continue;
+      };
+      if sender != owner {
+        // NetworkManager may have restarted under a new connection name.
+        match network_manager_owner(system).await {
+          Some(current) if current == sender => owner = current,
+          _ => continue,
+        }
+      }
       if let Ok(state) = message.body().deserialize::<u32>() {
         if is_network_back(previous, state) {
           on_up();
@@ -608,6 +624,19 @@ async fn logind_locked_hint(system: &Connection) -> bool {
 }
 
 /// One method call with a timeout; any failure (service missing, refused, wrong type) is `None`.
+/// The unique bus name NetworkManager holds right now.
+async fn network_manager_owner(system: &Connection) -> Option<String> {
+  call::<String, _>(
+    system,
+    BUS_DAEMON,
+    "/org/freedesktop/DBus",
+    BUS_DAEMON,
+    "GetNameOwner",
+    &(NETWORK_MANAGER,),
+  )
+  .await
+}
+
 /// A NetworkManager state change that brings the network (back) up: from below connected to
 /// connected, or from site-only to global connectivity (the captive-portal check passed).
 fn is_network_back(previous: u32, state: u32) -> bool {
