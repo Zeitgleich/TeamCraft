@@ -17,7 +17,7 @@ use super::sealed::LazySeal;
 /// Queued this much, the writes are issued right away instead of waiting for the batch delay.
 pub(crate) const MAX_QUEUED_BYTES: usize = 8 * 1024 * 1024;
 /// Queued this much when the batch delay ends, the batch waits a little longer to take the next
-/// rewrite of its large record along (the MLS state, rewritten for every group a catch-up joins).
+/// rewrite of its large record along (#326: the MLS state was one such record until #424).
 pub(crate) const LARGE_BATCH_BYTES: usize = 1024 * 1024;
 
 /// Writes that have not committed yet, by record key.

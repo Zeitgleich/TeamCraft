@@ -5,7 +5,8 @@
 //! pseudorandom lookup ID. Opening decrypts all records into a [`MemoryStore`], which answers every
 //! read; writes update the cache and go to the backend right away. A backend that collects writes
 //! may seal a record only when it writes it ([`RecordBackend::put_lazy`]), so a record rewritten
-//! before then is sealed once (issue #326: the MLS state, megabytes, after every group joined).
+//! before then is sealed once (issue #326: the MLS state, then one record of megabytes, after
+//! every group joined; one record per entry since #424).
 //!
 //! A group of writes that the backend rolls back stays in the cache: the running app goes on
 //! with it (as with any failed write), the next start reads what the backend kept.
@@ -20,7 +21,9 @@ use teamcraft_crypto::local_store::{LocalStoreKeys, LookupId};
 use teamcraft_crypto::secret::SymmetricKey;
 use teamcraft_proto::{Base64Bytes, ClientMessageId, ConversationId, MessageId};
 
-use super::{LocalStore, MediaRange, MemoryStore, MessageFilter, StoreError, StoredMessage, Table};
+use super::{
+  LocalStore, MediaRange, MemoryStore, MessageFilter, StoreError, StoredMessage, Table, WriteTally,
+};
 
 const ENTRY_NAMESPACE: &str = "entry";
 const MESSAGE_NAMESPACE: &str = "message";
@@ -68,6 +71,11 @@ pub trait RecordBackend {
   }
   /// [`LocalStore::write_soon`] for the records.
   fn write_soon(&self) {}
+  /// [`LocalStore::write_tally`] for the records. The cache keeps a group the backend rolled back,
+  /// so the tally is the only way a caller learns that the disk lost it.
+  fn write_tally(&self) -> Option<WriteTally> {
+    None
+  }
 }
 
 /// What a sealed record holds: the plaintext name next to the value, so loading can rebuild the
@@ -280,6 +288,10 @@ impl<B: RecordBackend> LocalStore for SealedStore<B> {
 
   fn write_soon(&self) {
     self.backend.write_soon();
+  }
+
+  fn write_tally(&self) -> Option<WriteTally> {
+    self.backend.write_tally()
   }
 }
 

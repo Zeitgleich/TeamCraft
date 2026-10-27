@@ -165,6 +165,8 @@ impl PendingEnrollment {
       clock,
       settings,
       provider: Default::default(),
+      // Knows nothing of the store: the first save writes the whole state and drops the rest.
+      saved_mls: Default::default(),
       account,
       groups: HashMap::new(),
       sync,

@@ -312,8 +312,9 @@ for months must keep fresh ones on the server:
   memory before it goes, and so is every old copy of the MLS storage in the store's cache. The
   local database zeroes freed pages (SQLite `secure_delete`), and the native store truncates its
   write-ahead log after a deletion, and after saves of the MLS storage at most every 30 seconds
-  (a checkpoint costs two or three syncs and the snapshot is saved for every processed message;
-  measured with the snapshot's own write: about 20 ms per save at 64 KiB, 320 ms at 1 MiB). What the
+  (a checkpoint costs two or three syncs and the MLS storage is saved for every processed
+  message; measured when the storage was one record: about 20 ms per save at 64 KiB, 320 ms at
+  1 MiB; since #424 a save writes only the entries that changed, §9.5). What the
   interval keeps back is cleared when the app stops (goes to the background) or closes the store;
   a checkpoint that cannot finish (another reader holds the log) stays due and is retried, and never
   fails the write. Inside a group of writes (§9.5) the purge waits for the commit. So old storage
@@ -1899,6 +1900,27 @@ If SQLite rolls a group's transaction back by itself (a full disk), the group's 
 refused instead of being committed one by one. Where order alone is enough (content keys are written before
 the MLS state that consumed the epoch), reprocessing an entry after a crash is idempotent.
 
+**MLS state (issue #424).** The openmls provider storage (every group's tree, context, epoch and
+message secrets; key package private keys) is a map from storage key to value; each entry is one
+record of the `mls_storage` table (`entry/` and the storage key in base64url). A save writes the
+entries that changed since the last save and deletes the ones openmls dropped, as one group of
+writes, inside the caller's group where there is one (the cursor past a processed entry, the
+applied changes): after a crash the store holds the state before or after the save, never a group
+half old, half new (kill-point tests in `store_integrity.rs`). Joining a group or processing a
+message writes that group's few changed entries, whatever the number of groups; before, the whole
+storage was one record rewritten after every change, which made a catch-up of many new groups
+quadratic (0.8 GB written for 300 groups, docs/performance.md). The client remembers what the
+store holds (`SavedMlsStorage`) to find the changes without reading the store. A store that can
+lose writes it accepted counts its committed and rolled-back groups (`LocalStore::write_tally`,
+the SQLite stores): after a lost group the next save writes every entry again and deletes every key
+that may still be on disk, the deletes of groups not yet known to be committed included (the sealed
+store's cache keeps a rolled-back group, so its listing no longer shows them). The browser store
+never loses an accepted write while the page runs (§9.4). A deleted group leaves no entry, the
+previous epoch's leaf keys included, which openmls 0.9 leaves behind after a commit that removed
+the device. Versions before 1.0.9 kept the whole storage as one record (`provider`); opening the
+store moves it to entries in one group of writes that removes the old record last, so until that
+group is on disk the old record is what a start reads, and an interrupted move is done again from it.
+
 **Layout versions.** The SQLite stores keep their layout version in `PRAGMA user_version`. Each store
 has a list of numbered steps (forward-only, never edited once released); opening runs the missing
 ones, each in its own transaction together with setting its version, so a crash or a failed step
@@ -1906,8 +1928,11 @@ leaves the database at the last step that completed. Upkeep that can't run in a 
 one-time wipe of free pages, version 2, issue #391) runs after the earlier steps committed and
 counts as done only once it succeeded; a failure (a full disk) is tried again on the next start.
 Released 1.0 databases carry version 0 and the layout of version 1. A newer layout is refused
-without touching it.
-IndexedDB versions its object stores itself and refuses a newer database (`VersionError`). Databases
+without touching it. Version 3 changes no table but marks the MLS state stored per entry, which an
+older version would read as no MLS state at all; it is set without upkeep, so a failed wipe before
+it is still retried and the marker waits for it.
+IndexedDB versions its object stores itself and refuses a newer database (`VersionError`); version 2
+is the same marker (an older page that still holds the database closes it on `versionchange`). Databases
 written by every release are kept as fixtures (`crates/teamcraft-core/tests/fixtures/store/`) and
 opened by every later version in CI. Records inside the store stay JSON with defaults for new
 fields and an `Unknown` catch-all, so newer records are read or skipped, not misread.

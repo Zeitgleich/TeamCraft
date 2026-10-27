@@ -18,6 +18,7 @@ pub mod link_preview;
 // worker reads pictures for its notifications.
 #[cfg(any(feature = "ui", feature = "service-worker"))]
 pub mod media_cache;
+pub mod mls_storage;
 pub mod notify_rules;
 pub mod picked_files;
 pub mod platform;
