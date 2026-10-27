@@ -1,38 +1,41 @@
 //! The worker's side of webhooks with files (docs/bridge.md, "Files"): uploads the files of one
 //! message after another with the core's direct uploads, each file encrypted with its own key, and
-//! hands the message on once all of its files are up. A failed file gives the upload up at the
-//! server and answers the waiting request; its message is never sent, so there is no message with
-//! files missing.
+//! hands the message on once all of its files are up. The uploads are completed only then, all
+//! together: until that moment each is an unfinished upload, so a failed file, or a producer who
+//! hung up, gives all of them up and the server frees them. The message is never sent then, so
+//! there is no message with files missing and no file without its message.
 //!
 //! The bytes go up beside the worker's loop ([`FileJobs::sent`] in its `select!`), so logs,
 //! webhooks and the gateway keep going while a large file uploads. Messages with files wait in
-//! line, at most [`MAX_WAITING_FILE_MESSAGES`]; one is uploaded at a time.
+//! line (no more than the endpoint lets run at once); one is uploaded at a time.
 
 use std::collections::VecDeque;
 use std::sync::Arc;
 
 use teamcraft_core::Client;
 use teamcraft_core::api::{ApiError, ServerApi};
-use teamcraft_core::client::direct_uploads::{DirectUpload, DirectUploadError, DirectUploadStep};
+use teamcraft_core::client::direct_uploads::{
+  DirectUpload, DirectUploadError, DirectUploadProgress, DirectUploadStep,
+};
 use teamcraft_core::client::files::UploadSource;
 use teamcraft_core::store::{AttachmentRef, LocalStore};
 use tokio::sync::oneshot;
 use tracing::{debug, warn};
 
-use crate::sources::Source;
+use crate::sources::{FileCharge, Source};
 use crate::spool::SpooledFile;
 
-/// Messages with files waiting for their upload; more are refused (`503`).
-pub const MAX_WAITING_FILE_MESSAGES: usize = 32;
-
-/// A webhook message with files, from the endpoint. Its files are deleted from the spool once it
-/// is dropped: after its upload, or when it is refused.
+/// A webhook message with files, from the endpoint. Its files are deleted from the spool, and its
+/// bytes given back unless its upload began, once it is dropped: after its upload, or when it is
+/// refused.
 #[derive(Debug)]
 pub struct FilesMessage {
   pub source: Arc<Source>,
   pub text: String,
   pub is_alert: bool,
   pub files: Vec<SpooledFile>,
+  /// What the request took from the byte budgets.
+  pub charge: FileCharge,
   /// The endpoint waits for this answer; it is gone when the producer hung up.
   pub reply: oneshot::Sender<Result<(), FilesFailure>>,
 }
@@ -52,6 +55,9 @@ pub enum FilesFailure {
   Busy,
   /// The files are up, but the bridge's store could not keep their message.
   NotQueued,
+  /// The bot has no encryption group for the channel yet (a welcome on its way): the message
+  /// couldn't be sent, so nothing is uploaded.
+  ChannelNotReady,
 }
 
 /// A message whose files are all up: what the worker sends.
@@ -65,30 +71,54 @@ pub struct UploadedMessage {
 }
 
 /// The messages with files: the one uploading and the ones waiting.
-#[derive(Default)]
 pub struct FileJobs {
   waiting: VecDeque<FilesMessage>,
   maybe_active: Option<ActiveJob>,
+  capacity: usize,
 }
 
 /// The message whose files go up now.
 struct ActiveJob {
   message: FilesMessage,
-  /// The file going up: `message.files[uploaded.len()]`.
-  upload: DirectUpload,
+  /// Indices into `message.files` still to go up, the next one first: the largest files first, so
+  /// the small ones (sent whole, and swept sooner by the server while unfinished) come last.
+  queued: VecDeque<usize>,
+  /// The file going up now and its upload.
+  current: (usize, DirectUpload),
   maybe_step: Option<DirectUploadStep>,
-  uploaded: Vec<AttachmentRef>,
+  /// Files whose bytes are all up, waiting to be completed together.
+  sent: Vec<(usize, DirectUpload)>,
 }
 
 impl FileJobs {
+  /// Room for `capacity` messages waiting.
+  pub fn new(capacity: usize) -> Self {
+    Self {
+      waiting: VecDeque::new(),
+      maybe_active: None,
+      capacity,
+    }
+  }
+
   /// Lines the message up, or refuses it when too many wait.
   pub fn push(&mut self, message: FilesMessage) {
-    if self.waiting.len() >= MAX_WAITING_FILE_MESSAGES {
+    if self.waiting.len() >= self.capacity {
       warn!(source = %message.source.name, "too many messages with files wait; refusing one");
       let _ = message.reply.send(Err(FilesFailure::Busy));
       return;
     }
     self.waiting.push_back(message);
+  }
+
+  /// Drops the waiting messages whose producers hung up: their files leave the spool at once.
+  pub fn drop_abandoned(&mut self) {
+    self.waiting.retain(|message| {
+      let is_waited_for = !message.reply.is_closed();
+      if !is_waited_for {
+        debug!(source = %message.source.name, "the producer hung up before its files went up");
+      }
+      is_waited_for
+    });
   }
 
   /// Resolves once the bytes of the step on its way are sent; never while none is.
@@ -100,37 +130,43 @@ impl FileJobs {
   }
 
   /// Starts the next step when none is on its way: the next part or file of the active message,
-  /// or the first file of the next message. Returns a message whose files are all up.
-  pub async fn advance<A: ServerApi, S: LocalStore>(
-    &mut self,
-    client: &mut Client<A, S>,
-  ) -> Option<UploadedMessage> {
+  /// or the first file of the next message.
+  pub async fn advance<A: ServerApi, S: LocalStore>(&mut self, client: &mut Client<A, S>) {
     loop {
       if self
         .maybe_active
         .as_ref()
         .is_some_and(|job| job.maybe_step.is_some())
       {
-        return None;
+        return;
       }
       if self.maybe_active.is_none() {
-        self.maybe_active = Some(self.next_job()?);
+        let Some(job) = self.next_job(client) else {
+          return;
+        };
+        self.maybe_active = Some(job);
       }
-      let job = self.maybe_active.as_mut()?;
+      let Some(job) = self.maybe_active.as_mut() else {
+        return;
+      };
       if job.message.reply.is_closed() {
-        debug!(source = %job.message.source.name, "the producer hung up; its files are dropped");
+        debug!(source = %job.message.source.name, "the producer hung up; its files are given up");
         self.give_up(client, None).await;
         continue;
       }
-      match client.start_direct_upload(&mut job.upload).await {
-        Ok(step) => job.maybe_step = Some(step),
+      match client.start_direct_upload(&mut job.current.1).await {
+        Ok(step) => {
+          // Bytes leave for the server now: what the request took stays taken.
+          job.message.charge.keep();
+          job.maybe_step = Some(step);
+        },
         Err(error) => self.give_up(client, Some(&error)).await,
       }
     }
   }
 
-  /// Completes the step whose bytes were sent ([`Self::sent`] resolved). Returns a message whose
-  /// files are all up.
+  /// Records the step whose bytes were sent ([`Self::sent`] resolved). Returns a message whose
+  /// files are all up and completed.
   pub async fn finish_step<A: ServerApi, S: LocalStore>(
     &mut self,
     client: &mut Client<A, S>,
@@ -138,18 +174,16 @@ impl FileJobs {
   ) -> Option<UploadedMessage> {
     let job = self.maybe_active.as_mut()?;
     let step = job.maybe_step.take()?;
-    match client.finish_direct_upload(&mut job.upload, step, sent).await {
-      // A part is stored; the next one follows.
-      Ok(None) => None,
-      Ok(Some(attachment)) => {
-        job.uploaded.push(attachment);
-        match job.message.files.get(job.uploaded.len()) {
-          Some(next) => {
-            job.upload = direct_upload(&job.message.source, next);
-            None
-          },
-          None => self.maybe_active.take().map(ActiveJob::into_uploaded),
-        }
+    match client.finish_direct_upload(&mut job.current.1, step, sent).await {
+      Ok(DirectUploadProgress::MoreToSend) => None,
+      Ok(DirectUploadProgress::AllSent) => {
+        let Some(next) = job.queued.pop_front() else {
+          return self.complete(client).await;
+        };
+        let upload = direct_upload(&job.message.source, &job.message.files[next]);
+        let done = std::mem::replace(&mut job.current, (next, upload));
+        job.sent.push(done);
+        None
       },
       Err(error) => {
         self.give_up(client, Some(&error)).await;
@@ -160,37 +194,90 @@ impl FileJobs {
 
   /// Gives up whatever is under way, at shutdown.
   pub async fn abandon_all<A: ServerApi, S: LocalStore>(&mut self, client: &Client<A, S>) {
-    if let Some(job) = self.maybe_active.take() {
-      client.abandon_direct_upload(&job.upload).await;
-    }
+    self.give_up(client, None).await;
     self.waiting.clear();
   }
 
-  /// The next waiting message whose producer still waits for the answer.
-  fn next_job(&mut self) -> Option<ActiveJob> {
+  /// The next waiting message whose producer still waits and whose channel the bot can write in.
+  fn next_job<A: ServerApi, S: LocalStore>(&mut self, client: &mut Client<A, S>) -> Option<ActiveJob> {
     while let Some(message) = self.waiting.pop_front() {
       if message.reply.is_closed() {
         debug!(source = %message.source.name, "the producer hung up before its files went up");
         continue;
       }
-      let Some(first) = message.files.first() else {
+      if !client.has_group(message.source.conversation).unwrap_or(false) {
+        let _ = message.reply.send(Err(FilesFailure::ChannelNotReady));
+        continue;
+      }
+      let mut order: Vec<usize> = (0..message.files.len()).collect();
+      order.sort_by_key(|index| std::cmp::Reverse(message.files[*index].size_bytes));
+      let mut queued = VecDeque::from(order);
+      let Some(first) = queued.pop_front() else {
         // The endpoint hands on only messages with files; nothing to upload is nothing to send.
         let _ = message.reply.send(Err(FilesFailure::LocalFile));
         continue;
       };
-      let upload = direct_upload(&message.source, first);
+      let upload = direct_upload(&message.source, &message.files[first]);
       return Some(ActiveJob {
         message,
-        upload,
+        queued,
+        current: (first, upload),
         maybe_step: None,
-        uploaded: Vec::new(),
+        sent: Vec::new(),
       });
     }
     None
   }
 
-  /// Ends the active message without sending it: gives its upload up and answers with `error`
-  /// (none when nobody waits for the answer any more).
+  /// Every file of the active message is up: completes them all, then hands the message on with
+  /// its files in the order the producer sent them.
+  async fn complete<A: ServerApi, S: LocalStore>(
+    &mut self,
+    client: &mut Client<A, S>,
+  ) -> Option<UploadedMessage> {
+    let ActiveJob {
+      message,
+      current,
+      mut sent,
+      ..
+    } = self.maybe_active.take()?;
+    sent.push(current);
+    let mut attachments: Vec<(usize, AttachmentRef)> = Vec::with_capacity(sent.len());
+    for (index, upload) in &mut sent {
+      match client.complete_direct_upload(upload).await {
+        Ok(attachment) => attachments.push((*index, attachment)),
+        Err(error) => {
+          // Files completed before this one stay at the server without a message: the window is
+          // the few requests of completing, not the whole upload.
+          abandon(client, sent.iter().map(|(_, upload)| upload)).await;
+          report(&message, &error);
+          let _ = message.reply.send(Err(failure_of(&error)));
+          return None;
+        },
+      }
+    }
+    attachments.sort_by_key(|(index, _)| *index);
+    let FilesMessage {
+      source,
+      text,
+      is_alert,
+      reply,
+      ..
+    } = message;
+    Some(UploadedMessage {
+      source,
+      text,
+      is_alert,
+      attachments: attachments
+        .into_iter()
+        .map(|(_, attachment)| attachment)
+        .collect(),
+      reply,
+    })
+  }
+
+  /// Ends the active message without sending it: gives all of its uploads up and answers with the
+  /// error (none when nobody waits for the answer any more).
   async fn give_up<A: ServerApi, S: LocalStore>(
     &mut self,
     client: &Client<A, S>,
@@ -199,32 +286,27 @@ impl FileJobs {
     let Some(job) = self.maybe_active.take() else {
       return;
     };
-    client.abandon_direct_upload(&job.upload).await;
+    let uploads = std::iter::once(&job.current.1).chain(job.sent.iter().map(|(_, upload)| upload));
+    abandon(client, uploads).await;
     if let Some(error) = maybe_error {
-      warn!(source = %job.message.source.name, %error, "uploading a webhook's files failed");
+      report(&job.message, error);
       let _ = job.message.reply.send(Err(failure_of(error)));
     }
-    // The files already up stay at the server without a message: nothing carries their keys.
   }
 }
 
-impl ActiveJob {
-  fn into_uploaded(self) -> UploadedMessage {
-    let FilesMessage {
-      source,
-      text,
-      is_alert,
-      reply,
-      ..
-    } = self.message;
-    UploadedMessage {
-      source,
-      text,
-      is_alert,
-      attachments: self.uploaded,
-      reply,
-    }
+async fn abandon<'a, A: ServerApi, S: LocalStore>(
+  client: &Client<A, S>,
+  uploads: impl Iterator<Item = &'a DirectUpload>,
+) {
+  for upload in uploads {
+    client.abandon_direct_upload(upload).await;
   }
+}
+
+fn report(message: &FilesMessage, error: &DirectUploadError) {
+  // The core's network errors name no URL, so no presigned one reaches the log.
+  warn!(source = %message.source.name, %error, "uploading a webhook's files failed");
 }
 
 fn direct_upload(source: &Source, file: &SpooledFile) -> DirectUpload {
@@ -238,6 +320,7 @@ fn direct_upload(source: &Source, file: &SpooledFile) -> DirectUpload {
     file.media_type.clone(),
     file.size_bytes,
   )
+  .with_picture(file.maybe_thumbnail.clone(), file.maybe_dimensions)
 }
 
 fn failure_of(error: &DirectUploadError) -> FilesFailure {
@@ -264,10 +347,11 @@ mod tests {
   use tokio::sync::mpsc;
 
   use super::*;
-  use crate::app::start_endpoints;
+  use crate::app::{WorkerStop, shut_down, start_endpoints, worker_settings};
   use crate::config::BridgeConfig;
   use crate::multipart::tests::form;
   use crate::sources::SourceRegistry;
+  use crate::spool::SpoolDir;
   use crate::worker::{Worker, WorkerSettings};
 
   type TestClient = Client<FakeServerApi, Arc<MemoryStore>>;
@@ -320,6 +404,159 @@ mod tests {
       !texts(&alice, channel).iter().any(|text| text == "two files"),
       "no message with a file missing"
     );
+    assert_eq!(server.attachment_count(), 0, "and no file without its message");
+  }
+
+  mod hang_ups {
+    use super::*;
+
+    #[tokio::test]
+    async fn a_message_whose_producer_hung_up_while_it_waited_uploads_nothing() {
+      let (server, _alice, _gateway, mut bot, channel) = channel_with_bot().await;
+      let (registry, source) = registry_for(channel);
+      let spool = SpoolDir::new(scratch_dir("queued"), u64::MAX);
+      let (message, answer) = files_message(&registry, &source, vec![spooled(&spool, "a.txt", b"a").await]);
+      let mut jobs = FileJobs::new(4);
+      jobs.push(message);
+      drop(answer);
+      jobs.drop_abandoned();
+      jobs.advance(&mut bot).await;
+      assert_eq!(server.attachment_count(), 0);
+      assert_eq!(spool.used_bytes(), 0, "its files left the spool");
+    }
+
+    #[tokio::test]
+    async fn a_producer_hanging_up_during_the_upload_gives_every_file_up() {
+      let (server, _alice, _gateway, mut bot, channel) = channel_with_bot().await;
+      let (registry, source) = registry_for(channel);
+      let spool = SpoolDir::new(scratch_dir("active"), u64::MAX);
+      let large: Vec<u8> = (0..9 * 1024 * 1024).map(|index| (index % 251) as u8).collect();
+      let files = vec![
+        spooled(&spool, "small.txt", b"small").await,
+        spooled(&spool, "large.bin", &large).await,
+      ];
+      let (message, answer) = files_message(&registry, &source, files);
+      let mut jobs = FileJobs::new(4);
+      jobs.push(message);
+      // The large file goes first; its first part goes up, then the producer hangs up.
+      jobs.advance(&mut bot).await;
+      let sent = jobs.sent().await;
+      assert!(jobs.finish_step(&mut bot, sent).await.is_none());
+      assert_eq!(server.attachment_count(), 1, "one unfinished upload");
+      drop(answer);
+      jobs.advance(&mut bot).await;
+      assert_eq!(server.attachment_count(), 0, "given up at the server");
+      assert_eq!(server.abandoned_attachments().len(), 1);
+      assert_eq!(spool.used_bytes(), 0);
+    }
+
+    #[tokio::test]
+    async fn a_channel_the_bot_cannot_write_in_yet_is_refused_before_any_upload() {
+      let (server, mut alice, _gateway, mut bot, _channel) = channel_with_bot().await;
+      // A channel the bot isn't in: it has no group for it.
+      let space = alice.api().list_spaces().await.unwrap().spaces[0].id;
+      let other = alice.create_channel(space, "elsewhere").await.unwrap();
+      let (registry, source) = registry_for(other);
+      let spool = SpoolDir::new(scratch_dir("no-group"), u64::MAX);
+      let (message, answer) = files_message(&registry, &source, vec![spooled(&spool, "a.txt", b"a").await]);
+      let mut jobs = FileJobs::new(4);
+      jobs.push(message);
+      jobs.advance(&mut bot).await;
+      assert_eq!(answer.await.unwrap(), Err(FilesFailure::ChannelNotReady));
+      assert_eq!(server.attachment_count(), 0);
+    }
+  }
+
+  #[tokio::test]
+  async fn a_stalled_producer_does_not_hold_up_the_shutdown() {
+    let (_server, _alice, _gateway, bot, channel) = channel_with_bot().await;
+    let config = bridge_config(channel, "drain_timeout_secs = 1");
+    let (sender, receiver) = mpsc::channel(16);
+    let sources = SourceRegistry::new(&config);
+    let endpoints = start_endpoints(&config, sources.clone(), sender).await.unwrap();
+    let address = endpoints.addrs[0];
+    let worker = Worker::new(bot, sources, receiver, worker_settings(&config));
+    let (stop, stopped) = WorkerStop::new();
+    let script = async {
+      // Headers and the start of a form, then nothing: the request stays open.
+      let mut stream = tokio::net::TcpStream::connect(address).await.unwrap();
+      let head = format!(
+        "POST /hooks/{TOKEN} HTTP/1.1\r\nhost: bridge\r\ncontent-type: {FORM_TYPE}\r\n\
+         content-length: 100000\r\n\r\n--XyZ\r\n"
+      );
+      tokio::io::AsyncWriteExt::write_all(&mut stream, head.as_bytes())
+        .await
+        .unwrap();
+      let started = std::time::Instant::now();
+      shut_down(endpoints, &stop, std::time::Duration::from_millis(300)).await;
+      started.elapsed()
+    };
+    let (_, waited) = tokio::join!(worker.run_until(stopped), script);
+    assert!(waited < std::time::Duration::from_secs(5), "{waited:?}");
+  }
+
+  /// The registry of a bridge with one source for `channel`, and that source.
+  fn registry_for(channel: ConversationId) -> (SourceRegistry, Arc<Source>) {
+    let config = bridge_config(channel, "");
+    let registry = SourceRegistry::new(&config);
+    let source = registry.find(TOKEN, crate::sources::Endpoint::Webhook).unwrap();
+    (registry, source)
+  }
+
+  fn files_message(
+    registry: &SourceRegistry,
+    source: &Arc<Source>,
+    files: Vec<SpooledFile>,
+  ) -> (FilesMessage, oneshot::Receiver<Result<(), FilesFailure>>) {
+    let (reply, answer) = oneshot::channel();
+    let message = FilesMessage {
+      source: source.clone(),
+      text: "files".into(),
+      is_alert: false,
+      files,
+      charge: FileCharge::new(registry.clone(), source.clone()),
+      reply,
+    };
+    (message, answer)
+  }
+
+  async fn spooled(spool: &SpoolDir, name: &str, content: &[u8]) -> SpooledFile {
+    let mut writer = spool
+      .create(name.into(), "application/octet-stream".into())
+      .await
+      .unwrap();
+    writer.write(content).await.unwrap();
+    writer.finish().await.unwrap()
+  }
+
+  fn scratch_dir(name: &str) -> std::path::PathBuf {
+    std::env::temp_dir().join(format!("teamcraft-bridge-jobs-{}-{name}", std::process::id()))
+  }
+
+  /// The bridge's configuration with one source for `channel`; `listen` adds to `[listen]`.
+  fn bridge_config(channel: ConversationId, listen: &str) -> BridgeConfig {
+    let spool = scratch_dir(&format!("spool-{channel}"));
+    BridgeConfig::from_toml(&format!(
+      r#"
+      [server]
+      url = "http://localhost"
+      [store]
+      path = "x.db"
+      [listen]
+      addrs = ["127.0.0.1:0"]
+      {listen}
+      [files]
+      spool_dir = "{spool}"
+      [app_sources]
+      enabled = false
+      [[sources]]
+      name = "ci"
+      token = "{TOKEN}"
+      conversation_id = "{channel}"
+      "#,
+      spool = spool.display()
+    ))
+    .unwrap()
   }
 
   /// Starts the bridge for the bot, posts `body` as a webhook with files, waits for the answer and
@@ -355,9 +592,8 @@ mod tests {
     let endpoints = start_endpoints(&config, sources.clone(), sender).await.unwrap();
     let url = format!("http://{}/hooks/{TOKEN}", endpoints.addrs[0]);
     let settings = WorkerSettings {
-      batch: config.batch_limits(),
       index_interval: None,
-      maybe_app_sources: None,
+      ..worker_settings(&config)
     };
     let worker = Worker::new(bot, sources, receiver, settings);
     let script = async {

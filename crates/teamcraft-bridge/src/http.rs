@@ -66,8 +66,12 @@ pub enum HookError {
   RateLimited { retry_after: Duration },
   #[error("the bridge takes no more file bytes this minute")]
   FileRateLimited { retry_after: Duration },
-  #[error("the request is larger than the bridge takes in file bytes a minute")]
+  #[error("the request is larger than a source may send in file bytes a minute")]
   RequestTooLarge,
+  #[error("the request sent nothing for too long")]
+  RequestTimeout,
+  #[error("the text and the files don't fit into one message")]
+  MessageTooLarge,
   #[error("the body is larger than listen.max_body_bytes")]
   BodyTooLarge,
   #[error("the body could not be read")]
@@ -80,6 +84,10 @@ pub enum HookError {
   ServerFileTooLarge,
   #[error("the files could not be stored for their upload")]
   SpoolFailed,
+  #[error("the bridge holds as many files as it may; try again later")]
+  SpoolFull,
+  #[error("the bot can't write in the channel yet; try again later")]
+  ChannelNotReady,
   #[error("the message could not be stored")]
   NotQueued,
   #[error("uploading a file to the server failed")]
@@ -91,6 +99,11 @@ pub enum HookError {
   #[error("the bridge is shutting down")]
   ShuttingDown,
 }
+
+/// When a busy or stopping bridge expects to have room again.
+const RETRY_SOON: Duration = Duration::from_secs(5);
+/// When a full spool, a server out of reach or a channel the bot isn't in yet may be better.
+const RETRY_LATER: Duration = Duration::from_secs(30);
 
 /// A webhook's body: read whole up to `listen.max_body_bytes` (JSON, the form-encoded `payload=`),
 /// or left to stream for `multipart/form-data`, which carries files far larger than that.
@@ -117,6 +130,19 @@ impl HttpState {
 
   pub fn files(&self) -> &FileSettings {
     &self.files
+  }
+
+  /// A place in the worker's queue, held while a request with files is read, so a request is never
+  /// refused for a full queue after its body arrived.
+  pub fn reserve_submission(&self) -> Result<mpsc::OwnedPermit<Submission>, HookError> {
+    self
+      .sender
+      .clone()
+      .try_reserve_owned()
+      .map_err(|error| match error {
+        mpsc::error::TrySendError::Full(_) => HookError::Busy,
+        mpsc::error::TrySendError::Closed(_) => HookError::ShuttingDown,
+      })
   }
 }
 
@@ -218,7 +244,7 @@ fn too_many_requests(state: &HttpState, source: &Source) -> Response {
 }
 
 /// Hands a submission to the worker without waiting.
-pub(crate) fn submit(state: &HttpState, submission: Submission) -> Result<(), HookError> {
+fn submit(state: &HttpState, submission: Submission) -> Result<(), HookError> {
   match state.sender.try_send(submission) {
     Ok(()) => Ok(()),
     Err(mpsc::error::TrySendError::Full(_)) => {
@@ -245,7 +271,10 @@ impl HookError {
   pub fn status(&self) -> StatusCode {
     match self {
       Self::RateLimited { .. } | Self::FileRateLimited { .. } => StatusCode::TOO_MANY_REQUESTS,
-      Self::RequestTooLarge | Self::BodyTooLarge | Self::ServerFileTooLarge => StatusCode::PAYLOAD_TOO_LARGE,
+      Self::RequestTooLarge | Self::BodyTooLarge | Self::ServerFileTooLarge | Self::MessageTooLarge => {
+        StatusCode::PAYLOAD_TOO_LARGE
+      },
+      Self::RequestTimeout => StatusCode::REQUEST_TIMEOUT,
       Self::UnreadableBody | Self::Payload(_) => StatusCode::BAD_REQUEST,
       Self::Form(error) => match error {
         FormError::Multipart(_) | FormError::NotText(_) => StatusCode::BAD_REQUEST,
@@ -256,7 +285,9 @@ impl HookError {
       },
       Self::SpoolFailed | Self::NotQueued => StatusCode::INTERNAL_SERVER_ERROR,
       Self::UploadFailed => StatusCode::BAD_GATEWAY,
-      Self::ServerUnreachable | Self::Busy | Self::ShuttingDown => StatusCode::SERVICE_UNAVAILABLE,
+      Self::ServerUnreachable | Self::Busy | Self::ShuttingDown | Self::SpoolFull | Self::ChannelNotReady => {
+        StatusCode::SERVICE_UNAVAILABLE
+      },
     }
   }
 
@@ -266,6 +297,8 @@ impl HookError {
       Self::RateLimited { .. } => "rate_limited",
       Self::FileRateLimited { .. } => "file_rate_limited",
       Self::RequestTooLarge => "request_too_large",
+      Self::RequestTimeout => "request_timeout",
+      Self::MessageTooLarge => "message_too_large",
       Self::BodyTooLarge => "payload_too_large",
       Self::UnreadableBody => "invalid_body",
       Self::Payload(_) => "invalid_payload",
@@ -279,6 +312,8 @@ impl HookError {
       },
       Self::ServerFileTooLarge => "file_too_large",
       Self::SpoolFailed => "spool_failed",
+      Self::SpoolFull => "spool_full",
+      Self::ChannelNotReady => "channel_not_ready",
       Self::NotQueued => "internal_error",
       Self::UploadFailed => "upload_failed",
       Self::ServerUnreachable => "server_unreachable",
@@ -287,9 +322,12 @@ impl HookError {
     }
   }
 
+  /// Every `429` and `503` says when to try again.
   fn maybe_retry_after(&self) -> Option<Duration> {
     match self {
       Self::RateLimited { retry_after } | Self::FileRateLimited { retry_after } => Some(*retry_after),
+      Self::Busy | Self::ShuttingDown => Some(RETRY_SOON),
+      Self::ServerUnreachable | Self::SpoolFull | Self::ChannelNotReady => Some(RETRY_LATER),
       _ => None,
     }
   }
@@ -317,6 +355,7 @@ impl From<FilesFailure> for HookError {
       FilesFailure::LocalFile => Self::SpoolFailed,
       FilesFailure::Busy => Self::Busy,
       FilesFailure::NotQueued => Self::NotQueued,
+      FilesFailure::ChannelNotReady => Self::ChannelNotReady,
     }
   }
 }
@@ -610,6 +649,7 @@ mod tests {
 
   mod files {
     use super::*;
+    use crate::file_hooks::MIN_FILE_CHARGE_BYTES;
     use crate::file_jobs::FilesFailure;
 
     const FORM_TYPE: &str = "multipart/form-data; boundary=XyZ";
@@ -746,16 +786,39 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn file_bytes_over_the_bridge_budget_get_429_with_retry_after() {
-      let (base, mut receiver) = start_with(config_with_files(60, "total_bytes_per_minute = 1000")).await;
+    async fn file_bytes_over_the_budget_get_429_and_refused_requests_give_theirs_back() {
+      // 100 kB of file bytes a minute; a file costs at least 64 KiB.
+      let budget = "source_bytes_per_minute = 100000\ntotal_bytes_per_minute = 100000";
+      let (base, mut receiver) = start_with(config_with_files(60, budget)).await;
       let url = format!("{base}/hooks/{TOKEN_A}");
       let body = form(&[("file", Some("a.bin"), [1u8; 600].as_slice())]);
+
+      // Refused for its message: what it paid comes back.
+      let refused = form(&[
+        ("file", Some("a.bin"), [1u8; 600].as_slice()),
+        ("payload_json", None, b"{"),
+      ]);
+      for _ in 0..3 {
+        let (status, _) = post_form(url.clone(), FORM_TYPE, refused.clone()).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+      }
+
       let first = tokio::spawn(post_form(url.clone(), FORM_TYPE, body.clone()));
       let Some(Submission::Files(message)) = receiver.recv().await else {
         panic!("no files")
       };
-      message.reply.send(Ok(())).unwrap();
+      // As the worker does once the upload began: the bytes stay taken.
+      let FilesMessage {
+        reply, mut charge, ..
+      } = message;
+      assert!(
+        charge.bytes() >= MIN_FILE_CHARGE_BYTES,
+        "a small file costs the minimum"
+      );
+      charge.keep();
+      reply.send(Ok(())).unwrap();
       assert_eq!(first.await.unwrap().0, StatusCode::OK, "the first one fits");
+
       let response = reqwest::Client::new()
         .post(&url)
         .header("content-type", FORM_TYPE)
@@ -766,12 +829,145 @@ mod tests {
       assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
       assert!(response.headers().get("retry-after").is_some());
       assert_eq!(error_code(&response.text().await.unwrap()), "file_rate_limited");
-      let huge = form(&[("file", Some("a.bin"), [1u8; 1001].as_slice())]);
-      let (status, answer) = post_form(url, FORM_TYPE, huge).await;
+
+      // A length that can never fit is refused before the body is read.
+      let (status, answer) = post_form(url, FORM_TYPE, vec![b'x'; 150_000]).await;
       assert_eq!(
         (status, error_code(&answer)),
         (StatusCode::PAYLOAD_TOO_LARGE, "request_too_large".to_owned())
       );
+    }
+
+    #[tokio::test]
+    async fn one_source_cannot_use_up_the_file_bytes_of_another() {
+      let budget = "source_bytes_per_minute = 100000\ntotal_bytes_per_minute = 200000";
+      let (base, mut receiver) = start_with(config_with_files(60, budget)).await;
+      let body = form(&[("file", Some("a.bin"), [1u8; 600].as_slice())]);
+      let a = format!("{base}/hooks/{TOKEN_A}");
+      let first = tokio::spawn(post_form(a.clone(), FORM_TYPE, body.clone()));
+      keep_and_answer(&mut receiver).await;
+      assert_eq!(first.await.unwrap().0, StatusCode::OK);
+      assert_eq!(
+        post_form(a, FORM_TYPE, body.clone()).await.0,
+        StatusCode::TOO_MANY_REQUESTS,
+        "a's share is used up"
+      );
+      let b = tokio::spawn(post_form(format!("{base}/hooks/{TOKEN_B}"), FORM_TYPE, body));
+      keep_and_answer(&mut receiver).await;
+      assert_eq!(b.await.unwrap().0, StatusCode::OK, "b still has its own");
+    }
+
+    #[tokio::test]
+    async fn requests_over_the_running_limit_get_503_before_their_body_is_read() {
+      let (base, mut receiver) = start(60).await;
+      let url = format!("{base}/hooks/{TOKEN_A}");
+      let body = form(&[("file", Some("a.bin"), b"1".as_slice())]);
+      // Two run for source a (the default); the worker holds their answers.
+      let first = tokio::spawn(post_form(url.clone(), FORM_TYPE, body.clone()));
+      let second = tokio::spawn(post_form(url.clone(), FORM_TYPE, body.clone()));
+      let mut held = Vec::new();
+      for _ in 0..2 {
+        let Some(Submission::Files(message)) = receiver.recv().await else {
+          panic!("no files")
+        };
+        held.push(message);
+      }
+      let response = reqwest::Client::new()
+        .post(&url)
+        .header("content-type", FORM_TYPE)
+        .body(body)
+        .send()
+        .await
+        .unwrap();
+      assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+      assert!(response.headers().get("retry-after").is_some());
+      assert_eq!(error_code(&response.text().await.unwrap()), "bridge_busy");
+      for message in held {
+        message.reply.send(Ok(())).unwrap();
+      }
+      assert_eq!(first.await.unwrap().0, StatusCode::OK);
+      assert_eq!(second.await.unwrap().0, StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn a_body_that_stalls_is_cut_off() {
+      let (base, _receiver) = start_with(config_with_files(60, "idle_timeout_secs = 1")).await;
+      let address = base.trim_start_matches("http://").to_owned();
+      let mut stream = tokio::net::TcpStream::connect(&address).await.unwrap();
+      let head = format!(
+        "POST /hooks/{TOKEN_A} HTTP/1.1\r\nhost: bridge\r\ncontent-type: {FORM_TYPE}\r\n\
+         content-length: 1000\r\n\r\n--XyZ\r\n"
+      );
+      tokio::io::AsyncWriteExt::write_all(&mut stream, head.as_bytes())
+        .await
+        .unwrap();
+      // Nothing more comes; the answer arrives after the idle timeout.
+      let mut answer = Vec::new();
+      let _ = tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        tokio::io::AsyncReadExt::read_to_end(&mut stream, &mut answer),
+      )
+      .await
+      .unwrap();
+      let answer = String::from_utf8_lossy(&answer);
+      assert!(answer.starts_with("HTTP/1.1 408"), "{answer}");
+      assert!(answer.contains("request_timeout"), "{answer}");
+    }
+
+    #[tokio::test]
+    async fn a_full_spool_answers_503_and_keeps_nothing() {
+      let (base, receiver) = start_with(config_with_files(60, "max_spool_bytes = 1024")).await;
+      let url = format!("{base}/hooks/{TOKEN_A}");
+      let body = form(&[
+        ("files[0]", Some("a.bin"), [1u8; 1000].as_slice()),
+        ("files[1]", Some("b.bin"), [2u8; 1000].as_slice()),
+      ]);
+      let response = reqwest::Client::new()
+        .post(&url)
+        .header("content-type", FORM_TYPE)
+        .body(body)
+        .send()
+        .await
+        .unwrap();
+      assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+      assert!(response.headers().get("retry-after").is_some());
+      assert_eq!(error_code(&response.text().await.unwrap()), "spool_full");
+      drop(receiver);
+    }
+
+    #[tokio::test]
+    async fn a_message_too_large_for_the_server_is_refused_before_any_upload() {
+      let (base, mut receiver) = start_with(config_with_files(60, "max_message_bytes = 65536")).await;
+      // Pictures count with their thumbnails: four of them don't fit into 64 KiB.
+      let body = form(&[
+        ("text", None, b"screenshots".as_slice()),
+        ("files[0]", Some("a.png"), b"1"),
+        ("files[1]", Some("b.png"), b"2"),
+        ("files[2]", Some("c.png"), b"3"),
+        ("files[3]", Some("d.png"), b"4"),
+      ]);
+      let request = post_form(format!("{base}/hooks/{TOKEN_A}"), FORM_TYPE, body);
+      tokio::select! {
+        (status, answer) = request => assert_eq!(
+          (status, error_code(&answer)),
+          (StatusCode::PAYLOAD_TOO_LARGE, "message_too_large".to_owned())
+        ),
+        _ = receiver.recv() => panic!("the message reached the worker"),
+      }
+    }
+
+    #[tokio::test]
+    async fn an_empty_file_is_a_file() {
+      let (base, mut receiver) = start(60).await;
+      let body = form(&[("file", Some("empty.txt"), b"".as_slice())]);
+      let request = tokio::spawn(post_form(format!("{base}/hooks/{TOKEN_A}"), FORM_TYPE, body));
+      let Some(Submission::Files(message)) = receiver.recv().await else {
+        panic!("no files")
+      };
+      assert_eq!(message.files.len(), 1);
+      assert_eq!(message.files[0].size_bytes, 0);
+      message.reply.send(Ok(())).unwrap();
+      assert_eq!(request.await.unwrap().0, StatusCode::OK);
     }
 
     #[tokio::test]
@@ -793,6 +989,18 @@ mod tests {
         (status, error_code(&answer)),
         (StatusCode::BAD_REQUEST, "invalid_payload".to_owned())
       );
+    }
+
+    /// Answers the next message with files as the worker does after uploading it.
+    async fn keep_and_answer(receiver: &mut mpsc::Receiver<Submission>) {
+      let Some(Submission::Files(message)) = receiver.recv().await else {
+        panic!("no files")
+      };
+      let FilesMessage {
+        reply, mut charge, ..
+      } = message;
+      charge.keep();
+      reply.send(Ok(())).unwrap();
     }
 
     async fn post_form(url: String, content_type: &'static str, body: Vec<u8>) -> (StatusCode, String) {

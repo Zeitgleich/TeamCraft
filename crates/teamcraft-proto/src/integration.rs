@@ -20,8 +20,10 @@ use crate::wire_enum::wire_enum;
 pub const DEFAULT_SOURCE_RATE_LIMIT_PER_MINUTE: u32 = 600;
 /// Highest rate limit a source may ask for; a bigger value is clamped to it.
 pub const MAX_SOURCE_RATE_LIMIT_PER_MINUTE: u32 = 60_000;
-/// Most files one webhook message of a source may carry; a bigger value is clamped to it.
-pub const MAX_SOURCE_FILES_PER_MESSAGE: u32 = 50;
+/// Most files one webhook message of a source may carry; a bigger value is clamped to it. The
+/// bridge completes a message's uploads only once all are up, and the server allows 20 unfinished
+/// uploads per account by default (`max_pending_attachments_per_user`): this leaves room.
+pub const MAX_SOURCE_FILES_PER_MESSAGE: u32 = 16;
 /// Longest source name, in characters (it shows in the bridge's logs and its notices).
 pub const MAX_SOURCE_NAME_CHARS: usize = 80;
 /// Most alert levels a source may list, and the longest level name.

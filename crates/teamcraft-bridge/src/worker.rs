@@ -34,6 +34,9 @@ pub struct WorkerSettings {
   pub index_interval: Option<Duration>,
   /// Whether sources announced in the app are served; `None` turns them off.
   pub maybe_app_sources: Option<AppSourceSettings>,
+  /// Messages with files that may wait for their upload (`files.max_concurrent_requests`: the
+  /// endpoint lets no more run at once).
+  pub max_file_messages: usize,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -87,7 +90,7 @@ impl<A: ServerApi, S: LocalStore> Worker<A, S> {
       scanned: HashSet::new(),
       receiver,
       batcher: Batcher::new(settings.batch),
-      files: FileJobs::default(),
+      files: FileJobs::new(settings.max_file_messages),
       settings,
       gateway: None,
       waiting: VecDeque::new(),
@@ -100,11 +103,18 @@ impl<A: ServerApi, S: LocalStore> Worker<A, S> {
   }
 
   /// Runs until every sender of submissions is gone, then sends what is left.
-  pub async fn run(mut self) -> Client<A, S> {
+  pub async fn run(self) -> Client<A, S> {
+    self.run_until(std::future::pending()).await
+  }
+
+  /// Like [`Self::run`], but also stops once `stop` resolves (the drain timeout at shutdown ran
+  /// out): what is queued is sent, uploads under way are given up and their producers get `503`.
+  pub async fn run_until(mut self, stop: impl Future<Output = ()>) -> Client<A, S> {
     // The store already holds what the bridge learned before a restart.
     self.refresh_sources().await;
     let mut tick = tokio::time::interval(TICK);
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    tokio::pin!(stop);
     loop {
       tokio::select! {
         submission = self.receiver.recv() => match submission {
@@ -117,8 +127,12 @@ impl<A: ServerApi, S: LocalStore> Worker<A, S> {
             self.send_uploaded(uploaded).await;
           }
         },
+        () = &mut stop => {
+          info!("stopping before every request was answered");
+          break;
+        },
       }
-      self.advance_files().await;
+      self.files.advance(&mut self.client).await;
     }
     self.files.abandon_all(&self.client).await;
     for batch in self.batcher.take_all() {
@@ -171,6 +185,7 @@ impl<A: ServerApi, S: LocalStore> Worker<A, S> {
 
   async fn on_tick(&mut self) {
     let now = Instant::now();
+    self.files.drop_abandoned();
     for batch in self.batcher.take_due(now) {
       self.send(batch.conversation, batch.text, batch.mentions).await;
     }
@@ -303,13 +318,6 @@ impl<A: ServerApi, S: LocalStore> Worker<A, S> {
     }
   }
 
-  /// Starts uploading the next file (or part) of the messages with files when nothing goes up.
-  async fn advance_files(&mut self) {
-    while let Some(uploaded) = self.files.advance(&mut self.client).await {
-      self.send_uploaded(uploaded).await;
-    }
-  }
-
   /// A message whose files are all up goes out like any webhook, and its producer gets its answer.
   async fn send_uploaded(&mut self, uploaded: UploadedMessage) {
     let UploadedMessage {
@@ -411,7 +419,7 @@ impl<A: ServerApi, S: LocalStore> Worker<A, S> {
 }
 
 /// An alert gets the mentioned people's names in front and their IDs as metadata.
-fn alert_text(text: String, is_alert: bool, mentions: &Mentions) -> (String, Vec<UserId>) {
+pub(crate) fn alert_text(text: String, is_alert: bool, mentions: &Mentions) -> (String, Vec<UserId>) {
   if !is_alert || mentions.users.is_empty() {
     return (text, Vec::new());
   }
