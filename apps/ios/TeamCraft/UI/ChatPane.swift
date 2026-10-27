@@ -78,6 +78,8 @@ struct ChatPane: View {
   private var screen: some View {
     VStack(spacing: 0) {
       OfflineBanner()
+      // Admins asking to join this channel, when the user owns it (admin.md §2.4.1).
+      if threadId == nil { JoinRequestBanner(conversationId: conversation.id) }
       messageList
         .environment(\.openPicture, OpenPictureAction { file in maybeViewing = PictureTarget(file: file) })
       if let line = typingText(typingNames) {

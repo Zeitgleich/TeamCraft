@@ -71,6 +71,16 @@ final class SystemLineTests: XCTestCase {
     XCTAssertEqual(refresh, ["action": "refresh_read_receipts", "conversation": "1"])
   }
 
+  func testAnAdminWhoJoinedSaysWhoApprovedTheRequest() {
+    // admin.md §2.4: by themselves (`visible`), or let in by an owner (`owner_approval`, #799).
+    XCTAssertEqual(
+      line(event: .joined, extras: #"{"event":"admin_joined","user":"2"}"#),
+      .adminJoined(name: "Sam", maybeApprovedBy: nil))
+    XCTAssertEqual(
+      line(extras: #"{"event":"admin_joined","user":"2","approved_by":"1"}"#),
+      .adminJoined(name: "Sam", maybeApprovedBy: "Ada"))
+  }
+
   private func line(
     event: SystemEventItem? = nil, extras workspace: String? = nil, body: String = "", names: [String: String]? = nil
   ) -> SystemLine? {
