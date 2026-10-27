@@ -558,6 +558,18 @@ its own. See [admin.md](admin.md) §2.
   ID wasn't applied before, and the commit's add/remove proposals do exactly what the change says.
   MLS external proposals from a registered admin key are a later option; the signed change format
   stays the same.
+- **An admin outside the group lets no admin in against the policy** (admin.md §2.4, issue #816).
+  The actor whose authority counts is the signer, not the committer. A signer who is in the group
+  (and no guest) may add anybody: members' clients see who is in the group, but not who holds
+  `manage_members` or owns the channel (channel roles aren't signed yet, issue #380), so that part
+  is the server's word. A roster owner or admin who isn't in the group may sign any change for the
+  members to commit, except bringing an owner or admin of the roster into a conversation that
+  isn't an open public channel (as the conversation's visibility shows): themselves or another one
+  alike, only under `admin_self_join = visible`. Clients before 1.0.9 checked only the admin's own
+  self-join and still commit another admin's addition of an admin; a member on 1.0.9 or later
+  refuses that commit, falls out and is added back into the group with the admin ("Falling out
+  and coming back", below). This version never commits what an older one refuses, so the group
+  doesn't split either way.
 - **Deactivation suspends, removal rotates keys** (admin.md §3.2.1). Deactivating an account changes
   no group: the user's devices stay members and new messages are still encrypted to them, so a
   reactivation needs no recovery and no re-adding. The server refuses the account every request

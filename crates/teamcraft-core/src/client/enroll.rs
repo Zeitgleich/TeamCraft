@@ -192,6 +192,7 @@ impl PendingEnrollment {
       maybe_heads: None,
       read_ahead: Default::default(),
       maybe_last_heard_ms: None,
+      is_checking_as_before_v1_0_9: false,
     };
     client.persist_sync()?;
     client.store_wrapped_keys_blob(&wrapped_keys)?;
