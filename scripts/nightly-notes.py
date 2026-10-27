@@ -36,6 +36,7 @@ def main() -> int:
 
     entries: list[tuple[int, str]] = []  # (sort rank, bullet)
     breaking: list[str] = []
+    seen_titles: set[str] = set()
     for number in dict.fromkeys(numbers):
         pr = pull_request(number)
         if pr is None:
@@ -44,6 +45,10 @@ def main() -> int:
         if "skip-release-notes" in labels or "dependabot" in pr["author"]["login"]:
             continue
         title = TRAILING_NUMBER.sub("", pr["title"])
+        # The same change can come in as several pull requests (a branch and its integration copy).
+        if title in seen_titles:
+            continue
+        seen_titles.add(title)
         line = f"- {title} (#{number})"
         rank = 0 if labels & {"security", "breaking"} else 1
         entries.append((rank, line))
