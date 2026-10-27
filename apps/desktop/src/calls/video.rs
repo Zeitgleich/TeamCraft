@@ -239,6 +239,17 @@ pub(super) fn open_screen(
     .map(|capture| (Box::new(capture) as Box<dyn VideoCapture>, None))
 }
 
+/// Closes the system's screen picker of a share that was stopped while it was open. macOS hides
+/// ScreenCaptureKit's picker; the Linux portal's dialog stays until the user answers it, which
+/// then goes nowhere.
+#[cfg(target_os = "macos")]
+pub(super) fn close_screen_picker() {
+  teamcraft_media::capture_screencapturekit::ScreenCaptureKitScreen::close_picker();
+}
+
+#[cfg(not(target_os = "macos"))]
+pub(super) fn close_screen_picker() {}
+
 #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
 pub(super) fn open_screen(
   _maybe_restore_token: Option<&str>,

@@ -88,6 +88,22 @@ pub struct CallHost {
   preview: tokio::sync::Mutex<Preview>,
   /// Where the pre-join check's microphone level goes.
   levels: LevelWatch,
+  /// The screen picker a share start waits on, if one is open.
+  screen_picker: OpenPicker,
+}
+
+/// The system's screen picker while a share start waits for the user's choice in it: stopping
+/// the share or leaving the call ends the wait (and closes the picker where the system lets us),
+/// and a second share start doesn't open another (issue #683: a picker nobody answered held the
+/// call's other actions).
+#[derive(Default)]
+struct OpenPicker(Mutex<Option<Arc<tokio::sync::Notify>>>);
+
+/// A share start's wait for the picker; marks the picker closed when dropped (the start answered,
+/// failed or was given up).
+struct PickerWait<'a> {
+  picker: &'a OpenPicker,
+  cancelled: Arc<tokio::sync::Notify>,
 }
 
 /// Files the calls need from the app's directories.
@@ -208,6 +224,7 @@ impl CallHost {
       maybe_segmentation_model: files.maybe_segmentation_model,
       preview: tokio::sync::Mutex::default(),
       levels: LevelWatch::default(),
+      screen_picker: OpenPicker::default(),
     }
   }
 
@@ -335,6 +352,7 @@ impl CallHost {
   }
 
   pub async fn leave(&self) {
+    self.screen_picker.cancel();
     if let Some(call) = self.media.lock().await.take() {
       call.leave().await;
     }
@@ -650,10 +668,22 @@ impl CallHost {
   /// the call state says so.
   pub async fn start_screen_share(&self, has_sound: bool, mode: ScreenContentMode) -> Result<(), String> {
     self.ensure_video_codec().await?;
+    let Some(wait) = self.screen_picker.open() else {
+      tracing::info!("a screen picker is open already");
+      return Ok(());
+    };
     let maybe_token = lock(&self.state).maybe_screen_token.clone();
-    let opened = tokio::task::spawn_blocking(move || video::open_screen(maybe_token.as_deref(), mode))
-      .await
-      .map_err(|error| error.to_string())?;
+    let picking = tokio::task::spawn_blocking(move || video::open_screen(maybe_token.as_deref(), mode));
+    let opened = tokio::select! {
+      opened = picking => opened.map_err(|error| error.to_string())?,
+      () = wait.cancelled.notified() => {
+        // The picker's thread ends with the user's answer, which nobody takes any more.
+        tracing::info!("screen share stopped while its picker was open");
+        video::close_screen_picker();
+        return Ok(());
+      },
+    };
+    drop(wait);
     let (capture, maybe_new_token) = match opened {
       Ok(opened) => opened,
       // Closing the picker is a choice, not a failure: nothing is shared, nothing to report.
@@ -700,6 +730,7 @@ impl CallHost {
   }
 
   pub async fn stop_screen_share(&self) {
+    self.screen_picker.cancel();
     self.control(Control::StopScreenAudio).await;
     self.control(Control::StopVideo(VideoTrackKind::Screen)).await;
     self.update_active(|active| {
@@ -930,6 +961,43 @@ impl CallHost {
 
   fn changed(&self) {
     (self.notify)();
+  }
+}
+
+impl OpenPicker {
+  /// Marks a picker open until the wait is dropped; `None` while another one is open.
+  fn open(&self) -> Option<PickerWait<'_>> {
+    let mut maybe_open = lock(&self.0);
+    if maybe_open.is_some() {
+      return None;
+    }
+    let cancelled = Arc::new(tokio::sync::Notify::new());
+    *maybe_open = Some(Arc::clone(&cancelled));
+    Some(PickerWait {
+      picker: self,
+      cancelled,
+    })
+  }
+
+  /// Ends the wait of the open picker, if there is one. A permit is kept: a wait that starts
+  /// right after still ends.
+  fn cancel(&self) {
+    if let Some(cancelled) = lock(&self.0).take() {
+      cancelled.notify_one();
+    }
+  }
+}
+
+impl Drop for PickerWait<'_> {
+  fn drop(&mut self) {
+    let mut maybe_open = lock(&self.picker.0);
+    // Only this wait's own mark: a cancel took it already, and another may have opened since.
+    if maybe_open
+      .as_ref()
+      .is_some_and(|open| Arc::ptr_eq(open, &self.cancelled))
+    {
+      *maybe_open = None;
+    }
   }
 }
 
@@ -1341,6 +1409,46 @@ mod tests {
     let error = host.set_camera(true).await.unwrap_err();
     assert!(error.contains("requires one of its backgrounds"), "{error}");
     assert!(!host.is_camera_on());
+  }
+
+  /// Issue #683: a share start waiting in the picker must not hold the call.
+  mod screen_picker {
+    use std::time::Duration;
+
+    use super::*;
+
+    #[test]
+    fn one_picker_at_a_time_until_its_wait_ends() {
+      let picker = OpenPicker::default();
+      let wait = picker.open().unwrap();
+      assert!(
+        picker.open().is_none(),
+        "a second share start opens no second picker"
+      );
+      drop(wait);
+      assert!(picker.open().is_some(), "the answered picker is closed");
+    }
+
+    #[tokio::test]
+    async fn stopping_the_share_ends_the_wait_and_a_new_picker_may_open() {
+      let picker = OpenPicker::default();
+      let first = picker.open().unwrap();
+      picker.cancel();
+      // The permit is kept: the wait ends even though it starts after the cancel.
+      tokio::time::timeout(Duration::from_secs(1), first.cancelled.notified())
+        .await
+        .unwrap();
+      let second = picker.open().unwrap();
+      // The cancelled wait going away leaves the new picker's mark alone.
+      drop(first);
+      assert!(picker.open().is_none());
+      drop(second);
+      picker.cancel();
+      assert!(
+        picker.open().is_some(),
+        "cancelling without a picker changes nothing"
+      );
+    }
   }
 
   mod video_starts {
