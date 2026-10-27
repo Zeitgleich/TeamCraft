@@ -89,6 +89,10 @@ pub enum CoreError {
   /// The new device received the transfer but could not open the key bag in it.
   #[error("the new device could not open the keys it received; link it again")]
   LinkRejected,
+  /// This device stopped waiting for the new device's receipt (the user closed the dialog, the app
+  /// stopped). The keys were sent; whether they arrived is unknown.
+  #[error("stopped waiting for the new device to confirm the keys")]
+  LinkCancelled,
   /// The server gave this device the ID of another (or a revoked) device of the user.
   #[error("the server assigned device ID {0}, which the signed device list gives another device")]
   DeviceIdTaken(DeviceId),

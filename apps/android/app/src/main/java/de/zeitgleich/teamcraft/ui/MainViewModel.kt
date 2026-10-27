@@ -615,7 +615,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
   /** Sends the typed code of a reviewed request; a wrong code stays on the step for another try. */
   fun confirmLinkReview(typedCode: String) = viewModelScope.launch {
     val current = review.value ?: return@launch
-    review.value = when (confirmLink(typedCode)) {
+    val confirmation = confirmLink(typedCode)
+    // Closing the review while the new device's receipt is awaited cancels the wait (issue #415):
+    // a review the user closed (or replaced) meanwhile stays closed, without an error.
+    if (review.value !== current) return@launch
+    review.value = when (confirmation) {
       LinkConfirmation.CONFIRMED -> current.copy(maybeError = null, isDone = true)
       LinkConfirmation.WRONG_CODE -> current.copy(maybeError = R.string.approve_code_wrong)
       LinkConfirmation.ATTEMPT_ENDED -> current.copy(maybeError = R.string.approve_attempt_ended, isDone = false)
@@ -664,6 +668,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     review.value = null
     graph.calls.hangUp()
     graph.push.unregister()
+    // A setup given up on leaves no keys behind, and its device is revoked (issue #415).
+    runCatching { graph.core.core().forgetUnfinishedSetup() }
     runCatching { graph.core.core().deletePlaintextFiles() }
     graph.core.close()
     graph.auth.signOut()

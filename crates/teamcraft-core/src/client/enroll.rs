@@ -30,7 +30,7 @@ use crate::store::{LocalStore, Table};
 
 /// Device ID used in the provisional certificate sent at registration, before the server has
 /// assigned the real one (crate README: server gaps).
-const PROVISIONAL_DEVICE_ID: u64 = 0;
+const PROVISIONAL_DEVICE_ID: u64 = records::PENDING_DEVICE_ID;
 
 pub struct EnrollmentOptions {
   /// Shown in the user's device list ("Firefox on Linux").
@@ -131,8 +131,9 @@ impl PendingEnrollment {
       },
     };
 
+    let identity = recovered.key_bag.identity();
     let (device_id, device, certificate) =
-      ensure_device(&api, &store, me.id, recovered.key_bag.identity(), &options).await?;
+      ensure_device(&api, &store, &*clock, me.id, identity, &options).await?;
     if is_new_identity {
       publish_identity(&api, &mut recovered, &certificate, &options).await?;
     }
@@ -684,6 +685,7 @@ async fn publish_identity(
 async fn ensure_device(
   api: &impl ServerApi,
   store: &impl LocalStore,
+  clock: &dyn Clock,
   user: UserId,
   identity: &IdentityKeyPair,
   options: &EnrollmentOptions,
@@ -692,6 +694,7 @@ async fn ensure_device(
   let identity_public_key = *identity.public_key().as_bytes();
   let maybe_pending =
     records::load_pending_device(store, provisional)?.filter(|pending| pending.user_id == user);
+  let new_pending = || new_pending_device(store, user, identity_public_key, clock.now_ms());
   let device = match maybe_pending {
     Some(pending) => {
       let maybe_registered = find_registered(api, user, &pending.device).await?;
@@ -701,24 +704,25 @@ async fn ensure_device(
         },
         Some(orphan) => {
           revoke_orphan(api, orphan).await?;
-          new_pending_device(store, user, identity_public_key)?
+          new_pending()?
         },
         // The registration never reached the server: register the same keys.
         None if pending.identity_public_key == identity_public_key => pending.device,
-        None => new_pending_device(store, user, identity_public_key)?,
+        None => new_pending()?,
       }
     },
-    None => new_pending_device(store, user, identity_public_key)?,
+    None => new_pending()?,
   };
   let id = register_device(api, user, identity, &device, options).await?;
   certify(user, identity, &device, id)
 }
 
-/// A fresh device key pair, stored before it is registered.
+/// A fresh device key pair, stored (at `now_ms`) before it is registered.
 fn new_pending_device(
   store: &impl LocalStore,
   user: UserId,
   identity_public_key: [u8; 32],
+  now_ms: i64,
 ) -> Result<DeviceKeyPair, CoreError> {
   let pending = PendingDevice {
     user_id: user,
@@ -729,7 +733,7 @@ fn new_pending_device(
       &mut OsRng,
     ),
   };
-  records::save_pending_device(store, &pending)?;
+  records::save_pending_device(store, &pending, now_ms)?;
   Ok(pending.device)
 }
 
@@ -739,7 +743,7 @@ async fn find_registered(
   user: UserId,
   device: &DeviceKeyPair,
 ) -> Result<Option<DeviceId>, CoreError> {
-  let public_key = device_public_key(device);
+  let public_key = records::device_public_key(device);
   let devices = api.list_user_devices(user).await?.devices;
   Ok(
     devices
@@ -749,7 +753,8 @@ async fn find_registered(
   )
 }
 
-async fn revoke_orphan(api: &impl ServerApi, orphan: DeviceId) -> Result<(), CoreError> {
+/// Revokes a registration no enrollment will use; one the server no longer has counts as revoked.
+pub(super) async fn revoke_orphan(api: &impl ServerApi, orphan: DeviceId) -> Result<(), CoreError> {
   tracing::info!(device_id = %orphan, "revoking the device an interrupted enrollment registered");
   match api.revoke_device(orphan).await {
     Ok(()) => Ok(()),
@@ -771,7 +776,7 @@ async fn register_device(
   let registered = api
     .register_device(&RegisterDeviceRequest {
       name: options.device_name.clone(),
-      public_key: Base64Bytes::new(device_public_key(device)),
+      public_key: Base64Bytes::new(records::device_public_key(device)),
       cross_signature: Base64Bytes::new(provisional_certificate.to_bytes()?),
     })
     .await?;
@@ -790,14 +795,6 @@ fn certify(
   let device = DeviceKeyPair::from_secrets(crypto_user, convert::device(id), &signing, &agreement);
   let certificate = identity.certify_device(crypto_user, &device.public_keys())?;
   Ok((id, device, certificate))
-}
-
-/// What the server stores as the device's public key: signing key, then agreement key.
-fn device_public_key(device: &DeviceKeyPair) -> Vec<u8> {
-  let public = device.public_keys();
-  let mut public_key = public.signing_key.as_bytes().to_vec();
-  public_key.extend_from_slice(public.agreement_key.as_bytes());
-  public_key
 }
 
 fn passphrase_wrap(

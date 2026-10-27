@@ -19,7 +19,10 @@ use teamcraft_client_api::remote::{
 use teamcraft_client_api::snapshot_changes::{SnapshotChanges, SnapshotCursor};
 use teamcraft_core::api::{AccessTokenSource, ApiError, HttpServerApi, ServerApi};
 use teamcraft_core::client::files::{BlobUpload, sweep_staged_copies};
-use teamcraft_core::client::{CatchUpFocus, LinkAnnouncement, LinkApproval, LinkedSecrets, NewDeviceLink};
+use teamcraft_core::client::{
+  CatchUpFocus, LinkAnnouncement, LinkApproval, LinkReceipt, LinkedSecrets, NewDeviceLink, ReceiptCancel,
+  SIGN_OUT_REVOKE_PATIENCE,
+};
 use teamcraft_core::clock::{Clock, SystemClock};
 use teamcraft_core::connection::{
   ConnectionSettings, ConnectionState, ConnectionStatus, ConnectionSupervisor,
@@ -46,6 +49,7 @@ use teamcraft_proto::{
   GatewayClientMessage, GatewayEvent, MessageId, OrgBackgroundId, UserId,
 };
 use tokio::sync::{mpsc, oneshot};
+use tokio::task::LocalSet;
 
 use super::media::{KeptKey, MediaSlot};
 use crate::auth::{AuthService, TokenPeek, TokenStore};
@@ -279,7 +283,7 @@ enum Request {
   LinkCancel,
   /// The local database is unreadable: set it aside and start this device afresh (issue #160).
   ResetStore(oneshot::Sender<Result<(), String>>),
-  /// The user signs out: drop what an unfinished enrollment kept (issue #168).
+  /// The user signs out: drop what an unfinished enrollment kept (issues #168, #415).
   ForgetUnfinishedSetup(oneshot::Sender<()>),
   ApprovalStart {
     code: String,
@@ -368,8 +372,11 @@ impl CoreRuntime {
           shared_media,
         );
         // A panic ends the core for good: logged here, and `status` then answers `Stopped`, so the
-        // UI shows an internal error instead of a keystore problem.
-        let outcome = std::panic::catch_unwind(AssertUnwindSafe(|| runtime.block_on(core.run(receiver))));
+        // UI shows an internal error instead of a keystore problem. The local set runs what the
+        // core starts beside its loop (a link receipt, issue #415) and drops it when the core ends.
+        let tasks = LocalSet::new();
+        let outcome =
+          std::panic::catch_unwind(AssertUnwindSafe(|| tasks.block_on(&runtime, core.run(receiver))));
         if let Err(payload) = outcome {
           tracing::error!(panic = %panic_text(payload.as_ref()), "the client core panicked and stopped");
         }
@@ -514,7 +521,8 @@ impl CoreRuntime {
   }
 
   /// The user signs out: drops the keys of an unfinished link and the pending device key, if this
-  /// device isn't set up yet.
+  /// device isn't set up yet, and gives the server a few seconds to revoke the device that key
+  /// registered (issue #415).
   pub async fn forget_unfinished_setup(&self) {
     // `None`: the core already stopped, so there is nothing to forget in it.
     let _ = self.ask(Request::ForgetUnfinishedSetup).await;
@@ -540,7 +548,8 @@ impl CoreRuntime {
 
   /// Existing device: hands the keys over if `short_code` is the code the new device shows. The check
   /// is here, not in the UI: a script in the webview cannot approve a link it did not see on the
-  /// new device (docs/security-review.md C3).
+  /// new device (docs/security-review.md C3). Answers once the new device confirmed the keys; the
+  /// core goes on meanwhile (issue #415).
   pub async fn approval_confirm(&self, short_code: String) -> Result<(), String> {
     self
       .ask(|reply| Request::ApprovalConfirm { short_code, reply })
@@ -739,6 +748,9 @@ struct Core {
   link_failure: LinkStatus,
   approval: Option<LinkApproval<<Api as ServerApi>::Rendezvous>>,
   approval_misses: u8,
+  /// Stops the wait for the receipt of the keys this device sent, which runs on a task of its own
+  /// (issue #415).
+  maybe_receipt: Option<ReceiptCancel>,
   /// The last attention report, repeated after a reconnect (the server forgets it with the
   /// connection).
   maybe_attention: Option<bool>,
@@ -843,6 +855,7 @@ impl Core {
       link_failure: LinkStatus::Idle,
       approval: None,
       approval_misses: 0,
+      maybe_receipt: None,
       maybe_attention: None,
       is_idle: false,
       typing: TypingAnnouncer::default(),
@@ -991,6 +1004,7 @@ impl Core {
         if let Some(status) = self.resume_link(store).await? {
           return Ok(status);
         }
+        self.drop_abandoned_setup().await;
         let has_existing_identity = match self.api().identity_key(self.user).await {
           Ok(maybe_key) => maybe_key.is_some(),
           Err(error @ ApiError::Token(_)) => return Err(OpenError::NoToken(error.to_string())),
@@ -1060,17 +1074,35 @@ impl Core {
   }
 
   /// Another device may have enrolled the account since the database was opened; the enrollment
-  /// screen must then offer recovery and linking instead of a new identity.
+  /// screen must then offer recovery and linking instead of a new identity. An app left on that
+  /// screen also drops a setup given up on meanwhile.
   async fn refresh_enrollment_hint(&mut self) {
     if self.client.is_none()
       && self.link.is_none()
       && let CoreStatus::NeedsEnrollment { .. } = self.status
-      && let Ok(maybe_key) = self.api().identity_key(self.user).await
     {
-      self.status = CoreStatus::NeedsEnrollment {
-        has_existing_identity: maybe_key.is_some(),
-        was_data_lost: self.was_store_set_aside,
-      };
+      self.drop_abandoned_setup().await;
+      if let Ok(maybe_key) = self.api().identity_key(self.user).await {
+        self.status = CoreStatus::NeedsEnrollment {
+          has_existing_identity: maybe_key.is_some(),
+          was_data_lost: self.was_store_set_aside,
+        };
+      }
+    }
+  }
+
+  /// Drops the device key pair of a setup the user gave up on and revokes its registration (issue
+  /// #415). Called only while this device is not set up and no link runs: enrolling runs to its end
+  /// inside one request, so nothing else is in progress then. A failure (offline) is retried on the
+  /// next start or status request.
+  async fn drop_abandoned_setup(&self) {
+    let Some(store) = &self.store else { return };
+    if self.link.is_some() {
+      return;
+    }
+    let settings = self.client_settings();
+    if let Err(error) = PendingEnrollment::drop_abandoned(&self.api(), store, &SystemClock, &settings).await {
+      tracing::info!(%error, "could not revoke the device of a setup that was given up yet");
     }
   }
 
@@ -1153,18 +1185,30 @@ impl Core {
       Request::ForgetUnfinishedSetup(reply) => {
         if self.client.is_none()
           && let Some(store) = &self.store
-          && let Err(error) = records::forget_unfinished_enrollment(store)
         {
-          tracing::warn!(%error, "could not drop the keys of an unfinished setup");
+          self.link = None;
+          // The keys go at once; the server gets a few seconds to revoke the device they registered
+          // (issue #415), the next start of this account does it otherwise.
+          let forgotten =
+            PendingEnrollment::forget_unfinished(&self.api(), store, &SystemClock, SIGN_OUT_REVOKE_PATIENCE)
+              .await;
+          if let Err(error) = forgotten {
+            tracing::warn!(%error, "could not drop the keys of an unfinished setup");
+          }
         }
         // Deliberately ignored: the caller may have stopped waiting; nothing is left to tell.
         let _ = reply.send(());
       },
       Request::ApprovalStart { code, reply } => drop(reply.send(self.approval_start(&code).await)),
-      Request::ApprovalConfirm { short_code, reply } => {
-        drop(reply.send(self.approval_confirm(&short_code).await))
+      Request::ApprovalConfirm { short_code, reply } => match self.approval_confirm(&short_code).await {
+        Ok(receipt) => self.wait_for_receipt(receipt, reply),
+        Err(message) => drop(reply.send(Err(message))),
       },
-      Request::ApprovalCancel => self.approval = None,
+      Request::ApprovalCancel => {
+        self.approval = None;
+        // A receipt still awaited: its wait ends, and the waiting call hears that it was cancelled.
+        self.maybe_receipt = None;
+      },
       Request::LinkAnnounce(reply) => drop(reply.send(self.link_announce().await)),
       Request::LinkRequests(reply) => drop(reply.send(self.link_requests())),
       Request::LinkRequestReview { id, reply } => drop(reply.send(self.link_request_review(&id).await)),
@@ -1501,8 +1545,12 @@ impl Core {
   }
 
   /// Compares what the user typed with the short code of the handshake; only a match hands over the
-  /// keys. A few wrong guesses end the attempt, so the code cannot be guessed by trial.
-  async fn approval_confirm(&mut self, typed: &str) -> Result<(), String> {
+  /// keys. A few wrong guesses end the attempt, so the code cannot be guessed by trial. The new
+  /// device's receipt is still to come.
+  async fn approval_confirm(
+    &mut self,
+    typed: &str,
+  ) -> Result<LinkReceipt<<Api as ServerApi>::Rendezvous>, String> {
     let approval = self
       .approval
       .as_ref()
@@ -1522,9 +1570,30 @@ impl Core {
       .ok_or("there is no device waiting for approval")?;
     let client = self.client.as_mut().ok_or("this device is not set up yet")?;
     client
-      .complete_link_approval(approval)
+      .send_link_transfer(approval)
       .await
       .map_err(describe_failure)
+  }
+
+  /// Waits for the new device's receipt on a task of its own (issue #415): it can take up to a minute
+  /// when the new device went away, and the loop answers everything else meanwhile. `reply` gets
+  /// the outcome, so the dialog shows its progress until then. One receipt is awaited at a time; a
+  /// wait still running for an earlier link ends as cancelled. The task ends with the core.
+  fn wait_for_receipt(
+    &mut self,
+    receipt: LinkReceipt<<Api as ServerApi>::Rendezvous>,
+    reply: oneshot::Sender<Result<(), String>>,
+  ) {
+    let (waiting, cancel) = receipt.detach();
+    self.maybe_receipt = Some(cancel);
+    tokio::task::spawn_local(async move {
+      let outcome = waiting.await.map_err(describe_failure);
+      if let Err(message) = &outcome {
+        tracing::info!(%message, "the device link was not confirmed");
+      }
+      // The dialog may have closed meanwhile; nobody is left to tell then.
+      drop(reply.send(outcome));
+    });
   }
 
   fn snapshot(&mut self) -> Result<ChatSnapshot, String> {

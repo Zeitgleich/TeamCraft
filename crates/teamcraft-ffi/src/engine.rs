@@ -19,7 +19,9 @@ use teamcraft_client_api::search::parse_query;
 use teamcraft_core::api::{AccessTokenSource, ApiError, HttpRendezvous, HttpServerApi, ServerApi};
 use teamcraft_core::client::NewDeviceLink;
 use teamcraft_core::client::files::sweep_staged_copies;
-use teamcraft_core::client::{LinkAnnouncement, LinkApproval, LinkRequestList};
+use teamcraft_core::client::{
+  LinkAnnouncement, LinkApproval, LinkRequestList, ReceiptCancel, SIGN_OUT_REVOKE_PATIENCE,
+};
 use teamcraft_core::clock::{Clock as _, SystemClock};
 use teamcraft_core::connection::{ConnectionStatus, NetworkChanges};
 use teamcraft_core::notify_rules::{load_mention_preferences, save_mention_preferences};
@@ -37,7 +39,7 @@ use teamcraft_core::{
 use teamcraft_crypto::backup::Argon2Settings;
 use teamcraft_crypto::secret::{SecretBytes, SymmetricKey};
 use teamcraft_proto::{CallJoinTokenResponse, ConversationId, DeviceActivity, Id, ThreadId};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
 use tokio::task::{JoinHandle, LocalSet};
 
 use crate::calls::{CallHub, CallPreparation};
@@ -100,6 +102,9 @@ pub(crate) struct Engine {
   link_requests: LinkRequestList,
   maybe_new_link: Option<NewDeviceLink<HttpRendezvous>>,
   maybe_approval: Option<PendingApproval>,
+  /// Stops the wait for the receipt of the keys this device sent, which runs beside the jobs
+  /// (issue #415).
+  maybe_receipt: Option<ReceiptCancel>,
   calls: CallHub,
   /// Applied to decrypted push texts (keywords, first name).
   mentions: MentionSettings,
@@ -387,6 +392,7 @@ impl Engine {
       link_requests: LinkRequestList::default(),
       maybe_new_link: None,
       maybe_approval: None,
+      maybe_receipt: None,
       calls: CallHub::default(),
       mentions,
       signals,
@@ -435,6 +441,7 @@ impl Engine {
       // Dropped if they can't work; the user links again.
       Err(error) => tracing::warn!(%error, "could not finish the enrollment of an interrupted device link"),
     }
+    self.drop_abandoned_setup().await;
     let api = self.api();
     let me = api.me().await.map_err(teamcraft_core::CoreError::from)?;
     let has_existing_identity = api
@@ -445,6 +452,37 @@ impl Engine {
     Ok(AccountState::NeedsEnrollment {
       has_existing_identity,
     })
+  }
+
+  /// Drops the device key pair of a setup the user gave up on and revokes its registration (issue
+  /// #415). Not while a link is in progress here; enrolling is one job, so it never overlaps. A
+  /// failure (offline) is retried when the app asks for the account state again.
+  async fn drop_abandoned_setup(&self) {
+    if self.maybe_link_offer.is_some() || self.maybe_new_link.is_some() {
+      return;
+    }
+    let settings = self.client_settings();
+    if let Err(error) =
+      PendingEnrollment::drop_abandoned(&self.api(), &self.store, &SystemClock, &settings).await
+    {
+      tracing::info!(%error, "could not revoke the device of a setup that was given up yet");
+    }
+  }
+
+  /// The user signs out before this device is set up (issues #168, #415): the keys of a link and the
+  /// device key pair go at once, and the server gets a few seconds to revoke the device that key
+  /// pair registered (otherwise the next start of this account does). Nothing changes on a device
+  /// that is set up.
+  pub(crate) async fn forget_unfinished_setup(&mut self) -> Result<(), TeamCraftError> {
+    if !matches!(self.client, ClientSlot::Missing) {
+      return Ok(());
+    }
+    self.maybe_link_offer = None;
+    self.maybe_link_announcement = None;
+    self.maybe_new_link = None;
+    PendingEnrollment::forget_unfinished(&self.api(), &self.store, &SystemClock, SIGN_OUT_REVOKE_PATIENCE)
+      .await?;
+    Ok(())
   }
 
   pub(crate) async fn enroll(
@@ -577,8 +615,14 @@ impl Engine {
 
   /// Existing device: the user typed the code the new device shows. Only a match sends the keys
   /// (docs/security-review.md C3: a script or a stray tap can't approve a device the user did not
-  /// see); a few wrong codes end the attempt.
-  pub(crate) async fn confirm_device_link(&mut self, typed_code: String) -> Result<(), TeamCraftError> {
+  /// see); a few wrong codes end the attempt. Syncing resumes once the keys are sent; the new
+  /// device's receipt is awaited beside the engine's jobs (issue #415), and the returned receiver
+  /// gets its outcome. One receipt is awaited at a time: a wait still running for an earlier link
+  /// ends as cancelled.
+  pub(crate) async fn confirm_device_link(
+    &mut self,
+    typed_code: String,
+  ) -> Result<oneshot::Receiver<Result<(), TeamCraftError>>, TeamCraftError> {
     let digits = |text: &str| text.chars().filter(char::is_ascii_digit).collect::<String>();
     let pending = self
       .maybe_approval
@@ -601,16 +645,25 @@ impl Engine {
       .take()
       .ok_or(TeamCraftError::NoLinkInProgress)?;
     let mut client = self.take_client().await?;
-    let result = client.complete_link_approval(pending.approval).await;
+    let sent = client.send_link_transfer(pending.approval).await;
     self.client = ClientSlot::Idle(client);
     if pending.was_running {
       self.start().await?;
     }
-    Ok(result?)
+    let (waiting, cancel) = sent?.detach();
+    self.maybe_receipt = Some(cancel);
+    let (outcome, receiver) = oneshot::channel();
+    tokio::task::spawn_local(async move {
+      // The app may have stopped waiting (a cancelled coroutine); nobody is left to tell then.
+      let _ = outcome.send(waiting.await.map_err(TeamCraftError::from));
+    });
+    Ok(receiver)
   }
 
-  /// Drops an approval the user abandoned (the codes were never confirmed) and resumes syncing.
+  /// Drops an approval the user abandoned (the codes were never confirmed) and resumes syncing; a
+  /// receipt still awaited ends as cancelled.
   pub(crate) async fn cancel_device_link_approval(&mut self) -> Result<(), TeamCraftError> {
+    self.maybe_receipt = None;
     let Some(pending) = self.maybe_approval.take() else {
       return Ok(());
     };

@@ -249,6 +249,10 @@ struct State {
   conversation_list_delays: HashMap<UserId, std::time::Duration>,
   /// Users whose member lists answer only after this long.
   member_list_delays: HashMap<UserId, std::time::Duration>,
+  /// Users whose reads of a user's registered devices answer only after this long.
+  user_device_delays: HashMap<UserId, std::time::Duration>,
+  /// Users whose reads of a user's registered devices are refused (403).
+  user_device_refusals: HashSet<UserId>,
   /// The gateway's heartbeat timeout on a clock of the test's ([`FakeServer::enforce_heartbeat_timeout`]).
   maybe_heartbeat_timeout: Option<(Arc<dyn Clock + Send + Sync>, i64)>,
   /// When each gateway connection last sent a frame, while the timeout is enforced.
@@ -607,6 +611,22 @@ impl FakeServer {
   /// The user's member lists answer only after `delay` (a catch-up of many conversations).
   pub fn delay_member_lists(&self, user: UserId, delay: std::time::Duration) {
     self.lock().member_list_delays.insert(user, delay);
+  }
+
+  /// The user's reads of registered devices (`GET /users/{id}/devices`) answer only after `delay`.
+  pub fn delay_user_devices(&self, user: UserId, delay: std::time::Duration) {
+    self.lock().user_device_delays.insert(user, delay);
+  }
+
+  /// While set, the user's reads of registered devices are refused with 403, a refusal that a
+  /// retry doesn't change.
+  pub fn refuse_user_devices(&self, user: UserId, is_refusing: bool) {
+    let mut state = self.lock();
+    if is_refusing {
+      state.user_device_refusals.insert(user);
+    } else {
+      state.user_device_refusals.remove(&user);
+    }
   }
 
   /// Answers `GET /sync/heads` with a bare 404 from now on, like an older server (issue #714).
@@ -1132,6 +1152,11 @@ impl FakeServer {
     self.lock().device_lists.get(&user).cloned()
   }
 
+  /// Forgets the user's signed device list, as a server that lost it (or never kept one) would.
+  pub fn forget_device_list(&self, user: UserId) {
+    self.lock().device_lists.remove(&user);
+  }
+
   /// Replaces a stored organization background, as a compromised server could.
   pub fn swap_org_background(&self, id: OrgBackgroundId, picture: Vec<u8>) {
     if let Some(entry) = self.lock().org_backgrounds.get_mut(&id) {
@@ -1595,7 +1620,14 @@ impl ServerApi for FakeServerApi {
   }
 
   async fn list_user_devices(&self, user: UserId) -> Result<ListDevicesResponse, ApiError> {
+    let maybe_delay = self.server.lock().user_device_delays.get(&self.user).copied();
+    if let Some(delay) = maybe_delay {
+      crate::platform::sleep(delay).await;
+    }
     self.with(|state, me| {
+      if state.user_device_refusals.contains(&me) {
+        return Err(ApiError::status(403, ErrorCode::Forbidden, "not allowed"));
+      }
       Ok(ListDevicesResponse {
         devices: state
           .devices_of(user)

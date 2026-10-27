@@ -5,6 +5,7 @@
 // web_service_worker.rs.
 #![cfg(not(target_arch = "wasm32"))]
 
+mod abandoned_setup;
 mod account_data;
 mod activity;
 mod admin_add_policy;
