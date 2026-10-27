@@ -84,7 +84,7 @@ use crate::rtp::AudioLevel;
 use crate::video::EncodedVideoFrame;
 use crate::web_api::{
   AudioData, AudioDecoder, AudioEncoder, EncodedAudioChunk, WORKLET_SOURCE, WebTransport,
-  WebTransportBidirectionalStream, dictionary, has_global,
+  WebTransportBidirectionalStream, datagram_writable, dictionary, has_global,
 };
 
 /// Audio frame period.
@@ -1356,9 +1356,8 @@ impl Transport {
       .get_writer()
       .map_err(browser("signaling stream"))?;
     let datagram_stream = transport.datagrams();
-    let datagrams = datagram_stream
-      .writable()
-      .get_writer()
+    let datagrams = datagram_writable(&datagram_stream)
+      .and_then(|stream| stream.get_writer())
       .map_err(browser("datagram stream"))?;
     spawn_local(read_signaling(
       stream.readable(),
@@ -1470,14 +1469,11 @@ async fn received_packets(session: &WebTransport) -> PacketCount {
   let Ok(stats) = JsFuture::from(promise).await else {
     return PacketCount::Unknown;
   };
-  match Reflect::get(&stats, &JsValue::from_str("packetsReceived"))
-    .ok()
-    .and_then(|count| count.as_f64())
-  {
-    // Counts are whole numbers far below 2^53.
-    Some(count) if count >= 0.0 => PacketCount::Received(count as u64),
-    _ => PacketCount::Unsupported,
-  }
+  PacketCount::from_stats(
+    Reflect::get(&stats, &JsValue::from_str("packetsReceived"))
+      .ok()
+      .and_then(|count| count.as_f64()),
+  )
 }
 
 /// How a session whose signaling stream ended was closed: `closed` resolves with the SFU's close
