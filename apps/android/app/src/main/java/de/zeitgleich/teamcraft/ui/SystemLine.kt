@@ -28,18 +28,22 @@ sealed interface SystemLine {
 
   data class MemberRemoved(val name: String, val by: String) : SystemLine
 
-  data class Archived(val by: String) : SystemLine
+  // Changes the server reports of the channel (issue #818): [maybeBy] names who made one only when
+  // that member's own announcement matched it; otherwise the line is the server's statement ("This
+  // channel was archived").
 
-  data class Unarchived(val by: String) : SystemLine
+  data class Archived(val maybeBy: String?) : SystemLine
 
-  data class MadePrivate(val by: String) : SystemLine
+  data class Unarchived(val maybeBy: String?) : SystemLine
 
-  data class MadePublic(val by: String) : SystemLine
+  data class MadePrivate(val maybeBy: String?) : SystemLine
+
+  data class MadePublic(val maybeBy: String?) : SystemLine
 
   data class Pinned(val by: String) : SystemLine
 
-  /** To the space [space]; empty if the mover's device didn't know its name. */
-  data class Moved(val by: String, val space: String) : SystemLine
+  /** To the space [space]; empty if this device doesn't know its name. */
+  data class Moved(val maybeBy: String?, val space: String) : SystemLine
 
   /**
    * A workspace admin joined the private channel (admin.md §2.4): by themselves, or let in by the
@@ -78,15 +82,24 @@ fun SystemLine.localizedText(): String = when (this) {
   is SystemLine.MemberAdded ->
     stringResource(if (sharesHistory) R.string.event_member_added_history else R.string.event_member_added, by, name)
   is SystemLine.MemberRemoved -> stringResource(R.string.event_member_removed, by, name)
-  is SystemLine.Archived -> stringResource(R.string.event_archived, by)
-  is SystemLine.Unarchived -> stringResource(R.string.event_unarchived, by)
-  is SystemLine.MadePrivate -> stringResource(R.string.event_private, by)
-  is SystemLine.MadePublic -> stringResource(R.string.event_public, by)
+  is SystemLine.Archived ->
+    maybeBy?.let { stringResource(R.string.event_archived, it) }
+      ?: stringResource(R.string.event_archived_unattributed)
+  is SystemLine.Unarchived ->
+    maybeBy?.let { stringResource(R.string.event_unarchived, it) }
+      ?: stringResource(R.string.event_unarchived_unattributed)
+  is SystemLine.MadePrivate ->
+    maybeBy?.let { stringResource(R.string.event_private, it) }
+      ?: stringResource(R.string.event_private_unattributed)
+  is SystemLine.MadePublic ->
+    maybeBy?.let { stringResource(R.string.event_public, it) }
+      ?: stringResource(R.string.event_public_unattributed)
   is SystemLine.Pinned -> stringResource(R.string.event_pinned, by)
-  is SystemLine.Moved -> if (space.isEmpty()) {
-    stringResource(R.string.event_moved_unnamed, by)
-  } else {
-    stringResource(R.string.event_moved, by, space)
+  is SystemLine.Moved -> when {
+    space.isEmpty() -> maybeBy?.let { stringResource(R.string.event_moved_unnamed, it) }
+      ?: stringResource(R.string.event_moved_unnamed_unattributed)
+    else -> maybeBy?.let { stringResource(R.string.event_moved, it, space) }
+      ?: stringResource(R.string.event_moved_unattributed, space)
   }
   is SystemLine.AdminJoined -> maybeApprovedBy?.let { by ->
     stringResource(R.string.event_admin_joined_approved, name, by)
@@ -112,18 +125,22 @@ private fun systemEventLine(event: JsonElement, name: String): SystemLine? {
   }
 }
 
-/** The extras' `WorkspaceEvent`, tagged by `event`; `null` for one this version doesn't know. */
+/**
+ * The extras' `WorkspaceEvent`, tagged by `event`; `null` for one this version doesn't know. A change
+ * the server reports without `by` names nobody (issue #818).
+ */
 private fun workspaceLine(event: JsonObject, nameOf: (String) -> String): SystemLine? {
   val by = nameOf(event.text("by"))
+  val maybeBy = event.text("by").takeIf { it.isNotEmpty() }?.let(nameOf)
   return when (event.text("event")) {
     "member_added" ->
       SystemLine.MemberAdded(nameOf(event.text("user")), by, sharesHistory = event.text("history") == "full")
     "member_removed" -> SystemLine.MemberRemoved(nameOf(event.text("user")), by)
-    "archived" -> SystemLine.Archived(by)
-    "unarchived" -> SystemLine.Unarchived(by)
-    "made_private" -> SystemLine.MadePrivate(by)
-    "made_public" -> SystemLine.MadePublic(by)
-    "moved" -> SystemLine.Moved(by, event.text("space"))
+    "archived" -> SystemLine.Archived(maybeBy)
+    "unarchived" -> SystemLine.Unarchived(maybeBy)
+    "made_private" -> SystemLine.MadePrivate(maybeBy)
+    "made_public" -> SystemLine.MadePublic(maybeBy)
+    "moved" -> SystemLine.Moved(maybeBy, event.text("space"))
     "pinned" -> SystemLine.Pinned(by)
     "admin_joined" -> event.text("added_by").takeIf { it.isNotEmpty() }?.let { addedBy ->
       SystemLine.AdminAdded(nameOf(event.text("user")), nameOf(addedBy))

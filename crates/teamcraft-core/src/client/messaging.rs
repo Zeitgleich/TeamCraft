@@ -319,10 +319,10 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
   pub(crate) fn receive_message(&mut self, message: MessageResponse) -> Result<(), CoreError> {
     let conversation = message.conversation_id;
     if let Some(existing) = self.store.message(conversation, message.client_message_id)?
-      && (existing.maybe_server_id.is_some() || existing.maybe_verified_commit.is_some())
+      && (existing.maybe_server_id.is_some() || existing.is_local_line())
     {
       // Already known (own message echoed back, or a duplicate delivery), or the ID of a line this
-      // device derived from a commit, which no message replaces (issue #811).
+      // device derived, which no message replaces (issues #811, #818).
       return Ok(());
     }
     if self.sent_after_leaving(&message)? {
@@ -337,7 +337,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
         {
           self.note_workspace_head(&head)?;
         }
-        self.store.upsert_message(&StoredMessage {
+        let stored = StoredMessage {
           conversation_id: conversation,
           client_message_id: message.client_message_id,
           maybe_server_id: Some(message.id),
@@ -350,7 +350,23 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
           maybe_edit_id: None,
           is_pinned: false,
           maybe_verified_commit: None,
-        })?;
+          maybe_server_change: None,
+        };
+        if super::server_changes::is_announcement(&stored) {
+          // An announcement of a change the server reports and the name it puts on a line reach
+          // the disk together: after a crash in between, the message would be known and the line
+          // would never get the name (issue #818).
+          crate::store::write_group(&self.store, || -> Result<(), CoreError> {
+            self.store.upsert_message(&stored)?;
+            super::server_changes::note_announcement(
+              &self.store,
+              &stored,
+              self.settings.change_announcement_window,
+            )
+          })?;
+        } else {
+          self.store.upsert_message(&stored)?;
+        }
         apply_control_with(
           &self.store,
           conversation,
@@ -635,9 +651,10 @@ fn apply_control_with(
       maybe_server_id,
     );
   };
-  // A deleted message stays deleted; a line this device derived from a commit is no message
-  // anybody sent, so nobody's edit, delete or pin changes it (issue #811).
-  if matches!(stored.content, MessageContent::Deleted) || stored.maybe_verified_commit.is_some() {
+  // A deleted message stays deleted; a line this device derived (from a commit, issue #811, or
+  // from the server's record, issue #818) is no message anybody sent, so nobody's edit, delete or
+  // pin changes it.
+  if matches!(stored.content, MessageContent::Deleted) || stored.is_local_line() {
     return Ok(());
   }
   let is_own = stored.sender_user_id == sender;
@@ -807,6 +824,7 @@ mod tests {
       maybe_edit_id: None,
       is_pinned: false,
       maybe_verified_commit: None,
+      maybe_server_change: None,
     }
   }
 

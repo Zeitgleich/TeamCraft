@@ -13,6 +13,7 @@ use teamcraft_proto::{
 
 use super::Client;
 use super::member_device::GroupInfoOutcome;
+use super::server_changes::{Asked, Observed};
 use crate::api::{ApiError, ServerApi};
 use crate::client::groups::CREATE_ATTEMPTS;
 use crate::convert;
@@ -101,16 +102,16 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     let maybe_before: Option<ConversationResponse> =
       records::get_json(&self.store, Table::Conversations, &conversation.to_string())?;
     let after = self.api.update_conversation(conversation, request).await?;
-    records::put_json(
-      &self.store,
-      Table::Conversations,
-      &conversation.to_string(),
-      &after,
-    )?;
+    // The lines for archiving and converting (issue #818) come from the server's answer; the
+    // announcements are still sent, for older versions and to name who made the change.
+    let observed = Observed::OwnChange {
+      asked: Asked::update(request),
+    };
+    self.store_conversation_from(maybe_before.as_ref(), &after, observed)?;
     let Some(before) = maybe_before else {
       return Ok(());
     };
-    for event in changes(&before, &after) {
+    for event in changes(&before, &after, request) {
       self.announce(conversation, event).await?;
     }
     Ok(())
@@ -123,12 +124,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     request: &MoveChannelRequest,
   ) -> Result<(), CoreError> {
     let after = self.api.move_conversation(conversation, request).await?;
-    records::put_json(
-      &self.store,
-      Table::Conversations,
-      &conversation.to_string(),
-      &after,
-    )?;
+    self.store_conversation(&after, Observed::OwnChange { asked: Asked::MOVE })?;
     let maybe_space: Option<SpaceResponse> =
       records::get_json(&self.store, Table::Spaces, &request.space_id.to_string())?;
     self
@@ -164,12 +160,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
   pub async fn join_channel(&mut self, conversation: ConversationId) -> Result<(), CoreError> {
     self.api.join_conversation(conversation).await?;
     let response = self.api.conversation(conversation).await?;
-    records::put_json(
-      &self.store,
-      Table::Conversations,
-      &conversation.to_string(),
-      &response,
-    )?;
+    self.store_conversation(&response, Observed::FromServer { maybe_head: None })?;
     self.post_self_add(&response).await
   }
 
@@ -552,27 +543,34 @@ fn users_to_add(picked: &[UserId], members: impl IntoIterator<Item = UserId>) ->
     .collect()
 }
 
-/// The announcements a channel update calls for.
-fn changes(before: &ConversationResponse, after: &ConversationResponse) -> Vec<ConversationEvent> {
+/// The announcements a channel update calls for: what `request` changed. A difference it didn't
+/// ask for (somebody else's change this device hadn't seen yet) is theirs to announce, so this
+/// user isn't named for it (issue #818).
+fn changes(
+  before: &ConversationResponse,
+  after: &ConversationResponse,
+  request: &UpdateConversationRequest,
+) -> Vec<ConversationEvent> {
   let mut events = Vec::new();
-  if before.maybe_name != after.maybe_name
+  if request.maybe_name.is_some()
+    && before.maybe_name != after.maybe_name
     && let Some(name) = &after.maybe_name
   {
     events.push(ConversationEvent::Renamed { name: name.clone() });
   }
-  if before.maybe_topic != after.maybe_topic {
+  if request.maybe_topic.is_some() && before.maybe_topic != after.maybe_topic {
     events.push(ConversationEvent::TopicChanged {
       topic: after.maybe_topic.clone().unwrap_or_default(),
     });
   }
-  if before.is_archived != after.is_archived {
+  if request.maybe_is_archived == Some(after.is_archived) && before.is_archived != after.is_archived {
     events.push(if after.is_archived {
       ConversationEvent::Archived
     } else {
       ConversationEvent::Unarchived
     });
   }
-  if before.visibility != after.visibility {
+  if request.maybe_visibility.as_ref() == Some(&after.visibility) && before.visibility != after.visibility {
     events.push(match after.visibility {
       ConversationVisibility::Public => ConversationEvent::MadePublic,
       _ => ConversationEvent::MadePrivate,

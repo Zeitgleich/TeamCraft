@@ -163,6 +163,56 @@ mod kill_points {
     }
     panic!("processing never finished within {MAX_KILL_POINTS} writes");
   }
+
+  /// Issue #818: a crash on any write while a member's device sees the server archive a channel and
+  /// receives the announcement leaves exactly one "archived" line, naming who archived it, once the
+  /// device is back.
+  #[tokio::test]
+  async fn a_crash_while_a_channel_is_archived_leaves_one_named_line() {
+    for kill_point in 0..MAX_KILL_POINTS {
+      let server = FakeServer::new();
+      let mut alice = Peer::enroll(&server, "Alice").await;
+      let (mut bob, mut bob_gateway, store) = enroll_on_kill_point_store(&server, "Bob").await;
+      let channel = alice
+        .client
+        .create_channel(alice.space().await, "ops")
+        .await
+        .unwrap();
+      alice.client.add_member(channel, bob.user_id()).await.unwrap();
+      pump_until_quiet(&mut bob, &mut bob_gateway, &mut alice).await;
+
+      store.crash_after(kill_point);
+      alice
+        .client
+        .update_channel(
+          channel,
+          &teamcraft_proto::UpdateConversationRequest {
+            maybe_is_archived: Some(true),
+            ..Default::default()
+          },
+        )
+        .await
+        .unwrap();
+      let processed = pump_until_quiet_or_crash(&mut bob, &mut bob_gateway, &mut alice).await;
+      let has_crashed = store.has_crashed();
+      if !has_crashed {
+        processed.unwrap();
+      }
+
+      let mut reopened = reopen(&bob, store.durable());
+      let (mut gateway, _) = reopened.connect_gateway().await.unwrap();
+      pump_until_quiet(&mut reopened, &mut gateway, &mut alice).await;
+      assert_eq!(
+        archived_lines(&store.durable(), channel),
+        vec![Some(alice.client.user_id())],
+        "kill point {kill_point}"
+      );
+      if !has_crashed {
+        return;
+      }
+    }
+    panic!("processing never finished within {MAX_KILL_POINTS} writes");
+  }
 }
 
 mod linking {
@@ -568,6 +618,22 @@ fn admin_lines(store: &MemoryStore, conversation: ConversationId) -> usize {
       )
     })
     .count()
+}
+
+/// Whom each "archived" line `store` lists in `conversation` names.
+fn archived_lines(store: &MemoryStore, conversation: ConversationId) -> Vec<Option<teamcraft_proto::UserId>> {
+  store
+    .messages(conversation, MessageFilter::TopLevel)
+    .unwrap()
+    .into_iter()
+    .filter(|message| {
+      message.content
+        == MessageContent::Event {
+          event: ConversationEvent::Archived,
+        }
+    })
+    .map(|message| message.maybe_actor())
+    .collect()
 }
 
 fn texts(store: &MemoryStore, conversation: ConversationId) -> Vec<String> {

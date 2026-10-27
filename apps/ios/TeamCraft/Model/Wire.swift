@@ -105,12 +105,14 @@ struct MessageExtras: Decodable, Equatable, Sendable {
 enum WorkspaceEvent: Decodable, Equatable, Sendable {
   case memberAdded(user: String, by: String, sharesHistory: Bool)
   case memberRemoved(user: String, by: String)
-  case archived(by: String)
-  case unarchived(by: String)
-  case madePrivate(by: String)
-  case madePublic(by: String)
-  /// To the space named `space`; empty if the mover's device didn't know its name.
-  case moved(by: String, space: String)
+  // Changes the server reports of the channel (issue #818): `maybeBy` names who made one only when
+  // that member's own announcement matched it; `nil` words the line as the server's statement.
+  case archived(maybeBy: String?)
+  case unarchived(maybeBy: String?)
+  case madePrivate(maybeBy: String?)
+  case madePublic(maybeBy: String?)
+  /// To the space named `space`; empty if this device doesn't know its name.
+  case moved(maybeBy: String?, space: String)
   case pinned(by: String)
   /// A workspace admin joined the private channel (admin.md §2.4): by themselves, or let in by the
   /// channel owner `maybeApprovedBy` who answered their request.
@@ -128,14 +130,15 @@ enum WorkspaceEvent: Decodable, Equatable, Sendable {
     let container = try decoder.container(keyedBy: CodingKeys.self)
     let text = { (key: CodingKeys) -> String? in try? container.decodeIfPresent(String.self, forKey: key) }
     let by = text(.by) ?? ""
+    let maybeBy = by.isEmpty ? nil : by
     switch text(.event) {
     case "member_added": self = .memberAdded(user: text(.user) ?? "", by: by, sharesHistory: text(.history) == "full")
     case "member_removed": self = .memberRemoved(user: text(.user) ?? "", by: by)
-    case "archived": self = .archived(by: by)
-    case "unarchived": self = .unarchived(by: by)
-    case "made_private": self = .madePrivate(by: by)
-    case "made_public": self = .madePublic(by: by)
-    case "moved": self = .moved(by: by, space: text(.space) ?? "")
+    case "archived": self = .archived(maybeBy: maybeBy)
+    case "unarchived": self = .unarchived(maybeBy: maybeBy)
+    case "made_private": self = .madePrivate(maybeBy: maybeBy)
+    case "made_public": self = .madePublic(maybeBy: maybeBy)
+    case "moved": self = .moved(maybeBy: maybeBy, space: text(.space) ?? "")
     case "pinned": self = .pinned(by: by)
     case "admin_joined":
       if let addedBy = text(.addedBy), !addedBy.isEmpty {

@@ -636,6 +636,7 @@ fn enqueue_as(peer: &Peer, channel: ConversationId, id: ClientMessageId, content
       maybe_edit_id: None,
       is_pinned: false,
       maybe_verified_commit: None,
+      maybe_server_change: None,
     })
     .unwrap();
   records::put_json(

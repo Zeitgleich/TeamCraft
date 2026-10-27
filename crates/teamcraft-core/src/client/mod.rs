@@ -39,6 +39,7 @@ mod read_ahead;
 mod removal;
 #[cfg(not(target_arch = "wasm32"))]
 mod segments;
+mod server_changes;
 mod sources;
 mod sync;
 mod sync_trace;
@@ -155,6 +156,11 @@ pub struct ClientSettings {
   /// times): each answer costs a commit, and a broken or malicious device could ask far more often
   /// than `rejoin_retry` (issue #149).
   pub rejoin_cooldown: std::time::Duration,
+  /// How long after this device saw a change the server reports of a channel (archived, made
+  /// private, ...) a member's encrypted announcement of it may come and still name who made it
+  /// (issue #818), measured on the server's clock from the newest message known then. Later
+  /// announcements name nobody; the line is there either way.
+  pub change_announcement_window: std::time::Duration,
   /// Removal records whose absence ended before the workspace's retention limit are dropped
   /// (issue #186); this much later, to spare messages still on the way.
   pub removed_sender_retention_leeway: std::time::Duration,
@@ -317,6 +323,7 @@ impl Default for ClientSettings {
       rejoin_retry_max: std::time::Duration::from_secs(24 * 60 * 60),
       pending_addition_expiry: std::time::Duration::from_secs(90 * 24 * 60 * 60),
       rejoin_cooldown: std::time::Duration::from_secs(30 * 60),
+      change_announcement_window: std::time::Duration::from_secs(10 * 60),
       removed_sender_retention_leeway: std::time::Duration::from_secs(24 * 60 * 60),
       dm_welcome_timeout: std::time::Duration::from_secs(2 * 60),
       removal_retry: std::time::Duration::from_secs(60 * 60),

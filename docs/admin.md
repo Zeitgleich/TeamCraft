@@ -526,7 +526,11 @@ themselves and the server can't relax it.
 Every admin action, recovery, device change and role change is logged with actor, target and time.
 
 - Admins see the full log.
-- Members see admin actions affecting their conversations as system messages.
+- Members see admin actions affecting their conversations as system messages. Archiving,
+  converting and moving a channel show as lines each member's device derives from the server's
+  record of the channel ("This channel was archived"); the member who made the change is named only
+  when their own encrypted announcement matches it (e2ee.md §4.9, issue #818). Until channel
+  properties are signed, the change itself is the server's word.
 - Users see actions affecting themselves (device removed, recovery started) in their security settings.
 - The log contains metadata only, never message content.
 

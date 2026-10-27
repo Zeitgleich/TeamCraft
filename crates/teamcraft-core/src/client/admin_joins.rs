@@ -84,6 +84,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
         maybe_edit_id: None,
         is_pinned: false,
         maybe_verified_commit: Some(commit.id),
+        maybe_server_change: None,
       })?;
       tracing::info!(conversation_id = %conversation, mls_message_id = %commit.id, "a workspace admin joined the channel");
     }

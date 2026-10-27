@@ -209,6 +209,12 @@
   <string name="event_pinned">%1$s hat eine Nachricht angeheftet</string>
   <string name="event_moved">%1$s hat diesen Kanal in %2$s verschoben</string>
   <string name="event_moved_unnamed">%1$s hat diesen Kanal in einen anderen Bereich verschoben</string>
+  <string name="event_archived_unattributed">Dieser Kanal wurde archiviert</string>
+  <string name="event_unarchived_unattributed">Dieser Kanal wurde wiederhergestellt</string>
+  <string name="event_private_unattributed">Dieser Kanal wurde privat gemacht</string>
+  <string name="event_public_unattributed">Dieser Kanal wurde öffentlich gemacht</string>
+  <string name="event_moved_unattributed">Dieser Kanal wurde in %1$s verschoben</string>
+  <string name="event_moved_unnamed_unattributed">Dieser Kanal wurde in einen anderen Bereich verschoben</string>
   <string name="org_recovery_instead">Über meine Organisation wiederherstellen</string>
   <string name="org_recovery_title">Über deine Organisation wiederherstellen</string>
   <string name="org_recovery_hint">Lies diesen Code einer Administratorin oder einem Administrator deiner Organisation am Telefon oder persönlich vor. Zwei Admins geben die Wiederherstellung frei.</string>

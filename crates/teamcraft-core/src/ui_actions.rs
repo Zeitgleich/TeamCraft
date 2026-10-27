@@ -425,11 +425,12 @@ impl<S: LocalStore> CoreChatBackend<S> {
     messages
       .iter()
       .filter_map(|id| {
-        // A server can give a message the ID of a commit a line was derived from; the line wins
-        // (issue #811), so the ID clash can't hide it.
+        // A server can give a message the ID a derived line sits at (a commit's, issue #811; the
+        // announcement a line moved to is hidden, issue #818); the line wins, so the ID clash
+        // can't hide it.
         let stored = all
           .iter()
-          .find(|stored| stored.maybe_verified_commit.is_some() && ui_message_id(stored) == *id)
+          .find(|stored| stored.is_local_line() && ui_message_id(stored) == *id)
           .or_else(|| all.iter().find(|stored| ui_message_id(stored) == *id))?;
         let mut extras = MessageExtras::new(*id);
         extras.is_read = ticks.is_read(stored, self.me_id());
@@ -454,7 +455,7 @@ impl<S: LocalStore> CoreChatBackend<S> {
         match &stored.content {
           MessageContent::Text { meta, .. } => self.fill_from_meta(&mut extras, meta, &all),
           MessageContent::Event { event } => {
-            extras.maybe_workspace_event = workspace_event(event, stored.sender_user_id);
+            extras.maybe_workspace_event = workspace_event(event, stored);
           },
           _ => {},
         }
@@ -596,9 +597,12 @@ fn parse_permalink(link: &str) -> Option<PermalinkTarget> {
   })
 }
 
-/// The UI's view of a conversation event, sent by `actor`; `None` for events the UI shows through
-/// its own system events only (joins, leaves, renames, topics).
-fn workspace_event(event: &ConversationEvent, actor: UserId) -> Option<WorkspaceEvent> {
+/// The UI's view of the conversation event `stored` holds; `None` for events the UI shows through
+/// its own system events only (joins, leaves, renames, topics). A change the server reports names
+/// whoever the line names, if anybody (issue #818); other events their sender.
+fn workspace_event(event: &ConversationEvent, stored: &StoredMessage) -> Option<WorkspaceEvent> {
+  let actor = stored.sender_user_id;
+  let maybe_by = stored.maybe_actor();
   Some(match event {
     ConversationEvent::MemberAdded { user, history } => WorkspaceEvent::MemberAdded {
       user: *user,
@@ -616,12 +620,12 @@ fn workspace_event(event: &ConversationEvent, actor: UserId) -> Option<Workspace
       maybe_approved_by: is_approved.then_some(actor),
       maybe_added_by: (!is_approved && actor != *user).then_some(actor),
     },
-    ConversationEvent::Archived => WorkspaceEvent::Archived { by: actor },
-    ConversationEvent::Unarchived => WorkspaceEvent::Unarchived { by: actor },
-    ConversationEvent::MadePrivate => WorkspaceEvent::MadePrivate { by: actor },
-    ConversationEvent::MadePublic => WorkspaceEvent::MadePublic { by: actor },
+    ConversationEvent::Archived => WorkspaceEvent::Archived { maybe_by },
+    ConversationEvent::Unarchived => WorkspaceEvent::Unarchived { maybe_by },
+    ConversationEvent::MadePrivate => WorkspaceEvent::MadePrivate { maybe_by },
+    ConversationEvent::MadePublic => WorkspaceEvent::MadePublic { maybe_by },
     ConversationEvent::Moved { space } => WorkspaceEvent::Moved {
-      by: actor,
+      maybe_by,
       space: space.clone(),
     },
     ConversationEvent::Joined

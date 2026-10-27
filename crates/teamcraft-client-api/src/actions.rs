@@ -619,21 +619,30 @@ pub enum WorkspaceEvent {
     user: UserId,
     by: UserId,
   },
+  // The next five are changes the server records of the channel (issue #818): the server's word.
+  // They name who made the change (`by`) only when that member's own encrypted announcement
+  // matched it, or the user made it on this device; otherwise `by` is absent ("This channel was
+  // archived").
   Archived {
-    by: UserId,
+    #[serde(rename = "by", default, skip_serializing_if = "Option::is_none")]
+    maybe_by: Option<UserId>,
   },
   Unarchived {
-    by: UserId,
+    #[serde(rename = "by", default, skip_serializing_if = "Option::is_none")]
+    maybe_by: Option<UserId>,
   },
   MadePrivate {
-    by: UserId,
+    #[serde(rename = "by", default, skip_serializing_if = "Option::is_none")]
+    maybe_by: Option<UserId>,
   },
   MadePublic {
-    by: UserId,
+    #[serde(rename = "by", default, skip_serializing_if = "Option::is_none")]
+    maybe_by: Option<UserId>,
   },
-  /// The channel moved to the space with this name (empty if the mover's client did not know it).
+  /// The channel moved to the space with this name (empty if this device does not know it).
   Moved {
-    by: UserId,
+    #[serde(rename = "by", default, skip_serializing_if = "Option::is_none")]
+    maybe_by: Option<UserId>,
     space: String,
   },
   Pinned {
@@ -788,11 +797,23 @@ mod tests {
     );
     assert_eq!(
       serde_json::to_value(WorkspaceEvent::Moved {
-        by: id_from_raw(1),
+        maybe_by: Some(id_from_raw(1)),
         space: "Project A".into(),
       })
       .expect("serialize"),
       serde_json::json!({ "event": "moved", "by": "1", "space": "Project A" })
+    );
+    // A change nobody is named for (issue #818) leaves `by` out; the apps word it without a name.
+    assert_eq!(
+      serde_json::to_value(WorkspaceEvent::Archived { maybe_by: None }).expect("serialize"),
+      serde_json::json!({ "event": "archived" })
+    );
+    assert_eq!(
+      serde_json::from_value::<WorkspaceEvent>(serde_json::json!({ "event": "made_private", "by": "4" }))
+        .expect("parse"),
+      WorkspaceEvent::MadePrivate {
+        maybe_by: Some(id_from_raw(4))
+      }
     );
   }
 

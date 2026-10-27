@@ -2364,11 +2364,9 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
         })?;
         self.note_dm_welcome_joined(conversation)?;
         if let Ok(response) = self.api.conversation(conversation).await {
-          records::put_json(
-            &self.store,
-            Table::Conversations,
-            &conversation.to_string(),
+          self.store_conversation(
             &response,
+            super::server_changes::Observed::FromServer { maybe_head: None },
           )?;
         }
         self.sync_mls(conversation).await
