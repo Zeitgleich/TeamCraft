@@ -4,13 +4,12 @@
 //!
 //! Both follow the finger 1:1 and decide on release with the momentum the finger had: where the
 //! movement would come to rest if it coasted on (Apple's "projection" with the scroll view's
-//! deceleration rate), not only where the finger let go.
+//! deceleration rate), not only where the finger let go. The velocity, projection and rubber band
+//! are the shared [`physics`], which the lightbox uses too.
 
-/// Deceleration per millisecond of a coasting scroll view (UIScrollView's `normal` rate).
-const DECELERATION_RATE: f64 = 0.998;
-/// Samples older than this don't count for the release velocity: a finger that stopped before
-/// lifting has no momentum.
-const VELOCITY_WINDOW_MS: f64 = 100.0;
+pub mod physics;
+
+use self::physics::{AxisTracker, RUBBERBAND_CONSTANT, SCROLL_DECELERATION, project, rubberband};
 
 /// A sheet closes when flicked down faster than this (px/ms) …
 const SHEET_DISMISS_VELOCITY: f64 = 0.11;
@@ -18,7 +17,7 @@ const SHEET_DISMISS_VELOCITY: f64 = 0.11;
 const SHEET_DISMISS_FRACTION: f64 = 0.3;
 /// Movement before a press on a sheet becomes a drag (taps and small jitters stay taps).
 const SHEET_SLOP_PX: f64 = 6.0;
-/// How far a sheet gives when pulled up past its resting place: the pull is damped to this scale.
+/// How far a sheet gives when pulled up past its resting place: the pull never shows more than this.
 const RUBBER_BAND_PX: f64 = 24.0;
 
 /// Width of the leading-edge strip where a back swipe can start.
@@ -31,13 +30,7 @@ const SWIPE_COMMIT_FRACTION: f64 = 0.5;
 /// Where a movement that leaves the finger at `velocity_px_per_ms` comes to rest, measured from
 /// where it was let go.
 pub fn projected_travel(velocity_px_per_ms: f64) -> f64 {
-  velocity_px_per_ms * DECELERATION_RATE / (1.0 - DECELERATION_RATE)
-}
-
-/// Positions of a moving finger along one axis, for its velocity at the end.
-#[derive(Clone, Debug, Default)]
-struct Track {
-  samples: Vec<(f64, f64)>,
+  project(velocity_px_per_ms, SCROLL_DECELERATION)
 }
 
 /// Dragging a sheet by its body or its handle.
@@ -46,7 +39,7 @@ pub struct SheetDrag {
   start_y: f64,
   start_x: f64,
   is_dragging: bool,
-  track: Track,
+  track: AxisTracker,
 }
 
 /// What a sheet does when the finger lifts.
@@ -66,7 +59,7 @@ pub struct EdgeSwipe {
   start_x: f64,
   start_y: f64,
   state: SwipeState,
-  track: Track,
+  track: AxisTracker,
 }
 
 /// Where an edge swipe stands after a move.
@@ -87,31 +80,10 @@ pub enum SwipeRelease {
   Stay,
 }
 
-impl Track {
-  fn push(&mut self, position: f64, at_ms: f64) {
-    self.samples.push((position, at_ms));
-    self
-      .samples
-      .retain(|(_, sample_at)| at_ms - sample_at <= VELOCITY_WINDOW_MS);
-  }
-
-  /// Pixels per millisecond over the recent samples; 0 without two of them.
-  fn velocity(&self) -> f64 {
-    let (Some(first), Some(last)) = (self.samples.first(), self.samples.last()) else {
-      return 0.0;
-    };
-    let elapsed = last.1 - first.1;
-    if elapsed <= 0.0 {
-      return 0.0;
-    }
-    (last.0 - first.0) / elapsed
-  }
-}
-
 impl SheetDrag {
   pub fn start(x: f64, y: f64, at_ms: f64) -> Self {
-    let mut track = Track::default();
-    track.push(y, at_ms);
+    let mut track = AxisTracker::default();
+    track.push(at_ms, y);
     Self {
       start_y: y,
       start_x: x,
@@ -123,7 +95,7 @@ impl SheetDrag {
   /// The finger moved; returns how far the sheet is pulled down (negative: rubber-banded up), or
   /// `None` while it isn't a drag (yet).
   pub fn moved(&mut self, x: f64, y: f64, at_ms: f64) -> Option<f64> {
-    self.track.push(y, at_ms);
+    self.track.push(at_ms, y);
     let (dx, dy) = (x - self.start_x, y - self.start_y);
     if !self.is_dragging {
       // Down and more down than sideways; a pull up is the content's scroll, not the sheet's.
@@ -165,8 +137,7 @@ fn rubber_band(offset: f64) -> f64 {
   if offset >= 0.0 {
     return offset;
   }
-  let pull = -offset;
-  -(RUBBER_BAND_PX * pull / (pull + RUBBER_BAND_PX))
+  rubberband(offset, RUBBER_BAND_PX, RUBBERBAND_CONSTANT)
 }
 
 impl EdgeSwipe {
@@ -175,8 +146,8 @@ impl EdgeSwipe {
     if !(0.0..=EDGE_START_PX).contains(&x) {
       return None;
     }
-    let mut track = Track::default();
-    track.push(x, at_ms);
+    let mut track = AxisTracker::default();
+    track.push(at_ms, x);
     Some(Self {
       start_x: x,
       start_y: y,
@@ -186,7 +157,7 @@ impl EdgeSwipe {
   }
 
   pub fn moved(&mut self, x: f64, y: f64, at_ms: f64) -> SwipeState {
-    self.track.push(x, at_ms);
+    self.track.push(at_ms, x);
     let (dx, dy) = (x - self.start_x, y - self.start_y);
     self.state = match self.state {
       SwipeState::Abandoned => SwipeState::Abandoned,
