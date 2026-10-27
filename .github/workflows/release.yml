@@ -1,5 +1,6 @@
 # Release (docs/release.md): a tag `v*` builds everything a release ships and attaches it to a
-# **draft** GitHub release, which a maintainer reviews and publishes by hand.
+# **draft** GitHub release, which a maintainer reviews and publishes by hand (the nightly release
+# starts it with `publish` and the last job publishes it, docs/release.md).
 #
 # - Server, SFU and integration bridge images, multi-arch (amd64 + arm64, each built on a native
 #   runner), pushed to ghcr.io/<owner>/teamcraft-server, -sfu and -bridge: the version tag, X.Y and `latest` for releases, only
@@ -23,6 +24,14 @@ name: Release
 on:
   push:
     tags: ["v*"]
+  # Started on a tag ref by nightly-release.yml, whose tag push (made with GITHUB_TOKEN) starts no
+  # workflow, and by hand to re-run a release (`gh workflow run release.yml --ref vX.Y.Z`).
+  workflow_dispatch:
+    inputs:
+      publish:
+        description: Publish the release once it is built (the nightly release does)
+        type: boolean
+        default: false
 
 # Never two runs for the same tag; a re-pushed tag waits for the previous run instead of racing it.
 concurrency:
@@ -530,3 +539,33 @@ jobs:
           echo "::notice::${TAG} was published before its Android files were attached; starting Google Play and Packages again"
           gh workflow run google-play.yml --ref "$DEFAULT_BRANCH" -f tag="$TAG"
           gh workflow run packages.yml --ref "$DEFAULT_BRANCH"
+
+  # Nightly releases (`publish`): publishes the release when it is built. Publishing with the
+  # workflow's token starts no `release: published` workflows, so the package site and Google Play
+  # are started here. An Android build that failed doesn't hold the release back (#696): the files
+  # are attached later, and `android-release` then starts both again.
+  publish:
+    name: Publish
+    needs: [release, android-release]
+    if: ${{ !cancelled() && inputs.publish && needs.release.result == 'success' }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      actions: write
+    env:
+      TAG: ${{ github.ref_name }}
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+      ANDROID_RESULT: ${{ needs.android-release.result }}
+    steps:
+      - name: Publish the release
+        run: gh release edit "$TAG" --draft=false
+      - name: Package site and Google Play
+        run: |
+          gh workflow run packages.yml --ref "$DEFAULT_BRANCH"
+          if [ "$ANDROID_RESULT" = success ]; then
+            gh workflow run google-play.yml --ref "$DEFAULT_BRANCH" -f tag="$TAG"
+          else
+            echo "::warning::no Android files yet; re-run android-release, it starts Google Play"
+          fi
