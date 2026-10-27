@@ -1,11 +1,14 @@
 //! Settings > Devices and Settings > Security & privacy. Devices: this device first, the others
-//! with platform and last seen, signing out (confirmed first) and linking a new one. Security: the
-//! state of encryption in plain words with the next step, the recovery passphrase, verifying
-//! people, the user's own key one level down, and what others can see.
+//! with platform and last seen, what this device verified of each and how it gets pushes;
+//! renaming, a test push, signing out (confirmed first) and linking a new one. Security: the state
+//! of encryption and of the key backup in plain words with the next step, the recovery passphrase,
+//! verifying people, the user's own key one level down, and what others can see.
 
 use leptos::prelude::*;
-use teamcraft_client_api::admin::DeviceInfo;
+use teamcraft_client_api::admin::{DeviceInfo, DevicePushStatus, DeviceVerification};
 use teamcraft_client_api::privacy::LastSeenVisibility;
+use teamcraft_client_api::security::{KeyBackupState, RecoveryMethod};
+use teamcraft_proto::{PushProvider, TestPushOutcome};
 
 use crate::auth::tauri;
 use crate::clock::{format_relative, now_ms};
@@ -16,13 +19,15 @@ use crate::components::settings_rows::{
   slug_options,
 };
 use crate::feedback::{ActionFailure, FailureKind, PendingAction};
-use crate::i18n::use_i18n;
-use crate::model::{DeviceId, UserId};
+use crate::i18n::{I18n, use_i18n};
+use crate::model::{DeviceId, TimestampMs, UserId};
 use crate::reactive::SetIfAlive;
 use crate::state::{Overlay, use_app_state};
 
 /// Same rule as at enrollment: short passphrases are cheap to guess offline.
 const MIN_PASSPHRASE_CHARS: usize = 12;
+/// The server's default limit for names (`limits.max_name_length`).
+const MAX_DEVICE_NAME_CHARS: usize = 100;
 
 #[component]
 pub fn DevicesSection() -> impl IntoView {
@@ -68,7 +73,7 @@ pub fn DevicesSection() -> impl IntoView {
     </SettingsCard>
     <SettingsCard heading="settings-device-others">
       <ul class="set-devices">
-        <For each=move || others.get() key=|device| (device.id, device.name.clone(), device.last_seen) let:device>
+        <For each=move || others.get() key=|device| device.clone() let:device>
           <li><DeviceItem device=device /></li>
         </For>
       </ul>
@@ -111,18 +116,27 @@ pub fn DevicesSection() -> impl IntoView {
   }
 }
 
-/// One device: icon, name, platform and last seen; the others can be signed out after a confirm.
+/// One device: icon, name, platform and last seen, what this device verified of it and how it gets
+/// pushes. Every device can be renamed and sent a test push (when it gets pushes); the others can
+/// be signed out after a confirm.
 #[component]
 fn DeviceItem(device: DeviceInfo) -> impl IntoView {
   let state = use_app_state();
   let i18n = use_i18n();
   let id = device.id;
   let is_current = device.is_current;
-  let pending = PendingAction::new();
+  let signing_out = PendingAction::new();
+  let testing = PendingAction::new();
   let is_confirming = RwSignal::new(false);
+  let is_renaming = RwSignal::new(false);
   let name = device.name.clone();
   let platform = device.platform.clone();
   let last_seen = device.last_seen;
+  let verification = device.verification;
+  let maybe_push = device.maybe_push.clone();
+  let can_test = maybe_push
+    .as_ref()
+    .is_some_and(|push| push.maybe_provider.is_some());
   let detail = move || {
     let seen = if is_current {
       i18n.t("settings-device-active-now")
@@ -136,6 +150,8 @@ fn DeviceItem(device: DeviceInfo) -> impl IntoView {
     }
   };
   let confirm_name = name.clone();
+  let rename_name = name.clone();
+  let send_test = move |_| testing.run(|| state.write(|backend| backend.test_push_my_device(id)));
 
   view! {
     <div class="set-device" class:is-current=is_current>
@@ -146,16 +162,37 @@ fn DeviceItem(device: DeviceInfo) -> impl IntoView {
           {is_current.then(|| view! { <span class="set-badge">{move || i18n.t("settings-device-current")}</span> })}
         </span>
         <span class="set-row-hint">{detail}</span>
+        {verification_line(verification)}
+        {maybe_push.map(push_lines)}
       </div>
-      {(!is_current).then(|| view! {
-        <Show
-          when=move || is_confirming.get()
-          fallback=move || view! {
-            <PendingButton pending=pending class="btn btn-small" on_click=move |_| is_confirming.set(true)>
+      <div class="set-device-actions">
+        <Show when=move || !is_renaming.get() fallback=|| ()>
+          <button type="button" class="btn btn-small" on:click=move |_| { is_confirming.set(false); is_renaming.set(true); }>
+            {move || i18n.t("settings-device-rename")}
+          </button>
+        </Show>
+        {can_test.then(|| view! {
+          <PendingButton pending=testing class="btn btn-small" on_click=send_test>
+            {move || i18n.t("settings-device-test-push")}
+          </PendingButton>
+        })}
+        {(!is_current).then(|| view! {
+          <Show when=move || !is_confirming.get() fallback=|| ()>
+            <PendingButton
+              pending=signing_out
+              class="btn btn-small btn-danger-quiet"
+              on_click=move |_| { is_renaming.set(false); is_confirming.set(true); }
+            >
               {move || i18n.t("settings-device-sign-out")}
             </PendingButton>
-          }
-        >
+          </Show>
+        })}
+      </div>
+      <Show when=move || is_renaming.get() fallback=|| ()>
+        <RenameForm device=id current=rename_name.clone() is_open=is_renaming />
+      </Show>
+      {(!is_current).then(|| view! {
+        <Show when=move || is_confirming.get() fallback=|| ()>
           <div class="set-confirm is-inline" role="alertdialog" aria-label=move || i18n.t("settings-device-sign-out-confirm")>
             <p>{
               let confirm_name = confirm_name.clone();
@@ -170,7 +207,7 @@ fn DeviceItem(device: DeviceInfo) -> impl IntoView {
                 class="btn btn-small btn-danger"
                 on:click=move |_| {
                   is_confirming.set(false);
-                  pending.run(|| state.write(|backend| backend.remove_my_device(id)));
+                  signing_out.run(|| state.write(|backend| backend.remove_my_device(id)));
                 }
               >
                 {move || i18n.t("settings-device-sign-out-confirm")}
@@ -180,6 +217,174 @@ fn DeviceItem(device: DeviceInfo) -> impl IntoView {
         </Show>
       })}
     </div>
+  }
+}
+
+/// Renames a device in place: the name is selected for typing over, Enter saves, Escape or
+/// Cancel keeps the old one. The list shows the new name once the server answered.
+#[component]
+fn RenameForm(device: DeviceId, current: String, is_open: RwSignal<bool>) -> impl IntoView {
+  let state = use_app_state();
+  let i18n = use_i18n();
+  let draft = RwSignal::new(current.clone());
+  let saving = PendingAction::new();
+  let input = NodeRef::<leptos::html::Input>::new();
+  // The form opens on a click: take the focus with the name selected for typing over.
+  Effect::new(move |_| {
+    if let Some(element) = input.get() {
+      drop(element.focus());
+      element.select();
+    }
+  });
+  let input_id = format!("device-name-{device}");
+  let label_for = input_id.clone();
+  let current = StoredValue::new(current.trim().to_owned());
+  let can_save = move || {
+    let name = draft.get();
+    let name = name.trim();
+    !name.is_empty()
+      && name.chars().count() <= MAX_DEVICE_NAME_CHARS
+      && current.with_value(|current| name != current)
+  };
+  let save = move |ev: leptos::ev::SubmitEvent| {
+    ev.prevent_default();
+    if !can_save() {
+      return;
+    }
+    let name = draft.get_untracked().trim().to_owned();
+    saving.run_and_then(
+      || state.write(|backend| backend.rename_my_device(device, name)),
+      move || is_open.set_if_alive(false),
+    );
+  };
+  view! {
+    <form class="set-device-rename" on:submit=save>
+      <label class="visually-hidden" for=label_for>{move || i18n.t("settings-device-name")}</label>
+      <input
+        id=input_id
+        class="input"
+        type="text"
+        autocomplete="off"
+        maxlength=MAX_DEVICE_NAME_CHARS.to_string()
+        node_ref=input
+        prop:value=move || draft.get()
+        on:input=move |ev| draft.set(event_target_value(&ev))
+        on:keydown=move |ev| {
+          if ev.key() == "Escape" {
+            ev.stop_propagation();
+            is_open.set(false);
+          }
+        }
+      />
+      <div class="set-confirm-actions">
+        <button type="button" class="btn btn-small" on:click=move |_| is_open.set(false)>{move || i18n.t("cancel")}</button>
+        <button
+          type="submit"
+          class="btn btn-small btn-primary"
+          prop:disabled=move || saving.is_pending() || !can_save()
+          aria-busy=move || saving.is_pending().then_some("true")
+        >
+          <Show when=move || saving.is_pending() fallback=|| ()>
+            <span class="spinner" role="status" aria-label=move || i18n.t("action-running")></span>
+          </Show>
+          {move || i18n.t("settings-device-rename-save")}
+        </button>
+      </div>
+    </form>
+  }
+}
+
+/// What this device verified of the device, in plain words; nothing when it couldn't check.
+fn verification_line(verification: DeviceVerification) -> Option<AnyView> {
+  let i18n = use_i18n();
+  let (class, icon, key) = match verification {
+    DeviceVerification::Verified => ("is-verified", IconName::Check, "settings-device-verified"),
+    DeviceVerification::Pending => ("is-pending", IconName::Clock, "settings-device-pending"),
+    DeviceVerification::Unverified => ("is-unverified", IconName::Alert, "settings-device-unverified"),
+    DeviceVerification::Unknown => return None,
+  };
+  Some(
+    view! {
+      <span class=format!("set-device-check {class}")>
+        <Icon name=icon />
+        <span>{move || i18n.t(key)}</span>
+      </span>
+    }
+    .into_any(),
+  )
+}
+
+/// How the device gets pushes and when the last one went out, and the last test's outcome.
+fn push_lines(push: DevicePushStatus) -> impl IntoView {
+  let i18n = use_i18n();
+  let summary = {
+    let push = push.clone();
+    move || push_summary(&push, i18n, now_ms())
+  };
+  let maybe_test = push.maybe_test.clone();
+  view! {
+    <span class="set-row-hint">{summary}</span>
+    {maybe_test.map(|outcome| {
+      let is_ok = outcome == TestPushOutcome::Sent;
+      view! {
+        <span class="set-row-hint set-device-test" class:is-warn=!is_ok role="status">
+          {move || i18n.t(test_outcome_key(&outcome))}
+        </span>
+      }
+    })}
+  }
+}
+
+/// "Push notifications via Google (FCM) · Last push 5 minutes ago".
+fn push_summary(push: &DevicePushStatus, i18n: I18n, now: TimestampMs) -> String {
+  let Some(provider) = &push.maybe_provider else {
+    return i18n.t("settings-device-push-off");
+  };
+  let service = match provider {
+    PushProvider::Apns => i18n.t("settings-device-push-apns"),
+    PushProvider::Fcm => i18n.t("settings-device-push-fcm"),
+    PushProvider::UnifiedPush => i18n.t("settings-device-push-unifiedpush"),
+    PushProvider::WebPush => i18n.t("settings-device-push-webpush"),
+    PushProvider::Unknown(name) => name.clone(),
+  };
+  let via = i18n.t_with("settings-device-push-via", &[("service", &service)]);
+  let locale = i18n.locale().tag();
+  let has_failed_last = match (push.maybe_last_failed_at, push.maybe_last_sent_at) {
+    (Some(failed), Some(sent)) => failed > sent,
+    (Some(_), None) => true,
+    _ => false,
+  };
+  let last = if has_failed_last {
+    push.maybe_last_failed_at.map(|at| {
+      i18n.t_with(
+        "settings-device-push-failed",
+        &[("when", &format_relative(at, now, locale))],
+      )
+    })
+  } else {
+    push.maybe_last_sent_at.map(|at| {
+      i18n.t_with(
+        "settings-device-push-last",
+        &[("when", &format_relative(at, now, locale))],
+      )
+    })
+  };
+  match last {
+    Some(last) => format!("{via} · {last}"),
+    None => via,
+  }
+}
+
+/// The i18n key for how the push service took a test push.
+fn test_outcome_key(outcome: &TestPushOutcome) -> &'static str {
+  match outcome {
+    TestPushOutcome::Sent => "settings-device-test-sent",
+    TestPushOutcome::NotRegistered => "settings-device-test-not-registered",
+    TestPushOutcome::NotConfigured => "settings-device-test-not-configured",
+    TestPushOutcome::Unavailable => "settings-device-test-unavailable",
+    TestPushOutcome::Rejected => "settings-device-test-rejected",
+    TestPushOutcome::Gone => "settings-device-test-gone",
+    TestPushOutcome::Unknown(_) => "settings-device-test-unknown",
   }
 }
 
@@ -294,10 +499,20 @@ pub fn SecuritySection() -> impl IntoView {
   }
 }
 
-/// Replaces the recovery passphrase: the key backup is wrapped with the new one (e2ee.md §6.2).
+/// The key backup in plain words with the next step (issue #410), and the recovery passphrase:
+/// setting or replacing it wraps the backup with the new one (e2ee.md §6.2).
 #[component]
 fn RecoveryCard() -> impl IntoView {
+  let state = use_app_state();
   let i18n = use_i18n();
+  let backup = Memo::new(move |_| state.read(|backend| backend.key_backup()));
+  let needs_recovery = Memo::new(move |_| {
+    backup.with(|maybe| {
+      maybe
+        .as_ref()
+        .is_some_and(|state| !state.has(RecoveryMethod::Passphrase))
+    })
+  });
   let is_open = RwSignal::new(false);
   let passphrase = RwSignal::new(String::new());
   let confirm = RwSignal::new(String::new());
@@ -324,14 +539,20 @@ fn RecoveryCard() -> impl IntoView {
     });
   };
   view! {
-    <SettingsCard heading="recovery-title">
+    <SettingsCard heading="security-backup-title">
+      {move || backup.get().map(|state| backup_status(&state, i18n))}
       <SettingRow
         label="security-recovery-row"
         live_hint=Signal::derive(move || if is_done.get() { i18n.t("recovery-done") } else { i18n.t("recovery-hint") })
       >
         <Show when=move || !is_open.get() fallback=|| ()>
-          <button type="button" class="btn btn-small" on:click=move |_| { is_done.set(false); is_open.set(true); }>
-            {move || i18n.t("recovery-save")}
+          <button
+            type="button"
+            class="btn btn-small"
+            class:btn-primary=move || needs_recovery.get()
+            on:click=move |_| { is_done.set(false); is_open.set(true); }
+          >
+            {move || if needs_recovery.get() { i18n.t("security-backup-set-up") } else { i18n.t("recovery-save") }}
           </button>
         </Show>
       </SettingRow>
@@ -378,6 +599,57 @@ fn RecoveryCard() -> impl IntoView {
       </Show>
     </SettingsCard>
   }
+}
+
+/// The key backup in plain words: whether it is on the server and how it can be restored, with
+/// when the passphrase was last set. No crypto terms on this level.
+fn backup_status(state: &KeyBackupState, i18n: I18n) -> impl IntoView + use<> {
+  let has_passphrase = state.has(RecoveryMethod::Passphrase);
+  let is_ok = state.is_stored && has_passphrase;
+  let title = if !state.is_stored {
+    i18n.t("security-backup-missing")
+  } else if has_passphrase {
+    i18n.t("security-backup-ok")
+  } else {
+    i18n.t("security-backup-no-recovery")
+  };
+  let detail = backup_detail(state, i18n, now_ms());
+  view! {
+    <div class="set-backup" class:is-ok=is_ok class:is-warn=!is_ok role="status">
+      <span class="set-backup-icon" aria-hidden="true">
+        <Icon name=if is_ok { IconName::Shield } else { IconName::Alert } />
+      </span>
+      <div class="set-row-text">
+        <span class="set-row-label">{title}</span>
+        <span class="set-row-hint">{detail}</span>
+      </div>
+    </div>
+  }
+}
+
+/// The sentences under the backup's state: how it is protected and what is still to do.
+fn backup_detail(state: &KeyBackupState, i18n: I18n, now: TimestampMs) -> String {
+  let mut parts = Vec::new();
+  if !state.is_stored {
+    parts.push(i18n.t("security-backup-missing-hint"));
+  } else if state.has(RecoveryMethod::Passphrase) {
+    parts.push(match state.maybe_passphrase_set_at {
+      Some(at) => i18n.t_with(
+        "security-backup-passphrase-set",
+        &[("when", &format_relative(at, now, i18n.locale().tag()))],
+      ),
+      None => i18n.t("security-backup-passphrase"),
+    });
+  } else {
+    parts.push(i18n.t("security-backup-no-recovery-hint"));
+  }
+  if state.has(RecoveryMethod::Organization) {
+    parts.push(i18n.t("security-backup-organization"));
+  }
+  if state.is_stored && state.has_pending_upload {
+    parts.push(i18n.t("security-backup-pending"));
+  }
+  parts.join(" ")
 }
 
 /// What others can see: read receipts, typing, last seen, and when the status turns to away.
