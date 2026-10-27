@@ -12,6 +12,7 @@ mod attested;
 mod backgrounds;
 mod calls;
 mod catch_up;
+mod channel_roles;
 mod custom_status;
 pub mod devices;
 pub mod direct_uploads;
@@ -61,6 +62,9 @@ pub use attested::{AttestationSettings, JwksSource};
 pub use calls::{CallEventSink, CallKeySigner, CallMoveRecord, CallPreparation, call_move_announcement};
 pub(crate) use catch_up::CATCHING_UP_PREFIX;
 pub use catch_up::{CatchUpFocus, is_catching_up};
+pub use channel_roles::RoleSigning;
+#[cfg(feature = "ui")]
+pub(crate) use channel_roles::channel_roles_key;
 pub use enroll::{EnrollmentOptions, EnrollmentSecret, OrgRecoveryUnlock, PendingEnrollment};
 pub use gateway::{
   DEFAULT_HANDSHAKE_TIMEOUT, GatewayOutcome, GatewayStart, GatewayTiming, HeldFrames, HeldLimits, KeptAlive,

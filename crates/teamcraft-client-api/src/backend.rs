@@ -535,7 +535,7 @@ pub trait ChatBackend {
     Vec::new()
   }
   /// Whether sources the user adds would be in force: they need an admin of the verified
-  /// workspace roster (channel roles aren't signed yet, issue #380).
+  /// workspace roster (signed channel roles don't count for sources yet, e2ee.md §13.1).
   fn can_manage_integration_sources(&self) -> bool {
     false
   }
@@ -554,8 +554,18 @@ pub trait ChatBackend {
   }
   /// Gives a channel member another role. The UI offers only what [`crate::role_rules`] allows;
   /// the server enforces the permission and its invariants, and a refusal shows as a failed
-  /// action. The role is the server's record, not yet a signed assignment (issue #380).
+  /// action. The core then signs the channel's new roles where the user can (issue #380).
   fn set_channel_role(&self, _conversation: ConversationId, _user: UserId, _role: crate::model::ChannelRole) {
+  }
+  /// Signs the role the server lists for a member, whose role is the server's word only
+  /// ([`crate::model::ChannelMember::is_role_signed`]); nothing changes on the server.
+  fn confirm_channel_role(&self, _conversation: ConversationId, _user: UserId) {}
+  /// Reads the channel's members and signed roles afresh (the members section opened).
+  fn refresh_channel_roles(&self, _conversation: ConversationId) {}
+  /// Whether the user can sign the channel's roles in a way members accept: a signed channel
+  /// admin or an admin of the signed workspace roster.
+  fn can_sign_channel_roles(&self, _conversation: ConversationId) -> bool {
+    false
   }
   /// The members of a space with their roles, as far as the user may see them.
   fn space_members(&self, _space: SpaceId) -> crate::model::SpaceRoster {

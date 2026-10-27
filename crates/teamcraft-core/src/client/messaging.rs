@@ -332,10 +332,13 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     }
     match self.decrypt(&message) {
       Ok(mut content) => {
-        if let MessageContent::Text { meta, .. } = &mut content
-          && let Some(head) = meta.maybe_workspace_head.take()
-        {
-          self.note_workspace_head(&head)?;
+        if let MessageContent::Text { meta, .. } = &mut content {
+          if let Some(head) = meta.maybe_workspace_head.take() {
+            self.note_workspace_head(&head)?;
+          }
+          if let Some(head) = meta.maybe_channel_roles_head.take() {
+            self.note_channel_roles_head(conversation, &head)?;
+          }
         }
         self.store.upsert_message(&StoredMessage {
           conversation_id: conversation,
@@ -435,6 +438,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     let mut content = stored.content.clone();
     if let MessageContent::Text { meta, .. } = &mut content {
       meta.maybe_workspace_head = Some(Box::new(self.workspace()?.head()));
+      meta.maybe_channel_roles_head = self.channel_roles_head(entry.conversation_id)?.map(Box::new);
     }
     let plaintext =
       Zeroizing::new(serde_json::to_vec(&content).map_err(|error| CoreError::Corrupt(error.to_string()))?);

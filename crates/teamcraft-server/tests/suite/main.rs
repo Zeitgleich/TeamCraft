@@ -22,6 +22,7 @@ mod call_move;
 mod call_roster;
 mod calls;
 mod channel_images;
+mod channel_roles;
 mod conversations;
 mod dependency_outages;
 mod device_gaps;
