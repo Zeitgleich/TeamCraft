@@ -647,8 +647,11 @@ The app is split into wasm chunks (`crates/teamcraft-ui/src/areas.rs`, built by
   search; since 1.0.8 also the account menu, the dialogs a first visit doesn't open, the Saved,
   Files and Calls pages, Activity, a conversation's members and pins, an integration channel's log
   view and the image codecs that make thumbnails (below); since 1.0.9 the synthesis of the message
-  sounds (`sounds`, #800), with the first sound. `lazy_area` shows a spinner when a chunk takes a
-  moment and an error with a retry when it can't load.
+  sounds (`sounds`, #800), with the first sound, the administration console's data layer (with the
+  console, `admin`), a conversation's huddle bar (`calls`), and the formatting toolbar, the emoji
+  picker, the date pills' menu, the prompt of a device asking to be linked, the desktop app's update
+  banner and the "open in another tab" page (`dialogs`; below). `lazy_area` shows a spinner when a
+  chunk takes a moment and an error with a retry when it can't load.
 - Code several modules share goes into shared chunks (one per combination of modules), so each file
   is downloaded once.
 - The call engine (`teamcraft-web-calls`, #330) stays a module of its own that loads in the
@@ -719,6 +722,43 @@ next candidates: the admin console's data layer (`admin_live.rs`, about 0.1 MB b
 which the shell reaches through the backend's vtable and uses for an admin's permission scheme
 outside the console, and the image headers `image_dimensions` reads (about 0.15 MB before
 wasm-opt).
+
+Over the budget again on the way to 1.0.9 (CI on `679c2dee`: 4,732,887 B; with #800, #830 and #838
+4,751,073 B). The growth came with the settings' device checks and key backup (#409, #410), #818,
+the abandoned device setups (#827) and the message sounds (#800); the settings themselves are an area
+already. Measured on the signed-in app's files (`twiggy top` on the split before wasm-opt), parts a
+first visit doesn't need were still in it, and moved out:
+
+- **The administration console's data layer** (`admin_live.rs`, about 0.2 MB before wasm-opt with
+  the admin API's wire types): the shell reaches it through the backend's vtable, so it stayed in the
+  signed-in app although only an admin's console uses it. Its refresh and its requests (changes,
+  on-demand data, connection tests, brand images) now run through `areas::admin_refresh` and
+  `areas::admin_task`, in the console's chunk; what stays is the cached data the synchronous
+  backend answers from. Nothing changes for an admin: the console loads that chunk anyway.
+- **Parts shown only in some situations**, each where it shows (`lazy_area`, new places `Inline`
+  for a part of a view and `Popover` for a popover, whose error leaves the app usable): the huddle
+  bar with the first call it shows (`calls`); the formatting toolbar (off by default), the emoji
+  picker and the date pills' menu the first time they open, the prompt of a device asking to be
+  linked with the first request, the update banner only in the desktop app, and the page a tab
+  shows while another tab runs the app (`dialogs`).
+
+Every new module multiplies the shared chunks (one per combination of modules that use a function),
+and each file costs a few hundred bytes of headers and types: a first try with four new modules
+(one per part) made the signed-in app 745 files instead of 627; in existing modules it is 629. New
+parts go into an existing module where one fits.
+
+Release `trunk build` on macOS (trunk 0.22.0, Rust 1.99.1, wasm-opt 131, the CI job's commands),
+gzip -9:
+
+| Web wasm       | Before (`4e9bfd38`) | After       | Delta      |
+|----------------|---------------------|-------------|------------|
+| App            | 2,397,220 B         | 2,399,068 B | +1,848 B   |
+| Signed-in app  | 1,959,081 B         | 1,798,771 B | −160,310 B |
+| Service worker | 394,772 B           | 394,772 B   | 0 B        |
+| Total          | 4,751,073 B         | 4,592,611 B | −158,462 B |
+
+A guest's first visit stays at 2.79 MB. Loaded later grew accordingly: the console's chunk from
+1.08 to 1.28 MB uncompressed, `dialogs` from 0.24 to 0.38 MB, `calls` from 0.29 to 0.32 MB.
 
 Release `trunk build` in the CI image (Rust 1.99.1, trunk 0.22.0, wasm-opt 131), `main` c55b2e58:
 
