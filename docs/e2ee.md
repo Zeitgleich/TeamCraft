@@ -1171,7 +1171,8 @@ encryption, and what does and does not hold:
 - Guests stay what they were: they can't join public channels on their own and are always `from_join`.
 - Integration channels (bridge output) stay private; archived channels are converted after unarchiving.
 - Members get a `privacy_changed` system event, the audit log records `conversation_visibility_changed`
-  with the old and new value (metadata only).
+  with the old and new value (metadata only). The line members' apps show ("This channel was made
+  public") comes from the server's record of the channel, not from a member's message (§4.9).
 - *Later:* a signed per-channel history record (like the roster) would let clients trust "this channel
   shares its past with newcomers" without the server's word.
 
@@ -1190,9 +1191,72 @@ are**, and nobody is added or removed. Consequences:
 - The space's permission scheme and its retention defaults apply from the move on; a channel's own
   retention setting stays.
 - A move is announced as a `moved` system event (metadata) and, by the client of the person who moved it,
-  as an encrypted `moved` group message naming the new space.
+  as an encrypted `moved` group message naming the new space. Members' apps show the line from the
+  server's record of the channel; the message only names the mover (§4.9).
 - The new space's admins manage the channel from then on (its scheme applies), like any channel of that
   space.
+
+### 4.9 Lines about channel changes (issue #818)
+
+Whether a channel is archived, public or listed in a space is the **server's record**: no MLS commit
+carries it, and nothing signs it until channel properties are signed (a follow-up of the signed
+channel roles, issues #380, #801). The lines "… archived this channel", "… made this channel
+private / public" and "… moved this channel to …" used to come from the encrypted message of whoever
+made the change. Its sender is authenticated, its content wasn't checked against anything: a member
+could post "Carol archived this channel" without anything happening, and a member who did it could
+leave the message out. So the line now comes from where the change is, and says whose word it is:
+
+- **The line is the server's statement.** Every member's device compares the server's record of a
+  channel with the one it held whenever it stores a new one: the refetch after a gateway
+  `conversation_update`, a sync's conversation list, the server's answer to its own change. Each
+  difference in `is_archived`, public or not, and space is a line, in that order, worded as what the
+  server says: "This channel was archived", "This channel was moved to Project B" (the space's name
+  as this device knows it). Only channels; a record the device sees for the first time tells
+  nothing (nothing it saw changed), so a device that joins later, or was away while a change was
+  undone again, shows no line for it.
+- **Who made it, only when that member says so and it fits.** Whoever makes the change still sends
+  the encrypted `archived` / `unarchived` / `made_private` / `made_public` / `moved` message (older
+  versions show it). This version keeps every such message hidden; one names who made the change
+  ("Carol archived this channel") on the line it matches: the same kind (for a move, the same space
+  unless one side doesn't know its name), sent after every message the device held when it saw the
+  change, and no later than `change_announcement_window` (10 minutes by default, on the server's
+  clock) after the server's newest message then (the sync's head for the conversation, else the
+  newest the device held). The earliest line still unnamed takes it, and moves back to the
+  message's place if that is earlier (a change caught up after a while away), never later. A second
+  member's message that fits a named line leaves it naming nobody: two members claimed the change.
+  A user's own change names them on the device that made it ("You archived
+  this channel"), whatever others claim, and only for what their request asked for: a difference
+  in the server's answer that somebody else made meanwhile names nobody, and the device announces
+  only what it changed. A message that matches nothing (a made-up change, a different kind, too
+  early or too late) shows nothing at all, rather than a neutral "Carol says …": it would still
+  read as a system line, and the change, if there was one, is on the record's line already.
+- **Where and how often.** The line is stored like a message, marked as derived from the server's
+  record (`server_change`, only ever set by the device itself), with no server ID. It sits after
+  everything the device knew of the conversation when it saw the change (the server's newest
+  message for a sync, else the newest message held) at the last ID of that millisecond, which no
+  message gets unless one server instance hands out 4096 IDs in one millisecond, and a second line
+  of the same record at the next millisecond's; once a message names who made it and is older, at
+  that message. Its ID comes from that first place. The record and its lines are written in one
+  group of writes, so a crash keeps both (the change was told) or neither (the next refetch or sync
+  sees it again): refetches, syncs and reconnects tell a change once. An announcement and the name it puts on a
+  line reach the disk together too. As for the admin-join line (admin.md §2.4.2) no message
+  replaces, edits, deletes or pins it, and a message the server gives the same ID doesn't take its
+  row. The time shown is when the device learned of it (at least its place's); once named, the
+  message's.
+- **Unread** like the admin-join line: like a message at its place, from anybody but the user
+  (their own change isn't unread to them); a line newer than every message is read when the user
+  reads the conversation on this device.
+- **Older versions.** 1.0.8 clients send the same messages, which name them here; this version still
+  sends them, so 1.0.8 shows its changes as before. Messages stored before the update are hidden
+  after it, and their changes have no line (they happened before this device compared records).
+
+What still rests on the server: whether and when a channel changed, and the space's name, are its
+word. A server can report a change that didn't happen or hold one back, and nothing a member sends
+makes a line or keeps one away. A name on a line is always a member's own encrypted claim of that
+kind of change; a server that numbers messages could at most hand a device such a claim it never
+saw before (an older one, re-timed into the window), or drop the real one so that a member's
+competing claim is the only one that fits. A member racing the real announcement with their own
+only makes the line name nobody. Signed channel properties would close this.
 
 ## 5. Adding a device (Threema/WhatsApp style)
 

@@ -30,8 +30,7 @@ use teamcraft_client_api::model::{
 use teamcraft_proto::{
   AttachmentId, ClientMessageId, ConversationKind as ConversationKindProto, ConversationResponse,
   ConversationVisibility, Id, InviteId, JoinPolicy, ListConversationMembersResponse, ListInvitesResponse,
-  MessageId, MlsMessageId, NotificationLevel, PresenceState, Snowflake, SpaceResponse, SpaceRole, UserKind,
-  UserSummary,
+  MessageId, NotificationLevel, PresenceState, Snowflake, SpaceResponse, SpaceRole, UserKind, UserSummary,
 };
 use teamcraft_proto::{BackgroundId, OrgBackgroundId};
 use teamcraft_proto::{
@@ -812,13 +811,11 @@ impl<S: LocalStore> CoreChatBackend<S> {
       .maybe_my_membership
       .as_ref()
       .and_then(|membership| membership.maybe_last_read_message_id);
-    // A line derived from a commit (issue #811) counts like a message at the commit's place: the
-    // server's read position covers it once a later message was read; one newer than all of them
-    // is read once this device marked the conversation read after it arrived.
-    let maybe_lines_read = if messages
-      .iter()
-      .any(|message| message.maybe_verified_commit.is_some())
-    {
+    // A line this device derived (from a commit, issue #811, or from the server's record, issue
+    // #818) counts like a message at its place: the server's read position covers it once a later
+    // message was read; one newer than all of them is read once this device marked the
+    // conversation read after it arrived.
+    let maybe_lines_read = if messages.iter().any(StoredMessage::is_local_line) {
       self.read(lines_read_through(&self.store, response.id))
     } else {
       None
@@ -827,8 +824,8 @@ impl<S: LocalStore> CoreChatBackend<S> {
       .into_iter()
       .filter(|message| {
         let is_read_line = message
-          .maybe_verified_commit
-          .is_some_and(|commit| maybe_lines_read.is_some_and(|read| commit <= read));
+          .line_position()
+          .is_some_and(|at| maybe_lines_read.is_some_and(|read| at <= read));
         match (unread_position(message), maybe_mark, maybe_last_read) {
           (Some(id), Some(mark), _) => id >= mark,
           (Some(id), None, Some(last_read)) => {
@@ -2072,28 +2069,25 @@ pub(crate) fn newest_server_id(messages: &[StoredMessage]) -> Option<MessageId> 
     .max()
 }
 
-/// The newest commit whose "joined as a workspace admin" line this device read in `conversation`
-/// (issue #811). The server's read position names messages only, so a line newer than all of them
-/// is read when the user marks the conversation read on this device.
+/// The place of the newest line this device derived ([`StoredMessage::line_position`]) that the
+/// user read in `conversation` (issues #811, #818). The server's read position names messages
+/// only, so a line newer than all of them is read when the user marks the conversation read on
+/// this device. Kept as the commit's ID before #818: the same time-ordered number.
 fn lines_read_through(
   store: &impl LocalStore,
   conversation: ConversationId,
-) -> Result<Option<MlsMessageId>, CoreError> {
+) -> Result<Option<MessageId>, CoreError> {
   records::get_json(store, Table::SyncState, &lines_read_key(conversation))
 }
 
-/// The user read `conversation`: its lines from commits up to the newest of `messages` count as
-/// read here. Never moves back.
+/// The user read `conversation`: its derived lines up to the newest of `messages` count as read
+/// here. Never moves back.
 pub(crate) fn note_lines_read(
   store: &impl LocalStore,
   conversation: ConversationId,
   messages: &[StoredMessage],
 ) -> Result<(), CoreError> {
-  let Some(newest) = messages
-    .iter()
-    .filter_map(|message| message.maybe_verified_commit)
-    .max()
-  else {
+  let Some(newest) = messages.iter().filter_map(StoredMessage::line_position).max() else {
     return Ok(());
   };
   if lines_read_through(store, conversation)?.is_some_and(|read| read >= newest) {
@@ -2106,24 +2100,21 @@ fn lines_read_key(conversation: ConversationId) -> String {
   format!("lines_read/{conversation}")
 }
 
-/// Where a message stands for unread counting: the server's ID, a line derived from a commit at
-/// the commit's (the same clock); an outbox message not at all.
+/// Where a message stands for unread counting: the server's ID, a line this device derived at
+/// its place (the same clock); an outbox message not at all.
 fn unread_position(message: &StoredMessage) -> Option<MessageId> {
-  message.maybe_server_id.or_else(|| {
-    message
-      .maybe_verified_commit
-      .map(|commit| MessageId::from_snowflake(commit.snowflake()))
-  })
+  message.maybe_server_id.or_else(|| message.line_position())
 }
 
-/// The ID the UI uses: the server's, for a line derived from a commit the commit's (time-ordered
-/// like the messages', and no outbox message's), or a stable stand-in for outbox messages.
+/// The ID the UI uses: the server's, for a line this device derived its place (a commit's ID, or
+/// where a line about a change the server reports sits; time-ordered like the messages', and no
+/// outbox message's), or a stable stand-in for outbox messages.
 pub(crate) fn ui_message_id(message: &StoredMessage) -> MessageId {
   if let Some(id) = message.maybe_server_id {
     return id;
   }
-  if let Some(commit) = message.maybe_verified_commit {
-    return MessageId::from_snowflake(commit.snowflake());
+  if let Some(at) = message.line_position() {
+    return at;
   }
   let mut bytes = [0u8; 8];
   bytes.copy_from_slice(&message.client_message_id.as_bytes()[..8]);
@@ -2184,6 +2175,7 @@ mod tests {
       maybe_edit_id: None,
       is_pinned: false,
       maybe_verified_commit: None,
+      maybe_server_change: None,
     };
     let body = MessageContent::Text {
       body: "hello".into(),
@@ -2711,6 +2703,7 @@ mod tests {
           maybe_edit_id: None,
           is_pinned: false,
           maybe_verified_commit: None,
+          maybe_server_change: None,
         })
         .unwrap();
     }
@@ -2801,6 +2794,119 @@ mod tests {
             maybe_edit_id: None,
             is_pinned: false,
             maybe_verified_commit: Some(id(commit)),
+            maybe_server_change: None,
+          })
+          .unwrap();
+      }
+    }
+
+    /// Issue #818: a line about a change the server reports is a change row at its place, counts
+    /// as unread like a message there unless it names the user, and names nobody unless an
+    /// announcement matched it.
+    mod server_change_lines {
+      use teamcraft_client_api::actions::WorkspaceEvent;
+
+      use crate::store::{ChangeActor, ServerChange, nobody};
+
+      use super::*;
+
+      #[test]
+      fn a_line_is_a_change_row_at_its_place_naming_whom_it_names() {
+        let (backend, conversation, _) = mention_fixture(&[]);
+        store_line(&backend, &conversation, 150, ChangeActor::Nobody, nobody());
+        let all = backend.all_messages(conversation.id);
+        let row = backend.to_message(&all[0], &all);
+        assert_eq!(row.kind, MessageKind::Change);
+        assert_eq!(row.id, id::<MessageId>(150), "not shown as sending");
+        let extras = backend.ui_message_extras(conversation.id, &[row.id]);
+        assert_eq!(
+          extras[0].maybe_workspace_event,
+          Some(WorkspaceEvent::Archived { maybe_by: None })
+        );
+
+        let announcement = ClientMessageId::from_bytes([9; 16]);
+        store_line(
+          &backend,
+          &conversation,
+          150,
+          ChangeActor::Announced { announcement },
+          id(2),
+        );
+        let extras = backend.ui_message_extras(conversation.id, &[row.id]);
+        assert_eq!(
+          extras[0].maybe_workspace_event,
+          Some(WorkspaceEvent::Archived {
+            maybe_by: Some(id(2))
+          })
+        );
+      }
+
+      #[test]
+      fn a_line_after_the_read_position_is_unread_until_read_here() {
+        let (backend, mut conversation, users) = mention_fixture(&[(2, "before", &[])]);
+        let mut membership = test_membership();
+        membership.maybe_last_read_message_id = Some(id(101));
+        conversation.maybe_my_membership = Some(membership);
+        let unread = |backend: &CoreChatBackend<MemoryStore>| {
+          backend
+            .to_conversation(&conversation, &users, &backend.mention_preferences())
+            .unread_count
+        };
+        store_line(&backend, &conversation, 90, ChangeActor::Nobody, nobody());
+        assert_eq!(unread(&backend), 0, "older than what was read");
+
+        store_line(&backend, &conversation, 150, ChangeActor::Nobody, nobody());
+        assert_eq!(unread(&backend), 1, "newer than everything read, by nobody named");
+        let messages = backend.all_messages(conversation.id);
+        note_lines_read(&backend.store, conversation.id, &messages).unwrap();
+        assert_eq!(unread(&backend), 0, "read on this device");
+      }
+
+      #[test]
+      fn the_users_own_change_is_not_unread() {
+        let (backend, conversation, users) = mention_fixture(&[]);
+        store_line(&backend, &conversation, 150, ChangeActor::ThisDevice, id(1));
+        assert_eq!(
+          backend
+            .to_conversation(&conversation, &users, &backend.mention_preferences())
+            .unread_count,
+          0
+        );
+      }
+
+      /// The line "This channel was archived" at `at`, naming `actor` (sent as `sender`).
+      fn store_line(
+        backend: &CoreChatBackend<MemoryStore>,
+        conversation: &ConversationResponse,
+        at: i64,
+        actor: ChangeActor,
+        sender: UserId,
+      ) {
+        let mut bytes = [0xff_u8; 16];
+        bytes[..8].copy_from_slice(&at.to_be_bytes());
+        backend
+          .store
+          .upsert_message(&StoredMessage {
+            conversation_id: conversation.id,
+            client_message_id: ClientMessageId::from_bytes(bytes),
+            maybe_server_id: None,
+            sender_user_id: sender,
+            maybe_thread_id: None,
+            sent_at_ms: 0,
+            content: MessageContent::Event {
+              event: ConversationEvent::Archived,
+            },
+            is_edited: false,
+            edits: Vec::new(),
+            maybe_edit_id: None,
+            is_pinned: false,
+            maybe_verified_commit: None,
+            maybe_server_change: Some(ServerChange {
+              at: id(at),
+              seen_after: id(at - 1),
+              seen_until: id(at - 1),
+              actor,
+            }),
           })
           .unwrap();
       }

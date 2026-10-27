@@ -501,8 +501,8 @@ mod tests {
     crate::store::sql_group::tests::assert_numbered(MIGRATIONS);
   }
 
-  /// Issue #811: an admin's join as a message that an older version stored as listed is hidden
-  /// now, without rewriting the database.
+  /// Issues #811, #818: an admin's join or an archiving as a message that an older version stored
+  /// as listed is hidden now, without rewriting the database.
   #[test]
   fn a_row_listed_by_an_older_version_follows_what_this_one_hides() {
     use teamcraft_proto::{Id, Snowflake};
@@ -531,8 +531,18 @@ mod tests {
       maybe_edit_id: None,
       is_pinned: false,
       maybe_verified_commit: None,
+      maybe_server_change: None,
+    };
+    let archived = StoredMessage {
+      client_message_id: ClientMessageId::from_bytes([2; 16]),
+      maybe_server_id: Some(MessageId::from_snowflake(id(101))),
+      content: MessageContent::Event {
+        event: ConversationEvent::Archived,
+      },
+      ..announced.clone()
     };
     store.upsert_message(&announced).unwrap();
+    store.upsert_message(&archived).unwrap();
     store
       .lock()
       .connection
@@ -547,7 +557,7 @@ mod tests {
     );
     assert_eq!(
       store.messages(conversation, MessageFilter::All).unwrap(),
-      vec![announced]
+      vec![announced, archived]
     );
   }
 

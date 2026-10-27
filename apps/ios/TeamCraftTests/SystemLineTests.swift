@@ -22,11 +22,21 @@ final class SystemLineTests: XCTestCase {
   }
 
   func testChannelChangesNameWhoMadeThem() {
-    XCTAssertEqual(line(extras: #"{"event":"archived","by":"1"}"#), .archived(by: "Ada"))
-    XCTAssertEqual(line(extras: #"{"event":"made_public","by":"1"}"#), .madePublic(by: "Ada"))
-    XCTAssertEqual(line(extras: #"{"event":"moved","by":"1","space":""}"#), .moved(by: "Ada", space: ""))
+    XCTAssertEqual(line(extras: #"{"event":"archived","by":"1"}"#), .archived(maybeBy: "Ada"))
+    XCTAssertEqual(line(extras: #"{"event":"made_public","by":"1"}"#), .madePublic(maybeBy: "Ada"))
+    XCTAssertEqual(line(extras: #"{"event":"moved","by":"1","space":""}"#), .moved(maybeBy: "Ada", space: ""))
     // A person this device doesn't know yet: the author is who made the change.
     XCTAssertEqual(line(extras: #"{"event":"pinned","by":"2"}"#, names: [:]), .pinned(by: "Sam"))
+  }
+
+  /// Issue #818: no member's announcement matched the change the server reports, so no `by`.
+  func testChannelChangesNobodyIsNamedForAreTheServersWord() {
+    XCTAssertEqual(line(extras: #"{"event":"archived"}"#), .archived(maybeBy: nil))
+    XCTAssertEqual(line(extras: #"{"event":"unarchived"}"#), .unarchived(maybeBy: nil))
+    XCTAssertEqual(line(extras: #"{"event":"made_private"}"#), .madePrivate(maybeBy: nil))
+    XCTAssertEqual(line(extras: #"{"event":"made_public"}"#), .madePublic(maybeBy: nil))
+    XCTAssertEqual(
+      line(extras: #"{"event":"moved","space":"Project B"}"#), .moved(maybeBy: nil, space: "Project B"))
   }
 
   func testUnknownEventsFallBackToAQuietLine() {
@@ -52,8 +62,14 @@ final class SystemLineTests: XCTestCase {
         ? "Ada hat Sam hinzugefügt und den bisherigen Verlauf geteilt"
         : "Ada added Sam and shared the earlier history")
     XCTAssertEqual(
-      SystemLine.moved(by: "Ada", space: "").text,
+      SystemLine.moved(maybeBy: "Ada", space: "").text,
       isGerman ? "Ada hat diesen Kanal in einen anderen Bereich verschoben" : "Ada moved this channel to another space")
+    XCTAssertEqual(
+      SystemLine.archived(maybeBy: nil).text,
+      isGerman ? "Dieser Kanal wurde archiviert" : "This channel was archived")
+    XCTAssertEqual(
+      SystemLine.moved(maybeBy: nil, space: "Project B").text,
+      isGerman ? "Dieser Kanal wurde in Project B verschoben" : "This channel was moved to Project B")
     XCTAssertEqual(SystemLine.changed.text, isGerman ? "Unterhaltung geändert" : "Conversation updated")
   }
 

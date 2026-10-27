@@ -1449,6 +1449,102 @@
         }
       }
     },
+    "event_archived_unattributed": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "This channel was archived"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Dieser Kanal wurde archiviert"
+          }
+        }
+      }
+    },
+    "event_unarchived_unattributed": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "This channel was restored"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Dieser Kanal wurde wiederhergestellt"
+          }
+        }
+      }
+    },
+    "event_made_private_unattributed": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "This channel was made private"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Dieser Kanal wurde privat gemacht"
+          }
+        }
+      }
+    },
+    "event_made_public_unattributed": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "This channel was made public"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Dieser Kanal wurde öffentlich gemacht"
+          }
+        }
+      }
+    },
+    "event_moved_unattributed %@": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "This channel was moved to %@"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Dieser Kanal wurde in %@ verschoben"
+          }
+        }
+      }
+    },
+    "event_moved_unnamed_unattributed": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "This channel was moved to another space"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Dieser Kanal wurde in einen anderen Bereich verschoben"
+          }
+        }
+      }
+    },
     "message_read": {
       "localizations": {
         "en": {

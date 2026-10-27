@@ -402,6 +402,7 @@ pub(crate) fn enqueue_message_as(
     maybe_edit_id: None,
     is_pinned: false,
     maybe_verified_commit: None,
+    maybe_server_change: None,
   };
   let entry = OutboxEntry {
     conversation_id: draft.conversation_id,
