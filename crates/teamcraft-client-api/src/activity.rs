@@ -52,6 +52,9 @@ pub struct JoinRequest {
   pub user: UserId,
   /// The admin's name as the server gave it: they may share nothing else with the user yet.
   pub user_name: String,
+  /// Their username, so two people with one name differ; absent from older cores.
+  #[serde(rename = "username", default, skip_serializing_if = "Option::is_none")]
+  pub maybe_username: Option<String>,
   pub requested_at: TimestampMs,
   /// When the server closes the request (its clock).
   pub expires_at: TimestampMs,
@@ -145,6 +148,7 @@ mod tests {
       conversation: id_from_raw(7),
       user: id_from_raw(2),
       user_name: "Admin A".into(),
+      maybe_username: Some("admin.a".into()),
       requested_at: 5,
       expires_at: 50,
       standing: JoinRequestStanding::Approvable,

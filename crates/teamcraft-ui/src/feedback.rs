@@ -148,6 +148,7 @@ pub fn failure_message_key(failure: &ActionFailure) -> &'static str {
       ErrorCode::CannotDeleteSelf => "admin-error-cannot-delete-self",
       ErrorCode::LastAdmin => "admin-error-last-admin",
       ErrorCode::AdminJoinRequestNotFound => "error-admin-join-request-gone",
+      ErrorCode::AdminJoinRequestTooSoon => "error-admin-join-request-too-soon",
       // All `*_not_found` codes, including ones this version doesn't know yet.
       other if other.as_str().ends_with("_not_found") => "error-not-found",
       _ => "error-generic",

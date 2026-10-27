@@ -1,20 +1,25 @@
-//! Admins asking to join a private channel under `admin_self_join = owner_approval` (admin.md §2.4,
-//! issue #776).
+//! Admins asking to join a private channel under `admin_self_join = owner_approval` (admin.md
+//! §2.4.1, issue #776).
 //!
 //! Members' clients refuse an admin's own signed self-join under this policy, so the admin asks
 //! and the server keeps the request; nothing about it is trusted. A channel owner's client checks
-//! the requester against the fresh verified roster and approves by adding them with its own MLS
-//! commit, which every member checks like any addition by a member, then posts the visible "joined
-//! as a workspace admin" message.
+//! the request against what it verified itself (the policy, the requester in the fresh roster, a
+//! private channel whose group it is in) and approves by adding the admin with its own MLS commit,
+//! which every member checks like any addition by a member, then posts the visible "joined as a
+//! workspace admin" message.
 
 use teamcraft_crypto::membership::HistoryShare;
-use teamcraft_proto::{AdminJoinRequestResponse, AdminSelfJoin, ConversationId, UserId};
+use teamcraft_proto::{
+  AdminJoinRequestResponse, AdminSelfJoin, ConversationId, ConversationKind, ConversationResponse,
+  ConversationVisibility, HistoryPolicy, UserId,
+};
 
 use super::Client;
 use crate::api::ServerApi;
-use crate::error::CoreError;
+use crate::error::{CoreError, JoinRequestRefusal};
 use crate::read_state;
-use crate::store::{ConversationEvent, LocalStore};
+use crate::records;
+use crate::store::{ConversationEvent, LocalStore, Table};
 use crate::workspace::WorkspaceState;
 
 impl<A: ServerApi, S: LocalStore> Client<A, S> {
@@ -46,17 +51,46 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     self.refresh_admin_join_requests().await
   }
 
-  /// A channel owner lets the admin in: the server membership, then this device's own MLS add with
-  /// the signed default history (as a self-join would get), then the visible message. Only for
-  /// somebody the fresh verified roster lists as an admin: the server's word that they are one is
-  /// not enough (admin.md §2.3).
+  /// A channel owner lets the admin in with the history from the join on: no more than the admin's
+  /// own self-join would get (e2ee.md §4.7). See [`Self::approve_admin_join_sharing`].
   pub async fn approve_admin_join(
     &mut self,
     conversation: ConversationId,
     user: UserId,
   ) -> Result<(), CoreError> {
-    if !self.is_fresh_admin(&self.workspace()?, user) {
+    self
+      .approve_admin_join_sharing(conversation, user, HistoryPolicy::FromJoin)
+      .await
+  }
+
+  /// A channel owner lets the admin in: the server membership, then this device's own MLS add with
+  /// `history` (full history only when the owner chose it), then the visible message. Only when
+  /// this device's own state agrees (admin.md §2.3): the verified policy asks for an owner's
+  /// approval, the fresh verified roster lists the person as an admin, and the conversation is a
+  /// private, unarchived channel this device knows and is in the group of. A request the server
+  /// makes up for a DM, a meeting chat or an unknown conversation adds nobody. Somebody already in
+  /// the group (another owner was first) is neither added nor announced again.
+  pub async fn approve_admin_join_sharing(
+    &mut self,
+    conversation: ConversationId,
+    user: UserId,
+    history: HistoryPolicy,
+  ) -> Result<(), CoreError> {
+    let workspace = self.workspace()?;
+    if workspace.policy.admin_self_join != AdminSelfJoin::OwnerApproval {
+      return Err(CoreError::JoinRequestNotApprovable(
+        JoinRequestRefusal::PolicyWithoutApproval,
+      ));
+    }
+    if !self.is_fresh_admin(&workspace, user) {
       return Err(CoreError::NotAnAdmin(user));
+    }
+    let maybe_response: Option<ConversationResponse> =
+      records::get_json(&self.store, Table::Conversations, &conversation.to_string())?;
+    if !maybe_response.as_ref().is_some_and(is_open_private_channel) {
+      return Err(CoreError::JoinRequestNotApprovable(
+        JoinRequestRefusal::NotAPrivateChannel,
+      ));
     }
     // Only a member of the group can commit the add.
     if !self.has_group(conversation)? {
@@ -64,18 +98,27 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     }
     self.cancel_removal_on_add(conversation, user)?;
     self.api.approve_admin_join(conversation, user).await?;
-    let requested = self.implicit_history_in(conversation, user).await?;
-    let history: HistoryShare = self.commit_addition(conversation, user, requested).await?;
-    tracing::info!(conversation_id = %conversation, ?history, "let an admin in who asked");
-    self
-      .announce(
-        conversation,
-        ConversationEvent::AdminJoined {
-          user,
-          is_approved: true,
-        },
-      )
-      .await?;
+    if !self.group_users(conversation)?.contains(&user) {
+      let requested = match history {
+        HistoryPolicy::Full => HistoryShare::Full,
+        _ => HistoryShare::FromJoin,
+      };
+      let shared = self.commit_addition(conversation, user, requested).await?;
+      // Announced once the admin's devices are in: an add that had to wait (no key packages yet)
+      // is announced by nobody rather than twice.
+      if self.group_users(conversation)?.contains(&user) {
+        tracing::info!(conversation_id = %conversation, ?shared, "let an admin in who asked");
+        self
+          .announce(
+            conversation,
+            ConversationEvent::AdminJoined {
+              user,
+              is_approved: true,
+            },
+          )
+          .await?;
+      }
+    }
     self.refresh_admin_join_requests().await
   }
 
@@ -112,4 +155,12 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     let max_age_ms = i64::try_from(self.settings.workspace_max_age.as_millis()).unwrap_or(i64::MAX);
     workspace.is_admin(user) && workspace.is_roster_fresh(self.now_ms(), max_age_ms)
   }
+}
+
+/// The only kind of conversation an admin's request can be approved for (admin.md §2.4): a
+/// private, unarchived channel. Not a DM, a group DM or a meeting chat.
+pub fn is_open_private_channel(conversation: &ConversationResponse) -> bool {
+  conversation.kind == ConversationKind::Channel
+    && conversation.visibility == ConversationVisibility::Private
+    && !conversation.is_archived
 }

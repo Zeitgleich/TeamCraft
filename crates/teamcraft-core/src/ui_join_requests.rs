@@ -2,8 +2,10 @@
 //! the owner's side in the activity feed and the channel settings, the admin's in the channel
 //! browser.
 //!
-//! The list is the server's word. Whether the owner may approve is decided here, from this device's
-//! verified roster and policy, never from the server's role list (admin.md §2.3).
+//! The list is the server's word. What is shown and whether the owner may approve is decided here,
+//! from this device's verified roster and policy and the conversations it knows, never from the
+//! server's role list (admin.md §2.3): a request for anything but a private, unarchived channel
+//! (a DM, a meeting chat, an unknown conversation) isn't shown at all.
 
 use std::collections::HashSet;
 
@@ -11,6 +13,7 @@ use teamcraft_client_api::activity::{JoinRequest, JoinRequestStanding};
 use teamcraft_client_api::model::{ConversationId, UserId};
 use teamcraft_proto::{AdminJoinRequestResponse, AdminSelfJoin};
 
+use crate::client::is_open_private_channel;
 use crate::read_state;
 use crate::records;
 use crate::store::{LocalStore, Table};
@@ -31,7 +34,21 @@ impl<S: LocalStore> CoreChatBackend<S> {
     }
     let workspace = self.verified_workspace();
     let is_roster_fresh = workspace.is_roster_fresh(self.now_ms(), ROSTER_MAX_AGE_MS);
-    requests_to_decide(self.me_id(), &requests, &workspace, is_roster_fresh)
+    let channels: HashSet<ConversationId> = self
+      .conversations_raw()
+      .into_iter()
+      .filter(|conversation| {
+        conversation.maybe_my_membership.is_some() && is_open_private_channel(conversation)
+      })
+      .map(|conversation| conversation.id)
+      .collect();
+    requests_to_decide(
+      self.me_id(),
+      &requests,
+      &workspace,
+      is_roster_fresh,
+      |conversation| channels.contains(&conversation),
+    )
   }
 
   /// The private channels this admin asked to join and still waits for.
@@ -53,25 +70,28 @@ impl<S: LocalStore> CoreChatBackend<S> {
   }
 }
 
-/// The requests of others (the server lists the user's own too), each with what the owner may do.
-/// None while the verified policy doesn't ask for an owner's approval: then they are moot, and the
-/// server closes them anyway.
+/// The requests of others (the server lists the user's own too) for conversations
+/// `is_my_private_channel` accepts (private, unarchived channels the user is in), each with what
+/// the owner may do. None while the verified policy doesn't ask for an owner's approval: then they
+/// are moot, and the server closes them anyway.
 pub fn requests_to_decide(
   me: UserId,
   requests: &[AdminJoinRequestResponse],
   workspace: &WorkspaceState,
   is_roster_fresh: bool,
+  is_my_private_channel: impl Fn(ConversationId) -> bool,
 ) -> Vec<JoinRequest> {
   if workspace.policy.admin_self_join != AdminSelfJoin::OwnerApproval {
     return Vec::new();
   }
   requests
     .iter()
-    .filter(|request| request.user.id != me)
+    .filter(|request| request.user.id != me && is_my_private_channel(request.conversation_id))
     .map(|request| JoinRequest {
       conversation: request.conversation_id,
       user: request.user.id,
       user_name: request.user.display_name.clone(),
+      maybe_username: request.user.maybe_username.clone(),
       requested_at: request.requested_at.0,
       expires_at: request.expires_at.0,
       standing: if is_roster_fresh && workspace.is_admin(request.user.id) {
@@ -94,44 +114,80 @@ mod tests {
   const ADMIN: u64 = 2;
   const STRANGER: u64 = 3;
 
+  const CHANNEL: u64 = 50;
+  const DM: u64 = 60;
+
   #[test]
   fn an_admin_of_the_fresh_roster_can_be_approved() {
-    let shown = requests_to_decide(
-      user(ME),
-      &[request(ADMIN)],
-      &workspace(AdminSelfJoin::OwnerApproval),
-      true,
-    );
+    let shown = decide(ME, &[request(ADMIN, CHANNEL)], AdminSelfJoin::OwnerApproval, true);
     assert_eq!(shown.len(), 1);
     assert_eq!(shown[0].standing, JoinRequestStanding::Approvable);
     assert_eq!(shown[0].user_name, "Person 2");
+    assert_eq!(shown[0].maybe_username.as_deref(), Some("person2"));
   }
 
   #[test]
   fn the_servers_word_alone_or_a_stale_roster_only_allows_declining() {
-    let workspace = workspace(AdminSelfJoin::OwnerApproval);
-    let unknown = requests_to_decide(user(ME), &[request(STRANGER)], &workspace, true);
+    let unknown = decide(
+      ME,
+      &[request(STRANGER, CHANNEL)],
+      AdminSelfJoin::OwnerApproval,
+      true,
+    );
     assert_eq!(unknown[0].standing, JoinRequestStanding::NotAnAdmin);
-    let stale = requests_to_decide(user(ME), &[request(ADMIN)], &workspace, false);
+    let stale = decide(
+      ME,
+      &[request(ADMIN, CHANNEL)],
+      AdminSelfJoin::OwnerApproval,
+      false,
+    );
     assert_eq!(stale[0].standing, JoinRequestStanding::NotAnAdmin);
+  }
+
+  /// Review M1: a request the server makes up for a DM, a meeting chat or a conversation this
+  /// device doesn't know as one of its private channels isn't shown at all.
+  #[test]
+  fn requests_for_anything_but_my_private_channels_are_not_shown() {
+    let shown = decide(
+      ME,
+      &[request(ADMIN, DM), request(ADMIN, 70), request(ADMIN, CHANNEL)],
+      AdminSelfJoin::OwnerApproval,
+      true,
+    );
+    let conversations: Vec<_> = shown.iter().map(|request| request.conversation).collect();
+    assert_eq!(conversations, vec![conversation(CHANNEL)]);
   }
 
   #[test]
   fn own_requests_and_other_policies_show_nothing_to_decide() {
-    let own = requests_to_decide(
-      user(ADMIN),
-      &[request(ADMIN)],
-      &workspace(AdminSelfJoin::OwnerApproval),
-      true,
+    assert!(
+      decide(
+        ADMIN,
+        &[request(ADMIN, CHANNEL)],
+        AdminSelfJoin::OwnerApproval,
+        true
+      )
+      .is_empty()
     );
-    assert!(own.is_empty());
     for policy in [
       AdminSelfJoin::Visible,
       AdminSelfJoin::Disabled,
       AdminSelfJoin::Unknown("later".into()),
     ] {
-      assert!(requests_to_decide(user(ME), &[request(ADMIN)], &workspace(policy), true).is_empty());
+      assert!(decide(ME, &[request(ADMIN, CHANNEL)], policy, true).is_empty());
     }
+  }
+
+  /// [`requests_to_decide`] for `me`, where only [`CHANNEL`] is one of the user's private channels.
+  fn decide(
+    me: u64,
+    requests: &[AdminJoinRequestResponse],
+    self_join: AdminSelfJoin,
+    is_roster_fresh: bool,
+  ) -> Vec<JoinRequest> {
+    requests_to_decide(user(me), requests, &workspace(self_join), is_roster_fresh, |id| {
+      id == conversation(CHANNEL)
+    })
   }
 
   fn workspace(self_join: AdminSelfJoin) -> WorkspaceState {
@@ -145,12 +201,12 @@ mod tests {
     state
   }
 
-  fn request(raw: u64) -> AdminJoinRequestResponse {
+  fn request(raw: u64, channel: u64) -> AdminJoinRequestResponse {
     AdminJoinRequestResponse {
-      conversation_id: teamcraft_client_api::model::id_from_raw(50),
+      conversation_id: conversation(channel),
       user: UserSummary {
         id: user(raw),
-        maybe_username: None,
+        maybe_username: Some(format!("person{raw}")),
         display_name: format!("Person {raw}"),
         kind: UserKind::Member,
         maybe_email: None,
@@ -165,6 +221,10 @@ mod tests {
   }
 
   fn user(raw: u64) -> UserId {
+    teamcraft_client_api::model::id_from_raw(raw)
+  }
+
+  fn conversation(raw: u64) -> ConversationId {
     teamcraft_client_api::model::id_from_raw(raw)
   }
 }

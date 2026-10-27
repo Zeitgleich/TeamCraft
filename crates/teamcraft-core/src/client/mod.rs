@@ -71,6 +71,7 @@ pub use group_health::{
 };
 pub use groups::{DmSetupStatus, dm_setup_status};
 pub use guest::{GuestAdmission, GuestLinkMaterial, guest_link_fragment};
+pub use join_requests::is_open_private_channel;
 pub use linking::{
   LinkAnnouncement, LinkApproval, LinkOffer, LinkRequestInfo, LinkRequestList, LinkedSecrets, NewDeviceLink,
 };

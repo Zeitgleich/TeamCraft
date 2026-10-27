@@ -860,8 +860,8 @@ impl<C: ChatBackend + 'static> ChatBackend for Hybrid<C> {
     self.chat.withdraw_admin_join(conversation);
   }
 
-  fn approve_admin_join(&self, conversation: ConversationId, user: UserId) {
-    self.chat.approve_admin_join(conversation, user);
+  fn approve_admin_join(&self, conversation: ConversationId, user: UserId, history: HistoryPolicy) {
+    self.chat.approve_admin_join(conversation, user, history);
   }
 
   fn decline_admin_join(&self, conversation: ConversationId, user: UserId) {

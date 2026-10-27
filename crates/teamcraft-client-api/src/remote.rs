@@ -578,10 +578,13 @@ pub enum ChatAction {
   WithdrawAdminJoin {
     conversation: ConversationId,
   },
-  /// A channel owner lets an admin in who asked.
+  /// A channel owner lets an admin in who asked, sharing `history` (older UIs send none: from the
+  /// join on, what a self-join gets).
   ApproveAdminJoin {
     conversation: ConversationId,
     user: UserId,
+    #[serde(default = "history_from_join")]
+    history: HistoryPolicy,
   },
   DeclineAdminJoin {
     conversation: ConversationId,
@@ -879,6 +882,11 @@ pub enum AttachmentPriority {
   Now,
 }
 
+/// An admin let in without an explicit choice gets what a self-join gets (e2ee.md §4.7).
+fn history_from_join() -> HistoryPolicy {
+  HistoryPolicy::FromJoin
+}
+
 impl ChatAction {
   /// A new message: the host answers it once it is in the outbox and sends it afterwards, so the
   /// message shows at once, also while a sync or an upload holds the client.
@@ -917,7 +925,11 @@ impl ChatAction {
       Self::MarkActivityRead => backend.mark_activity_read(),
       Self::RequestAdminJoin { conversation } => backend.request_admin_join(conversation),
       Self::WithdrawAdminJoin { conversation } => backend.withdraw_admin_join(conversation),
-      Self::ApproveAdminJoin { conversation, user } => backend.approve_admin_join(conversation, user),
+      Self::ApproveAdminJoin {
+        conversation,
+        user,
+        history,
+      } => backend.approve_admin_join(conversation, user, history),
       Self::DeclineAdminJoin { conversation, user } => backend.decline_admin_join(conversation, user),
       Self::SetLastSeenVisibility { visibility } => backend.set_last_seen_visibility(visibility),
       Self::RefreshCallHistory => backend.refresh_call_history(),

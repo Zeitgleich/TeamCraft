@@ -222,10 +222,12 @@ pub enum CoreCommand {
   WithdrawAdminJoin {
     conversation: ConversationId,
   },
-  /// A channel owner lets an admin in who asked: the server membership and the own MLS add.
+  /// A channel owner lets an admin in who asked: the server membership and the own MLS add, with
+  /// the history the owner chose.
   ApproveAdminJoin {
     conversation: ConversationId,
     user: UserId,
+    history: HistoryPolicy,
   },
   DeclineAdminJoin {
     conversation: ConversationId,
@@ -1676,8 +1678,12 @@ impl<S: LocalStore> ChatBackend for CoreChatBackend<S> {
     self.command(CoreCommand::WithdrawAdminJoin { conversation });
   }
 
-  fn approve_admin_join(&self, conversation: ConversationId, user: UserId) {
-    self.command(CoreCommand::ApproveAdminJoin { conversation, user });
+  fn approve_admin_join(&self, conversation: ConversationId, user: UserId, history: HistoryPolicy) {
+    self.command(CoreCommand::ApproveAdminJoin {
+      conversation,
+      user,
+      history,
+    });
   }
 
   fn decline_admin_join(&self, conversation: ConversationId, user: UserId) {

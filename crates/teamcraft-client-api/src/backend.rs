@@ -183,8 +183,9 @@ pub trait ChatBackend {
   /// Takes the signed-in admin's request back.
   fn withdraw_admin_join(&self, _conversation: ConversationId) {}
   /// A channel owner lets the admin in: the server membership, this device's MLS add and the
-  /// visible "joined as a workspace admin" message.
-  fn approve_admin_join(&self, _conversation: ConversationId, _user: UserId) {}
+  /// visible "joined as a workspace admin" message. `history` is what the owner chose to share:
+  /// `from_join` (what a self-join gets) unless they explicitly chose `full`.
+  fn approve_admin_join(&self, _conversation: ConversationId, _user: UserId, _history: HistoryPolicy) {}
   fn decline_admin_join(&self, _conversation: ConversationId, _user: UserId) {}
   /// Removes a deactivated user from all chats with signed removals (admin.md §3.2.1). Needs
   /// [`Self::can_sign_workspace`].

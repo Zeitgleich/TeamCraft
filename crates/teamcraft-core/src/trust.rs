@@ -178,7 +178,8 @@ impl MembershipAuthority for WorkspaceAuthority {
     match action {
       MembershipAction::AddUser { user_id, .. } if *user_id == actor => match self.self_join {
         AdminSelfJoin::Visible => true,
-        // No approval flow yet: without an owner's approval the join is refused.
+        // Under `owner_approval` the admin asks instead and a channel owner adds them with an
+        // ordinary member's commit (admin.md §2.4.1); their own self-join is never committed.
         AdminSelfJoin::OwnerApproval | AdminSelfJoin::Disabled | AdminSelfJoin::Unknown(_) => false,
       },
       _ => true,

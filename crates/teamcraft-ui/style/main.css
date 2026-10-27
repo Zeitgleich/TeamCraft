@@ -13504,6 +13504,12 @@ html.call-window body {
   color: var(--text-muted);
 }
 
+.join-request-history {
+  margin: var(--space-2) 0 0;
+  font-size: var(--text-xs);
+  letter-spacing: var(--tracking-xs);
+}
+
 .join-request-actions {
   display: flex;
   flex-wrap: wrap;
