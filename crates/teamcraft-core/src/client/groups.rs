@@ -1530,6 +1530,8 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
         ChangeSource::Delegated(signed) => (**signed).clone(),
       };
       // This device's own decision to commit; the members check the commit at the server's time.
+      // With the channel roles it has just read, as they will judge it.
+      self.refresh_channel_roles_for_commit(conversation).await;
       let authority = self.group_authority(conversation, self.now_ms())?;
       let group = self
         .groups
