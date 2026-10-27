@@ -31,6 +31,9 @@ pub struct MultipartParser {
   /// that are not complete yet.
   buffer: Vec<u8>,
   preamble_bytes: usize,
+  /// How far an unfinished header block was searched for its end already, so a block that arrives
+  /// in many small pieces is read once, not again with every piece.
+  header_scanned: usize,
 }
 
 /// What a chunk of the body contained, in order.
@@ -97,6 +100,7 @@ impl MultipartParser {
       // every boundary is found the same way.
       buffer: CRLF.to_vec(),
       preamble_bytes: 0,
+      header_scanned: 0,
     })
   }
 
@@ -201,19 +205,24 @@ impl MultipartParser {
       return Err(MultipartError::MalformedBoundary);
     }
     self.state = State::Headers;
+    self.header_scanned = 0;
     Ok(padding + CRLF.len())
   }
 
   /// A part's headers, up to the empty line that ends them.
   fn read_headers(&mut self, rest: &[u8], events: &mut Vec<Event>) -> Result<usize, MultipartError> {
+    // The block starts where `rest` starts until it is complete; what was searched already can't
+    // hold its end, apart from a part of the end cut off by the piece before.
+    let from = self.header_scanned.min(rest.len());
     let (block, consumed) = if rest.starts_with(CRLF) {
       (&rest[..0], CRLF.len())
-    } else if let Some(end) = find(rest, HEADER_END) {
+    } else if let Some(end) = find(&rest[from..], HEADER_END).map(|end| from + end) {
       (&rest[..end], end + HEADER_END.len())
     } else if rest.len() > MAX_HEADER_BYTES + HEADER_END.len() - 1 {
       // Even if the end came next, the headers before it would be too long.
       return Err(MultipartError::HeadersTooLarge);
     } else {
+      self.header_scanned = rest.len().saturating_sub(HEADER_END.len() - 1);
       return Ok(0);
     };
     if block.len() > MAX_HEADER_BYTES {
