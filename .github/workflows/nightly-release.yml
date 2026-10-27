@@ -147,7 +147,8 @@ jobs:
             # version numbers of a tree whose CI was checked above, so the gate is set by hand: the
             # commit goes to a helper branch first (a status needs a commit GitHub knows), then main.
             helper="nightly/bump-$VERSION"
-            git push origin "HEAD:refs/heads/$helper"
+            # Forced: a run that broke after this step leaves the helper behind with another commit.
+            git push --force origin "HEAD:refs/heads/$helper"
             gh api "repos/$GH_REPO/statuses/$(git rev-parse HEAD)" -f state=success -f context=ci-gate \
               -f description="Version bump of the nightly release; CI of its tree was green"
             git push origin "HEAD:${DEFAULT_BRANCH}"
