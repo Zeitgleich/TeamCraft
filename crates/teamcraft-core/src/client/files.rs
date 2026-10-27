@@ -715,13 +715,15 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     let content = read_source(&file.source, file.size_bytes)
       .await
       .map_err(|()| UploadError::Failed(TransferFailure::LocalFile))?;
-    let maybe_thumbnail = crate::thumbnail::thumbnail(&content, &file.media_type).or_else(|| {
-      file
-        .maybe_thumbnail
-        .as_ref()
-        .filter(|thumbnail| thumbnail.as_slice().len() <= MAX_APP_THUMBNAIL_BYTES)
-        .map(|thumbnail| thumbnail.as_slice().to_vec())
-    });
+    let maybe_thumbnail = crate::thumbnail::make_thumbnail(&content, &file.media_type)
+      .await
+      .or_else(|| {
+        file
+          .maybe_thumbnail
+          .as_ref()
+          .filter(|thumbnail| thumbnail.as_slice().len() <= MAX_APP_THUMBNAIL_BYTES)
+          .map(|thumbnail| thumbnail.as_slice().to_vec())
+      });
     // Receivers reserve the picture's space before anything loads (issue #316).
     let maybe_dimensions = crate::thumbnail::image_dimensions(&content, &file.media_type)
       .map(|(width, height)| ImageDimensions { width, height });

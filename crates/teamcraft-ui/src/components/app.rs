@@ -15,37 +15,26 @@ use crate::backend::Backend;
 use crate::calls::CallPhase;
 use crate::calls::{BackgroundEffect, CallEvent, CallRequest, CallStatusSounds};
 use crate::clock::now_ms;
-use crate::components::activity_view::{ActivityHome, ActivitySidebar};
 use crate::components::announcement_banner::AnnouncementBanner;
 use crate::components::bottom_nav::BottomNav;
 use crate::components::bundle_banner::{BundleBanner, ReleaseBanner};
-use crate::components::calls_unavailable::CallsUnavailableDialog;
-use crate::components::calls_view::CallsView;
-use crate::components::channel_preview::ChannelPreview;
 use crate::components::channel_view::ChannelView;
 use crate::components::edge_swipe::EdgeSwipeBack;
 use crate::components::file_drop;
-use crate::components::files_view::FilesView;
 use crate::components::getting_started::GettingStarted;
 use crate::components::guest_join::GuestJoinPage;
-use crate::components::home::{HomeSidebar, HomeStart, NewMessageDialog};
+use crate::components::home::{HomeSidebar, HomeStart};
 use crate::components::icons::{Icon, IconName};
 use crate::components::incoming_call::IncomingCallDialog;
 use crate::components::link_request_prompt::LinkRequestPrompt;
-use crate::components::members_panel::MembersPanel;
-use crate::components::message_actions::{PinsPanel, SavedView};
 use crate::components::notification_prompt::NotificationPrompt;
 use crate::components::offline_banner::OfflineBanner;
-use crate::components::profile_views::UserProfileDialog;
 use crate::components::rail::SpaceRail;
 use crate::components::roster_banner::RosterBanner;
-use crate::components::security_ui::{DeviceApprovalDialog, LinkDeviceDialog};
 use crate::components::settings_tabs::apply_call_prefs;
 #[cfg(target_arch = "wasm32")]
 use crate::components::share_download::ShareDownloadPage;
 use crate::components::sidebar::Sidebar;
-use crate::components::status_menu::CustomStatusDialog;
-use crate::components::status_menu::StatusMenu;
 use crate::components::storage_banner::StorageBanner;
 use crate::components::thread_panel::ThreadPanel;
 use crate::components::top_bar::TopBar;
@@ -284,7 +273,7 @@ pub fn Shell(backend: Rc<dyn Backend>, settings: Settings) -> impl IntoView {
           {move || match rail.get() {
             RailEntry::Chats => view! { <HomeSidebar /> }.into_any(),
             RailEntry::Space => view! { <Sidebar /> }.into_any(),
-            RailEntry::Activity => view! { <ActivitySidebar /> }.into_any(),
+            RailEntry::Activity => lazy_area(Place::Sidebar, || areas::activity_list(())),
           }}
         </Show>
         <main id="main-content" class="main" tabindex="-1">
@@ -293,16 +282,16 @@ pub fn Shell(backend: Rc<dyn Backend>, settings: Settings) -> impl IntoView {
             MainView::Admin(section) => lazy_area(Place::Pane, move || areas::admin_console(section)),
             MainView::Search => lazy_area(Place::Pane, || areas::search(())),
             MainView::Meetings => lazy_area(Place::Pane, || areas::meetings(())),
-            MainView::Saved => view! { <SavedView /> }.into_any(),
-            MainView::Files => view! { <FilesView /> }.into_any(),
-            MainView::Activity => view! { <ActivityHome /> }.into_any(),
-            MainView::Calls => view! { <CallsView /> }.into_any(),
+            MainView::Saved => lazy_area(Place::Pane, || areas::saved(())),
+            MainView::Files => lazy_area(Place::Pane, || areas::files(())),
+            MainView::Activity => lazy_area(Place::Pane, || areas::activity_home(())),
+            MainView::Calls => lazy_area(Place::Pane, || areas::call_history(())),
             MainView::Directory => lazy_area(Place::Pane, || areas::directory(())),
             MainView::GettingStarted => view! { <GettingStarted /> }.into_any(),
             MainView::Home => view! { <HomeStart /> }.into_any(),
             // Only the compact layout shows a space without a channel; its list is the sidebar.
             MainView::Space => ().into_any(),
-            MainView::ChannelPreview(space, channel) => view! { <ChannelPreview space=space channel=channel /> }.into_any(),
+            MainView::ChannelPreview(space, channel) => lazy_area(Place::Pane, move || areas::channel_preview(space, channel)),
           }}
         </main>
         <Show when=move || matches!(state.view.get(), MainView::Conversation(_)) fallback=|| ()>
@@ -312,11 +301,11 @@ pub fn Shell(backend: Rc<dyn Backend>, settings: Settings) -> impl IntoView {
               view! { <ThreadPanel conversation=conversation thread=thread /> }.into_any()
             },
             SidePanel::Pins => match open_conversation.get() {
-              Some(id) => view! { <PinsPanel conversation=id /> }.into_any(),
+              Some(id) => lazy_area(Place::Panel, move || areas::pins(id)),
               None => ().into_any(),
             },
             SidePanel::Members => match open_conversation.get() {
-              Some(id) => view! { <MembersPanel conversation=id /> }.into_any(),
+              Some(id) => lazy_area(Place::Panel, move || areas::members(id)),
               None => ().into_any(),
             },
           }}
@@ -327,7 +316,7 @@ pub fn Shell(backend: Rc<dyn Backend>, settings: Settings) -> impl IntoView {
       </Show>
       // On phones the account menu is a sheet over the bottom navigation's "You".
       <Show when=move || state.is_compact() && state.overlay.get() == Overlay::StatusMenu fallback=|| ()>
-        <StatusMenu />
+        {lazy_area(Place::Overlay, || areas::status_menu(()))}
       </Show>
       <crate::components::link_menu::LinkMenu />
       <crate::components::attachment_menu::AttachmentMenu />
@@ -401,11 +390,11 @@ pub fn Shell(backend: Rc<dyn Backend>, settings: Settings) -> impl IntoView {
       </div>
       {move || match state.overlay.get() {
         Overlay::QuickSwitcher => lazy_area(Place::Overlay, || areas::quick_switcher(())),
-        Overlay::CustomStatus => view! { <CustomStatusDialog /> }.into_any(),
+        Overlay::CustomStatus => lazy_area(Place::Overlay, || areas::custom_status(())),
         Overlay::Settings => lazy_area(Place::Overlay, || areas::settings(())),
         Overlay::Shortcuts => lazy_area(Place::Overlay, || areas::shortcuts(())),
-        Overlay::DeviceApproval => view! { <DeviceApprovalDialog /> }.into_any(),
-        Overlay::LinkDevice => view! { <LinkDeviceDialog /> }.into_any(),
+        Overlay::DeviceApproval => lazy_area(Place::Overlay, || areas::device_approval(())),
+        Overlay::LinkDevice => lazy_area(Place::Overlay, || areas::link_device(())),
         Overlay::VerifyContact(user) => lazy_area(Place::Overlay, move || areas::verify_contact(user)),
         Overlay::VerifyKey(conversation) => lazy_area(Place::Overlay, move || areas::verify_key(conversation)),
         Overlay::ScheduleMeeting => lazy_area(Place::Overlay, || areas::schedule_meeting(())),
@@ -418,7 +407,7 @@ pub fn Shell(backend: Rc<dyn Backend>, settings: Settings) -> impl IntoView {
         Overlay::Lightbox(conversation, start) => lazy_area(Place::Overlay, move || areas::lightbox(conversation, start)),
         Overlay::FilePreview(conversation, key) => lazy_area(Place::Overlay, move || areas::file_preview(conversation, key)),
         Overlay::NewSpace => lazy_area(Place::Overlay, || areas::new_space(())),
-        Overlay::NewMessage => view! { <NewMessageDialog /> }.into_any(),
+        Overlay::NewMessage => lazy_area(Place::Overlay, || areas::new_message(())),
         Overlay::BrowseSpaces(maybe_highlight) => lazy_area(Place::Overlay, move || areas::browse_spaces(maybe_highlight)),
         Overlay::InvitePeople(space) => lazy_area(Place::Overlay, move || areas::invite_people(space)),
         Overlay::AddToChannel(conversation) => lazy_area(Place::Overlay, move || areas::add_to_channel(conversation)),
@@ -431,8 +420,8 @@ pub fn Shell(backend: Rc<dyn Backend>, settings: Settings) -> impl IntoView {
           lazy_area(Place::Overlay, move || areas::edit_history(conversation, message))
         },
         Overlay::Bookmarks(conversation) => lazy_area(Place::Overlay, move || areas::bookmarks(conversation)),
-        Overlay::UserProfile(user) => view! { <UserProfileDialog user=user /> }.into_any(),
-        Overlay::CallsUnavailable => view! { <CallsUnavailableDialog /> }.into_any(),
+        Overlay::UserProfile(user) => lazy_area(Place::Overlay, move || areas::user_profile(user)),
+        Overlay::CallsUnavailable => lazy_area(Place::Overlay, || areas::calls_unavailable(())),
         // The admin console renders its own dialog, in its part of the app.
         Overlay::None | Overlay::StatusMenu | Overlay::DeleteUser(_) => ().into_any(),
       }}

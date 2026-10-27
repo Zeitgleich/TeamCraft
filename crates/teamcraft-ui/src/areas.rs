@@ -15,6 +15,7 @@
 //! functions are called directly.
 
 use std::future::Future;
+use std::pin::Pin;
 use std::rc::Rc;
 
 use leptos::html;
@@ -24,24 +25,36 @@ use leptos::wasm_split::{SplitLoaderError, wasm_split};
 
 use crate::admin::AdminSection;
 use crate::calls::CallRequest;
+use crate::components::activity_view::{ActivityHome, ActivitySidebar};
 use crate::components::add_to_call::AddToCallDialog;
 use crate::components::admin_console::AdminConsole;
 use crate::components::bookmarks::BookmarksDialog;
 use crate::components::call_prejoin::PreJoinScreen;
 use crate::components::call_screen::CallScreen;
+use crate::components::calls_unavailable::CallsUnavailableDialog;
+use crate::components::calls_view::CallsView;
+use crate::components::channel_preview::ChannelPreview;
 use crate::components::directory_view::DirectoryView;
 use crate::components::file_preview::FilePreview;
+use crate::components::files_view::FilesView;
 use crate::components::guest_meeting::{GuestMeeting, GuestSession};
+use crate::components::home::NewMessageDialog;
 use crate::components::lightbox::Lightbox;
+use crate::components::log_view::IntegrationFeed;
 use crate::components::login::SessionGate;
 use crate::components::meetings_view::{MeetingCreatedDialog, MeetingsView, ScheduleMeetingDialog};
-use crate::components::message_actions::{EditHistoryDialog, ForwardDialog};
+use crate::components::members_panel::MembersPanel;
+use crate::components::message_actions::{EditHistoryDialog, ForwardDialog, PinsPanel, SavedView};
+use crate::components::profile_views::UserProfileDialog;
 use crate::components::quick_switcher::QuickSwitcher;
 use crate::components::search_view::SearchView;
-use crate::components::security_ui::{VerifyContactDialog, VerifyKeyDialog};
+use crate::components::security_ui::{
+  DeviceApprovalDialog, LinkDeviceDialog, VerifyContactDialog, VerifyKeyDialog,
+};
 use crate::components::settings_modal::{SettingsModal, ShortcutsModal};
 use crate::components::share_link_dialog::ShareLinkDialog;
 use crate::components::space_invites::{AddToChannelDialog, BrowseSpacesDialog, InvitePeopleDialog};
+use crate::components::status_menu::{CustomStatusDialog, StatusMenu};
 use crate::components::video_player::VideoPlayer;
 use crate::components::workspace_dialogs::{
   BrowseChannelsDialog, ChannelSettingsDialog, NewChannelDialog, NewSpaceDialog, SpaceSettingsDialog,
@@ -64,6 +77,10 @@ pub enum Place {
   Overlay,
   /// The whole window (the signed-in app, the call screens).
   Screen,
+  /// The sidebar's place: the placeholder takes its box.
+  Sidebar,
+  /// A conversation's side panel: the placeholder takes its box.
+  Panel,
 }
 
 /// Where an area stands.
@@ -73,6 +90,9 @@ enum Phase {
   Ready,
   Failed,
 }
+
+/// An area's view on its way: its chunk loading, then the view built.
+type AreaLoad = Pin<Box<dyn Future<Output = Result<AnyView, SplitLoaderError>>>>;
 
 /// Declares split points: `name(args) => module: view` builds `view` in chunk `module`.
 macro_rules! areas {
@@ -112,6 +132,8 @@ areas! {
   browse_spaces(maybe_highlight: Option<SpaceId>) => workspace: view! { <BrowseSpacesDialog maybe_highlight=maybe_highlight /> };
   invite_people(space: SpaceId) => workspace: view! { <InvitePeopleDialog space=space /> };
   add_to_channel(conversation: ConversationId) => workspace: view! { <AddToChannelDialog conversation=conversation /> };
+  /// A channel of a space before joining it, opened from browsing the channels.
+  channel_preview(space: SpaceId, channel: ConversationId) => workspace: view! { <ChannelPreview space=space channel=channel /> };
   /// The call screens (the incoming call card stays in the app, so a call rings at once).
   call_prejoin(request: CallRequest) => calls: view! { <PreJoinScreen request=request /> };
   call_screen(request: CallRequest) => calls: view! { <CallScreen request=request /> };
@@ -133,6 +155,37 @@ areas! {
   share_file(conversation: ConversationId, message: MessageId, file: AttachmentId) => dialogs: view! { <ShareLinkDialog conversation=conversation message=message file=file /> };
   verify_key(conversation: ConversationId) => dialogs: view! { <VerifyKeyDialog conversation=conversation /> };
   verify_contact(user: UserId) => dialogs: view! { <VerifyContactDialog user=user /> };
+  /// More dialogs a first visit doesn't open: a person's profile, a new direct message, linking or
+  /// approving a device, why calls are unavailable.
+  user_profile(user: UserId) => dialogs: view! { <UserProfileDialog user=user /> };
+  new_message(_unit: ()) => dialogs: view! { <NewMessageDialog /> };
+  link_device(_unit: ()) => dialogs: view! { <LinkDeviceDialog /> };
+  device_approval(_unit: ()) => dialogs: view! { <DeviceApprovalDialog /> };
+  calls_unavailable(_unit: ()) => dialogs: view! { <CallsUnavailableDialog /> };
+  /// The account menu behind the user's picture and the custom status it opens.
+  status_menu(_unit: ()) => account: view! { <StatusMenu /> };
+  custom_status(_unit: ()) => account: view! { <CustomStatusDialog /> };
+  /// Home pages a first visit doesn't open (Meetings and People have their own chunks), and a
+  /// conversation's side panels except the thread.
+  saved(_unit: ()) => places: view! { <SavedView /> };
+  files(_unit: ()) => places: view! { <FilesView /> };
+  call_history(_unit: ()) => places: view! { <CallsView /> };
+  pins(conversation: ConversationId) => places: view! { <PinsPanel conversation=conversation /> };
+  members(conversation: ConversationId) => places: view! { <MembersPanel conversation=conversation /> };
+  /// Activity (#752): its list in the sidebar's place and its main column.
+  activity_list(_unit: ()) => activity: view! { <ActivitySidebar /> };
+  activity_home(_unit: ()) => activity: view! { <ActivityHome /> };
+  /// The log view of an integration channel: its toolbar and the filtered log.
+  integration_feed(conversation: ConversationId) => log: view! { <IntegrationFeed conversation=conversation /> };
+}
+
+/// Thumbnails of the pictures this page sends, by teamcraft-core's image codecs (its
+/// `make_thumbnail`, installed in `web_core.rs`): a large part of the app that a first visit doesn't
+/// need, so they load with the first picture.
+#[cfg(target_arch = "wasm32")]
+#[wasm_split(images, wasm_split_path = ::leptos::wasm_split, fallible)]
+pub fn thumbnail(bytes: &[u8], media_type: &str) -> Result<Option<Vec<u8>>, SplitLoaderError> {
+  Ok(teamcraft_core::thumbnail::thumbnail(bytes, media_type))
 }
 
 /// Shows the view `load` builds once its chunk is there: a placeholder until then, and a message
@@ -142,6 +195,13 @@ where
   F: Fn() -> Fut + 'static,
   Fut: Future<Output = Result<AnyView, SplitLoaderError>> + 'static,
 {
+  // Only this boxing is per caller: the views below are built once for every area. Generic, they
+  // were copied for each caller's closure types, a few kB of the first visit each.
+  area_view(place, Rc::new(move || Box::pin(load())))
+}
+
+/// [`lazy_area`] for any loader.
+fn area_view(place: Place, load: Rc<dyn Fn() -> AreaLoad>) -> AnyView {
   let i18n = use_i18n();
   let phase = RwSignal::new(Phase::Loading);
   let ready: StoredValue<Option<AnyView>, LocalStorage> = StoredValue::new_local(None);
@@ -229,6 +289,8 @@ impl Place {
       Self::Pane => "lazy-area-pane",
       Self::Overlay => "lazy-area-overlay",
       Self::Screen => "lazy-area-screen",
+      Self::Sidebar => "sidebar",
+      Self::Panel => "side-panel",
     }
   }
 }
