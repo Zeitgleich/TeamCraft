@@ -6,6 +6,7 @@
 
 mod account;
 mod actions;
+mod admin_joins;
 mod attachments;
 mod attested;
 mod backgrounds;
@@ -552,6 +553,10 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     self
       .store
       .delete(Table::AppliedChanges, &pending_post_key(conversation))?;
+    self.store.delete(
+      Table::AppliedChanges,
+      &admin_joins::pending_signer_key(conversation),
+    )?;
     self
       .store
       .delete(Table::AppliedChanges, &groups::rejoin_key(conversation))?;

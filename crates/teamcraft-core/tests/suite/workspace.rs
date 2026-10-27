@@ -575,12 +575,13 @@ async fn admin_self_join_follows_the_signed_policy() {
   bob.client.admin_add_member(channel, bob_id).await.unwrap();
   settle(&mut [&mut alice, &mut bob, &mut carol]).await;
   assert!(bob.client.has_group(channel).unwrap(), "self-join is visible");
-  // Never silent (admin.md §2.4): the committing member tells everybody, once.
+  // Never silent (admin.md §2.4): the member's device shows it once, from the commit it made
+  // (issue #811, tests/suite/admin_joins.rs); the admin's own device joined by the welcome.
   let joined = teamcraft_core::store::ConversationEvent::AdminJoined {
     user: bob_id,
     is_approved: false,
   };
-  for peer in [&carol, &bob] {
+  for (peer, expected) in [(&carol, 1), (&bob, 0)] {
     let shown = peer
       .store
       .messages(channel, teamcraft_core::store::MessageFilter::TopLevel)
@@ -590,7 +591,7 @@ async fn admin_self_join_follows_the_signed_policy() {
         matches!(&message.content, teamcraft_core::store::MessageContent::Event { event } if *event == joined)
       })
       .count();
-    assert_eq!(shown, 1, "{}", peer.name);
+    assert_eq!(shown, expected, "{}", peer.name);
   }
 }
 
@@ -693,11 +694,13 @@ mod owner_approval {
       bob.client.has_group(channel).unwrap(),
       "the owner's commit let him in"
     );
+    // The owner's device shows it from its own commit (issue #811); the admin joined by the
+    // welcome. tests/suite/admin_joins.rs has the members' side.
     let joined = ConversationEvent::AdminJoined {
       user: bob_id,
       is_approved: true,
     };
-    for peer in [&carol, &bob] {
+    for (peer, expected) in [(&carol, 1), (&bob, 0)] {
       let shown = peer
         .store
         .messages(channel, MessageFilter::TopLevel)
@@ -705,7 +708,7 @@ mod owner_approval {
         .into_iter()
         .filter(|message| matches!(&message.content, MessageContent::Event { event } if *event == joined))
         .count();
-      assert_eq!(shown, 1, "{}", peer.name);
+      assert_eq!(shown, expected, "{}", peer.name);
     }
     for peer in [&carol, &bob] {
       assert!(
@@ -733,9 +736,23 @@ mod owner_approval {
     carol.client.decline_admin_join(channel, bob_id).await.unwrap();
     settle(&mut [&mut alice, &mut bob, &mut carol]).await;
     assert!(bob.client.has_group(channel).unwrap(), "the approval stands");
-    for peer in [&carol, &bob] {
-      assert_eq!(admin_joins(peer, channel), 1, "{}", peer.name);
-    }
+    assert_eq!(admin_joins(&carol, channel), 1, "one commit, one line");
+    // The message for older versions went out once too.
+    let announced = bob
+      .store
+      .messages(channel, MessageFilter::All)
+      .unwrap()
+      .into_iter()
+      .filter(|message| {
+        matches!(
+          &message.content,
+          MessageContent::Event {
+            event: ConversationEvent::AdminJoined { .. }
+          }
+        )
+      })
+      .count();
+    assert_eq!(announced, 1);
   }
 
   /// Review L4: approving shares what a self-join would get, the history from the join on, unless
@@ -892,7 +909,7 @@ mod owner_approval {
     common::backend_of(peer).join_requests()
   }
 
-  /// How often the visible "joined as a workspace admin" message is in `peer`'s copy of `channel`.
+  /// How often the visible "joined as a workspace admin" line is in `peer`'s copy of `channel`.
   fn admin_joins(peer: &Peer, channel: teamcraft_proto::ConversationId) -> usize {
     peer
       .store

@@ -2002,10 +2002,14 @@ pub(crate) fn newest_server_id(messages: &[StoredMessage]) -> Option<MessageId> 
     .max()
 }
 
-/// The ID the UI uses: the server's, or a stable stand-in for outbox messages.
+/// The ID the UI uses: the server's, for a line derived from a commit the commit's (time-ordered
+/// like the messages', and no outbox message's), or a stable stand-in for outbox messages.
 pub(crate) fn ui_message_id(message: &StoredMessage) -> MessageId {
   if let Some(id) = message.maybe_server_id {
     return id;
+  }
+  if let Some(commit) = message.maybe_verified_commit {
+    return MessageId::from_snowflake(commit.snowflake());
   }
   let mut bytes = [0u8; 8];
   bytes.copy_from_slice(&message.client_message_id.as_bytes()[..8]);
@@ -2065,6 +2069,7 @@ mod tests {
       edits: Vec::new(),
       maybe_edit_id: None,
       is_pinned: false,
+      maybe_verified_commit: None,
     };
     let body = MessageContent::Text {
       body: "hello".into(),
@@ -2591,6 +2596,7 @@ mod tests {
           edits: Vec::new(),
           maybe_edit_id: None,
           is_pinned: false,
+          maybe_verified_commit: None,
         })
         .unwrap();
     }

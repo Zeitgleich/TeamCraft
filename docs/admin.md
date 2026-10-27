@@ -183,19 +183,20 @@ self-join asks only for the history from the join on: members' apps refuse a sig
 asks for more, whatever the workspace default (e2ee.md §4.7). That is allowed, but never silent:
 
 - Per instance setting `admin_self_join` for private channels:
-  - `visible` (default) – allowed; members see the same system message as for any added member
-    ("Paul joined"), marked with an admin badge. Unlike normal join/leave messages, it can't be
-    hidden by the user setting,
+  - `visible` (default) – allowed; members see "Paul joined this channel as a workspace admin"
+    (§2.4.2). Unlike normal join/leave messages, it can't be hidden by the user setting,
   - `owner_approval` – a channel owner must approve (§2.4.1),
   - `disabled`.
 - Member clients enforce this setting themselves (it's part of the signed workspace policy), so the
   server can't bypass it.
 - **Where admins join.** The channel browser lists a space's private channels to workspace admins,
   marked private, as the verified policy allows: "Join as admin" for `visible`, "Ask to join" for
-  `owner_approval` (§2.4.1), nothing for `disabled`. The admin's app signs the self-join; the
-  member whose app commits it then posts the encrypted "joined as a workspace admin" message
-  (`AdminJoined`), shown to everybody whatever their join/leave setting. Members' apps let the
-  admin in only while their role is in the fresh signed roster.
+  `owner_approval` (§2.4.1), nothing for `disabled`. The admin's app signs the self-join. Members'
+  apps let the admin in only while their role is in the fresh signed roster.
+- **How members are told** (§2.4.2): each member's device writes the line "… joined this channel as
+  a workspace admin" (with "approved by …" when somebody else let them in) itself, from the MLS
+  commit that added the admin, once it verified that commit; shown whatever the join/leave
+  setting. No message makes or suppresses it.
 
 #### 2.4.1 Asking the owners (`owner_approval`)
 
@@ -223,10 +224,11 @@ admin in is an owner's own membership change.
   request is open and the person who asked is still an instance admin, by their last sign-in), so
   of several owners or devices exactly one approves and a decline or an expiry at the same moment
   wins completely or not at all; only the approving owner's retry is answered again, everybody
-  else gets `admin_join_request_not_found`. Then the owner's own MLS add and the encrypted
-  `AdminJoined` message with "approved by", shown to everybody whatever their join/leave setting,
-  sent only when this commit put the admin's devices in (a second approval announces nothing).
-  Members' apps check the add like any addition by a member.
+  else gets `admin_join_request_not_found`. Then the owner's own MLS add, which members' apps
+  check like any addition by a member and from which each of them shows "… joined this channel as
+  a workspace admin, approved by …" whatever their join/leave setting (§2.4.2). For older versions
+  the encrypted `AdminJoined` message with "approved by" goes out too, only when this commit put
+  the admin's devices in (a second approval announces nothing).
 - **History.** Approving shares what a self-join gets, the history from the join on (e2ee.md
   §4.7). The earlier history only when the owner ticks "Also share the earlier history" in
   Activity or the channel settings; Approve in a notification never shares it, and its text says
@@ -268,8 +270,44 @@ admin in is an owner's own membership change.
   browser; joining without asking (`visible`) stays on desktop and web.
 - **Not yet:** no push wakes an owner's phone for a request (wake-ups name messages and calls
   only; a request kind is a follow-up); a phone that was closed sees the waiting requests when it
-  connects again. The `AdminJoined` message is the approving owner's application message, not
-  checked against the commit (as for self-joins).
+  connects again.
+
+#### 2.4.2 The line comes from the commit (issue #811)
+
+"Never silent" can't rest on a message: a member could send "joined as a workspace admin" without
+anybody joining, and a committer that crashed after its commit, or a server that drops the
+message, would keep a real join quiet. So the line is derived where the join happens:
+
+- **When.** A device that merges a commit, one it verified like any other (§2.3) or its own,
+  compares the group before and after: every user with a device in the group now and none before
+  (not a further device or a device added back), whom the verified roster lists as an owner or
+  admin, gets the line, in a channel that isn't open to everybody as the device knows it (a
+  private channel, or an archived public one; not a DM, group DM or meeting chat, where admins
+  have no way in of their own). The channel's visibility is the server's word here as in the
+  members' check of a self-join (`visible` doesn't apply to an open public channel); the roster's
+  freshness decides an admin's authority, not whether members are told, so a member adding an
+  admin while the roster waits for re-signing is still told. However the admin got in, the line
+  is there: their own signed self-join, an owner's approval, a member's ordinary add, or another
+  admin's signed change (§2.2), which used to be silent.
+- **Who let them in.** "approved by" names the verified signer of the change that added the admin,
+  unless that is the admin (a self-join): the owner who approved, whose device also committed it,
+  the member who added them, or the admin who signed the change. A device's own commit keeps its
+  signer next to the pending commit, so a commit whose answer was lost and that is merged from the
+  queue later names the same person; one staged by an older version names nobody.
+- **Where.** The line sits at the commit's place in the conversation (the commit's ID is the
+  server's time-ordered ID, like a message's), is stored like a message but marked as derived
+  from that commit, and is no message of the server's (no read position, paging cursor, permalink
+  or unread count uses it). Its ID comes from the commit and the admin, so processing the commit
+  again after a restart writes it once, on every device of every member, the committer's
+  included. That ID is known to whoever saw the commit, so a message with it is never stored over
+  the line, and no edit, delete or pin changes it. The apps' row of the line goes by the commit's
+  ID; a message the server gives the same ID doesn't take the line's place there either.
+- **Who doesn't see it.** The admin's own devices join by the welcome and see no commit: they show
+  no line. A member who joins later doesn't see lines from before their time either.
+- **Older versions.** The committer still sends the encrypted `AdminJoined` message (members'
+  self-join commits, owners' approvals), which versions before this show; this version stores it
+  hidden and never shows it, also one stored before the update. A self-join committed by an older
+  version is still told here, from its commit.
 
 ### 2.5 Orphaned channels
 

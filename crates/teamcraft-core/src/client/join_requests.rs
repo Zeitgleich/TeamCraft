@@ -5,8 +5,8 @@
 //! and the server keeps the request; nothing about it is trusted. A channel owner's client checks
 //! the request against what it verified itself (the policy, the requester in the fresh roster, a
 //! private channel whose group it is in) and approves by adding the admin with its own MLS commit,
-//! which every member checks like any addition by a member, then posts the visible "joined as a
-//! workspace admin" message.
+//! which every member checks like any addition by a member and derives the visible "joined as a
+//! workspace admin, approved by …" line from (issue #811).
 
 use teamcraft_crypto::membership::HistoryShare;
 use teamcraft_proto::{
@@ -104,8 +104,9 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
         _ => HistoryShare::FromJoin,
       };
       let shared = self.commit_addition(conversation, user, requested).await?;
-      // Announced once the admin's devices are in: an add that had to wait (no key packages yet)
-      // is announced by nobody rather than twice.
+      // Every member's device (this one too) shows the line it derived from the commit (issue
+      // #811); the message is for older versions. Announced once the admin's devices are in: an add
+      // that had to wait (no key packages yet) is announced by nobody rather than twice.
       if self.group_users(conversation)?.contains(&user) {
         tracing::info!(conversation_id = %conversation, ?shared, "let an admin in who asked");
         self

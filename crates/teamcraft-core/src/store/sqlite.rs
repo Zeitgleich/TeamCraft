@@ -233,23 +233,36 @@ impl LocalStore for SqlCipherStore {
     maybe_record.map(|record| decode_message(&record)).transpose()
   }
 
-  /// Server messages sort by their ID (`sort_group` 0), so the order index finds one directly.
+  /// Server messages sort by their ID (`sort_group` 0), so the order index finds one directly. A
+  /// line derived from a commit sorts by the commit's ID in the same group; it is no server
+  /// message, whatever ID the server gave the commit.
   fn message_by_server_id(
     &self,
     conversation: ConversationId,
     server_id: MessageId,
   ) -> Result<Option<StoredMessage>, StoreError> {
-    let maybe_record: Option<Vec<u8>> = self
-      .lock()
+    let inner = self.lock();
+    let mut statement = inner
       .connection
-      .query_row(
+      .prepare(
         "SELECT record FROM messages WHERE conversation_id = ?1 AND sort_group = 0 AND sort_value = ?2",
+      )
+      .map_err(database_error)?;
+    let records: Vec<Vec<u8>> = statement
+      .query_map(
         params![conversation.snowflake().get(), server_id.snowflake().get()],
         |row| row.get(0),
       )
-      .optional()
+      .map_err(database_error)?
+      .collect::<Result<_, _>>()
       .map_err(database_error)?;
-    maybe_record.map(|record| decode_message(&record)).transpose()
+    for record in records {
+      let message = decode_message(&record)?;
+      if message.maybe_server_id == Some(server_id) {
+        return Ok(Some(message));
+      }
+    }
+    Ok(None)
   }
 
   fn messages(
@@ -280,7 +293,16 @@ impl LocalStore for SqlCipherStore {
       .map_err(database_error)?
       .collect::<Result<_, _>>()
       .map_err(database_error)?;
-    records.iter().map(|record| decode_message(record)).collect()
+    // The columns only preselect: a row written by an older version may say "listed" for a kind
+    // this one hides (an admin's join as a message, issue #811), so the record decides.
+    let mut messages = Vec::with_capacity(records.len());
+    for record in &records {
+      let message = decode_message(record)?;
+      if message.matches(filter) {
+        messages.push(message);
+      }
+    }
+    Ok(messages)
   }
 
   /// Walks the order index from the range's start and tests the records' bytes for a picture or
@@ -466,6 +488,56 @@ mod tests {
   #[test]
   fn migration_steps_are_numbered() {
     crate::store::sql_group::tests::assert_numbered(MIGRATIONS);
+  }
+
+  /// Issue #811: an admin's join as a message that an older version stored as listed is hidden
+  /// now, without rewriting the database.
+  #[test]
+  fn a_row_listed_by_an_older_version_follows_what_this_one_hides() {
+    use teamcraft_proto::{Id, Snowflake};
+
+    use crate::store::{ConversationEvent, MessageContent};
+
+    let store =
+      SqlCipherStore::open_in_memory(&StaticKeySource::new(SymmetricKey::generate(&mut OsRng))).unwrap();
+    let id = |raw: i64| Snowflake::new(raw).unwrap();
+    let conversation = ConversationId::from_snowflake(id(1));
+    let announced = StoredMessage {
+      conversation_id: conversation,
+      client_message_id: ClientMessageId::from_bytes([1; 16]),
+      maybe_server_id: Some(MessageId::from_snowflake(id(100))),
+      sender_user_id: teamcraft_proto::UserId::from_snowflake(id(2)),
+      maybe_thread_id: None,
+      sent_at_ms: 1_000,
+      content: MessageContent::Event {
+        event: ConversationEvent::AdminJoined {
+          user: teamcraft_proto::UserId::from_snowflake(id(3)),
+          is_approved: false,
+        },
+      },
+      is_edited: false,
+      edits: Vec::new(),
+      maybe_edit_id: None,
+      is_pinned: false,
+      maybe_verified_commit: None,
+    };
+    store.upsert_message(&announced).unwrap();
+    store
+      .lock()
+      .connection
+      .execute("UPDATE messages SET is_hidden = 0", [])
+      .unwrap();
+
+    assert!(
+      store
+        .messages(conversation, MessageFilter::TopLevel)
+        .unwrap()
+        .is_empty()
+    );
+    assert_eq!(
+      store.messages(conversation, MessageFilter::All).unwrap(),
+      vec![announced]
+    );
   }
 
   #[test]

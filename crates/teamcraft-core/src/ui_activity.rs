@@ -617,6 +617,7 @@ mod tests {
       edits: Vec::new(),
       maybe_edit_id: None,
       is_pinned: false,
+      maybe_verified_commit: None,
     }
   }
 
