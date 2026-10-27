@@ -1909,6 +1909,17 @@ start and remain visible while the server or its object storage is unavailable.
   name, and every `teamcraft-media-*` database the browser lists (`indexedDB.databases()`), also at
   a start while signed out.
 - An entry that doesn't open (tampered with, another key) is deleted and counts as missing.
+- **Notification pictures (#543).** System notifications show the sender's avatar or the channel's
+  or space's picture from this cache, never a rendition. The OS shows them in other processes, so
+  they leave the seal there: Linux gets the pixels over D-Bus (`image-data`, no file); Windows and
+  macOS get a small PNG (128 px) in the app's cache directory (mode 0600 where the system has modes),
+  one per picture on Windows (the toast reads it again from the Action Center) and a copy per
+  notification on macOS (the notification center moves it into its own store). These files are
+  deleted at sign-out, at start and, on Windows, when the picture is no longer among the last 32
+  shown. The browser's service worker reads the cache like the page, with the account's wrapped key,
+  and hands the picture to the browser as a `data:` URL. Pictures go only with names: a
+  notification the workspace policy or the device setting keeps to "New message" has none
+  (notifications.md, "Desktop notifications").
 - The mobile apps don't use it: Android keeps avatars in its own file cache and opens pictures from
   the decrypted downloads (§4.5).
 
