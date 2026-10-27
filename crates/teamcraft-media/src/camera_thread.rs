@@ -124,16 +124,34 @@ mod tests {
   #[test]
   fn a_camera_that_never_delivers_still_stops_within_the_bound() {
     let (frames, _frame_rx) = frame_queue();
+    let (reading, is_reading) = mpsc::channel();
     let (_never_sent, blocked) = mpsc::channel::<()>();
-    let camera = CameraThread::start("test-silent-camera", move || Ok(Silent(blocked)), frames).unwrap();
-    let start = Instant::now();
-    camera.stop();
-    let waited = start.elapsed();
+    let camera = CameraThread::start(
+      "test-silent-camera",
+      move || Ok(Silent { reading, blocked }),
+      frames,
+    )
+    .unwrap();
+    // Only once the camera thread is inside its read, which never returns: a stop before that
+    // ends the thread at once and proves nothing.
+    is_reading
+      .recv_timeout(Duration::from_secs(10))
+      .expect("the camera thread reads");
+    // Stopped on a thread of its own, so a stop that waits for good fails the test instead of
+    // hanging it.
+    let (stopped, has_stopped) = mpsc::channel();
+    std::thread::spawn(move || {
+      let start = Instant::now();
+      camera.stop();
+      let _ = stopped.send(start.elapsed());
+    });
+    let waited = has_stopped
+      .recv_timeout(CAMERA_STOP_WAIT * 10)
+      .expect("stopping a camera that never delivers came back");
     assert!(
       waited >= CAMERA_STOP_WAIT,
-      "it did wait for the thread: {waited:?}"
+      "it waited for the thread first: {waited:?}"
     );
-    assert!(waited < CAMERA_STOP_WAIT * 10, "{waited:?}");
   }
 
   #[test]
@@ -159,12 +177,18 @@ mod tests {
     fn close(&mut self) {}
   }
 
-  /// A camera whose read never returns, as AVFoundation's without a frame.
-  struct Silent(mpsc::Receiver<()>);
+  /// A camera whose read never returns, as AVFoundation's without a frame. It says when it
+  /// starts reading.
+  struct Silent {
+    reading: mpsc::Sender<()>,
+    blocked: mpsc::Receiver<()>,
+  }
 
   impl CameraReader for Silent {
     fn read(&mut self, _start: Instant) -> Result<Option<VideoFrame>, CaptureError> {
-      let _ = self.0.recv();
+      // The test may have stopped waiting for this.
+      let _ = self.reading.send(());
+      let _ = self.blocked.recv();
       Ok(None)
     }
 
