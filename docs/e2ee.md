@@ -441,18 +441,32 @@ shows only the resulting PNG. Thumbnails of SVG are drawn by the sender's browse
 `resvg` on native platforms, with no DTD, no resources loaded and limits on size, element count and
 `<use>` expansion (`teamcraft-core` `svg_thumbnail`).
 
-#### 4.5.0 Previews of Markdown, HTML and PDF files
+#### 4.5.0 Previews of files
 
-A received `.md`, `.html` or `.pdf` file (by media type, or by extension when the type is generic) can be
-opened as a formatted preview in the app, up to 10 MiB (larger files are only downloaded). The preview works
-from the file the client core already downloaded and decrypted; nothing leaves the client. The file is
-untrusted, so each kind is shown in a way that can't run its code or reach the app:
+A received `.md`, `.html` or `.pdf` file, or a text file (`.txt`, `.log`, `.json`, `.csv`, `.yaml`, `.toml`,
+`.xml`, `.ini`, `.conf`, any `text/*` type; by media type, or by extension when the type is generic), can be
+opened as a preview in the app, up to a size the user chooses (`PreviewLimit`, 2 to 50 MiB, default 10 MiB;
+a larger file shows its size and the download, and is not loaded). The preview works from the file the client
+core already downloaded and decrypted, in memory; nothing leaves the client. The file is untrusted, so each
+kind is shown in a way that can't run its code or reach the app:
 
 | Kind     | Shown as                                                                                       |
 |----------|------------------------------------------------------------------------------------------------|
 | Markdown | the app's own renderer (the message subset: a tree of elements, no HTML string); "show source" |
 | HTML     | a sandboxed frame, see below; "show source"                                                    |
 | PDF      | the vendored PDF.js, see below                                                                 |
+| Text     | plain text in the text viewer, see below                                                       |
+
+**Text.** Text nodes only (`crates/teamcraft-ui/src/text_preview`): nothing in the file is read as HTML or
+Markdown, and addresses in it stay text (no link is made, nothing is fetched). The bytes are read as UTF-8,
+UTF-16 or, when clearly text in no Unicode encoding, Windows-1252; a file with NUL bytes or many control
+characters is binary and not shown. Terminal escape sequences in logs are never acted on: SGR colours become
+one of sixteen colours of the stylesheet, every other sequence (cursor moves, titles, OSC 8 hyperlinks,
+device controls) is removed, and an unterminated one hides nothing beyond its line. JSON is formatted only on
+request, after `serde_json` accepted it, by re-indenting its tokens, with nesting (128 levels) and the
+formatted size (64 MiB) bounded so a small hostile file can't blow up. Only the rows in view
+are in the page, at most a million lines are indexed, and finding is capped (10,000 matches), so a large
+file can't exhaust the page.
 
 **HTML.** An `<iframe sandbox="" srcdoc="…">` with the strictest sandbox (no `allow-scripts`, no
 `allow-same-origin`: an opaque origin that reaches nothing of the app, its storage or its tokens; no forms,

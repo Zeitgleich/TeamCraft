@@ -102,6 +102,7 @@ pub mod startup;
 pub mod state;
 pub mod sync_reads;
 pub mod tab_handover;
+pub mod text_preview;
 pub mod toast_motion;
 pub mod toast_timer;
 pub mod unread_divider;

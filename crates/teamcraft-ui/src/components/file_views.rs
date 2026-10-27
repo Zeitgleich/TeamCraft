@@ -42,7 +42,7 @@ use crate::media_layout::{
 use crate::model::{ConversationId, MessageId};
 use crate::object_url::{FetchError, ObjectUrl};
 use crate::prefs::ImageSize;
-use crate::preview::{self, PreviewKind};
+use crate::preview::PreviewKind;
 use crate::state::{AppState, Overlay, use_app_state};
 
 /// From this size on, a transfer's progress is told in bytes ("12 MB / 48 MB"), below in percent.
@@ -864,12 +864,10 @@ pub fn FileCard(file: FileInfo) -> impl IntoView {
     let is_touch = crate::viewport::is_touch_primary();
     menu_file.with_value(|file| attachment_menu::open_on_right_click(maybe_menu, &ev, file, is_touch));
   };
-  // Markdown, HTML and PDF files open in the app (#557) unless they are too large.
-  let maybe_document_key = MediaKey::for_file(&file).filter(|_| {
-    is_on_server
-      && PreviewKind::of(&file.media_type, &file.file_name).is_some()
-      && preview::is_within_limit(file.size_bytes)
-  });
+  // Markdown, HTML, PDF and text files open in the app (#557, #821); one above the preview limit
+  // says so there and offers the download.
+  let maybe_document_key = MediaKey::for_file(&file)
+    .filter(|_| is_on_server && PreviewKind::of(&file.media_type, &file.file_name).is_some());
   let show_download = is_on_server
     && !matches!(
       file.transfer,

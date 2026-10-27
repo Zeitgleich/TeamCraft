@@ -1,5 +1,6 @@
-//! Demo pictures and a demo video in `#design`, so the files, albums and the lightbox can be shown
-//! without a server. The bytes are small generated fixtures (`demo-media/`).
+//! Demo pictures, a demo video and text files in `#design`, so the files, albums, the lightbox and
+//! the previews can be shown without a server. The bytes are small generated fixtures
+//! (`demo-media/`).
 
 use teamcraft_client_api::actions::{FileInfo, FileTransfer};
 
@@ -81,8 +82,26 @@ const CLIP: DemoFile = DemoFile {
   maybe_thumbnail: Some(include_bytes!("../demo-media/clip-thumb.png")),
 };
 
+/// A log with levels, terminal colours and a stack trace, for the text viewer (#821). IDs of the
+/// demo files must not start with one another (`demo_bytes`).
+const SERVER_LOG: DemoFile = DemoFile {
+  id: "9000011",
+  name: "server.log",
+  media_type: "text/plain",
+  bytes: include_bytes!("../demo-media/server.log"),
+  maybe_thumbnail: None,
+};
+/// Minified JSON, to format in the text viewer.
+const SETTINGS_JSON: DemoFile = DemoFile {
+  id: "9000012",
+  name: "settings.json",
+  media_type: "application/json",
+  bytes: include_bytes!("../demo-media/settings.json"),
+  maybe_thumbnail: None,
+};
+
 /// Which files go with which message, counted from the newest message of the channel.
-const ATTACHED: [(usize, &[DemoFile]); 8] = [
+const ATTACHED: [(usize, &[DemoFile]); 9] = [
   (0, &[REPORT]),
   (1, &[LAKE, DUNES, PEAKS]),
   (2, &[DIAGRAM]),
@@ -90,6 +109,7 @@ const ATTACHED: [(usize, &[DemoFile]); 8] = [
   (6, &[PHOTO]),
   (3, &[BOUNCE]),
   (5, &[CLIP]),
+  (7, &[SERVER_LOG, SETTINGS_JSON]),
   (8, &[DUNES]),
 ];
 
@@ -127,7 +147,17 @@ pub(super) fn demo_files(conversation: ConversationId, messages: &[Message]) -> 
 /// The full bytes of a demo file, as the lightbox fetches them.
 pub fn demo_bytes(file_id: &str) -> Option<&'static [u8]> {
   [
-    LAKE, DUNES, PEAKS, BOUNCE, CLIP, REPORT, DIAGRAM, LANDSCAPE, PHOTO,
+    LAKE,
+    DUNES,
+    PEAKS,
+    BOUNCE,
+    CLIP,
+    REPORT,
+    DIAGRAM,
+    LANDSCAPE,
+    PHOTO,
+    SERVER_LOG,
+    SETTINGS_JSON,
   ]
   .into_iter()
   .find(|file| file_id.starts_with(file.id))

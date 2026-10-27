@@ -1,12 +1,16 @@
-//! The in-app preview of a Markdown, HTML or PDF attachment (#557). It works from the file the
-//! client core has already downloaded and decrypted (`object_url::fetch_decrypted`); nothing leaves
-//! the client. The file is untrusted, so each kind is shown in a way that can't run its code or
-//! reach the app (see `preview.rs`):
+//! The in-app preview of a Markdown, HTML, PDF or text attachment (#557, #821). It works from the
+//! file the client core has already downloaded and decrypted (`object_url::fetch_decrypted`);
+//! nothing leaves the client. The file is untrusted, so each kind is shown in a way that can't run
+//! its code or reach the app (see `preview.rs`):
 //!
 //! - Markdown: the app's own renderer, a tree of elements.
 //! - HTML: a sandboxed frame with no permissions and its own policy; its links are listed next to
 //!   it and open in the system browser.
 //! - PDF: the vendored PDF.js (`pdf-viewer.mjs`), loaded when the first PDF opens.
+//! - Text, logs and data files: plain text in the text viewer (`text_viewer.rs`).
+//!
+//! A file above the preview limit (a setting, `PreviewLimit`) is not loaded: the preview says how
+//! large it is and offers the download.
 
 use std::rc::Rc;
 
@@ -24,12 +28,14 @@ use wasm_bindgen_futures::JsFuture;
 use crate::components::icons::{Icon, IconName};
 use crate::components::modal::Modal;
 use crate::components::rich_text::RichText;
+use crate::components::text_viewer::text_viewer;
 use crate::i18n::{I18n, use_i18n};
 use crate::lightbox::MediaKey;
 use crate::model::ConversationId;
 use crate::object_url::fetch_decrypted;
 use crate::preview::{self, PreviewKind};
 use crate::reactive::SetIfAlive;
+use crate::settings::PreviewLimit;
 use crate::state::{AppState, use_app_state};
 
 /// The PDF viewer module; the version in the path is the cache key of the vendored PDF.js
@@ -74,6 +80,8 @@ type PageCallback = Closure<dyn Fn(u32)>;
 /// What the preview is showing.
 #[derive(Clone)]
 enum Load {
+  /// Above the preview limit: not loaded at all.
+  TooLarge,
   Loading,
   /// Not downloaded or decrypted (offline, server trouble).
   Unavailable,
@@ -82,8 +90,10 @@ enum Load {
 
 #[derive(Clone)]
 enum Content {
+  /// Markdown and HTML.
   Text(Rc<String>),
-  Pdf(Uint8Array),
+  /// PDF and the text viewer's files, which read the bytes themselves.
+  Bytes(Uint8Array),
 }
 
 /// The preview of one file of a conversation.
@@ -91,16 +101,20 @@ enum Content {
 pub fn FilePreview(conversation: ConversationId, key: MediaKey) -> impl IntoView {
   let state = use_app_state();
   let i18n = use_i18n();
-  let maybe_file = file_of(state, conversation, key);
-  let Some(file) = maybe_file.filter(|file| {
-    PreviewKind::of(&file.media_type, &file.file_name).is_some() && preview::is_within_limit(file.size_bytes)
-  }) else {
+  let maybe_previewed = file_of(state, conversation, key)
+    .and_then(|file| PreviewKind::of(&file.media_type, &file.file_name).map(|kind| (file, kind)));
+  let Some((file, kind)) = maybe_previewed else {
     // Gone (deleted) or not previewable: nothing to show.
     state.close_overlay();
     return ().into_any();
   };
-  let kind = PreviewKind::of(&file.media_type, &file.file_name).unwrap_or(PreviewKind::Markdown);
-  let phase: RwSignal<Load, LocalStorage> = RwSignal::new_local(Load::Loading);
+  let limit = PreviewLimit::load();
+  let is_too_large = !limit.allows(file.size_bytes);
+  let phase: RwSignal<Load, LocalStorage> = RwSignal::new_local(if is_too_large {
+    Load::TooLarge
+  } else {
+    Load::Loading
+  });
   let is_source = RwSignal::new(false);
   let file_id = StoredValue::new(file.file_id.clone());
   let message = key.message;
@@ -111,8 +125,10 @@ pub fn FilePreview(conversation: ConversationId, key: MediaKey) -> impl IntoView
     spawn_local(async move {
       let loaded = fetch_decrypted(conversation, message, file_id, AttachmentPriority::Now).await;
       phase.set_if_alive(match loaded {
-        Ok(bytes) if kind.is_text() => Load::Ready(Content::Text(Rc::new(preview::text_of(&bytes.to_vec())))),
-        Ok(bytes) => Load::Ready(Content::Pdf(bytes)),
+        Ok(bytes) if kind.has_source() => {
+          Load::Ready(Content::Text(Rc::new(preview::text_of(&bytes.to_vec()))))
+        },
+        Ok(bytes) => Load::Ready(Content::Bytes(bytes)),
         Err(error) => {
           tracing::warn!(%error, "a file could not be loaded for its preview");
           Load::Unavailable
@@ -120,18 +136,33 @@ pub fn FilePreview(conversation: ConversationId, key: MediaKey) -> impl IntoView
       });
     });
   };
-  start();
+  if !is_too_large {
+    start();
+  }
 
-  let download = move |_| {
+  let download = Callback::new(move |()| {
     file_id.with_value(|file_id| {
       state.write(|backend| backend.download_attachment(conversation, message, file_id));
     });
-  };
+  });
   let name = file.file_name.clone();
   let size = format_bytes(file.size_bytes);
-  let toggles_source = kind.is_text();
+  let too_large = i18n.t_with(
+    "preview-too-large",
+    &[("size", &size), ("limit", &format_bytes(limit.bytes()))],
+  );
+  let viewer_name = StoredValue::new(name.clone());
+  let toggles_source = kind.has_source();
   let body = move || {
     match phase.get() {
+    Load::TooLarge => view! {
+      <div class="preview-status" role="status">
+        <p class="preview-status-title">{move || i18n.t("preview-too-large-title")}</p>
+        <p>{too_large.clone()}</p>
+        <button class="btn btn-primary" on:click=move |_| download.run(())>{move || i18n.t("preview-download-to-open")}</button>
+      </div>
+    }
+    .into_any(),
     Load::Loading => view! {
       <div class="preview-status" role="status" aria-busy="true"><span class="spinner" aria-hidden="true"></span></div>
     }
@@ -143,7 +174,10 @@ pub fn FilePreview(conversation: ConversationId, key: MediaKey) -> impl IntoView
       </div>
     }
     .into_any(),
-    Load::Ready(Content::Pdf(bytes)) => pdf_pane(i18n, bytes),
+    Load::Ready(Content::Bytes(bytes)) => match kind {
+      PreviewKind::Text(format) => text_viewer(state, i18n, bytes, format, viewer_name.get_value(), download),
+      _ => pdf_pane(i18n, bytes),
+    },
     Load::Ready(Content::Text(text)) => match (kind, is_source.get()) {
       (_, true) => view! { <pre class="preview-source" translate="no">{text.as_str().to_owned()}</pre> }.into_any(),
       (PreviewKind::Html, false) => html_pane(i18n, &text),
@@ -151,9 +185,15 @@ pub fn FilePreview(conversation: ConversationId, key: MediaKey) -> impl IntoView
     },
   }
   };
+  // Logs and data are wide: the text viewer gets more room.
+  let class = if matches!(kind, PreviewKind::Text(_)) {
+    "file-preview is-text"
+  } else {
+    "file-preview"
+  };
 
   view! {
-    <Modal labelled_by="file-preview-title" class="file-preview">
+    <Modal labelled_by="file-preview-title" class=class>
       <header class="modal-head preview-head">
         <h2 id="file-preview-title" class="preview-name" translate="no" title=name.clone()>{name.clone()}</h2>
         <span class="preview-size">{size}</span>
@@ -163,7 +203,7 @@ pub fn FilePreview(conversation: ConversationId, key: MediaKey) -> impl IntoView
               {move || if is_source.get() { i18n.t("preview-show-formatted") } else { i18n.t("preview-show-source") }}
             </button>
           })}
-          <button class="icon-btn" aria-label=move || i18n.t("file-download") data-tip=move || i18n.t("file-download") on:click=download>
+          <button class="icon-btn" aria-label=move || i18n.t("file-download") data-tip=move || i18n.t("file-download") on:click=move |_| download.run(())>
             <Icon name=IconName::Download />
           </button>
           <button class="icon-btn" aria-label=move || i18n.t("close") data-autofocus on:click=move |_| state.close_overlay()>
