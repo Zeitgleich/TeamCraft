@@ -594,6 +594,64 @@ async fn admin_self_join_follows_the_signed_policy() {
   }
 }
 
+/// #775: under `visible` with the default policy (full history for roster members) an admin's
+/// self-join signed full history, which every committer refuses (a self-add may only ask for the
+/// history from the join on, e2ee.md §4.7): the admin stayed out for good.
+#[tokio::test]
+async fn an_admin_joins_by_themselves_under_the_default_full_history() {
+  let server = FakeServer::new();
+  let mut alice = Peer::enroll(&server, "Alice").await;
+  let mut bob = Peer::enroll(&server, "Bob").await;
+  let mut carol = Peer::enroll(&server, "Carol").await;
+  let (alice_id, bob_id) = (alice.client.user_id(), bob.client.user_id());
+  alice
+    .client
+    .publish_roster(&[(alice_id, RosterRole::Owner), (bob_id, RosterRole::Admin)])
+    .await
+    .unwrap();
+  alice
+    .client
+    .publish_policy(WorkspacePolicy {
+      admin_self_join: AdminSelfJoin::Visible,
+      history_default: HistoryPolicy::Full,
+      ..WorkspacePolicy::default()
+    })
+    .await
+    .unwrap();
+  server.set_admin(bob_id);
+  settle(&mut [&mut alice, &mut bob, &mut carol]).await;
+  let channel = carol
+    .client
+    .create_channel(carol.space().await, "private")
+    .await
+    .unwrap();
+  carol
+    .client
+    .send_text(channel, None, "before the admin came")
+    .await
+    .unwrap();
+  settle(&mut [&mut alice, &mut bob, &mut carol]).await;
+
+  bob.client.admin_add_member(channel, bob_id).await.unwrap();
+  settle(&mut [&mut alice, &mut bob, &mut carol]).await;
+  assert!(
+    bob.client.has_group(channel).unwrap(),
+    "the self-join went through"
+  );
+  carol
+    .client
+    .send_text(channel, None, "after the admin came")
+    .await
+    .unwrap();
+  settle(&mut [&mut alice, &mut bob, &mut carol]).await;
+  bob.client.load_older_messages(channel).await.unwrap();
+  assert_eq!(
+    bob.texts(channel),
+    vec!["after the admin came"],
+    "a self-join reads from the join on"
+  );
+}
+
 /// Issue #776 (admin.md §2.4): under `owner_approval` the admin asks, a channel owner's client
 /// adds them with its own commit and tells everybody; the server's request is only a hint.
 mod owner_approval {
