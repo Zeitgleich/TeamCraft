@@ -51,7 +51,7 @@ use teamcraft_media::effects::{BackgroundImage, EffectHandle};
 use teamcraft_media::ringtone;
 use teamcraft_media::system_audio::SystemAudioCapture;
 use teamcraft_media::video_capture::{CameraInfo, CaptureError};
-use teamcraft_media::video_pipeline::{VideoSendConfig, VideoStartError, preferred_encoders};
+use teamcraft_media::video_pipeline::{BlackReport, VideoSendConfig, VideoStartError, preferred_encoders};
 use teamcraft_proto::{
   AudioCodec, ConversationId, DeviceId, GatewayEvent, MediaCapabilities, MediaStreamId, ScreenContentMode,
   VideoCodec, VideoTrackKind,
@@ -1001,6 +1001,7 @@ async fn run_media(
   let mut roster = CallRoster::new(own_device);
   let mut video_starts = VideoStarts::default();
   let (failed, mut failed_rx) = mpsc::unbounded_channel::<VideoStartFailure>();
+  let (black, mut black_rx) = mpsc::unbounded_channel::<VideoBlack>();
   loop {
     tokio::select! {
       maybe_control = controls.recv() => match maybe_control {
@@ -1014,16 +1015,25 @@ async fn run_media(
         Some(Control::StartVideo(config, done)) => {
           let kind = config.kind.clone();
           let result = match call.start_video_checked(config).await {
-            Ok(first_picture) => {
+            Ok(mut first_picture) => {
               // The answer doesn't wait for the first picture (up to seconds): other call actions
-              // queue behind this one. The check reports later (`failed_rx`).
+              // queue behind this one. The check reports later (`failed_rx`), and so does a track
+              // that then shows nothing but black (`black_rx`, issue #683).
               let start = video_starts.started(&kind);
               set_video_flag(&state, &kind, true);
-              let failed = failed.clone();
+              let (failed, black) = (failed.clone(), black.clone());
+              let maybe_black_pictures = first_picture.take_black_pictures();
               tokio::spawn(async move {
                 if let Err(error) = first_picture.wait().await {
                   // The call ended meanwhile: nobody to tell.
                   let _ = failed.send(VideoStartFailure { start, error });
+                  return;
+                }
+                let Some(black_pictures) = maybe_black_pictures else {
+                  return;
+                };
+                if let Some(report) = black_pictures.wait().await {
+                  let _ = black.send(VideoBlack { start, report });
                 }
               });
               Ok(())
@@ -1073,6 +1083,14 @@ async fn run_media(
         set_video_flag(&state, &kind, false);
         report_failure(video::start_failure_wire(&kind, &NativeCallError::from(failure.error)));
         notify();
+      },
+      Some(black) = black_rx.recv() => {
+        // The track goes on (black may be what is shared); the user hears why it may be black.
+        if video_starts.is_current(&black.start) {
+          let kind = &black.start.kind;
+          tracing::warn!(?kind, frames = black.report.frames, "own video shows nothing but black");
+          report_failure(video::black_pictures_wire(kind, black.report));
+        }
       },
       maybe_event = call.next_event() => match maybe_event {
         Some(CallEngineEvent::VideoFrame(frame)) => {
@@ -1131,6 +1149,12 @@ struct VideoStart {
 struct VideoStartFailure {
   start: VideoStart,
   error: VideoStartError,
+}
+
+/// A running track that showed nothing but black for a while.
+struct VideoBlack {
+  start: VideoStart,
+  report: BlackReport,
 }
 
 impl VideoStarts {
@@ -1447,6 +1471,30 @@ mod tests {
       tokio::time::timeout(PROMPT, media.task).await.unwrap().unwrap();
     }
 
+    /// Issue #683: a share that macOS blanks (the permission not applied yet) tells the user why,
+    /// and stays on.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_black_screen_share_says_why_and_stays_on() {
+      let mut media = start_media().await;
+      let answer = start_video(&media, VideoTrackKind::Screen, Box::new(BlackCapture::default()));
+      assert_eq!(
+        tokio::time::timeout(PROMPT, answer).await.unwrap().unwrap(),
+        Ok(())
+      );
+      let wait = teamcraft_media::video_pipeline::BLACK_PICTURES_REPORT_AFTER + PROMPT;
+      let reported = tokio::time::timeout(wait, media.reported.recv())
+        .await
+        .unwrap()
+        .unwrap();
+      assert_eq!(
+        ActionFailure::from_wire(&reported).kind,
+        FailureKind::Call(CallFailure::ScreenBlack)
+      );
+      assert!(media.flags().1, "the share stays on");
+      media.controls.send(Control::Leave).unwrap();
+      tokio::time::timeout(PROMPT, media.task).await.unwrap().unwrap();
+    }
+
     /// A running media task and what it shares.
     struct Media {
       controls: mpsc::UnboundedSender<Control>,
@@ -1482,6 +1530,32 @@ mod tests {
       }
 
       fn stop(&mut self) {}
+    }
+
+    /// A screen that shows one black picture and then stands still.
+    #[derive(Default)]
+    struct BlackCapture {
+      maybe_frames: Option<FrameSender>,
+    }
+
+    impl VideoCapture for BlackCapture {
+      fn format(&self) -> CaptureFormat {
+        FORMAT
+      }
+
+      fn start(&mut self, frames: FrameSender) -> Result<(), CaptureError> {
+        let resolution = FORMAT.resolution;
+        let pixels = usize::from(resolution.width) * usize::from(resolution.height);
+        let mut data = vec![16; pixels];
+        data.resize(pixels * 3 / 2, 128);
+        frames.send(teamcraft_media::video::VideoFrame::new(resolution, 0, data).unwrap());
+        self.maybe_frames = Some(frames);
+        Ok(())
+      }
+
+      fn stop(&mut self) {
+        self.maybe_frames = None;
+      }
     }
 
     async fn start_media() -> Media {

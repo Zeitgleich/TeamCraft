@@ -30,7 +30,7 @@ use teamcraft_media::video::{VideoResolution, fit_within, screen_limits, simulca
 use teamcraft_media::video_capture::{CameraInfo, CaptureError, CaptureFormat, VideoCapture};
 use teamcraft_media::video_codec::OpenH264Decoder;
 use teamcraft_media::video_jpeg::JpegTranscoder;
-use teamcraft_media::video_pipeline::FrameFilter;
+use teamcraft_media::video_pipeline::{BlackReport, FrameFilter};
 use teamcraft_proto::{MediaStreamId, ScreenContentMode, VideoCodec, VideoLayerInfo, VideoTrackKind};
 use tracing::{debug, info, warn};
 
@@ -114,6 +114,18 @@ pub(super) fn start_failure_wire(kind: &VideoTrackKind, error: &NativeCallError)
     NativeCallError::Capture(capture) => camera_failure_wire(capture),
     other => other.to_string(),
   }
+}
+
+/// An own track that sends nothing but black (issue #683), as the UI reads it: a hint, the track
+/// stays on.
+pub(super) fn black_pictures_wire(kind: &VideoTrackKind, report: BlackReport) -> String {
+  let failure = if *kind == VideoTrackKind::Screen {
+    CallFailure::ScreenBlack
+  } else {
+    CallFailure::CameraBlack
+  };
+  let detail = format!("{} black pictures in a row", report.frames);
+  ActionFailure::new(FailureKind::Call(failure), detail).to_wire()
 }
 
 /// A screen capture that couldn't start, as the UI reads it.
@@ -594,6 +606,21 @@ mod tests {
     assert_eq!(
       start_failure_wire(&VideoTrackKind::Camera, &NativeCallError::TaskEnded),
       NativeCallError::TaskEnded.to_string()
+    );
+  }
+
+  /// Issue #683: a track that sends only black tells the user why it may be black, per kind.
+  #[test]
+  fn black_video_reaches_the_user_per_kind() {
+    let report = BlackReport { frames: 90 };
+    let screen = ActionFailure::from_wire(&black_pictures_wire(&VideoTrackKind::Screen, report));
+    assert_eq!(screen.kind, FailureKind::Call(CallFailure::ScreenBlack));
+    assert_eq!(screen.detail, "90 black pictures in a row");
+    let camera = ActionFailure::from_wire(&black_pictures_wire(&VideoTrackKind::Camera, report));
+    assert_eq!(camera.kind, FailureKind::Call(CallFailure::CameraBlack));
+    assert!(
+      CallFailure::CameraBlack.is_camera_failure(),
+      "offers another camera"
     );
   }
 

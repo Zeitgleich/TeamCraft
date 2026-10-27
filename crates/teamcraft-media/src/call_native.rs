@@ -1416,6 +1416,7 @@ impl VideoState {
         let progress = sender.progress();
         stats.frames_captured += progress.frames_captured;
         stats.pictures_encoded += progress.pictures_encoded;
+        stats.frames_black += progress.frames_black;
       }
     }
     totals
@@ -1509,6 +1510,7 @@ impl VideoState {
       if let Some(stats) = self.counts.of_mut(&kind) {
         stats.frames_captured += progress.frames_captured;
         stats.pictures_encoded += progress.pictures_encoded;
+        stats.frames_black += progress.frames_black;
       }
     }
   }
