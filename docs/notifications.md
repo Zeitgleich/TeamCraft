@@ -397,6 +397,33 @@ top-level message: the worker sets the read position with the stored push sessio
 language the page last left next to the database name; with an expired session the click opens the
 conversation instead. Join on meeting reminders needs a server push for reminders and is not built.
 
+**Message sounds (#800).** "Sound for new messages" (`message_sound`) is the system's notification
+sound (the default, as before), none, one of the app's own sounds or the user's own file. The app's
+sounds (Chime, Ping, Pop, Marimba, Knock, Keys and a playful "Uh-oh!") are synthesized like the
+ringtone (`teamcraft_media::message_sounds`; the "uh-oh" is two sung vowels by formant synthesis), so
+there are no sound files and nothing to license; no sound is copied from another product. A sound
+plays for the message notifications the rules above let through, so a muted conversation, the level
+and do-not-disturb keep it quiet, as does the desktop's own do-not-disturb where the OS tells (GNOME,
+KDE; macOS Focus and Windows' do-not-disturb aren't readable, as for the ringtone); not during a
+call. A burst of messages plays one sound (at most one every 2 s). With the app's sound or none, the
+notification itself is silent (macOS without a sound, Windows `<audio silent>`, freedesktop
+`suppress-sound`, the browser's `silent`), except in a browser tab nobody has touched yet: it can't
+play sound¹, so its notifications keep the system's. The settings play a sound when it is chosen and
+with Play.
+
+The own file is picked in the shell's file dialog (desktop) or the browser's file picker and refused
+unless it decodes (desktop: Symphonia, for MP3, Ogg Vorbis, WAV and FLAC; browser:
+`decodeAudioData`). Limits are settings (`own_sound_limits`): at most 1 MiB, and at most 5 s are
+played (2, 5 or 10 s; longer sounds fade out at the cut). The file stays on that device: in the app's
+data directory (`sounds/`) or in IndexedDB (`teamcraft-sounds`); it is never uploaded or synced, so
+the server never sees it and other devices keep their own choice. Each sound is made or decoded once
+per run and kept in memory, and nothing runs between messages (the desktop plays on a thread that
+ends with the sound, the page closes its `AudioContext`). A missing or broken file never keeps a sound
+from playing: the default sound (Chime) plays instead and the settings say why. The choice is a
+device setting like the desktop level and the ringtone; one value for every kind of message for now,
+and a field of the same type per kind (direct messages, mentions, channels) can follow. On the phones
+the system settings choose the sound (Android channels).
+
 **Calls (desktop).** A ringing call follows the rules of a direct message from the caller: a muted
 conversation, the level "nothing" and do-not-disturb (except people on the allow list) keep it to the
 in-app card. Otherwise the ringtone plays (setting `plays_ringtone`, default on; a synthesized
