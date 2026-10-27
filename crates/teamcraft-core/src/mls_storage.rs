@@ -14,15 +14,18 @@
 //! catch-up that joined 300 groups wrote it 600 times, about 0.8 GB (docs/performance.md).
 //!
 //! [`SavedMlsStorage`] remembers what the store holds, so a save finds the changes without reading
-//! the store. When the store may have lost writes it accepted (a group of writes rolled back,
-//! [`LocalStore::write_tally`]) or a save failed, the next save writes every entry again and deletes
-//! every key that may still be on disk, so memory and disk agree again as they did with one record.
+//! the store. When the disk may hold something else ([`LocalStore::write_tally`]: a group of writes
+//! the disk rolled back, a commit of another process) or a save failed, the next save writes every
+//! entry again and deletes every key that may still be on disk, the deletes the disk lost included
+//! ([`LocalStore::lost_deletes`]): memory and disk agree again, as they did with one record. A
+//! client loaded on a store that lost writes (reopened in the same process) starts that way too.
 //!
-//! Versions before 1.0.9 kept the storage as one record ([`LEGACY_KEY`]); [`load_mls_storage`] moves
-//! it to entries. The entries and the removal of the old record are one group of writes, the old
-//! record removed last: as long as it is on disk it is what a start reads, and entries an earlier,
-//! interrupted try left are replaced. The store layouts carry a version for the change (SQLite layout
-//! 3, IndexedDB version 2), so an older version refuses the store instead of reading no MLS state.
+//! Versions before 1.0.9 kept the storage as one record ([`LEGACY_KEY`]). [`load_mls_storage`] moves
+//! it to entries in one group of writes and leaves [`MOVED_MARKER`] in its place, which every
+//! earlier version fails to read (instead of reading no MLS state, losing every group, and later
+//! saving a near-empty record). The store layouts carry a version for the change as well (SQLite
+//! layout 3, IndexedDB version 2), so versions that check it refuse the store before that. Entries
+//! next to an old record of another kind are never dropped: that record is set aside.
 
 use std::collections::{BTreeSet, HashMap};
 use std::sync::{Mutex, MutexGuard};
@@ -38,9 +41,15 @@ use crate::store::{LocalStore, Table, WriteTally, write_group};
 
 /// The one record of the whole storage that versions before 1.0.9 wrote.
 const LEGACY_KEY: &str = "provider";
+/// What [`LEGACY_KEY`] holds once the state is stored per entry: a length prefix far beyond the
+/// record, so every version before 1.0.9 (which reads length-prefixed keys and values from it)
+/// reports the store as damaged instead of reading no MLS state.
+const MOVED_MARKER: &[u8] = b"\xff\xff\xff\xffMLS state stored per entry since TeamCraft 1.0.9 (#424)";
 /// Records of entries are keyed `entry/` and the storage key in unpadded base64url (which has no
 /// `/`, so no entry is keyed [`LEGACY_KEY`]).
 const ENTRY_PREFIX: &str = "entry/";
+/// Where an old record found next to entries is kept (numbered), never read again.
+const SET_ASIDE_PREFIX: &str = "set_aside/";
 
 /// The provider storage's map, as openmls keeps it.
 type StorageMap = HashMap<Vec<u8>, Vec<u8>>;
@@ -56,10 +65,7 @@ pub struct SavedMlsStorage {
 struct Saved {
   /// The entries the store holds, by storage key.
   entries: Entries,
-  /// Keys deleted by saves whose group of writes the store may still roll back (only on stores
-  /// that can lose writes). A save after a lost write deletes them again.
-  unconfirmed_deletes: BTreeSet<Vec<u8>>,
-  /// The store's tally inside the last save's group of writes.
+  /// The store's tally at the last save (or the load).
   maybe_tally: Option<WriteTally>,
   /// The store may not hold [`Self::entries`]: the next save writes everything.
   is_rewrite_due: bool,
@@ -71,16 +77,32 @@ struct Saved {
 struct Changes<'a> {
   puts: Vec<&'a [u8]>,
   deletes: Vec<Vec<u8>>,
-  /// Everything is written (a rewrite); `has_legacy`: the record of an older version is there.
+  /// Everything is written (a rewrite); `old_record`: what the store holds under [`LEGACY_KEY`].
   is_rewrite: bool,
-  has_legacy: bool,
+  old_record: OldRecord,
+}
+
+/// What a store holds under [`LEGACY_KEY`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum OldRecord {
+  Missing,
+  /// [`MOVED_MARKER`].
+  Marker,
+  /// The whole storage as a version before 1.0.9 wrote it.
+  Snapshot,
+}
+
+/// The MLS records of a store as listed.
+struct Listed {
+  entries: Entries,
+  maybe_old_record: Option<Zeroizing<Vec<u8>>>,
+  set_aside: usize,
 }
 
 impl Default for SavedMlsStorage {
   fn default() -> Self {
     Self::new(Saved {
       entries: HashMap::new(),
-      unconfirmed_deletes: BTreeSet::new(),
       maybe_tally: None,
       is_rewrite_due: true,
       written_bytes: 0,
@@ -109,37 +131,40 @@ impl SavedMlsStorage {
 /// Loads the provider storage, moving the record of a version before 1.0.9 to entries first.
 /// The returned [`SavedMlsStorage`] knows what the store holds.
 pub fn load_mls_storage(store: &impl LocalStore) -> Result<(OpenMlsRustCrypto, SavedMlsStorage), CoreError> {
-  let mut entries = Entries::new();
-  let mut maybe_legacy = None;
-  for (key, value) in store.list(Table::MlsStorage)? {
-    let value = Zeroizing::new(value);
-    if key == LEGACY_KEY {
-      maybe_legacy = Some(value);
-    } else if let Some(storage_key) = parse_entry_key(&key) {
-      entries.insert(storage_key, value);
-    } else {
-      // Not written by this version; left alone.
-      tracing::warn!("skipping an MLS storage record of an unknown kind");
-    }
-  }
-  let mut unconfirmed_deletes = BTreeSet::new();
-  if let Some(legacy) = maybe_legacy {
-    let (migrated, stale) = migrate(store, &legacy, &entries)?;
-    if store.write_tally().is_some() {
-      unconfirmed_deletes.extend(stale);
-    }
-    entries = migrated;
+  let Listed {
+    mut entries,
+    maybe_old_record,
+    set_aside,
+  } = list_records(store)?;
+  match maybe_old_record {
+    Some(old) if old.as_slice() == MOVED_MARKER => {},
+    Some(old) if entries.is_empty() => entries = migrate(store, &old)?,
+    // Only an older version writing next to moved entries gets here (all stores write a group
+    // whole, the move included): the entries are the device's state, the record is kept apart.
+    Some(old) => {
+      tracing::warn!("an MLS record of an older version was found next to the entries; set aside");
+      write_group(store, || -> Result<(), CoreError> {
+        store.put(Table::MlsStorage, &set_aside_key(set_aside), &old)?;
+        store.put(Table::MlsStorage, LEGACY_KEY, MOVED_MARKER)?;
+        Ok(())
+      })?;
+    },
+    // Moved before the marker existed, or a store this version set up.
+    None => store.put(Table::MlsStorage, LEGACY_KEY, MOVED_MARKER)?,
   }
   let provider = OpenMlsRustCrypto::default();
   *provider.storage().values.write().map_err(|_| poisoned())? = entries
     .iter()
     .map(|(key, value)| (key.clone(), value.to_vec()))
     .collect();
+  let maybe_tally = store.write_tally();
+  // The store already lost writes (a client reopened in the same process) or another process
+  // wrote: what it lists may not be what the disk holds.
+  let is_rewrite_due = maybe_tally.is_some_and(|tally| tally.lost > 0 || tally.foreign > 0);
   let saved = SavedMlsStorage::new(Saved {
     entries,
-    unconfirmed_deletes,
-    maybe_tally: store.write_tally(),
-    is_rewrite_due: false,
+    maybe_tally,
+    is_rewrite_due,
     written_bytes: 0,
   });
   Ok((provider, saved))
@@ -161,8 +186,6 @@ pub fn save_mls_storage(
     return Ok(());
   }
   let written = write_group(store, || -> Result<_, CoreError> {
-    // Inside the group: a commit the store counts from here on ends this group too.
-    let tally = store.write_tally();
     let mut bytes = 0u64;
     for key in &changes.puts {
       let Some(value) = values.get(*key) else {
@@ -175,15 +198,15 @@ pub fn save_mls_storage(
     for key in &changes.deletes {
       store.delete(Table::MlsStorage, &entry_key(key))?;
     }
-    if changes.has_legacy {
-      // A store of a version before 1.0.9 this device was set up on again.
-      store.delete(Table::MlsStorage, LEGACY_KEY)?;
+    if changes.is_rewrite && changes.old_record != OldRecord::Marker {
+      // A store set up again (an old record of any version goes) or one that lost the marker.
+      store.put(Table::MlsStorage, LEGACY_KEY, MOVED_MARKER)?;
     }
-    Ok((tally, bytes))
+    Ok(bytes)
   });
   match written {
-    Ok((tally, bytes)) => {
-      state.saved(&changes, &values, tally);
+    Ok(bytes) => {
+      state.saved(&changes, &values, store.write_tally());
       state.written_bytes = state.written_bytes.saturating_add(bytes);
       drop(state);
       // Replaced and deleted entries (old epoch secrets, spent key package private keys) sit in
@@ -192,7 +215,7 @@ pub fn save_mls_storage(
       Ok(())
     },
     Err(error) => {
-      state.failed(changes.deletes);
+      state.failed();
       Err(error)
     },
   }
@@ -209,19 +232,16 @@ pub fn mls_storage_len(provider: &OpenMlsRustCrypto) -> usize {
 }
 
 impl Saved {
-  /// Takes in what became of the store's groups of writes since the last save: a lost one means
-  /// the store may not hold what this remembers; a committed one confirms the earlier deletes.
+  /// A moved tally since the last save means the disk may hold something else: writes it lost,
+  /// or another process's commits.
   fn note_tally(&mut self, maybe_now: Option<WriteTally>) {
-    match (self.maybe_tally, maybe_now) {
-      (Some(before), Some(now)) if now.lost != before.lost => {
-        tracing::warn!("the local store lost writes; the MLS state is written again in full");
-        self.is_rewrite_due = true;
-      },
-      // A commit needs every open group ended, so the last save's group is on disk.
-      (Some(before), Some(now)) if now.committed != before.committed => self.unconfirmed_deletes.clear(),
-      // The store keeps every write it accepted.
-      (_, None) => self.unconfirmed_deletes.clear(),
-      _ => {},
+    if maybe_now != self.maybe_tally {
+      if self.maybe_tally.is_some() {
+        tracing::warn!(
+          "the local store lost writes or another process wrote; the MLS state is written in full"
+        );
+      }
+      self.is_rewrite_due = true;
     }
   }
 
@@ -249,23 +269,25 @@ impl Saved {
         puts,
         deletes,
         is_rewrite: false,
-        has_legacy: false,
+        old_record: OldRecord::Marker,
       });
     }
     // Every key that may be on disk: what the store lists (the disk itself for SQLCipher), what
-    // this remembers, and deletes a lost group may have undone (a sealed store's cache doesn't
-    // list those).
-    let mut maybe_stored: BTreeSet<Vec<u8>> = self.unconfirmed_deletes.clone();
-    maybe_stored.extend(self.entries.keys().cloned());
-    let mut has_legacy = false;
-    for (key, value) in store.list(Table::MlsStorage)? {
-      drop(Zeroizing::new(value));
-      if key == LEGACY_KEY {
-        has_legacy = true;
-      } else if let Some(storage_key) = parse_entry_key(&key) {
-        maybe_stored.insert(storage_key);
-      }
-    }
+    // this remembers, and deletes the disk lost (a sealed store's cache doesn't list those).
+    let listed = list_records(store)?;
+    let mut maybe_stored: BTreeSet<Vec<u8>> = self.entries.keys().cloned().collect();
+    maybe_stored.extend(listed.entries.into_keys());
+    maybe_stored.extend(
+      store
+        .lost_deletes(Table::MlsStorage)
+        .iter()
+        .filter_map(|key| parse_entry_key(key)),
+    );
+    let old_record = match listed.maybe_old_record {
+      None => OldRecord::Missing,
+      Some(old) if old.as_slice() == MOVED_MARKER => OldRecord::Marker,
+      Some(_) => OldRecord::Snapshot,
+    };
     Ok(Changes {
       puts: values.keys().map(Vec::as_slice).collect(),
       deletes: maybe_stored
@@ -273,12 +295,12 @@ impl Saved {
         .filter(|key| !values.contains_key(key))
         .collect(),
       is_rewrite: true,
-      has_legacy,
+      old_record,
     })
   }
 
-  /// The save's group of writes went through; an outer group may still roll it back, which
-  /// [`Self::note_tally`] finds out.
+  /// The save's group of writes went through; an outer group may still roll it back, which the
+  /// store's tally tells the next save.
   fn saved(&mut self, changes: &Changes<'_>, values: &StorageMap, maybe_tally: Option<WriteTally>) {
     if changes.is_rewrite {
       self.entries.clear();
@@ -291,43 +313,50 @@ impl Saved {
     for key in &changes.deletes {
       self.entries.remove(key);
     }
-    if maybe_tally.is_some() {
-      self.unconfirmed_deletes.extend(changes.deletes.iter().cloned());
-    }
     self.maybe_tally = maybe_tally;
     self.is_rewrite_due = false;
   }
 
-  /// The save failed: what reached the store is unknown.
-  fn failed(&mut self, deletes: Vec<Vec<u8>>) {
-    self.unconfirmed_deletes.extend(deletes);
+  /// The save failed: what reached the store is unknown, so the next save writes everything, on
+  /// any store (one without a tally too).
+  fn failed(&mut self) {
     self.is_rewrite_due = true;
   }
 }
 
-/// Moves the record of a version before 1.0.9 to entries (see the module docs). `found` are
-/// entries already in the store (left by an interrupted earlier try): the old record wins. Returns
-/// the entries and the keys of `found` it deleted.
-fn migrate(
-  store: &impl LocalStore,
-  legacy: &[u8],
-  found: &Entries,
-) -> Result<(Entries, Vec<Vec<u8>>), CoreError> {
+/// The MLS records of `store`: entries, the record under [`LEGACY_KEY`], and how many were set
+/// aside. Records of other kinds (a newer version's) are left alone.
+fn list_records(store: &impl LocalStore) -> Result<Listed, CoreError> {
+  let mut listed = Listed {
+    entries: Entries::new(),
+    maybe_old_record: None,
+    set_aside: 0,
+  };
+  for (key, value) in store.list(Table::MlsStorage)? {
+    let value = Zeroizing::new(value);
+    if key == LEGACY_KEY {
+      listed.maybe_old_record = Some(value);
+    } else if let Some(storage_key) = parse_entry_key(&key) {
+      listed.entries.insert(storage_key, value);
+    } else if key.starts_with(SET_ASIDE_PREFIX) {
+      listed.set_aside += 1;
+    } else {
+      tracing::warn!("skipping an MLS storage record of an unknown kind");
+    }
+  }
+  Ok(listed)
+}
+
+/// Moves the record of a version before 1.0.9 to entries (see the module docs) and returns them.
+/// One group of writes: the entries, then [`MOVED_MARKER`] in the old record's place.
+fn migrate(store: &impl LocalStore, legacy: &[u8]) -> Result<Entries, CoreError> {
   let entries = decode_legacy(legacy)?;
-  let stale: Vec<Vec<u8>> = found
-    .keys()
-    .filter(|key| !entries.contains_key(key.as_slice()))
-    .cloned()
-    .collect();
   write_group(store, || -> Result<(), CoreError> {
     for (key, value) in &entries {
       store.put(Table::MlsStorage, &entry_key(key), value)?;
     }
-    for key in &stale {
-      store.delete(Table::MlsStorage, &entry_key(key))?;
-    }
     // Last: until the entries are on disk, the old record is what a start reads.
-    store.delete(Table::MlsStorage, LEGACY_KEY)?;
+    store.put(Table::MlsStorage, LEGACY_KEY, MOVED_MARKER)?;
     Ok(())
   })?;
   // The old record's bytes go from the free pages and the log too.
@@ -336,7 +365,7 @@ fn migrate(
     entries = entries.len(),
     "moved the MLS state from one record to one record per entry"
   );
-  Ok((entries, stale))
+  Ok(entries)
 }
 
 /// The entries of the one record versions before 1.0.9 wrote: length-prefixed keys and values.
@@ -368,12 +397,17 @@ fn parse_entry_key(key: &str) -> Option<Vec<u8>> {
   URL_SAFE_NO_PAD.decode(key.strip_prefix(ENTRY_PREFIX)?).ok()
 }
 
+fn set_aside_key(index: usize) -> String {
+  format!("{SET_ASIDE_PREFIX}{LEGACY_KEY}-{}", index + 1)
+}
+
 fn poisoned() -> CoreError {
   CoreError::Corrupt("MLS storage lock poisoned".into())
 }
 
 #[cfg(test)]
 mod tests {
+  use std::collections::BTreeSet;
   use std::sync::Mutex;
 
   use teamcraft_proto::{ClientMessageId, ConversationId, MessageId};
@@ -390,6 +424,7 @@ mod tests {
     }
     assert_eq!(parse_entry_key(LEGACY_KEY), None);
     assert_eq!(parse_entry_key("entry/not base64!"), None);
+    assert_eq!(parse_entry_key(&set_aside_key(0)), None);
   }
 
   #[test]
@@ -437,13 +472,13 @@ mod tests {
 
     save_mls_storage(&store, &provider, &SavedMlsStorage::default()).unwrap();
 
-    let keys: Vec<String> = store
-      .list(Table::MlsStorage)
-      .unwrap()
-      .into_iter()
-      .map(|(key, _)| key)
-      .collect();
-    assert_eq!(keys, [entry_key(b"new")]);
+    assert_eq!(
+      store.list(Table::MlsStorage).unwrap(),
+      [
+        (entry_key(b"new"), b"z".to_vec()),
+        (LEGACY_KEY.to_string(), MOVED_MARKER.to_vec())
+      ]
+    );
   }
 
   mod migration {
@@ -465,11 +500,15 @@ mod tests {
 
       assert_eq!(entries_of(&provider), [entry(b"a", b"1"), entry(b"b", b"2")]);
       assert_eq!(durable_entries(&store), entries_of(&provider));
-      assert_eq!(store.durable.get(Table::MlsStorage, LEGACY_KEY).unwrap(), None);
+      assert_eq!(
+        store.durable.get(Table::MlsStorage, LEGACY_KEY).unwrap(),
+        Some(MOVED_MARKER.to_vec()),
+        "the marker in the old record's place"
+      );
       assert_eq!(
         store.groups(),
         1,
-        "entries and the old record's removal are one group"
+        "entries and the old record's replacement are one group"
       );
       // Saved as it was moved: nothing is written again.
       store.take_counts();
@@ -490,13 +529,79 @@ mod tests {
 
       assert_eq!(entries_of(&provider), [entry(b"a", b"1")]);
       assert_eq!(store.take_counts(), (0, 0));
+      assert_eq!(store.marker_writes(), 1);
     }
 
-    /// Entries next to the old record: a try that didn't finish on a store whose groups aren't
-    /// atomic. The old record still decides.
+    /// Issue #424 review, H1: every version before 1.0.9 reads the old record as length-prefixed
+    /// keys and values (this module's `decode_legacy` is that reader); the marker makes it fail
+    /// instead of reading no MLS state.
     #[test]
-    fn an_unfinished_move_is_done_again_from_the_old_record() {
+    fn every_older_version_fails_to_read_the_marker() {
+      assert!(matches!(decode_legacy(MOVED_MARKER), Err(CoreError::Corrupt(_))));
+    }
+
+    /// A store this version set up, or moved before the marker existed, gets the marker on load.
+    #[test]
+    fn a_store_without_the_marker_gets_it() {
+      let store = MemoryStore::new();
+      store.put(Table::MlsStorage, &entry_key(b"a"), b"1").unwrap();
+
+      let (provider, _) = load_mls_storage(&store).unwrap();
+
+      assert_eq!(entries_of(&provider), [entry(b"a", b"1")]);
+      assert_eq!(
+        store.get(Table::MlsStorage, LEGACY_KEY).unwrap(),
+        Some(MOVED_MARKER.to_vec())
+      );
+    }
+
+    /// Issue #424 review, H1: an old record next to entries can only come from an older version
+    /// writing after the move (before the marker existed). The entries are the device's groups:
+    /// they stay, the record is set aside, nothing is deleted.
+    #[test]
+    fn entries_next_to_an_old_record_stay_and_the_record_is_set_aside() {
       let store = FlakyStore::default();
+      store
+        .put(Table::MlsStorage, &entry_key(b"group"), b"epoch 7")
+        .unwrap();
+      let written_by_older = legacy(&[(b"key package", b"new")]);
+      store
+        .put(Table::MlsStorage, LEGACY_KEY, &written_by_older)
+        .unwrap();
+      store.take_counts();
+
+      let (provider, _) = load_mls_storage(&store).unwrap();
+
+      assert_eq!(entries_of(&provider), [entry(b"group", b"epoch 7")]);
+      assert_eq!(store.take_counts(), (0, 0), "no entry written or deleted");
+      assert_eq!(
+        store.durable.get(Table::MlsStorage, &set_aside_key(0)).unwrap(),
+        Some(written_by_older)
+      );
+      assert_eq!(
+        store.durable.get(Table::MlsStorage, LEGACY_KEY).unwrap(),
+        Some(MOVED_MARKER.to_vec())
+      );
+      // A second one is set aside next to the first.
+      store
+        .put(Table::MlsStorage, LEGACY_KEY, &legacy(&[(b"other", b"x")]))
+        .unwrap();
+      load_mls_storage(&store).unwrap();
+      assert!(
+        store
+          .durable
+          .get(Table::MlsStorage, &set_aside_key(1))
+          .unwrap()
+          .is_some()
+      );
+      assert_eq!(durable_entries(&store), [entry(b"group", b"epoch 7")]);
+    }
+
+    /// Issue #424 review, H1: moved, then opened by an older version (which fails on the marker and
+    /// writes nothing), then by this one again: nothing is lost.
+    #[test]
+    fn a_downgrade_and_back_loses_nothing() {
+      let store = MemoryStore::new();
       store
         .put(
           Table::MlsStorage,
@@ -504,14 +609,14 @@ mod tests {
           &legacy(&[(b"a", b"1"), (b"b", b"2")]),
         )
         .unwrap();
-      store.put(Table::MlsStorage, &entry_key(b"a"), b"other").unwrap();
-      store.put(Table::MlsStorage, &entry_key(b"stale"), b"x").unwrap();
+      load_mls_storage(&store).unwrap();
+
+      // The older version reads the old record only, and fails on it.
+      let old_record = store.get(Table::MlsStorage, LEGACY_KEY).unwrap().unwrap();
+      assert!(decode_legacy(&old_record).is_err());
 
       let (provider, _) = load_mls_storage(&store).unwrap();
-
       assert_eq!(entries_of(&provider), [entry(b"a", b"1"), entry(b"b", b"2")]);
-      assert_eq!(durable_entries(&store), entries_of(&provider));
-      assert_eq!(store.durable.get(Table::MlsStorage, LEGACY_KEY).unwrap(), None);
     }
 
     /// A move whose group of writes failed leaves the old record, and the next start moves it.
@@ -576,6 +681,50 @@ mod tests {
       assert_eq!(store.take_counts(), (1, 0));
     }
 
+    /// Issue #424 review, M1: a client loaded again on a store that lost writes (the engine reopens
+    /// it after a panic) gets its baseline from a cache holding the lost group: its first save
+    /// writes everything, the lost deletes included.
+    #[test]
+    fn a_client_loaded_after_a_lost_group_writes_everything() {
+      let store = FlakyStore::default();
+      let provider = provider_with(&[(b"X/context", b"epoch 1"), (b"X/secrets", b"epoch 1")]);
+      let saved = SavedMlsStorage::default();
+      save_mls_storage(&store, &provider, &saved).unwrap();
+      set(&provider, b"X/context", Some(b"epoch 2"));
+      set(&provider, b"X/secrets", Some(b"epoch 2"));
+      set(&provider, b"X/proposal", Some(b"queued"));
+      save_mls_storage(&store, &provider, &saved).unwrap();
+      set(&provider, b"X/proposal", None);
+      store.fail_next_group();
+      assert!(write_group(&store, || save_mls_storage(&store, &provider, &saved)).is_err());
+
+      let (reloaded, saved_again) = load_mls_storage(&store).unwrap();
+      set(&reloaded, b"X/secrets", Some(b"epoch 2, one message later"));
+      save_mls_storage(&store, &reloaded, &saved_again).unwrap();
+
+      assert_eq!(durable_entries(&store), entries_of(&reloaded));
+    }
+
+    /// Issue #424 review, H2: another process committed to the store (the iOS notification
+    /// extension, before it stopped writing MLS state). This process's state wins whole, as it did
+    /// with one record, instead of mixing epochs per entry.
+    #[test]
+    fn after_another_writer_the_next_save_writes_everything() {
+      let store = FlakyStore::default();
+      let provider = provider_with(&[(b"X/context", b"epoch 1"), (b"X/secrets", b"epoch 1")]);
+      let saved = SavedMlsStorage::default();
+      save_mls_storage(&store, &provider, &saved).unwrap();
+      store.write_elsewhere(b"X/context", b"epoch 2");
+      store.write_elsewhere(b"X/secrets", b"epoch 2");
+
+      set(&provider, b"X/secrets", Some(b"epoch 1, one message later"));
+      store.take_counts();
+      save_mls_storage(&store, &provider, &saved).unwrap();
+
+      assert_eq!(store.take_counts(), (2, 0), "both entries written");
+      assert_eq!(durable_entries(&store), entries_of(&provider));
+    }
+
     /// A save whose own group failed: unknown what reached the store, so the next one writes all.
     #[test]
     fn after_a_failed_save_the_next_one_writes_everything() {
@@ -594,39 +743,29 @@ mod tests {
       assert_eq!(durable_entries(&store), entries_of(&provider));
     }
 
-    /// Deletes are remembered only until a commit shows their group reached the disk.
+    /// On a store without a tally (it keeps what it accepted, also from a save that failed) the
+    /// failed save itself makes the next one write everything: an entry changed back since would
+    /// otherwise look saved and stay as the failed save left it.
     #[test]
-    fn deletes_are_forgotten_once_a_later_group_committed() {
-      let store = FlakyStore::default();
+    fn after_a_failed_save_on_a_store_without_tally_the_next_one_writes_everything() {
+      let store = FlakyStore {
+        has_no_tally: true,
+        ..FlakyStore::default()
+      };
       let provider = provider_with(&[(b"a", b"1"), (b"b", b"2")]);
       let saved = SavedMlsStorage::default();
       save_mls_storage(&store, &provider, &saved).unwrap();
-      set(&provider, b"b", None);
-      write_group(&store, || -> Result<(), CoreError> {
-        save_mls_storage(&store, &provider, &saved)?;
-        set(&provider, b"a", None);
-        save_mls_storage(&store, &provider, &saved)?;
-        // Both saves' groups are still open: their deletes may still be lost.
-        assert_eq!(saved.lock()?.unconfirmed_deletes.len(), 2);
-        Ok(())
-      })
-      .unwrap();
-      set(&provider, b"c", Some(b"3"));
-      save_mls_storage(&store, &provider, &saved).unwrap();
-      assert!(saved.lock().unwrap().unconfirmed_deletes.is_empty());
-    }
 
-    /// A store that keeps every write it accepted needs no deletes remembered.
-    #[test]
-    fn a_store_without_a_tally_keeps_no_deletes() {
-      let store = MemoryStore::new();
-      let provider = provider_with(&[(b"a", b"1"), (b"b", b"2")]);
-      let saved = SavedMlsStorage::default();
+      set(&provider, b"a", Some(b"11"));
+      store.fail_next_group();
+      assert!(save_mls_storage(&store, &provider, &saved).is_err());
+      assert_eq!(durable_entries(&store)[0], entry(b"a", b"11"), "kept anyway");
+      set(&provider, b"a", Some(b"1"));
+      store.take_counts();
       save_mls_storage(&store, &provider, &saved).unwrap();
-      set(&provider, b"b", None);
-      save_mls_storage(&store, &provider, &saved).unwrap();
-      assert!(saved.lock().unwrap().unconfirmed_deletes.is_empty());
-      assert_eq!(store.get(Table::MlsStorage, &entry_key(b"b")).unwrap(), None);
+
+      assert_eq!(store.take_counts(), (2, 0), "everything written");
+      assert_eq!(durable_entries(&store), entries_of(&provider));
     }
   }
 
@@ -703,14 +842,14 @@ mod tests {
     entries
   }
 
-  /// The entries on the fake store's disk.
+  /// The entries on the fake store's disk (the marker and set-aside records left out).
   fn durable_entries(store: &FlakyStore) -> Vec<Entry> {
     let mut entries: Vec<Entry> = store
       .durable
       .list(Table::MlsStorage)
       .unwrap()
       .into_iter()
-      .map(|(key, value)| (parse_entry_key(&key).unwrap(), value))
+      .filter_map(|(key, value)| Some((parse_entry_key(&key)?, value)))
       .collect();
     entries.sort();
     entries
@@ -730,11 +869,14 @@ mod tests {
 
   /// A store like the sealed SQLite one: reads come from a cache that keeps every write, the disk
   /// ([`Self::durable`]) gets a group when it commits, and a group can be made to fail, which the
-  /// disk rolls back and the tally counts. Counts the MLS puts and deletes.
+  /// disk rolls back and the tally counts; the deletes it lost are listed. With `has_no_tally` it
+  /// is like the browser's instead: it reports the failure but keeps the group's writes. Counts
+  /// the puts and deletes of MLS entries.
   #[derive(Default)]
   struct FlakyStore {
     cache: MemoryStore,
     durable: MemoryStore,
+    has_no_tally: bool,
     state: Mutex<FlakyState>,
   }
 
@@ -744,9 +886,11 @@ mod tests {
     group: Vec<(String, Option<Vec<u8>>)>,
     is_next_group_failing: bool,
     tally: WriteTally,
+    lost_deletes: BTreeSet<String>,
     groups: usize,
     puts: usize,
     deletes: usize,
+    marker_writes: usize,
   }
 
   impl FlakyStore {
@@ -764,13 +908,26 @@ mod tests {
       self.state.lock().unwrap().is_next_group_failing = true;
     }
 
-    /// MLS puts and deletes since the last call.
+    /// Another process commits an entry: on the disk, not in this store's cache.
+    fn write_elsewhere(&self, storage_key: &[u8], value: &[u8]) {
+      self
+        .durable
+        .put(Table::MlsStorage, &entry_key(storage_key), value)
+        .unwrap();
+      self.state.lock().unwrap().tally.foreign += 1;
+    }
+
+    /// Puts and deletes of MLS entries since the last call.
     fn take_counts(&self) -> (usize, usize) {
       let mut state = self.state.lock().unwrap();
       (
         std::mem::take(&mut state.puts),
         std::mem::take(&mut state.deletes),
       )
+    }
+
+    fn marker_writes(&self) -> usize {
+      self.state.lock().unwrap().marker_writes
     }
 
     /// Outermost groups ended so far.
@@ -785,15 +942,20 @@ mod tests {
         None => self.cache.delete(table, key)?,
       }
       let mut state = self.state.lock().unwrap();
-      match maybe_value {
-        Some(_) => state.puts += 1,
-        None => state.deletes += 1,
+      if key.starts_with(ENTRY_PREFIX) {
+        match maybe_value {
+          Some(_) => state.puts += 1,
+          None => state.deletes += 1,
+        }
+      } else if key == LEGACY_KEY && maybe_value == Some(MOVED_MARKER) {
+        state.marker_writes += 1;
       }
       let write = (key.to_string(), maybe_value.map(<[u8]>::to_vec));
       if state.depth > 0 {
         state.group.push(write);
         Ok(())
       } else {
+        state.lost_deletes.remove(key);
         apply(&self.durable, &write)
       }
     }
@@ -886,18 +1048,34 @@ mod tests {
       state.groups += 1;
       let group = std::mem::take(&mut state.group);
       if std::mem::take(&mut state.is_next_group_failing) {
+        if self.has_no_tally {
+          for write in &group {
+            apply(&self.durable, write)?;
+          }
+          return Err(StoreError::GroupFailed("made to fail, kept anyway".into()));
+        }
         state.tally.lost += 1;
+        for (key, maybe_value) in &group {
+          if maybe_value.is_none() {
+            state.lost_deletes.insert(key.clone());
+          }
+        }
         return Err(StoreError::GroupFailed("made to fail".into()));
       }
-      state.tally.committed += 1;
       for write in &group {
+        state.lost_deletes.remove(&write.0);
         apply(&self.durable, write)?;
       }
       Ok(())
     }
 
     fn write_tally(&self) -> Option<WriteTally> {
-      Some(self.state.lock().unwrap().tally)
+      (!self.has_no_tally).then(|| self.state.lock().unwrap().tally)
+    }
+
+    fn lost_deletes(&self, table: Table) -> Vec<String> {
+      assert_eq!(table, Table::MlsStorage);
+      self.state.lock().unwrap().lost_deletes.iter().cloned().collect()
     }
   }
 }

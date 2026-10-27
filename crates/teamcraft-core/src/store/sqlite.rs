@@ -119,11 +119,10 @@ impl SqlCipherStore {
       .execute_batch("PRAGMA secure_delete = ON;")
       .map_err(database_error)?;
     run_migrations(&connection, MIGRATIONS)?;
+    let mut group = WriteGroup::default();
+    group.watch_other_connections(&connection)?;
     Ok(Self {
-      inner: Mutex::new(Inner {
-        connection,
-        group: WriteGroup::default(),
-      }),
+      inner: Mutex::new(Inner { connection, group }),
     })
   }
 
@@ -408,7 +407,9 @@ impl LocalStore for SqlCipherStore {
   }
 
   fn write_tally(&self) -> Option<WriteTally> {
-    Some(self.lock().group.tally())
+    let mut inner = self.lock();
+    let Inner { connection, group } = &mut *inner;
+    Some(group.tally(connection))
   }
 }
 
@@ -597,21 +598,43 @@ mod tests {
       .unwrap();
     assert!(matches!(store.end_writes(), Err(StoreError::GroupFailed(_))));
     assert_eq!(store.get(Table::Outbox, "1").unwrap(), None);
-    assert_eq!(
-      store.write_tally(),
-      Some(WriteTally {
-        committed: 0,
-        lost: 1
-      })
-    );
+    let lost = Some(WriteTally { lost: 1, foreign: 0 });
+    assert_eq!(store.write_tally(), lost);
     crate::store::write_group(&store, || store.put(Table::Outbox, "2", b"entry")).unwrap();
-    assert_eq!(
-      store.write_tally(),
-      Some(WriteTally {
-        committed: 1,
-        lost: 1
+    assert_eq!(store.write_tally(), lost, "a commit changes nothing");
+  }
+
+  /// Issue #424 review, H1: the layout marks the MLS state per entry; 1.0.8 (its steps end before
+  /// the marker) refuses such a database instead of reading no MLS state.
+  #[test]
+  fn a_version_before_the_mls_state_per_entry_refuses_the_database() {
+    let store =
+      SqlCipherStore::open_in_memory(&StaticKeySource::new(SymmetricKey::generate(&mut OsRng))).unwrap();
+    let as_in_1_0_8 = &MIGRATIONS[..2];
+    assert!(matches!(
+      run_migrations(&store.lock().connection, as_in_1_0_8),
+      Err(StoreError::NewerSchema {
+        found: 3,
+        supported: 2
       })
-    );
+    ));
+  }
+
+  /// Issue #424 review, H2: a commit of another connection to the same file (another process)
+  /// shows in the tally, so the next MLS save writes the whole state.
+  #[test]
+  fn another_connections_commit_shows_in_the_tally() {
+    let directory = scratch_dir();
+    let path = directory.join("store.db");
+    let key = SymmetricKey::generate(&mut OsRng);
+    let ours = SqlCipherStore::open(&path, &StaticKeySource::new(key.duplicate())).unwrap();
+    let theirs = SqlCipherStore::open(&path, &StaticKeySource::new(key)).unwrap();
+    ours.put(Table::Users, "1", b"ours").unwrap();
+    assert_eq!(ours.write_tally(), Some(WriteTally::default()));
+    theirs.put(Table::Users, "2", b"theirs").unwrap();
+    assert_eq!(ours.write_tally().map(|tally| tally.foreign), Some(1));
+    drop((ours, theirs));
+    std::fs::remove_dir_all(&directory).unwrap();
   }
 
   /// Issue #424: a save of the MLS state in a group SQLite rolled back (a full disk) went

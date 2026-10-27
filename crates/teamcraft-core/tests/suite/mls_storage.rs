@@ -193,9 +193,12 @@ mod migration {
   fn store_as_before_v1_0_9(store: &MemoryStore) {
     let mut legacy = Vec::new();
     for (key, value) in store.list(Table::MlsStorage).unwrap() {
-      for chunk in [storage_key(&key), value] {
-        legacy.extend_from_slice(&u32::try_from(chunk.len()).unwrap().to_be_bytes());
-        legacy.extend_from_slice(&chunk);
+      // The marker that replaces the old record goes too.
+      if key.starts_with("entry/") {
+        for chunk in [storage_key(&key), value] {
+          legacy.extend_from_slice(&u32::try_from(chunk.len()).unwrap().to_be_bytes());
+          legacy.extend_from_slice(&chunk);
+        }
       }
       store.delete(Table::MlsStorage, &key).unwrap();
     }
@@ -264,9 +267,13 @@ fn group_records(store: &impl LocalStore, conversation: ConversationId) -> usize
     .count()
 }
 
-/// Whether an MLS record belongs to `conversation`'s group. openmls keys a group's entries with the
-/// group ID as JSON (`openmls_memory_storage`), and the group ID ends with the conversation ID.
+/// Whether an MLS record is an entry of `conversation`'s group. openmls keys a group's entries with
+/// the group ID as JSON (`openmls_memory_storage`), and the group ID ends with the conversation ID.
 fn is_of_group(record_key: &str, conversation: ConversationId) -> bool {
+  if !record_key.starts_with("entry/") {
+    // The marker in the old record's place.
+    return false;
+  }
   let id = u64::try_from(conversation.snowflake().get()).unwrap();
   let id_bytes: Vec<String> = id.to_be_bytes().iter().map(u8::to_string).collect();
   let marker = format!(",{}]", id_bytes.join(","));

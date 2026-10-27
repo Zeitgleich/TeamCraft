@@ -5,6 +5,10 @@ use rusqlite::{Connection, ErrorCode};
 
 use super::{StoreError, WriteTally};
 
+/// Upkeep steps a marker passed over after they failed ([`MigrationKind::Marker`]): run again on
+/// every open until they succeed.
+const UPKEEP_DUE_TABLE: &str = "CREATE TABLE IF NOT EXISTS upkeep_due (version INTEGER PRIMARY KEY)";
+
 /// The group of writes open on a connection; kept under the connection's lock.
 #[derive(Debug, Default)]
 pub(crate) struct WriteGroup {
@@ -12,8 +16,11 @@ pub(crate) struct WriteGroup {
   depth: u32,
   /// A write of the open group failed: the group is rolled back when it ends.
   has_failed: bool,
-  /// Groups committed and lost so far ([`super::LocalStore::write_tally`]).
+  /// Writes lost and other connections' commits seen so far ([`super::LocalStore::write_tally`]).
   tally: WriteTally,
+  /// `PRAGMA data_version` when last looked at: it changes when another connection (another
+  /// process: the iOS notification extension) committed. `None` until the store watches it.
+  maybe_data_version: Option<i64>,
 }
 
 impl WriteGroup {
@@ -41,16 +48,29 @@ impl WriteGroup {
     }
     self.depth = 0;
     let ended = Self::commit_or_roll_back(self.has_failed, connection);
-    if ended.is_ok() {
-      self.tally.committed = self.tally.committed.saturating_add(1);
-    } else {
+    if ended.is_err() {
       self.tally.lost = self.tally.lost.saturating_add(1);
     }
     ended
   }
 
-  /// What became of the groups so far.
-  pub(crate) fn tally(&self) -> WriteTally {
+  /// Starts counting other connections' commits from what `connection` sees now; called when the
+  /// store opens, before anything is read into memory.
+  pub(crate) fn watch_other_connections(&mut self, connection: &Connection) -> Result<(), StoreError> {
+    self.maybe_data_version = Some(data_version(connection)?);
+    Ok(())
+  }
+
+  /// What was lost so far, and whether another connection committed since the last look. A
+  /// `data_version` that can't be read counts as a foreign commit: the caller then writes all.
+  pub(crate) fn tally(&mut self, connection: &Connection) -> WriteTally {
+    if let Some(seen) = self.maybe_data_version {
+      let maybe_now = data_version(connection).ok();
+      if maybe_now != Some(seen) {
+        self.tally.foreign = self.tally.foreign.saturating_add(1);
+        self.maybe_data_version = maybe_now.or(Some(seen));
+      }
+    }
     self.tally
   }
 
@@ -71,10 +91,12 @@ impl WriteGroup {
     self.depth > 0
   }
 
-  /// A write failed; inside a group this undoes the group.
+  /// A write failed; inside a group this undoes the group. Outside one it is lost by itself.
   pub(crate) fn note_failure(&mut self) {
     if self.depth > 0 {
       self.has_failed = true;
+    } else {
+      self.tally.lost = self.tally.lost.saturating_add(1);
     }
   }
 
@@ -132,8 +154,8 @@ pub(crate) enum MigrationKind {
   Maintenance(fn(&Connection) -> Result<(), StoreError>),
   /// Changes no table but what records hold, which the client moves when it opens the store (the
   /// MLS state per entry, `mls_storage`): versions before refuse the database instead of misreading
-  /// it. It depends on no upkeep, so a failed one before it is retried as usual and the marker
-  /// waits for it.
+  /// it. It must not wait for upkeep: a failed upkeep step before it is noted as due
+  /// (`upkeep_due`) and run again on every open, and the marker is set anyway.
   Marker,
 }
 
@@ -149,12 +171,14 @@ pub(crate) const fn latest_version(steps: &[Migration]) -> i64 {
 /// runs in its own transaction together with setting its version, so a crash or a failed step
 /// leaves the database at the last step that completed; a maintenance step runs outside one
 /// ([`MigrationKind::Maintenance`]). A newer layout than this version knows is refused untouched.
+/// Upkeep a marker passed over earlier runs first.
 pub(crate) fn run_migrations(connection: &Connection, steps: &[Migration]) -> Result<(), StoreError> {
   let supported = latest_version(steps);
   let found = user_version(connection)?;
   if found > supported {
     return Err(StoreError::NewerSchema { found, supported });
   }
+  run_due_upkeep(connection, steps)?;
   for (index, step) in steps.iter().enumerate().filter(|(_, step)| step.version > found) {
     match step.kind {
       MigrationKind::Layout(apply) => {
@@ -166,16 +190,83 @@ pub(crate) fn run_migrations(connection: &Connection, steps: &[Migration]) -> Re
       MigrationKind::Marker => set_user_version(connection, step.version)?,
       MigrationKind::Maintenance(apply) => {
         if let Err(error) = apply(connection).and_then(|()| set_user_version(connection, step.version)) {
-          let is_needed_later = steps[index + 1..]
+          let later = &steps[index + 1..];
+          let is_needed_later = later
             .iter()
             .any(|later| matches!(later.kind, MigrationKind::Layout(_)));
           if error.is_unreadable() || is_needed_later {
             return Err(error);
           }
+          let has_marker_later = later
+            .iter()
+            .any(|later| matches!(later.kind, MigrationKind::Marker));
+          if has_marker_later && pass_over_upkeep(connection, step.version).is_ok() {
+            tracing::warn!(%error, version = step.version, "local database upkeep failed; trying again on the next start, the layout goes on");
+            continue;
+          }
           // Steps run in order: the later maintenance steps wait for this one too.
           tracing::warn!(%error, version = step.version, "local database upkeep failed; trying again on the next start");
           return Ok(());
         }
+      },
+    }
+  }
+  Ok(())
+}
+
+/// Notes a failed upkeep step as due and moves the layout past it, together: a later marker must
+/// not wait for upkeep ([`MigrationKind::Marker`]).
+fn pass_over_upkeep(connection: &Connection, version: i64) -> Result<(), StoreError> {
+  let transaction = connection.unchecked_transaction().map_err(sqlite_error)?;
+  transaction
+    .execute_batch(UPKEEP_DUE_TABLE)
+    .map_err(sqlite_error)?;
+  transaction
+    .execute(
+      "INSERT OR IGNORE INTO upkeep_due (version) VALUES (?1)",
+      [version],
+    )
+    .map_err(sqlite_error)?;
+  set_user_version(&transaction, version)?;
+  transaction.commit().map_err(sqlite_error)
+}
+
+/// Runs the upkeep steps [`pass_over_upkeep`] noted as due; one that fails again stays due.
+fn run_due_upkeep(connection: &Connection, steps: &[Migration]) -> Result<(), StoreError> {
+  let has_table = connection
+    .prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'upkeep_due'")
+    .and_then(|mut statement| statement.exists([]))
+    .map_err(sqlite_error)?;
+  if !has_table {
+    return Ok(());
+  }
+  let due: Vec<i64> = connection
+    .prepare("SELECT version FROM upkeep_due ORDER BY version")
+    .and_then(|mut statement| {
+      statement
+        .query_map([], |row| row.get(0))?
+        .collect::<Result<_, _>>()
+    })
+    .map_err(sqlite_error)?;
+  for version in due {
+    let maybe_apply = steps.iter().find_map(|step| match step.kind {
+      MigrationKind::Maintenance(apply) if step.version == version => Some(apply),
+      _ => None,
+    });
+    let outcome = match maybe_apply {
+      Some(apply) => apply(connection),
+      // Not a step of this version: nothing to run.
+      None => Ok(()),
+    };
+    match outcome {
+      Ok(()) => {
+        connection
+          .execute("DELETE FROM upkeep_due WHERE version = ?1", [version])
+          .map_err(sqlite_error)?;
+      },
+      Err(error) if error.is_unreadable() => return Err(error),
+      Err(error) => {
+        tracing::warn!(%error, version, "local database upkeep failed again; trying on the next start");
       },
     }
   }
@@ -191,6 +282,12 @@ fn user_version(connection: &Connection) -> Result<i64, StoreError> {
 fn set_user_version(connection: &Connection, version: i64) -> Result<(), StoreError> {
   connection
     .execute_batch(&format!("PRAGMA user_version = {version}"))
+    .map_err(sqlite_error)
+}
+
+fn data_version(connection: &Connection) -> Result<i64, StoreError> {
+  connection
+    .query_row("PRAGMA data_version", [], |row| row.get(0))
     .map_err(sqlite_error)
 }
 
@@ -290,9 +387,10 @@ pub(crate) mod tests {
     assert_eq!(version(&connection), 1);
   }
 
-  /// A marker (issue #424) waits for a failed upkeep before it instead of failing the open.
+  /// Issue #424: a marker is set though the upkeep before it failed (an older version must refuse
+  /// the database); the upkeep stays due and runs on a later open.
   #[test]
-  fn a_marker_after_failed_upkeep_waits_for_it() {
+  fn a_marker_is_set_though_upkeep_before_it_failed() {
     let with_marker: Vec<Migration> = WITH_UPKEEP
       .iter()
       .copied()
@@ -304,16 +402,66 @@ pub(crate) mod tests {
     assert_numbered(&with_marker);
     let connection = Connection::open_in_memory().unwrap();
     run_migrations(&connection, &with_marker).unwrap();
-    assert_eq!(version(&connection), 1);
+    assert_eq!(version(&connection), 3, "marked although the upkeep failed");
+    assert_eq!(due_upkeep(&connection), [2]);
+    // An older version (without the marker) refuses it now.
+    assert!(matches!(
+      run_migrations(&connection, &with_marker[..2]),
+      Err(StoreError::NewerSchema { found: 3, .. })
+    ));
+    // Still failing: stays due, the store opens.
+    run_migrations(&connection, &with_marker).unwrap();
+    assert_eq!(due_upkeep(&connection), [2]);
     create(&connection, "allowed").unwrap();
     run_migrations(&connection, &with_marker).unwrap();
+    assert!(due_upkeep(&connection).is_empty(), "ran once it could");
     assert_eq!(version(&connection), 3);
+  }
+
+  /// Another connection's commit shows in the tally; this connection's own don't.
+  #[test]
+  fn commits_of_another_connection_are_counted() {
+    let directory = std::env::temp_dir().join(format!(
+      "teamcraft-sql-group-{}",
+      rand_core::RngCore::next_u64(&mut rand_core::OsRng)
+    ));
+    std::fs::create_dir_all(&directory).unwrap();
+    let path = directory.join("shared.db");
+    let ours = Connection::open(&path).unwrap();
+    ours.execute_batch("CREATE TABLE t (x INTEGER)").unwrap();
+    let mut group = WriteGroup::default();
+    group.watch_other_connections(&ours).unwrap();
+    group.begin(&ours).unwrap();
+    ours.execute_batch("INSERT INTO t VALUES (1)").unwrap();
+    group.end(&ours).unwrap();
+    assert_eq!(
+      group.tally(&ours),
+      WriteTally::default(),
+      "own commits don't count"
+    );
+
+    let theirs = Connection::open(&path).unwrap();
+    theirs.execute_batch("INSERT INTO t VALUES (2)").unwrap();
+    assert_eq!(group.tally(&ours).foreign, 1);
+    assert_eq!(group.tally(&ours).foreign, 1, "counted once");
+    drop((ours, theirs));
+    std::fs::remove_dir_all(&directory).unwrap();
   }
 
   fn create(connection: &Connection, name: &str) -> Result<(), StoreError> {
     connection
       .execute_batch(&format!("CREATE TABLE {name} (x INTEGER)"))
       .map_err(sqlite_error)
+  }
+
+  fn due_upkeep(connection: &Connection) -> Vec<i64> {
+    connection
+      .prepare("SELECT version FROM upkeep_due ORDER BY version")
+      .unwrap()
+      .query_map([], |row| row.get(0))
+      .unwrap()
+      .map(Result::unwrap)
+      .collect()
   }
 
   fn version(connection: &Connection) -> i64 {

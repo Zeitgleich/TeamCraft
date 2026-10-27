@@ -38,7 +38,8 @@ mod write_queue;
 
 #[cfg(target_arch = "wasm32")]
 pub use browser::{
-  IndexedDbRecords, IndexedDbStore, browser_database_key, vault_delete, vault_get, vault_put,
+  IndexedDbRecords, IndexedDbStore, browser_database_key, browser_database_key_without_upgrade, vault_delete,
+  vault_get, vault_put,
 };
 #[cfg(not(any(target_arch = "wasm32", target_os = "android", target_os = "ios")))]
 pub use key_source::KeyringKeySource;
@@ -555,23 +556,34 @@ pub trait LocalStore {
   /// write at once keep the default.
   fn write_soon(&self) {}
 
-  /// What became of the groups of writes since the store was opened, for a caller that remembers
-  /// what it wrote instead of reading it back (the MLS state, `mls_storage`): a committed group
-  /// means every group open before it is on disk, a lost one that some writes it accepted are not.
-  /// `None` for a store that keeps every write it accepted (in memory; the browser's, which writes
-  /// a failed one again until it goes through).
+  /// What the disk may hold other than what this store accepted, counted since it was opened, for
+  /// a caller that remembers what it wrote instead of reading it back (the MLS state,
+  /// `mls_storage`): writes the disk lost, and commits of another connection to the same database.
+  /// Once a count moved, that caller writes everything again. `None` for a store that keeps every
+  /// write it accepted and has no other writer (in memory; the browser's, which writes a failed
+  /// one again until it goes through and is owned by one tab).
   fn write_tally(&self) -> Option<WriteTally> {
     None
+  }
+
+  /// Keys of `table` deleted in groups of writes the disk rolled back, which the store no longer
+  /// lists although the disk may still hold them (a sealed store's cache keeps a rolled-back group);
+  /// writing or deleting a key again in a group that reaches the disk forgets it. Stores that read
+  /// the disk itself, or never lose a write, keep the default.
+  fn lost_deletes(&self, table: Table) -> Vec<String> {
+    let _ = table;
+    Vec::new()
   }
 }
 
 /// Counts of [`LocalStore::write_tally`].
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct WriteTally {
-  /// Outermost groups of writes committed.
-  pub committed: u64,
-  /// Groups of writes rolled back (one of their writes failed, or the commit did).
+  /// Writes the disk lost: groups rolled back (one of their writes failed, or the commit did) and
+  /// single writes that failed.
   pub lost: u64,
+  /// Times another connection had committed to the database since the store last looked.
+  pub foreign: u64,
 }
 
 /// Runs `writes` as one group of writes ([`LocalStore::begin_writes`]). An error of `writes` doesn't
@@ -686,6 +698,10 @@ macro_rules! forward_local_store {
 
       fn write_tally(&self) -> Option<WriteTally> {
         (**self).write_tally()
+      }
+
+      fn lost_deletes(&self, table: Table) -> Vec<String> {
+        (**self).lost_deletes(table)
       }
     }
   };

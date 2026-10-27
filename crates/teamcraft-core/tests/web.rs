@@ -16,7 +16,7 @@ use teamcraft_core::api::ServerApi;
 use teamcraft_core::api::fake::FakeServer;
 use teamcraft_core::store::{
   IndexedDbStore, LocalStore, MessageContent, MessageFilter, StoreError, StoredMessage, Table,
-  browser_database_key,
+  browser_database_key, browser_database_key_without_upgrade,
 };
 use teamcraft_core::{PendingEnrollment, mls_storage};
 use teamcraft_crypto::push::{open_wakeup, seal_wakeup};
@@ -209,6 +209,21 @@ async fn an_older_database_opens_and_its_mls_state_moves_to_entries() {
   }
 }
 
+/// Issue #424 review, M2: the service worker opens the store at the version it has and never
+/// upgrades it, so a push never closes an older page that still owns the store; a page does.
+#[wasm_bindgen_test]
+async fn the_service_worker_never_upgrades_the_database() {
+  let name = database_name();
+  create_first_version(&name).await;
+  let key = browser_database_key_without_upgrade(&name).await.unwrap();
+  drop(IndexedDbStore::open_without_upgrade(&name, &key).await.unwrap());
+  assert_eq!(database_version(&name).await, 1.0);
+
+  let key = browser_database_key(&name).await.unwrap();
+  drop(IndexedDbStore::open(&name, &key).await.unwrap());
+  assert_eq!(database_version(&name).await, 2.0);
+}
+
 #[wasm_bindgen_test]
 fn push_wake_up_round_trips_in_wasm() {
   let key = SymmetricKey::generate(&mut OsRng);
@@ -311,6 +326,28 @@ async fn create_first_version(name: &str) {
   );
   let created: js_sys::Promise = js_sys::eval(&script).unwrap().unchecked_into();
   wasm_bindgen_futures::JsFuture::from(created).await.unwrap();
+}
+
+/// The version `name` has now (opened without one, so nothing is upgraded).
+async fn database_version(name: &str) -> f64 {
+  use wasm_bindgen::JsCast;
+  let script = format!(
+    "new Promise((resolve, reject) => {{
+      const request = indexedDB.open({name:?});
+      request.onsuccess = () => {{
+        const version = request.result.version;
+        request.result.close();
+        resolve(version);
+      }};
+      request.onerror = () => reject(request.error);
+    }})"
+  );
+  let opened: js_sys::Promise = js_sys::eval(&script).unwrap().unchecked_into();
+  wasm_bindgen_futures::JsFuture::from(opened)
+    .await
+    .unwrap()
+    .as_f64()
+    .unwrap()
 }
 
 /// Each test gets its own database, so tests don't see each other's data.

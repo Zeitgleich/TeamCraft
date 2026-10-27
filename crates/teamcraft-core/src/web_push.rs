@@ -133,7 +133,7 @@ mod service_worker {
   use crate::push_preview::{PushPreview, push_preview, push_session};
   use crate::push_subscription::{subscription_change, subscription_change_from};
   use crate::push_text::{NotificationLabels, notification_text};
-  use crate::store::{IndexedDbStore, browser_database_key};
+  use crate::store::{IndexedDbStore, browser_database_key_without_upgrade};
 
   /// Key of the conversation ID in a notification's `data`.
   const CONVERSATION_FIELD: &str = "conversation_id";
@@ -268,8 +268,9 @@ mod service_worker {
     let unreadable = || CoreError::Corrupt("unreadable notification data".into());
     let conversation: ConversationId = conversation.parse().map_err(|_| unreadable())?;
     let message_id: MessageId = message.parse().map_err(|_| unreadable())?;
-    let key = browser_database_key(database_name).await?;
-    let store = IndexedDbStore::open(database_name, &key).await?;
+    // Never upgrades the database: only the page that owns the store does (e2ee.md §9.4).
+    let key = browser_database_key_without_upgrade(database_name).await?;
+    let store = IndexedDbStore::open_without_upgrade(database_name, &key).await?;
     let session = push_session(&store, SystemClock.now_ms())?
       .ok_or_else(|| CoreError::Browser("no valid push session".into()))?;
     let api = HttpServerApi::new(&session.server_url, StaticToken(session.access_token));
@@ -312,8 +313,9 @@ mod service_worker {
     maybe_old_subscription: Option<&str>,
     token: &str,
   ) -> Result<bool, CoreError> {
-    let key = browser_database_key(database_name).await?;
-    let store = IndexedDbStore::open(database_name, &key).await?;
+    // Never upgrades the database: only the page that owns the store does (e2ee.md §9.4).
+    let key = browser_database_key_without_upgrade(database_name).await?;
+    let store = IndexedDbStore::open_without_upgrade(database_name, &key).await?;
     let Some(change) = subscription_change(&store, token)? else {
       return Ok(false);
     };
@@ -343,8 +345,9 @@ mod service_worker {
   }
 
   async fn preview(database_name: &str, payload: &[u8]) -> Result<PushPreview, CoreError> {
-    let key = browser_database_key(database_name).await?;
-    let store = IndexedDbStore::open(database_name, &key).await?;
+    // Never upgrades the database: only the page that owns the store does (e2ee.md §9.4).
+    let key = browser_database_key_without_upgrade(database_name).await?;
+    let store = IndexedDbStore::open_without_upgrade(database_name, &key).await?;
     let maybe_api = push_session(&store, SystemClock.now_ms())?
       .map(|session| HttpServerApi::new(&session.server_url, StaticToken(session.access_token)));
     // Read-only: the preview never writes, so the app's own cache stays authoritative.
