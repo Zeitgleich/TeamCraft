@@ -1022,10 +1022,25 @@ fn workspace_event_text(
       "ws-member-removed",
       vec![("name", name_of(*user)), ("by", name_of(*by))],
     ),
-    WorkspaceEvent::Archived { by } => ("ws-archived", vec![("by", name_of(*by))]),
-    WorkspaceEvent::Unarchived { by } => ("ws-unarchived", vec![("by", name_of(*by))]),
-    WorkspaceEvent::MadePrivate { by } => ("ws-made-private", vec![("by", name_of(*by))]),
-    WorkspaceEvent::MadePublic { by } => ("ws-made-public", vec![("by", name_of(*by))]),
+    // Changes the server reports (issue #818): who made them only when the line names somebody.
+    WorkspaceEvent::Archived { maybe_by } => {
+      by_or_server(*maybe_by, ("ws-archived", "ws-archived-unattributed"), &name_of)
+    },
+    WorkspaceEvent::Unarchived { maybe_by } => by_or_server(
+      *maybe_by,
+      ("ws-unarchived", "ws-unarchived-unattributed"),
+      &name_of,
+    ),
+    WorkspaceEvent::MadePrivate { maybe_by } => by_or_server(
+      *maybe_by,
+      ("ws-made-private", "ws-made-private-unattributed"),
+      &name_of,
+    ),
+    WorkspaceEvent::MadePublic { maybe_by } => by_or_server(
+      *maybe_by,
+      ("ws-made-public", "ws-made-public-unattributed"),
+      &name_of,
+    ),
     WorkspaceEvent::Pinned { by, .. } => ("ws-pinned", vec![("by", name_of(*by))]),
     WorkspaceEvent::AdminJoined {
       user,
@@ -1044,12 +1059,31 @@ fn workspace_event_text(
       vec![("name", name_of(*user)), ("by", name_of(*by))],
     ),
     WorkspaceEvent::AdminJoined { user, .. } => ("ws-admin-joined", vec![("name", name_of(*user))]),
-    WorkspaceEvent::Moved { by, space } if space.is_empty() => {
-      ("ws-moved-unnamed", vec![("by", name_of(*by))])
+    WorkspaceEvent::Moved { maybe_by, space } if space.is_empty() => by_or_server(
+      *maybe_by,
+      ("ws-moved-unnamed", "ws-moved-unnamed-unattributed"),
+      &name_of,
+    ),
+    WorkspaceEvent::Moved { maybe_by, space } => {
+      let (key, mut args) = by_or_server(*maybe_by, ("ws-moved", "ws-moved-unattributed"), &name_of);
+      args.push(("space", space.clone()));
+      (key, args)
     },
-    WorkspaceEvent::Moved { by, space } => ("ws-moved", vec![("by", name_of(*by)), ("space", space.clone())]),
     WorkspaceEvent::Unknown => return None,
   })
+}
+
+/// A change's line: the first of `keys` with who made it when somebody is named (`maybe_by`), else
+/// the second, its wording as the server's statement ("This channel was archived", issue #818).
+fn by_or_server(
+  maybe_by: Option<crate::model::UserId>,
+  (named, unattributed): (&'static str, &'static str),
+  name_of: &impl Fn(crate::model::UserId) -> String,
+) -> LineText {
+  match maybe_by {
+    Some(by) => (named, vec![("by", name_of(by))]),
+    None => (unattributed, Vec::new()),
+  }
 }
 
 /// Whether `message` goes under the header of the one before: only a message people wrote has
@@ -1207,6 +1241,73 @@ mod tests {
     assert_eq!(
       workspace_event_text(&own, name_of),
       Some(("ws-admin-joined", vec![("name", "Sam".to_owned())]))
+    );
+  }
+
+  /// Issue #818: a change the server reports names who made it only when the line does; else it
+  /// is worded as the server's statement, with no name at all.
+  #[test]
+  fn server_changes_name_nobody_unless_the_line_does() {
+    let by = id_from_raw::<UserId>(1);
+    let name_of = |_: UserId| "Ada".to_owned();
+    let cases = [
+      (
+        WorkspaceEvent::Archived { maybe_by: None },
+        "ws-archived-unattributed",
+      ),
+      (
+        WorkspaceEvent::Unarchived { maybe_by: None },
+        "ws-unarchived-unattributed",
+      ),
+      (
+        WorkspaceEvent::MadePrivate { maybe_by: None },
+        "ws-made-private-unattributed",
+      ),
+      (
+        WorkspaceEvent::MadePublic { maybe_by: None },
+        "ws-made-public-unattributed",
+      ),
+      (
+        WorkspaceEvent::Moved {
+          maybe_by: None,
+          space: String::new(),
+        },
+        "ws-moved-unnamed-unattributed",
+      ),
+    ];
+    for (event, key) in cases {
+      assert_eq!(
+        workspace_event_text(&event, name_of),
+        Some((key, Vec::new())),
+        "{event:?}"
+      );
+    }
+    assert_eq!(
+      workspace_event_text(
+        &WorkspaceEvent::Moved {
+          maybe_by: None,
+          space: "Project B".into()
+        },
+        name_of
+      ),
+      Some(("ws-moved-unattributed", vec![("space", "Project B".to_owned())]))
+    );
+    assert_eq!(
+      workspace_event_text(&WorkspaceEvent::Archived { maybe_by: Some(by) }, name_of),
+      Some(("ws-archived", vec![("by", "Ada".to_owned())]))
+    );
+    assert_eq!(
+      workspace_event_text(
+        &WorkspaceEvent::Moved {
+          maybe_by: Some(by),
+          space: "Project B".into()
+        },
+        name_of
+      ),
+      Some((
+        "ws-moved",
+        vec![("by", "Ada".to_owned()), ("space", "Project B".to_owned())]
+      ))
     );
   }
 

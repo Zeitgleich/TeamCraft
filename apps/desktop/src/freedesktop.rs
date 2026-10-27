@@ -9,7 +9,7 @@ use std::time::Duration;
 use futures_util::StreamExt;
 use tokio::sync::OnceCell;
 use zbus::Connection;
-use zbus::zvariant::{OwnedValue, Value};
+use zbus::zvariant::{OwnedValue, Structure, Value};
 
 /// A D-Bus service that does not answer within this time counts as missing.
 const CALL_TIMEOUT: Duration = Duration::from_secs(1);
@@ -24,6 +24,12 @@ const INLINE_REPLY: &str = "inline-reply";
 /// Urgency hint values of the notification spec.
 const URGENCY_NORMAL: u8 = 1;
 const URGENCY_CRITICAL: u8 = 2;
+/// The picture hint of the notification spec 1.2 (`image_data` in 1.1, `icon_data` in 1.0), which
+/// GNOME Shell and KDE Plasma both show in place of the app icon.
+const IMAGE_DATA_HINT: &str = "image-data";
+/// `image-data` is 8-bit RGBA.
+const IMAGE_BITS_PER_SAMPLE: i32 = 8;
+const IMAGE_CHANNELS: i32 = 4;
 
 const LOGIND: &str = "org.freedesktop.login1";
 const LOGIND_MANAGER: &str = "org.freedesktop.login1.Manager";
@@ -78,6 +84,16 @@ pub struct DesktopNotification<'a> {
   /// No server sound: a ringing call (the app rings) or a message whose sound the app plays itself
   /// (or none, the user's choice).
   pub is_quiet: bool,
+  /// The sender's or channel's picture (#543).
+  pub maybe_image: Option<HintImage<'a>>,
+}
+
+/// A square picture for the `image-data` hint.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct HintImage<'a> {
+  pub side: u32,
+  /// Straight (not premultiplied) RGBA, row by row, `side` × `side`.
+  pub rgba: &'a [u8],
 }
 
 /// What the notification server reports about a notification.
@@ -146,6 +162,9 @@ impl Buses {
     hints.insert("urgency", Value::from(urgency));
     if notification.is_quiet {
       hints.insert("suppress-sound", Value::from(true));
+    }
+    if let Some(image) = notification.maybe_image.and_then(image_data) {
+      hints.insert(IMAGE_DATA_HINT, image);
     }
     let actions = server_actions(notification, has_inline_reply);
     let expire_timeout = if notification.is_ringing {
@@ -438,6 +457,29 @@ fn server_actions<'a>(notification: &DesktopNotification<'a>, has_inline_reply: 
 }
 
 /// The `app_uri` of a LauncherEntry update.
+/// The `image-data` hint: `(iiibiiay)` width, height, row stride, alpha, bits per sample, channels
+/// and the pixels. `None` for a picture whose pixels don't match its side.
+fn image_data(image: HintImage<'_>) -> Option<Value<'static>> {
+  let side = i32::try_from(image.side).ok()?;
+  let row_stride = side.checked_mul(IMAGE_CHANNELS)?;
+  let expected = usize::try_from(row_stride)
+    .ok()?
+    .checked_mul(usize::try_from(side).ok()?)?;
+  if image.rgba.len() != expected || side == 0 {
+    return None;
+  }
+  let structure = Structure::from((
+    side,
+    side,
+    row_stride,
+    true,
+    IMAGE_BITS_PER_SAMPLE,
+    IMAGE_CHANNELS,
+    image.rgba.to_vec(),
+  ));
+  Some(Value::from(structure))
+}
+
 fn launcher_app_uri(desktop_entry: &str) -> String {
   format!("application://{desktop_entry}")
 }
@@ -566,6 +608,29 @@ mod tests {
   }
 
   #[test]
+  fn a_picture_travels_as_the_image_data_hint() {
+    let rgba = vec![7_u8; 2 * 2 * 4];
+    let value = image_data(HintImage { side: 2, rgba: &rgba }).expect("a hint");
+    assert_eq!(value.value_signature().to_string(), "(iiibiiay)");
+    let Value::Structure(structure) = value else {
+      panic!("a structure");
+    };
+    let fields = structure.fields();
+    assert_eq!(fields[0], Value::from(2_i32), "width");
+    assert_eq!(fields[1], Value::from(2_i32), "height");
+    assert_eq!(fields[2], Value::from(8_i32), "row stride");
+    assert_eq!(fields[3], Value::from(true), "alpha");
+    assert_eq!(fields[4], Value::from(8_i32), "bits per sample");
+    assert_eq!(fields[5], Value::from(4_i32), "channels");
+    assert_eq!(fields[6], Value::from(rgba.clone()), "pixels");
+    assert!(
+      image_data(HintImage { side: 3, rgba: &rgba }).is_none(),
+      "too few pixels"
+    );
+    assert!(image_data(HintImage { side: 0, rgba: &[] }).is_none(), "nothing");
+  }
+
+  #[test]
   fn the_launcher_badge_names_the_desktop_entry_and_hides_at_zero() {
     assert_eq!(
       launcher_app_uri("TeamCraft.desktop"),
@@ -619,6 +684,7 @@ mod tests {
       category: "im.received",
       is_ringing: false,
       is_quiet: false,
+      maybe_image: None,
     }
   }
 }

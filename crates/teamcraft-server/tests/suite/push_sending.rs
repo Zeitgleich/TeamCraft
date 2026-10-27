@@ -2352,4 +2352,41 @@ mod diagnostics {
     assert_eq!(denied.status, StatusCode::FORBIDDEN);
     app.stop().await;
   }
+
+  #[tokio::test]
+  async fn users_see_the_push_state_of_their_own_devices_only() {
+    let recorder = Recorder::default();
+    let Some(app) = start(&recorder).await else { return };
+    let s = scene(&app).await;
+    let unregistered = register_device(&app, &s.carol).await;
+    mention_carol(&app, &s, 1).await;
+    recorder.wait_for(1).await;
+
+    let health = app.get(&s.carol, "/me/push-health").await;
+    assert_eq!(health.status, StatusCode::OK, "{}", health.body);
+    let devices = health.body["devices"].as_array().unwrap();
+    let by_id = |id: &str| {
+      devices
+        .iter()
+        .find(|device| device["device_id"] == id)
+        .unwrap_or_else(|| panic!("{id} missing: {devices:?}"))
+        .clone()
+    };
+    let pushed = by_id(&s.carol_push_device);
+    assert_eq!(pushed["provider"], "fcm");
+    assert_eq!(pushed["counts"]["sent"], 1);
+    assert!(pushed["counts"]["last_sent_at"].is_number(), "{pushed}");
+    let quiet = by_id(&unregistered);
+    assert!(quiet.get("provider").is_none(), "{quiet}");
+    assert_eq!(quiet["counts"]["sent"], 0);
+    assert!(
+      devices
+        .iter()
+        .all(|device| device["device_id"] != s.alice_device.as_str()),
+      "only the caller's devices: {devices:?}"
+    );
+    let text = health.body.to_string();
+    assert!(!text.contains("token"), "no push token: {text}");
+    app.stop().await;
+  }
 }

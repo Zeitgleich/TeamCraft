@@ -85,6 +85,13 @@ key only keeps the passwords out of database dumps and backups ([admin.md](admin
   removal backoff, `removal_attempts` times, then dropped. A full resync (gateway events missed)
   does the same check once against the groups it holds. The revoked device's leaves carry the
   user's ID, so the removal is the user's own change, as from the revoking device.
+- **Verification state in the settings** (issue #409). Settings > Devices marks each of the user's
+  devices from what this device verified, never from the server's list alone: *verified* when its
+  certificate opens with the user's identity key and the newest signed device list names it with
+  that key; *being set up* when the certificate is the user's but the list doesn't name it yet;
+  *not verified* when nothing the identity key signed vouches for it (a device the server added on its
+  own). Device names are the user's: the server shows them to the user and admins only, colleagues'
+  clients get the keys with an empty name.
 - MLS ciphersuite: `MLS_128_DHKEMX25519_CHACHA20POLY1305_SHA256_Ed25519` (matches the device keys).
   The device key signs both MLS messages and TeamCraft structures; every TeamCraft signature and AEAD
   input is prefixed with a length-prefixed `TeamCraft-v1 …` label, so it can't collide with MLS's
@@ -312,8 +319,9 @@ for months must keep fresh ones on the server:
   memory before it goes, and so is every old copy of the MLS storage in the store's cache. The
   local database zeroes freed pages (SQLite `secure_delete`), and the native store truncates its
   write-ahead log after a deletion, and after saves of the MLS storage at most every 30 seconds
-  (a checkpoint costs two or three syncs and the snapshot is saved for every processed message;
-  measured with the snapshot's own write: about 20 ms per save at 64 KiB, 320 ms at 1 MiB). What the
+  (a checkpoint costs two or three syncs and the MLS storage is saved for every processed
+  message; measured when the storage was one record: about 20 ms per save at 64 KiB, 320 ms at
+  1 MiB; since #424 a save writes only the entries that changed, §9.5). What the
   interval keeps back is cleared when the app stops (goes to the background) or closes the store;
   a checkpoint that cannot finish (another reader holds the log) stays due and is retried, and never
   fails the write. Inside a group of writes (§9.5) the purge waits for the commit. So old storage
@@ -347,6 +355,12 @@ and client message ID, thread ID, `content_key_id`, size, **list of mentioned us
 flag. Reactions are encrypted messages, so not even reaction counts are visible.
 
 Encrypted: text, attachments, attachment names, reactions, edits, polls, link previews, drafts.
+
+Typing indicators are plaintext metadata too: a `typing` gateway frame tells the server that a user
+types in a conversation (never what), and it forwards that to the other members (gateway.md). Clients
+send at most one every 3 s while there is text in the composer, and none when the user turned "Show
+when I'm typing" off (a preference of each device, on by default). Nothing about typing is stored, on
+the server or the clients.
 
 Directory data, not encrypted: the server has to show and route by it, so it holds it in plain text
 like the identity provider does. Space names, descriptions, colors and **pictures**; channel names,
@@ -441,18 +455,32 @@ shows only the resulting PNG. Thumbnails of SVG are drawn by the sender's browse
 `resvg` on native platforms, with no DTD, no resources loaded and limits on size, element count and
 `<use>` expansion (`teamcraft-core` `svg_thumbnail`).
 
-#### 4.5.0 Previews of Markdown, HTML and PDF files
+#### 4.5.0 Previews of files
 
-A received `.md`, `.html` or `.pdf` file (by media type, or by extension when the type is generic) can be
-opened as a formatted preview in the app, up to 10 MiB (larger files are only downloaded). The preview works
-from the file the client core already downloaded and decrypted; nothing leaves the client. The file is
-untrusted, so each kind is shown in a way that can't run its code or reach the app:
+A received `.md`, `.html` or `.pdf` file, or a text file (`.txt`, `.log`, `.json`, `.csv`, `.yaml`, `.toml`,
+`.xml`, `.ini`, `.conf`, any `text/*` type; by media type, or by extension when the type is generic), can be
+opened as a preview in the app, up to a size the user chooses (`PreviewLimit`, 2 to 50 MiB, default 10 MiB;
+a larger file shows its size and the download, and is not loaded). The preview works from the file the client
+core already downloaded and decrypted, in memory; nothing leaves the client. The file is untrusted, so each
+kind is shown in a way that can't run its code or reach the app:
 
 | Kind     | Shown as                                                                                       |
 |----------|------------------------------------------------------------------------------------------------|
 | Markdown | the app's own renderer (the message subset: a tree of elements, no HTML string); "show source" |
 | HTML     | a sandboxed frame, see below; "show source"                                                    |
 | PDF      | the vendored PDF.js, see below                                                                 |
+| Text     | plain text in the text viewer, see below                                                       |
+
+**Text.** Text nodes only (`crates/teamcraft-ui/src/text_preview`): nothing in the file is read as HTML or
+Markdown, and addresses in it stay text (no link is made, nothing is fetched). The bytes are read as UTF-8,
+UTF-16 or, when clearly text in no Unicode encoding, Windows-1252; a file with NUL bytes or many control
+characters is binary and not shown. Terminal escape sequences in logs are never acted on: SGR colours become
+one of sixteen colours of the stylesheet, every other sequence (cursor moves, titles, OSC 8 hyperlinks,
+device controls) is removed, and an unterminated one hides nothing beyond its line. JSON is formatted only on
+request, after `serde_json` accepted it, by re-indenting its tokens, with nesting (128 levels) and the
+formatted size (64 MiB) bounded so a small hostile file can't blow up. Only the rows in view
+are in the page, at most a million lines are indexed, and finding is capped (10,000 matches), so a large
+file can't exhaust the page.
 
 **HTML.** An `<iframe sandbox="" srcdoc="…">` with the strictest sandbox (no `allow-scripts`, no
 `allow-same-origin`: an opaque origin that reaches nothing of the app, its storage or its tokens; no forms,
@@ -1143,7 +1171,8 @@ encryption, and what does and does not hold:
 - Guests stay what they were: they can't join public channels on their own and are always `from_join`.
 - Integration channels (bridge output) stay private; archived channels are converted after unarchiving.
 - Members get a `privacy_changed` system event, the audit log records `conversation_visibility_changed`
-  with the old and new value (metadata only).
+  with the old and new value (metadata only). The line members' apps show ("This channel was made
+  public") comes from the server's record of the channel, not from a member's message (§4.9).
 - *Later:* a signed per-channel history record (like the roster) would let clients trust "this channel
   shares its past with newcomers" without the server's word.
 
@@ -1162,9 +1191,72 @@ are**, and nobody is added or removed. Consequences:
 - The space's permission scheme and its retention defaults apply from the move on; a channel's own
   retention setting stays.
 - A move is announced as a `moved` system event (metadata) and, by the client of the person who moved it,
-  as an encrypted `moved` group message naming the new space.
+  as an encrypted `moved` group message naming the new space. Members' apps show the line from the
+  server's record of the channel; the message only names the mover (§4.9).
 - The new space's admins manage the channel from then on (its scheme applies), like any channel of that
   space.
+
+### 4.9 Lines about channel changes (issue #818)
+
+Whether a channel is archived, public or listed in a space is the **server's record**: no MLS commit
+carries it, and nothing signs it until channel properties are signed (a follow-up of the signed
+channel roles, issues #380, #801). The lines "… archived this channel", "… made this channel
+private / public" and "… moved this channel to …" used to come from the encrypted message of whoever
+made the change. Its sender is authenticated, its content wasn't checked against anything: a member
+could post "Carol archived this channel" without anything happening, and a member who did it could
+leave the message out. So the line now comes from where the change is, and says whose word it is:
+
+- **The line is the server's statement.** Every member's device compares the server's record of a
+  channel with the one it held whenever it stores a new one: the refetch after a gateway
+  `conversation_update`, a sync's conversation list, the server's answer to its own change. Each
+  difference in `is_archived`, public or not, and space is a line, in that order, worded as what the
+  server says: "This channel was archived", "This channel was moved to Project B" (the space's name
+  as this device knows it). Only channels; a record the device sees for the first time tells
+  nothing (nothing it saw changed), so a device that joins later, or was away while a change was
+  undone again, shows no line for it.
+- **Who made it, only when that member says so and it fits.** Whoever makes the change still sends
+  the encrypted `archived` / `unarchived` / `made_private` / `made_public` / `moved` message (older
+  versions show it). This version keeps every such message hidden; one names who made the change
+  ("Carol archived this channel") on the line it matches: the same kind (for a move, the same space
+  unless one side doesn't know its name), sent after every message the device held when it saw the
+  change, and no later than `change_announcement_window` (10 minutes by default, on the server's
+  clock) after the server's newest message then (the sync's head for the conversation, else the
+  newest the device held). The earliest line still unnamed takes it, and moves back to the
+  message's place if that is earlier (a change caught up after a while away), never later. A second
+  member's message that fits a named line leaves it naming nobody: two members claimed the change.
+  A user's own change names them on the device that made it ("You archived
+  this channel"), whatever others claim, and only for what their request asked for: a difference
+  in the server's answer that somebody else made meanwhile names nobody, and the device announces
+  only what it changed. A message that matches nothing (a made-up change, a different kind, too
+  early or too late) shows nothing at all, rather than a neutral "Carol says …": it would still
+  read as a system line, and the change, if there was one, is on the record's line already.
+- **Where and how often.** The line is stored like a message, marked as derived from the server's
+  record (`server_change`, only ever set by the device itself), with no server ID. It sits after
+  everything the device knew of the conversation when it saw the change (the server's newest
+  message for a sync, else the newest message held) at the last ID of that millisecond, which no
+  message gets unless one server instance hands out 4096 IDs in one millisecond, and a second line
+  of the same record at the next millisecond's; once a message names who made it and is older, at
+  that message. Its ID comes from that first place. The record and its lines are written in one
+  group of writes, so a crash keeps both (the change was told) or neither (the next refetch or sync
+  sees it again): refetches, syncs and reconnects tell a change once. An announcement and the name it puts on a
+  line reach the disk together too. As for the admin-join line (admin.md §2.4.2) no message
+  replaces, edits, deletes or pins it, and a message the server gives the same ID doesn't take its
+  row. The time shown is when the device learned of it (at least its place's); once named, the
+  message's.
+- **Unread** like the admin-join line: like a message at its place, from anybody but the user
+  (their own change isn't unread to them); a line newer than every message is read when the user
+  reads the conversation on this device.
+- **Older versions.** 1.0.8 clients send the same messages, which name them here; this version still
+  sends them, so 1.0.8 shows its changes as before. Messages stored before the update are hidden
+  after it, and their changes have no line (they happened before this device compared records).
+
+What still rests on the server: whether and when a channel changed, and the space's name, are its
+word. A server can report a change that didn't happen or hold one back, and nothing a member sends
+makes a line or keeps one away. A name on a line is always a member's own encrypted claim of that
+kind of change; a server that numbers messages could at most hand a device such a claim it never
+saw before (an older one, re-timed into the window), or drop the real one so that a member's
+competing claim is the only one that fits. A member racing the real announcement with their own
+only makes the line name nobody. Signed channel properties would close this.
 
 ## 5. Adding a device (Threema/WhatsApp style)
 
@@ -1407,6 +1499,11 @@ restored together with them on a new device.
   leaves a tombstone with its left time for the usual 90 days, so the same absence isn't taken
   back from another device's local records or an older key bag (possibly without its return); a
   later removal of the device counts as before.
+- **When the recovery passphrase was last set** (issue #410): the device that sets it (enrollment,
+  a change, a recovery) records its clock's time; merging keeps the later one. Settings > Security
+  shows it next to the backup's state, which each device reads from what it already knows: whether a
+  key bag is stored, uploads still pending, and which wraps exist (passphrase, passkey,
+  organization). The server learns nothing new.
 - **The activity feed has no read mark of its own** (issue #534): an entry is read when the read
   position of its target (conversation or thread) is at or after it, and those positions sync
   through the server like any other. The older `activity_read` field is still merged (the later one
@@ -1893,6 +1990,27 @@ If SQLite rolls a group's transaction back by itself (a full disk), the group's 
 refused instead of being committed one by one. Where order alone is enough (content keys are written before
 the MLS state that consumed the epoch), reprocessing an entry after a crash is idempotent.
 
+**MLS state (issue #424).** The openmls provider storage (every group's tree, context, epoch and
+message secrets; key package private keys) is a map from storage key to value; each entry is one
+record of the `mls_storage` table (`entry/` and the storage key in base64url). A save writes the
+entries that changed since the last save and deletes the ones openmls dropped, as one group of
+writes, inside the caller's group where there is one (the cursor past a processed entry, the
+applied changes): after a crash the store holds the state before or after the save, never a group
+half old, half new (kill-point tests in `store_integrity.rs`). Joining a group or processing a
+message writes that group's few changed entries, whatever the number of groups; before, the whole
+storage was one record rewritten after every change, which made a catch-up of many new groups
+quadratic (0.8 GB written for 300 groups, docs/performance.md). The client remembers what the
+store holds (`SavedMlsStorage`) to find the changes without reading the store. A store that can
+lose writes it accepted counts its committed and rolled-back groups (`LocalStore::write_tally`,
+the SQLite stores): after a lost group the next save writes every entry again and deletes every key
+that may still be on disk, the deletes of groups not yet known to be committed included (the sealed
+store's cache keeps a rolled-back group, so its listing no longer shows them). The browser store
+never loses an accepted write while the page runs (§9.4). A deleted group leaves no entry, the
+previous epoch's leaf keys included, which openmls 0.9 leaves behind after a commit that removed
+the device. Versions before 1.0.9 kept the whole storage as one record (`provider`); opening the
+store moves it to entries in one group of writes that removes the old record last, so until that
+group is on disk the old record is what a start reads, and an interrupted move is done again from it.
+
 **Layout versions.** The SQLite stores keep their layout version in `PRAGMA user_version`. Each store
 has a list of numbered steps (forward-only, never edited once released); opening runs the missing
 ones, each in its own transaction together with setting its version, so a crash or a failed step
@@ -1900,8 +2018,11 @@ leaves the database at the last step that completed. Upkeep that can't run in a 
 one-time wipe of free pages, version 2, issue #391) runs after the earlier steps committed and
 counts as done only once it succeeded; a failure (a full disk) is tried again on the next start.
 Released 1.0 databases carry version 0 and the layout of version 1. A newer layout is refused
-without touching it.
-IndexedDB versions its object stores itself and refuses a newer database (`VersionError`). Databases
+without touching it. Version 3 changes no table but marks the MLS state stored per entry, which an
+older version would read as no MLS state at all; it is set without upkeep, so a failed wipe before
+it is still retried and the marker waits for it.
+IndexedDB versions its object stores itself and refuses a newer database (`VersionError`); version 2
+is the same marker (an older page that still holds the database closes it on `versionchange`). Databases
 written by every release are kept as fixtures (`crates/teamcraft-core/tests/fixtures/store/`) and
 opened by every later version in CI. Records inside the store stay JSON with defaults for new
 fields and an `Unknown` catch-all, so newer records are read or skipped, not misread.
@@ -1971,6 +2092,17 @@ start and remain visible while the server or its object storage is unavailable.
   name, and every `teamcraft-media-*` database the browser lists (`indexedDB.databases()`), also at
   a start while signed out.
 - An entry that doesn't open (tampered with, another key) is deleted and counts as missing.
+- **Notification pictures (#543).** System notifications show the sender's avatar or the channel's
+  or space's picture from this cache, never a rendition. The OS shows them in other processes, so
+  they leave the seal there: Linux gets the pixels over D-Bus (`image-data`, no file); Windows and
+  macOS get a small PNG (128 px) in the app's cache directory (mode 0600 where the system has modes),
+  one per picture on Windows (the toast reads it again from the Action Center) and a copy per
+  notification on macOS (the notification center moves it into its own store). These files are
+  deleted at sign-out, at start and, on Windows, when the picture is no longer among the last 32
+  shown. The browser's service worker reads the cache like the page, with the account's wrapped key,
+  and hands the picture to the browser as a `data:` URL. Pictures go only with names: a
+  notification the workspace policy or the device setting keeps to "New message" has none
+  (notifications.md, "Desktop notifications").
 - The mobile apps don't use it: Android keeps avatars in its own file cache and opens pictures from
   the decrypted downloads (§4.5).
 

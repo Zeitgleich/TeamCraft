@@ -113,6 +113,7 @@ fn main() -> anyhow::Result<()> {
     .manage(service.clone())
     .manage(attention::OsProbe::default())
     .manage(notifications::ShownNotifications::default())
+    .manage(notifications::pictures::NotificationPictures::default())
     .manage(call_window::CallWindowState::default())
     .manage(ringtone::RingtoneState::default())
     .manage(message_sound::MessageSoundState::default())
@@ -166,6 +167,12 @@ fn main() -> anyhow::Result<()> {
         tracing::warn!(%error, "no tray icon");
       }
       create_main_window(app)?;
+      match app.path().app_cache_dir() {
+        Ok(dir) => app
+          .state::<notifications::pictures::NotificationPictures>()
+          .use_dir(dir.join(notifications::pictures::PICTURES_DIR)),
+        Err(error) => tracing::info!(%error, "no cache folder: notifications show no pictures on Windows and macOS"),
+      }
       notifications::prepare(app.handle());
       #[cfg(target_os = "linux")]
       notifications::watch_notifications(app.handle());

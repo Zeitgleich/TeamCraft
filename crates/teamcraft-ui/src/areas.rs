@@ -121,7 +121,7 @@ areas! {
   inline_video_player(src: String, video: NodeRef<html::Video>, label: String, on_error: Callback<()>) => video: view! {
     <VideoPlayer src=src video=video label=label class="media-video-player" is_autoplay=true on_error=on_error />
   };
-  /// The preview of Markdown, HTML and PDF files (#557).
+  /// The preview of Markdown, HTML, PDF and text files (#557), with the text and log viewer (#821).
   file_preview(conversation: ConversationId, key: MediaKey) => preview: view! { <FilePreview conversation=conversation key=key /> };
   /// Creating and configuring spaces and channels, and inviting people.
   new_space(_unit: ()) => workspace: view! { <NewSpaceDialog /> };

@@ -3,7 +3,7 @@
 
 use rusqlite::{Connection, ErrorCode};
 
-use super::StoreError;
+use super::{StoreError, WriteTally};
 
 /// The group of writes open on a connection; kept under the connection's lock.
 #[derive(Debug, Default)]
@@ -12,6 +12,8 @@ pub(crate) struct WriteGroup {
   depth: u32,
   /// A write of the open group failed: the group is rolled back when it ends.
   has_failed: bool,
+  /// Groups committed and lost so far ([`super::LocalStore::write_tally`]).
+  tally: WriteTally,
 }
 
 impl WriteGroup {
@@ -38,24 +40,18 @@ impl WriteGroup {
       },
     }
     self.depth = 0;
-    // SQLite may have rolled the transaction back by itself (a full disk, an I/O error).
-    let is_open = !connection.is_autocommit();
-    if self.has_failed {
-      if is_open {
-        connection.execute_batch("ROLLBACK").map_err(sqlite_error)?;
-      }
-      return Err(StoreError::GroupFailed("a write of the group failed".into()));
+    let ended = Self::commit_or_roll_back(self.has_failed, connection);
+    if ended.is_ok() {
+      self.tally.committed = self.tally.committed.saturating_add(1);
+    } else {
+      self.tally.lost = self.tally.lost.saturating_add(1);
     }
-    if !is_open {
-      return Err(StoreError::GroupFailed("the transaction ended early".into()));
-    }
-    if let Err(error) = connection.execute_batch("COMMIT") {
-      // Deliberately ignored: rolling back after a failed commit only makes sure the connection
-      // leaves the transaction; the commit's error is the one reported.
-      let _ = connection.execute_batch("ROLLBACK");
-      return Err(StoreError::GroupFailed(error.to_string()));
-    }
-    Ok(())
+    ended
+  }
+
+  /// What became of the groups so far.
+  pub(crate) fn tally(&self) -> WriteTally {
+    self.tally
   }
 
   /// Before a write: inside a group, the transaction must still be open. SQLite rolls it back by
@@ -80,6 +76,29 @@ impl WriteGroup {
     if self.depth > 0 {
       self.has_failed = true;
     }
+  }
+
+  /// Ends the outermost group's transaction: commits it, or rolls it back if one of its writes
+  /// failed.
+  fn commit_or_roll_back(has_failed: bool, connection: &Connection) -> Result<(), StoreError> {
+    // SQLite may have rolled the transaction back by itself (a full disk, an I/O error).
+    let is_open = !connection.is_autocommit();
+    if has_failed {
+      if is_open {
+        connection.execute_batch("ROLLBACK").map_err(sqlite_error)?;
+      }
+      return Err(StoreError::GroupFailed("a write of the group failed".into()));
+    }
+    if !is_open {
+      return Err(StoreError::GroupFailed("the transaction ended early".into()));
+    }
+    if let Err(error) = connection.execute_batch("COMMIT") {
+      // Deliberately ignored: rolling back after a failed commit only makes sure the connection
+      // leaves the transaction; the commit's error is the one reported.
+      let _ = connection.execute_batch("ROLLBACK");
+      return Err(StoreError::GroupFailed(error.to_string()));
+    }
+    Ok(())
   }
 }
 
@@ -111,6 +130,11 @@ pub(crate) enum MigrationKind {
   /// version is set only once it succeeded. It doesn't change what the store reads, so a failure
   /// (a full disk) is retried on the next start, unless a later layout step depends on it.
   Maintenance(fn(&Connection) -> Result<(), StoreError>),
+  /// Changes no table but what records hold, which the client moves when it opens the store (the
+  /// MLS state per entry, `mls_storage`): versions before refuse the database instead of misreading
+  /// it. It depends on no upkeep, so a failed one before it is retried as usual and the marker
+  /// waits for it.
+  Marker,
 }
 
 /// The version the last of `steps` brings a database to.
@@ -139,6 +163,7 @@ pub(crate) fn run_migrations(connection: &Connection, steps: &[Migration]) -> Re
         set_user_version(&transaction, step.version)?;
         transaction.commit().map_err(sqlite_error)?;
       },
+      MigrationKind::Marker => set_user_version(connection, step.version)?,
       MigrationKind::Maintenance(apply) => {
         if let Err(error) = apply(connection).and_then(|()| set_user_version(connection, step.version)) {
           let is_needed_later = steps[index + 1..]
@@ -263,6 +288,26 @@ pub(crate) mod tests {
       .collect();
     assert!(run_migrations(&connection, &with_layout_after).is_err());
     assert_eq!(version(&connection), 1);
+  }
+
+  /// A marker (issue #424) waits for a failed upkeep before it instead of failing the open.
+  #[test]
+  fn a_marker_after_failed_upkeep_waits_for_it() {
+    let with_marker: Vec<Migration> = WITH_UPKEEP
+      .iter()
+      .copied()
+      .chain([Migration {
+        version: 3,
+        kind: MigrationKind::Marker,
+      }])
+      .collect();
+    assert_numbered(&with_marker);
+    let connection = Connection::open_in_memory().unwrap();
+    run_migrations(&connection, &with_marker).unwrap();
+    assert_eq!(version(&connection), 1);
+    create(&connection, "allowed").unwrap();
+    run_migrations(&connection, &with_marker).unwrap();
+    assert_eq!(version(&connection), 3);
   }
 
   fn create(connection: &Connection, name: &str) -> Result<(), StoreError> {

@@ -400,7 +400,7 @@ What changed and what the numbers say:
   covers the long case).
 - **Left open (#424):** the MLS state is still one record rewritten per group, quadratic in the
   number of groups; splitting it per group is a change to the store format and needs its own
-  review.
+  review. Done since: see "The MLS state per entry (issue #424)" below.
 
 #### Coming back: requests and round trips (issue #714)
 
@@ -458,11 +458,57 @@ Left open (see the PR of #714/#717):
   `GET /me` before they start the core; offline the web app shows the sign-in page instead of the
   stored chats. The cached account should start the core at once and the sign-in be checked beside it.
 - The web core decrypts the whole IndexedDB store into memory before it answers the first read.
-- The MLS state is still one record (#424); a catch-up of many changed groups rewrites it per group.
+- The MLS state was still one record (#424); a catch-up of many changed groups rewrote it per group.
+  Fixed since, see the next section.
 
 The desktop and Android apps are measured against the same harness (`PERF_MOBILE_USER`) in a local
 session. Slack, Teams and Element were not measured: that needs their apps installed and accounts
 on their services.
+
+#### The MLS state per entry (issue #424)
+
+The MLS state of all groups was one record, rewritten after every change to any group: a catch-up
+that joins 300 groups wrote it two times per group. It is now one record per openmls storage entry,
+and a save writes the entries that changed (docs/e2ee.md §9.5). Measured in the client core against
+the fake server: Carol comes back to channels Alice made and added her to meanwhile, and catches up
+(`tests/suite/mls_storage.rs`, a store that counts the bytes written to the MLS table; debug build,
+local machine, October 2026; "before" is the same test on `integration/v1.0.9` ecdc727):
+
+```sh
+# MLS_STORAGE_SQLCIPHER=1: on a SQLCipher file instead of the memory store
+MLS_STORAGE_CHANNELS=300 cargo test -p teamcraft-core --all-features --test suite -- \
+  --ignored --nocapture mls_storage
+```
+
+| Catch-up of           | Before: MLS writes | Before: bytes written | After: MLS writes | After: bytes written | State in the store, before / after |
+|-----------------------|--------------------|-----------------------|-------------------|----------------------|------------------------------------|
+| 100 groups            | 201                | 92.0 MB               | 1,203             | 1.1 MB               | 0.91 / 0.96 MB                     |
+| 300 groups            | 601                | 816.2 MB              | 3,603             | 3.3 MB               | 2.71 / 2.86 MB                     |
+| Per group, 300 groups | 2                  | 2.7 MB                | 12                | 11 KB                | 9.0 / 9.5 KB                       |
+
+| Time of Carol's catch-up (debug build) | Before  | After   |
+|----------------------------------------|---------|---------|
+| 100 groups, store in memory            | 2.14 s  | 1.32 s  |
+| 300 groups, store in memory            | 15.62 s | 7.96 s  |
+| 100 groups, SQLCipher file             | 3.32 s  | 2.09 s  |
+| 300 groups, SQLCipher file             | 22.91 s | 10.30 s |
+
+- **Bytes written per join no longer grow with the number of groups:** about 11 KB per join, the
+  joined group's entries and the spent key package. Before, the n-th join wrote the whole state of
+  n groups twice. The test `writes_per_joined_group_do_not_grow_with_the_number_of_groups` fails if
+  they grow again.
+- More, smaller records: a group's state is about a dozen entries (tree, context, secrets, leaf
+  keys). Opening a store reads them all, as it read the one record; the bytes are the same.
+- What a save costs besides the writes: the client compares the provider storage with what it
+  wrote last (a copy of the state in memory, compared byte for byte: no hashing, and no read of the
+  store). With the state of 300 groups (2.7 MB in 3,600 entries) a save of one changed entry takes
+  0.3 ms in a release build (`mls_storage::tests::measure_save_of_one_change`). The copy costs as
+  much memory as the state.
+- The catch-up time still grows faster than the number of groups (memory store, debug build: 1.3 s
+  for 100, 8 s for 300). The comparison is one part of it (unoptimised in a debug build); the rest
+  was not taken apart here.
+- The browser's batches stay small now, so the extra wait for a batch over 1 MiB (#326) rarely
+  applies; the large web workspace (`perf.rs`, `PERF_SCALE=large`) is still to be measured with it.
 
 ### Desktop on Linux: idle (issue #399)
 

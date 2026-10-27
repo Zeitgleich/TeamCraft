@@ -15,6 +15,7 @@ use teamcraft_proto::{AttachmentId, ConversationId};
 
 use crate::api::ServerApi;
 use crate::client::Client;
+use crate::client::files::failure_of;
 use crate::error::CoreError;
 use crate::store::{AttachmentRef, LocalStore};
 
@@ -205,7 +206,12 @@ impl Downloads {
                 saved: download.save().await,
               }
             })),
-            Err(error) => tracing::warn!(%error, "could not start saving a file"),
+            Err(error) => tracing::warn!(
+              %error,
+              attachment_id = %attachment,
+              reason = ?failure_of(&error),
+              "could not start saving a file"
+            ),
           }
         },
       }
@@ -228,8 +234,15 @@ impl Downloads {
       return false;
     };
     match client.finish_download_to_disk(attachment, saved) {
-      Ok(_) => {},
-      Err(error) => tracing::warn!(%error, "saving a file failed"),
+      Ok(_) => tracing::info!(attachment_id = %attachment, "saved a file"),
+      // The card shows the reason; the log keeps the error (issue #807). Never the path: it names
+      // the file.
+      Err(error) => tracing::warn!(
+        %error,
+        attachment_id = %attachment,
+        reason = ?failure_of(&error),
+        "saving a file failed"
+      ),
     }
     true
   }

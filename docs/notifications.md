@@ -370,15 +370,17 @@ notification. Except for a ringing call, a newer notification closes its predece
 as a new one instead of replacing it: KDE Plasma doesn't report a popup that timed out into its
 history, and replacing that one only updates the history entry, without a popup (#531).
 
-| Platform | Shown through                          | Replace, withdraw | Buttons | Reply field                     | Ringtone, attention                       |
-|----------|----------------------------------------|-------------------|---------|---------------------------------|-------------------------------------------|
-| Linux    | freedesktop notification service       | yes               | yes     | servers with `inline-reply`     | yes; quiet in GNOME/KDE do-not-disturb    |
-| Windows  | WinRT toasts (tag, group `teamcraft`)  | yes               | yes     | yes                             | yes; taskbar flash                        |
-| macOS    | `UNUserNotificationCenter` (bundled)   | yes               | yes     | yes                             | yes; dock bounce                          |
-| Web      | service worker registration, else page | yes               | yes     | no (browsers have none)         | yes, in the tab that runs the calls¹      |
+| Platform | Shown through                          | Replace, withdraw | Buttons | Reply field                     | Ringtone, attention                       | Picture²                              |
+|----------|----------------------------------------|-------------------|---------|---------------------------------|-------------------------------------------|---------------------------------------|
+| Linux    | freedesktop notification service       | yes               | yes     | servers with `inline-reply`     | yes; quiet in GNOME/KDE do-not-disturb    | `image-data` hint (pixels, no file)   |
+| Windows  | WinRT toasts (tag, group `teamcraft`)  | yes               | yes     | yes                             | yes; taskbar flash                        | `appLogoOverride`, circle for people  |
+| macOS    | `UNUserNotificationCenter` (bundled)   | yes               | yes     | yes                             | yes; dock bounce                          | attachment                            |
+| Web      | service worker registration, else page | yes               | yes     | no (browsers have none)         | yes, in the tab that runs the calls¹      | `icon` (`data:` URL)                  |
 
 ¹ Browsers play sound only in a tab the user has interacted with; a tab untouched since it loaded
 shows the incoming call card and the notification without the ringtone.
+
+² See "Pictures" below. The notification plugin (the fallback) shows none.
 
 macOS buttons and the reply field need a notification category (registered as notifications arrive,
 since the labels are translated) and a notification center delegate, an Objective-C class that
@@ -396,6 +398,41 @@ In the browser, a push notification shown by the service worker (no tab open) ha
 top-level message: the worker sets the read position with the stored push session token, in the
 language the page last left next to the database name; with an expired session the click opens the
 conversation instead. Join on meeting reminders needs a server push for reminders and is not built.
+
+**Pictures (#543).** As in messaging apps, a notification shows who wrote or where: the sender's
+avatar for DMs and group DMs (thread replies included), the channel's picture (else its space's) for
+channels, the caller's avatar for ringing and missed calls, and the admin's avatar for a join
+request; the settings' test notification shows the user's own. Meeting and `/remind` reminders have
+none. The UI picks the picture (`teamcraft_ui::notifier::PictureSubject`, `notification_pictures`)
+and names it by its key in the persistent media cache (e2ee.md §9.6), where the app keeps every
+avatar and space or channel picture it showed; the shell (`apps/desktop/src/notifications/pictures.rs`)
+or the page reads it from there and never fetches a picture for a notification. Without a cached copy
+the notification shows the tile the app draws instead (initials on the person's or space's colour,
+drawn by the UI into a canvas); a channel outside any space without a picture has none. Pictures are
+cut to the app's shapes (people round, spaces and channels with rounded corners) at 128 px; the shell
+keeps the last 32 prepared, so a burst of messages decodes a picture once.
+
+- **Privacy:** a picture names a person or place as a name does, so it follows the names, not the
+  text: the workspace policy `push_content` "generic" (or a mode this version doesn't know) removes
+  it with the names, "sender" keeps it; "show message preview" hides only the text. Web Push follows
+  the same rule after the device's own setting ("nothing" removes the picture). Desktop and web have
+  no app lock; the Android app lock caps content at "sender only", which keeps names and so would
+  keep pictures. On the lock screen the system's own preview setting applies (macOS "show previews:
+  when unlocked" hides the attachment too).
+- **Linux:** the pixels go along as the `image-data` hint (spec 1.2), which GNOME Shell and KDE
+  Plasma show in place of the app icon; the app icon and `desktop-entry` still name the app.
+- **Windows:** the toast's `appLogoOverride` with `hint-crop="circle"` for people, from a PNG file in
+  the app's cache directory (one per picture, deleted when it is no longer kept, at sign-out and at
+  start).
+- **macOS:** a `UNNotificationAttachment`, which Notification Center shows beside the text; the
+  system moves the file, so every notification writes its own copy. A communication notification
+  (the avatar in place of the app icon) would need the Communication Notifications entitlement and a
+  donated `INSendMessageIntent`; not built.
+- **Web:** the page sets the notification's `icon` to a `data:` URL of the picture drawn in its shape
+  (the page's CSP allows `data:` images). The service worker's Web Push notifications (no tab open)
+  read the account's media cache with its wrapped key and use the cached picture as it is (PNG, JPEG
+  or WebP up to 1 MiB, as the browser shows it: square, no initials tile), with the same order: the
+  sender for DMs and calls, the channel's picture, then the space's.
 
 **Message sounds (#800).** "Sound for new messages" (`message_sound`) is the system's notification
 sound (the default, as before), none, one of the app's own sounds or the user's own file. The app's
@@ -472,6 +509,10 @@ read without bringing the window up).
 - `GET /api/v1/admin/users/{id}/push-health`: per device the provider and counts since the server
   started (sent, failed, suppressed by DND, held for an attentive desktop, dismissals) with the time of
   the last success and failure. Counts only: no message, conversation or token.
+- `GET /api/v1/me/push-health`: the same for the caller's own devices. Settings > Devices shows per
+  device the push service and when the last push went out, and sends a test push to any of them
+  (issue #409). The counts live in the server process, so after a restart a device shows no push until
+  the next one.
 
 ### What only real devices can show
 

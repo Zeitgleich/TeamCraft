@@ -40,6 +40,7 @@ mod read_ahead;
 mod removal;
 #[cfg(not(target_arch = "wasm32"))]
 mod segments;
+mod server_changes;
 mod sources;
 mod sync;
 mod sync_trace;
@@ -54,6 +55,9 @@ pub(crate) use workspace::WORKSPACE_KEY;
 use std::collections::{BTreeMap, HashMap};
 
 pub use account::stored_account_data;
+pub use devices::OwnDeviceCheck;
+#[cfg(feature = "ui")]
+pub(crate) use enroll::{WRAPPED_KEYS_KEY, decode_wrapped_keys};
 /// Where the engine records its upload limit for the UI.
 pub const MAX_UPLOAD_KEY: &str = "max_upload_bytes";
 pub use actions::{OutgoingText, REPLY_EXCERPT_CHARS, forward_content, reply_ref};
@@ -86,7 +90,6 @@ pub(crate) use messaging::{REMOVED_SENDER_GRACE_MS, decrypt_content};
 #[cfg(feature = "ui")]
 pub(crate) use messaging::{apply_control, bookmarks_key};
 pub(crate) use notifications::registered_push_token;
-pub use notifications::{TYPING_TIMEOUT_MS, TypingState};
 use openmls_rust_crypto::OpenMlsRustCrypto;
 pub use org_recovery::{SealedShare, recovery_request};
 pub use pending_actions::{PendingAction, PendingActionSettings, StatusChange};
@@ -103,6 +106,7 @@ use crate::api::ServerApi;
 use crate::clock::Clock;
 use crate::convert;
 use crate::error::CoreError;
+use crate::mls_storage;
 use crate::records::{self, Account, PinnedIdentity, SyncState};
 use crate::store::{LocalStore, Table};
 use crate::trust::PinnedDirectory;
@@ -159,6 +163,11 @@ pub struct ClientSettings {
   /// times): each answer costs a commit, and a broken or malicious device could ask far more often
   /// than `rejoin_retry` (issue #149).
   pub rejoin_cooldown: std::time::Duration,
+  /// How long after this device saw a change the server reports of a channel (archived, made
+  /// private, ...) a member's encrypted announcement of it may come and still name who made it
+  /// (issue #818), measured on the server's clock from the newest message known then. Later
+  /// announcements name nobody; the line is there either way.
+  pub change_announcement_window: std::time::Duration,
   /// Removal records whose absence ended before the workspace's retention limit are dropped
   /// (issue #186); this much later, to spare messages still on the way.
   pub removed_sender_retention_leeway: std::time::Duration,
@@ -239,10 +248,12 @@ pub struct Client<A, S> {
   clock: Box<dyn Clock>,
   settings: ClientSettings,
   provider: OpenMlsRustCrypto,
+  /// What the store holds of the provider's storage, so a save writes only what changed.
+  saved_mls: mls_storage::SavedMlsStorage,
   account: Account,
   groups: HashMap<ConversationId, ConversationGroup>,
   sync: SyncState,
-  typing: notifications::TypingState,
+  typing: crate::typing::TypingState,
   /// Refusals of earlier user actions found by a background flush, for the host to show
   /// ([`Client::take_background_failures`]).
   background_failures: Vec<CoreError>,
@@ -321,6 +332,7 @@ impl Default for ClientSettings {
       rejoin_retry_max: std::time::Duration::from_secs(24 * 60 * 60),
       pending_addition_expiry: std::time::Duration::from_secs(90 * 24 * 60 * 60),
       rejoin_cooldown: std::time::Duration::from_secs(30 * 60),
+      change_announcement_window: std::time::Duration::from_secs(10 * 60),
       removed_sender_retention_leeway: std::time::Duration::from_secs(24 * 60 * 60),
       dm_welcome_timeout: std::time::Duration::from_secs(2 * 60),
       removal_retry: std::time::Duration::from_secs(60 * 60),
@@ -363,7 +375,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     let Some(account) = records::load_account(&store)? else {
       return Ok(None);
     };
-    let provider = records::load_mls_storage(&store)?;
+    let (provider, saved_mls) = mls_storage::load_mls_storage(&store)?;
     // The UI shows the upload limit before sending.
     records::put_json(&store, Table::Account, MAX_UPLOAD_KEY, &settings.max_upload_bytes)?;
     let sync = records::load_sync_state(&store)?;
@@ -375,6 +387,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       clock,
       settings,
       provider,
+      saved_mls,
       account,
       groups: HashMap::new(),
       sync,
@@ -594,7 +607,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       .store
       .delete(Table::SyncState, &groups::group_info_published_key(conversation))?;
     self.mls_current.remove(&conversation);
-    records::save_mls_storage(&self.store, &self.provider)
+    self.save_mls_storage()
   }
 
   /// Writes MLS state (provider storage and applied change IDs) after a group operation, as one
@@ -618,7 +631,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
   }
 
   fn write_group_state(&self, conversation: ConversationId) -> Result<(), CoreError> {
-    records::save_mls_storage(&self.store, &self.provider)?;
+    self.save_mls_storage()?;
     if let Some(group) = self.groups.get(&conversation) {
       let applied: Vec<[u8; 16]> = group.applied_changes().map(|id| *id.as_bytes()).collect();
       records::put_json(
@@ -646,6 +659,12 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       }
     }
     Ok(())
+  }
+
+  /// Writes what changed in the MLS state (the provider storage) since the last save, as one
+  /// group of writes; inside a caller's group it reaches the disk with that group.
+  pub(crate) fn save_mls_storage(&self) -> Result<(), CoreError> {
+    mls_storage::save_mls_storage(&self.store, &self.provider, &self.saved_mls)
   }
 
   /// Writes the key bag after content keys changed, and marks it for upload (together, so a bag

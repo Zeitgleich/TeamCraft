@@ -17,7 +17,7 @@ use super::sql_group::{
   Migration, MigrationKind, WriteGroup, run_migrations, sqlite_error as database_error,
 };
 use super::sqlite_wipe::wipe_free_pages;
-use super::{DatabaseKeySource, StoreError};
+use super::{DatabaseKeySource, StoreError, WriteTally};
 
 /// The layout steps of this store, in order ([`run_migrations`]); released 1.0 databases carry
 /// version 0 and the table of version 1.
@@ -29,6 +29,11 @@ pub(crate) const MIGRATIONS: &[Migration] = &[
   Migration {
     version: 2,
     kind: MigrationKind::Maintenance(wipe_free_pages),
+  },
+  // The MLS state is stored per entry (issue #424); versions before would read none of it.
+  Migration {
+    version: 3,
+    kind: MigrationKind::Marker,
   },
 ];
 /// How long a write waits for another connection's lock (a checkpoint of the log runs into one).
@@ -195,6 +200,10 @@ impl RecordBackend for SqliteRecords {
     if !group.is_open() {
       run_purge_if_due(connection, purge);
     }
+  }
+
+  fn write_tally(&self) -> Option<WriteTally> {
+    Some(self.lock().group.tally())
   }
 }
 
@@ -485,6 +494,66 @@ mod tests {
     );
     assert_eq!(reopened.get(Table::Outbox, "1").unwrap(), None);
     assert_eq!(reopened.get(Table::SyncState, "sync").unwrap(), None);
+    drop(reopened);
+    std::fs::remove_dir_all(&directory).unwrap();
+  }
+
+  /// Issue #424: the cache keeps a group the database rolled back, a deleted MLS entry included,
+  /// so the store's list no longer shows what the disk still holds. The tally makes the next
+  /// save write the whole state and delete that entry again: after a restart the database holds
+  /// what the provider holds.
+  #[test]
+  fn the_mls_state_is_written_again_after_a_rolled_back_group() {
+    use openmls_traits::OpenMlsProvider as _;
+
+    use crate::mls_storage::{SavedMlsStorage, load_mls_storage, save_mls_storage};
+
+    let directory = scratch_dir();
+    let path = directory.join("store.db");
+    let key = SymmetricKey::generate(&mut OsRng);
+    let provider = openmls_rust_crypto::OpenMlsRustCrypto::default();
+    let set = |key: &[u8], maybe_value: Option<&[u8]>| {
+      let mut values = provider.storage().values.write().unwrap();
+      match maybe_value {
+        Some(value) => values.insert(key.to_vec(), value.to_vec()),
+        None => values.remove(key),
+      };
+    };
+    {
+      let store = SealedSqliteStore::open(&path, &StaticKeySource::new(key.duplicate())).unwrap();
+      let saved = SavedMlsStorage::default();
+      set(b"epoch", Some(b"1"));
+      set(b"spent key package", Some(b"secret"));
+      save_mls_storage(&store, &provider, &saved).unwrap();
+
+      set(b"epoch", Some(b"2"));
+      set(b"spent key package", None);
+      store.begin_writes().unwrap();
+      save_mls_storage(&store, &provider, &saved).unwrap();
+      store
+        .backend()
+        .lock()
+        .connection
+        .execute_batch("ROLLBACK")
+        .unwrap();
+      assert!(store.end_writes().is_err());
+      assert_eq!(
+        store.write_tally(),
+        Some(WriteTally {
+          committed: 1,
+          lost: 1
+        })
+      );
+
+      set(b"next group", Some(b"3"));
+      save_mls_storage(&store, &provider, &saved).unwrap();
+    }
+    let reopened = SealedSqliteStore::open(&path, &StaticKeySource::new(key)).unwrap();
+    let (loaded, _) = load_mls_storage(&reopened).unwrap();
+    assert_eq!(
+      *loaded.storage().values.read().unwrap(),
+      *provider.storage().values.read().unwrap()
+    );
     drop(reopened);
     std::fs::remove_dir_all(&directory).unwrap();
   }

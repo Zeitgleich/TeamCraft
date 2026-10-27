@@ -52,6 +52,15 @@ is still your server's word. The workspace policy `admin_self_join` decides whet
 allowed (`visible` by default), need a channel owner's approval (`owner_approval`) or are refused
 (`disabled`).
 
+## Channel changes
+
+Lines like "This channel was archived", "… was made public" or "… was moved to another space" come
+from your server's record of the channel: your app writes them itself when it sees that record
+change, so another member can't make one up or keep one away. They are your server's word until
+channel settings are signed. The line names who made the change ("Ada archived this channel") only
+when Ada's own app announced it right then; if nobody did, or two people claimed it, it names
+nobody.
+
 ## The web app
 
 The web app is delivered by your server. It checks a **signed release** before it updates itself,

@@ -924,6 +924,12 @@ final class AppModel {
     await answer(.browseChannels(spaceId: spaceId))?.channels ?? []
   }
 
+  /// The key backup as the core knows it (Settings > Security); `nil` before the first key bag sync.
+  func keyBackup() async -> BackupSnapshot.KeyBackup? {
+    guard let json = try? await core().snapshot() else { return nil }
+    return Wire.decode(BackupSnapshot.self, from: json)?.security?.backup
+  }
+
   /// Display names by user ID, for reply quotes; former accounts too, deleted ones by the app's own
   /// "Deleted user".
   func displayNames() async -> [String: String] {

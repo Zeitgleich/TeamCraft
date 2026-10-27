@@ -54,6 +54,22 @@ class SystemLineTest {
   }
 
   @Test
+  fun channelChangesNobodyIsNamedForAreTheServersWord() {
+    // Issue #818: no member's announcement matched the change the server reports, so no "by".
+    assertEquals(
+      SystemLine.Archived(maybeBy = null),
+      line(kind = "\"Change\"", workspace = """{"event":"archived"}"""),
+    )
+    assertEquals(SystemLine.Unarchived(maybeBy = null), line(workspace = """{"event":"unarchived"}"""))
+    assertEquals(SystemLine.MadePrivate(maybeBy = null), line(workspace = """{"event":"made_private"}"""))
+    assertEquals(SystemLine.MadePublic(maybeBy = null), line(workspace = """{"event":"made_public"}"""))
+    assertEquals(
+      SystemLine.Moved(maybeBy = null, space = "Project B"),
+      line(workspace = """{"event":"moved","space":"Project B"}"""),
+    )
+  }
+
+  @Test
   fun anAdminWhoJoinedSaysWhoApprovedTheRequest() {
     // admin.md §2.4: by themselves (`visible`), or let in by an owner (`owner_approval`, #799).
     assertEquals(

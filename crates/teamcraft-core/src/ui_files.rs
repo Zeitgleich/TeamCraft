@@ -512,5 +512,8 @@ fn failure_view(reason: TransferFailure) -> FileFailure {
     TransferFailure::Network => FileFailure::Network,
     TransferFailure::Corrupted => FileFailure::Corrupted,
     TransferFailure::LocalFile => FileFailure::LocalFile,
+    TransferFailure::StorageUnavailable => FileFailure::StorageUnavailable,
+    TransferFailure::Missing => FileFailure::Missing,
+    TransferFailure::Intercepted => FileFailure::Intercepted,
   }
 }

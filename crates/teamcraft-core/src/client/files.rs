@@ -303,13 +303,25 @@ pub enum TransferState {
   Failed { reason: TransferFailure },
 }
 
+/// Why a file didn't make it, kept with the file so its card can say so (issue #807). Stored in the
+/// local store: variants are only added.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TransferFailure {
   TooLarge,
+  /// The transfer failed on the network, or the server or the storage answered with an error.
   Network,
+  /// The blob doesn't match what the sender encrypted (tampered or corrupted): not decrypted.
   Corrupted,
+  /// Reading or writing the file on this device failed.
   LocalFile,
+  /// The file storage (or the server) answered "unavailable" (503): an outage that a later retry
+  /// gets through.
+  StorageUnavailable,
+  /// The server doesn't have the file (any more), or doesn't give it to this user (404).
+  Missing,
+  /// A captive portal answered, or the connection's certificate isn't trusted.
+  Intercepted,
 }
 
 /// A share link this user created (only its creator has the fragment).
@@ -988,20 +1000,20 @@ impl DiskDownload {
       maybe_target,
     } = self;
     if let Some(path) = maybe_target {
-      // The user picked this file in a save dialog, which asked before replacing one.
+      // The user picked this file in a save dialog, which asked before replacing one. Written in
+      // place, not through a temporary file beside it: on macOS the save dialog grants access to
+      // the picked file only, not to other files in a protected folder (Downloads, Documents).
       let plaintext = download.open().await?;
-      std::fs::write(&path, plaintext.expose_secret())
-        .map_err(|error| CoreError::Corrupt(error.to_string()))?;
+      write_file(&path, plaintext.expose_secret())?;
       return Ok(path.to_string_lossy().into_owned());
     }
     let directory =
-      maybe_directory.ok_or_else(|| CoreError::Corrupt("no download directory configured".into()))?;
+      maybe_directory.ok_or_else(|| CoreError::InvalidRequest("no download directory configured".into()))?;
     let file_name = download.reference().file_name.clone();
     let plaintext = download.open().await?;
-    std::fs::create_dir_all(&directory).map_err(|error| CoreError::Corrupt(error.to_string()))?;
+    std::fs::create_dir_all(&directory).map_err(CoreError::LocalFile)?;
     let path = unique_path(&directory, &file_name);
-    std::fs::write(&path, plaintext.expose_secret())
-      .map_err(|error| CoreError::Corrupt(error.to_string()))?;
+    write_file(&path, plaintext.expose_secret())?;
     Ok(path.to_string_lossy().into_owned())
   }
 
@@ -1361,9 +1373,16 @@ async fn read_source(source: &UploadSource, size_bytes: u64) -> Result<Vec<u8>, 
   }
 }
 
-fn failure_of(error: &CoreError) -> TransferFailure {
+/// What a failed download says about where it failed: the card names it instead of a bare
+/// "Transfer failed" (issue #807).
+pub(crate) fn failure_of(error: &CoreError) -> TransferFailure {
   match error {
     CoreError::Api(ApiError::BlobTooLarge { .. }) => TransferFailure::TooLarge,
+    CoreError::Api(ApiError::Intercepted { .. }) => TransferFailure::Intercepted,
+    CoreError::Api(api) if api.is_not_found() || is_status(api, 410) => TransferFailure::Missing,
+    CoreError::Api(_) if RetryCause::of(error) == RetryCause::StorageUnavailable => {
+      TransferFailure::StorageUnavailable
+    },
     CoreError::Api(_) => TransferFailure::Network,
     CoreError::Attachment(_) => TransferFailure::Corrupted,
     CoreError::Corrupt(message) if message.contains("hash") => TransferFailure::Corrupted,
@@ -1510,6 +1529,23 @@ fn unique_path(directory: &std::path::Path, file_name: &str) -> std::path::PathB
     .unwrap_or(candidate)
 }
 
+/// Writes a downloaded file. A write that fails halfway removes what it left, so no cut-off file
+/// looks like the real one.
+#[cfg(not(target_arch = "wasm32"))]
+fn write_file(path: &std::path::Path, bytes: &[u8]) -> Result<(), CoreError> {
+  use std::io::Write;
+
+  let mut file = std::fs::File::create(path).map_err(CoreError::LocalFile)?;
+  if let Err(error) = file.write_all(bytes) {
+    drop(file);
+    // Deliberately ignored: the write error is what the user needs; a file that can't be removed
+    // either stays as it is.
+    let _ = std::fs::remove_file(path);
+    return Err(CoreError::LocalFile(error));
+  }
+  Ok(())
+}
+
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests {
   use super::*;
@@ -1538,6 +1574,64 @@ mod tests {
   fn oversized_blobs_are_a_too_large_failure_not_a_network_one() {
     let error = CoreError::Api(ApiError::BlobTooLarge { max_bytes: 10 });
     assert_eq!(failure_of(&error), TransferFailure::TooLarge);
+  }
+
+  /// A failed download keeps where it broke, so the card can say it (#807).
+  #[test]
+  fn a_failed_download_keeps_where_it_broke() {
+    let api = |error: ApiError| failure_of(&CoreError::Api(error));
+    assert_eq!(
+      api(ApiError::Network("connection reset".into())),
+      TransferFailure::Network
+    );
+    assert_eq!(
+      api(ApiError::status(500, ErrorCode::Internal, "boom")),
+      TransferFailure::Network
+    );
+    assert_eq!(
+      api(ApiError::status(503, ErrorCode::Unavailable, "storage down")),
+      TransferFailure::StorageUnavailable
+    );
+    assert_eq!(
+      api(ApiError::status(404, ErrorCode::AttachmentNotFound, "gone")),
+      TransferFailure::Missing
+    );
+    assert_eq!(
+      api(ApiError::Intercepted {
+        kind: crate::api::Interception::UntrustedCertificate,
+        detail: "unknown issuer".into(),
+      }),
+      TransferFailure::Intercepted
+    );
+    assert_eq!(
+      failure_of(&CoreError::Corrupt(
+        "attachment blob doesn't match its hash".into()
+      )),
+      TransferFailure::Corrupted
+    );
+    let denied = std::io::Error::from(std::io::ErrorKind::PermissionDenied);
+    let error = CoreError::LocalFile(denied);
+    assert_eq!(failure_of(&error), TransferFailure::LocalFile);
+    assert!(
+      error
+        .to_string()
+        .starts_with("writing the file on this device failed")
+    );
+  }
+
+  #[test]
+  fn writing_into_a_missing_folder_is_a_local_file_error() {
+    let missing = std::env::temp_dir()
+      .join(format!(
+        "teamcraft-no-folder-{}",
+        rand_core::RngCore::next_u64(&mut OsRng)
+      ))
+      .join("file.wav");
+    assert!(matches!(
+      write_file(&missing, b"RIFF"),
+      Err(CoreError::LocalFile(error)) if error.kind() == std::io::ErrorKind::NotFound
+    ));
+    assert!(!missing.exists());
   }
 
   #[test]
