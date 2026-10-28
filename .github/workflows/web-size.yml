@@ -2,7 +2,8 @@
 # bundle like the release does (`trunk build --release`) and checks the wasm of a first visit (the
 # app, the signed-in app's chunks and the service worker) with scripts/check-web-size.py. Every run
 # prints the sizes and the delta to the last `main` run into the job summary. It fails above the
-# compressed (gzip -9) budget, the default in the script.
+# compressed (gzip -9) budget, the default in the script, and above the call module's own budget
+# (the service worker fetches it for every member).
 #
 # Only changes that can change the bundle run it: the crates compiled into it, the lockfile and the
 # toolchain. `main` saves its sizes for the next delta (a few hundred bytes in the cache).
@@ -14,6 +15,8 @@ on:
     paths:
       - "crates/teamcraft-ui/**"
       - "crates/teamcraft-web-sw/**"
+      - "crates/teamcraft-web-calls/**"
+      - "crates/teamcraft-web-segmentation/**"
       - "crates/teamcraft-web-bundle/**"
       - "crates/teamcraft-media/**"
       - "crates/teamcraft-core/**"
@@ -30,6 +33,8 @@ on:
     paths:
       - "crates/teamcraft-ui/**"
       - "crates/teamcraft-web-sw/**"
+      - "crates/teamcraft-web-calls/**"
+      - "crates/teamcraft-web-segmentation/**"
       - "crates/teamcraft-web-bundle/**"
       - "crates/teamcraft-media/**"
       - "crates/teamcraft-core/**"

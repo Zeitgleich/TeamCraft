@@ -304,7 +304,7 @@ impl TrackSender {
   #[cfg(feature = "effects")]
   pub fn set_effect(&mut self, effect: crate::effects::BackgroundEffect) {
     if let Some(effects) = &mut self.maybe_effects {
-      effects.pipeline.set_effect(effect);
+      effects.set_effect(effect);
     }
   }
 
@@ -1056,20 +1056,58 @@ async fn play_hidden(stream: &MediaStream) -> Result<HtmlVideoElement, WebCallEr
   Ok(video)
 }
 
-/// What the camera's background effects need: the pipeline, and optionally a canvas that shows
-/// each picture as it is sent, for the self view (`captureStream()` of it plays in a `<video>`).
+/// The camera's background effects (#439): the segmentation worker, a compositor (WebGPU, or WebGL2
+/// where reading a frame back from WebGPU is too slow, as in Firefox), the effect, and optionally a
+/// canvas that shows each picture as it is sent, for the self view (`captureStream()` of it plays
+/// in a `<video>`).
 #[cfg(feature = "effects")]
 pub struct CameraEffects {
-  pipeline: crate::effects::EffectsPipeline,
+  compositor: effects::BrowserCompositor,
+  worker: std::rc::Rc<super::SegmentationWorker>,
+  effect: crate::effects::BackgroundEffect,
   maybe_view: Option<HtmlCanvasElement>,
   is_required: bool,
 }
 
 #[cfg(feature = "effects")]
 impl CameraEffects {
-  pub fn new(pipeline: crate::effects::EffectsPipeline) -> Self {
+  /// Composites with WebGPU (Chrome, Edge, Safari): the picture is read from a canvas, turned into
+  /// I420 and read back from the GPU for the encoders.
+  pub async fn webgpu(
+    worker: std::rc::Rc<super::SegmentationWorker>,
+    effect: crate::effects::BackgroundEffect,
+  ) -> Result<Self, crate::effects::EffectsError> {
+    let compositor = crate::effects::Compositor::new(crate::effects::EffectsConfig::default()).await?;
+    Ok(Self::with(
+      effects::BrowserCompositor::WebGpu(Box::new(compositor)),
+      worker,
+      effect,
+    ))
+  }
+
+  /// Composites with WebGL2 (Firefox, browsers without WebGPU): the picture stays on the GPU and
+  /// the encoders take the canvas it is drawn into.
+  pub fn webgl(
+    worker: std::rc::Rc<super::SegmentationWorker>,
+    effect: crate::effects::BackgroundEffect,
+  ) -> Result<Self, crate::effects::EffectsError> {
+    let compositor = super::GlCompositor::new(crate::effects::EffectsConfig::default())?;
+    Ok(Self::with(
+      effects::BrowserCompositor::WebGl(Box::new(compositor)),
+      worker,
+      effect,
+    ))
+  }
+
+  fn with(
+    compositor: effects::BrowserCompositor,
+    worker: std::rc::Rc<super::SegmentationWorker>,
+    effect: crate::effects::BackgroundEffect,
+  ) -> Self {
     Self {
-      pipeline,
+      compositor,
+      worker,
+      effect,
       maybe_view: None,
       is_required: false,
     }
@@ -1089,26 +1127,51 @@ impl CameraEffects {
   }
 }
 
-/// Background effects in the browser: the picture goes through a canvas into I420, through the
-/// shared effects pipeline (WebGPU) and back into a `VideoFrame` for the encoders. Without an
-/// effect the picture goes to the encoders as it is, without that detour.
+/// Background effects in the browser. The segmentation runs in its worker on a small copy of the
+/// picture whenever the worker is idle and a mask is due ([`MaskCadence`](crate::effects::MaskCadence));
+/// each picture is composited with the newest mask the worker answered with. With WebGPU the
+/// picture goes through a canvas into I420, through the compositor and back into a `VideoFrame`;
+/// with WebGL2 it stays on the GPU and the `VideoFrame` is the compositor's canvas. Without an
+/// effect the picture goes to the encoders as it is, without either detour.
 #[cfg(feature = "effects")]
 mod effects {
+  use std::rc::Rc;
+  use std::time::Duration;
+
   use js_sys::{Object, Uint8Array};
   use wasm_bindgen::JsCast;
   use wasm_bindgen::prelude::*;
   use web_sys::{HtmlCanvasElement, HtmlVideoElement};
 
-  use super::super::{WebCallError, browser, dictionary, window};
+  use super::super::{GlCompositor, SegmentationWorker, WebCallError, browser, dictionary, window};
   use super::CameraEffects;
-  use crate::capture_convert::{PixelFormat, RawPicture};
-  use crate::effects::{BackgroundEffect, EffectsPipeline};
+  use crate::capture_convert::rgbx_to_i420;
+  use crate::effects::{
+    BackgroundEffect, Compositor, EffectsError, MODEL_INPUT_HEIGHT, MODEL_INPUT_WIDTH, MaskCadence,
+    SegmentationMask,
+  };
   use crate::web_api::{Canvas2d, VideoFrame as WebVideoFrame};
 
+  /// The segmentation's average time per frame in its worker (a frame lasts 33 ms at 30 fps): a
+  /// slower segmenter runs every second or third frame instead, so it leaves the device's CPU to
+  /// the page and the encoders.
+  const SEGMENTATION_BUDGET: Duration = Duration::from_millis(8);
+
+  pub(in super::super) enum BrowserCompositor {
+    WebGpu(Box<Compositor>),
+    WebGl(Box<GlCompositor>),
+  }
+
   pub(in super::super) struct WebEffects {
-    pub pipeline: EffectsPipeline,
-    canvas: HtmlCanvasElement,
-    context: Canvas2d,
+    compositor: BrowserCompositor,
+    /// WebGPU: the canvas the camera's picture is read from.
+    maybe_reader: Option<(HtmlCanvasElement, Canvas2d)>,
+    worker: Rc<SegmentationWorker>,
+    effect: BackgroundEffect,
+    cadence: MaskCadence,
+    /// The newest mask; before the first one, nobody (only the background shows).
+    maybe_mask: Option<SegmentationMask>,
+    nobody: SegmentationMask,
     /// The self view's canvas and its context.
     maybe_view: Option<(HtmlCanvasElement, Canvas2d)>,
     is_required: bool,
@@ -1118,14 +1181,15 @@ mod effects {
 
   impl WebEffects {
     pub fn new(effects: CameraEffects) -> Result<Self, WebCallError> {
-      let canvas: HtmlCanvasElement = window()?
-        .document()
-        .ok_or(WebCallError::Unsupported("a document"))?
-        .create_element("canvas")
-        .map_err(browser("canvas"))?
-        .unchecked_into();
-      let options = dictionary(&[("willReadFrequently", JsValue::TRUE)]).map_err(browser("canvas"))?;
-      let context = context_2d(&canvas, &options)?;
+      let maybe_reader = match effects.compositor {
+        BrowserCompositor::WebGpu(_) => {
+          let canvas = new_canvas()?;
+          let options = dictionary(&[("willReadFrequently", JsValue::TRUE)]).map_err(browser("canvas"))?;
+          let context = context_2d(&canvas, &options)?;
+          Some((canvas, context))
+        },
+        BrowserCompositor::WebGl(_) => None,
+      };
       let maybe_view = match effects.maybe_view {
         Some(view) => {
           let context = context_2d(&view, &Object::new())?;
@@ -1133,14 +1197,32 @@ mod effects {
         },
         None => None,
       };
+      let size = MODEL_INPUT_WIDTH as usize * MODEL_INPUT_HEIGHT as usize;
+      let nobody = SegmentationMask::new(MODEL_INPUT_WIDTH, MODEL_INPUT_HEIGHT, vec![0.0; size])
+        .map_err(effects_error)?;
+      // A mask the worker made for an earlier camera would show where the person was then.
+      effects.worker.forget_mask();
       Ok(Self {
-        pipeline: effects.pipeline,
-        canvas,
-        context,
+        compositor: effects.compositor,
+        maybe_reader,
+        worker: effects.worker,
+        effect: effects.effect,
+        cadence: MaskCadence::within(SEGMENTATION_BUDGET),
+        maybe_mask: None,
+        nobody,
         maybe_view,
         is_required: effects.is_required,
         failures_in_a_row: 0,
       })
+    }
+
+    pub fn set_effect(&mut self, effect: BackgroundEffect) {
+      if effect != self.effect {
+        // A mask from before a pause would show where the person was then.
+        self.maybe_mask = None;
+        self.worker.forget_mask();
+      }
+      self.effect = effect;
     }
 
     /// The current picture with the effect applied (as it is without one), as a `VideoFrame`;
@@ -1150,7 +1232,7 @@ mod effects {
       video: &HtmlVideoElement,
       timestamp_us: f64,
     ) -> Result<WebVideoFrame, WebCallError> {
-      let frame = if *self.pipeline.effect() == BackgroundEffect::None {
+      let frame = if self.effect == BackgroundEffect::None {
         plain_frame(video, timestamp_us)?
       } else {
         match self.apply(video, timestamp_us).await {
@@ -1160,7 +1242,7 @@ mod effects {
           },
           // A required background: the room must not show (the caller skips the picture).
           Err(error) if self.is_required => return Err(error),
-          // A GPU hiccup or a lost device: the video goes on without the effect.
+          // A GPU hiccup, a lost device or a failed worker: the video goes on without the effect.
           Err(error) => {
             self.failures_in_a_row = self.failures_in_a_row.saturating_add(1);
             if self.failures_in_a_row == 1 {
@@ -1189,59 +1271,114 @@ mod effects {
       }
     }
 
-    /// The current picture through the effects pipeline, as an I420 `VideoFrame`.
+    /// The current picture composited with the newest mask; hands the worker the next picture to
+    /// segment when one is due and it is idle.
     async fn apply(
       &mut self,
       video: &HtmlVideoElement,
       timestamp_us: f64,
     ) -> Result<WebVideoFrame, WebCallError> {
-      // Effects need a width that is a multiple of 8 and even heights (I420).
-      let width = video.video_width() & !7;
-      let height = video.video_height() & !1;
-      if self.canvas.width() != width || self.canvas.height() != height {
-        self.canvas.set_width(width);
-        self.canvas.set_height(height);
+      if let Some(answer) = self.worker.take_mask() {
+        self.cadence.observe(answer.cost);
+        self.maybe_mask = Some(answer.mask);
       }
-      let (w, h) = (f64::from(width), f64::from(height));
-      self
-        .context
-        .draw_video(video, 0.0, 0.0, w, h)
-        .map_err(browser("canvas"))?;
-      let pixels = self
-        .context
-        .get_image_data(0.0, 0.0, w, h)
-        .map_err(browser("canvas"))?
-        .data();
-      let picture = RawPicture {
-        format: PixelFormat::Rgbx,
-        width,
-        height,
-        stride: 0,
-        data: &pixels,
-      };
-      let frame = picture
-        .to_i420(timestamp_us as u64)
-        .map_err(|error| WebCallError::Browser {
-          context: "effects",
-          message: error.to_string(),
-        })?;
-      let frame = self
-        .pipeline
-        .apply(frame)
-        .await
-        .map_err(|error| WebCallError::Browser {
-          context: "effects",
-          message: error.to_string(),
-        })?;
-      let init: Object = dictionary(&[
-        ("format", JsValue::from_str("I420")),
-        ("codedWidth", JsValue::from(width)),
-        ("codedHeight", JsValue::from(height)),
-        ("timestamp", JsValue::from(timestamp_us)),
-      ])
-      .map_err(browser("VideoFrame"))?;
-      WebVideoFrame::new(&Uint8Array::from(frame.data()).into(), &init).map_err(browser("VideoFrame"))
+      if let Some(failure) = self.worker.maybe_failure() {
+        return Err(effects_error(EffectsError::Segmentation(failure)));
+      }
+      let is_due = self.maybe_mask.is_none() || self.cadence.is_due();
+      let wants_picture = is_due && !self.worker.is_busy();
+      let Self {
+        compositor,
+        maybe_reader,
+        worker,
+        effect,
+        maybe_mask,
+        nobody,
+        ..
+      } = self;
+      let mask = maybe_mask.as_ref().unwrap_or(nobody);
+      match compositor {
+        BrowserCompositor::WebGpu(compositor) => {
+          let Some((canvas, context)) = maybe_reader else {
+            return Err(WebCallError::Unsupported("a canvas to read the camera from"));
+          };
+          // The compositor needs a width that is a multiple of 8 and even heights (I420).
+          let width = video.video_width() & !7;
+          let height = video.video_height() & !1;
+          if canvas.width() != width || canvas.height() != height {
+            canvas.set_width(width);
+            canvas.set_height(height);
+          }
+          let (w, h) = (f64::from(width), f64::from(height));
+          context
+            .draw_video(video, 0.0, 0.0, w, h)
+            .map_err(browser("canvas"))?;
+          let pixels = context
+            .get_image_data(0.0, 0.0, w, h)
+            .map_err(browser("canvas"))?
+            .data();
+          if wants_picture {
+            let small = shrink(&pixels, width, height);
+            worker
+              .segment(MODEL_INPUT_WIDTH, MODEL_INPUT_HEIGHT, &small)
+              .map_err(effects_error)?;
+          }
+          let frame = rgbx_to_i420(&pixels, width, height, timestamp_us as u64).map_err(|error| {
+            WebCallError::Browser {
+              context: "effects",
+              message: error.to_string(),
+            }
+          })?;
+          let frame = compositor
+            .apply(&frame, mask, effect)
+            .await
+            .map_err(effects_error)?;
+          let init: Object = dictionary(&[
+            ("format", JsValue::from_str("I420")),
+            ("codedWidth", JsValue::from(width)),
+            ("codedHeight", JsValue::from(height)),
+            ("timestamp", JsValue::from(timestamp_us)),
+          ])
+          .map_err(browser("VideoFrame"))?;
+          WebVideoFrame::new(&Uint8Array::from(frame.data()).into(), &init).map_err(browser("VideoFrame"))
+        },
+        BrowserCompositor::WebGl(compositor) => {
+          let size = compositor.take_picture(video).map_err(effects_error)?;
+          if wants_picture {
+            let small = compositor.model_input().map_err(effects_error)?;
+            worker
+              .segment(MODEL_INPUT_WIDTH, MODEL_INPUT_HEIGHT, &small)
+              .map_err(effects_error)?;
+          }
+          compositor.composite(size, mask, effect).map_err(effects_error)?;
+          WebVideoFrame::new(
+            compositor.canvas().as_ref(),
+            &dictionary(&[("timestamp", JsValue::from(timestamp_us))]).map_err(browser("VideoFrame"))?,
+          )
+          .map_err(browser("VideoFrame"))
+        },
+      }
     }
+  }
+
+  /// The RGBA picture at the model's input size (nearest sample: the model is far smaller).
+  pub(super) fn shrink(pixels: &[u8], width: u32, height: u32) -> Vec<u8> {
+    let (width, height) = (width as usize, height as usize);
+    let (model_width, model_height) = (MODEL_INPUT_WIDTH as usize, MODEL_INPUT_HEIGHT as usize);
+    let mut small = Vec::with_capacity(model_width * model_height * 4);
+    if width == 0 || height == 0 || pixels.len() < width * height * 4 {
+      small.resize(model_width * model_height * 4, 0);
+      return small;
+    }
+    for row in 0..model_height {
+      let y = (row * height + height / 2) / model_height;
+      for column in 0..model_width {
+        let x = (column * width + width / 2) / model_width;
+        let at = (y * width + x) * 4;
+        small.extend_from_slice(&pixels[at..at + 4]);
+      }
+    }
+    small
   }
 
   fn plain_frame(video: &HtmlVideoElement, timestamp_us: f64) -> Result<WebVideoFrame, WebCallError> {
@@ -1252,6 +1389,17 @@ mod effects {
     .map_err(browser("VideoFrame"))
   }
 
+  fn new_canvas() -> Result<HtmlCanvasElement, WebCallError> {
+    Ok(
+      window()?
+        .document()
+        .ok_or(WebCallError::Unsupported("a document"))?
+        .create_element("canvas")
+        .map_err(browser("canvas"))?
+        .unchecked_into(),
+    )
+  }
+
   fn context_2d(canvas: &HtmlCanvasElement, options: &Object) -> Result<Canvas2d, WebCallError> {
     Ok(
       canvas
@@ -1260,6 +1408,13 @@ mod effects {
         .ok_or(WebCallError::Unsupported("a 2D canvas"))?
         .unchecked_into(),
     )
+  }
+
+  fn effects_error(error: EffectsError) -> WebCallError {
+    WebCallError::Browser {
+      context: "effects",
+      message: error.to_string(),
+    }
   }
 }
 

@@ -27,7 +27,7 @@ graphics hardware where the system offers it.
 | Desktop calls, camera, screen share, push-to-talk | Works; needs the admin to run the media server (SFU) |
 | Android calls (system call UI, Android Auto)      | Works                                                |
 | Browser calls, camera, screen share               | Works in current Chrome, Edge, Firefox and Safari (26.4 or later, also on iPhone and iPad) |
-| Background blur and scenes                        | Works on desktop; the segmentation model is bundled  |
+| Background blur and scenes                        | Works on desktop; in the browser in the call (no photo scenes) |
 | iOS calls                                         | In preparation                                       |
 | Reactions in calls, recording, live captions      | Coming soon                                          |
 
@@ -42,7 +42,10 @@ either, the app says so: allow it with the icon in the address bar and try again
   says so instead of calling.
 - **Ringing:** an incoming call rings in that tab and shows a notification. Browsers play sound only
   after you clicked or typed in the tab once since it loaded.
-- **Not in the browser yet:** background effects, sharing your computer's sound with the screen.
+- **Background effects:** blur, the drawn scenes and your own and your organization's pictures,
+  picked in the call. The first effect of a session downloads the person detection (about 2 MB)
+  once; the photo scenes are only in the apps.
+- **Not in the browser yet:** sharing your computer's sound with the screen.
 - **Older browsers** without WebTransport can't call; the call buttons explain this.
 If calls fail to start with *service unavailable*, the admin has not configured the call service
 ([Admin: calls and SFU](../admin/calls-sfu.md)).

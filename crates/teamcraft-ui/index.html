@@ -38,8 +38,8 @@
     <link data-trunk rel="rust" data-bin="teamcraft-ui" data-trunk-skip />
     <!-- The calls (#330): their own ES module, which the app imports in the background after sign-in (web_calls.rs), so they are not part of the first download. -->
     <link data-trunk rel="copy-file" href="../teamcraft-media/src/call_web/teamcraft-call-worklet.js" />
-    <!-- --enable-simd: the background effects' segmentation (tract, #439) brings rustfft, which carries WebAssembly SIMD code; every browser with WebTransport runs it. -->
-    <link data-trunk rel="rust" href="../teamcraft-web-calls/Cargo.toml" data-type="worker" data-bindgen-target="web" data-cargo-profile-release="web-release" data-wasm-opt="z" data-wasm-opt-params="--converge --enable-bulk-memory --enable-nontrapping-float-to-int --enable-sign-ext --enable-mutable-globals --enable-reference-types --enable-multivalue --enable-simd" />
+    <!-- The background effects' segmentation (#439) is a module of its own, which the call module runs in a worker: built by scripts/build-segmentation.sh (with WebAssembly SIMD), not here. -->
+    <link data-trunk rel="rust" href="../teamcraft-web-calls/Cargo.toml" data-type="worker" data-bindgen-target="web" data-cargo-profile-release="web-release" data-wasm-opt="z" data-wasm-opt-params="--converge --enable-bulk-memory --enable-nontrapping-float-to-int --enable-sign-ext --enable-mutable-globals --enable-reference-types --enable-multivalue" />
     <!-- The service worker's Rust half (push wake-ups); scripts/finish-sw.sh inlines it into sw.js. -->
     <link data-trunk rel="rust" href="../teamcraft-web-sw/Cargo.toml" data-type="worker" data-bindgen-target="no-modules" data-cargo-profile-release="web-release" data-wasm-opt="z" data-wasm-opt-params="--converge --enable-bulk-memory --enable-nontrapping-float-to-int --enable-sign-ext --enable-mutable-globals --enable-reference-types --enable-multivalue" />
   </head>

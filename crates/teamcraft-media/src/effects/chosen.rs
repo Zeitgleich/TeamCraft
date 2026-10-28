@@ -1,7 +1,8 @@
 //! The UI's choice of background as the effects' [`BackgroundEffect`], for the browser's call
-//! module (#439): the illustrations are drawn here, the user's own and the organization's pictures
-//! decoded from the file the page's core hands over. The photos are only in the apps
-//! (`photo-backgrounds`); the desktop maps its choices itself.
+//! module (#439): the illustrations are drawn here; the user's own and the organization's pictures
+//! come decoded from the file the page's core hands over (the browser decodes them,
+//! `call_web::decode_picture`, so the call module carries no image decoder). The photos are only
+//! in the apps (`photo-backgrounds`); the desktop maps its choices itself.
 
 use std::sync::Arc;
 
@@ -17,22 +18,21 @@ pub fn needs_picture(effect: ChosenEffect) -> bool {
   matches!(effect, ChosenEffect::Custom(_) | ChosenEffect::Org(_))
 }
 
-/// The effect for `chosen`; `maybe_picture` is the file of an own or organization picture.
-/// Decoding and drawing take a moment (tens of milliseconds): keep the result while the choice
-/// stays.
+/// The effect for `chosen`; `maybe_picture` is an own or organization picture, decoded (it is
+/// scaled to fit the presets' size). Drawing takes a moment (tens of milliseconds): keep the result
+/// while the choice stays.
 pub fn chosen_background(
   chosen: ChosenEffect,
-  maybe_picture: Option<&[u8]>,
+  maybe_picture: Option<BackgroundImage>,
 ) -> Result<BackgroundEffect, EffectsError> {
   let image = match chosen {
     ChosenEffect::None => return Ok(BackgroundEffect::None),
     ChosenEffect::BlurLight => return Ok(BackgroundEffect::Blur(BlurStrength::Light)),
     ChosenEffect::BlurStrong => return Ok(BackgroundEffect::Blur(BlurStrength::Strong)),
     ChosenEffect::Preset(preset) => illustration(preset)?.render(PRESET_WIDTH, PRESET_HEIGHT)?,
-    ChosenEffect::Custom(_) | ChosenEffect::Org(_) => {
-      let picture = maybe_picture.ok_or_else(|| EffectsError::UnsupportedImage("no picture file".into()))?;
-      BackgroundImage::decode(picture)?.fit_within(PRESET_WIDTH, PRESET_HEIGHT)
-    },
+    ChosenEffect::Custom(_) | ChosenEffect::Org(_) => maybe_picture
+      .ok_or_else(|| EffectsError::UnsupportedImage("no picture file".into()))?
+      .fit_within(PRESET_WIDTH, PRESET_HEIGHT),
   };
   Ok(BackgroundEffect::Image(Arc::new(image)))
 }
@@ -95,24 +95,32 @@ mod tests {
   }
 
   #[test]
-  fn own_and_organization_pictures_are_decoded_from_their_file() {
+  fn own_and_organization_pictures_go_behind_scaled_to_fit() {
     let own = ChosenEffect::Custom("5".parse().unwrap());
     let org = ChosenEffect::Org("6".parse().unwrap());
     assert!(needs_picture(own) && needs_picture(org));
-    let file = BackgroundImage::new(64, 48, vec![120; 64 * 48 * 4])
+    let small = || BackgroundImage::new(64, 48, vec![120; 64 * 48 * 4]).unwrap();
+    let large = || {
+      BackgroundImage::new(
+        PRESET_WIDTH * 2,
+        PRESET_HEIGHT,
+        vec![120; PRESET_WIDTH as usize * PRESET_HEIGHT as usize * 8],
+      )
       .unwrap()
-      .to_jpeg(80)
-      .unwrap();
+    };
     for chosen in [own, org] {
-      let BackgroundEffect::Image(image) = chosen_background(chosen, Some(&file)).unwrap() else {
+      let BackgroundEffect::Image(image) = chosen_background(chosen, Some(small())).unwrap() else {
         panic!("{chosen:?} is no picture");
       };
       assert_eq!((image.width(), image.height()), (64, 48));
+      let BackgroundEffect::Image(image) = chosen_background(chosen, Some(large())).unwrap() else {
+        panic!("{chosen:?} is no picture");
+      };
+      assert_eq!((image.width(), image.height()), (PRESET_WIDTH, PRESET_HEIGHT / 2));
       assert!(matches!(
         chosen_background(chosen, None),
         Err(EffectsError::UnsupportedImage(_))
       ));
-      assert!(chosen_background(chosen, Some(b"not a picture")).is_err());
     }
   }
 }

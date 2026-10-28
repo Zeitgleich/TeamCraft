@@ -29,7 +29,9 @@ use teamcraft_client_api::calls::{
   PreviewCamera, PushToTalk, ScreenShareSound,
 };
 use teamcraft_client_api::failure::{ActionFailure, CallFailure, FailureKind};
-use teamcraft_client_api::page_calls::{PreparedCall, browser_applies_effects};
+use teamcraft_client_api::page_calls::{
+  BrowserGraphics, EffectsCompositing, PreparedCall, browser_effects_compositing,
+};
 use teamcraft_client_api::remote::{CallAction, CallActionAnswer, CallSnapshot};
 use teamcraft_client_api::video_stats::VideoStatsReport;
 use teamcraft_media::audio_io::{AudioDeviceChoice, AudioDeviceId, AudioDeviceInfo, AudioSink, AudioSource};
@@ -42,7 +44,7 @@ use teamcraft_media::call_resilience::{
 use teamcraft_media::call_view::{CallRoster, started_screen_sound, status_cues};
 use teamcraft_media::call_web::{
   self, CameraEffects, LocalTicketFuture, MediaAccessReason, MediaInput, MicrophoneMeter, WebCall,
-  WebCallConfig, WebCallError, WebJoinTicketSource,
+  WebCallConfig, WebCallError, WebJoinTicketSource, decode_picture,
 };
 use teamcraft_media::effects::{BackgroundEffect as MediaEffect, needs_picture};
 use teamcraft_media::jitter::JitterBufferConfig;
@@ -752,9 +754,13 @@ impl Host {
     let Some(effect) = plan.maybe_effect else {
       return Ok((plan.shown, None));
     };
-    match self.effects.pipeline(effect).await {
-      Ok(pipeline) => {
-        let effects = CameraEffects::new(pipeline);
+    let Some(compositing) = self.effects_compositing() else {
+      // background_plan only plans an effect where the browser runs them.
+      self.effect_failed(plan.is_required, "this browser can't composite the effects")?;
+      return Ok((BackgroundEffect::None, None));
+    };
+    match self.effects.camera_effects(compositing, effect).await {
+      Ok(effects) => {
         let effects = if plan.is_required {
           effects.required()
         } else {
@@ -778,7 +784,7 @@ impl Host {
       .unwrap_or_default();
     let rule = self.background_rule().await;
     let is_required = rule.is_required();
-    let chosen = match rule.camera_background(requested, self.can_apply_effects()) {
+    let chosen = match rule.camera_background(requested, self.effects_compositing().is_some()) {
       CameraBackground::Plain => return Ok(BackgroundPlan::plain(is_required)),
       CameraBackground::Refused => {
         return Err(background_required("no background can be applied here"));
@@ -804,13 +810,14 @@ impl Host {
       return Ok(effect);
     }
     let maybe_picture = if needs_picture(chosen) {
-      Some(self.background_picture(chosen).await?)
+      let file = self.background_picture(chosen).await?;
+      Some(decode_picture(&file).await.map_err(|error| error.to_string())?)
     } else {
       None
     };
     self
       .effects
-      .effect(chosen, maybe_picture.as_deref())
+      .effect(chosen, maybe_picture)
       .map_err(|error| error.to_string())
   }
 
@@ -827,16 +834,22 @@ impl Host {
     Ok(())
   }
 
-  /// Whether this browser runs the effects and the page hands over what they need.
-  fn can_apply_effects(&self) -> bool {
+  /// How this browser composites the effects, where it runs them and the page hands over what
+  /// they need.
+  fn effects_compositing(&self) -> Option<EffectsCompositing> {
     let has_callbacks =
       self.callbacks.maybe_background_rule.is_some() && self.callbacks.maybe_background_picture.is_some();
-    let Some(window) = web_sys::window() else {
-      return false;
+    if !has_callbacks {
+      return None;
+    }
+    let window = web_sys::window()?;
+    let (has_webgpu, has_webgl2, has_wasm_simd) = teamcraft_media::web_api::effects_graphics();
+    let graphics = BrowserGraphics {
+      has_webgpu,
+      has_webgl2,
+      has_wasm_simd,
     };
-    let navigator = window.navigator();
-    let has_webgpu = Reflect::get(&navigator, &JsValue::from_str("gpu")).is_ok_and(|gpu| gpu.is_object());
-    has_callbacks && browser_applies_effects(has_webgpu, &navigator.user_agent().unwrap_or_default())
+    browser_effects_compositing(graphics, &window.navigator().user_agent().unwrap_or_default())
   }
 
   /// The organization's background rule from the page's core. Without the callback (an older page)

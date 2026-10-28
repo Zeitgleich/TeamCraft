@@ -1,8 +1,9 @@
-//! How often the segmenter runs. Natively it runs on every frame. In the browser it runs on the
-//! page's main thread, where a frame's segmentation (about 12 ms in WebAssembly for a 256x144
-//! model) would take a third of the frame time at 30 fps: there it runs only every second or
-//! third frame, so that its share stays within a budget, and the last mask serves the frames in
-//! between. The compositor smooths masks over time anyway, so a reused mask doesn't show.
+//! How often the segmenter runs. Natively it runs on every frame. In the browser it runs in a
+//! worker of its own (#439), which shares the device's CPU with the page and the encoders: a slow
+//! segmentation (about 5 ms in WebAssembly with SIMD for a 256x144 model, more on slower machines)
+//! runs only every second or third frame there, so that its share stays within a budget, and the
+//! last mask serves the frames in between. The compositor smooths masks over time anyway, so a
+//! reused mask doesn't show.
 
 use std::time::Duration;
 

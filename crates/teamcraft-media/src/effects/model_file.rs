@@ -1,9 +1,9 @@
 //! The segmentation model as a file the browser downloads (#439). The web build serves it under a
-//! name with its hash (`scripts/finish-calls.sh`), so it is cached for good; the call module checks
-//! it against the SHA-256 it was built with (the pin `models/fetch.sh` checks too), so a server
-//! can't hand it another model, then parses it once and keeps it for the session.
+//! name with its hash (`scripts/finish-calls.sh`), so it is cached for good; the segmentation
+//! worker checks it against the SHA-256 it was built with (the pin `models/fetch.sh` checks too),
+//! so a server can't hand it another model, then parses it once and keeps it for the session.
 
-use teamcraft_crypto::attachment::content_sha256;
+use sha2::{Digest, Sha256};
 
 use super::{EffectsError, SegmentationModel, TractSegmenter};
 
@@ -23,21 +23,6 @@ pub struct ModelCache {
 /// Whether `model` is the pinned segmentation model.
 pub fn check_segmentation_model(model: &[u8]) -> Result<(), EffectsError> {
   check_against(model, pinned_sha256())
-}
-
-/// Where the page serves the model: the `content` of its `<meta>`. Only a path of the page's own
-/// origin (its Content-Security-Policy allows no other).
-pub fn model_url(maybe_meta: Option<&str>) -> Result<String, EffectsError> {
-  let path = maybe_meta
-    .map(str::trim)
-    .filter(|path| !path.is_empty())
-    .ok_or_else(|| EffectsError::Segmentation("this build serves no segmentation model".into()))?;
-  if !path.starts_with('/') || path.starts_with("//") || !path.ends_with(".onnx") {
-    return Err(EffectsError::Segmentation(format!(
-      "{path} is no model path of this origin"
-    )));
-  }
-  Ok(path.to_owned())
 }
 
 impl ModelCache {
@@ -73,7 +58,7 @@ fn pinned_sha256() -> &'static str {
 }
 
 fn check_against(file: &[u8], expected_hex: &str) -> Result<(), EffectsError> {
-  let actual: String = content_sha256(file)
+  let actual: String = Sha256::digest(file)
     .iter()
     .map(|byte| format!("{byte:02x}"))
     .collect();
@@ -108,24 +93,6 @@ mod tests {
   }
 
   #[test]
-  fn the_model_comes_from_a_path_of_the_page() {
-    assert_eq!(
-      model_url(Some("/models/selfie_segmentation_landscape-0123.onnx")).unwrap(),
-      "/models/selfie_segmentation_landscape-0123.onnx"
-    );
-    for refused in [
-      None,
-      Some(""),
-      Some("  "),
-      Some("https://elsewhere.example.com/model.onnx"),
-      Some("//elsewhere.example.com/model.onnx"),
-      Some("/models/model.wasm"),
-    ] {
-      assert!(model_url(refused).is_err(), "{refused:?}");
-    }
-  }
-
-  #[test]
   fn a_checked_model_is_parsed_once_and_kept() {
     let file = mean_of_channels_model();
     let mut cache = ModelCache::new(&sha256_hex(&file), TEST_MODEL);
@@ -147,7 +114,7 @@ mod tests {
   }
 
   fn sha256_hex(file: &[u8]) -> String {
-    content_sha256(file)
+    Sha256::digest(file)
       .iter()
       .map(|byte| format!("{byte:02x}"))
       .collect()

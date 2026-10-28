@@ -5,7 +5,9 @@
 //! same: the mask is smoothed over time (no flicker), feathered at the edges, and the background
 //! is blurred at a quarter of the resolution or replaced by an image scaled to cover the frame.
 //! Segmentation is a [`PersonSegmenter`]; platforms with their own (Apple Vision, ML Kit) plug in
-//! there.
+//! there. The browser runs it in a worker of its own ([`worker_protocol`]) and composites with
+//! WebGPU or, where reading a frame back from WebGPU is too slow (Firefox), WebGL2
+//! (`call_web`'s camera effects).
 
 mod cadence;
 #[cfg(feature = "call-view")]
@@ -18,6 +20,7 @@ mod model_file;
 mod photos;
 mod presets;
 mod segmentation;
+pub mod worker_protocol;
 
 use std::sync::Arc;
 
@@ -27,17 +30,21 @@ pub use chosen::{chosen_background, needs_picture};
 
 pub use compositor::Compositor;
 pub use image_file::{
-  BACKGROUND_MAX_HEIGHT, BACKGROUND_MAX_WIDTH, MAX_DECODED_DIMENSION, normalize_background_file,
+  BACKGROUND_MAX_HEIGHT, BACKGROUND_MAX_WIDTH, MAX_BACKGROUND_FILE_BYTES, MAX_DECODED_DIMENSION,
+  MAX_DECODED_PIXELS, fitted_size, normalize_background_file,
 };
 #[cfg(feature = "segmentation")]
-pub use model_file::{ModelCache, SEGMENTATION_MODEL_FILE, check_segmentation_model, model_url};
+pub use model_file::{ModelCache, SEGMENTATION_MODEL_FILE, check_segmentation_model};
 #[cfg(feature = "photo-backgrounds")]
 pub use photos::PhotoBackground;
 pub use presets::{PRESET_HEIGHT, PRESET_WIDTH, PresetBackground};
-pub use segmentation::{EllipseSegmenter, PersonSegmenter, SegmentationMask};
+pub use segmentation::{
+  EllipseSegmenter, MODEL_INPUT_HEIGHT, MODEL_INPUT_WIDTH, PersonSegmenter, SegmentationMask,
+};
 #[cfg(feature = "segmentation")]
 pub use segmentation::{SegmentationModel, TensorLayout, TractSegmenter};
 use thiserror::Error;
+pub use worker_protocol::{model_url, worker_url};
 
 use crate::video::{VideoError, VideoFrame};
 

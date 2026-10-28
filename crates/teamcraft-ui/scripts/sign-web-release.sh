@@ -6,10 +6,12 @@
 # Writes <dist-dir>/release.json: every file of the bundle with its SHA-256, and an Ed25519 signature
 # over the canonical JSON of {version, files}; and puts the matching public key into <dist-dir>/sw.js.
 # `lazy` lists the wasm files index.html and sw.js don't name (the chunks that load when first used
-# and the signed-in app's, #334) and the segmentation model (#439): the worker fetches those when
-# needed or after a member's page loaded instead of on install, so a guest's meeting page doesn't
-# download the signed-in app. It is outside the
-# signature (older workers verify {version, files} only); every file is checked against its hash.
+# and the signed-in app's, #334): the worker fetches those when needed or after a member's page
+# loaded instead of on install, so a guest's meeting page doesn't download the signed-in app.
+# `on_demand` (also in `lazy`) lists the background effects' segmentation (#439: the worker's
+# script and module, the model): fetched only when someone turns an effect on, never in the
+# background. Both are outside the signature (older workers verify {version, files} only, and
+# fetch `on_demand` files like lazy ones); every file is checked against its hash.
 # Run it on the machine that holds the release key, not on the server that serves the files.
 # Needs openssl 3, python3 and sha256sum (or shasum on macOS).
 set -eu
@@ -48,14 +50,19 @@ with tempfile.NamedTemporaryFile(delete=False) as handle:
 signature = subprocess.run(["openssl", "pkeyutl", "-sign", "-rawin", "-inkey", key, "-in", handle.name], check=True, capture_output=True).stdout
 os.unlink(handle.name)
 entry_points = "".join(open(os.path.join(dist, name), encoding="utf-8").read() for name in ("index.html", "sw.js"))
-# The segmentation model (#439) is named in index.html, but only the call module downloads it, when
-# the first background effect starts.
-lazy = sorted(
-    path for path in files
-    if path.endswith(".onnx") or (path.endswith(".wasm") and path not in entry_points)
-)
-manifest = {"version": version, "files": files, "lazy": lazy, "signature": base64.b64encode(signature).decode()}
+# The segmentation worker's script and the model (#439) are named in index.html, but only the call
+# module loads them, when the first background effect starts.
+on_demand_prefixes = ("teamcraft-segmentation-worker-", "teamcraft-web-segmentation-")
+on_demand = sorted(path for path in files if path.endswith(".onnx") or path.startswith(on_demand_prefixes))
+lazy = sorted(set(on_demand) | {path for path in files if path.endswith(".wasm") and path not in entry_points})
+manifest = {
+    "version": version,
+    "files": files,
+    "lazy": lazy,
+    "on_demand": on_demand,
+    "signature": base64.b64encode(signature).decode(),
+}
 with open(os.path.join(dist, "release.json"), "w") as out:
     json.dump(manifest, out, indent=1, sort_keys=True)
-print(f"signed {len(files)} files ({len(lazy)} loaded when used) as version {version}")
+print(f"signed {len(files)} files ({len(lazy)} loaded when used, {len(on_demand)} of them on demand) as version {version}")
 PY

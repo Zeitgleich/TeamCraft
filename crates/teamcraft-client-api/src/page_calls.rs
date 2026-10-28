@@ -25,9 +25,10 @@
 //! the module asks `background_rule` for the organization's rule ([`crate::calls::OrgBackgrounds`])
 //! and `background_picture` for the picture the effect the rule leaves needs (the user's own,
 //! decrypted, or the organization's, hash-checked: the core has both). A page without them gets no
-//! effects. The segmentation model is a file of the build ([`SEGMENTATION_MODEL_META`]), fetched
-//! by the module when the first effect starts and checked against the SHA-256 the module was built
-//! with.
+//! effects. The segmentation runs in a worker of its own ([`SEGMENTATION_WORKER_META`]), which the
+//! module starts when the first effect starts; the worker downloads the model, a file of the build
+//! ([`SEGMENTATION_MODEL_META`]), and checks it against the SHA-256 it was built with. How the
+//! module composites depends on the browser ([`browser_effects_compositing`]).
 //!
 //! Sharing the screen takes two steps (issue #930): Safari opens the screen picker only while the
 //! click's user activation lasts, which the action queue and the module's tasks outlast. So the
@@ -54,6 +55,10 @@ pub const WORKLET_META: &str = "teamcraft-call-worklet";
 /// (`crates/teamcraft-media/models`), named after its content by the build
 /// (`scripts/finish-calls.sh`). A build without the model has none: no effects then.
 pub const SEGMENTATION_MODEL_META: &str = "teamcraft-segmentation-model";
+/// `<meta name>` with the URL of the segmentation worker's script (`teamcraft-web-segmentation`,
+/// a module worker of the page's origin), named after its content by the build
+/// (`scripts/build-segmentation.sh`). A build without it has no effects.
+pub const SEGMENTATION_WORKER_META: &str = "teamcraft-segmentation-worker";
 /// `start(callbacks)`: once, after the module is initialized.
 pub const EXPORT_START: &str = "start";
 /// `act(CallAction JSON) -> Promise<undefined | string>` (see the module docs).
@@ -111,12 +116,44 @@ pub struct PreparedCall {
   pub certificate_sha256: Vec<String>,
 }
 
-/// Whether this browser runs the background effects (#439): they need WebGPU for the compositing.
-/// Firefox has it, but reads a frame back from the GPU only about every 100 ms (measured with the
-/// effects' compositor, 720p), far too slow for video, so it gets none. `user_agent` is
-/// `navigator.userAgent`.
-pub fn browser_applies_effects(has_webgpu: bool, user_agent: &str) -> bool {
-  has_webgpu && !user_agent.contains("Firefox/")
+/// How the browser's call module composites the background effects (#439).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EffectsCompositing {
+  /// WebGPU, read back as I420 for the encoders: Chrome, Edge, Safari 26.
+  WebGpu,
+  /// WebGL2, whose canvas the encoders take: Firefox and browsers without WebGPU.
+  WebGl2,
+}
+
+/// What a browser offers that the background effects need, as the page finds it.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct BrowserGraphics {
+  pub has_webgpu: bool,
+  pub has_webgl2: bool,
+  /// WebAssembly SIMD: the segmentation module is built with it.
+  pub has_wasm_simd: bool,
+}
+
+/// How this browser composites the background effects (#439), or `None` where it can't run them.
+/// WebGPU where there is one, except in Firefox: it reads a frame back from the GPU only about
+/// every 80 ms (measured with the effects' compositor, 720p, Firefox 147), far too slow for video,
+/// so it composites with WebGL2 like browsers without WebGPU. The segmentation needs WebAssembly
+/// SIMD (every browser with WebTransport has it). `user_agent` is `navigator.userAgent`.
+pub fn browser_effects_compositing(
+  graphics: BrowserGraphics,
+  user_agent: &str,
+) -> Option<EffectsCompositing> {
+  if !graphics.has_wasm_simd {
+    return None;
+  }
+  let is_firefox = user_agent.contains("Firefox/");
+  if graphics.has_webgpu && !is_firefox {
+    Some(EffectsCompositing::WebGpu)
+  } else if graphics.has_webgl2 {
+    Some(EffectsCompositing::WebGl2)
+  } else {
+    None
+  }
 }
 
 // The join token doesn't belong in logs.
@@ -135,17 +172,48 @@ mod tests {
   use crate::model::id_from_raw;
 
   #[test]
-  fn effects_run_where_webgpu_reads_back_in_time() {
+  fn effects_composite_with_webgpu_where_it_reads_back_in_time_else_with_webgl2() {
     let chrome = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/156.0.0.0 Safari/537.36";
     let safari = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/26.6.2 Safari/605.1.15";
     let firefox = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:147.0) Gecko/20100101 Firefox/147.0";
-    assert!(browser_applies_effects(true, chrome));
-    assert!(browser_applies_effects(true, safari));
-    assert!(!browser_applies_effects(true, firefox));
-    assert!(
-      !browser_applies_effects(false, chrome),
-      "no WebGPU (older Safari)"
+    let all = BrowserGraphics {
+      has_webgpu: true,
+      has_webgl2: true,
+      has_wasm_simd: true,
+    };
+    let compositing = |graphics, user_agent| browser_effects_compositing(graphics, user_agent);
+    assert_eq!(compositing(all, chrome), Some(EffectsCompositing::WebGpu));
+    assert_eq!(compositing(all, safari), Some(EffectsCompositing::WebGpu));
+    assert_eq!(compositing(all, firefox), Some(EffectsCompositing::WebGl2));
+    let no_webgpu = BrowserGraphics {
+      has_webgpu: false,
+      ..all
+    };
+    assert_eq!(
+      compositing(no_webgpu, chrome),
+      Some(EffectsCompositing::WebGl2),
+      "Chrome without WebGPU (Linux)"
     );
+    let no_gpu = BrowserGraphics {
+      has_wasm_simd: true,
+      ..BrowserGraphics::default()
+    };
+    assert_eq!(compositing(no_gpu, firefox), None, "neither WebGPU nor WebGL2");
+    assert_eq!(
+      compositing(
+        BrowserGraphics {
+          has_webgl2: true,
+          ..no_gpu
+        },
+        firefox
+      ),
+      Some(EffectsCompositing::WebGl2)
+    );
+    let no_simd = BrowserGraphics {
+      has_wasm_simd: false,
+      ..all
+    };
+    assert_eq!(compositing(no_simd, chrome), None, "the segmentation needs SIMD");
   }
 
   #[test]

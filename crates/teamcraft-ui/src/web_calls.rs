@@ -22,9 +22,10 @@ use teamcraft_client_api::call_view::CallSignal;
 use teamcraft_client_api::calls::{BackgroundEffect, CallsUnavailableReason};
 use teamcraft_client_api::failure::ActionFailure;
 use teamcraft_client_api::page_calls::{
-  EXPORT_ACT, EXPORT_CAMERA_VIEW, EXPORT_NETWORK_CHANGED, EXPORT_PICK_SCREEN, EXPORT_PREVIEW_LEVEL,
-  EXPORT_RING, EXPORT_SHARE_SCREEN, EXPORT_SIGNAL, EXPORT_START, EXPORT_STOP, EXPORT_UNWATCH_VIDEO,
-  EXPORT_VIDEO_STATS, EXPORT_WATCH_VIDEO, MODULE_META, PreparedCall, WORKLET_META, browser_applies_effects,
+  BrowserGraphics, EXPORT_ACT, EXPORT_CAMERA_VIEW, EXPORT_NETWORK_CHANGED, EXPORT_PICK_SCREEN,
+  EXPORT_PREVIEW_LEVEL, EXPORT_RING, EXPORT_SHARE_SCREEN, EXPORT_SIGNAL, EXPORT_START, EXPORT_STOP,
+  EXPORT_UNWATCH_VIDEO, EXPORT_VIDEO_STATS, EXPORT_WATCH_VIDEO, MODULE_META, PreparedCall, WORKLET_META,
+  browser_effects_compositing,
 };
 use teamcraft_client_api::remote::{CallAction, CallActionAnswer, CallSnapshot};
 use teamcraft_core::CallKeySigner;
@@ -95,15 +96,19 @@ struct Callbacks {
 struct CoreSigner(CallKeySigner);
 
 /// Whether the call module can put background effects behind the camera image in this browser
-/// (#439): WebGPU, and one that reads frames back in time.
+/// (#439): WebGPU or WebGL2 for the compositing, WebAssembly SIMD for the segmentation.
 pub fn applies_effects() -> bool {
   let Some(window) = web_sys::window() else {
     return false;
   };
-  let navigator = window.navigator();
-  let has_webgpu = Reflect::get(&navigator, &JsValue::from_str("gpu")).is_ok_and(|gpu| gpu.is_object());
-  let user_agent = navigator.user_agent().unwrap_or_default();
-  browser_applies_effects(has_webgpu, &user_agent)
+  let (has_webgpu, has_webgl2, has_wasm_simd) = teamcraft_media::web_api::effects_graphics();
+  let graphics = BrowserGraphics {
+    has_webgpu,
+    has_webgl2,
+    has_wasm_simd,
+  };
+  let user_agent = window.navigator().user_agent().unwrap_or_default();
+  browser_effects_compositing(graphics, &user_agent).is_some()
 }
 
 /// Whether this page can make calls, and why not.

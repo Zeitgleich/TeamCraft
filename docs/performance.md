@@ -241,6 +241,33 @@ alias fine patterns; an area filter would look better at about the same cost, if
 How fast and how lean the apps are for the person using them; the budgets they must stay within are
 in [.claude/rules/robustness.md](../.claude/rules/robustness.md) ("Performance and resources").
 
+### Background effects in the browser (#439)
+
+Local bench page with the call module's code paths (`call_web` camera effects, the segmentation
+worker built like the release), MacBook (Apple Silicon), a 720p `<video>` in, strong blur, one
+picture every 33 ms, encoded with WebCodecs H.264. Main thread per frame:
+
+| Browser     | Compositing | Main thread per frame | Of that                                                   | Segmentation (worker) |
+|-------------|-------------|-----------------------|-----------------------------------------------------------|-----------------------|
+| Chrome 156  | WebGPU      | 5.4 ms                | getImageData 1.4, RGBx→I420 1.9, GPU and read-back 1.6    | 7.4 ms, every frame   |
+| Safari 26.6 | WebGPU      | 6.2 ms                | getImageData 2.3, RGBx→I420 2.1, GPU and read-back 1.4    | 8.2 ms, every frame   |
+| Firefox 158 | WebGL2      | 5.3 ms                | texImage2D 0.4, model input 1.2, `VideoFrame(canvas)` 3.5 | 11.0 ms, every second |
+| Firefox 158 | WebGPU      | 103 ms                | read-back 93                                              | –                     |
+
+- The segmentation runs in its worker, as often as keeps it within 8 ms a frame on average
+  (`MaskCadence`); the main thread only hands it the model's 256x144 input. Before the worker it
+  ran on the main thread: 14.6 ms a frame in Chrome with the WebGPU compositor, 13.3 ms in Safari.
+- WebAssembly SIMD (`+simd128`) for the segmentation module, in the worker with one picture a
+  frame: 8.6 instead of 15.0 ms in Chrome, 9.2 instead of 15.3 ms in Safari, 11.4 instead of
+  19.8 ms in Firefox 147.
+- RGBx→I420 has a function of its own for the browser (`capture_convert::rgbx_to_i420`, whole rows
+  and 2x2 blocks): 1.9 ms instead of about 30 ms with the general per-pixel path in the
+  size-optimized call module.
+- WebGL2 in Chrome and Safari would cost 1.1 and 4.2 ms a frame on the main thread; they use
+  WebGPU where it starts and WebGL2 otherwise.
+- A CPU compositor for Firefox would pay getImageData and RGBx→I420 alone with 9 ms a frame there,
+  more than the whole WebGL2 path. Firefox 147 measured 7.0 ms with WebGL2.
+
 ### Web client (Chrome)
 
 `tests/e2e` `perf.rs` drives the release web build in headless Chrome against the release server
@@ -737,9 +764,13 @@ The app is split into wasm chunks (`crates/teamcraft-ui/src/areas.rs`, built by
   is downloaded once.
 - The call engine (`teamcraft-web-calls`, #330) stays a module of its own that loads in the
   background after sign-in; the budget doesn't count it.
-- The background effects (#439) are part of it: tract's person segmentation (about 2 MB gzip) and
-  the WebGPU compositor. The segmentation model (0.46 MB, 0.26 MB gzip) is a file of its own,
-  downloaded when the first effect starts.
+- The background effects (#439) add their compositors (WebGPU and WebGL2) to it, about 56 kB gzip;
+  pictures are decoded by the browser. The person segmentation is a module of its own,
+  `teamcraft-web-segmentation` (tract, built with WebAssembly SIMD: 2.09 MB gzip), which the call
+  module runs in a worker, and the model (0.46 MB, 0.26 MB gzip) a file of its own: both are only
+  downloaded when someone first turns an effect on. A signed release lists them in `on_demand`,
+  so the service worker doesn't fetch them in the background. `check-web-size.py` keeps the call
+  module under 1 MB gzip.
 - A signed release's service worker installs without the chunks (the signed-in app's included) and
   fetches each one, checked against its signed hash, when it is first used or in the background
   about 15 s after a page loaded; not for a guest's meeting page (e2ee.md §9.3).

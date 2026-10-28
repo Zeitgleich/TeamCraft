@@ -1967,7 +1967,9 @@ everything (§9.1). Signing the releases narrows this to what the operator contr
   still verify the manifest. The worker installs without them, and fetches a chunk the first time a
   page asks for it, or in the background about 15 s after a page other than a guest's meeting page
   loaded (so guests never download the signed-in app), checks it against the signed hash in the
-  version's verified file list and only then stores and serves it. A server that edits `lazy` only
+  version's verified file list and only then stores and serves it. Files only some people use are
+  also listed in `on_demand` (the background effects' segmentation worker and model, #439): the
+  worker skips them in the background fetch. A server that edits `lazy` or `on_demand` only
   changes when a file is downloaded, never what runs. A chunk that doesn't match its hash isn't
   served, and the pages warn as for a release that doesn't verify. A page of a release whose chunks
   the server no longer has (a deploy since it loaded, before the background fetch) gets an error

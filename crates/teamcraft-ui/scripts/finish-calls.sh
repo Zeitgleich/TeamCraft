@@ -4,11 +4,13 @@
 # module (Trunk names its worker assets without a hash), and tells the page the names in
 # <meta name="teamcraft-calls"> and <meta name="teamcraft-call-worklet"> (web_calls.rs).
 #
-# The segmentation model for background effects (#439) is named in
+# Background effects (#439): the segmentation worker's script, which build-segmentation.sh built
+# and named, goes into <meta name="teamcraft-segmentation-worker">; the call module starts it when
+# the first effect starts. The segmentation model is named in
 # <meta name="teamcraft-segmentation-model"> under a name with its pinned hash
-# (models/<name>-<hash>.onnx); the call module downloads it when the first effect starts. The file
-# is copied there when crates/teamcraft-media/models/fetch.sh fetched it; the web release adds it
-# with add-segmentation-model.sh instead (the desktop app embeds this bundle and has its own copy).
+# (models/<name>-<hash>.onnx); the worker downloads it. The file is copied there when
+# crates/teamcraft-media/models/fetch.sh fetched it; the web release adds it with
+# add-segmentation-model.sh instead (the desktop app embeds this bundle and has its own copy).
 # Without it the browser's effects say they couldn't start.
 set -eu
 dist="${TRUNK_STAGING_DIR:?run this as a Trunk hook}"
@@ -44,6 +46,12 @@ if "</head>" not in index:
     raise SystemExit("finish-calls: index.html has no </head>")
 meta = (f'<meta name="teamcraft-calls" content="/{module}">\n'
         f'<meta name="teamcraft-call-worklet" content="/{worklet}">\n')
+
+workers = sorted(name for name in os.listdir(dist)
+                 if name.startswith("teamcraft-segmentation-worker-") and name.endswith(".js"))
+if len(workers) != 1:
+    raise SystemExit(f"finish-calls: expected one segmentation worker script, found {workers}")
+meta += f'<meta name="teamcraft-segmentation-worker" content="/{workers[0]}">\n'
 
 model_name = "selfie_segmentation_landscape"
 model_path = os.path.join(models, model_name + ".onnx")

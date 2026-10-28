@@ -8,6 +8,11 @@ use crate::video::VideoFrame;
 
 use super::EffectsError;
 
+/// The model's input size (MediaPipe's landscape selfie segmentation). The browser scales its
+/// camera picture to it before handing it to the segmentation worker (#439).
+pub const MODEL_INPUT_WIDTH: u32 = 256;
+pub const MODEL_INPUT_HEIGHT: u32 = 144;
+
 /// Person probability (0..1) per pixel at the segmenter's resolution, row by row.
 #[derive(Clone, PartialEq)]
 pub struct SegmentationMask {
@@ -128,8 +133,8 @@ mod tract {
     /// MediaPipe selfie segmentation, landscape variant (256x144, one output channel), as the
     /// ONNX export the apps bundle (`models/fetch.sh`): NCHW.
     pub const MEDIAPIPE_LANDSCAPE: Self = Self {
-      width: 256,
-      height: 144,
+      width: super::MODEL_INPUT_WIDTH,
+      height: super::MODEL_INPUT_HEIGHT,
       person_channel: 0,
       layout: TensorLayout::ChannelsFirst,
     };
@@ -170,10 +175,42 @@ mod tract {
       .into_runnable()
   }
 
-  impl PersonSegmenter for TractSegmenter {
-    fn segment(&mut self, frame: &VideoFrame) -> Result<SegmentationMask, EffectsError> {
+  impl TractSegmenter {
+    /// The mask for an RGBA picture (`width` x `height`, row by row), scaled to the model's input
+    /// like a frame: the browser's segmentation worker gets the camera picture this way (#439).
+    pub fn segment_rgba(
+      &mut self,
+      width: u32,
+      height: u32,
+      rgba: &[u8],
+    ) -> Result<SegmentationMask, EffectsError> {
+      let (source_width, source_height) = (width as usize, height as usize);
+      if source_width == 0 || source_height == 0 || rgba.len() != source_width * source_height * 4 {
+        return Err(EffectsError::Segmentation(format!(
+          "picture of {width}x{height} with {} bytes",
+          rgba.len()
+        )));
+      }
+      let (model_width, model_height) = (self.model.width as usize, self.model.height as usize);
+      self.rgb.clear();
+      self.rgb.reserve(model_width * model_height * 3);
+      for row in 0..model_height {
+        let source_y = (row * source_height + source_height / 2) / model_height;
+        for column in 0..model_width {
+          let source_x = (column * source_width + source_width / 2) / model_width;
+          let pixel = (source_y * source_width + source_x) * 4;
+          for channel in &rgba[pixel..pixel + 3] {
+            self.rgb.push(f32::from(*channel) / 255.0);
+          }
+        }
+      }
+      to_layout(self.model.layout, &mut self.rgb);
+      self.run()
+    }
+
+    /// Runs the model on the input in `self.rgb`.
+    fn run(&mut self) -> Result<SegmentationMask, EffectsError> {
       let (width, height) = (self.model.width as usize, self.model.height as usize);
-      fill_rgb(frame, width, height, self.model.layout, &mut self.rgb);
       let input = Tensor::from_shape(&self.model.input_shape(), &self.rgb).map_err(segmentation_error)?;
       let outputs = self
         .plan
@@ -209,6 +246,14 @@ mod tract {
     }
   }
 
+  impl PersonSegmenter for TractSegmenter {
+    fn segment(&mut self, frame: &VideoFrame) -> Result<SegmentationMask, EffectsError> {
+      let (width, height) = (self.model.width as usize, self.model.height as usize);
+      fill_rgb(frame, width, height, self.model.layout, &mut self.rgb);
+      self.run()
+    }
+  }
+
   /// Scales the I420 frame to the model size as RGB in 0..1 (nearest sample: the model is far
   /// smaller than the frame), interleaved or as three planes per `layout`.
   fn fill_rgb(frame: &VideoFrame, width: usize, height: usize, layout: TensorLayout, out: &mut Vec<f32>) {
@@ -236,11 +281,16 @@ mod tract {
         }
       }
     }
+    to_layout(layout, out);
+  }
+
+  /// Interleaved RGB as `layout` wants it: three planes for channels first.
+  fn to_layout(layout: TensorLayout, rgb: &mut Vec<f32>) {
     if layout == TensorLayout::ChannelsFirst {
       let planar: Vec<f32> = (0..3)
-        .flat_map(|channel| out.iter().skip(channel).step_by(3).copied().collect::<Vec<_>>())
+        .flat_map(|channel| rgb.iter().skip(channel).step_by(3).copied().collect::<Vec<_>>())
         .collect();
-      *out = planar;
+      *rgb = planar;
     }
   }
 
@@ -291,6 +341,36 @@ pub(super) mod tests {
         .iter()
         .all(|value| (value - 130.4 / 255.0).abs() < 0.01),
       "{mask:?}"
+    );
+  }
+
+  #[test]
+  fn tract_runs_on_an_rgba_picture_scaled_to_the_model() {
+    let mut segmenter = TractSegmenter::new(&mean_of_channels_model(), MODEL).unwrap();
+    // Red 60, green 120, blue 180: the model averages the three channels.
+    let picture = [60u8, 120, 180, 255].repeat(32 * 16);
+    let mask = segmenter.segment_rgba(32, 16, &picture).unwrap();
+    assert_eq!((mask.width(), mask.height()), (8, 4));
+    assert!(
+      mask
+        .values()
+        .iter()
+        .all(|value| (value - 120.0 / 255.0).abs() < 0.001),
+      "{mask:?}"
+    );
+    assert!(
+      segmenter.segment_rgba(32, 16, &picture[4..]).is_err(),
+      "short picture"
+    );
+    assert!(segmenter.segment_rgba(0, 16, &[]).is_err(), "empty picture");
+  }
+
+  #[test]
+  fn the_model_input_size_is_the_landscape_models() {
+    let model = SegmentationModel::MEDIAPIPE_LANDSCAPE;
+    assert_eq!(
+      (model.width, model.height),
+      (MODEL_INPUT_WIDTH, MODEL_INPUT_HEIGHT)
     );
   }
 
