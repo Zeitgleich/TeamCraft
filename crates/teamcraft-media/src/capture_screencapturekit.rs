@@ -17,7 +17,8 @@
 //! The capture passes on what macOS reports about its frames: frames it marks blank go on as
 //! black pictures (the call notices a share that stays black and tells the user why), and a
 //! stream the system stops (the user ended the share in the menu bar, the shared window closed,
-//! the permission was taken back) ends the track instead of freezing it.
+//! the permission was taken back) ends the track instead of freezing it. The end counts whether
+//! macOS reports it to the stream's delegate or only through frames marked stopped (#931).
 //!
 //! A share's sound comes from the share's own stream, with the content filter of the pick (#914):
 //! the sound of the picked display or application, or of the picked window's application. A
@@ -82,6 +83,7 @@ pub struct ScreenCaptureKitAudio {
 /// Converts and queues the frames of a screen stream.
 struct ScreenOutput {
   frames: SharedFrames,
+  maybe_sound: Option<SharedSound>,
   /// The size the stream was configured for: blank frames carry no picture of their own.
   size: (u32, u32),
   start: Instant,
@@ -120,8 +122,11 @@ enum ScreenSample {
   /// macOS shows nothing of the content: before the Screen Recording permission applies, for
   /// protected content.
   Blank,
-  /// The capture paused (the display slept, the screen locked) or ended.
+  /// The capture paused (the display slept, the screen locked); frames come back after it.
   Paused,
+  /// The stream stopped (the shared window closed, the display went away): the share ends, as
+  /// when the delegate hears of the stop. Repeating the last picture would freeze it (#931).
+  Ended,
 }
 
 /// Converts and queues the sound of a screen stream.
@@ -255,6 +260,7 @@ impl VideoCapture for ScreenCaptureKitScreen {
       .add_output_handler(
         ScreenOutput {
           frames,
+          maybe_sound: self.maybe_sound.clone(),
           size: (width, height),
           start: Instant::now(),
           has_logged_blank: AtomicBool::new(false),
@@ -320,6 +326,12 @@ impl SCStreamOutputTrait for ScreenOutput {
     let maybe_frame = match ScreenSample::of(sample.frame_status()) {
       ScreenSample::Picture => picture_of(&sample, timestamp_us),
       ScreenSample::Unchanged | ScreenSample::Paused => None,
+      ScreenSample::Ended => {
+        if end_share(&self.frames, self.maybe_sound.as_ref()) {
+          warn!("ScreenCaptureKit marks the screen frames stopped; the share ends");
+        }
+        None
+      },
       ScreenSample::Blank => {
         if !self.has_logged_blank.swap(true, Ordering::Relaxed) {
           warn!(
@@ -345,12 +357,7 @@ impl SCStreamOutputTrait for ScreenOutput {
 impl SCStreamDelegateTrait for StreamEnd {
   fn did_stop_with_error(&self, error: SCError) {
     warn!(%error, "the system stopped the screen capture; the share ends");
-    // Dropping the queues ends the track and its sound: the encoder thread sees the capture end,
-    // the call the sound.
-    lock(&self.frames).take();
-    if let Some(sound) = &self.maybe_sound {
-      lock(sound).end();
-    }
+    end_share(&self.frames, self.maybe_sound.as_ref());
   }
 
   fn stream_did_become_inactive(&self) {
@@ -397,9 +404,22 @@ impl ScreenSample {
       None | Some(SCFrameStatus::Complete | SCFrameStatus::Started) => Self::Picture,
       Some(SCFrameStatus::Idle) => Self::Unchanged,
       Some(SCFrameStatus::Blank) => Self::Blank,
-      Some(SCFrameStatus::Suspended | SCFrameStatus::Stopped | SCFrameStatus::Unknown(_)) => Self::Paused,
+      Some(SCFrameStatus::Suspended | SCFrameStatus::Unknown(_)) => Self::Paused,
+      Some(SCFrameStatus::Stopped) => Self::Ended,
     }
   }
+}
+
+/// Ends a share the system stopped: dropping the queues ends the track and its sound (the
+/// encoder thread sees the capture end, the call the sound), so the call reports the share as
+/// ended. `true` the first time; the stream may go on with more stopped frames, or its delegate
+/// may hear of the stop as well.
+fn end_share(frames: &SharedFrames, maybe_sound: Option<&SharedSound>) -> bool {
+  let was_running = lock(frames).take().is_some();
+  if let Some(sound) = maybe_sound {
+    lock(sound).end();
+  }
+  was_running
 }
 
 /// The sample's picture as I420; `None` when it has none or it can't be read.
@@ -691,13 +711,28 @@ mod tests {
       ScreenSample::Unchanged
     );
     assert_eq!(ScreenSample::of(Some(SCFrameStatus::Blank)), ScreenSample::Blank);
-    for paused in [
-      SCFrameStatus::Suspended,
-      SCFrameStatus::Stopped,
-      SCFrameStatus::Unknown(9),
-    ] {
+    for paused in [SCFrameStatus::Suspended, SCFrameStatus::Unknown(9)] {
       assert_eq!(ScreenSample::of(Some(paused)), ScreenSample::Paused);
     }
+    // A closed window or a display that went away: the share ends instead of freezing (#931).
+    assert_eq!(
+      ScreenSample::of(Some(SCFrameStatus::Stopped)),
+      ScreenSample::Ended
+    );
+  }
+
+  #[test]
+  fn an_ended_share_drops_its_frame_queue_once() {
+    let (sender, receiver) = crate::video_capture::frame_queue();
+    let frames: SharedFrames = Arc::new(Mutex::new(Some(sender)));
+    assert!(end_share(&frames, None));
+    // The encoder thread sees the capture end, as when the delegate hears of the stop.
+    assert!(matches!(
+      receiver.try_recv(),
+      Err(std::sync::mpsc::TryRecvError::Disconnected)
+    ));
+    // More stopped frames, or the delegate after them, change nothing.
+    assert!(!end_share(&frames, None));
   }
 
   #[test]
