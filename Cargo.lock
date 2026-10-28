@@ -10941,6 +10941,7 @@ dependencies = [
  "jpeg-encoder",
  "js-sys",
  "ndk",
+ "nix",
  "nokhwa",
  "nokhwa-bindings-macos",
  "objc2-core-graphics",
