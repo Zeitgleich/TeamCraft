@@ -51,7 +51,7 @@ use teamcraft_proto::{
   ScreenContentMode, VideoCodec, VideoTrackKind,
 };
 use thiserror::Error;
-use tracing::{debug, info, warn};
+use tracing::{debug, error, info, warn};
 use wasm_bindgen::JsCast;
 use wasm_bindgen::prelude::*;
 use wasm_bindgen_futures::{JsFuture, spawn_local};
@@ -65,7 +65,7 @@ use web_time::Instant;
 
 pub use self::meter::MicrophoneMeter;
 use self::session_watch::{NetworkVerdict, PacketCount, PathVerdict, Reading, SessionWatch, may_hurry};
-use self::video::{TrackSender, VideoView};
+use self::video::{EncoderGaveUp, FrameDecoder, Publication, TrackSender, VideoView};
 
 use crate::audio_frame::{
   EncodedAudioFrame, FRAME_SAMPLES_PER_CHANNEL, SAMPLE_RATE_HZ, planned_loss_percent,
@@ -81,6 +81,7 @@ use crate::call_engine::{
 use crate::call_resilience::{
   Jitter, JoinTicket, JoinTicketError, ReconnectSchedule, ResilienceConfig, rejoin_attempt,
 };
+use crate::call_video::ReceivedVideoFrame;
 use crate::datagram::SimulcastLayer;
 use crate::jitter::{JitterBuffer, JitterBufferConfig, Playout};
 use crate::rtp::AudioLevel;
@@ -271,7 +272,11 @@ enum Input {
     stream: RemoteStream,
     samples: Vec<f32>,
   },
-  CodecFailed(String),
+  /// A codec reported an error that only needs logging (audio codecs, drawing a video frame).
+  CodecFailed {
+    context: &'static str,
+    message: String,
+  },
   FrameTick,
   TimerTick,
   VideoTick(VideoTrackKind),
@@ -283,9 +288,19 @@ enum Input {
     timestamp_us: f64,
   },
   VideoEnded(VideoTrackKind),
-  /// The decoder of a watched track failed: a new one starts at the next keyframe.
+  /// WebCodecs closed a layer's encoder after an error (`generation` tells which encoder): the
+  /// track replaces it.
+  VideoEncodeFailed {
+    kind: VideoTrackKind,
+    layer: u8,
+    generation: u64,
+    message: String,
+  },
+  /// WebCodecs closed a watched track's decoder after an error (`generation` tells which
+  /// decoder): a new one starts at the next keyframe, which is asked for.
   VideoDecodeFailed {
     stream_id: MediaStreamId,
+    generation: u64,
     message: String,
   },
   Command(Command),
@@ -879,7 +894,7 @@ impl CallState<'_> {
           remote.decoded.drain(..excess);
         }
       },
-      Input::CodecFailed(message) => warn!(%message, "audio codec error"),
+      Input::CodecFailed { context, message } => warn!(context, %message, "codec error"),
       Input::FrameTick => {
         self.on_frame_tick(audio)?;
         if self.is_ending_lost && !self.cues.is_playing(CallCue::ConnectionLost) {
@@ -898,9 +913,12 @@ impl CallState<'_> {
         }
         return Ok(self.on_path_verdict(engine, tick.verdict));
       },
+      // A video error stays with its track or tile: it never ends the call (issue #919).
       Input::VideoTick(kind) => {
-        if let Some(sender) = self.senders.iter_mut().find(|sender| sender.kind == kind) {
-          sender.capture().await?;
+        if let Some(sender) = self.sender_of_kind(&kind)
+          && let Err(gave_up) = sender.capture().await
+        {
+          self.on_encoders_gave_up(engine, &kind, gave_up);
         }
       },
       Input::VideoEncoded {
@@ -909,13 +927,33 @@ impl CallState<'_> {
         data,
         is_keyframe,
         timestamp_us,
-      } => self.send_video_frame(engine, &kind, layer, data, is_keyframe, timestamp_us),
+      } => {
+        if let Some(sender) = self.sender_of_kind(&kind) {
+          sender.on_encoded(layer);
+        }
+        self.send_video_frame(engine, &kind, layer, data, is_keyframe, timestamp_us);
+      },
       Input::VideoEnded(kind) => self.end_video(engine, &kind),
-      Input::VideoDecodeFailed { stream_id, message } => {
-        warn!(%message, stream_id = stream_id.0, "video decoder failed; waiting for a keyframe");
+      Input::VideoEncodeFailed {
+        kind,
+        layer,
+        generation,
+        message,
+      } => {
+        warn!(%message, ?kind, layer, "video encoder failed");
+        if let Some(sender) = self.sender_of_kind(&kind)
+          && let Err(gave_up) = sender.on_encoder_failed(layer, generation)
+        {
+          self.on_encoders_gave_up(engine, &kind, gave_up);
+        }
+      },
+      Input::VideoDecodeFailed {
+        stream_id,
+        generation,
+        message,
+      } => {
         if let Some(view) = self.views.get_mut(&stream_id) {
-          view.reset_decoder();
-          engine.request_keyframe(stream_id, Instant::now());
+          recover_decoder(view, stream_id, generation, &message, engine);
         }
       },
       Input::Command(command) => return self.on_command(command, engine, audio).await,
@@ -954,7 +992,7 @@ impl CallState<'_> {
         },
         EngineOutput::Event(CallEngineEvent::VideoFrame(frame)) => {
           if let Some(view) = self.views.get_mut(&frame.stream_id) {
-            view.decode(&frame)?;
+            decode_video(view, &frame, engine);
           }
         },
         EngineOutput::Event(event) => {
@@ -968,17 +1006,8 @@ impl CallState<'_> {
             } => {
               self.remotes.remove(&(*device_id, AudioOrigin::Screen));
             },
-            CallEngineEvent::VideoPublished(track) if track.device_id == self.own_device => {
-              if let Some(sender) = self
-                .senders
-                .iter_mut()
-                .find(|sender| sender.kind == track.kind && sender.maybe_stream_id.is_none())
-              {
-                sender.maybe_stream_id = Some(track.stream_id);
-              }
-            },
-            CallEngineEvent::VideoUnpublished(stream_id) => {
-              self.views.remove(stream_id);
+            CallEngineEvent::VideoPublished(_) | CallEngineEvent::VideoUnpublished(_) => {
+              self.on_publication(&event);
             },
             CallEngineEvent::KeyframeRequested { stream_id, layer } => {
               if let Some(sender) = self.sender_of(*stream_id) {
@@ -1306,10 +1335,10 @@ impl CallState<'_> {
     self.encoded_kinds.retain(|encoded| encoded != kind);
     let (stopped, kept): (Vec<_>, Vec<_>) = std::mem::take(&mut self.senders)
       .into_iter()
-      .partition(|sender| sender.kind == *kind);
+      .partition(|sender| sender.publication.kind == *kind);
     self.senders = kept;
     for sender in stopped {
-      if let Some(stream_id) = sender.maybe_stream_id {
+      if let Some(stream_id) = sender.publication.maybe_stream_id {
         engine.unpublish_video(stream_id);
       }
       sender.stop();
@@ -1317,10 +1346,10 @@ impl CallState<'_> {
   }
 
   /// An own track ended by itself (the browser ended its capture: "Stop sharing" in its bar, an
-  /// unplugged camera, a revoked permission): it stops, and the app hears about it, so the UI
-  /// doesn't show the camera or share on any more (issue #920).
+  /// unplugged camera, a revoked permission; or its encoders gave up): it stops, and the app
+  /// hears about it, so the UI doesn't show the camera or share on any more (issue #920).
   fn end_video(&mut self, engine: &mut CallEngine, kind: &VideoTrackKind) {
-    if !self.senders.iter().any(|sender| sender.kind == *kind) {
+    if self.sender_of_kind(kind).is_none() {
       // Stopped already: nothing ended by itself.
       return;
     }
@@ -1337,11 +1366,44 @@ impl CallState<'_> {
     });
   }
 
+  /// A layer's encoders kept failing: the track stops as if the browser had ended it. Others see
+  /// its tile go, and the app shows the camera or share off ([`Self::end_video`]).
+  fn on_encoders_gave_up(&mut self, engine: &mut CallEngine, kind: &VideoTrackKind, gave_up: EncoderGaveUp) {
+    error!(
+      ?kind,
+      layer = gave_up.layer,
+      "the browser can't encode this video; stopping it"
+    );
+    self.end_video(engine, kind);
+  }
+
+  /// Own tracks follow their publications ([`follow_publication`]); a track that is gone loses
+  /// its view.
+  fn on_publication(&mut self, event: &CallEngineEvent) {
+    if let CallEngineEvent::VideoUnpublished(stream_id) = event {
+      self.views.remove(stream_id);
+    }
+    let publications = self.senders.iter_mut().map(|sender| &mut sender.publication);
+    if let Some(index) = follow_publication(publications, self.own_device, event)
+      && let Some(sender) = self.senders.get_mut(index)
+    {
+      // Receivers of the new stream start with a keyframe on every layer.
+      sender.request_keyframes();
+    }
+  }
+
   fn sender_of(&mut self, stream_id: MediaStreamId) -> Option<&mut TrackSender> {
     self
       .senders
       .iter_mut()
-      .find(|sender| sender.maybe_stream_id == Some(stream_id))
+      .find(|sender| sender.publication.maybe_stream_id == Some(stream_id))
+  }
+
+  fn sender_of_kind(&mut self, kind: &VideoTrackKind) -> Option<&mut TrackSender> {
+    self
+      .senders
+      .iter_mut()
+      .find(|sender| sender.publication.kind == *kind)
   }
 
   fn send_video_frame(
@@ -1353,15 +1415,15 @@ impl CallState<'_> {
     is_keyframe: bool,
     timestamp_us: f64,
   ) {
-    let has_sender = self.senders.iter().any(|sender| sender.kind == *kind);
+    let has_sender = self.sender_of_kind(kind).is_some();
     if has_sender && !self.encoded_kinds.contains(kind) {
       self.encoded_kinds.push(kind.clone());
     }
     let Some(stream_id) = self
       .senders
       .iter()
-      .find(|sender| sender.kind == *kind)
-      .and_then(|sender| sender.maybe_stream_id)
+      .find(|sender| sender.publication.kind == *kind)
+      .and_then(|sender| sender.publication.maybe_stream_id)
     else {
       return;
     };
@@ -1721,11 +1783,14 @@ impl OpusEncoder {
           let _ = sender.unbounded_send(Input::Encoded(bytes.to_vec()));
         },
         Err(error) => {
-          let _ = sender.unbounded_send(Input::CodecFailed(js_message(&error)));
+          let _ = sender.unbounded_send(Input::CodecFailed {
+            context: "audio encoder output",
+            message: js_message(&error),
+          });
         },
       }
     });
-    let error = codec_error_callback(inputs);
+    let error = codec_error_callback(inputs, "audio encoder");
     let init = dictionary(&[
       ("output", output.as_ref().clone()),
       ("error", error.as_ref().clone()),
@@ -1851,11 +1916,14 @@ impl RemoteAudio {
           stream,
           samples: samples.to_vec(),
         },
-        Err(error) => Input::CodecFailed(js_message(&error)),
+        Err(error) => Input::CodecFailed {
+          context: "audio decoder output",
+          message: js_message(&error),
+        },
       };
       let _ = decoded_tx.unbounded_send(input);
     });
-    let error = codec_error_callback(inputs);
+    let error = codec_error_callback(inputs, "audio decoder");
     let init = dictionary(&[
       ("output", output.as_ref().clone()),
       ("error", error.as_ref().clone()),
@@ -2090,10 +2158,76 @@ async fn set_sink(context: &AudioContext, choice: &AudioDeviceChoice) {
   }
 }
 
-fn codec_error_callback(inputs: &mpsc::UnboundedSender<Input>) -> Closure<dyn FnMut(JsValue)> {
+/// Keeps own tracks' stream ids in step with the engine, like the native driver: an own track
+/// waiting for one takes the id the SFU published for its kind, and one whose stream the SFU
+/// dropped (a rejoin without the slot) gives it up, so the engine's new publication of the track
+/// reaches it (issue #919). Returns the index of the track that got a stream id.
+fn follow_publication<'a>(
+  publications: impl IntoIterator<Item = &'a mut Publication>,
+  own_device: DeviceId,
+  event: &CallEngineEvent,
+) -> Option<usize> {
+  match event {
+    CallEngineEvent::VideoPublished(track) if track.device_id == own_device => {
+      let (index, publication) = publications
+        .into_iter()
+        .enumerate()
+        .find(|(_, publication)| publication.kind == track.kind && publication.maybe_stream_id.is_none())?;
+      publication.maybe_stream_id = Some(track.stream_id);
+      Some(index)
+    },
+    CallEngineEvent::VideoUnpublished(stream_id) => {
+      for publication in publications {
+        if publication.maybe_stream_id == Some(*stream_id) {
+          publication.maybe_stream_id = None;
+        }
+      }
+      None
+    },
+    _ => None,
+  }
+}
+
+/// Decodes a frame of a watched track. A failure stays with its tile: the failed decoder is gone
+/// and a keyframe, from which a new one starts, is asked for; the call goes on.
+fn decode_video<D: FrameDecoder>(
+  view: &mut VideoView<D>,
+  frame: &ReceivedVideoFrame,
+  engine: &mut CallEngine,
+) {
+  if let Err(error) = view.decode(frame) {
+    warn!(%error, stream_id = frame.stream_id.0, "decoding a video frame failed; asking for a keyframe");
+    engine.request_keyframe(frame.stream_id, Instant::now());
+  }
+}
+
+/// WebCodecs closed a tile's decoder: the view drops it and a keyframe is asked for. The report of
+/// a decoder the view already replaced changes nothing.
+fn recover_decoder<D: FrameDecoder>(
+  view: &mut VideoView<D>,
+  stream_id: MediaStreamId,
+  generation: u64,
+  message: &str,
+  engine: &mut CallEngine,
+) {
+  if view.on_decoder_failed(generation) {
+    warn!(%message, stream_id = stream_id.0, "video decoder failed; asking for a keyframe");
+    engine.request_keyframe(stream_id, Instant::now());
+  } else {
+    debug!(%message, stream_id = stream_id.0, "a replaced video decoder failed");
+  }
+}
+
+fn codec_error_callback(
+  inputs: &mpsc::UnboundedSender<Input>,
+  context: &'static str,
+) -> Closure<dyn FnMut(JsValue)> {
   let sender = inputs.clone();
   Closure::<dyn FnMut(JsValue)>::new(move |error: JsValue| {
-    let _ = sender.unbounded_send(Input::CodecFailed(js_message(&error)));
+    let _ = sender.unbounded_send(Input::CodecFailed {
+      context,
+      message: js_message(&error),
+    });
   })
 }
 
@@ -2161,7 +2295,13 @@ fn to_i16(sample: f32) -> i16 {
 
 #[cfg(test)]
 mod tests {
+  use teamcraft_proto::{
+    CallEvent, CallId, CallParticipant, Id, MediaCapabilities, Snowflake, UserId, VideoLayerInfo, VideoTrack,
+  };
+
   use super::*;
+  use crate::bwe::BweConfig;
+  use crate::call_engine::VideoSendOutcome;
 
   const GRACE: Duration = Duration::from_secs(30);
 
@@ -2273,6 +2413,282 @@ mod tests {
       assert!(decoder.push(&[0, 0]).unwrap().is_empty());
       assert_eq!(decoder.push(&[0, 1, b'x']).unwrap(), vec![b"x".to_vec()]);
     }
+  }
+
+  mod own_video {
+    use super::*;
+
+    #[test]
+    fn an_own_track_takes_the_stream_published_for_its_kind() {
+      let mut publications = vec![
+        publication(VideoTrackKind::Camera),
+        publication(VideoTrackKind::Screen),
+      ];
+      let others = CallEngineEvent::VideoPublished(video_track(8, 2, VideoTrackKind::Screen));
+      assert_eq!(follow_publication(&mut publications, device(1), &others), None);
+      let own = CallEngineEvent::VideoPublished(video_track(7, 1, VideoTrackKind::Screen));
+      assert_eq!(follow_publication(&mut publications, device(1), &own), Some(1));
+      assert_eq!(publications[0].maybe_stream_id, None);
+      assert_eq!(publications[1].maybe_stream_id, Some(MediaStreamId(7)));
+      // Another device's track going away changes nothing here.
+      let gone = CallEngineEvent::VideoUnpublished(MediaStreamId(8));
+      follow_publication(&mut publications, device(1), &gone);
+      assert_eq!(publications[1].maybe_stream_id, Some(MediaStreamId(7)));
+    }
+
+    /// Issue #919: after an SFU restart the engine publishes the camera again; the web driver must
+    /// send on the new stream, not the old one (dropped as not published, a black tile for others).
+    #[test]
+    fn a_rejoin_without_the_slot_moves_own_video_to_its_new_stream() {
+      let now = Instant::now();
+      let mut engine = joined_engine(now);
+      let mut publications = vec![publication(VideoTrackKind::Camera)];
+      engine.publish_video(VideoTrackKind::Camera, VideoCodec::H264, layers());
+      let published = event(
+        2,
+        CallEvent::VideoPublished {
+          track: video_track(50, 1, VideoTrackKind::Camera),
+        },
+      );
+      engine.handle_signal(published, now).unwrap();
+      assert_eq!(follow(&mut engine, &mut publications), vec![0]);
+      assert_eq!(publications[0].maybe_stream_id, Some(MediaStreamId(50)));
+
+      // The SFU restarted and lost the slot: the engine unpublishes and publishes again.
+      engine.connection_lost();
+      engine.rejoin("fresh".into(), now);
+      follow(&mut engine, &mut publications);
+      engine.handle_signal(event(1, joined(&[2])), now).unwrap();
+      let outputs = drain(&mut engine);
+      assert!(
+        outputs.contains(&EngineOutput::Signal(CallClientMessage::PublishVideo {
+          kind: VideoTrackKind::Camera,
+          codec: VideoCodec::H264,
+          layers: layers(),
+        }))
+      );
+      follow_outputs(&outputs, &mut publications);
+      assert_eq!(publications[0].maybe_stream_id, None, "the old stream is gone");
+
+      let republished = event(
+        2,
+        CallEvent::VideoPublished {
+          track: video_track(51, 1, VideoTrackKind::Camera),
+        },
+      );
+      engine.handle_signal(republished, now).unwrap();
+      assert_eq!(follow(&mut engine, &mut publications), vec![0]);
+      assert_eq!(publications[0].maybe_stream_id, Some(MediaStreamId(51)));
+      let frame = EncodedVideoFrame {
+        codec: VideoCodec::H264,
+        layer: SimulcastLayer::new(0).unwrap(),
+        timestamp: EncodedVideoFrame::rtp_timestamp(0),
+        is_keyframe: true,
+        data: vec![0, 0, 0, 1, 0x65],
+      };
+      assert_eq!(
+        engine.send_video(MediaStreamId(50), &frame, now),
+        VideoSendOutcome::NotPublished
+      );
+      assert_ne!(
+        engine.send_video(MediaStreamId(51), &frame, now),
+        VideoSendOutcome::NotPublished
+      );
+    }
+
+    /// Feeds the engine's events through the driver's bookkeeping; returns the indexes of tracks
+    /// that got a stream.
+    fn follow(engine: &mut CallEngine, publications: &mut [Publication]) -> Vec<usize> {
+      follow_outputs(&drain(engine), publications)
+    }
+
+    fn follow_outputs(outputs: &[EngineOutput], publications: &mut [Publication]) -> Vec<usize> {
+      outputs
+        .iter()
+        .filter_map(|output| match output {
+          EngineOutput::Event(event) => follow_publication(publications.iter_mut(), device(1), event),
+          _ => None,
+        })
+        .collect()
+    }
+
+    fn publication(kind: VideoTrackKind) -> Publication {
+      Publication {
+        kind,
+        maybe_stream_id: None,
+      }
+    }
+  }
+
+  mod video_errors {
+    use super::*;
+
+    #[test]
+    fn a_failed_decode_asks_for_a_keyframe_and_the_call_goes_on() {
+      let now = Instant::now();
+      let mut engine = watching_engine(now);
+      let mut view = VideoView::with_decoders(MediaStreamId(60), |_codec: &VideoCodec, _generation| {
+        Ok(BrokenDecoder)
+      });
+      decode_video(&mut view, &remote_keyframe(), &mut engine);
+      assert!(engine.is_in_call());
+      assert_eq!(keyframe_requests(&mut engine), vec![MediaStreamId(60)]);
+    }
+
+    #[test]
+    fn only_the_current_decoders_failure_asks_for_a_keyframe() {
+      let now = Instant::now();
+      let mut engine = watching_engine(now);
+      let mut view = VideoView::with_decoders(MediaStreamId(60), |_codec: &VideoCodec, _generation| {
+        Ok(WorkingDecoder)
+      });
+      decode_video(&mut view, &remote_keyframe(), &mut engine);
+      recover_decoder(&mut view, MediaStreamId(60), 3, "replaced", &mut engine);
+      assert!(keyframe_requests(&mut engine).is_empty());
+      recover_decoder(&mut view, MediaStreamId(60), 0, "failed", &mut engine);
+      assert_eq!(keyframe_requests(&mut engine), vec![MediaStreamId(60)]);
+    }
+
+    /// Throws like a decoder WebCodecs closed.
+    struct BrokenDecoder;
+
+    struct WorkingDecoder;
+
+    impl FrameDecoder for BrokenDecoder {
+      fn codec(&self) -> &VideoCodec {
+        &VideoCodec::H264
+      }
+
+      fn is_configured(&self) -> bool {
+        true
+      }
+
+      fn decode(&self, _frame: &ReceivedVideoFrame) -> Result<(), WebCallError> {
+        Err(WebCallError::Browser {
+          context: "VideoDecoder",
+          message: "InvalidStateError".into(),
+        })
+      }
+    }
+
+    impl FrameDecoder for WorkingDecoder {
+      fn codec(&self) -> &VideoCodec {
+        &VideoCodec::H264
+      }
+
+      fn is_configured(&self) -> bool {
+        true
+      }
+
+      fn decode(&self, _frame: &ReceivedVideoFrame) -> Result<(), WebCallError> {
+        Ok(())
+      }
+    }
+
+    /// In a call where device 2 publishes a camera on stream 60.
+    fn watching_engine(now: Instant) -> CallEngine {
+      let mut engine = joined_engine(now);
+      let published = event(
+        2,
+        CallEvent::VideoPublished {
+          track: video_track(60, 2, VideoTrackKind::Camera),
+        },
+      );
+      engine.handle_signal(published, now).unwrap();
+      engine.subscribe_video(MediaStreamId(60), Some(0));
+      drain(&mut engine);
+      engine
+    }
+
+    fn keyframe_requests(engine: &mut CallEngine) -> Vec<MediaStreamId> {
+      drain(engine)
+        .into_iter()
+        .filter_map(|output| match output {
+          EngineOutput::Signal(CallClientMessage::RequestKeyframe { stream_id }) => Some(stream_id),
+          _ => None,
+        })
+        .collect()
+    }
+
+    fn remote_keyframe() -> ReceivedVideoFrame {
+      ReceivedVideoFrame {
+        sender: device(2),
+        stream_id: MediaStreamId(60),
+        codec: VideoCodec::H264,
+        layer: SimulcastLayer::new(0).unwrap(),
+        timestamp: crate::rtp::RtpTimestamp(0),
+        is_keyframe: true,
+        data: vec![0, 0, 0, 1, 0x65],
+      }
+    }
+  }
+
+  /// Device 1 in a call with device 2.
+  fn joined_engine(now: Instant) -> CallEngine {
+    let mut engine = CallEngine::new(
+      CallEngineConfig {
+        user_id: UserId::from_snowflake(Snowflake::new(1001).unwrap()),
+        device_id: device(1),
+        capabilities: MediaCapabilities::default(),
+        bwe: BweConfig::default(),
+      },
+      now,
+    );
+    engine.join("t".into());
+    engine.handle_signal(event(1, joined(&[2])), now).unwrap();
+    drain(&mut engine);
+    engine
+  }
+
+  fn joined(others: &[i64]) -> CallEvent {
+    CallEvent::Joined {
+      call_id: CallId::from_snowflake(Snowflake::new(99).unwrap()),
+      participant: participant(1),
+      participants: others.iter().map(|other| participant(*other)).collect(),
+      video_tracks: Vec::new(),
+      screen_audio_tracks: Vec::new(),
+      maybe_reconnect_grace_ms: Some(30_000),
+    }
+  }
+
+  fn participant(id: i64) -> CallParticipant {
+    CallParticipant {
+      user_id: UserId::from_snowflake(Snowflake::new(1000 + id).unwrap()),
+      device_id: device(id),
+      audio_stream_id: MediaStreamId(u32::try_from(id).unwrap()),
+    }
+  }
+
+  fn video_track(stream: u32, owner: i64, kind: VideoTrackKind) -> VideoTrack {
+    VideoTrack {
+      stream_id: MediaStreamId(stream),
+      device_id: device(owner),
+      kind,
+      codec: VideoCodec::H264,
+      layers: layers(),
+    }
+  }
+
+  fn layers() -> Vec<VideoLayerInfo> {
+    vec![VideoLayerInfo {
+      layer: 0,
+      width: 320,
+      height: 180,
+      max_framerate: 30,
+      max_bitrate_bps: 150_000,
+    }]
+  }
+
+  fn event(seq: u64, event: CallEvent) -> CallServerMessage {
+    CallServerMessage::Event { seq, event }
+  }
+
+  fn drain(engine: &mut CallEngine) -> Vec<EngineOutput> {
+    std::iter::from_fn(|| engine.poll_output()).collect()
+  }
+
+  fn device(id: i64) -> DeviceId {
+    DeviceId::from_snowflake(Snowflake::new(id).unwrap())
   }
 
   fn framed(body: &[u8]) -> Vec<u8> {
