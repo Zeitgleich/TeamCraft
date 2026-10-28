@@ -347,7 +347,9 @@ The same approach Fluxer announced for its new voice system (see https://fluxer.
 - **Keyframes:** the SFU asks the publisher for one when a receiver switches layers, (re)subscribes,
   or sends `request_keyframe` because it can't decode until the next one (a lost fragment, a frame
   that didn't decrypt, a failed decoder). Requests are rate-limited per receiver and track (1 s) and
-  per track and layer (500 ms, `KeyframeRequestConfig`). A sender whose capture delivers nothing
+  per track and layer (500 ms, `KeyframeRequestConfig`); a switch waiting for its keyframe asks
+  again only after 2 s (a 1440p keyframe takes longer to encode and arrive on a slow machine, and
+  every request meanwhile cost another one of 500 KB). A sender whose capture delivers nothing
   (a still screen) answers a keyframe request with its last picture after 150 ms, and screen
   shares send their last picture again about once a second while the screen doesn't change
   (`VideoSendConfig::maybe_idle_refresh`).

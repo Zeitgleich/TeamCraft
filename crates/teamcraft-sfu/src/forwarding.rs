@@ -82,6 +82,12 @@ pub struct KeyframeRequestConfig {
   pub per_layer_interval: Duration,
   /// One request per receiver and track at most this often ([`Forwarder::request_keyframe`]).
   pub per_receiver_interval: Duration,
+  /// A layer switch that waits for its keyframe asks again only this often (a keyframe that
+  /// starts arriving ends the wait). A large keyframe takes longer than `per_layer_interval` to
+  /// be encoded and to arrive on a slow machine, and each request meanwhile cost one more: on a
+  /// CI runner a screen share's 1440p layer came with three keyframes of 500 KB in three seconds,
+  /// and the viewer's sharp picture only after the third (#939).
+  pub switch_retry_interval: Duration,
 }
 
 /// What to do with one incoming datagram.
@@ -210,6 +216,7 @@ impl Default for KeyframeRequestConfig {
     Self {
       per_layer_interval: Duration::from_millis(500),
       per_receiver_interval: Duration::from_secs(1),
+      switch_retry_interval: Duration::from_secs(2),
     }
   }
 }
@@ -533,7 +540,8 @@ impl Forwarder {
     // Subscribing again (a video shown anew) brings a new decoder that needs a keyframe, also
     // when the layer stays the same and the allocation asked for none.
     if let Some((publisher, layer)) = self.received_layer(receiver, stream_id) {
-      effects.extend(self.keyframe_request(publisher, stream_id, layer, now));
+      let interval = self.config.keyframes.per_layer_interval;
+      effects.extend(self.keyframe_request(publisher, stream_id, layer, interval, now));
     }
     effects.extend(self.update_layers_needed(stream_id));
     Ok(effects)
@@ -561,8 +569,9 @@ impl Forwarder {
     let Some((publisher, layer)) = self.received_layer(receiver, stream_id) else {
       return Vec::new();
     };
+    let interval = self.config.keyframes.per_layer_interval;
     self
-      .keyframe_request(publisher, stream_id, layer, now)
+      .keyframe_request(publisher, stream_id, layer, interval, now)
       .into_iter()
       .collect()
   }
@@ -830,9 +839,10 @@ impl Forwarder {
       // While the target doesn't flow, the best lower layer that does stands in (it needs a
       // keyframe as well); the target is still asked for, so it starts with one when it's back.
       let live = live_layer(&route.arrivals, layer, stalled_after);
+      let interval = self.config.keyframes.switch_retry_interval;
       for wanted in [live, layer] {
         if current != Some(wanted) {
-          effects.extend(self.keyframe_request(publisher, stream_id, wanted, now));
+          effects.extend(self.keyframe_request(publisher, stream_id, wanted, interval, now));
         }
       }
     }
@@ -865,9 +875,9 @@ impl Forwarder {
     publisher: DeviceId,
     stream_id: StreamId,
     layer: u8,
+    interval: Duration,
     now: Instant,
   ) -> Option<Effect> {
-    let interval = self.config.keyframes.per_layer_interval;
     let key = (stream_id, layer);
     let is_due = self
       .last_keyframe_requests
@@ -1363,6 +1373,33 @@ mod tests {
       let effects = forwarder.on_timer(device(2), later);
       assert!(effects.contains(&keyframe_request(2)), "{effects:?}");
       assert!(effects.contains(&layers_needed(&[1, 2])), "{effects:?}");
+    }
+
+    /// Issue #939: a switch waiting for its keyframe doesn't ask for another every half second:
+    /// a large one takes longer than that to come on a slow machine, and each request cost one
+    /// more keyframe.
+    #[test]
+    fn a_switch_waiting_for_its_keyframe_asks_again_only_after_a_while() {
+      let (mut forwarder, now) = wide_video_room();
+      on_top_layer(&mut forwarder, now);
+      let effects = forwarder
+        .set_uplink_layers(device(1), VIDEO, &[0, 1], now)
+        .unwrap();
+      assert!(effects.contains(&keyframe_request(1)), "{effects:?}");
+      let retry = KeyframeRequestConfig::default().switch_retry_interval;
+      // Not within one and a half seconds (it was every half second, `per_layer_interval`).
+      let mut at = now;
+      while at + Duration::from_millis(100) < now + Duration::from_millis(1_500) {
+        at += Duration::from_millis(100);
+        let effects = forwarder.on_timer(device(2), at);
+        assert!(
+          !effects.contains(&keyframe_request(1)),
+          "asked again after {:?}",
+          at - now
+        );
+      }
+      let effects = forwarder.on_timer(device(2), now + retry);
+      assert!(effects.contains(&keyframe_request(1)), "{effects:?}");
     }
 
     #[test]
