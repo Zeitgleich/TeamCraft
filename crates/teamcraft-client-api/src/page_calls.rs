@@ -19,6 +19,11 @@
 //!
 //! A rejoin after a lost connection prepares again (fresh token, current devices).
 //!
+//! Sharing the screen takes two steps (issue #930): Safari opens the screen picker only while the
+//! click's user activation lasts, which the action queue and the module's tasks outlast. So the
+//! page calls [`EXPORT_PICK_SCREEN`] synchronously in the click handler, which opens the picker at
+//! once, and hands the promise it answers to [`EXPORT_SHARE_SCREEN`] when the action's turn comes.
+//!
 //! Failed actions reject with [`crate::failure::ActionFailure`] wire text. An action that went
 //! through resolves with nothing, or with the wire text of a part of it that failed without
 //! undoing it ([`crate::remote::CallActionAnswer`]).
@@ -58,6 +63,15 @@ pub const EXPORT_PREVIEW_LEVEL: &str = "preview_level";
 pub const EXPORT_NETWORK_CHANGED: &str = "network_changed";
 /// `stop() -> Promise`: leaves a running call; the page is signing out.
 pub const EXPORT_STOP: &str = "stop";
+/// `pick_screen(ScreenContentMode JSON) -> Promise<MediaStream>`: opens the browser's screen picker
+/// at once (`getDisplayMedia`); call it synchronously in the click handler. Throws when the browser
+/// can't open one; the page then falls back to [`EXPORT_ACT`], which reports why.
+pub const EXPORT_PICK_SCREEN: &str = "pick_screen";
+/// `share_screen(has_sound, ScreenContentMode JSON, Promise<MediaStream>) -> Promise<undefined>`:
+/// shares the screen chosen in a picker [`EXPORT_PICK_SCREEN`] opened, as `act` would carry out
+/// `StartScreenShare` (a closed picker is no failure). The module owns the stream from here: it
+/// stops it when the call ended meanwhile or the share fails.
+pub const EXPORT_SHARE_SCREEN: &str = "share_screen";
 
 /// What the page's client core prepared for joining a call (e2ee.md §8). The page keeps the
 /// signer and the verified certificates and answers `sign` and `verify` with them.

@@ -136,6 +136,7 @@ pub fn failure_message_key(failure: &ActionFailure) -> &'static str {
       CallFailure::CameraNotConnected => "error-call-camera-not-connected",
       CallFailure::CameraUnavailable => "error-call-camera-unavailable",
       CallFailure::ScreenUnavailable => "error-call-screen-unavailable",
+      CallFailure::ScreenNeedsClick => "error-call-screen-needs-click",
       CallFailure::CameraNoPicture => "error-call-camera-no-picture",
       CallFailure::CameraStopped => "error-call-camera-stopped",
       CallFailure::ScreenNoPicture => "error-call-screen-no-picture",
@@ -454,6 +455,7 @@ mod tests {
         FailureKind::Call(CallFailure::CameraInUse),
         FailureKind::Call(CallFailure::CameraNotConnected),
         FailureKind::Call(CallFailure::CameraUnavailable),
+        FailureKind::Call(CallFailure::ScreenNeedsClick),
       ];
       for kind in kinds {
         let key = failure_message_key(&ActionFailure::new(kind, "x"));

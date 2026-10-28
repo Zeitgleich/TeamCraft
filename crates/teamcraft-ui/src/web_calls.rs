@@ -22,15 +22,15 @@ use teamcraft_client_api::call_view::CallSignal;
 use teamcraft_client_api::calls::CallsUnavailableReason;
 use teamcraft_client_api::failure::ActionFailure;
 use teamcraft_client_api::page_calls::{
-  EXPORT_ACT, EXPORT_CAMERA_VIEW, EXPORT_NETWORK_CHANGED, EXPORT_PREVIEW_LEVEL, EXPORT_RING, EXPORT_SIGNAL,
-  EXPORT_START, EXPORT_STOP, EXPORT_UNWATCH_VIDEO, EXPORT_WATCH_VIDEO, MODULE_META, PreparedCall,
-  WORKLET_META,
+  EXPORT_ACT, EXPORT_CAMERA_VIEW, EXPORT_NETWORK_CHANGED, EXPORT_PICK_SCREEN, EXPORT_PREVIEW_LEVEL,
+  EXPORT_RING, EXPORT_SHARE_SCREEN, EXPORT_SIGNAL, EXPORT_START, EXPORT_STOP, EXPORT_UNWATCH_VIDEO,
+  EXPORT_WATCH_VIDEO, MODULE_META, PreparedCall, WORKLET_META,
 };
 use teamcraft_client_api::remote::{CallAction, CallActionAnswer, CallSnapshot};
 use teamcraft_core::CallKeySigner;
 use teamcraft_crypto::call_binding::{CallBindingError, CallId as CryptoCallId, SignedCallKeyBinding};
 use teamcraft_media::call_auth::{CallBindingSigner, CallKeyAuthenticator, DeviceCallKeyAuthenticator};
-use teamcraft_proto::{CallId, ConversationId, DeviceId, GatewayEvent, MediaStreamId};
+use teamcraft_proto::{CallId, ConversationId, DeviceId, GatewayEvent, MediaStreamId, ScreenContentMode};
 use wasm_bindgen::JsCast;
 use wasm_bindgen::prelude::*;
 use wasm_bindgen_futures::{JsFuture, future_to_promise, spawn_local};
@@ -179,6 +179,18 @@ pub fn camera_view() -> Option<Element> {
     .and_then(|video| video.dyn_into().ok())
 }
 
+/// Opens the browser's screen picker now and returns the promise of the chosen screen, for
+/// [`WebCallHost::share_screen`]. Call it synchronously in the click handler: Safari opens the
+/// picker only while the click's user activation lasts, which the action queue outlasts (issue
+/// #930). `None` without a running call module, or when the browser can't open a picker; the share
+/// then goes the usual way, which says why it failed.
+pub fn pick_screen(mode: ScreenContentMode) -> Option<Promise> {
+  let module = current()?.loaded_module()?;
+  module
+    .call_sync(EXPORT_PICK_SCREEN, &[json_value(&mode)])
+    .and_then(|picked| picked.dyn_into().ok())
+}
+
 /// The microphone's level in the pre-join check (#442), from 0.0 to 1.0; 0.0 without one.
 pub fn preview_level() -> f32 {
   current()
@@ -229,6 +241,25 @@ impl WebCallHost {
     let json = serde_json::to_string(&action).map_err(|error| error.to_string())?;
     module
       .call(EXPORT_ACT, &[JsValue::from_str(&json)])
+      .await
+      .map(|answer| answer.as_string())
+      .map_err(|failure| failure.to_wire())
+  }
+
+  /// Shares the screen chosen in a picker [`pick_screen`] opened (`StartScreenShare` with the
+  /// screen already asked for); answers like [`WebCallHost::act`].
+  pub async fn share_screen(
+    self: &Rc<Self>,
+    has_sound: bool,
+    mode: ScreenContentMode,
+    picked: Promise,
+  ) -> Result<CallActionAnswer, String> {
+    let module = self.module().await?;
+    module
+      .call(
+        EXPORT_SHARE_SCREEN,
+        &[JsValue::from_bool(has_sound), json_value(&mode), picked.into()],
+      )
       .await
       .map(|answer| answer.as_string())
       .map_err(|failure| failure.to_wire())

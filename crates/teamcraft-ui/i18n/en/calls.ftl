@@ -208,6 +208,7 @@ error-call-camera-unsupported = This camera's picture format isn't supported, so
 error-call-camera-not-connected = The iPhone camera didn't connect: it was declined on the iPhone, or the iPhone is locked or too far away. Allow it on the iPhone, or choose another camera.
 error-call-camera-unavailable = The camera can't be opened. Choose another camera, or try again.
 error-call-screen-unavailable = Your screen can't be shared from here.
+error-call-screen-needs-click = Your browser didn't open the screen picker. Select Share screen again, then choose what to share.
 error-call-camera-no-picture = Your camera turned on but sends no picture, so your video stays off. Check that no other app uses it, or choose another camera.
 error-call-camera-stopped = Your camera stopped, so your video is off: it was disconnected, or the system or another app took it. Turn it on again, or choose another camera.
 error-call-screen-no-picture = Your screen share started but sends no picture, so it was stopped. Try sharing again, or choose another screen or window.

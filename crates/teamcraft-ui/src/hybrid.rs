@@ -1105,10 +1105,7 @@ impl<C: ChatBackend> CallBackend for Hybrid<C> {
 
   fn start_screen_share(&self, has_sound: bool, content_mode: ScreenContentMode) {
     if let Some(calls) = &self.maybe_calls {
-      calls.act(CallAction::StartScreenShare {
-        has_sound,
-        content_mode,
-      });
+      calls.start_screen_share(has_sound, content_mode);
     }
   }
 

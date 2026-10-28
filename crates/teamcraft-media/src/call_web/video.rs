@@ -19,7 +19,7 @@
 //! starts. Only encoders that keep failing stop their track.
 
 use futures::channel::mpsc;
-use js_sys::Uint8Array;
+use js_sys::{Promise, Uint8Array};
 use teamcraft_proto::{
   MediaStreamId, ScreenContentMode, VideoCodec, VideoLayerInfo, VideoPublicationId, VideoTrackKind,
 };
@@ -870,6 +870,12 @@ async fn request_camera(constraints: &MediaStreamConstraints) -> Result<MediaStr
 
 /// Asks the user what to share (`getDisplayMedia`). Needs a recent user gesture.
 pub(super) async fn capture_screen(mode: ScreenContentMode) -> Result<MediaStream, WebCallError> {
+  picked_screen(request_screen(mode)?).await
+}
+
+/// Opens the screen picker now (synchronously, so a click's user activation still counts) and
+/// returns `getDisplayMedia`'s promise.
+pub(super) fn request_screen(mode: ScreenContentMode) -> Result<Promise, WebCallError> {
   let (limit, framerate) = screen_limits(mode);
   let video = dictionary(&[
     ("frameRate", maximum(u32::from(framerate))?),
@@ -879,14 +885,18 @@ pub(super) async fn capture_screen(mode: ScreenContentMode) -> Result<MediaStrea
   .map_err(browser("getDisplayMedia"))?;
   let constraints = DisplayMediaStreamConstraints::new();
   constraints.set_video(&video);
-  let promise = window()?
+  window()?
     .navigator()
     .media_devices()
     .map_err(|_| WebCallError::Unsupported(super::SECURE_CONTEXT))?
     .get_display_media_with_constraints(&constraints)
-    .map_err(media_access(MediaInput::Screen))?;
+    .map_err(media_access(MediaInput::Screen))
+}
+
+/// The stream of a picker [`request_screen`] opened, once the user chose.
+pub(super) async fn picked_screen(request: Promise) -> Result<MediaStream, WebCallError> {
   Ok(
-    JsFuture::from(promise)
+    JsFuture::from(request)
       .await
       .map_err(media_access(MediaInput::Screen))?
       .unchecked_into(),
