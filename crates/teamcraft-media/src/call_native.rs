@@ -13,7 +13,7 @@
 //! goes away (a restart, a deploy), the driver gets a fresh join ticket and rejoins on a new
 //! connection within the SFU's grace period; devices, mute state and tracks carry over.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::future::Future;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, UdpSocket};
 use std::pin::Pin;
@@ -59,8 +59,8 @@ use crate::system_audio::{SystemAudioCapture, SystemAudioError, SystemAudioRecei
 use crate::video::EncodedVideoFrame;
 use crate::video_capture::CaptureError;
 use crate::video_pipeline::{
-  FirstPicture, FrameSink, KeyframeNeeded, RepeatedWarning, VideoReceiver, VideoSendConfig, VideoSender,
-  VideoStartError,
+  FirstPicture, FrameSink, KeyframeNeeded, RepeatedWarning, SendProgress, StoppingSender, VideoReceiver,
+  VideoSendConfig, VideoSender, VideoStartError,
 };
 
 /// Audio frame period.
@@ -208,10 +208,7 @@ enum VideoCommand {
   },
   /// Capture, encode and publish a track (camera or screen); the answer brings the wait for
   /// its first picture.
-  Start(
-    VideoSendConfig,
-    oneshot::Sender<Result<FirstPicture, CaptureError>>,
-  ),
+  Start(VideoSendConfig, StartAnswer),
   Stop(VideoTrackKind),
   Watch {
     stream_id: MediaStreamId,
@@ -223,11 +220,26 @@ enum VideoCommand {
   RequestKeyframe(MediaStreamId),
 }
 
+/// Where the answer to a [`VideoCommand::Start`] goes.
+type StartAnswer = oneshot::Sender<Result<FirstPicture, CaptureError>>;
+
+/// What starting an own track's capture and encoder thread gave.
+type StartResult = Result<(VideoSender, FirstPicture), CaptureError>;
+
 /// The driver's video: own tracks being captured and received tracks being decoded.
 #[derive(Default)]
 struct VideoState {
   /// Own tracks; the stream id arrives with `VideoPublished`.
   senders: Vec<(VideoSender, Option<MediaStreamId>)>,
+  /// Own tracks being stopped: their threads end on blocking tasks (up to a second and a half for
+  /// a camera), and their counters join [`VideoState::counts`] once they did (#922).
+  stopping: Vec<StoppingSender>,
+  /// The own track whose capture is opening on a blocking task: a camera takes up to seconds,
+  /// during which the call's audio and signaling go on (#922).
+  maybe_starting: Option<StartingVideo>,
+  /// Starts and stops of own tracks asked for while one opens. They follow it in the order asked,
+  /// so a camera turned off while it opened ends up off, and of two camera switches the last wins.
+  waiting: VecDeque<OwnVideoRequest>,
   receivers: HashMap<MediaStreamId, VideoReceiver>,
   /// The call task's own command queue, for the decoder threads' keyframe requests. Weak: it
   /// must not keep the call running once the app dropped its handle.
@@ -238,6 +250,19 @@ struct VideoState {
   send_warning: RepeatedWarning,
   /// When the counters were last looked at, and what they were.
   maybe_last_log: Option<(Instant, VideoCounts)>,
+}
+
+/// An own track whose capture and encoder thread start on a blocking task.
+struct StartingVideo {
+  kind: VideoTrackKind,
+  task: JoinHandle<StartResult>,
+  done: StartAnswer,
+}
+
+/// A start or stop of an own track.
+enum OwnVideoRequest {
+  Start(VideoSendConfig, StartAnswer),
+  Stop(VideoTrackKind),
 }
 
 /// Where an own track's pictures stopped during one [`VIDEO_LOG_INTERVAL`].
@@ -366,7 +391,9 @@ impl NativeCall {
 
   /// Captures, encodes (simulcast per `config.layers`) and publishes a track; replaces a running
   /// track of the same kind. Frames flow once the SFU confirmed the track. Returns once the
-  /// capture started; see [`NativeCall::start_video_checked`] to learn whether pictures come.
+  /// capture started; see [`NativeCall::start_video_checked`] to learn whether pictures come. The
+  /// capture opens off the call's task (a camera takes up to seconds): audio and signaling go on,
+  /// and starts and stops asked for meanwhile follow in order.
   pub async fn start_video(&self, config: VideoSendConfig) -> Result<(), NativeCallError> {
     self.start_video_checked(config).await.map(drop)
   }
@@ -382,6 +409,7 @@ impl NativeCall {
     Ok(done_rx.await.map_err(|_| NativeCallError::TaskEnded)??)
   }
 
+  /// Stops and unpublishes the own track of `kind`; its capture is let go off the call's task.
   pub fn stop_video(&self, kind: VideoTrackKind) {
     self.video(VideoCommand::Stop(kind));
   }
@@ -639,9 +667,15 @@ async fn run_call(
         if maybe_screen_audio.is_some() && !engine.is_sharing_screen_audio() {
           stop_screen_audio(&mut engine, &mut maybe_screen_audio);
         }
+        sinks.video.collect_stopped();
         sinks.video.log_counts(now);
       },
       Some((kind, frame)) = encoded_rx.recv() => sinks.video.send(&mut engine, &kind, &frame, Instant::now()),
+      started = started_video(&mut sinks.video.maybe_starting) => {
+        if let Some(starting) = sinks.video.maybe_starting.take() {
+          sinks.video.on_started(&mut engine, &encoded_tx, starting, started);
+        }
+      },
       maybe_command = commands.recv() => {
         match maybe_command {
           Some(Command::Mute(is_muted)) => {
@@ -704,6 +738,7 @@ async fn run_call(
   }
   devices.close();
   connection.close();
+  sinks.video.finish_stopping().await;
   let mut stats = sinks.stats;
   let video = sinks.video.totals();
   (stats.camera, stats.screen) = (video.camera, video.screen);
@@ -1175,22 +1210,8 @@ fn handle_video(
   command: VideoCommand,
 ) {
   match command {
-    VideoCommand::Start(config, done) => {
-      let kind = config.kind.clone();
-      // The running track of the kind stops only once its successor started: a camera that
-      // can't be opened (busy, refused) leaves the running one sending, as the UI shows it.
-      let result = VideoSender::start(config, encoded.clone())
-        .map(|(sender, first_picture)| {
-          video.stop(engine, &kind);
-          engine.publish_video(sender.kind.clone(), VideoCodec::H264, sender.layers.clone());
-          video.senders.push((sender, None));
-          first_picture
-        })
-        .inspect_err(|error| warn!(%error, ?kind, "video capture not started; the running one goes on"));
-      // The caller may have given up waiting.
-      let _ = done.send(result);
-    },
-    VideoCommand::Stop(kind) => video.stop(engine, &kind),
+    VideoCommand::Start(config, done) => video.request(engine, encoded, OwnVideoRequest::Start(config, done)),
+    VideoCommand::Stop(kind) => video.request(engine, encoded, OwnVideoRequest::Stop(kind)),
     VideoCommand::Watch {
       stream_id,
       maybe_max_layer,
@@ -1218,6 +1239,18 @@ fn handle_video(
       // Frames the app encodes itself; what becomes of each is its own business.
       let _ = engine.send_video(stream_id, &frame, Instant::now());
     },
+  }
+}
+
+/// The result of the own track that is starting, once its start is done; never while none is.
+async fn started_video(
+  maybe_starting: &mut Option<StartingVideo>,
+) -> Result<StartResult, tokio::task::JoinError> {
+  match maybe_starting {
+    // Awaiting the handle by reference: when another branch of the call loop wins, the start
+    // goes on and is awaited again next time.
+    Some(starting) => (&mut starting.task).await,
+    None => std::future::pending().await,
   }
 }
 
@@ -1362,6 +1395,68 @@ impl Sinks {
 }
 
 impl VideoState {
+  /// Starts or stops an own track: at once, or after the start that is opening its capture.
+  fn request(
+    &mut self,
+    engine: &mut CallEngine,
+    encoded: &mpsc::UnboundedSender<(VideoTrackKind, EncodedVideoFrame)>,
+    request: OwnVideoRequest,
+  ) {
+    if self.maybe_starting.is_some() {
+      self.waiting.push_back(request);
+    } else {
+      self.apply(engine, encoded, request);
+    }
+  }
+
+  /// A start opens its capture on a blocking task ([`VideoState::on_started`] goes on from
+  /// there); a stop doesn't wait for the threads either ([`VideoState::stop`]).
+  fn apply(
+    &mut self,
+    engine: &mut CallEngine,
+    encoded: &mpsc::UnboundedSender<(VideoTrackKind, EncodedVideoFrame)>,
+    request: OwnVideoRequest,
+  ) {
+    match request {
+      OwnVideoRequest::Start(config, done) => {
+        let kind = config.kind.clone();
+        let encoded = encoded.clone();
+        let task = tokio::task::spawn_blocking(move || VideoSender::start(config, encoded));
+        self.maybe_starting = Some(StartingVideo { kind, task, done });
+      },
+      OwnVideoRequest::Stop(kind) => self.stop(engine, &kind),
+    }
+  }
+
+  /// The capture of `starting` opened, or didn't. The running track of the kind stops only once
+  /// its successor started: a camera that can't be opened (busy, refused) leaves the running one
+  /// sending, as the UI shows it. Then the requests that waited go on.
+  fn on_started(
+    &mut self,
+    engine: &mut CallEngine,
+    encoded: &mpsc::UnboundedSender<(VideoTrackKind, EncodedVideoFrame)>,
+    starting: StartingVideo,
+    started: Result<StartResult, tokio::task::JoinError>,
+  ) {
+    let StartingVideo { kind, done, .. } = starting;
+    let result = started
+      .unwrap_or_else(|error| Err(CaptureError::Device(format!("the capture start failed: {error}"))))
+      .map(|(sender, first_picture)| {
+        self.stop(engine, &kind);
+        engine.publish_video(sender.kind.clone(), VideoCodec::H264, sender.layers.clone());
+        self.senders.push((sender, None));
+        first_picture
+      })
+      .inspect_err(|error| warn!(%error, ?kind, "video capture not started; the running one goes on"));
+    // The caller may have given up waiting.
+    let _ = done.send(result);
+    while self.maybe_starting.is_none()
+      && let Some(request) = self.waiting.pop_front()
+    {
+      self.apply(engine, encoded, request);
+    }
+  }
+
   /// What a decoder thread of `stream_id` calls when it needs a keyframe: a command to the call
   /// task (nothing once the call ended).
   fn keyframe_requester(&self, stream_id: MediaStreamId) -> KeyframeNeeded {
@@ -1423,15 +1518,39 @@ impl VideoState {
       camera: self.counts.camera,
       screen: self.counts.screen,
     };
-    for (sender, _) in &self.senders {
-      if let Some(stats) = totals.of_mut(&sender.kind) {
-        let progress = sender.progress();
-        stats.frames_captured += progress.frames_captured;
-        stats.pictures_encoded += progress.pictures_encoded;
-        stats.frames_black += progress.frames_black;
-      }
+    let running = self
+      .senders
+      .iter()
+      .map(|(sender, _)| (&sender.kind, sender.progress()));
+    let stopping = self
+      .stopping
+      .iter()
+      .map(|stopping| (&stopping.kind, stopping.progress()));
+    for (kind, progress) in running.chain(stopping) {
+      totals.add(kind, progress);
     }
     totals
+  }
+
+  /// Moves the counters of tracks whose threads ended into the call's.
+  fn collect_stopped(&mut self) {
+    let (stopped, stopping): (Vec<_>, Vec<_>) = std::mem::take(&mut self.stopping)
+      .into_iter()
+      .partition(StoppingSender::is_stopped);
+    self.stopping = stopping;
+    for stopped in stopped {
+      self.counts.add(&stopped.kind, stopped.progress());
+    }
+  }
+
+  /// Waits for the tracks being stopped (each at most a second and a half), so the call's
+  /// counters are final.
+  async fn finish_stopping(&mut self) {
+    for stopping in std::mem::take(&mut self.stopping) {
+      let kind = stopping.kind.clone();
+      let progress = stopping.stopped().await;
+      self.counts.add(&kind, progress);
+    }
   }
 
   /// Logs the counters every [`VIDEO_LOG_INTERVAL`] while there is video, and warns when an own
@@ -1514,7 +1633,8 @@ impl VideoState {
       .collect()
   }
 
-  /// Stops capturing a track of `kind` and unpublishes it.
+  /// Stops capturing a track of `kind` and unpublishes it. Its threads end on a blocking task:
+  /// a camera may take up to a second and a half to let go, and the call goes on meanwhile.
   fn stop(&mut self, engine: &mut CallEngine, kind: &VideoTrackKind) {
     let (stopped, kept): (Vec<_>, Vec<_>) = std::mem::take(&mut self.senders)
       .into_iter()
@@ -1524,14 +1644,7 @@ impl VideoState {
       if let Some(stream_id) = maybe_stream {
         engine.unpublish_video(stream_id);
       }
-      let kind = sender.kind.clone();
-      // Read after the thread stopped: nothing changes the counters any more.
-      let progress = sender.finish();
-      if let Some(stats) = self.counts.of_mut(&kind) {
-        stats.frames_captured += progress.frames_captured;
-        stats.pictures_encoded += progress.pictures_encoded;
-        stats.frames_black += progress.frames_black;
-      }
+      self.stopping.push(sender.stop_in_background());
     }
   }
 }
@@ -1552,6 +1665,15 @@ fn video_stall(kind: &VideoTrackKind, before: &VideoStats, after: &VideoStats) -
 }
 
 impl VideoCounts {
+  /// Adds what a track of `kind` captured and encoded.
+  fn add(&mut self, kind: &VideoTrackKind, progress: SendProgress) {
+    if let Some(stats) = self.of_mut(kind) {
+      stats.frames_captured += progress.frames_captured;
+      stats.pictures_encoded += progress.pictures_encoded;
+      stats.frames_black += progress.frames_black;
+    }
+  }
+
   fn of(&self, kind: &VideoTrackKind) -> Option<&VideoStats> {
     match kind {
       VideoTrackKind::Camera => Some(&self.camera),
