@@ -52,6 +52,9 @@ wire_enum! {
     AdminJoinRequestTooSoon => "admin_join_request_too_soon",
     ShareUnavailable => "share_unavailable",
     LocalAccountsDisabled => "local_accounts_disabled",
+    /// The signed workspace policy lets members protect their key backup only with a recovery kit:
+    /// a new or changed recovery passphrase is refused (e2ee.md §6.5.8).
+    RecoveryPassphraseNotAllowed => "recovery_passphrase_not_allowed",
     UserGroupNotFound => "user_group_not_found",
     MfaRequired => "mfa_required",
     Conflict => "conflict",
@@ -275,6 +278,7 @@ mod tests {
       ErrorCode::AdminJoinRequestNotFound,
       ErrorCode::AdminJoinRequestTooSoon,
       ErrorCode::ShareUnavailable,
+      ErrorCode::RecoveryPassphraseNotAllowed,
       ErrorCode::UnknownHost,
       ErrorCode::BrandAssetNotFound,
       ErrorCode::UserGroupNotFound,

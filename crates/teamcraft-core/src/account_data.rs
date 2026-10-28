@@ -75,6 +75,14 @@ pub struct AccountData {
     skip_serializing_if = "Option::is_none"
   )]
   pub maybe_recovery_passphrase_set_at: Option<i64>,
+  /// When one of the user's devices last made a recovery kit (e2ee.md §6.5), merged like
+  /// `maybe_recovery_passphrase_set_at`.
+  #[serde(
+    rename = "recovery_key_set_at",
+    default,
+    skip_serializing_if = "Option::is_none"
+  )]
+  pub maybe_recovery_key_set_at: Option<i64>,
 }
 
 /// When a device last left a conversation, and when it was last added back, in server times.
@@ -236,6 +244,9 @@ impl AccountData {
     self.maybe_recovery_passphrase_set_at = self
       .maybe_recovery_passphrase_set_at
       .max(other.maybe_recovery_passphrase_set_at);
+    self.maybe_recovery_key_set_at = self
+      .maybe_recovery_key_set_at
+      .max(other.maybe_recovery_key_set_at);
     self.forget_tombstones(now_ms);
   }
 
@@ -804,6 +815,26 @@ mod tests {
     let mut kept = laptop.clone();
     kept.merge(&older, 10_000);
     assert_eq!(kept.maybe_recovery_passphrase_set_at, Some(9_000));
+  }
+
+  #[test]
+  fn the_later_recovery_kit_wins() {
+    let phone = AccountData {
+      maybe_recovery_key_set_at: Some(5_000),
+      ..AccountData::default()
+    };
+    let laptop = AccountData {
+      maybe_recovery_key_set_at: Some(9_000),
+      ..AccountData::default()
+    };
+    let mut merged = laptop.clone();
+    merged.merge(&phone, 10_000);
+    assert_eq!(merged.maybe_recovery_key_set_at, Some(9_000));
+    let json: serde_json::Value = serde_json::from_slice(&merged.to_bytes().unwrap()).unwrap();
+    assert_eq!(json["recovery_key_set_at"], 9_000);
+    let without: serde_json::Value =
+      serde_json::from_slice(&AccountData::default().to_bytes().unwrap()).unwrap();
+    assert!(without.get("recovery_key_set_at").is_none());
   }
 
   #[test]

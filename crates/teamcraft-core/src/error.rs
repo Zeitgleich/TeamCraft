@@ -61,6 +61,10 @@ pub enum CoreError {
   /// recovery factor, so the user sets a recovery passphrase again instead.
   #[error("the server has no key bag for this account; set a recovery passphrase again")]
   KeyBagMissing,
+  /// The verified workspace policy lets members protect their backup only with a recovery kit
+  /// (e2ee.md §6.5.8). The message starts with the server's stable code, which the UI localizes.
+  #[error("recovery_passphrase_not_allowed: the workspace policy allows only a recovery kit")]
+  PassphraseNotAllowed,
   /// The two devices speak different versions of the device-linking protocol (e2ee.md §5).
   #[error("the other device uses device linking version {theirs}, this one {ours}; update both apps")]
   LinkVersionMismatch { ours: u32, theirs: u32 },
@@ -265,6 +269,9 @@ impl CoreError {
       Self::LinkNotConfirmed | Self::LinkRejected => FailureKind::Link(LinkFailure::NotConfirmed),
       Self::LinkRequestGone => FailureKind::Link(LinkFailure::RequestGone),
       Self::CallMoveRefused { .. } => FailureKind::Call(CallFailure::MoveRefused),
+      Self::PassphraseNotAllowed => {
+        FailureKind::Server(teamcraft_proto::ErrorCode::RecoveryPassphraseNotAllowed)
+      },
       _ => FailureKind::Other,
     };
     ActionFailure::new(kind, self.to_string())

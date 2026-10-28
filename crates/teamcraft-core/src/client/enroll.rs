@@ -9,11 +9,13 @@ use std::collections::HashMap;
 
 use rand_core::OsRng;
 use teamcraft_crypto::backup::{
-  Argon2Settings, BackupKey, BackupKeyWrapper, PassphraseWrapper, WrapMethod, WrappedBackupKey,
+  self, Argon2Settings, BackupError, BackupKey, BackupKeyWrapper, PassphraseWrapper, RecoveryKeyWrapper,
+  WrapMethod, WrappedBackupKey,
 };
 use teamcraft_crypto::identity::{DeviceKeyPair, IdentityKeyPair, SignedDeviceCertificate};
 use teamcraft_crypto::key_bag::{EncryptedKeyBag, KeyBag, KeyBagBinding};
 use teamcraft_crypto::org_recovery::{RecoveryRequest, RecoveryRequestKey};
+use teamcraft_crypto::recovery_key::RecoveryKey;
 use teamcraft_crypto::secret::{SecretBytes, SymmetricKey};
 use teamcraft_proto::{
   Base64Bytes, DeviceActivity, DeviceId, InitialKeyBag, PutKeyBagRequest, RegisterDeviceRequest,
@@ -43,13 +45,20 @@ pub struct EnrollmentOptions {
   pub maybe_attestation: Option<String>,
 }
 
-/// Where the account's keys come from. Only a passphrase enrollment may create a new identity:
-/// linked and recovering devices fail closed when the server claims the account has none
-/// (security review B1).
+/// Where the account's keys come from. Only an enrollment with a recovery key or a passphrase may
+/// create a new identity: linked and recovering devices fail closed when the server claims the
+/// account has none (security review B1).
 pub enum EnrollmentSecret {
-  /// Recovery passphrase (e2ee.md §6.2 fallback): wraps the backup key for a new identity, unwraps
-  /// it when recovering an existing one.
+  /// The recovery key of a recovery kit (e2ee.md §6.5): wraps the backup key for a new identity
+  /// (the kit the user just saved), unwraps it when recovering an existing one.
+  RecoveryKey(RecoveryKey),
+  /// Legacy recovery passphrase (e2ee.md §6.2 fallback): wraps the backup key for a new identity,
+  /// unwraps it when recovering an existing one. A text that opens no passphrase wrap but reads as
+  /// a recovery key is tried as one (apps with only a passphrase field, e2ee.md §6.5.5).
   Passphrase(SecretBytes),
+  /// The backup key this device kept in its OS keychain (desktop, e2ee.md §6.5.6): recovers an
+  /// existing identity only.
+  KeptBackupKey(SymmetricKey),
   /// Secrets received from an existing device by linking (e2ee.md §5).
   Linked(super::LinkedSecrets),
   /// Recovering through the organization (e2ee.md §6.3.1); `new_passphrase` wraps the fresh backup
@@ -117,9 +126,21 @@ impl PendingEnrollment {
     let is_new_identity = existing.is_none();
     let mut recovered = match existing {
       None => match &options.secret {
-        EnrollmentSecret::Passphrase(passphrase) => {
-          new_identity(me.id, self.identity, passphrase, options.argon2, clock.now_ms())?
-        },
+        EnrollmentSecret::Passphrase(passphrase) => new_identity(
+          me.id,
+          self.identity,
+          &PassphraseWrapper::new(
+            SecretBytes::new(passphrase.expose_secret().to_vec()),
+            options.argon2,
+          )?,
+          clock.now_ms(),
+        )?,
+        EnrollmentSecret::RecoveryKey(recovery_key) => new_identity(
+          me.id,
+          self.identity,
+          &RecoveryKeyWrapper::new(recovery_key),
+          clock.now_ms(),
+        )?,
         _ => return Err(CoreError::IdentityMissing),
       },
       Some(existing) => {
@@ -333,12 +354,16 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
   }
 
   /// Encrypts the key bag and uploads it, wrapping the backup key with `passphrase` (replacing an
-  /// earlier passphrase wrap; the other recovery factors stay).
+  /// earlier passphrase wrap; the other recovery factors stay). Refused when the verified workspace
+  /// policy allows no passphrases (e2ee.md §6.5.8).
   pub async fn upload_key_bag_with(
     &mut self,
     passphrase: &SecretBytes,
     argon2: Argon2Settings,
   ) -> Result<(), CoreError> {
+    if !crate::workspace::is_passphrase_allowed(&self.store) {
+      return Err(CoreError::PassphraseNotAllowed);
+    }
     let wrapped = self.passphrase_wrap(passphrase, argon2)?;
     let mut keys: Vec<WrappedBackupKey> = self
       .current_wrapped_keys()
@@ -353,6 +378,41 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       true
     })?;
     self.upload_key_bag_keeping(WrapsOnMerge::KeepOwn).await
+  }
+
+  /// Wraps the backup key with the recovery key of a new recovery kit (e2ee.md §6.5.7) and uploads
+  /// the key bag with it. The new wrap replaces an earlier kit's and the legacy passphrase's, so
+  /// both stop opening the backup; the other factors (org, passkey) stay. The backup key itself
+  /// doesn't change, so the user's other devices carry on.
+  pub async fn set_recovery_key(&mut self, recovery_key: &RecoveryKey) -> Result<(), CoreError> {
+    let wrapped = RecoveryKeyWrapper::new(recovery_key).wrap_key(
+      convert::user(self.account.user_id),
+      &self.account.backup_key(),
+      &mut OsRng,
+    )?;
+    let mut keys: Vec<WrappedBackupKey> = self
+      .current_wrapped_keys()
+      .await?
+      .into_iter()
+      .filter(|existing| {
+        !matches!(
+          existing.method(),
+          WrapMethod::Passphrase | WrapMethod::RecoveryKey
+        )
+      })
+      .collect();
+    keys.push(wrapped);
+    self.store_wrapped_keys(&keys)?;
+    self.update_account_data(|data, now| {
+      data.maybe_recovery_key_set_at = Some(now);
+      true
+    })?;
+    self.upload_key_bag_keeping(WrapsOnMerge::KeepOwn).await
+  }
+
+  /// The backup key, for the desktop app to keep in the OS keychain (e2ee.md §6.5.6).
+  pub fn backup_secret(&self) -> SymmetricKey {
+    self.account.backup_secret.duplicate()
   }
 
   /// Switches the account to a fresh backup key, after a recovery in which others saw the old one
@@ -525,6 +585,15 @@ async fn recover_key_bag(
 ) -> Result<Recovered, CoreError> {
   let crypto_user = convert::user(user);
   let passphrase = match &options.secret {
+    EnrollmentSecret::KeptBackupKey(backup_secret) => {
+      return open_stored(api, crypto_user, BackupKey::from_key(backup_secret.duplicate())).await;
+    },
+    EnrollmentSecret::RecoveryKey(recovery_key) => {
+      let stored = api.key_bag().await?;
+      let wraps = decode_wrapped_keys(stored.wrapped_backup_keys.as_slice())?;
+      let backup_key = unwrap_any(crypto_user, &RecoveryKeyWrapper::new(recovery_key), &wraps)?;
+      return open_stored(api, crypto_user, backup_key).await;
+    },
     EnrollmentSecret::Linked(linked) => {
       let backup_key = BackupKey::from_key(linked.backup_secret.duplicate());
       let encrypted = EncryptedKeyBag::from_bytes(&linked.encrypted_key_bag)?;
@@ -552,17 +621,38 @@ async fn recover_key_bag(
     EnrollmentSecret::Passphrase(passphrase) => passphrase,
   };
   let stored = api.key_bag().await?;
+  let wraps = decode_wrapped_keys(stored.wrapped_backup_keys.as_slice())?;
   let wrapper = PassphraseWrapper::new(
     SecretBytes::new(passphrase.expose_secret().to_vec()),
     options.argon2,
   )?;
+  let by_passphrase = unwrap_any(crypto_user, &wrapper, &wraps);
+  // An app with only a passphrase field: the user may have typed the kit's key into it.
+  let maybe_typed_key = std::str::from_utf8(passphrase.expose_secret())
+    .ok()
+    .and_then(|text| RecoveryKey::parse(text).ok());
+  let backup_key = match (by_passphrase, maybe_typed_key) {
+    (Ok(backup_key), _) => backup_key,
+    (Err(error), None) => return Err(error),
+    (Err(_), Some(recovery_key)) => unwrap_any(crypto_user, &RecoveryKeyWrapper::new(&recovery_key), &wraps)?,
+  };
+  open_stored(api, crypto_user, backup_key).await
+}
+
+/// The backup key from the first of `wraps` of the wrapper's method that opens with it.
+/// `NotEnrolled` when the list has no wrap of that method.
+fn unwrap_any(
+  user: teamcraft_crypto::ids::UserId,
+  wrapper: &dyn BackupKeyWrapper,
+  wraps: &[WrappedBackupKey],
+) -> Result<BackupKey, CoreError> {
   let mut last_error = None;
-  for wrapped in decode_wrapped_keys(stored.wrapped_backup_keys.as_slice())? {
-    if wrapped.method() != wrapper.method() {
-      continue;
-    }
-    match wrapper.unwrap_key(crypto_user, &wrapped) {
-      Ok(backup_key) => return open_stored(api, crypto_user, backup_key).await,
+  for wrapped in wraps
+    .iter()
+    .filter(|wrapped| wrapped.method() == wrapper.method())
+  {
+    match wrapper.unwrap_key(user, wrapped) {
+      Ok(backup_key) => return Ok(backup_key),
       Err(error) => last_error = Some(error),
     }
   }
@@ -587,25 +677,27 @@ async fn open_stored(
   })
 }
 
-/// A new identity with a fresh backup key, wrapped with the passphrase (the only way to create one).
+/// A new identity with a fresh backup key, wrapped with the recovery kit's key or the passphrase
+/// (the only ways to create one).
 fn new_identity(
   user: UserId,
   identity: IdentityKeyPair,
-  passphrase: &SecretBytes,
-  argon2: Argon2Settings,
+  wrapper: &dyn BackupKeyWrapper,
   now_ms: i64,
 ) -> Result<Recovered, CoreError> {
   let backup_secret = SymmetricKey::generate(&mut OsRng);
-  let wrapped = passphrase_wrap(
-    user,
+  let wrapped = wrapper.wrap_key(
+    convert::user(user),
     &BackupKey::from_key(backup_secret.duplicate()),
-    passphrase,
-    argon2,
+    &mut OsRng,
   )?;
   let mut key_bag = KeyBag::new(convert::user(user), identity);
-  // The user's devices show when the passphrase was set (issue #410); the first bag carries it.
+  // The user's devices show when the kit or passphrase was set (issue #410); the first bag
+  // carries it.
+  let is_kit = wrapper.method() == WrapMethod::RecoveryKey;
   let account_data = crate::account_data::AccountData {
-    maybe_recovery_passphrase_set_at: Some(now_ms),
+    maybe_recovery_passphrase_set_at: (!is_kit).then_some(now_ms),
+    maybe_recovery_key_set_at: is_kit.then_some(now_ms),
     ..crate::account_data::AccountData::default()
   };
   key_bag.set_account_data(
@@ -807,18 +899,10 @@ fn passphrase_wrap(
   Ok(wrapper.wrap_key(convert::user(user), backup_key, &mut OsRng)?)
 }
 
-/// The server stores one opaque blob of wrapped backup keys; it holds a list (one per method).
+/// The server stores one opaque blob of wrapped backup keys; it holds a list (one per method,
+/// `teamcraft_crypto::backup::encode_wrapped_key_list`).
 pub(crate) fn encode_wrapped_keys(wrapped: &[WrappedBackupKey]) -> Result<Vec<u8>, CoreError> {
-  let mut out =
-    vec![u8::try_from(wrapped.len()).map_err(|_| CoreError::Corrupt("too many wrapped keys".into()))?];
-  for key in wrapped {
-    let bytes = key.to_bytes()?;
-    let length =
-      u32::try_from(bytes.len()).map_err(|_| CoreError::Corrupt("wrapped key too large".into()))?;
-    out.extend_from_slice(&length.to_be_bytes());
-    out.extend_from_slice(&bytes);
-  }
-  Ok(out)
+  backup::encode_wrapped_key_list(wrapped).map_err(list_error)
 }
 
 /// The device ID of the certificate a device registers with, before the server assigned its own.
@@ -827,18 +911,14 @@ pub(crate) fn provisional_device_id() -> teamcraft_crypto::ids::DeviceId {
 }
 
 pub(crate) fn decode_wrapped_keys(bytes: &[u8]) -> Result<Vec<WrappedBackupKey>, CoreError> {
-  let corrupt = || CoreError::Corrupt("malformed wrapped backup keys".into());
-  let (&count, mut rest) = bytes.split_first().ok_or_else(corrupt)?;
-  let mut keys = Vec::with_capacity(usize::from(count));
-  for _ in 0..count {
-    let (length, tail) = rest.split_first_chunk::<4>().ok_or_else(corrupt)?;
-    let length = u32::from_be_bytes(*length) as usize;
-    let chunk = tail.get(..length).ok_or_else(corrupt)?;
-    keys.push(WrappedBackupKey::from_bytes(chunk)?);
-    rest = &tail[length..];
+  backup::decode_wrapped_key_list(bytes).map_err(list_error)
+}
+
+/// A list that doesn't split is corrupt data; a wrap inside it that doesn't decode keeps its error.
+fn list_error(error: BackupError) -> CoreError {
+  match error {
+    BackupError::MalformedList => CoreError::Corrupt("malformed wrapped backup keys".into()),
+    BackupError::TooManyWraps => CoreError::Corrupt("too many wrapped keys".into()),
+    other => CoreError::Backup(other),
   }
-  if !rest.is_empty() {
-    return Err(corrupt());
-  }
-  Ok(keys)
 }

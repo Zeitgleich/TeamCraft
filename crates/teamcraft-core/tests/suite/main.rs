@@ -44,6 +44,7 @@ mod people_directory;
 mod push;
 mod push_guard;
 mod queries;
+mod recovery_kit;
 mod removal_followups;
 mod runner;
 mod search;

@@ -24,6 +24,7 @@ pub mod mls;
 pub mod org_recovery;
 pub mod push;
 pub mod push_gateway;
+pub mod recovery_key;
 pub mod rendezvous;
 pub mod secret;
 pub mod server_secret;

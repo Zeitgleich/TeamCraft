@@ -15,6 +15,10 @@ pub(crate) const ATTACHMENT_AAD: &str = "TeamCraft-v1 attachment chunk";
 pub(crate) const KEY_BAG_AAD: &str = "TeamCraft-v1 key bag";
 pub(crate) const BACKUP_KEY_WRAP_AAD: &str = "TeamCraft-v1 backup key wrap";
 pub(crate) const PASSKEY_PRF_KDF: &str = "TeamCraft-v1 passkey prf backup key wrap";
+/// HKDF info of the key that a recovery kit's key wraps the backup key with (e2ee.md §6.5.2).
+pub(crate) const RECOVERY_KEY_WRAP_KDF: &str = "TeamCraft-v1 recovery key backup key wrap";
+/// Hash input label of a recovery key's checksum (e2ee.md §6.5.1).
+pub(crate) const RECOVERY_KEY_CHECKSUM: &str = "TeamCraft-v1 recovery key checksum";
 pub(crate) const ACCOUNT_SECRET_AAD: &str = "TeamCraft-v1 account secret";
 pub(crate) const ACCOUNT_SECRET_KEY: &str = "TeamCraft-v1 account secret key";
 pub(crate) const RECOVERY_REQUEST_FINGERPRINT: &str = "TeamCraft-v1 recovery request fingerprint";
@@ -66,7 +70,7 @@ pub(crate) fn labeled(label: &str, body: &[u8]) -> Vec<u8> {
 mod tests {
   use super::*;
 
-  const ALL_LABELS: [&str; 37] = [
+  const ALL_LABELS: [&str; 39] = [
     DEVICE_CERTIFICATE,
     IDENTITY_FINGERPRINT,
     MESSAGE_AAD,
@@ -75,6 +79,8 @@ mod tests {
     KEY_BAG_AAD,
     BACKUP_KEY_WRAP_AAD,
     PASSKEY_PRF_KDF,
+    RECOVERY_KEY_WRAP_KDF,
+    RECOVERY_KEY_CHECKSUM,
     MEMBERSHIP_CHANGE,
     REJOIN_REQUEST,
     PUSH_WAKEUP_AAD,

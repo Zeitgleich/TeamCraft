@@ -705,8 +705,9 @@ impl SecurityBackend for MockBackend {
     Some(KeyBackupState {
       is_stored: true,
       has_pending_upload: false,
-      recovery: vec![RecoveryMethod::Passphrase, RecoveryMethod::Organization],
-      maybe_passphrase_set_at: Some(self.now - 40 * DAY),
+      recovery: vec![RecoveryMethod::RecoveryKey, RecoveryMethod::Organization],
+      maybe_recovery_key_set_at: Some(self.now - 40 * DAY),
+      ..KeyBackupState::default()
     })
   }
 

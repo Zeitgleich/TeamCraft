@@ -15,6 +15,7 @@ All TeamCraft cryptography. No other crate implements or combines primitives
 | `attachment`     | Per-file key, chunked STREAM encryption (XChaCha20-Poly1305, BE32)          | e2ee.md §4.5                     |
 | `key_bag`        | Identity key + all content keys, serialized and encrypted with backup key   | e2ee.md §2, §6                   |
 | `backup`         | Backup key, `BackupKeyWrapper` trait, passphrase (Argon2id), keystore, PRF  | e2ee.md §6.1–§6.3                |
+| `recovery_key`   | Recovery kit key: 128 bit, Crockford Base32, checksum, `tcrecovery1:` form  | e2ee.md §6.5                     |
 | `membership`     | Signed membership changes, `IdentityDirectory`, `MembershipAuthority`       | e2ee.md §4.6, admin.md §2.2–§2.3 |
 | `mls`            | `openmls` groups, key packages, content key bundles, commit authorization   | e2ee.md §4.1, §4.6               |
 | `push`           | Push wake-up sealed with the device push key; Web Push (RFC 8291) + VAPID   | e2ee.md §7                       |
@@ -84,8 +85,8 @@ certificate-based credential.
   requests are still missing (see teamcraft-core's README).
 - **Not yet implemented:** share link password wrapping (§4.5.1), OIDC attestation verification
   (§3.1).
-- **Review needed:** the rendezvous handshake (§5) and org recovery (§6.3.1) combine primitives in
-  new ways; security.md asks for a review before relying on them.
+- **Review needed:** the rendezvous handshake (§5), org recovery (§6.3.1) and the recovery kit
+  (§6.5) combine primitives in new ways; security.md asks for a review before relying on them.
 - **Argon2id cost.** Default 128 MiB, 3 iterations, 1 lane (configurable). "~1 s" (§6.2) still needs
   measuring on phones and in the browser (single-threaded wasm).
 - **IDs.** `ids` holds local newtypes; switch to `teamcraft-proto`'s IDs once this crate may depend

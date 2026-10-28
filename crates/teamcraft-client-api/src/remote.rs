@@ -1933,14 +1933,24 @@ mod tests {
         has_pending_upload: false,
         recovery: vec![crate::security::RecoveryMethod::Passphrase],
         maybe_passphrase_set_at: Some(1_000),
+        ..crate::security::KeyBackupState::default()
       }),
       ..SecuritySnapshot::default()
     };
     let json = serde_json::to_value(&snapshot).expect("serialize");
     assert_eq!(
       json["backup"],
-      serde_json::json!({"is_stored": true, "has_pending_upload": false, "recovery": ["passphrase"], "passphrase_set_at": 1000})
+      serde_json::json!({"is_stored": true, "has_pending_upload": false, "recovery": ["passphrase"], "passphrase_set_at": 1000, "is_passphrase_allowed": true})
     );
+    let older: crate::security::KeyBackupState =
+      serde_json::from_str(r#"{"is_stored":true,"recovery":["passphrase"]}"#).expect("parse");
+    assert!(older.is_passphrase_allowed);
+    assert_eq!(older.maybe_recovery_key_set_at, None);
+    let kit: crate::security::KeyBackupState =
+      serde_json::from_str(r#"{"is_stored":true,"recovery":["recovery_key"],"recovery_key_set_at":5}"#)
+        .expect("parse");
+    assert!(kit.has(crate::security::RecoveryMethod::RecoveryKey));
+    assert_eq!(kit.maybe_recovery_key_set_at, Some(5));
     let newer: crate::security::KeyBackupState =
       serde_json::from_str(r#"{"is_stored":true,"recovery":["passphrase","hardware_key"]}"#).expect("parse");
     assert_eq!(

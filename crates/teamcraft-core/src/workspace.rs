@@ -650,6 +650,16 @@ fn payload_error(log: &'static str, entry: &WorkspaceLogEntryResponse, reason: &
   }
 }
 
+/// Whether the verified policy lets members set a recovery passphrase (e2ee.md §6.5.8). Before a
+/// policy was verified (or when the state can't be read) the default applies, which allows it:
+/// the server refuses new passphrases under a stricter policy either way.
+pub fn is_passphrase_allowed(store: &impl LocalStore) -> bool {
+  records::get_json::<WorkspaceState>(store, Table::Workspace, crate::client::WORKSPACE_KEY)
+    .ok()
+    .flatten()
+    .is_none_or(|state| state.policy.recovery.is_passphrase_allowed)
+}
+
 /// Which statuses the verified policy allows, for the UI's status menu and the people it shows.
 /// `None` before a workspace was verified or when the state can't be read; the server enforces
 /// the policy either way, so this only decides what the UI offers.
