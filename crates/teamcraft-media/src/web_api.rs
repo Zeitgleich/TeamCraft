@@ -136,6 +136,10 @@ extern "C" {
   #[wasm_bindgen(method, getter, js_name = encodeQueueSize)]
   pub fn encode_queue_size(this: &VideoEncoder) -> u32;
 
+  /// `"unconfigured"`, `"configured"` or `"closed"`: WebCodecs closes an encoder after an error.
+  #[wasm_bindgen(method, getter)]
+  pub fn state(this: &VideoEncoder) -> String;
+
   #[wasm_bindgen(method, catch)]
   pub fn close(this: &VideoEncoder) -> Result<(), JsValue>;
 
@@ -156,6 +160,10 @@ extern "C" {
 
   #[wasm_bindgen(method, getter, js_name = decodeQueueSize)]
   pub fn decode_queue_size(this: &VideoDecoder) -> u32;
+
+  /// `"unconfigured"`, `"configured"` or `"closed"`: WebCodecs closes a decoder after an error.
+  #[wasm_bindgen(method, getter)]
+  pub fn state(this: &VideoDecoder) -> String;
 
   /// Resolves to `{ supported, config }`.
   #[wasm_bindgen(static_method_of = VideoDecoder, js_name = isConfigSupported, catch)]

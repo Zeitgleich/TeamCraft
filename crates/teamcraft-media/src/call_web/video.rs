@@ -7,10 +7,16 @@
 //! fixed rate, which works in every browser with WebCodecs (Firefox has no
 //! MediaStreamTrackProcessor). Each simulcast layer has its own encoder configured at the layer's
 //! size; WebCodecs scales the frame to it.
+//!
+//! A codec error stays with its track or tile, never ends the call (issue #919): WebCodecs closes
+//! a failed encoder or decoder for good, so a failed encoder is replaced by a new one that starts
+//! with a keyframe, and a failed decoder is dropped and a keyframe asked for, from which a new one
+//! starts. Only encoders that keep failing stop their track.
 
 use futures::channel::mpsc;
 use js_sys::Uint8Array;
 use teamcraft_proto::{MediaStreamId, ScreenContentMode, VideoCodec, VideoLayerInfo, VideoTrackKind};
+use tracing::{debug, warn};
 use wasm_bindgen::JsCast;
 use wasm_bindgen::prelude::*;
 use wasm_bindgen_futures::JsFuture;
@@ -39,44 +45,112 @@ const CAMERA_BITRATE_BPS: u32 = 1_500_000;
 const KEYFRAME_INTERVAL_SECONDS: u32 = 4;
 /// Frames waiting in an encoder above this are skipped (slow machine or encoder).
 const MAX_ENCODE_QUEUE: u32 = 2;
+/// A layer's encoder that failed is replaced this many times in a row (without an encoded frame in
+/// between); failing once more stops the track: the browser can't encode it.
+const MAX_ENCODER_RESTARTS: u8 = 3;
+/// WebCodecs' state of an encoder or decoder that takes frames.
+const CONFIGURED: &str = "configured";
 
 /// One own track: capture, optional effects, an encoder per layer.
 pub(super) struct TrackSender {
-  pub kind: VideoTrackKind,
-  pub maybe_stream_id: Option<MediaStreamId>,
+  pub publication: Publication,
   stream: MediaStream,
   video: HtmlVideoElement,
-  layers: Vec<LayerEncoder>,
+  encoders: LayerEncoders<LayerEncoder>,
   framerate: u8,
   frames_since_keyframe: u32,
   timestamp_us: f64,
+  /// Pictures in a row that couldn't be taken; only the first of a run is a warning.
+  failed_pictures_in_a_row: u32,
   #[cfg(feature = "effects")]
   maybe_effects: Option<effects::WebEffects>,
   _timer: Interval,
   _ended: Closure<dyn FnMut()>,
 }
 
-struct LayerEncoder {
+/// Which SFU stream an own track is sent on.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct Publication {
+  pub kind: VideoTrackKind,
+  /// `None` until the SFU published the track, and again once it dropped it (a rejoin without the
+  /// slot) until the engine's new publication is confirmed.
+  pub maybe_stream_id: Option<MediaStreamId>,
+}
+
+/// The encoders of one own track, one per simulcast layer. A failed encoder is replaced by a new
+/// one that starts with a keyframe; a layer whose encoders keep failing gives up.
+pub(super) struct LayerEncoders<E> {
+  layers: Vec<Layer<E>>,
+  open: EncoderOpener<E>,
+  next_generation: u64,
+}
+
+/// Opens an encoder for a layer; the number (generation) tells its failure reports from those of
+/// the encoders it replaced.
+type EncoderOpener<E> = Box<dyn FnMut(VideoLayerInfo, u64) -> Result<E, WebCallError>>;
+
+struct Layer<E> {
   info: VideoLayerInfo,
-  encoder: VideoEncoder,
+  encoder: E,
+  generation: u64,
   is_needed: bool,
   wants_keyframe: bool,
+  restarts_in_a_row: u8,
+}
+
+/// One layer's encoder: WebCodecs in the browser, a fake in tests.
+pub(super) trait FrameEncoder {
+  type Frame;
+
+  /// Whether it takes frames: WebCodecs closes an encoder for good after an error.
+  fn is_configured(&self) -> bool;
+  fn queue_size(&self) -> u32;
+  fn encode(&self, frame: &Self::Frame, is_keyframe: bool) -> Result<(), WebCallError>;
+}
+
+/// A layer's encoders kept failing: the browser can't encode the track, which stops.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct EncoderGaveUp {
+  pub layer: u8,
+}
+
+/// A WebCodecs H.264 encoder for one layer; closed on drop.
+struct LayerEncoder {
+  encoder: VideoEncoder,
   _output: Closure<dyn FnMut(EncodedVideoChunk)>,
   _error: Closure<dyn FnMut(JsValue)>,
 }
 
-/// Decodes one remote track into a canvas; the decoder is set up for the codec of the first frame.
-pub(super) struct VideoView {
+/// Decodes one remote track into a canvas. A decoder is opened at a keyframe, for that frame's
+/// codec; a failed one is dropped, and the next keyframe opens a new one.
+pub(super) struct VideoView<D = Decoder> {
   stream_id: MediaStreamId,
-  canvas: HtmlCanvasElement,
-  inputs: mpsc::UnboundedSender<Input>,
-  maybe_decoder: Option<Decoder>,
+  open: DecoderOpener<D>,
+  maybe_decoder: Option<OpenDecoder<D>>,
+  next_generation: u64,
 }
 
-struct Decoder {
+/// Opens a decoder for a codec; the number (generation) tells its failure reports from those of
+/// the decoders it replaced.
+type DecoderOpener<D> = Box<dyn FnMut(&VideoCodec, u64) -> Result<D, WebCallError>>;
+
+struct OpenDecoder<D> {
+  generation: u64,
+  decoder: D,
+}
+
+/// A tile's decoder: WebCodecs in the browser, a fake in tests.
+pub(super) trait FrameDecoder {
+  fn codec(&self) -> &VideoCodec;
+  /// Whether it takes frames: WebCodecs closes a decoder for good after an error.
+  fn is_configured(&self) -> bool;
+  fn decode(&self, frame: &ReceivedVideoFrame) -> Result<(), WebCallError>;
+}
+
+/// A WebCodecs decoder drawing into a tile's canvas; closed on drop.
+pub(super) struct Decoder {
   codec: VideoCodec,
   decoder: VideoDecoder,
-  is_waiting_for_keyframe: bool,
   _output: Closure<dyn FnMut(WebVideoFrame)>,
   _error: Closure<dyn FnMut(JsValue)>,
 }
@@ -122,10 +196,10 @@ impl TrackSender {
       .map_or(resolution, |limit| fit_within(resolution, limit));
     let video = play_hidden(&stream).await?;
     let infos = simulcast_layers(resolution, plan.framerate, plan.bitrate_bps, plan.max_layers);
-    let layers = infos
-      .into_iter()
-      .map(|info| LayerEncoder::new(info, plan.kind.clone(), plan.framerate, inputs))
-      .collect::<Result<Vec<_>, _>>()?;
+    let (kind, framerate, encoder_inputs) = (plan.kind.clone(), plan.framerate, inputs.clone());
+    let encoders = LayerEncoders::new(infos, move |info, generation| {
+      LayerEncoder::new(info, kind.clone(), framerate, generation, &encoder_inputs)
+    })?;
     // "Stop sharing" in the browser's own UI (or an unplugged camera) ends the track.
     let ended_sender = inputs.clone();
     let ended_kind = plan.kind.clone();
@@ -141,14 +215,17 @@ impl TrackSender {
       _ => Interval::start(period_ms, inputs, || Input::VideoTick(VideoTrackKind::Camera))?,
     };
     Ok(Self {
-      kind: plan.kind,
-      maybe_stream_id: None,
+      publication: Publication {
+        kind: plan.kind,
+        maybe_stream_id: None,
+      },
       stream,
       video,
-      layers,
+      encoders,
       framerate: plan.framerate,
       frames_since_keyframe: 0,
       timestamp_us: 0.0,
+      failed_pictures_in_a_row: 0,
       #[cfg(feature = "effects")]
       maybe_effects: plan.maybe_effects.map(effects::WebEffects::new).transpose()?,
       _timer: timer,
@@ -157,23 +234,22 @@ impl TrackSender {
   }
 
   pub fn layers(&self) -> Vec<VideoLayerInfo> {
-    self.layers.iter().map(|layer| layer.info).collect()
+    self.encoders.infos()
   }
 
   pub fn request_keyframe(&mut self, layer: u8) {
-    if let Some(encoder) = self.layers.iter_mut().find(|encoder| encoder.info.layer == layer) {
-      encoder.wants_keyframe = true;
-    }
+    self.encoders.request_keyframe(layer);
+  }
+
+  /// Every layer's next frame is a keyframe (the track is sent on a new stream).
+  pub fn request_keyframes(&mut self) {
+    self.encoders.request_keyframes();
   }
 
   /// Only `needed` layers are encoded (the SFU's `LayersNeeded`); a resumed layer starts with a
   /// keyframe.
   pub fn set_needed_layers(&mut self, needed: &[u8]) {
-    for encoder in &mut self.layers {
-      let is_needed = needed.contains(&encoder.info.layer);
-      encoder.wants_keyframe |= is_needed && !encoder.is_needed;
-      encoder.is_needed = is_needed;
-    }
+    self.encoders.set_needed_layers(needed);
   }
 
   #[cfg(feature = "effects")]
@@ -183,12 +259,21 @@ impl TrackSender {
     }
   }
 
-  /// Encodes the current picture on every needed layer; skipped while nothing plays yet.
-  pub async fn capture(&mut self) -> Result<(), WebCallError> {
-    if self.maybe_stream_id.is_none() || self.video.video_width() == 0 {
+  /// Encodes the current picture on every needed layer; skipped while nothing plays yet or the
+  /// track has no stream to go out on. A picture that can't be taken is skipped; only encoders
+  /// that keep failing end the track.
+  pub async fn capture(&mut self) -> Result<(), EncoderGaveUp> {
+    if self.publication.maybe_stream_id.is_none() || self.video.video_width() == 0 {
       return Ok(());
     }
-    let frame = self.next_frame().await?;
+    let frame = match self.next_frame().await {
+      Ok(frame) => frame,
+      Err(error) => {
+        self.on_picture_failed(&error);
+        return Ok(());
+      },
+    };
+    self.failed_pictures_in_a_row = 0;
     self.timestamp_us += 1_000_000.0 / f64::from(self.framerate.max(1));
     let is_periodic_keyframe =
       self.frames_since_keyframe >= KEYFRAME_INTERVAL_SECONDS * u32::from(self.framerate);
@@ -197,20 +282,19 @@ impl TrackSender {
     } else {
       self.frames_since_keyframe + 1
     };
-    let mut result = Ok(());
-    for layer in self.layers.iter_mut().filter(|layer| layer.is_needed) {
-      if layer.encoder.encode_queue_size() > MAX_ENCODE_QUEUE {
-        continue;
-      }
-      let is_keyframe = std::mem::take(&mut layer.wants_keyframe) || is_periodic_keyframe;
-      let options =
-        dictionary(&[("keyFrame", JsValue::from_bool(is_keyframe))]).map_err(browser("VideoEncoder"))?;
-      if let Err(error) = layer.encoder.encode(&frame, &options) {
-        result = Err(browser("VideoEncoder")(error));
-      }
-    }
+    let result = self.encoders.encode(&frame, is_periodic_keyframe);
     frame.close();
     result
+  }
+
+  /// A layer's encoder produced a frame: it works.
+  pub fn on_encoded(&mut self, layer: u8) {
+    self.encoders.on_encoded(layer);
+  }
+
+  /// WebCodecs reported that an encoder failed (and closed it).
+  pub fn on_encoder_failed(&mut self, layer: u8, generation: u64) -> Result<(), EncoderGaveUp> {
+    self.encoders.on_failed(layer, generation)
   }
 
   /// The picture to encode: straight from the `<video>`, or through the effects.
@@ -226,15 +310,148 @@ impl TrackSender {
     .map_err(browser("VideoFrame"))
   }
 
+  fn on_picture_failed(&mut self, error: &WebCallError) {
+    self.failed_pictures_in_a_row = self.failed_pictures_in_a_row.saturating_add(1);
+    let kind = &self.publication.kind;
+    if self.failed_pictures_in_a_row == 1 {
+      warn!(%error, ?kind, "taking a video picture failed; skipping it");
+    } else {
+      debug!(%error, ?kind, in_a_row = self.failed_pictures_in_a_row, "taking a video picture failed");
+    }
+  }
+
+  /// Stops capturing; the encoders close as they drop.
   pub fn stop(self) {
     for track in self.stream.get_tracks().iter() {
       track.unchecked_into::<MediaStreamTrack>().stop();
     }
     self.video.set_src_object(None);
-    for layer in &self.layers {
-      // Closing an encoder that already failed throws; nothing left to release then.
-      let _ = layer.encoder.close();
+  }
+}
+
+impl<E: FrameEncoder> LayerEncoders<E> {
+  /// Opens an encoder for every layer; every layer is needed and starts with a keyframe.
+  pub fn new(
+    infos: Vec<VideoLayerInfo>,
+    mut open: impl FnMut(VideoLayerInfo, u64) -> Result<E, WebCallError> + 'static,
+  ) -> Result<Self, WebCallError> {
+    let layers = infos
+      .into_iter()
+      .zip(0..)
+      .map(|(info, generation)| {
+        Ok(Layer {
+          info,
+          encoder: open(info, generation)?,
+          generation,
+          is_needed: true,
+          wants_keyframe: true,
+          restarts_in_a_row: 0,
+        })
+      })
+      .collect::<Result<Vec<_>, WebCallError>>()?;
+    Ok(Self {
+      next_generation: layers.len() as u64,
+      layers,
+      open: Box::new(open),
+    })
+  }
+
+  pub fn infos(&self) -> Vec<VideoLayerInfo> {
+    self.layers.iter().map(|layer| layer.info).collect()
+  }
+
+  pub fn request_keyframe(&mut self, layer: u8) {
+    if let Some(layer) = self.layer_mut(layer) {
+      layer.wants_keyframe = true;
     }
+  }
+
+  pub fn request_keyframes(&mut self) {
+    for layer in &mut self.layers {
+      layer.wants_keyframe = true;
+    }
+  }
+
+  pub fn set_needed_layers(&mut self, needed: &[u8]) {
+    for layer in &mut self.layers {
+      let is_needed = needed.contains(&layer.info.layer);
+      layer.wants_keyframe |= is_needed && !layer.is_needed;
+      layer.is_needed = is_needed;
+    }
+  }
+
+  /// Encodes `frame` on every needed layer whose encoder has room. A failed encoder is replaced
+  /// (the new one starts with the next frame, a keyframe); the error is only a layer that gave up.
+  pub fn encode(&mut self, frame: &E::Frame, is_periodic_keyframe: bool) -> Result<(), EncoderGaveUp> {
+    for index in 0..self.layers.len() {
+      let layer = &mut self.layers[index];
+      if !layer.is_needed {
+        continue;
+      }
+      // Closed after an error whose report hasn't arrived yet (that report is stale then).
+      if !layer.encoder.is_configured() {
+        debug!(layer = layer.info.layer, "video encoder closed after an error");
+        self.restart(index)?;
+        continue;
+      }
+      if layer.encoder.queue_size() > MAX_ENCODE_QUEUE {
+        continue;
+      }
+      let is_keyframe = std::mem::take(&mut layer.wants_keyframe) || is_periodic_keyframe;
+      if let Err(error) = layer.encoder.encode(frame, is_keyframe) {
+        warn!(%error, layer = layer.info.layer, "encoding a video frame failed");
+        self.restart(index)?;
+      }
+    }
+    Ok(())
+  }
+
+  /// A layer's encoder produced a frame: it works, so a later failure may restart it again.
+  pub fn on_encoded(&mut self, layer: u8) {
+    if let Some(layer) = self.layer_mut(layer) {
+      layer.restarts_in_a_row = 0;
+    }
+  }
+
+  /// WebCodecs reported an encoder's failure; the report of an encoder already replaced is stale.
+  pub fn on_failed(&mut self, layer: u8, generation: u64) -> Result<(), EncoderGaveUp> {
+    match self
+      .layers
+      .iter()
+      .position(|current| current.info.layer == layer && current.generation == generation)
+    {
+      Some(index) => self.restart(index),
+      None => Ok(()),
+    }
+  }
+
+  /// Replaces a layer's failed encoder; after too many restarts in a row the layer gives up.
+  fn restart(&mut self, index: usize) -> Result<(), EncoderGaveUp> {
+    let layer = &mut self.layers[index];
+    loop {
+      if layer.restarts_in_a_row >= MAX_ENCODER_RESTARTS {
+        return Err(EncoderGaveUp {
+          layer: layer.info.layer,
+        });
+      }
+      layer.restarts_in_a_row += 1;
+      let generation = self.next_generation;
+      self.next_generation += 1;
+      match (self.open)(layer.info, generation) {
+        Ok(encoder) => {
+          debug!(layer = layer.info.layer, "started a new video encoder");
+          layer.encoder = encoder;
+          layer.generation = generation;
+          layer.wants_keyframe = true;
+          return Ok(());
+        },
+        Err(error) => warn!(%error, layer = layer.info.layer, "starting a new video encoder failed"),
+      }
+    }
+  }
+
+  fn layer_mut(&mut self, layer: u8) -> Option<&mut Layer<E>> {
+    self.layers.iter_mut().find(|current| current.info.layer == layer)
   }
 }
 
@@ -243,25 +460,39 @@ impl LayerEncoder {
     info: VideoLayerInfo,
     kind: VideoTrackKind,
     framerate: u8,
+    generation: u64,
     inputs: &mpsc::UnboundedSender<Input>,
   ) -> Result<Self, WebCallError> {
     let sender = inputs.clone();
     let layer = info.layer;
+    let output_kind = kind.clone();
     let output = Closure::<dyn FnMut(EncodedVideoChunk)>::new(move |chunk: EncodedVideoChunk| {
       let bytes = Uint8Array::new_with_length(chunk.byte_length());
       let input = match chunk.copy_to(&bytes) {
         Ok(()) => Input::VideoEncoded {
-          kind: kind.clone(),
+          kind: output_kind.clone(),
           layer,
           data: bytes.to_vec(),
           is_keyframe: chunk.chunk_type() == "key",
           timestamp_us: chunk.timestamp(),
         },
-        Err(error) => Input::CodecFailed(js_message(&error)),
+        Err(error) => Input::CodecFailed {
+          context: "video encoder output",
+          message: js_message(&error),
+        },
       };
       let _ = sender.unbounded_send(input);
     });
-    let error = super::codec_error_callback(inputs);
+    // WebCodecs closed the encoder for good: the track replaces it.
+    let failure_sender = inputs.clone();
+    let error = Closure::<dyn FnMut(JsValue)>::new(move |error: JsValue| {
+      let _ = failure_sender.unbounded_send(Input::VideoEncodeFailed {
+        kind: kind.clone(),
+        layer,
+        generation,
+        message: js_message(&error),
+      });
+    });
     let encoder = VideoEncoder::new(
       &dictionary(&[
         ("output", output.as_ref().clone()),
@@ -286,13 +517,38 @@ impl LayerEncoder {
       )
       .map_err(browser("VideoEncoder"))?;
     Ok(Self {
-      info,
       encoder,
-      is_needed: true,
-      wants_keyframe: true,
       _output: output,
       _error: error,
     })
+  }
+}
+
+impl FrameEncoder for LayerEncoder {
+  type Frame = WebVideoFrame;
+
+  fn is_configured(&self) -> bool {
+    self.encoder.state() == CONFIGURED
+  }
+
+  fn queue_size(&self) -> u32 {
+    self.encoder.encode_queue_size()
+  }
+
+  fn encode(&self, frame: &WebVideoFrame, is_keyframe: bool) -> Result<(), WebCallError> {
+    let options =
+      dictionary(&[("keyFrame", JsValue::from_bool(is_keyframe))]).map_err(browser("VideoEncoder"))?;
+    self
+      .encoder
+      .encode(frame, &options)
+      .map_err(browser("VideoEncoder"))
+  }
+}
+
+impl Drop for LayerEncoder {
+  fn drop(&mut self) {
+    // Closing an encoder that already failed throws; nothing left to release then.
+    let _ = self.encoder.close();
   }
 }
 
@@ -302,57 +558,78 @@ impl VideoView {
     canvas: HtmlCanvasElement,
     inputs: &mpsc::UnboundedSender<Input>,
   ) -> Self {
+    let inputs = inputs.clone();
+    Self::with_decoders(stream_id, move |codec, generation| {
+      Decoder::new(stream_id, codec, generation, canvas.clone(), &inputs)
+    })
+  }
+}
+
+impl<D: FrameDecoder> VideoView<D> {
+  pub fn with_decoders(
+    stream_id: MediaStreamId,
+    open: impl FnMut(&VideoCodec, u64) -> Result<D, WebCallError> + 'static,
+  ) -> Self {
     Self {
       stream_id,
-      canvas,
-      inputs: inputs.clone(),
+      open: Box::new(open),
       maybe_decoder: None,
+      next_generation: 0,
     }
   }
 
-  /// Drops a failed decoder (WebCodecs closes it on an error); the next keyframe starts a new one.
-  pub fn reset_decoder(&mut self) {
-    self.maybe_decoder = None;
-  }
-
-  /// Decodes a frame; deltas before the first keyframe can't be decoded and are skipped.
+  /// Decodes a frame; deltas without a decoder are skipped until a keyframe opens one. An error
+  /// means this tile's decoder failed and is gone: the caller asks for a keyframe.
   pub fn decode(&mut self, frame: &ReceivedVideoFrame) -> Result<(), WebCallError> {
-    if self
-      .maybe_decoder
-      .as_ref()
-      .is_none_or(|decoder| decoder.codec != frame.codec)
-    {
-      self.maybe_decoder = Some(Decoder::new(
-        self.stream_id,
-        &frame.codec,
-        self.canvas.clone(),
-        &self.inputs,
-      )?);
+    let maybe_failure = self.drop_unusable_decoder(&frame.codec);
+    if self.maybe_decoder.is_none() {
+      if !frame.is_keyframe {
+        return maybe_failure.map_or(Ok(()), Err);
+      }
+      let generation = self.next_generation;
+      self.next_generation += 1;
+      let decoder = (self.open)(&frame.codec, generation)?;
+      self.maybe_decoder = Some(OpenDecoder { generation, decoder });
     }
-    let Some(decoder) = &mut self.maybe_decoder else {
+    let Some(open) = &self.maybe_decoder else {
       return Ok(());
     };
-    if decoder.is_waiting_for_keyframe && !frame.is_keyframe {
-      return Ok(());
+    if let Err(error) = open.decoder.decode(frame) {
+      self.maybe_decoder = None;
+      return Err(error);
     }
-    decoder.is_waiting_for_keyframe = false;
-    let chunk = EncodedVideoChunk::new(
-      &dictionary(&[
-        (
-          "type",
-          JsValue::from_str(if frame.is_keyframe { "key" } else { "delta" }),
-        ),
-        // RTP video clock (90 kHz) to microseconds; only the order matters to the decoder.
-        (
-          "timestamp",
-          JsValue::from(f64::from(frame.timestamp.0) * 1_000_000.0 / 90_000.0),
-        ),
-        ("data", Uint8Array::from(frame.data.as_slice()).into()),
-      ])
-      .map_err(browser("EncodedVideoChunk"))?,
-    )
-    .map_err(browser("EncodedVideoChunk"))?;
-    decoder.decoder.decode(&chunk).map_err(browser("VideoDecoder"))
+    Ok(())
+  }
+
+  /// WebCodecs reported a decoder's failure. Returns whether it was the current decoder, which is
+  /// dropped then (the caller asks for a keyframe); the report of a decoder already replaced is
+  /// stale.
+  pub fn on_decoder_failed(&mut self, generation: u64) -> bool {
+    let is_current = self
+      .maybe_decoder
+      .as_ref()
+      .is_some_and(|open| open.generation == generation);
+    if is_current {
+      self.maybe_decoder = None;
+    }
+    is_current
+  }
+
+  /// Drops a decoder WebCodecs closed after an error (returned as the failure: its report may
+  /// still be on the way) or one for another codec.
+  fn drop_unusable_decoder(&mut self, codec: &VideoCodec) -> Option<WebCallError> {
+    let open = self.maybe_decoder.as_ref()?;
+    if !open.decoder.is_configured() {
+      self.maybe_decoder = None;
+      return Some(WebCallError::Browser {
+        context: "VideoDecoder",
+        message: format!("track {} decoder closed after an error", self.stream_id.0),
+      });
+    }
+    if open.decoder.codec() != codec {
+      self.maybe_decoder = None;
+    }
+    None
   }
 }
 
@@ -360,6 +637,7 @@ impl Decoder {
   fn new(
     stream_id: MediaStreamId,
     codec: &VideoCodec,
+    generation: u64,
     canvas: HtmlCanvasElement,
     inputs: &mpsc::UnboundedSender<Input>,
   ) -> Result<Self, WebCallError> {
@@ -381,16 +659,20 @@ impl Decoder {
         canvas.set_height(height);
       }
       if let Err(error) = context.draw_video_frame(&frame, 0.0, 0.0) {
-        let _ = error_sender.unbounded_send(Input::CodecFailed(js_message(&error)));
+        let _ = error_sender.unbounded_send(Input::CodecFailed {
+          context: "drawing a video frame",
+          message: js_message(&error),
+        });
       }
       frame.close();
     });
-    // A failed decoder is closed for good: the view builds a new one at the next keyframe, which
-    // is asked for.
+    // A failed decoder is closed for good: the view drops it and asks for a keyframe, from which a
+    // new one starts.
     let failure_sender = inputs.clone();
     let error = Closure::<dyn FnMut(JsValue)>::new(move |error: JsValue| {
       let _ = failure_sender.unbounded_send(Input::VideoDecodeFailed {
         stream_id,
+        generation,
         message: js_message(&error),
       });
     });
@@ -409,10 +691,39 @@ impl Decoder {
     Ok(Self {
       codec: codec.clone(),
       decoder,
-      is_waiting_for_keyframe: true,
       _output: output,
       _error: error,
     })
+  }
+}
+
+impl FrameDecoder for Decoder {
+  fn codec(&self) -> &VideoCodec {
+    &self.codec
+  }
+
+  fn is_configured(&self) -> bool {
+    self.decoder.state() == CONFIGURED
+  }
+
+  fn decode(&self, frame: &ReceivedVideoFrame) -> Result<(), WebCallError> {
+    let chunk = EncodedVideoChunk::new(
+      &dictionary(&[
+        (
+          "type",
+          JsValue::from_str(if frame.is_keyframe { "key" } else { "delta" }),
+        ),
+        // RTP video clock (90 kHz) to microseconds; only the order matters to the decoder.
+        (
+          "timestamp",
+          JsValue::from(f64::from(frame.timestamp.0) * 1_000_000.0 / 90_000.0),
+        ),
+        ("data", Uint8Array::from(frame.data.as_slice()).into()),
+      ])
+      .map_err(browser("EncodedVideoChunk"))?,
+    )
+    .map_err(browser("EncodedVideoChunk"))?;
+    self.decoder.decode(&chunk).map_err(browser("VideoDecoder"))
   }
 }
 
@@ -643,6 +954,369 @@ mod effects {
       ])
       .map_err(browser("VideoFrame"))?;
       WebVideoFrame::new(&Uint8Array::from(frame.data()).into(), &init).map_err(browser("VideoFrame"))
+    }
+  }
+}
+
+#[cfg(test)]
+mod tests {
+  use std::cell::RefCell;
+  use std::collections::HashSet;
+  use std::rc::Rc;
+
+  use teamcraft_proto::{DeviceId, Id, Snowflake};
+
+  use super::*;
+  use crate::datagram::SimulcastLayer;
+  use crate::rtp::RtpTimestamp;
+
+  mod layer_encoders {
+    use super::*;
+
+    #[test]
+    fn a_failed_encode_replaces_the_encoder_which_starts_with_a_keyframe() {
+      let (bench, mut encoders) = encoders(2);
+      encoders.encode(&(), false).unwrap();
+      encoders.encode(&(), false).unwrap();
+      bench.borrow_mut().throwing.insert(1);
+      // The call goes on: the failed layer gets a new encoder.
+      encoders.encode(&(), false).unwrap();
+      assert_eq!(bench.borrow().opened, vec![(0, 0), (1, 1), (1, 2)]);
+      encoders.encode(&(), false).unwrap();
+      assert_eq!(
+        bench.borrow().coded,
+        vec![
+          (0, 0, true),
+          (1, 1, true),
+          (0, 0, false),
+          (1, 1, false),
+          (0, 0, false),
+          (0, 0, false),
+          (1, 2, true),
+        ]
+      );
+    }
+
+    #[test]
+    fn a_closed_encoder_is_replaced_before_its_report_which_is_then_stale() {
+      let (bench, mut encoders) = encoders(1);
+      encoders.encode(&(), false).unwrap();
+      bench.borrow_mut().closed.insert(0);
+      encoders.encode(&(), false).unwrap();
+      assert_eq!(bench.borrow().opened, vec![(0, 0), (0, 1)]);
+      // WebCodecs' report of the closed encoder arrives late: nothing more to replace.
+      encoders.on_failed(0, 0).unwrap();
+      assert_eq!(bench.borrow().opened.len(), 2);
+      encoders.encode(&(), false).unwrap();
+      assert_eq!(bench.borrow().coded, vec![(0, 0, true), (0, 1, true)]);
+    }
+
+    #[test]
+    fn a_reported_failure_of_the_current_encoder_replaces_it() {
+      let (bench, mut encoders) = encoders(2);
+      encoders.encode(&(), false).unwrap();
+      encoders.on_failed(1, 1).unwrap();
+      encoders.encode(&(), false).unwrap();
+      assert_eq!(bench.borrow().opened, vec![(0, 0), (1, 1), (1, 2)]);
+      assert_eq!(
+        bench.borrow().coded,
+        vec![(0, 0, true), (1, 1, true), (0, 0, false), (1, 2, true)]
+      );
+    }
+
+    #[test]
+    fn encoders_that_keep_failing_give_up() {
+      let (bench, mut encoders) = encoders(1);
+      for generation in 0..u64::from(MAX_ENCODER_RESTARTS) {
+        encoders.on_failed(0, generation).unwrap();
+      }
+      assert_eq!(
+        encoders.on_failed(0, u64::from(MAX_ENCODER_RESTARTS)),
+        Err(EncoderGaveUp { layer: 0 })
+      );
+      assert_eq!(bench.borrow().opened.len(), 1 + usize::from(MAX_ENCODER_RESTARTS));
+    }
+
+    #[test]
+    fn an_encoded_frame_lets_a_later_failure_restart_again() {
+      let (_bench, mut encoders) = encoders(1);
+      for generation in 0..u64::from(MAX_ENCODER_RESTARTS) {
+        encoders.on_failed(0, generation).unwrap();
+      }
+      encoders.on_encoded(0);
+      assert_eq!(encoders.on_failed(0, u64::from(MAX_ENCODER_RESTARTS)), Ok(()));
+    }
+
+    #[test]
+    fn an_encoder_that_fails_to_open_is_tried_again_within_the_limit() {
+      let (bench, mut encoders) = encoders(1);
+      bench.borrow_mut().failing_opens = usize::from(MAX_ENCODER_RESTARTS) - 1;
+      encoders.on_failed(0, 0).unwrap();
+      assert_eq!(bench.borrow().opened, vec![(0, 0), (0, 3)]);
+      assert_eq!(encoders.on_failed(0, 3), Err(EncoderGaveUp { layer: 0 }));
+    }
+
+    #[test]
+    fn a_paused_layer_is_neither_encoded_nor_replaced() {
+      let (bench, mut encoders) = encoders(2);
+      encoders.set_needed_layers(&[1]);
+      bench.borrow_mut().closed.insert(0);
+      encoders.encode(&(), false).unwrap();
+      assert_eq!(bench.borrow().opened, vec![(0, 0), (1, 1)]);
+      assert_eq!(bench.borrow().coded, vec![(1, 1, true)]);
+      // Needed again: the closed encoder is replaced, and the new one starts with a keyframe.
+      encoders.set_needed_layers(&[0, 1]);
+      encoders.encode(&(), false).unwrap();
+      encoders.encode(&(), false).unwrap();
+      assert_eq!(bench.borrow().opened, vec![(0, 0), (1, 1), (0, 2)]);
+      assert!(bench.borrow().coded.contains(&(0, 2, true)));
+    }
+  }
+
+  mod video_view {
+    use super::*;
+
+    #[test]
+    fn deltas_wait_for_a_keyframe_to_open_a_decoder() {
+      let (bench, mut view) = view();
+      view.decode(&frame(VideoCodec::H264, false)).unwrap();
+      assert!(bench.borrow().opened.is_empty());
+      view.decode(&frame(VideoCodec::H264, true)).unwrap();
+      view.decode(&frame(VideoCodec::H264, false)).unwrap();
+      assert_eq!(bench.borrow().opened, vec![(VideoCodec::H264, 0)]);
+      assert_eq!(decoded(&bench), vec![(0, true), (0, false)]);
+    }
+
+    #[test]
+    fn a_failed_decode_drops_the_decoder_until_the_next_keyframe() {
+      let (bench, mut view) = view();
+      bench.borrow_mut().throwing.insert(0);
+      assert!(view.decode(&frame(VideoCodec::H264, true)).is_err());
+      view.decode(&frame(VideoCodec::H264, false)).unwrap();
+      assert_eq!(bench.borrow().opened.len(), 1);
+      view.decode(&frame(VideoCodec::H264, true)).unwrap();
+      assert_eq!(
+        bench.borrow().opened,
+        vec![(VideoCodec::H264, 0), (VideoCodec::H264, 1)]
+      );
+      assert_eq!(decoded(&bench), vec![(1, true)]);
+    }
+
+    #[test]
+    fn a_decoder_closed_before_its_report_fails_the_next_delta() {
+      let (bench, mut view) = view();
+      view.decode(&frame(VideoCodec::H264, true)).unwrap();
+      bench.borrow_mut().closed.insert(0);
+      // Never decoded on the closed decoder (which would throw): it's dropped and reported.
+      assert!(view.decode(&frame(VideoCodec::H264, false)).is_err());
+      assert_eq!(decoded(&bench), vec![(0, true)]);
+      // Its report arrives late: stale.
+      assert!(!view.on_decoder_failed(0));
+    }
+
+    #[test]
+    fn a_decoder_closed_before_a_keyframe_is_replaced_by_it() {
+      let (bench, mut view) = view();
+      view.decode(&frame(VideoCodec::H264, true)).unwrap();
+      bench.borrow_mut().closed.insert(0);
+      view.decode(&frame(VideoCodec::H264, true)).unwrap();
+      assert_eq!(decoded(&bench), vec![(0, true), (1, true)]);
+    }
+
+    #[test]
+    fn only_the_current_decoders_failure_report_counts() {
+      let (bench, mut view) = view();
+      view.decode(&frame(VideoCodec::H264, true)).unwrap();
+      assert!(!view.on_decoder_failed(7));
+      view.decode(&frame(VideoCodec::H264, false)).unwrap();
+      assert!(view.on_decoder_failed(0));
+      view.decode(&frame(VideoCodec::H264, false)).unwrap();
+      assert_eq!(decoded(&bench), vec![(0, true), (0, false)]);
+    }
+
+    #[test]
+    fn a_keyframe_of_another_codec_opens_a_new_decoder() {
+      let (bench, mut view) = view();
+      view.decode(&frame(VideoCodec::H264, true)).unwrap();
+      view.decode(&frame(VideoCodec::Vp9, false)).unwrap();
+      view.decode(&frame(VideoCodec::Vp9, true)).unwrap();
+      assert_eq!(
+        bench.borrow().opened,
+        vec![(VideoCodec::H264, 0), (VideoCodec::Vp9, 1)]
+      );
+      assert_eq!(decoded(&bench), vec![(0, true), (1, true)]);
+    }
+
+    #[test]
+    fn a_decoder_that_fails_to_open_is_an_error() {
+      let (bench, mut view) = view();
+      bench.borrow_mut().failing_opens = 1;
+      assert!(view.decode(&frame(VideoCodec::H264, true)).is_err());
+      // The next keyframe tries again.
+      view.decode(&frame(VideoCodec::H264, true)).unwrap();
+      assert_eq!(decoded(&bench), vec![(1, true)]);
+    }
+  }
+
+  /// What fake codecs did, and which of them WebCodecs "closed" or makes throw. Codecs are named
+  /// by layer (encoders) or codec (decoders) and their generation.
+  struct Bench<C> {
+    opened: Vec<(C, u64)>,
+    /// Name, generation, keyframe.
+    coded: Vec<(C, u64, bool)>,
+    closed: HashSet<u64>,
+    throwing: HashSet<u64>,
+    failing_opens: usize,
+  }
+
+  type Shared<C> = Rc<RefCell<Bench<C>>>;
+
+  struct FakeEncoder {
+    layer: u8,
+    generation: u64,
+    bench: Shared<u8>,
+  }
+
+  struct FakeDecoder {
+    codec: VideoCodec,
+    generation: u64,
+    bench: Shared<VideoCodec>,
+  }
+
+  impl<C> Bench<C> {
+    fn shared() -> Shared<C> {
+      Rc::new(RefCell::new(Self {
+        opened: Vec::new(),
+        coded: Vec::new(),
+        closed: HashSet::new(),
+        throwing: HashSet::new(),
+        failing_opens: 0,
+      }))
+    }
+
+    /// Opens a codec unless an open is set to fail.
+    fn open(&mut self, name: C, generation: u64) -> Result<(), WebCallError> {
+      if self.failing_opens > 0 {
+        self.failing_opens -= 1;
+        return Err(failure("open"));
+      }
+      self.opened.push((name, generation));
+      Ok(())
+    }
+
+    /// Codes a frame unless the codec throws (and is closed by it, like in WebCodecs).
+    fn code(&mut self, name: C, generation: u64, is_keyframe: bool) -> Result<(), WebCallError> {
+      if self.throwing.contains(&generation) {
+        self.closed.insert(generation);
+        return Err(failure("code"));
+      }
+      self.coded.push((name, generation, is_keyframe));
+      Ok(())
+    }
+  }
+
+  impl FrameEncoder for FakeEncoder {
+    type Frame = ();
+
+    fn is_configured(&self) -> bool {
+      !self.bench.borrow().closed.contains(&self.generation)
+    }
+
+    fn queue_size(&self) -> u32 {
+      0
+    }
+
+    fn encode(&self, _frame: &(), is_keyframe: bool) -> Result<(), WebCallError> {
+      self
+        .bench
+        .borrow_mut()
+        .code(self.layer, self.generation, is_keyframe)
+    }
+  }
+
+  impl FrameDecoder for FakeDecoder {
+    fn codec(&self) -> &VideoCodec {
+      &self.codec
+    }
+
+    fn is_configured(&self) -> bool {
+      !self.bench.borrow().closed.contains(&self.generation)
+    }
+
+    fn decode(&self, frame: &ReceivedVideoFrame) -> Result<(), WebCallError> {
+      self
+        .bench
+        .borrow_mut()
+        .code(self.codec.clone(), self.generation, frame.is_keyframe)
+    }
+  }
+
+  fn encoders(layer_count: u8) -> (Shared<u8>, LayerEncoders<FakeEncoder>) {
+    let bench = Bench::shared();
+    let shared = Rc::clone(&bench);
+    let infos = (0..layer_count).map(layer_info).collect();
+    let encoders = LayerEncoders::new(infos, move |info, generation| {
+      shared.borrow_mut().open(info.layer, generation)?;
+      Ok(FakeEncoder {
+        layer: info.layer,
+        generation,
+        bench: Rc::clone(&shared),
+      })
+    })
+    .unwrap();
+    (bench, encoders)
+  }
+
+  fn view() -> (Shared<VideoCodec>, VideoView<FakeDecoder>) {
+    let bench = Bench::shared();
+    let shared = Rc::clone(&bench);
+    let view = VideoView::with_decoders(MediaStreamId(60), move |codec, generation| {
+      shared.borrow_mut().open(codec.clone(), generation)?;
+      Ok(FakeDecoder {
+        codec: codec.clone(),
+        generation,
+        bench: Rc::clone(&shared),
+      })
+    });
+    (bench, view)
+  }
+
+  /// Decoder generation and keyframe of each decoded frame.
+  fn decoded(bench: &Shared<VideoCodec>) -> Vec<(u64, bool)> {
+    bench
+      .borrow()
+      .coded
+      .iter()
+      .map(|(_, generation, is_keyframe)| (*generation, *is_keyframe))
+      .collect()
+  }
+
+  fn layer_info(layer: u8) -> VideoLayerInfo {
+    VideoLayerInfo {
+      layer,
+      width: 320 << layer,
+      height: 180 << layer,
+      max_framerate: 30,
+      max_bitrate_bps: 150_000 << layer,
+    }
+  }
+
+  fn frame(codec: VideoCodec, is_keyframe: bool) -> ReceivedVideoFrame {
+    ReceivedVideoFrame {
+      sender: DeviceId::from_snowflake(Snowflake::new(2).unwrap()),
+      stream_id: MediaStreamId(60),
+      codec,
+      layer: SimulcastLayer::new(0).unwrap(),
+      timestamp: RtpTimestamp(0),
+      is_keyframe,
+      data: vec![0, 0, 0, 1],
+    }
+  }
+
+  fn failure(context: &'static str) -> WebCallError {
+    WebCallError::Browser {
+      context,
+      message: "InvalidStateError".into(),
     }
   }
 }
