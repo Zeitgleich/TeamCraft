@@ -279,6 +279,9 @@ pub struct AppState {
   pub space: RwSignal<SpaceId>,
   pub rail: RwSignal<RailEntry>,
   pub view: RwSignal<MainView>,
+  /// The open conversation that was unread when it was opened: the sidebar keeps it in its
+  /// "Unreads" section until the user opens another conversation (#890). Kept by the sidebar.
+  pub held_unread: RwSignal<Option<ConversationId>>,
   pub panel: RwSignal<SidePanel>,
   pub overlay: RwSignal<Overlay>,
   /// The filter of the activity list; "Threads" is one of them (#752).
@@ -414,6 +417,7 @@ impl AppState {
       space: RwSignal::new(space),
       rail: RwSignal::new(rail),
       view: RwSignal::new(view),
+      held_unread: RwSignal::new(None),
       panel: RwSignal::new(SidePanel::Closed),
       overlay: RwSignal::new(Overlay::None),
       activity_filter: RwSignal::new(ActivityFilter::default()),
@@ -1619,7 +1623,7 @@ impl AppState {
       .settings
       .prefs
       .with(|prefs| prefs.sidebar.is_grouped_by_space);
-    let options = self.settings.sidebar_options();
+    let options = self.settings.sidebar_options(self.held_unread.get_untracked());
     let all = self.sidebar_list(self.read(|backend| {
       if is_grouped {
         backend

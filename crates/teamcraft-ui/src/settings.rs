@@ -15,7 +15,6 @@ use crate::sections::SidebarOptions;
 const KEY_THEME: &str = "teamcraft.theme";
 const KEY_LOCALE: &str = "teamcraft.locale";
 const KEY_SEND_MODE: &str = "teamcraft.send_mode";
-const KEY_UNREADS_GROUP: &str = "teamcraft.unreads_group";
 const KEY_SHOW_JOIN_LEAVE: &str = "teamcraft.show_join_leave";
 #[cfg(feature = "demo")]
 const KEY_BACKEND: &str = "teamcraft.backend";
@@ -326,8 +325,6 @@ pub struct Settings {
   pub theme: RwSignal<Theme>,
   pub locale: RwSignal<Locale>,
   pub send_mode: RwSignal<SendMode>,
-  /// Show conversations with unread messages in a separate "Unreads" group at the top.
-  pub show_unreads_group: RwSignal<bool>,
   pub show_join_leave: RwSignal<bool>,
   /// Notifications, privacy, calls, display and sidebar options (one JSON document).
   pub prefs: RwSignal<Preferences>,
@@ -342,10 +339,12 @@ pub struct Settings {
 impl Settings {
   /// Sidebar grouping from the current preferences. `usize::MAX` as limit shows every DM (keyboard
   /// navigation must reach conversations that the list currently hides).
-  pub fn sidebar_options(&self) -> SidebarOptions {
+  /// `maybe_held_open` is the conversation that stays in the "Unreads" section while it is open.
+  pub fn sidebar_options(&self, maybe_held_open: Option<ConversationId>) -> SidebarOptions {
     SidebarOptions {
-      show_unreads_group: self.show_unreads_group.get(),
+      show_unreads_group: self.prefs.with(|prefs| prefs.sidebar.shows_unreads_section),
       sort: self.prefs.with(|prefs| prefs.sidebar.sort),
+      maybe_held_open,
     }
   }
 
@@ -367,7 +366,6 @@ impl Settings {
       theme: RwSignal::new(load(KEY_THEME, Theme::from_slug).unwrap_or(Theme::System)),
       locale: RwSignal::new(load(KEY_LOCALE, Locale::from_tag).unwrap_or_else(browser_locale)),
       send_mode: RwSignal::new(load(KEY_SEND_MODE, SendMode::from_slug).unwrap_or(SendMode::Enter)),
-      show_unreads_group: RwSignal::new(load(KEY_UNREADS_GROUP, parse_bool).unwrap_or(true)),
       show_join_leave: RwSignal::new(load(KEY_SHOW_JOIN_LEAVE, parse_bool).unwrap_or(true)),
       prefs: RwSignal::new(load(KEY_PREFS, |text| Some(Preferences::from_json(text))).unwrap_or_default()),
       recent_conversations: RwSignal::new(load(KEY_RECENT_CONVERSATIONS, from_json).unwrap_or_default()),
@@ -377,9 +375,6 @@ impl Settings {
     persist(KEY_THEME, settings.theme, |theme| theme.slug().to_owned());
     persist(KEY_LOCALE, settings.locale, |locale| locale.tag().to_owned());
     persist(KEY_SEND_MODE, settings.send_mode, |mode| mode.slug().to_owned());
-    persist(KEY_UNREADS_GROUP, settings.show_unreads_group, |value| {
-      value.to_string()
-    });
     persist(KEY_SHOW_JOIN_LEAVE, settings.show_join_leave, |value| {
       value.to_string()
     });
@@ -401,7 +396,6 @@ impl Settings {
       theme: RwSignal::new(Theme::System),
       locale: RwSignal::new(Locale::En),
       send_mode: RwSignal::new(SendMode::Enter),
-      show_unreads_group: RwSignal::new(true),
       show_join_leave: RwSignal::new(true),
       prefs: RwSignal::new(Preferences::default()),
       recent_conversations: RwSignal::new(Vec::new()),
