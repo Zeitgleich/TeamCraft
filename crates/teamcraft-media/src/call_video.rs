@@ -350,6 +350,7 @@ mod tests {
       kind: VideoTrackKind::Screen,
       codec: VideoCodec::Vp9,
       layers: Vec::new(),
+      maybe_publication_id: None,
     }
   }
 }

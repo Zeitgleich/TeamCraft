@@ -18,6 +18,7 @@ use std::future::Future;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, UdpSocket};
 use std::pin::Pin;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::mpsc as std_mpsc;
 use std::thread::JoinHandle as ThreadHandle;
 use std::time::{Duration, Instant};
@@ -26,7 +27,7 @@ use socket2::{Domain, Protocol, Socket, Type};
 use teamcraft_net::{ATTEMPT_DELAY, RaceError, interleave, race};
 use teamcraft_proto::{
   CallClientMessage, CallServerMessage, DeviceId, MediaStreamId, SFU_GOING_AWAY_CLOSE_CODE, VideoCodec,
-  VideoLayerInfo, VideoTrackKind,
+  VideoLayerInfo, VideoPublicationId, VideoTrackKind,
 };
 use thiserror::Error;
 use tokio::sync::{mpsc, oneshot};
@@ -48,7 +49,7 @@ use crate::call_auth::{CallKeyAuthenticator, DeviceCallKeyAuthenticator};
 use crate::call_cues::{CallCue, CuePlayer, StatusCues};
 use crate::call_engine::{
   AudioOrigin, CallEngine, CallEngineConfig, CallEngineError, CallEngineEvent, CallStats, EngineOutput,
-  OwnVideoEnd, VideoSendOutcome, VideoStats,
+  OwnPublication, OwnVideoEnd, VideoSendOutcome, VideoStats,
 };
 use crate::call_resilience::{
   JoinTicket, JoinTicketError, PathMonitor, PathState, ReconnectSchedule, ResilienceConfig, rejoin_attempt,
@@ -85,6 +86,8 @@ pub struct NativeCall {
   commands: mpsc::UnboundedSender<Command>,
   events: mpsc::UnboundedReceiver<CallEngineEvent>,
   task: JoinHandle<Result<CallStats, NativeCallError>>,
+  /// The id of the next video publication: every one of the call goes through this handle.
+  next_publication: AtomicU32,
 }
 
 /// How to reach the SFU and what to send and play.
@@ -193,10 +196,12 @@ struct ScreenAudio {
 /// platform specific).
 enum VideoCommand {
   Publish {
+    publication: VideoPublicationId,
     kind: VideoTrackKind,
     codec: VideoCodec,
     layers: Vec<VideoLayerInfo>,
   },
+  Withdraw(VideoPublicationId),
   Unpublish(MediaStreamId),
   Subscribe {
     stream_id: MediaStreamId,
@@ -206,9 +211,9 @@ enum VideoCommand {
     stream_id: MediaStreamId,
     frame: EncodedVideoFrame,
   },
-  /// Capture, encode and publish a track (camera or screen); the answer brings the wait for
-  /// its first picture.
-  Start(VideoSendConfig, StartAnswer),
+  /// Capture, encode and publish a track (camera or screen) under the id; the answer brings the
+  /// wait for its first picture.
+  Start(VideoSendConfig, VideoPublicationId, StartAnswer),
   Stop(VideoTrackKind),
   Watch {
     stream_id: MediaStreamId,
@@ -229,8 +234,8 @@ type StartResult = Result<(VideoSender, FirstPicture), CaptureError>;
 /// The driver's video: own tracks being captured and received tracks being decoded.
 #[derive(Default)]
 struct VideoState {
-  /// Own tracks; the stream id arrives with `VideoPublished`.
-  senders: Vec<(VideoSender, Option<MediaStreamId>)>,
+  /// Own tracks and their publications; the stream id arrives with `VideoPublished`.
+  senders: Vec<(VideoSender, OwnPublication)>,
   /// Own tracks being stopped: their threads end on blocking tasks (up to a second and a half for
   /// a camera), and their counters join [`VideoState::counts`] once they did (#922).
   stopping: Vec<StoppingSender>,
@@ -255,13 +260,15 @@ struct VideoState {
 /// An own track whose capture and encoder thread start on a blocking task.
 struct StartingVideo {
   kind: VideoTrackKind,
+  /// The id it is published under once the capture opened.
+  publication: VideoPublicationId,
   task: JoinHandle<StartResult>,
   done: StartAnswer,
 }
 
 /// A start or stop of an own track.
 enum OwnVideoRequest {
-  Start(VideoSendConfig, StartAnswer),
+  Start(VideoSendConfig, VideoPublicationId, StartAnswer),
   Stop(VideoTrackKind),
 }
 
@@ -353,6 +360,7 @@ impl NativeCall {
       commands,
       events,
       task,
+      next_publication: AtomicU32::new(0),
     })
   }
 
@@ -370,10 +378,29 @@ impl NativeCall {
     let _ = self.commands.send(Command::MoveHere);
   }
 
-  /// Publishes a video track; [`CallEngineEvent::VideoPublished`] for this device brings the stream
-  /// id for [`NativeCall::send_video`]. Screen shares use a single layer.
-  pub fn publish_video(&self, kind: VideoTrackKind, codec: VideoCodec, layers: Vec<VideoLayerInfo>) {
-    self.video(VideoCommand::Publish { kind, codec, layers });
+  /// Publishes a video track whose frames the app encodes itself; [`CallEngineEvent::VideoPublished`]
+  /// for this device with the returned id in its `maybe_publication_id` brings the stream id for
+  /// [`NativeCall::send_video`] ([`OwnPublication`] follows it). Screen shares use a single layer.
+  pub fn publish_video(
+    &self,
+    kind: VideoTrackKind,
+    codec: VideoCodec,
+    layers: Vec<VideoLayerInfo>,
+  ) -> VideoPublicationId {
+    let publication = self.next_publication_id();
+    self.video(VideoCommand::Publish {
+      publication,
+      kind,
+      codec,
+      layers,
+    });
+    publication
+  }
+
+  /// Stops a track of [`NativeCall::publish_video`], also before the SFU confirmed it: its answer
+  /// is then unpublished as soon as it arrives (#929).
+  pub fn withdraw_video(&self, publication: VideoPublicationId) {
+    self.video(VideoCommand::Withdraw(publication));
   }
 
   pub fn unpublish_video(&self, stream_id: MediaStreamId) {
@@ -405,7 +432,7 @@ impl NativeCall {
   /// it needs (an app that pushes the frames itself).
   pub async fn start_video_checked(&self, config: VideoSendConfig) -> Result<FirstPicture, NativeCallError> {
     let (done, done_rx) = oneshot::channel();
-    self.video(VideoCommand::Start(config, done));
+    self.video(VideoCommand::Start(config, self.next_publication_id(), done));
     Ok(done_rx.await.map_err(|_| NativeCallError::TaskEnded)??)
   }
 
@@ -488,6 +515,10 @@ impl NativeCall {
   fn video(&self, command: VideoCommand) {
     // A closed channel means the call already ended.
     let _ = self.commands.send(Command::Video(command));
+  }
+
+  fn next_publication_id(&self) -> VideoPublicationId {
+    VideoPublicationId(self.next_publication.fetch_add(1, Ordering::Relaxed))
   }
 
   /// The next event, or `None` once the call ended.
@@ -1210,7 +1241,9 @@ fn handle_video(
   command: VideoCommand,
 ) {
   match command {
-    VideoCommand::Start(config, done) => video.request(engine, encoded, OwnVideoRequest::Start(config, done)),
+    VideoCommand::Start(config, publication, done) => {
+      video.request(engine, encoded, OwnVideoRequest::Start(config, publication, done))
+    },
     VideoCommand::Stop(kind) => video.request(engine, encoded, OwnVideoRequest::Stop(kind)),
     VideoCommand::Watch {
       stream_id,
@@ -1229,7 +1262,13 @@ fn handle_video(
       }
     },
     VideoCommand::RequestKeyframe(stream_id) => engine.request_keyframe(stream_id, Instant::now()),
-    VideoCommand::Publish { kind, codec, layers } => engine.publish_video(kind, codec, layers),
+    VideoCommand::Publish {
+      publication,
+      kind,
+      codec,
+      layers,
+    } => engine.publish_video(publication, kind, codec, layers),
+    VideoCommand::Withdraw(publication) => engine.withdraw_video(publication),
     VideoCommand::Unpublish(stream_id) => engine.unpublish_video(stream_id),
     VideoCommand::Subscribe {
       stream_id,
@@ -1355,7 +1394,7 @@ impl Sinks {
               is_shared: false,
             } => self.mixer.remove_stream(*device_id, AudioOrigin::Screen),
             CallEngineEvent::VideoPublished(track) if track.device_id == engine.device_id() => {
-              self.video.on_published(&track.kind, track.stream_id);
+              self.video.follow_publications(engine.device_id(), &event);
             },
             CallEngineEvent::VideoPublished(track) => {
               self
@@ -1367,7 +1406,7 @@ impl Sinks {
               self.video.receivers.remove(stream_id);
               self.video.remote_kinds.remove(stream_id);
               // An own track the SFU dropped (rejoin without the slot) is published again.
-              self.video.on_unpublished(*stream_id);
+              self.video.follow_publications(engine.device_id(), &event);
             },
             CallEngineEvent::KeyframeRequested { stream_id, layer } => {
               if let Some(sender) = self.video.sender_of(*stream_id) {
@@ -1418,11 +1457,16 @@ impl VideoState {
     request: OwnVideoRequest,
   ) {
     match request {
-      OwnVideoRequest::Start(config, done) => {
+      OwnVideoRequest::Start(config, publication, done) => {
         let kind = config.kind.clone();
         let encoded = encoded.clone();
         let task = tokio::task::spawn_blocking(move || VideoSender::start(config, encoded));
-        self.maybe_starting = Some(StartingVideo { kind, task, done });
+        self.maybe_starting = Some(StartingVideo {
+          kind,
+          publication,
+          task,
+          done,
+        });
       },
       OwnVideoRequest::Stop(kind) => self.stop(engine, &kind),
     }
@@ -1438,13 +1482,23 @@ impl VideoState {
     starting: StartingVideo,
     started: Result<StartResult, tokio::task::JoinError>,
   ) {
-    let StartingVideo { kind, done, .. } = starting;
+    let StartingVideo {
+      kind,
+      publication,
+      done,
+      ..
+    } = starting;
     let result = started
       .unwrap_or_else(|error| Err(CaptureError::Device(format!("the capture start failed: {error}"))))
       .map(|(sender, first_picture)| {
         self.stop(engine, &kind);
-        engine.publish_video(sender.kind.clone(), VideoCodec::H264, sender.layers.clone());
-        self.senders.push((sender, None));
+        engine.publish_video(
+          publication,
+          sender.kind.clone(),
+          VideoCodec::H264,
+          sender.layers.clone(),
+        );
+        self.senders.push((sender, OwnPublication::new(publication)));
         first_picture
       })
       .inspect_err(|error| warn!(%error, ?kind, "video capture not started; the running one goes on"));
@@ -1586,32 +1640,22 @@ impl VideoState {
       .senders
       .iter()
       .find(|(sender, _)| sender.kind == *kind)
-      .and_then(|(_, maybe_stream)| *maybe_stream)
+      .and_then(|(_, publication)| publication.maybe_stream_id)
   }
 
   fn sender_of(&self, stream_id: MediaStreamId) -> Option<&VideoSender> {
     self
       .senders
       .iter()
-      .find(|(_, maybe_stream)| *maybe_stream == Some(stream_id))
+      .find(|(_, publication)| publication.maybe_stream_id == Some(stream_id))
       .map(|(sender, _)| sender)
   }
 
-  fn on_unpublished(&mut self, stream_id: MediaStreamId) {
-    for (_, maybe_stream) in &mut self.senders {
-      if *maybe_stream == Some(stream_id) {
-        *maybe_stream = None;
-      }
-    }
-  }
-
-  fn on_published(&mut self, kind: &VideoTrackKind, stream_id: MediaStreamId) {
-    if let Some((_, maybe_stream)) = self
-      .senders
-      .iter_mut()
-      .find(|(sender, maybe_stream)| sender.kind == *kind && maybe_stream.is_none())
-    {
-      *maybe_stream = Some(stream_id);
+  /// Own tracks take the stream the SFU confirmed for their own publication, and give it up when
+  /// the SFU dropped it; an answer to a stopped track never reaches another one (#929).
+  fn follow_publications(&mut self, own_device: DeviceId, event: &CallEngineEvent) {
+    for (_, publication) in &mut self.senders {
+      publication.follow(own_device, event);
     }
   }
 
@@ -1633,17 +1677,16 @@ impl VideoState {
       .collect()
   }
 
-  /// Stops capturing a track of `kind` and unpublishes it. Its threads end on a blocking task:
-  /// a camera may take up to a second and a half to let go, and the call goes on meanwhile.
+  /// Stops capturing a track of `kind` and unpublishes it, also when the SFU hasn't confirmed it
+  /// yet (#929). Its threads end on a blocking task: a camera may take up to a second and a half
+  /// to let go, and the call goes on meanwhile.
   fn stop(&mut self, engine: &mut CallEngine, kind: &VideoTrackKind) {
     let (stopped, kept): (Vec<_>, Vec<_>) = std::mem::take(&mut self.senders)
       .into_iter()
       .partition(|(sender, _)| sender.kind == *kind);
     self.senders = kept;
-    for (sender, maybe_stream) in stopped {
-      if let Some(stream_id) = maybe_stream {
-        engine.unpublish_video(stream_id);
-      }
+    for (sender, publication) in stopped {
+      engine.withdraw_video(publication.id);
       self.stopping.push(sender.stop_in_background());
     }
   }

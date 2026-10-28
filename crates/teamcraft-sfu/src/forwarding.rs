@@ -33,7 +33,7 @@ use teamcraft_media::{
 };
 use teamcraft_proto::{
   DeviceId, MAX_SIMULCAST_LAYERS, MediaCapabilities, MediaStreamId, ScreenAudioTrack, TransportFeedback,
-  VideoCodec, VideoLayerInfo, VideoTrack, VideoTrackKind,
+  VideoCodec, VideoLayerInfo, VideoPublicationId, VideoTrack, VideoTrackKind,
 };
 use thiserror::Error;
 
@@ -381,6 +381,7 @@ impl Forwarder {
     kind: VideoTrackKind,
     codec: VideoCodec,
     layers: Vec<VideoLayerInfo>,
+    maybe_publication_id: Option<VideoPublicationId>,
   ) -> Result<VideoTrack, ForwardError> {
     let participant = self.participants.get(&owner).ok_or(ForwardError::NotJoined)?;
     if !participant.capabilities.video_encoders.contains(&codec) {
@@ -415,6 +416,7 @@ impl Forwarder {
       kind,
       codec,
       layers,
+      maybe_publication_id,
     };
     let route = VideoTrackRoute {
       uplink_layers: track.layers.len(),
@@ -1147,6 +1149,7 @@ mod tests {
           VideoTrackKind::Camera,
           VideoCodec::Av1,
           three_layers(),
+          None,
         )
         .unwrap();
       forwarder.subscribe(device(2), VIDEO, Some(0), now).unwrap();
@@ -1516,7 +1519,8 @@ mod tests {
               stream,
               VideoTrackKind::Camera,
               VideoCodec::Av1,
-              layers.clone()
+              layers.clone(),
+              None
             )
             .is_ok()
         );
@@ -1527,7 +1531,8 @@ mod tests {
           StreamId(999),
           VideoTrackKind::Camera,
           VideoCodec::Av1,
-          layers.clone()
+          layers.clone(),
+          None
         ),
         Err(ForwardError::InvalidPublication(_))
       ));
@@ -1539,7 +1544,8 @@ mod tests {
             StreamId(100),
             VideoTrackKind::Camera,
             VideoCodec::Av1,
-            layers
+            layers,
+            None
           )
           .is_ok()
       );
@@ -1555,7 +1561,8 @@ mod tests {
           StreamId(7),
           VideoTrackKind::Camera,
           VideoCodec::H264,
-          layers.clone()
+          layers.clone(),
+          None
         ),
         Err(ForwardError::InvalidPublication(_))
       ));
@@ -1565,7 +1572,8 @@ mod tests {
           StreamId(7),
           VideoTrackKind::Camera,
           VideoCodec::Av1,
-          layers[1..].to_vec()
+          layers[1..].to_vec(),
+          None
         ),
         Err(ForwardError::InvalidPublication(_))
       ));
@@ -1781,6 +1789,7 @@ mod tests {
         VideoTrackKind::Camera,
         VideoCodec::Av1,
         three_layers(),
+        None,
       )
       .unwrap();
     (forwarder, now)

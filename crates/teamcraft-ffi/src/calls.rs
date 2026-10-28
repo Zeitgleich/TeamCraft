@@ -21,7 +21,7 @@ use teamcraft_media::audio_processing::AudioProcessingConfig;
 use teamcraft_media::bwe::BweConfig;
 use teamcraft_media::call_auth::{CallBindingSigner, DeviceCallKeyAuthenticator};
 use teamcraft_media::call_cues::StatusCues;
-use teamcraft_media::call_engine::{CallEngineConfig, CallEngineEvent};
+use teamcraft_media::call_engine::{CallEngineConfig, CallEngineEvent, OwnPublication};
 use teamcraft_media::call_native::{
   JoinTicketSource, NativeCall, NativeCallConfig, NativeCallError, TicketFuture,
 };
@@ -737,10 +737,9 @@ impl AudioControls {
 #[derive(Default)]
 struct EncodedVideoBridge {
   maybe_listener: Option<Arc<dyn EncodedVideoListener>>,
-  /// The stream id of this device's camera once the SFU announced it.
-  maybe_camera: Option<MediaStreamId>,
-  /// The camera was asked for; the track announcement may still be on its way.
-  is_camera_requested: bool,
+  /// This device's camera while it is asked for: its publication, with the stream id once the
+  /// SFU confirmed it.
+  maybe_camera: Option<OwnPublication>,
   /// Tracks of other devices that are published now; a listener that registers late (the app sets
   /// it after the join returned) learns about them when it registers.
   remote_tracks: Vec<RemoteVideoTrack>,
@@ -758,12 +757,17 @@ impl EncodedVideoBridge {
     self.maybe_listener = Some(listener);
   }
 
+  fn camera_stream(&self) -> Option<MediaStreamId> {
+    self.maybe_camera.and_then(|camera| camera.maybe_stream_id)
+  }
+
   /// Tells the app's listener what the engine reported, and notes the camera's stream.
   fn report(&mut self, own_device: DeviceId, event: &CallEngineEvent) {
     match event {
+      // Only the answer to the camera's own request (#929).
       CallEngineEvent::VideoPublished(track) if track.device_id == own_device => {
-        if track.kind == VideoTrackKind::Camera && self.is_camera_requested {
-          self.maybe_camera = Some(track.stream_id);
+        if let Some(camera) = &mut self.maybe_camera {
+          camera.follow(own_device, event);
         }
       },
       CallEngineEvent::VideoPublished(track) => {
@@ -778,8 +782,10 @@ impl EncodedVideoBridge {
         }
       },
       CallEngineEvent::VideoUnpublished(stream_id) => {
-        if self.maybe_camera == Some(*stream_id) {
-          self.maybe_camera = None;
+        if self.camera_stream() == Some(*stream_id) {
+          if let Some(camera) = &mut self.maybe_camera {
+            camera.follow(own_device, event);
+          }
         } else {
           let id = stream_id.0.to_string();
           self.remote_tracks.retain(|track| track.stream_id != id);
@@ -798,7 +804,7 @@ impl EncodedVideoBridge {
           });
         }
       },
-      CallEngineEvent::KeyframeRequested { stream_id, .. } if self.maybe_camera == Some(*stream_id) => {
+      CallEngineEvent::KeyframeRequested { stream_id, .. } if self.camera_stream() == Some(*stream_id) => {
         if let Some(listener) = &self.maybe_listener {
           listener.on_keyframe_requested();
         }
@@ -825,22 +831,22 @@ fn apply_encoded_control(
       encoded.set_listener(listener.clone());
     },
     Control::PublishEncodedCamera(layer) => {
-      if !encoded.is_camera_requested {
-        encoded.is_camera_requested = true;
+      if encoded.maybe_camera.is_none() {
         state.is_camera_on = true;
-        call.publish_video(VideoTrackKind::Camera, VideoCodec::H264, vec![*layer]);
+        let publication = call.publish_video(VideoTrackKind::Camera, VideoCodec::H264, vec![*layer]);
+        encoded.maybe_camera = Some(OwnPublication::new(publication));
       }
     },
     Control::SendEncodedCameraFrame(frame) => {
-      if let Some(stream) = encoded.maybe_camera {
+      if let Some(stream) = encoded.camera_stream() {
         call.send_video(stream, frame.clone());
       }
     },
     Control::StopEncodedCamera => {
-      encoded.is_camera_requested = false;
       state.is_camera_on = false;
-      if let Some(stream) = encoded.maybe_camera.take() {
-        call.unpublish_video(stream);
+      // Also before the SFU confirmed it: its answer is unpublished when it comes (#929).
+      if let Some(camera) = encoded.maybe_camera.take() {
+        call.withdraw_video(camera.id);
       }
     },
     Control::WatchEncodedVideo(stream) => call.subscribe_video(*stream, Some(0)),
@@ -1088,7 +1094,7 @@ fn lock(state: &Mutex<HubState>) -> MutexGuard<'_, HubState> {
 
 #[cfg(test)]
 mod tests {
-  use teamcraft_proto::{CallId, Id, Snowflake, VideoTrack};
+  use teamcraft_proto::{CallId, Id, Snowflake, VideoPublicationId, VideoTrack};
 
   use super::*;
 
@@ -1315,14 +1321,15 @@ mod tests {
       kind: VideoTrackKind::Camera,
       codec: VideoCodec::H264,
       layers: Vec::new(),
+      maybe_publication_id: Some(VideoPublicationId(0)),
     };
     video.report(own, &CallEngineEvent::VideoPublished(track(7, 2)));
     video.report(own, &CallEngineEvent::VideoPublished(track(8, 3)));
     video.report(own, &CallEngineEvent::VideoUnpublished(MediaStreamId(7)));
     // Own camera: remembered for sending, not shown as a remote track.
-    video.is_camera_requested = true;
+    video.maybe_camera = Some(OwnPublication::new(VideoPublicationId(0)));
     video.report(own, &CallEngineEvent::VideoPublished(track(9, 1)));
-    assert_eq!(video.maybe_camera, Some(MediaStreamId(9)));
+    assert_eq!(video.camera_stream(), Some(MediaStreamId(9)));
 
     let listener = Arc::new(VideoRecorder::default());
     video.set_listener(listener.clone());

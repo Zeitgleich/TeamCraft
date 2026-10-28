@@ -50,7 +50,7 @@ use futures::future::{Either, select};
 use js_sys::{Array, Float32Array, Function, Object, Promise, Reflect, Uint8Array};
 use teamcraft_proto::{
   CallClientMessage, CallServerMessage, DeviceId, MediaStreamId, SFU_GOING_AWAY_CLOSE_CODE,
-  ScreenContentMode, VideoCodec, VideoTrack, VideoTrackKind,
+  ScreenContentMode, VideoCodec, VideoPublicationId, VideoTrack, VideoTrackKind,
 };
 use thiserror::Error;
 use tracing::{debug, error, info, warn};
@@ -811,6 +811,7 @@ async fn run_call(
     stats: CallStats::default(),
     own_device: config.engine.device_id,
     senders: Vec::new(),
+    next_publication: VideoPublicationId(0),
     encoded_kinds: Vec::new(),
     views: HashMap::new(),
     remote_tracks: HashMap::new(),
@@ -902,6 +903,8 @@ struct CallState<'a> {
   stats: CallStats,
   own_device: DeviceId,
   senders: Vec<TrackSender>,
+  /// The id the next own video publication goes under.
+  next_publication: VideoPublicationId,
   /// Kinds whose running own track encoded a picture: one that ends before did not start.
   encoded_kinds: Vec<VideoTrackKind>,
   views: HashMap<MediaStreamId, Watched>,
@@ -1482,8 +1485,10 @@ impl CallState<'_> {
   ) -> Result<(), WebCallError> {
     let kind = plan.kind.clone();
     self.stop_video(engine, &kind);
-    let sender = TrackSender::start(stream, plan, self.inputs).await?;
-    engine.publish_video(kind, VideoCodec::H264, sender.layers());
+    let publication = self.next_publication;
+    self.next_publication = VideoPublicationId(publication.0.wrapping_add(1));
+    let sender = TrackSender::start(stream, plan, publication, self.inputs).await?;
+    engine.publish_video(publication, kind, VideoCodec::H264, sender.layers());
     self.senders.push(sender);
     Ok(())
   }
@@ -1495,9 +1500,8 @@ impl CallState<'_> {
       .partition(|sender| sender.publication.kind == *kind);
     self.senders = kept;
     for sender in stopped {
-      if let Some(stream_id) = sender.publication.maybe_stream_id {
-        engine.unpublish_video(stream_id);
-      }
+      // Also before the SFU confirmed it: its answer is then unpublished when it comes (#929).
+      engine.withdraw_video(sender.publication.own.id);
       sender.stop();
     }
   }
@@ -1560,7 +1564,7 @@ impl CallState<'_> {
     self
       .senders
       .iter_mut()
-      .find(|sender| sender.publication.maybe_stream_id == Some(stream_id))
+      .find(|sender| sender.publication.own.maybe_stream_id == Some(stream_id))
   }
 
   fn sender_of_kind(&mut self, kind: &VideoTrackKind) -> Option<&mut TrackSender> {
@@ -1587,7 +1591,7 @@ impl CallState<'_> {
       .senders
       .iter()
       .find(|sender| sender.publication.kind == *kind)
-      .and_then(|sender| sender.publication.maybe_stream_id)
+      .and_then(|sender| sender.publication.own.maybe_stream_id)
     else {
       return;
     };
@@ -2365,33 +2369,22 @@ async fn set_sink(context: &AudioContext, choice: &AudioDeviceChoice) {
 }
 
 /// Keeps own tracks' stream ids in step with the engine, like the native driver: an own track
-/// waiting for one takes the id the SFU published for its kind, and one whose stream the SFU
-/// dropped (a rejoin without the slot) gives it up, so the engine's new publication of the track
-/// reaches it (issue #919). Returns the index of the track that got a stream id.
+/// takes the stream the SFU confirmed for its own publication, never one meant for an earlier or
+/// later track of its kind (#929), and gives it up when the SFU dropped it (a rejoin without the
+/// slot), so the engine's renewed publication of the track reaches it (issue #919). Returns the
+/// index of the track that got a stream id.
 fn follow_publication<'a>(
   publications: impl IntoIterator<Item = &'a mut Publication>,
   own_device: DeviceId,
   event: &CallEngineEvent,
 ) -> Option<usize> {
-  match event {
-    CallEngineEvent::VideoPublished(track) if track.device_id == own_device => {
-      let (index, publication) = publications
-        .into_iter()
-        .enumerate()
-        .find(|(_, publication)| publication.kind == track.kind && publication.maybe_stream_id.is_none())?;
-      publication.maybe_stream_id = Some(track.stream_id);
-      Some(index)
-    },
-    CallEngineEvent::VideoUnpublished(stream_id) => {
-      for publication in publications {
-        if publication.maybe_stream_id == Some(*stream_id) {
-          publication.maybe_stream_id = None;
-        }
-      }
-      None
-    },
-    _ => None,
+  let mut maybe_confirmed = None;
+  for (index, publication) in publications.into_iter().enumerate() {
+    if publication.own.follow(own_device, event) {
+      maybe_confirmed = Some(index);
+    }
   }
+  maybe_confirmed
 }
 
 /// Decodes a frame of a watched track. A failure stays with its tile: the failed decoder is gone
@@ -2510,7 +2503,7 @@ mod tests {
 
   use super::*;
   use crate::bwe::BweConfig;
-  use crate::call_engine::VideoSendOutcome;
+  use crate::call_engine::{OwnPublication, VideoSendOutcome};
 
   const GRACE: Duration = Duration::from_secs(30);
 
@@ -2699,22 +2692,54 @@ mod tests {
   mod own_video {
     use super::*;
 
+    const CAMERA: VideoPublicationId = VideoPublicationId(0);
+    const SCREEN: VideoPublicationId = VideoPublicationId(1);
+
     #[test]
-    fn an_own_track_takes_the_stream_published_for_its_kind() {
+    fn an_own_track_takes_the_stream_published_for_it() {
       let mut publications = vec![
-        publication(VideoTrackKind::Camera),
-        publication(VideoTrackKind::Screen),
+        publication(VideoTrackKind::Camera, CAMERA),
+        publication(VideoTrackKind::Screen, SCREEN),
       ];
-      let others = CallEngineEvent::VideoPublished(video_track(8, 2, VideoTrackKind::Screen));
+      let others = CallEngineEvent::VideoPublished(video_track(8, 2, VideoTrackKind::Screen, Some(SCREEN)));
       assert_eq!(follow_publication(&mut publications, device(1), &others), None);
-      let own = CallEngineEvent::VideoPublished(video_track(7, 1, VideoTrackKind::Screen));
+      let own = CallEngineEvent::VideoPublished(video_track(7, 1, VideoTrackKind::Screen, Some(SCREEN)));
       assert_eq!(follow_publication(&mut publications, device(1), &own), Some(1));
-      assert_eq!(publications[0].maybe_stream_id, None);
-      assert_eq!(publications[1].maybe_stream_id, Some(MediaStreamId(7)));
+      assert_eq!(publications[0].own.maybe_stream_id, None);
+      assert_eq!(publications[1].own.maybe_stream_id, Some(MediaStreamId(7)));
       // Another device's track going away changes nothing here.
       let gone = CallEngineEvent::VideoUnpublished(MediaStreamId(8));
       follow_publication(&mut publications, device(1), &gone);
-      assert_eq!(publications[1].maybe_stream_id, Some(MediaStreamId(7)));
+      assert_eq!(publications[1].own.maybe_stream_id, Some(MediaStreamId(7)));
+    }
+
+    /// Issue #929: the camera is stopped and started again before the SFU answered. The answer to
+    /// the stopped one is unpublished, and the new camera sends on the stream of its own request.
+    #[test]
+    fn a_camera_restarted_before_its_answer_sends_on_its_own_stream() {
+      let now = Instant::now();
+      let mut engine = joined_engine(now);
+      let stopped = VideoPublicationId(4);
+      engine.publish_video(stopped, VideoTrackKind::Camera, VideoCodec::H264, layers());
+      // `stop_video`: the driver forgets the track and withdraws its publication.
+      engine.withdraw_video(stopped);
+      let restarted = VideoPublicationId(5);
+      let mut publications = vec![publication(VideoTrackKind::Camera, restarted)];
+      engine.publish_video(restarted, VideoTrackKind::Camera, VideoCodec::H264, layers());
+      drain(&mut engine);
+      for (seq, (stream, id)) in [(50, stopped), (51, restarted)].into_iter().enumerate() {
+        let track = video_track(stream, 1, VideoTrackKind::Camera, Some(id));
+        let answer = event(seq as u64 + 2, CallEvent::VideoPublished { track });
+        engine.handle_signal(answer, now).unwrap();
+      }
+      let outputs = drain(&mut engine);
+      assert!(
+        outputs.contains(&EngineOutput::Signal(CallClientMessage::UnpublishVideo {
+          stream_id: MediaStreamId(50)
+        }))
+      );
+      assert_eq!(follow_outputs(&outputs, &mut publications), vec![0]);
+      assert_eq!(publications[0].own.maybe_stream_id, Some(MediaStreamId(51)));
     }
 
     /// Issue #919: after an SFU restart the engine publishes the camera again; the web driver must
@@ -2723,17 +2748,17 @@ mod tests {
     fn a_rejoin_without_the_slot_moves_own_video_to_its_new_stream() {
       let now = Instant::now();
       let mut engine = joined_engine(now);
-      let mut publications = vec![publication(VideoTrackKind::Camera)];
-      engine.publish_video(VideoTrackKind::Camera, VideoCodec::H264, layers());
+      let mut publications = vec![publication(VideoTrackKind::Camera, CAMERA)];
+      engine.publish_video(CAMERA, VideoTrackKind::Camera, VideoCodec::H264, layers());
       let published = event(
         2,
         CallEvent::VideoPublished {
-          track: video_track(50, 1, VideoTrackKind::Camera),
+          track: video_track(50, 1, VideoTrackKind::Camera, Some(CAMERA)),
         },
       );
       engine.handle_signal(published, now).unwrap();
       assert_eq!(follow(&mut engine, &mut publications), vec![0]);
-      assert_eq!(publications[0].maybe_stream_id, Some(MediaStreamId(50)));
+      assert_eq!(publications[0].own.maybe_stream_id, Some(MediaStreamId(50)));
 
       // The SFU restarted and lost the slot: the engine unpublishes and publishes again.
       engine.connection_lost();
@@ -2746,20 +2771,24 @@ mod tests {
           kind: VideoTrackKind::Camera,
           codec: VideoCodec::H264,
           layers: layers(),
+          maybe_publication_id: Some(CAMERA),
         }))
       );
       follow_outputs(&outputs, &mut publications);
-      assert_eq!(publications[0].maybe_stream_id, None, "the old stream is gone");
+      assert_eq!(
+        publications[0].own.maybe_stream_id, None,
+        "the old stream is gone"
+      );
 
       let republished = event(
         2,
         CallEvent::VideoPublished {
-          track: video_track(51, 1, VideoTrackKind::Camera),
+          track: video_track(51, 1, VideoTrackKind::Camera, Some(CAMERA)),
         },
       );
       engine.handle_signal(republished, now).unwrap();
       assert_eq!(follow(&mut engine, &mut publications), vec![0]);
-      assert_eq!(publications[0].maybe_stream_id, Some(MediaStreamId(51)));
+      assert_eq!(publications[0].own.maybe_stream_id, Some(MediaStreamId(51)));
       let frame = EncodedVideoFrame {
         codec: VideoCodec::H264,
         layer: SimulcastLayer::new(0).unwrap(),
@@ -2793,10 +2822,10 @@ mod tests {
         .collect()
     }
 
-    fn publication(kind: VideoTrackKind) -> Publication {
+    fn publication(kind: VideoTrackKind, id: VideoPublicationId) -> Publication {
       Publication {
         kind,
-        maybe_stream_id: None,
+        own: OwnPublication::new(id),
       }
     }
   }
@@ -2872,7 +2901,7 @@ mod tests {
       let published = event(
         2,
         CallEvent::VideoPublished {
-          track: video_track(60, 2, VideoTrackKind::Camera),
+          track: video_track(60, 2, VideoTrackKind::Camera, None),
         },
       );
       engine.handle_signal(published, now).unwrap();
@@ -2940,13 +2969,19 @@ mod tests {
     }
   }
 
-  fn video_track(stream: u32, owner: i64, kind: VideoTrackKind) -> VideoTrack {
+  fn video_track(
+    stream: u32,
+    owner: i64,
+    kind: VideoTrackKind,
+    maybe_publication_id: Option<VideoPublicationId>,
+  ) -> VideoTrack {
     VideoTrack {
       stream_id: MediaStreamId(stream),
       device_id: device(owner),
       kind,
       codec: VideoCodec::H264,
       layers: layers(),
+      maybe_publication_id,
     }
   }
 

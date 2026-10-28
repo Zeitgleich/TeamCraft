@@ -68,7 +68,19 @@ pub struct VideoTrack {
   pub kind: VideoTrackKind,
   pub codec: VideoCodec,
   pub layers: Vec<VideoLayerInfo>,
+  /// The publisher's id of the request this track answers (`publish_video`), so it knows which of
+  /// its requests the SFU answered (#929). Older clients send none, older SFUs echo none.
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub maybe_publication_id: Option<VideoPublicationId>,
 }
+
+/// A client's own number for one of its video publications, unique per device within a call. The
+/// SFU only echoes it in the track it announces ([`VideoTrack::maybe_publication_id`]): an answer
+/// then belongs to exactly the request that asked for it, also when the client stopped the track
+/// before the answer came, or asked again for the same kind meanwhile.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct VideoPublicationId(pub u32);
 
 /// Arrival times of datagrams by transport sequence number, for bandwidth estimation (transport-wide
 /// feedback). Datagram `base_seq + i` (wrapping) arrived at `arrivals_us[i]` microseconds on the
@@ -120,6 +132,32 @@ mod tests {
       r#"{"audio_codecs":["opus"],"video_encoders":["h264"],"video_decoders":["av1","h264"],"max_simulcast_layers":3}"#
     );
     assert!(MediaCapabilities::default().video_decoders.is_empty());
+  }
+
+  #[test]
+  fn video_track_wire_format_with_and_without_publication_id() {
+    let mut track = VideoTrack {
+      stream_id: MediaStreamId(7),
+      device_id: "5".parse().unwrap(),
+      kind: VideoTrackKind::Camera,
+      codec: VideoCodec::H264,
+      layers: Vec::new(),
+      maybe_publication_id: Some(VideoPublicationId(3)),
+    };
+    let json = serde_json::to_string(&track).unwrap();
+    assert_eq!(
+      json,
+      r#"{"stream_id":7,"device_id":"5","kind":"camera","codec":"h264","layers":[],"maybe_publication_id":3}"#
+    );
+    assert_eq!(serde_json::from_str::<VideoTrack>(&json).unwrap(), track);
+    // Tracks of older clients, and from older SFUs, carry none; the field is left out then.
+    track.maybe_publication_id = None;
+    let older = r#"{"stream_id":7,"device_id":"5","kind":"camera","codec":"h264","layers":[]}"#;
+    assert_eq!(serde_json::to_string(&track).unwrap(), older);
+    assert_eq!(serde_json::from_str::<VideoTrack>(older).unwrap(), track);
+    // Fields of newer peers are ignored, as older peers ignore this one.
+    let newer = r#"{"stream_id":7,"device_id":"5","kind":"camera","codec":"h264","layers":[],"hint":"x"}"#;
+    assert_eq!(serde_json::from_str::<VideoTrack>(newer).unwrap(), track);
   }
 
   #[test]

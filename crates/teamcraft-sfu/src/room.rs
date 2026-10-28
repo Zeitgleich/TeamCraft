@@ -25,7 +25,8 @@ use teamcraft_media::{datagram::StreamId, dave::DaveEpoch};
 use teamcraft_proto::{
   Base64Bytes, CallClientMessage, CallEvent, CallId, CallParticipant, CallRosterEntry, ConversationId,
   DeviceId, ErrorBody, ErrorCode, MediaCapabilities, MediaStreamId, SFU_GOING_AWAY_CLOSE_CODE, SfuCallRoster,
-  SfuControlAction, TransportFeedback, UnixMillis, UserId, VideoCodec, VideoLayerInfo, VideoTrackKind,
+  SfuControlAction, TransportFeedback, UnixMillis, UserId, VideoCodec, VideoLayerInfo, VideoPublicationId,
+  VideoTrackKind,
 };
 use thiserror::Error;
 use tokio::sync::mpsc::{Sender, error::TrySendError};
@@ -487,9 +488,14 @@ impl Room {
         self.on_transport_feedback(participant_id, &feedback, now);
         Ok(())
       },
-      CallClientMessage::PublishVideo { kind, codec, layers } => rejected(
+      CallClientMessage::PublishVideo {
+        kind,
+        codec,
+        layers,
+        maybe_publication_id,
+      } => rejected(
         participant_id,
-        self.publish_video(participant_id, kind, codec, layers),
+        self.publish_video(participant_id, kind, codec, layers, maybe_publication_id),
       ),
       CallClientMessage::UnpublishVideo { stream_id } => {
         rejected(participant_id, self.unpublish_video(participant_id, stream_id))
@@ -557,19 +563,22 @@ impl Room {
     Ok(deliveries.len())
   }
 
-  /// Publishes a video track of `owner` and announces it to everyone.
+  /// Publishes a video track of `owner` and announces it to everyone. The track echoes the
+  /// owner's `maybe_publication_id`, also in later `joined` events, so the owner knows which of its
+  /// requests it answers (#929).
   pub fn publish_video(
     &self,
     owner: DeviceId,
     kind: VideoTrackKind,
     codec: VideoCodec,
     layers: Vec<VideoLayerInfo>,
+    maybe_publication_id: Option<VideoPublicationId>,
   ) -> Result<(), RoomError> {
     let mut state = lock(&self.state);
     let stream_id = state.allocate_stream_id();
     let track = state
       .forwarder
-      .publish_video(owner, stream_id, kind, codec, layers)?;
+      .publish_video(owner, stream_id, kind, codec, layers, maybe_publication_id)?;
     state.broadcast(CallEvent::VideoPublished { track });
     Ok(())
   }

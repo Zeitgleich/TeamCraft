@@ -17,7 +17,7 @@ use teamcraft_media::{
 };
 use teamcraft_proto::{
   CallClientMessage, CallEvent, CallServerMessage, MediaCapabilities, MediaStreamId, TransportFeedback,
-  VideoCodec, VideoLayerInfo, VideoTrackKind,
+  VideoCodec, VideoLayerInfo, VideoPublicationId, VideoTrackKind,
 };
 use teamcraft_sfu::{
   auth::DevTokenVerifier,
@@ -42,6 +42,7 @@ async fn subscriber_receives_the_allocated_layer_after_a_keyframe() {
       kind: VideoTrackKind::Camera,
       codec: VideoCodec::Av1,
       layers: three_layers(),
+      maybe_publication_id: Some(VideoPublicationId(3)),
     })
     .await;
   let published = publisher
@@ -50,6 +51,8 @@ async fn subscriber_receives_the_allocated_layer_after_a_keyframe() {
   let CallEvent::VideoPublished { track } = published else {
     unreachable!()
   };
+  // The answer names the request it answers (#929).
+  assert_eq!(track.maybe_publication_id, Some(VideoPublicationId(3)));
   subscriber
     .expect(|event| matches!(event, CallEvent::VideoPublished { .. }))
     .await;
@@ -123,6 +126,8 @@ async fn subscribing_to_an_undecodable_codec_is_rejected() {
       kind: VideoTrackKind::Screen,
       codec: VideoCodec::Av1,
       layers: three_layers()[..1].to_vec(),
+      // An older client: nothing to echo.
+      maybe_publication_id: None,
     })
     .await;
   let CallEvent::VideoPublished { track } = audio_only
@@ -131,6 +136,7 @@ async fn subscribing_to_an_undecodable_codec_is_rejected() {
   else {
     unreachable!()
   };
+  assert_eq!(track.maybe_publication_id, None);
   audio_only
     .send(CallClientMessage::Subscribe {
       stream_id: track.stream_id,
