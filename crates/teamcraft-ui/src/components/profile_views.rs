@@ -143,11 +143,13 @@ pub fn UserProfileDialog(user: UserId) -> impl IntoView {
 #[component]
 fn ProfileBadges(person: User) -> impl IntoView {
   let i18n = use_i18n();
-  let has_badges = person.is_guest || person.maybe_organization.is_some();
+  let state = use_app_state();
+  let is_guest_shown = person.is_guest && state.shows_guest_markers();
+  let has_badges = is_guest_shown || person.maybe_organization.is_some();
   has_badges.then(|| {
     view! {
       <p class="profile-badges">
-        {person.is_guest.then(|| view! { <span class="badge badge-guest">{move || i18n.t("badge-guest")}</span> })}
+        {is_guest_shown.then(|| view! { <span class="badge badge-guest">{move || i18n.t("badge-guest")}</span> })}
         {person.maybe_organization.clone().map(|name| view! { <crate::components::org_badge::OrgBadge organization=Some(name) /> })}
       </p>
     }

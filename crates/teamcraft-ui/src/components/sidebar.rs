@@ -896,8 +896,10 @@ pub fn SidebarItem(#[prop(into)] conversation: Signal<Conversation>) -> impl Int
     })
   });
   let has_external = Memo::new(move |_| {
-    conversation
-      .with(|conv| state.read(|backend| crate::components::channel_view::has_external_members(backend, conv)))
+    state.shows_guest_markers()
+      && conversation.with(|conv| {
+        state.read(|backend| crate::components::channel_view::has_external_members(backend, conv))
+      })
   });
   let is_peer_in_call = Memo::new(move |_| {
     maybe_peer

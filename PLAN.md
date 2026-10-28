@@ -315,7 +315,7 @@ no Asterisk, no cloud telephony API. Details: [docs/telephony.md](docs/telephony
 | Guest login: the company Keycloak realm with client role `guest`, or optional local account (password + TOTP/passkey) | v1   |                                                |
 | Guests see only their channels; no directory, no channel browser                                                      | v1   | Enforced by server and by MLS group membership |
 | Guests start no DM on their own (nobody, shared or anyone); members can always message them                           | v1   | `guests.dm_start`                              |
-| Guest badge everywhere, "external people" banner in channels                                                          | v1   |                                                |
+| Guest badge and "external people" banner for members, hidden from guests themselves                                   | v1   |                                                |
 | Expiry date, sponsor (responsible employee)                                                                           | v1   | Auto-removal on expiry                         |
 | Meeting-only guests (no account, one-time token)                                                                      | v1   |                                                |
 | History for guests: always from join                                                                                  | v1   |                                                |

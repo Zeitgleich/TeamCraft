@@ -331,7 +331,7 @@ fn BrowseRow(channel: BrowsableChannel) -> impl IntoView {
           {channel.name.clone()}
         </span>
         {is_private.then(|| view! { <span class="badge">{move || i18n.t("badge-private")}</span> })}
-        {channel.has_external_people.then(|| view! { <span class="badge badge-guest">{move || i18n.t("badge-external")}</span> })}
+        {(channel.has_external_people && state.shows_guest_markers()).then(|| view! { <span class="badge badge-guest">{move || i18n.t("badge-external")}</span> })}
         {channel.is_archived.then(|| view! { <span class="badge">{move || i18n.t("badge-archived")}</span> })}
         <span class="browse-topic" translate="no">{channel.topic.clone()}</span>
       </div>
@@ -681,7 +681,7 @@ fn ChannelMemberRow(
     <li class="settings-member">
       <Avatar user=user.clone() size=AvatarSize::Small show_presence=true />
       <span class="member-name" translate="no">{user.display_name.clone()}</span>
-      {user.is_guest.then(|| view! { <span class="badge badge-guest">{move || i18n.t("badge-guest")}</span> })}
+      {(user.is_guest && state.shows_guest_markers()).then(|| view! { <span class="badge badge-guest">{move || i18n.t("badge-guest")}</span> })}
       {is_me.then(|| view! { <span class="muted-text">{move || i18n.t("settings-member-you")}</span> })}
       <span class="grow"></span>
       {move || match (role.get(), options.get()) {

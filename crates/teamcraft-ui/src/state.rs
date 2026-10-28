@@ -861,6 +861,14 @@ impl AppState {
     self.read(|backend| backend.me())
   }
 
+  /// Whether the guest and "external people" markers show for the person looking: members, admins
+  /// and owners see them (somebody external reads along), a guest sees none, also none on other
+  /// guests. Every place that renders such a marker asks this (issue #911,
+  /// `scripts/check-guest-markers.py`).
+  pub fn shows_guest_markers(&self) -> bool {
+    !self.me().is_guest
+  }
+
   pub fn current_conversation_id(&self) -> Option<ConversationId> {
     match self.view.get() {
       MainView::Conversation(id) => Some(id),

@@ -295,6 +295,8 @@ jobs:
         run: scripts/split-hotspots.py --check
       - name: No emoji as UI icons, markers or labels (issue #575)
         run: scripts/check-no-emoji-icons.py
+      - name: Guest and external markers show only to members (issue #911)
+        run: scripts/check-guest-markers.py
       - name: Release notes render
         run: |
           version="$(scripts/check-versions.sh)"
