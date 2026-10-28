@@ -130,6 +130,8 @@ pub struct SimulcastEncoder {
 
 struct LayerEncoder {
   info: VideoLayerInfo,
+  /// What the encoder is built for: the layer's bitrate, or less on a limited uplink (#939).
+  bitrate_bps: u32,
   encoder: Box<dyn VideoEncoder>,
   is_needed: bool,
   wants_keyframe: bool,
@@ -378,6 +380,7 @@ impl SimulcastEncoder {
       .map(|info| {
         Ok(LayerEncoder {
           info: *info,
+          bitrate_bps: info.max_bitrate_bps,
           encoder: make_encoder(info)?,
           is_needed: true,
           wants_keyframe: true,
@@ -460,11 +463,49 @@ impl SimulcastEncoder {
         .iter()
         .find(|info| info.layer == layer.info.layer)
         .ok_or(VideoCodecError::UnknownLayer(layer.info.layer))?;
-      rebuilt.push((*info, make_encoder(info)?));
+      // A bitrate lowered for the uplink stays lowered.
+      let bitrate_bps = if layer.bitrate_bps == layer.info.max_bitrate_bps {
+        info.max_bitrate_bps
+      } else {
+        layer.bitrate_bps
+      };
+      let built = VideoLayerInfo {
+        max_bitrate_bps: bitrate_bps,
+        ..*info
+      };
+      rebuilt.push((*info, bitrate_bps, make_encoder(&built)?));
     }
-    for (layer, (info, encoder)) in self.layers.iter_mut().zip(rebuilt) {
+    for (layer, (info, bitrate_bps, encoder)) in self.layers.iter_mut().zip(rebuilt) {
       layer.info = info;
+      layer.bitrate_bps = bitrate_bps;
       layer.encoder = encoder;
+      layer.wants_keyframe = true;
+    }
+    Ok(())
+  }
+
+  /// Encodes the layers at `bitrates` (layer, bit/s) from now on (#939: the top layer of a camera
+  /// at less than its bitrate on a limited uplink). A layer whose bitrate changes gets a new
+  /// encoder from `make_encoder` and starts with a keyframe (not every encoder can change its
+  /// bitrate on the fly); the others go on. On an error that layer keeps its encoder.
+  pub fn set_bitrates(
+    &mut self,
+    bitrates: &[(u8, u32)],
+    mut make_encoder: impl FnMut(&VideoLayerInfo) -> Result<Box<dyn VideoEncoder>, VideoCodecError>,
+  ) -> Result<(), VideoCodecError> {
+    for layer in &mut self.layers {
+      let Some(&(_, bitrate_bps)) = bitrates.iter().find(|(id, _)| *id == layer.info.layer) else {
+        continue;
+      };
+      if bitrate_bps == layer.bitrate_bps || bitrate_bps == 0 {
+        continue;
+      }
+      let built = VideoLayerInfo {
+        max_bitrate_bps: bitrate_bps,
+        ..layer.info
+      };
+      layer.encoder = make_encoder(&built)?;
+      layer.bitrate_bps = bitrate_bps;
       layer.wants_keyframe = true;
     }
     Ok(())
@@ -579,6 +620,8 @@ pub(crate) fn starts_with_sps(data: &[u8]) -> bool {
 
 #[cfg(test)]
 mod tests {
+  use std::sync::{Arc, Mutex};
+
   use teamcraft_proto::ScreenContentMode;
 
   use super::*;
@@ -615,6 +658,59 @@ mod tests {
     assert_eq!(decoded.resolution(), HD);
     let psnr = luma_psnr(&original, &decoded);
     assert!(psnr > 30.0, "PSNR {psnr:.1} dB");
+  }
+
+  /// Issue #939: a layer whose bitrate changes gets an encoder built for it, which starts with a
+  /// keyframe and stays within the new bitrate; the other layers go on as they were, and a resize
+  /// keeps the lowered bitrate.
+  #[test]
+  #[cfg_attr(
+    not(feature = "openh264-source"),
+    ignore = "needs OpenH264: --features openh264-source"
+  )]
+  fn a_layer_bitrate_change_rebuilds_only_that_layer() {
+    let layers = simulcast_layers(HD, 30, 1_600_000, 3);
+    let built: Arc<Mutex<Vec<(u8, u32)>>> = Arc::default();
+    let make = |built: Arc<Mutex<Vec<(u8, u32)>>>| {
+      move |info: &VideoLayerInfo| {
+        built.lock().unwrap().push((info.layer, info.max_bitrate_bps));
+        Ok(Box::new(OpenH264Encoder::new(info, VideoContent::Camera)?) as Box<dyn VideoEncoder>)
+      }
+    };
+    let mut simulcast = SimulcastEncoder::new(&layers, make(Arc::clone(&built))).unwrap();
+    let mut index = 0;
+    encode_frames(&mut simulcast, &mut index, 30);
+    built.lock().unwrap().clear();
+    let lowered = [
+      (0, layers[0].max_bitrate_bps),
+      (1, layers[1].max_bitrate_bps),
+      (2, 560_000),
+    ];
+    simulcast
+      .set_bitrates(&lowered, make(Arc::clone(&built)))
+      .unwrap();
+    assert_eq!(*built.lock().unwrap(), vec![(2, 560_000)]);
+    let next = encode_frames(&mut simulcast, &mut index, 1);
+    for frame in &next {
+      let expected = frame.layer.value() == 2;
+      assert_eq!(frame.is_keyframe, expected, "layer {}", frame.layer.value());
+    }
+    // The same bitrates again rebuild nothing.
+    simulcast
+      .set_bitrates(&lowered, make(Arc::clone(&built)))
+      .unwrap();
+    assert_eq!(built.lock().unwrap().len(), 1);
+    // A source of another size rebuilds every layer, the lowered one at its lowered bitrate.
+    built.lock().unwrap().clear();
+    simulcast.resize(&layers, make(Arc::clone(&built))).unwrap();
+    assert_eq!(
+      *built.lock().unwrap(),
+      vec![
+        (0, layers[0].max_bitrate_bps),
+        (1, layers[1].max_bitrate_bps),
+        (2, 560_000)
+      ]
+    );
   }
 
   #[test]
