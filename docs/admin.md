@@ -664,7 +664,8 @@ Groups that are stored and reset as a whole:
 
 **Signed or not.** Settings that member clients must be able to verify against a compromised server
 are part of the owner-signed workspace policy (§2.3) and are edited there: `admin_self_join`, org
-recovery, history and retention defaults, session rules, directory privacy, presence, threads, guest
+recovery, whether members may still set a recovery passphrase instead of a recovery kit
+(`recovery.is_passphrase_allowed`, e2ee.md §6.5.8), history and retention defaults, session rules, directory privacy, presence, threads, guest
 rules (allowed e-mail domains, default expiry, whom guests may start a DM with), the shortest
 password, push content, call backgrounds, desktop updates and the recommended number of owners.
 Everything in this section is enforced
