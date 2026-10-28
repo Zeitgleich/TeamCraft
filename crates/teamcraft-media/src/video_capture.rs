@@ -14,6 +14,11 @@ use crate::video::{VideoError, VideoFrame, VideoResolution};
 
 /// Frames waiting for the encoder; more are dropped.
 pub const CAPTURE_QUEUE_FRAMES: usize = 2;
+/// The [`VideoCapture::stall_limit`] of cameras whose read never reports an end (#922): far above
+/// the gap between two frames of any running camera, even in low light, and above the short pause
+/// AVFoundation makes when another app reconfigures the camera; short enough that the user learns
+/// within seconds that their camera went away.
+pub const CAMERA_STALL_LIMIT: Duration = Duration::from_secs(5);
 
 /// A camera, a screen or a test source.
 pub trait VideoCapture: Send {
@@ -22,6 +27,15 @@ pub trait VideoCapture: Send {
   /// Starts delivering frames into `frames` until [`VideoCapture::stop`] or drop.
   fn start(&mut self, frames: FrameSender) -> Result<(), CaptureError>;
   fn stop(&mut self);
+
+  /// How long the capture may deliver nothing, once it delivered, before its track counts as
+  /// ended. For cameras that deliver all the time but never report that they stopped (nokhwa's
+  /// AVFoundation camera, unplugged or interrupted, #922). `None` (the default): no limit, for
+  /// captures that end by themselves when their device goes, screens that deliver only on change
+  /// and frames an app pushes when it can.
+  fn stall_limit(&self) -> Option<Duration> {
+    None
+  }
 }
 
 /// A camera to show in a picker.
