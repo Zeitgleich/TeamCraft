@@ -9,6 +9,11 @@
 //!   trendline over the one-way delay variation turns positive. Overuse cuts the rate to 85 % of
 //!   what was actually delivered.
 //! - **Loss:** above 10 % loss the rate shrinks with the loss; between 2 % and 10 % it holds.
+//! - **Application-limited senders** (sending less than half the estimate, like a still shared
+//!   screen that sends little but keyframes of hundreds of kilobytes): what got through says
+//!   nothing about the path, so a delay-based decrease starts from the estimate instead, and the
+//!   delay of their own bursts doesn't end the fast start (GCC's "ALR", #941). Loss still cuts
+//!   to what got through.
 //!
 //! Otherwise the rate grows multiplicatively (8 %/s by default; at the start, until the first sign
 //! of congestion, much faster: see [`BweConfig::start_increase_per_second`]), capped at 1.5× the
@@ -49,6 +54,11 @@ const SEND_HISTORY: Duration = Duration::from_secs(5);
 const DELAY_DECREASE_INTERVAL: Duration = Duration::from_millis(200);
 /// Window over which the loss ratio is measured.
 const LOSS_WINDOW: Duration = Duration::from_secs(1);
+/// Window over which the sent rate tells an application-limited sender.
+const APP_LIMITED_WINDOW: Duration = Duration::from_secs(2);
+/// A sender that sent less than this share of the estimate over [`APP_LIMITED_WINDOW`] is
+/// application-limited.
+const APP_LIMITED_SHARE: f64 = 0.5;
 /// Largest feedback the recorder produces in one message.
 const MAX_FEEDBACK_ENTRIES: usize = 1000;
 
@@ -93,6 +103,10 @@ pub struct SendSideEstimator {
   /// No sign of congestion since the start or [`SendSideEstimator::measure_afresh`]: growth at
   /// [`BweConfig::start_increase_per_second`].
   is_starting: bool,
+  /// (send time, bytes) of the last [`APP_LIMITED_WINDOW`], and their sum.
+  recent_sends: VecDeque<(Instant, usize)>,
+  recent_sent_bytes: usize,
+  maybe_first_send_at: Option<Instant>,
 }
 
 /// Receiver side: records arrival times and produces [`TransportFeedback`].
@@ -173,6 +187,9 @@ impl SendSideEstimator {
       maybe_demand_bps: None,
       is_holding_after_decrease: false,
       is_starting: true,
+      recent_sends: VecDeque::new(),
+      recent_sent_bytes: 0,
+      maybe_first_send_at: None,
     }
   }
 
@@ -188,6 +205,9 @@ impl SendSideEstimator {
     self.highest_sent = self.highest_sent.max(extended);
     self.sent.insert(extended, SentPacket { at: now, bytes });
     self.forget_old(now);
+    self.maybe_first_send_at.get_or_insert(now);
+    self.recent_sends.push_back((now, bytes));
+    self.recent_sent_bytes += bytes;
     seq
   }
 
@@ -275,8 +295,17 @@ impl SendSideEstimator {
       .map_or(Duration::ZERO, |last| now.saturating_duration_since(last));
     self.maybe_last_update_at = Some(now);
     let acked_bps = self.acked_bps();
-    // Congestion (a queue building up, loss that holds or cuts the rate) ends the start.
-    if self.delay.usage == BandwidthUsage::Overusing || self.last_loss_ratio >= 0.02 {
+    let is_app_limited = self.is_app_limited(now);
+    // What got through is the path's rate only while the sender filled it.
+    let decrease_base = if is_app_limited {
+      self.estimate_bps
+    } else {
+      acked_bps
+    };
+    // Congestion (a queue building up, loss that holds or cuts the rate) ends the start; the
+    // queue of an application-limited sender's own burst doesn't.
+    let is_overusing = self.delay.usage == BandwidthUsage::Overusing;
+    if (is_overusing && !is_app_limited) || self.last_loss_ratio >= 0.02 {
       self.is_starting = false;
     }
     match self.delay.usage {
@@ -285,7 +314,7 @@ impl SendSideEstimator {
           && !self.is_holding_after_decrease
           && self.may_decrease(now, DELAY_DECREASE_INTERVAL)
         {
-          self.estimate_bps = self.estimate_bps.min(self.config.decrease_factor * acked_bps);
+          self.estimate_bps = self.estimate_bps.min(self.config.decrease_factor * decrease_base);
           self.maybe_last_decrease_at = Some(now);
           self.is_holding_after_decrease = true;
         }
@@ -312,7 +341,7 @@ impl SendSideEstimator {
     }
     if self.last_loss_ratio > 0.10 && acked_bps > 0.0 && self.may_decrease(now, LOSS_WINDOW) {
       // Based on what got through, not on the previous estimate, so repeated reports of the same
-      // loss episode don't compound.
+      // loss episode don't compound. Loss is damage also to an application-limited sender.
       let loss_based = acked_bps * (1.0 - 0.5 * self.last_loss_ratio);
       self.estimate_bps = self.estimate_bps.min(loss_based);
       self.maybe_last_decrease_at = Some(now);
@@ -320,6 +349,26 @@ impl SendSideEstimator {
     self.estimate_bps = self
       .estimate_bps
       .clamp(f64::from(self.config.min_bps), f64::from(self.config.max_bps));
+  }
+
+  /// Whether the sender sent less than [`APP_LIMITED_SHARE`] of the estimate lately (over
+  /// [`APP_LIMITED_WINDOW`], or since its first packet when that is more recent).
+  fn is_app_limited(&mut self, now: Instant) -> bool {
+    while let Some(&(at, bytes)) = self.recent_sends.front() {
+      if now.saturating_duration_since(at) <= APP_LIMITED_WINDOW {
+        break;
+      }
+      self.recent_sends.pop_front();
+      self.recent_sent_bytes -= bytes;
+    }
+    let Some(first_send_at) = self.maybe_first_send_at else {
+      return true;
+    };
+    let span = now
+      .saturating_duration_since(first_send_at)
+      .clamp(Duration::from_millis(200), APP_LIMITED_WINDOW);
+    let sent_bps = self.recent_sent_bytes as f64 * 8.0 / span.as_secs_f64();
+    sent_bps < APP_LIMITED_SHARE * self.estimate_bps
   }
 
   fn may_decrease(&self, now: Instant, interval: Duration) -> bool {
@@ -638,6 +687,47 @@ mod tests {
       assert!(before > BweConfig::default().start_bps);
       sim.estimator.measure_afresh();
       assert_eq!(sim.estimator.estimate_bps(), before);
+    }
+  }
+
+  mod app_limited {
+    use super::*;
+
+    /// Issue #941: a still screen share sends little but bursts of keyframes, and the queue of a
+    /// burst reads as overuse. What got through is far below the path's rate then: the cut
+    /// starts from the estimate, not from it, and the fast start goes on.
+    #[test]
+    fn the_queue_of_an_application_limited_burst_cuts_the_estimate_a_step() {
+      let config = BweConfig {
+        start_bps: 8_000_000,
+        ..BweConfig::default()
+      };
+      let mut estimator = SendSideEstimator::new(config);
+      estimator.set_demand_bps(Some(9_000_000));
+      let epoch = Instant::now();
+      // One packet every 10 ms (about 1 Mbit/s), each waiting 3 ms longer than the one before.
+      let mut feedback_base = 0u16;
+      let mut arrivals_us = Vec::new();
+      for index in 0..60u64 {
+        let sent_at = epoch + Duration::from_millis(10 * index);
+        estimator.on_send(PACKET_BYTES, sent_at);
+        arrivals_us.push(Some((10 * index + 20 + 3 * index) * 1000));
+        if arrivals_us.len() == 10 {
+          let feedback = TransportFeedback {
+            base_seq: feedback_base,
+            arrivals_us: std::mem::take(&mut arrivals_us),
+          };
+          feedback_base += 10;
+          estimator.on_feedback(&feedback, sent_at + Duration::from_millis(30), epoch);
+        }
+      }
+      assert_eq!(estimator.usage(), BandwidthUsage::Overusing);
+      let estimate = estimator.estimate_bps();
+      assert!(
+        (6_000_000..8_000_000).contains(&estimate),
+        "one step down from the estimate, not to what got through: {estimate}"
+      );
+      assert!(estimator.is_starting, "the burst ends the fast start");
     }
   }
 

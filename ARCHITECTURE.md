@@ -542,8 +542,11 @@ Settings → Chats).
 - Estimates start fast: from the start value (and after measuring afresh) they triple per second
   until the first overuse or loss, then grow 8 %/s. The SFU measures a receiver's downlink afresh
   when it subscribes to a new track, so a viewer of a share started after a call of sound only gets
-  the sharp layer within about five seconds instead of minutes (#941). A screen share keeps its
-  layer through a dip shorter than three seconds (its keyframes are bursts the estimate reacts to).
+  the sharp layer within about five seconds instead of minutes (#941). A still screen sends little
+  but keyframe bursts: while a sender sends less than half its estimate, the queue of its own
+  burst cuts the estimate one step from where it is (not to what got through) and doesn't end the
+  fast start, and a screen share keeps its layers through a dip shorter than three seconds, at
+  the SFU and on the presenter's uplink.
 - Large frames: a frame of more than 255 fragments (a 1440p keyframe of text is about 450 KB)
   carries the fragment extension's long form (16-bit index and count, up to 4096 fragments); the
   short form stays for every other frame. Before, such keyframes could not be sent, and the top

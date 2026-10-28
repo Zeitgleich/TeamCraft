@@ -265,7 +265,7 @@ impl Timeline {
       .max()
       .unwrap_or(0);
     let mut lines = vec![
-      "  s  viewer (pictures size: mean/min PSNR dB)  |  sent per layer width: kbit/s (keyframes)  |  layers needed, uplink kbit/s"
+      "  s  viewer (pictures size: mean/min PSNR dB)  |  sent per layer width: kbit/s (keyframes)  |  layers needed, uplink kbit/s (low-high)"
         .to_string(),
     ];
     for second in 0..=seconds {
@@ -310,16 +310,28 @@ impl Timeline {
         .iter()
         .map(|(width, (bytes, keyframes))| format!("{width}: {} ({keyframes})", bytes * 8 / 1000))
         .collect();
+      // The layers asked for in order, and the uplink estimate's range between them.
       let mut presenter = Vec::new();
+      let mut maybe_range: Option<(u32, u32)> = None;
+      let close_range =
+        |presenter: &mut Vec<String>, maybe_range: &mut Option<(u32, u32)>| match maybe_range.take() {
+          Some((low, high)) if low == high => presenter.push(format!("{}", low / 1000)),
+          Some((low, high)) => presenter.push(format!("{}-{}", low / 1000, high / 1000)),
+          None => {},
+        };
       for (_, heard) in self.heard.iter().filter(|(at, _)| at.as_secs() == second) {
         match heard {
-          Heard::LayersNeeded(layers) => presenter.push(format!("{layers:?}")),
-          Heard::UplinkEstimate(bps) if presenter.last().is_none_or(|last| last.starts_with('[')) => {
-            presenter.push(format!("{}", bps / 1000));
+          Heard::LayersNeeded(layers) => {
+            close_range(&mut presenter, &mut maybe_range);
+            presenter.push(format!("{layers:?}"));
           },
-          Heard::UplinkEstimate(_) => {},
+          Heard::UplinkEstimate(bps) => {
+            let (low, high) = maybe_range.unwrap_or((*bps, *bps));
+            maybe_range = Some((low.min(*bps), high.max(*bps)));
+          },
         }
       }
+      close_range(&mut presenter, &mut maybe_range);
       lines.push(format!(
         "{second:3}  {:<46} |  {:<32} |  {}",
         viewer.join(", "),

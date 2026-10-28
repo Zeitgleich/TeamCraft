@@ -1226,7 +1226,7 @@ impl CallEngine {
     let has_changed =
       self
         .uplink_layers
-        .on_estimate(bps, &tracks, is_sending_screen_audio, &self.uplink_policy);
+        .on_estimate(bps, &tracks, is_sending_screen_audio, &self.uplink_policy, now);
     if has_changed {
       self.announce_layers(true);
       self.announce_uplink_layers();
