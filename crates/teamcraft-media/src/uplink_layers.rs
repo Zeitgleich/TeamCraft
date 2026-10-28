@@ -61,6 +61,26 @@ pub struct UplinkPolicy {
   /// rises while the layer stays. Each change costs a keyframe of the layer; stepping through
   /// the shares one after another sent three within a second into a nearly full link (#939).
   pub share_upswitch_hold: Duration,
+  /// A step up of a camera that adapts its bitrate counts as carried once it held this long; one
+  /// undone sooner was a probe the uplink didn't carry, and the next step up waits (4 s, doubling
+  /// with every such probe up to [`MAX_PROBE_BACKOFF`], from the start after one that held). The
+  /// estimate grows again within seconds after a cut, and every probe costs a keyframe and a
+  /// moment of congestion: on a link that stays limited they came every few seconds (#939).
+  pub probe_proof: Duration,
+}
+
+/// The longest wait before a camera steps up again after probes that failed.
+const MAX_PROBE_BACKOFF: Duration = Duration::from_secs(32);
+/// The wait after the first probe that failed.
+const FIRST_PROBE_BACKOFF: Duration = Duration::from_secs(4);
+
+/// The step-up probes of one adaptive camera.
+#[derive(Debug, Default)]
+struct Probes {
+  /// When it last stepped up, until the step counts as carried.
+  maybe_stepped_up_at: Option<Instant>,
+  backoff: Duration,
+  maybe_blocked_until: Option<Instant>,
 }
 
 /// One own video track as the allocation sees it.
@@ -88,6 +108,7 @@ pub struct UplinkLayers {
   /// Since when the estimate asks for another share of a camera's top layer, and whether a
   /// higher one.
   share_change_pending_since: HashMap<StreamId, (Instant, bool)>,
+  probes: HashMap<StreamId, Probes>,
 }
 
 impl Default for UplinkPolicy {
@@ -100,6 +121,7 @@ impl Default for UplinkPolicy {
       camera_bitrate_shares: [0.5, 0.7, 1.0],
       share_downswitch_hold: Duration::from_secs(1),
       share_upswitch_hold: Duration::from_secs(2),
+      probe_proof: Duration::from_secs(4),
     }
   }
 }
@@ -114,6 +136,7 @@ impl UplinkLayers {
       top_shares: HashMap::new(),
       downgrade_pending_since: HashMap::new(),
       share_change_pending_since: HashMap::new(),
+      probes: HashMap::new(),
     }
   }
 
@@ -159,6 +182,7 @@ impl UplinkLayers {
     self.top_shares.clear();
     self.downgrade_pending_since.clear();
     self.share_change_pending_since.clear();
+    self.probes.clear();
   }
 
   /// The bitrate `info`'s layer of `stream` is encoded at: its whole bitrate, or a share of it
@@ -189,6 +213,7 @@ impl UplinkLayers {
     self.top_shares.remove(&stream);
     self.downgrade_pending_since.remove(&stream);
     self.share_change_pending_since.remove(&stream);
+    self.probes.remove(&stream);
   }
 
   fn share_of(&self, stream: StreamId) -> f64 {
@@ -291,6 +316,17 @@ impl UplinkLayers {
         policy,
         now,
       );
+      let (maybe_top, share) = if is_adaptive {
+        self.after_probe_backoff(
+          track.stream,
+          (maybe_current, current_share),
+          (maybe_top, share),
+          policy,
+          now,
+        )
+      } else {
+        (maybe_top, share)
+      };
       let used = track
         .layers
         .iter()
@@ -314,6 +350,41 @@ impl UplinkLayers {
     self
       .share_change_pending_since
       .retain(|stream, _| tracks.iter().any(|track| track.stream == *stream));
+    self
+      .probes
+      .retain(|stream, _| tracks.iter().any(|track| track.stream == *stream));
+  }
+
+  /// `chosen` for an adaptive camera at `current`, unless it is a step up while an earlier one
+  /// that failed still holds them back ([`UplinkPolicy::probe_proof`]): then `current`.
+  fn after_probe_backoff(
+    &mut self,
+    stream: StreamId,
+    current: (Option<u8>, f64),
+    chosen: (Option<u8>, f64),
+    policy: &UplinkPolicy,
+    now: Instant,
+  ) -> (Option<u8>, f64) {
+    let rank = |(maybe_layer, share): (Option<u8>, f64)| (maybe_layer.map_or(-1, i16::from), share);
+    let probes = self.probes.entry(stream).or_default();
+    if probes
+      .maybe_stepped_up_at
+      .is_some_and(|at| now.saturating_duration_since(at) >= policy.probe_proof)
+    {
+      // The last step held: the uplink carries it.
+      probes.maybe_stepped_up_at = None;
+      probes.backoff = Duration::ZERO;
+    }
+    if rank(chosen) > rank(current) {
+      if probes.maybe_blocked_until.is_some_and(|until| now < until) {
+        return current;
+      }
+      probes.maybe_stepped_up_at = Some(now);
+    } else if rank(chosen) < rank(current) && probes.maybe_stepped_up_at.take().is_some() {
+      probes.backoff = (probes.backoff * 2).clamp(FIRST_PROBE_BACKOFF, MAX_PROBE_BACKOFF);
+      probes.maybe_blocked_until = Some(now + probes.backoff);
+    }
+    chosen
   }
 
   /// `share` for the top layer `maybe_top`, unless that is the current top layer at another
@@ -527,6 +598,42 @@ mod tests {
     assert!(uplink.on_estimate(7_000_000, &tracks, false, &policy(), at(6_000)));
     assert!(!uplink.allows(SCREEN, 1));
     assert!(uplink.allows(SCREEN, 0));
+  }
+
+  /// Issue #939: a step up that the uplink doesn't carry is undone at once; the next one waits,
+  /// longer with every failure, and as before once a step held.
+  #[test]
+  fn steps_up_that_fail_back_off() {
+    let layers = camera_layers();
+    let tracks = [adapting_camera(&layers)];
+    let start = Instant::now();
+    let at = |millis: u64| start + Duration::from_millis(millis);
+    let mut uplink = UplinkLayers::new(300_000);
+    uplink.on_estimate(2_500_000, &tracks, false, &policy(), at(0));
+    // Down to the middle layer, whole.
+    uplink.on_estimate(800_000, &tracks, false, &policy(), at(100));
+    assert!(!uplink.allows(CAMERA, 2));
+    // The estimate grows: the top layer comes back at half (the probe), and the cut that
+    // follows undoes it.
+    uplink.on_estimate(1_700_000, &tracks, false, &policy(), at(1_000));
+    assert!(uplink.allows(CAMERA, 2));
+    uplink.on_estimate(800_000, &tracks, false, &policy(), at(1_500));
+    assert!(!uplink.allows(CAMERA, 2));
+    // The next probe waits 4 s, the one after that 8 s.
+    uplink.on_estimate(1_700_000, &tracks, false, &policy(), at(3_000));
+    assert!(!uplink.allows(CAMERA, 2));
+    uplink.on_estimate(1_700_000, &tracks, false, &policy(), at(5_600));
+    assert!(uplink.allows(CAMERA, 2));
+    uplink.on_estimate(800_000, &tracks, false, &policy(), at(6_000));
+    uplink.on_estimate(1_700_000, &tracks, false, &policy(), at(13_000));
+    assert!(!uplink.allows(CAMERA, 2));
+    uplink.on_estimate(1_700_000, &tracks, false, &policy(), at(14_100));
+    assert!(uplink.allows(CAMERA, 2));
+    // This one holds: a later failure waits 4 s again.
+    uplink.on_estimate(1_700_000, &tracks, false, &policy(), at(18_200));
+    uplink.on_estimate(800_000, &tracks, false, &policy(), at(19_000));
+    uplink.on_estimate(1_700_000, &tracks, false, &policy(), at(19_100));
+    assert!(uplink.allows(CAMERA, 2));
   }
 
   /// Issue #939: a camera that adapts its bitrate keeps its top layer at a share of its bitrate

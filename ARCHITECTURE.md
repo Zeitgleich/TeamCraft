@@ -560,10 +560,13 @@ Settings → Chats).
 
   *Estimator* (`teamcraft_media::bwe`): a queue building up (delay trend) cuts the estimate a
   step, to 85 % of itself; a queue that lasts 500 ms (the window the delivered rate is measured
-  over) cuts it to 85 % of what got through, as does loss above 10 % (to what got through less
-  half the loss; only loss of packets sent after the last such cut counts); loss of 2–10 % holds
-  it. GCC cuts to what got through at once, but a camera doesn't fill its estimate (layers in
-  steps, keyframes): the queue of one keyframe cut it below the middle layer. Growth is 8 %/s,
+  over) while more is sent than gets through cuts it to 85 % of what got through, as does loss
+  above 10 % (to what got through less half the loss; only loss of packets sent after the last
+  such cut counts); loss of 2–10 % holds it. GCC cuts to what got through at once, but a camera
+  doesn't fill its estimate (layers in steps, keyframes): the queue of one keyframe cut it below
+  its top layer. A burst's queue can last as long (a still screen's keyframe read by a slow
+  machine), but nothing more is sent meanwhile: cut to what got through of it, a CI runner's
+  screen share viewer stayed on the half-size layer (#946's test). Growth is 8 %/s,
   and 50 %/s once the path showed no congestion for 2 s: simulcast grows in steps, so the next
   step is the probe. A probe that meets congestion doubles that wait (up to 32 s); once 10 % more
   than at the last congestion gets through, it is 2 s again. Before, a camera cut to its middle
@@ -575,7 +578,10 @@ Settings → Chats).
   its bitrate doesn't fit, and the next lower one becomes the top one, at once. A lower share
   waits 1 s, a higher one 2 s (each change rebuilds the layer's encoder, which starts with a
   keyframe), and the way back up goes one step at a time, with a 15 % margin until the estimate
-  covers everything. Before, the top layer stopped as soon as its whole bitrate didn't fit: a
+  covers everything. A step up undone within 4 s was a probe the uplink didn't carry: the next
+  one waits 4 s, doubling up to 32 s, and 4 s again after a step that held (the estimate grows
+  back within seconds after a cut, and every probe costs a keyframe and a moment of congestion).
+  Before, the top layer stopped as soon as its whole bitrate didn't fit: a
   500 kbit/s uplink carried 320×180 at about 80 kbit/s, a 2 Mbit/s one 640×360 at 300 kbit/s.
   Browsers' cameras and screen shares send a layer whole or not at all, as before.
 
@@ -593,7 +599,7 @@ Settings → Chats).
   | Uplink 500 kbit/s                     | 320×180, ~75 kbit/s, 33.8 dB              | 640×360, 200–350 kbit/s, 35.8 dB   |
   | Uplink 2 Mbit/s, after 500 kbit/s     | 320×180 or 640×360, at most 300 kbit/s    | 720p 2–9 s after the step          |
   | Uplink limit lifted                   | 720p 6 s later, or not within 10 s        | 720p already                       |
-  | Uplink drops to 500 kbit/s            | longest stall 0.2–0.3 s                   | longest stall 0.3–0.9 s            |
+  | Uplink drops to 500 kbit/s            | longest stall 0.2–0.3 s                   | longest stall 0.3–1.0 s            |
   | Viewer's downlink drops to 500 kbit/s | longest stall 2.2–3.4 s, then 320×180     | 0.6–1.0 s, then 320×180 or 640×360 |
   | Viewer's downlink limit lifted        | 640×360 after 1–2 s, 720p not within 14 s | 720p after 2–9 s                   |
   | The other viewer                      | 720p throughout                           | 720p throughout                    |
@@ -601,12 +607,12 @@ Settings → Chats).
   (dB: luma PSNR of the picture as a large tile shows it, a lower layer scaled up to 720p.) A
   sudden drop stalls a little longer than before: the top layer keeps its share for the hold
   until the estimator's cut to what got through. While a limit stays, the next layer is tried
-  now and then (the probe: a few seconds apart at first, then about every 15 s), which can hold
-  the picture up for up to a second. Not yet: the SFU's QUIC send buffer keeps up to
-  1 MiB of datagrams, so after a sudden drop it still delivers the old layer's queue before the
-  lower one; browsers' cameras don't adapt their bitrate (WebCodecs would need a reconfigured
-  encoder per change); the shares aren't told to the SFU, which allocates by the layers' full
-  bitrates.
+  now and then (the probe: 4 s apart at first, then up to 32 s), which can hold the picture up
+  for up to a second. Not yet: QUIC's send buffer (client and SFU, up to 1 MiB of datagrams)
+  and its congestion window, which collapses after the loss of a sudden drop, deliver the old
+  layer's queue before the lower one (seconds of it on a loaded machine); browsers' cameras
+  don't adapt their bitrate (WebCodecs would need a reconfigured encoder per change); the shares
+  aren't told to the SFU, which allocates by the layers' full bitrates.
 - Large frames: a frame of more than 255 fragments (a 1440p keyframe of text is about 450 KB)
   carries the fragment extension's long form (16-bit index and count, up to 4096 fragments); the
   short form stays for every other frame. Before, such keyframes could not be sent, and the top
