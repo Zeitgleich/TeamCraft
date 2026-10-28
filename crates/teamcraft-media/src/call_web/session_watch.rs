@@ -1,12 +1,36 @@
 //! The browser call task's decisions about its sessions, without the browser: which session's news
-//! still counts, when a session's path counts as lost, when to read its packet count, and when a
-//! network change may hurry a rejoin. Time is passed in, so all of it is tested without a network.
+//! still counts, when a session's path counts as lost, when to read its packet count or ping the
+//! SFU, and when a network change may hurry a rejoin. Time is passed in, so all of it is tested
+//! without a network.
+//!
+//! Two kinds of evidence prove a session's path alive, either is enough:
+//!
+//! - the browser's packet count (`getStats().packetsReceived`), which includes the SFU's QUIC
+//!   keep-alives. Safari reports every count as zero, so there it proves nothing;
+//! - the page's own traffic: each datagram and signaling frame the read loops deliver, and the
+//!   SFU's answers to the pings (`CallClientMessage::Ping`) sent when nothing else arrived for
+//!   the echo interval. Only an SFU that answered once is watched this way: an older one ignores
+//!   pings, and a quiet call would look dead (#841).
+//!
+//! Media alone never decides: a muted microphone, a camera that is off or a still screen share
+//! send nothing for long stretches, and the answered pings keep such a session alive.
+
+use std::time::Duration;
 
 use web_time::Instant;
 
 use crate::call_resilience::{PathMonitor, PathState, ReconnectSchedule, ResilienceConfig};
 
-/// Generations, packet counts and loss of the call's current session.
+/// Pings a session may leave unanswered, each given the echo interval, before its SFU counts as
+/// one that doesn't answer (an older one). The signaling stream is reliable and ordered, so an SFU
+/// that answers has answered by then unless the path is already gone.
+const MAX_UNANSWERED_PINGS: u32 = 5;
+
+/// A gap this long between two timer ticks means the page was suspended (a background tab, a
+/// locked phone): the silence it didn't watch proves nothing about the path.
+const SUSPENDED_TICK_GAP: Duration = Duration::from_secs(2);
+
+/// Generations, packet counts, pings and loss of the call's current session.
 #[derive(Debug, Clone)]
 pub(super) struct SessionWatch {
   /// Counts sessions: news of an older one (signals, datagrams, packet counts, its end) is stale.
@@ -20,7 +44,36 @@ pub(super) struct SessionWatch {
   /// Readings up to this one were asked for before (or right at) the last network change: they
   /// may include packets from before it, so they are a baseline, not a sign of life.
   maybe_baseline_until: Option<u64>,
+  /// What the page itself hears of the current session.
+  echo: Echo,
+  /// Ping ids grow across sessions, so an answer always names the ping it answers.
+  next_ping: u64,
+  maybe_last_tick_at: Option<Instant>,
   resilience: ResilienceConfig,
+}
+
+/// The page's own view of the current session: its traffic and the SFU's answers to pings.
+#[derive(Debug, Clone)]
+struct Echo {
+  watch: EchoWatch,
+  /// When a datagram, a signaling frame or an answer last arrived.
+  last_heard_at: Instant,
+  maybe_last_ping_at: Option<Instant>,
+  /// After a network change only the answer to this ping, or to a later one, proves the path:
+  /// anything else may have been on its way before the change.
+  maybe_handover_ping: Option<u64>,
+}
+
+/// Whether the current session's SFU answers pings.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EchoWatch {
+  /// No answer yet: pinging to find out.
+  Probing { unanswered: u32 },
+  /// It answered: its answers and the page's own traffic prove the path.
+  Answering,
+  /// No answer to `MAX_UNANSWERED_PINGS` pings: an older SFU, stop asking (a late answer still
+  /// counts).
+  Unanswered,
 }
 
 /// Whether the browser reports packet counts, which prove the session's path alive.
@@ -67,18 +120,33 @@ pub(super) enum PathVerdict {
   Unchanged,
   /// The browser can't report counts (log it once).
   Unwatchable,
+  /// The SFU doesn't answer pings (log it once).
+  Unanswered,
   /// Silent for too long, or after a network change: rejoin.
   Lost,
+}
+
+/// What a timer tick asks of the call task.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct Tick {
+  /// Send a ping with this id.
+  pub maybe_ping: Option<u64>,
+  pub verdict: PathVerdict,
 }
 
 /// What to do about a network change the page reported.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum NetworkVerdict {
-  /// The session has to show it still works: read its count now (unless a reading is on its way).
-  Check(Option<Reading>),
+  /// The session has to show it still works: read its count now (unless a reading is on its way
+  /// or the browser doesn't count) and ping the SFU (unless it doesn't answer).
+  Check {
+    maybe_reading: Option<Reading>,
+    maybe_ping: Option<u64>,
+  },
   /// No session: a rejoin is under way, it may try again early.
   HurryRejoin,
-  /// The browser can't tell whether the session still works; it shows when it closes.
+  /// Neither the browser's counts nor the SFU's answers can tell whether the session still works;
+  /// it shows when it closes.
   Nothing,
 }
 
@@ -93,6 +161,9 @@ impl SessionWatch {
       maybe_pending_reading: None,
       next_reading: 0,
       maybe_baseline_until: None,
+      echo: Echo::new(now),
+      next_ping: 0,
+      maybe_last_tick_at: None,
       resilience,
     }
   }
@@ -124,6 +195,80 @@ impl SessionWatch {
     self.monitor = PathMonitor::new(now);
     self.maybe_pending_reading = None;
     self.maybe_baseline_until = None;
+    // Maybe another SFU (a restarted one): whether it answers pings is found out again.
+    self.echo = Echo::new(now);
+  }
+
+  /// A datagram or a signaling frame of the current session arrived at `now` (the caller checked
+  /// [`Self::is_current`]). It proves the path, except while a network change waits for proof:
+  /// then it may have been on its way before the change.
+  pub(super) fn on_heard(&mut self, now: Instant) {
+    self.echo.last_heard_at = now;
+    if !self.monitor.is_migrating() {
+      self.monitor.on_activity(now);
+    }
+  }
+
+  /// The SFU answered the current session's ping `id` at `now` (the caller checked
+  /// [`Self::is_current`]).
+  pub(super) fn on_pong(&mut self, id: u64, now: Instant) {
+    self.echo.watch = EchoWatch::Answering;
+    self.echo.last_heard_at = now;
+    let is_proof = !self.monitor.is_migrating()
+      || self
+        .echo
+        .maybe_handover_ping
+        .is_some_and(|handover_ping| id >= handover_ping);
+    if is_proof {
+      self.echo.maybe_handover_ping = None;
+      self.monitor.on_activity(now);
+    }
+  }
+
+  /// A timer tick at `now`: whether to ping the SFU, and whether the session is lost. Only a
+  /// session whose SFU answers pings is judged here; packet counts are judged as they arrive.
+  pub(super) fn on_tick(&mut self, now: Instant) -> Tick {
+    let maybe_last_tick_at = self.maybe_last_tick_at.replace(now);
+    let mut tick = Tick {
+      maybe_ping: None,
+      verdict: PathVerdict::Unchanged,
+    };
+    if !self.is_connected {
+      return tick;
+    }
+    if maybe_last_tick_at.is_some_and(|last| now.saturating_duration_since(last) >= SUSPENDED_TICK_GAP) {
+      self.monitor.restart_silence(now, &self.resilience);
+      // Ask at once whether the session survived.
+      self.echo.maybe_last_ping_at = None;
+    }
+    let is_ping_due = self
+      .echo
+      .maybe_last_ping_at
+      .is_none_or(|pinged_at| now.saturating_duration_since(pinged_at) >= self.resilience.echo_interval);
+    match self.echo.watch {
+      EchoWatch::Probing { unanswered } if is_ping_due && unanswered >= MAX_UNANSWERED_PINGS => {
+        self.echo.watch = EchoWatch::Unanswered;
+        tick.verdict = PathVerdict::Unanswered;
+      },
+      EchoWatch::Probing { .. } => {
+        if is_ping_due {
+          tick.maybe_ping = Some(self.ping(now));
+        }
+      },
+      EchoWatch::Answering => {
+        let is_quiet =
+          now.saturating_duration_since(self.echo.last_heard_at) >= self.resilience.echo_interval;
+        // While a network change waits for proof, only answers count: keep asking.
+        if is_ping_due && (is_quiet || self.monitor.is_migrating()) {
+          tick.maybe_ping = Some(self.ping(now));
+        }
+        if self.monitor.check(now, &self.resilience) == PathState::Dead {
+          tick.verdict = PathVerdict::Lost;
+        }
+      },
+      EchoWatch::Unanswered => {},
+    }
+    tick
   }
 
   /// The next packet count reading to ask for: none without a session, while one is on its way, or
@@ -185,18 +330,51 @@ impl SessionWatch {
     if !self.is_connected {
       return NetworkVerdict::HurryRejoin;
     }
-    if self.path_watch == PathWatch::Unavailable {
+    let is_counted = self.path_watch != PathWatch::Unavailable;
+    if !is_counted && self.echo.watch != EchoWatch::Answering {
       return NetworkVerdict::Nothing;
     }
     self.monitor.on_network_changed(now, &self.resilience);
-    // A reading on its way, and the next one, may still count packets from before the change.
-    let maybe_reading = self.next_reading();
-    self.maybe_baseline_until = Some(match maybe_reading {
-      Some(reading) => reading.id,
-      // The one on its way is followed by the next one, asked for at the next tick.
-      None => self.next_reading,
-    });
-    NetworkVerdict::Check(maybe_reading)
+    let maybe_ping = (self.echo.watch != EchoWatch::Unanswered).then(|| self.ping(now));
+    self.echo.maybe_handover_ping = maybe_ping;
+    let maybe_reading = if is_counted {
+      // A reading on its way, and the next one, may still count packets from before the change.
+      let maybe_reading = self.next_reading();
+      self.maybe_baseline_until = Some(match maybe_reading {
+        Some(reading) => reading.id,
+        // The one on its way is followed by the next one, asked for at the next tick.
+        None => self.next_reading,
+      });
+      maybe_reading
+    } else {
+      None
+    };
+    NetworkVerdict::Check {
+      maybe_reading,
+      maybe_ping,
+    }
+  }
+
+  /// The next ping's id, sent at `now`.
+  fn ping(&mut self, now: Instant) -> u64 {
+    let id = self.next_ping;
+    self.next_ping += 1;
+    self.echo.maybe_last_ping_at = Some(now);
+    if let EchoWatch::Probing { unanswered } = &mut self.echo.watch {
+      *unanswered += 1;
+    }
+    id
+  }
+}
+
+impl Echo {
+  fn new(now: Instant) -> Self {
+    Self {
+      watch: EchoWatch::Probing { unanswered: 0 },
+      last_heard_at: now,
+      maybe_last_ping_at: None,
+      maybe_handover_ping: None,
+    }
   }
 }
 
@@ -268,7 +446,7 @@ mod tests {
     }
 
     #[test]
-    fn a_browser_without_counts_is_not_watched() {
+    fn a_browser_without_counts_is_not_asked_again() {
       let start = Instant::now();
       let mut watch = SessionWatch::new(start, config());
       let reading = watch.next_reading().unwrap();
@@ -277,7 +455,7 @@ mod tests {
         PathVerdict::Unwatchable
       );
       assert_eq!(watch.next_reading(), None);
-      // Nothing to check after a network change, and never lost for silence.
+      // Before the SFU answered a ping (`echo`) nothing proves the session after a network change.
       assert_eq!(
         watch.on_network_changed(at(start, 9_000)),
         NetworkVerdict::Nothing
@@ -293,7 +471,11 @@ mod tests {
       let start = Instant::now();
       let mut watch = SessionWatch::new(start, config());
       read(&mut watch, 10, at(start, 500));
-      let NetworkVerdict::Check(Some(reading)) = watch.on_network_changed(at(start, 1_000)) else {
+      let NetworkVerdict::Check {
+        maybe_reading: Some(reading),
+        ..
+      } = watch.on_network_changed(at(start, 1_000))
+      else {
         panic!("no reading asked for");
       };
       // Packets that arrived just before the change are no proof the new network works.
@@ -307,7 +489,11 @@ mod tests {
       let start = Instant::now();
       let mut watch = SessionWatch::new(start, config());
       read(&mut watch, 10, at(start, 500));
-      let NetworkVerdict::Check(Some(reading)) = watch.on_network_changed(at(start, 1_000)) else {
+      let NetworkVerdict::Check {
+        maybe_reading: Some(reading),
+        ..
+      } = watch.on_network_changed(at(start, 1_000))
+      else {
         panic!("no reading asked for");
       };
       watch.on_reading(reading, PacketCount::Received(12), at(start, 1_050));
@@ -323,7 +509,11 @@ mod tests {
       let before = watch.next_reading().unwrap();
       assert_eq!(
         watch.on_network_changed(at(start, 100)),
-        NetworkVerdict::Check(None)
+        NetworkVerdict::Check {
+          maybe_reading: None,
+          // Whether the SFU answers is not known yet: it is asked.
+          maybe_ping: Some(0),
+        }
       );
       watch.on_reading(before, PacketCount::Received(5), at(start, 150));
       read(&mut watch, 6, at(start, 600));
@@ -336,6 +526,190 @@ mod tests {
       let mut watch = SessionWatch::new(start, config());
       watch.lose();
       assert_eq!(watch.on_network_changed(start), NetworkVerdict::HurryRejoin);
+    }
+  }
+
+  /// Safari: no packet counts, so the page's own traffic and the SFU's answers decide (#841).
+  mod echo {
+    use super::*;
+
+    #[test]
+    fn answered_pings_keep_a_silent_call_alive() {
+      let start = Instant::now();
+      let mut watch = safari(start);
+      // Microphone muted, cameras off, nobody sharing: no media for a minute.
+      let run = run(&mut watch, start, 100..=60_000, |_| true);
+      assert!(run.verdicts.is_empty(), "{:?}", run.verdicts);
+      // About one per echo interval, no more.
+      assert!((50..=60).contains(&run.pings.len()), "{} pings", run.pings.len());
+    }
+
+    #[test]
+    fn a_session_whose_answers_stop_is_lost_after_the_stall_timeout() {
+      let start = Instant::now();
+      let mut watch = safari(start);
+      let run = run(&mut watch, start, 100..=30_000, |millis| millis < 10_000);
+      // The last answer came at 8.94 s (pings go out every 1.1 s: answered after 40 ms, then quiet
+      // for the echo interval).
+      assert_eq!(run.verdicts, vec![(14_000, PathVerdict::Lost)]);
+    }
+
+    #[test]
+    fn media_spares_the_pings() {
+      let start = Instant::now();
+      let mut watch = safari(start);
+      let mut pings = Vec::new();
+      for millis in (100..=10_000).step_by(100) {
+        // Someone talks: their audio arrives all the time.
+        watch.on_heard(at(start, millis - 20));
+        let tick = watch.on_tick(at(start, millis));
+        assert_eq!(tick.verdict, PathVerdict::Unchanged, "at {millis} ms");
+        if let Some(id) = tick.maybe_ping {
+          pings.push(id);
+          watch.on_pong(id, at(start, millis + 40));
+        }
+      }
+      // Only the first, which finds out that the SFU answers.
+      assert_eq!(pings, vec![0]);
+    }
+
+    #[test]
+    fn media_proves_the_path_without_answers() {
+      let start = Instant::now();
+      let mut watch = safari(start);
+      run(&mut watch, start, 100..=1_000, |_| true);
+      for millis in (1_100..=20_000).step_by(100) {
+        // A screen share's frames arrive, the answers don't (the SFU's queue was full).
+        watch.on_heard(at(start, millis - 50));
+        let tick = watch.on_tick(at(start, millis));
+        assert_eq!(tick.verdict, PathVerdict::Unchanged, "at {millis} ms");
+      }
+    }
+
+    #[test]
+    fn an_sfu_that_never_answers_is_asked_a_few_times_and_never_judged() {
+      let start = Instant::now();
+      let mut watch = safari(start);
+      let run = run(&mut watch, start, 100..=60_000, |_| false);
+      assert_eq!(run.pings.len(), MAX_UNANSWERED_PINGS as usize);
+      // Once, after the last ping had its echo interval.
+      assert_eq!(run.verdicts, vec![(5_100, PathVerdict::Unanswered)]);
+      assert_eq!(
+        watch.on_network_changed(at(start, 61_000)),
+        NetworkVerdict::Nothing
+      );
+    }
+
+    #[test]
+    fn a_late_answer_still_counts() {
+      let start = Instant::now();
+      let mut watch = safari(start);
+      run(&mut watch, start, 100..=6_000, |_| false);
+      watch.on_pong(4, at(start, 6_050));
+      let run = run(&mut watch, start, 6_100..=20_000, |_| false);
+      assert!(!run.pings.is_empty(), "asking again");
+      assert_eq!(run.verdicts, vec![(11_100, PathVerdict::Lost)]);
+    }
+
+    #[test]
+    fn after_a_network_change_only_a_fresh_answer_proves_the_path() {
+      let start = Instant::now();
+      let mut watch = safari(start);
+      run(&mut watch, start, 100..=2_000, |_| true);
+      let NetworkVerdict::Check {
+        maybe_reading: None,
+        maybe_ping: Some(handover_ping),
+      } = watch.on_network_changed(at(start, 2_050))
+      else {
+        panic!("no ping asked for");
+      };
+      // What was on its way before the change: media, and the answer to an older ping.
+      watch.on_heard(at(start, 2_060));
+      watch.on_pong(handover_ping - 1, at(start, 2_070));
+      let run = run(&mut watch, start, 2_100..=10_000, |_| false);
+      // Asked again while waiting; lost at the handover timeout, not the stall timeout.
+      assert!(run.pings.len() >= 2, "{:?}", run.pings);
+      assert_eq!(run.verdicts, vec![(5_100, PathVerdict::Lost)]);
+    }
+
+    #[test]
+    fn a_fresh_answer_after_a_network_change_keeps_the_session() {
+      let start = Instant::now();
+      let mut watch = safari(start);
+      run(&mut watch, start, 100..=2_000, |_| true);
+      let NetworkVerdict::Check {
+        maybe_ping: Some(handover_ping),
+        ..
+      } = watch.on_network_changed(at(start, 2_050))
+      else {
+        panic!("no ping asked for");
+      };
+      watch.on_pong(handover_ping, at(start, 2_200));
+      let run = run(&mut watch, start, 2_100..=20_000, |_| true);
+      assert!(run.verdicts.is_empty(), "{:?}", run.verdicts);
+    }
+
+    #[test]
+    fn a_suspended_page_is_not_lost_for_the_silence_it_slept_through() {
+      let start = Instant::now();
+      let mut watch = safari(start);
+      run(&mut watch, start, 100..=2_000, |_| true);
+      // The phone was locked for a minute; the timer stood still.
+      let tick = watch.on_tick(at(start, 62_000));
+      assert_eq!(tick.verdict, PathVerdict::Unchanged);
+      let id = tick.maybe_ping.expect("asks at once");
+      watch.on_pong(id, at(start, 62_050));
+      let run = run(&mut watch, start, 62_100..=80_000, |_| true);
+      assert!(run.verdicts.is_empty(), "{:?}", run.verdicts);
+    }
+
+    #[test]
+    fn a_suspended_page_whose_session_died_finds_out_within_the_stall_timeout() {
+      let start = Instant::now();
+      let mut watch = safari(start);
+      run(&mut watch, start, 100..=2_000, |_| true);
+      assert!(watch.on_tick(at(start, 62_000)).maybe_ping.is_some());
+      let run = run(&mut watch, start, 62_100..=80_000, |_| false);
+      assert_eq!(run.verdicts, vec![(67_000, PathVerdict::Lost)]);
+    }
+
+    #[test]
+    fn a_new_session_finds_out_again_whether_its_sfu_answers() {
+      let start = Instant::now();
+      let mut watch = safari(start);
+      run(&mut watch, start, 100..=2_000, |_| true);
+      let next = watch.lose();
+      assert_eq!(
+        watch.on_tick(at(start, 2_100)).maybe_ping,
+        None,
+        "no session to ask"
+      );
+      watch.relinked(next, at(start, 2_150));
+      // An older SFU took over: never lost for its silence.
+      let run = run(&mut watch, start, 2_200..=30_000, |_| false);
+      assert_eq!(run.pings.len(), MAX_UNANSWERED_PINGS as usize);
+      assert_eq!(run.verdicts, vec![(7_200, PathVerdict::Unanswered)]);
+    }
+
+    #[test]
+    fn own_traffic_counts_where_the_browser_counts_too() {
+      let start = Instant::now();
+      let mut watch = SessionWatch::new(start, config());
+      read(&mut watch, 10, at(start, 500));
+      // The count stands still, but media arrives.
+      watch.on_heard(at(start, 5_000));
+      assert_eq!(read(&mut watch, 10, at(start, 5_500)), PathVerdict::Unchanged);
+      assert_eq!(read(&mut watch, 10, at(start, 10_000)), PathVerdict::Lost);
+    }
+
+    #[test]
+    fn counting_browsers_are_judged_by_their_readings_until_the_sfu_answers() {
+      let start = Instant::now();
+      let mut watch = SessionWatch::new(start, config());
+      read(&mut watch, 10, at(start, 500));
+      // No answers, no readings: the ticks don't judge (the readings do, as before #841).
+      let run = run(&mut watch, start, 600..=20_000, |_| false);
+      assert_eq!(run.verdicts, vec![(5_600, PathVerdict::Unanswered)]);
     }
   }
 
@@ -402,6 +776,54 @@ mod tests {
       ));
       assert!(may_hurry(&schedule, Some(start), start + interval, &config()));
     }
+  }
+
+  /// What [`run`] saw: the pings sent, and every verdict but `Unchanged` with its time.
+  struct Run {
+    pings: Vec<u64>,
+    verdicts: Vec<(u64, PathVerdict)>,
+  }
+
+  /// Ticks every 100 ms over `millis` (after `start`), like the call task's timer; the SFU
+  /// answers a ping 40 ms after it went out while `answers(millis)` holds. Stops when the session
+  /// is lost.
+  fn run(
+    watch: &mut SessionWatch,
+    start: Instant,
+    millis: std::ops::RangeInclusive<u64>,
+    answers: impl Fn(u64) -> bool,
+  ) -> Run {
+    let mut run = Run {
+      pings: Vec::new(),
+      verdicts: Vec::new(),
+    };
+    for millis in millis.step_by(100) {
+      let tick = watch.on_tick(at(start, millis));
+      if tick.verdict != PathVerdict::Unchanged {
+        run.verdicts.push((millis, tick.verdict));
+      }
+      if tick.verdict == PathVerdict::Lost {
+        break;
+      }
+      if let Some(id) = tick.maybe_ping {
+        run.pings.push(id);
+        if answers(millis) {
+          watch.on_pong(id, at(start, millis + 40));
+        }
+      }
+    }
+    run
+  }
+
+  /// A session in a browser whose `getStats()` counts nothing.
+  fn safari(start: Instant) -> SessionWatch {
+    let mut watch = SessionWatch::new(start, config());
+    let reading = watch.next_reading().expect("a reading");
+    assert_eq!(
+      watch.on_reading(reading, PacketCount::Unsupported, start),
+      PathVerdict::Unwatchable
+    );
+    watch
   }
 
   fn read(watch: &mut SessionWatch, count: u64, now: Instant) -> PathVerdict {

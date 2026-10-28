@@ -21,12 +21,14 @@
 //! part of a short spread, like on native clients.
 //!
 //! A dead session doesn't have to wait for QUIC's idle timeout: where the browser reports the
-//! session's received packets (`getStats()`), the SFU's keep-alives prove the path alive, and
-//! silence beyond the stall timeout, or no packet soon after the page reported a network change
-//! ([`WebCall::network_changed`]), counts as lost. A network change while rejoining makes the
-//! next attempt due at once. When the page goes away (closed, reloaded), the driver closes its
-//! sessions in the `pagehide` handler itself: the SFU frees the slot at once instead of the others
-//! seeing "reconnecting" until the grace period ends.
+//! session's received packets (`getStats()`), the SFU's keep-alives prove the path alive; in every
+//! browser, so also in Safari whose counts stay zero, the datagrams and signaling frames the page
+//! reads do, and so do the SFU's answers to the pings the page sends when nothing else arrived for
+//! a second (`session_watch`). Silence beyond the stall timeout, or no proof soon after the page
+//! reported a network change ([`WebCall::network_changed`]), counts as lost. A network change
+//! while rejoining makes the next attempt due at once. When the page goes away (closed, reloaded),
+//! the driver closes its sessions in the `pagehide` handler itself: the SFU frees the slot at
+//! once instead of the others seeing "reconnecting" until the grace period ends.
 
 mod meter;
 mod session_watch;
@@ -814,7 +816,13 @@ impl CallState<'_> {
     match input {
       Input::Signal { generation, message } => {
         if self.watch.is_current(generation) {
-          engine.handle_signal(message, Instant::now())?;
+          let now = Instant::now();
+          if let CallServerMessage::Pong { id } = message {
+            self.watch.on_pong(id, now);
+          } else {
+            self.watch.on_heard(now);
+            engine.handle_signal(message, now)?;
+          }
         }
       },
       Input::SessionEnded { generation, end } => {
@@ -823,7 +831,7 @@ impl CallState<'_> {
         }
       },
       Input::PathPackets { reading, count } => return Ok(self.on_path_packets(engine, reading, count)),
-      Input::NetworkChanged => self.on_network_changed(),
+      Input::NetworkChanged => self.on_network_changed()?,
       Input::Relinked {
         transport,
         ticket,
@@ -844,7 +852,9 @@ impl CallState<'_> {
       },
       Input::Datagram { generation, bytes } => {
         if self.watch.is_current(generation) {
-          engine.handle_datagram(&bytes, Instant::now());
+          let now = Instant::now();
+          self.watch.on_heard(now);
+          engine.handle_datagram(&bytes, now);
         }
       },
       Input::Captured(samples) => {
@@ -878,6 +888,11 @@ impl CallState<'_> {
         if self.timer_ticks.is_multiple_of(STATS_EVERY_TICKS) {
           self.request_path_stats();
         }
+        let tick = self.watch.on_tick(Instant::now());
+        if let Some(id) = tick.maybe_ping {
+          self.send_ping(id)?;
+        }
+        return Ok(self.on_path_verdict(engine, tick.verdict));
       },
       Input::VideoTick(kind) => {
         if let Some(sender) = self.senders.iter_mut().find(|sender| sender.kind == kind) {
@@ -1015,24 +1030,45 @@ impl CallState<'_> {
 
   /// A packet count arrived: a path silent for too long, or after a network change, is lost.
   fn on_path_packets(&mut self, engine: &mut CallEngine, reading: Reading, count: PacketCount) -> Flow {
-    match self.watch.on_reading(reading, count, Instant::now()) {
+    let verdict = self.watch.on_reading(reading, count, Instant::now());
+    self.on_path_verdict(engine, verdict)
+  }
+
+  /// Acts on what a packet count or a timer tick said about the session's path.
+  fn on_path_verdict(&mut self, engine: &mut CallEngine, verdict: PathVerdict) -> Flow {
+    match verdict {
       PathVerdict::Unchanged => Flow::Continue,
       PathVerdict::Unwatchable => {
-        debug!("the browser reports no packet counts: a lost session shows when it closes");
+        debug!("the browser reports no packet counts: the page's own traffic and pings watch the session");
         Flow::Continue
       },
-      PathVerdict::Lost => self.on_session_lost(engine, SessionEnd::Lost),
+      PathVerdict::Unanswered => {
+        debug!(
+          "the SFU doesn't answer pings: only packet counts, where the browser has them, watch the session"
+        );
+        Flow::Continue
+      },
+      PathVerdict::Lost => {
+        info!("nothing arrived on the call's session for too long");
+        self.on_session_lost(engine, SessionEnd::Lost)
+      },
     }
   }
 
   /// The page reported a network change: the session has to show it still works, a rejoin under
   /// way may try again early.
-  fn on_network_changed(&mut self) {
+  fn on_network_changed(&mut self) -> Result<(), WebCallError> {
     match self.watch.on_network_changed(Instant::now()) {
-      NetworkVerdict::Check(maybe_reading) => {
+      NetworkVerdict::Check {
+        maybe_reading,
+        maybe_ping,
+      } => {
         debug!("network changed, checking the call's session");
         if let Some(reading) = maybe_reading {
           self.read_packets(reading);
+        }
+        if let Some(id) = maybe_ping {
+          self.send_ping(id)?;
         }
       },
       NetworkVerdict::HurryRejoin => {
@@ -1042,6 +1078,15 @@ impl CallState<'_> {
         }
       },
       NetworkVerdict::Nothing => {},
+    }
+    Ok(())
+  }
+
+  /// Asks the SFU to answer on the current session (its answer arrives as a signal).
+  fn send_ping(&self, id: u64) -> Result<(), WebCallError> {
+    match &self.maybe_transport {
+      Some(transport) => transport.send_signal(&CallClientMessage::Ping { id }),
+      None => Ok(()),
     }
   }
 

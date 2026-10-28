@@ -46,6 +46,10 @@ pub struct ResilienceConfig {
   pub stall_timeout: Duration,
   /// After the system reported a network change, the path has this long to show it migrated.
   pub handover_timeout: Duration,
+  /// Browsers: a session nothing arrived on for this long is pinged (the SFU answers), so a quiet
+  /// call still shows its path alive to a page that can't see QUIC keep-alives. Well below
+  /// `stall_timeout`, so a few answers can go missing.
+  pub echo_interval: Duration,
   /// How long to keep trying to rejoin when the SFU doesn't say how long it keeps the slot.
   pub default_reconnect_grace: Duration,
   /// Pause before the second rejoin attempt; it doubles up to `max_retry_interval`.
@@ -115,6 +119,7 @@ impl Default for ResilienceConfig {
       idle_timeout: Duration::from_secs(10),
       stall_timeout: Duration::from_secs(5),
       handover_timeout: Duration::from_secs(2),
+      echo_interval: Duration::from_secs(1),
       default_reconnect_grace: Duration::from_secs(30),
       first_retry_interval: Duration::from_millis(250),
       max_retry_interval: Duration::from_secs(2),
@@ -125,8 +130,9 @@ impl Default for ResilienceConfig {
 
 impl ResilienceConfig {
   /// The timing for browsers. The page sees no answers to the browser's own keep-alives: what
-  /// proves a session alive are the SFU's keep-alives, every 2 s. After a network change one of
-  /// them must arrive, so the window is a little longer than that interval.
+  /// proves a session alive are the SFU's keep-alives, every 2 s, where the browser counts them,
+  /// and the SFU's answers to the page's pings. After a network change one of them must arrive,
+  /// so the window is a little longer than the keep-alive interval.
   pub fn browser() -> Self {
     Self {
       handover_timeout: Duration::from_secs(3),
@@ -159,10 +165,31 @@ impl PathMonitor {
     self.received_packets = self.received_packets.max(count);
   }
 
+  /// Something arrived that proves the path, seen by the driver itself rather than counted by the
+  /// transport (a browser's answer to its ping): the same as new packets.
+  pub fn on_activity(&mut self, now: Instant) {
+    self.last_activity_at = self.last_activity_at.max(now);
+    self.maybe_handover_deadline = None;
+  }
+
   /// The system reported a network change (another interface, address or route): the path must
   /// show life again soon, packets that arrived before don't count.
   pub fn on_network_changed(&mut self, now: Instant, config: &ResilienceConfig) {
     self.maybe_handover_deadline = Some(now + config.handover_timeout);
+  }
+
+  /// Whether a network change is waiting for the path to show life.
+  pub fn is_migrating(&self) -> bool {
+    self.maybe_handover_deadline.is_some()
+  }
+
+  /// The driver couldn't watch for a while (a suspended page): the silence it missed proves
+  /// nothing, so the path gets its full time again from `now`.
+  pub fn restart_silence(&mut self, now: Instant, config: &ResilienceConfig) {
+    self.last_activity_at = self.last_activity_at.max(now);
+    if let Some(deadline) = &mut self.maybe_handover_deadline {
+      *deadline = (*deadline).max(now + config.handover_timeout);
+    }
   }
 
   pub fn check(&self, now: Instant, config: &ResilienceConfig) -> PathState {
@@ -395,6 +422,35 @@ mod tests {
       monitor.on_baseline_packets(12);
       monitor.on_received_packets(12, at(start, 2_000));
       assert_eq!(monitor.check(at(start, 3_000), &config()), PathState::Dead);
+    }
+
+    #[test]
+    fn activity_without_a_count_proves_the_path() {
+      let start = Instant::now();
+      let mut monitor = PathMonitor::new(start);
+      monitor.on_activity(at(start, 4_000));
+      assert_eq!(monitor.check(at(start, 8_000), &config()), PathState::Alive);
+      monitor.on_network_changed(at(start, 8_500), &config());
+      assert!(monitor.is_migrating());
+      monitor.on_activity(at(start, 9_000));
+      assert!(!monitor.is_migrating());
+      assert_eq!(monitor.check(at(start, 13_900), &config()), PathState::Alive);
+      assert_eq!(monitor.check(at(start, 14_000), &config()), PathState::Dead);
+    }
+
+    #[test]
+    fn a_restarted_silence_gives_the_path_its_full_time_again() {
+      let start = Instant::now();
+      let mut monitor = PathMonitor::new(start);
+      monitor.on_network_changed(at(start, 1_000), &config());
+      // The page slept through the handover deadline and the stall timeout.
+      monitor.restart_silence(at(start, 60_000), &config());
+      assert_eq!(monitor.check(at(start, 61_000), &config()), PathState::Migrating);
+      assert_eq!(monitor.check(at(start, 62_000), &config()), PathState::Dead);
+      let mut quiet = PathMonitor::new(start);
+      quiet.restart_silence(at(start, 60_000), &config());
+      assert_eq!(quiet.check(at(start, 64_900), &config()), PathState::Alive);
+      assert_eq!(quiet.check(at(start, 65_000), &config()), PathState::Dead);
     }
   }
 

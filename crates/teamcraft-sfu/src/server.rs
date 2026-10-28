@@ -472,6 +472,12 @@ impl ParticipantSession {
   }
 
   fn handle_client_message(&self, message: CallClientMessage) {
+    // Proves the session's path to a browser, which can't see QUIC keep-alives. One small answer
+    // per ping; when the queue is full it is dropped, and the client's next ping asks again.
+    if let CallClientMessage::Ping { id } = message {
+      let _ = self.signal_tx.try_send(Outgoing::Pong(id));
+      return;
+    }
     // The account's other devices leave for this one; one of them may be in the server's roster
     // only (its leave got lost), which a roster right after repairs at once instead of within the
     // interval.

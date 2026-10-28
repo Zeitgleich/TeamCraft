@@ -85,6 +85,62 @@ async fn invalid_join_token_is_rejected() {
   assert_eq!(error.error_code, ErrorCode::InvalidJoinToken);
 }
 
+/// Browsers prove a quiet session's path with pings (#841): the SFU answers each one, outside the
+/// event numbering.
+#[tokio::test]
+async fn a_ping_is_answered_without_taking_an_event_number() {
+  let (port, certificate_hash) = start_sfu().await;
+  let connection = connect(SocketAddr::new(V4, port), certificate_hash).await;
+  let (mut send, mut recv) = connection.open_bi().await.unwrap().await.unwrap();
+  let token = format!("dev:{CALL_ID}:{id}:{id}", id = device(9));
+  write_message(
+    &mut send,
+    &CallClientMessage::Join {
+      token,
+      capabilities: MediaCapabilities::default(),
+    },
+  )
+  .await
+  .unwrap();
+  let joined: CallServerMessage = read_message(&mut recv, MAX_SIGNALING_BYTES).await.unwrap();
+  assert!(
+    matches!(joined, CallServerMessage::Event { seq: 1, .. }),
+    "{joined:?}"
+  );
+
+  for id in [7, 8] {
+    write_message(&mut send, &CallClientMessage::Ping { id })
+      .await
+      .unwrap();
+  }
+  let mut last_seq = 1;
+  let mut answers = Vec::new();
+  tokio::time::timeout(TEST_TIMEOUT, async {
+    while answers.len() < 2 {
+      match read_message::<CallServerMessage>(&mut recv, MAX_SIGNALING_BYTES)
+        .await
+        .unwrap()
+      {
+        // Events of the call (the DAVE setup) go on being numbered without a gap.
+        CallServerMessage::Event { seq, .. } => {
+          assert_eq!(seq, last_seq + 1);
+          last_seq = seq;
+        },
+        other => answers.push(other),
+      }
+    }
+  })
+  .await
+  .expect("no answer");
+  assert_eq!(
+    answers,
+    vec![
+      CallServerMessage::Pong { id: 7 },
+      CallServerMessage::Pong { id: 8 }
+    ]
+  );
+}
+
 /// Runs one call; `client_ips[i]` is the SFU address participant `i` connects to.
 async fn run_call(client_ips: [IpAddr; 4]) {
   let (port, certificate_hash) = start_sfu().await;

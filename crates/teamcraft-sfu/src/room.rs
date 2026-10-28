@@ -511,6 +511,8 @@ impl Room {
         self.close_other_devices_of(participant_id);
         Ok(())
       },
+      // The session answers pings itself (`server.rs`): they are about its path, not the call.
+      CallClientMessage::Ping { .. } => Ok(()),
       CallClientMessage::Unknown => {
         debug!(participant_id = %participant_id, "ignoring unknown message");
         Ok(())
