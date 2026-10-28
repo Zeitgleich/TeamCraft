@@ -31,7 +31,9 @@ use super::{
 };
 use crate::call_video::ReceivedVideoFrame;
 use crate::video::{VideoResolution, fit_within, screen_bitrate_bps, screen_limits, simulcast_layers};
-use crate::web_api::{Canvas2d, EncodedVideoChunk, VideoDecoder, VideoEncoder, VideoFrame as WebVideoFrame};
+use crate::web_api::{
+  Canvas2d, EncodedVideoChunk, VideoDecoder, VideoEncoder, VideoFrame as WebVideoFrame, count_picture_drawn,
+};
 
 /// WebCodecs codec string: H.264 Constrained Baseline, level 4.0 (up to 1080p).
 const H264_CODEC: &str = "avc1.42e028";
@@ -658,11 +660,15 @@ impl Decoder {
         canvas.set_width(width);
         canvas.set_height(height);
       }
-      if let Err(error) = context.draw_video_frame(&frame, 0.0, 0.0) {
-        let _ = error_sender.unbounded_send(Input::CodecFailed {
-          context: "drawing a video frame",
-          message: js_message(&error),
-        });
+      match context.draw_video_frame(&frame, 0.0, 0.0) {
+        // The page tells a tile that stopped getting pictures by this count (#921).
+        Ok(()) => count_picture_drawn(&canvas),
+        Err(error) => {
+          let _ = error_sender.unbounded_send(Input::CodecFailed {
+            context: "drawing a video frame",
+            message: js_message(&error),
+          });
+        },
       }
       frame.close();
     });

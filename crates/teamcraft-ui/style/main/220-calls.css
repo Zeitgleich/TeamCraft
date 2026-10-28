@@ -546,6 +546,37 @@
   object-fit: contain;
 }
 
+/* Another device's video got no new picture for a while (#921): a quiet note over the last one,
+   styled like the tile's status. Reconnecting says more already. */
+.video-stalled {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  max-width: calc(100% - 24px);
+  padding: 4px 10px;
+  border-radius: var(--radius-pill);
+  background: rgb(0 0 0 / 0.6);
+  color: var(--on-fill);
+  font-size: var(--text-xs);
+  letter-spacing: var(--tracking-xs);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  pointer-events: none;
+  animation: video-stalled-in var(--dur-base) var(--ease-standard);
+}
+
+@keyframes video-stalled-in {
+  from {
+    opacity: 0;
+  }
+}
+
+.tile-reconnecting .video-stalled {
+  display: none;
+}
+
 .silhouette::before,
 .silhouette::after {
   content: "";
@@ -736,6 +767,7 @@
 }
 
 .shared-screen {
+  position: relative;
   flex: 1;
   min-height: 0;
   display: grid;

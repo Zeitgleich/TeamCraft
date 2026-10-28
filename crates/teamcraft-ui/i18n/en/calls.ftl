@@ -81,6 +81,7 @@ tile-muted = muted
 tile-hand = hand raised
 tile-speaking = speaking
 tile-reconnecting = reconnecting
+video-stalled = Video paused: weak connection
 
 ## Pre-join screen
 prejoin-quick-controls = Microphone and camera
