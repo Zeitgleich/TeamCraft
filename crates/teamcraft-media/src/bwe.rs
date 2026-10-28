@@ -220,6 +220,26 @@ impl SendSideEstimator {
     self.maybe_demand_bps = maybe_demand_bps;
   }
 
+  /// The sender starts sending far more than so far (a camera in a call that sent only sound):
+  /// what the estimate learned from the smaller traffic says little about the path. It grew only
+  /// as far as that traffic let it, and one lossy or jittery moment cut it to what the sound got
+  /// through, far below any video (#935). Measured afresh, as at the start: the estimate is at
+  /// least the start value again, and the loss, delay and delivered rate seen so far are
+  /// forgotten. Packets in flight still meet their feedback.
+  pub fn measure_afresh(&mut self) {
+    self.estimate_bps = self
+      .estimate_bps
+      .max(f64::from(self.config.start_bps))
+      .clamp(f64::from(self.config.min_bps), f64::from(self.config.max_bps));
+    self.delay = DelayDetector::new();
+    self.acked.clear();
+    self.loss_history.clear();
+    self.last_loss_ratio = 0.0;
+    self.maybe_last_update_at = None;
+    self.maybe_last_decrease_at = None;
+    self.is_holding_after_decrease = false;
+  }
+
   pub fn estimate_bps(&self) -> u32 {
     // Invariant: clamped to the u32 config bounds in `update_rate`.
     self.estimate_bps as u32
@@ -556,6 +576,25 @@ mod tests {
         sim.estimator.estimate_bps()
       );
       assert!(sim.estimator.loss_ratio() > 0.15);
+    }
+
+    /// Issue #935: about to send far more (a camera in a call that sent only sound), the estimate
+    /// starts from the start value again, and the loss seen so far no longer counts.
+    #[test]
+    fn measuring_afresh_starts_from_the_start_value_without_the_old_loss() {
+      let mut sim = Simulation::new(Link::new(3_000_000, 40, 250));
+      sim.run(Duration::from_secs(10));
+      assert!(sim.estimator.estimate_bps() < 300_000);
+      sim.estimator.measure_afresh();
+      assert_eq!(sim.estimator.estimate_bps(), BweConfig::default().start_bps);
+      assert!(sim.estimator.loss_ratio() < f64::EPSILON);
+      // A higher estimate stays.
+      let mut sim = Simulation::new(Link::new(3_000_000, 40, 0));
+      sim.run(Duration::from_secs(30));
+      let before = sim.estimator.estimate_bps();
+      assert!(before > BweConfig::default().start_bps);
+      sim.estimator.measure_afresh();
+      assert_eq!(sim.estimator.estimate_bps(), before);
     }
   }
 

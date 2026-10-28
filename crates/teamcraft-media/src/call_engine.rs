@@ -1640,11 +1640,26 @@ impl CallEngine {
     }
     self.own_tracks.insert(stream, track.clone());
     self.update_uplink_demand();
+    self.measure_uplink_afresh();
     let stream_id = track.stream_id;
     self.event(CallEngineEvent::VideoPublished(track));
     // The driver dropped the pictures encoded before this confirmation, the first keyframe
     // among them: receivers would see nothing until the next one (issue #683).
     self.request_own_keyframes(stream_id, &own_layers);
+  }
+
+  /// A new own track sends far more than the call did so far: the uplink is measured afresh, as
+  /// at the start of the call, and nothing is held back until the estimator cuts the rate with the
+  /// track sending. A call that had sent only sound left an estimate behind that one lossy moment
+  /// had cut below every camera layer: the camera started with all of them held back, nothing was
+  /// sent, the others saw black and the camera was turned off ("none could be encoded"); only a
+  /// rejoin, with a fresh estimate, helped (#935).
+  fn measure_uplink_afresh(&mut self) {
+    self.uplink.measure_afresh();
+    self.uplink_layers.measure_afresh(self.uplink.estimate_bps());
+    // Tracks that were held back come back as well, with keyframes.
+    self.announce_layers(true);
+    self.announce_uplink_layers();
   }
 
   /// Asks the SFU for a publication and waits for its answer.
@@ -3067,6 +3082,62 @@ mod tests {
       let mut deduped = announced.clone();
       deduped.dedup();
       assert_eq!(deduped, announced);
+    }
+
+    /// Issue #935: a call that sent only sound through a lossy moment left an estimate cut below
+    /// every camera layer. A camera turned on then starts with every layer and sends, instead of
+    /// having them all held back (nothing was encoded, and the camera was turned off).
+    #[test]
+    fn a_camera_after_a_lossy_moment_of_sound_starts_with_every_layer() {
+      let now = Instant::now();
+      let (mut alice, _bob) = secured_pair(now);
+      let mut seq = 6;
+      let cut_to = degrade_uplink(&mut alice, &mut seq, now)
+        .iter()
+        .rev()
+        .find_map(|output| match output {
+          EngineOutput::Event(CallEngineEvent::UplinkEstimate { bps, .. }) => Some(*bps),
+          _ => None,
+        })
+        .unwrap();
+      assert!(cut_to < UplinkPolicy::default().audio_reserve_bps, "{cut_to}");
+
+      let later = now + Duration::from_secs(3);
+      ask_for(&mut alice, &video_track(50, 1, 3));
+      let published = CallEvent::VideoPublished {
+        track: video_track(50, 1, 3),
+      };
+      alice.handle_signal(event(seq, published), later).unwrap();
+      seq += 1;
+      drain(&mut alice);
+      // The next feedback, without loss, reports sound sent before the camera.
+      for _ in 0..10 {
+        alice.send_audio(&frame(), later);
+      }
+      drain(&mut alice);
+      let feedback = TransportFeedback {
+        base_seq: 200,
+        arrivals_us: (0..10u64).map(|i| Some(3_000_000 + i * 2_000)).collect(),
+      };
+      let at = later + Duration::from_millis(100);
+      alice
+        .handle_signal(event(seq, CallEvent::TransportFeedback { feedback }), at)
+        .unwrap();
+      let outputs = drain(&mut alice);
+      assert!(
+        !outputs
+          .iter()
+          .any(|output| matches!(output, EngineOutput::Event(CallEngineEvent::LayersNeeded { .. }))),
+        "{outputs:?}"
+      );
+      let top_layer = EncodedVideoFrame {
+        layer: SimulcastLayer::new(2).unwrap(),
+        ..video_frame()
+      };
+      assert_eq!(
+        alice.send_video(MediaStreamId(50), &top_layer, at),
+        VideoSendOutcome::Sent
+      );
     }
 
     #[test]

@@ -139,10 +139,13 @@ pub enum VideoStartError {
   NoEncoder(String),
   #[error("the {0} delivered no picture")]
   NoFrames(&'static str),
-  #[error("the {source_name} delivered {captured} pictures, but none could be encoded")]
+  /// `detail`: the encoders and what they made of the last picture, e.g. `OpenH264: …` with the
+  /// error, or that they gave none (#935).
+  #[error("the {source_name} delivered {captured} pictures, but none could be encoded: {detail}")]
   NotEncoded {
     source_name: &'static str,
     captured: u64,
+    detail: String,
   },
   #[error("the {0} stopped before its first picture")]
   CaptureEnded(&'static str),
@@ -290,6 +293,7 @@ impl VideoSender {
       encoded,
       counters: Arc::clone(&counters),
       maybe_first_picture: Some(first_picture),
+      maybe_no_picture: None,
       black: BlackWatch::new(black_notice),
       stall,
     };
@@ -359,6 +363,9 @@ struct EncoderLoop {
   encoded: mpsc::UnboundedSender<(VideoTrackKind, EncodedVideoFrame)>,
   counters: Arc<SendCounters>,
   maybe_first_picture: Option<oneshot::Sender<Result<(), VideoStartError>>>,
+  /// Why the last frame gave no picture, while the first picture is pending: the start check's
+  /// failure names the encoders and their error (#935).
+  maybe_no_picture: Option<String>,
   black: BlackWatch,
   stall: StallWatch,
 }
@@ -486,6 +493,7 @@ impl EncoderLoop {
         match frame.scaled(target) {
           Ok(scaled) => scaled,
           Err(error) => {
+            self.note_no_picture(|| format!("scaling to {}x{}: {error}", target.width, target.height));
             encode_warning.warn(|suppressed| warn!(%error, suppressed, "video frame not scaled"));
             continue;
           },
@@ -543,9 +551,13 @@ impl EncoderLoop {
     encode_warning: &mut RepeatedWarning,
   ) -> Result<LastPicture, LoopStep> {
     self.follow_source_size(simulcast, frame.resolution());
+    if self.maybe_first_picture.is_some() && !simulcast.has_needed_layers() {
+      return self.encode_unsent(simulcast, frame, encode_warning);
+    }
     let encoded_frames = match simulcast.encode(&frame) {
       Ok(encoded_frames) => encoded_frames,
       Err(error) => {
+        self.note_no_picture(|| format!("{}: {error}", simulcast.encoder_names()));
         let kind = &self.kind;
         encode_warning.warn(|suppressed| warn!(%error, suppressed, ?kind, "video frame not encoded"));
         return Err(LoopStep::Continue);
@@ -561,11 +573,51 @@ impl EncoderLoop {
     // After the hand-off: once the start is reported, the first picture is on its way.
     if has_pictures {
       self.report_start(Ok(()));
+    } else {
+      self.note_no_picture(|| format!("{} gave no picture", simulcast.encoder_names()));
     }
     Ok(LastPicture {
       frame,
       encoded_at: Instant::now(),
     })
+  }
+
+  /// A frame while the first picture is pending and no layer is needed (nobody receives the track
+  /// yet, or the uplink holds every layer back): encoded on the lowest layer and dropped, so the
+  /// start check learns whether the encoders work. Frames held back on purpose are no failing
+  /// encoder (#935: such a camera was turned off with "none could be encoded").
+  fn encode_unsent(
+    &mut self,
+    simulcast: &mut SimulcastEncoder,
+    frame: VideoFrame,
+    encode_warning: &mut RepeatedWarning,
+  ) -> Result<LastPicture, LoopStep> {
+    match simulcast.encode_unsent(&frame) {
+      Ok(true) => {
+        self.counters.encoded.fetch_add(1, Ordering::Relaxed);
+        debug!(kind = ?self.kind, "no layer is needed yet; the encoders work");
+        self.report_start(Ok(()));
+      },
+      Ok(false) => self.note_no_picture(|| format!("{} gave no picture", simulcast.encoder_names())),
+      Err(error) => {
+        self.note_no_picture(|| format!("{}: {error}", simulcast.encoder_names()));
+        let kind = &self.kind;
+        encode_warning.warn(|suppressed| warn!(%error, suppressed, ?kind, "video frame not encoded"));
+        return Err(LoopStep::Continue);
+      },
+    }
+    Ok(LastPicture {
+      frame,
+      encoded_at: Instant::now(),
+    })
+  }
+
+  /// Remembers why the frame just taken gave no picture while the first picture is pending: the
+  /// start check's failure says it.
+  fn note_no_picture(&mut self, why: impl FnOnce() -> String) {
+    if self.maybe_first_picture.is_some() {
+      self.maybe_no_picture = Some(why());
+    }
   }
 
   /// Rebuilds the encoders at the pictures' size once it changed for good (a shared window was
@@ -619,7 +671,11 @@ impl EncoderLoop {
     if now.saturating_duration_since(started_at) < FIRST_PICTURE_TIMEOUT {
       return LoopStep::Continue;
     }
-    let error = first_picture_failure(self.source_name(), self.counters.progress());
+    let error = first_picture_failure(
+      self.source_name(),
+      self.counters.progress(),
+      self.maybe_no_picture.take(),
+    );
     warn!(%error, kind = ?self.kind, "video start failed; the track is stopped");
     self.report_start(Err(error));
     LoopStep::Stop
@@ -667,6 +723,7 @@ impl EncoderLoop {
   }
 
   fn report_start(&mut self, result: Result<(), VideoStartError>) {
+    self.maybe_no_picture = None;
     if let Some(first_picture) = self.maybe_first_picture.take() {
       if result.is_ok() {
         info!(kind = ?self.kind, "the video track sends its first picture");
@@ -681,7 +738,6 @@ impl EncoderLoop {
   }
 }
 
-/// Why no first picture came: nothing captured, or nothing of it encoded.
 /// The largest of `layers`' sizes: what the track sends at most.
 fn largest_resolution(layers: &[VideoLayerInfo]) -> Option<VideoResolution> {
   layers
@@ -693,13 +749,20 @@ fn largest_resolution(layers: &[VideoLayerInfo]) -> Option<VideoResolution> {
     .max_by_key(|resolution| u32::from(resolution.width) * u32::from(resolution.height))
 }
 
-fn first_picture_failure(source_name: &'static str, progress: SendProgress) -> VideoStartError {
+/// Why no first picture came: nothing captured, or nothing of it encoded (`maybe_no_picture`:
+/// what the encoders made of the last frame).
+fn first_picture_failure(
+  source_name: &'static str,
+  progress: SendProgress,
+  maybe_no_picture: Option<String>,
+) -> VideoStartError {
   if progress.frames_captured == 0 {
     VideoStartError::NoFrames(source_name)
   } else {
     VideoStartError::NotEncoded {
       source_name,
       captured: progress.frames_captured,
+      detail: maybe_no_picture.unwrap_or_else(|| "no frame reached the encoders".into()),
     }
   }
 }
@@ -1235,10 +1298,62 @@ mod tests {
       assert_eq!(encoder_loop.check_first_picture(late, start), LoopStep::Continue);
     }
 
+    /// Issue #935: a camera nobody receives yet (or whose layers the uplink holds back) proves
+    /// its encoder with a picture that isn't sent, instead of failing for frames held back.
+    #[tokio::test]
+    async fn a_track_whose_layers_are_all_held_back_still_proves_its_encoder() {
+      let pushed = Arc::new(Mutex::new(None));
+      let (sender, first_picture, mut encoded_rx) = start_sender(
+        Box::new(SharedCapture(manual_capture(), Arc::clone(&pushed))),
+        fake_encoders(),
+      );
+      sender.set_needed_layers(Vec::new());
+      let frames = pushed.lock().unwrap().clone().unwrap();
+      assert!(frames.send(test_pattern(VGA, 0, 0).unwrap()));
+      assert_eq!(first_picture.wait().await, Ok(()));
+      assert!(
+        encoded_rx.try_recv().is_err(),
+        "nothing is sent while no layer is needed"
+      );
+      // Once a receiver needs the layer, it starts with a keyframe.
+      sender.set_needed_layers(vec![0]);
+      assert!(frames.send(test_pattern(VGA, 1, 33_333).unwrap()));
+      let (_, picture) = encoded_rx.recv().await.unwrap();
+      assert!(picture.is_keyframe);
+      assert_eq!(sender.finish().pictures_encoded, 2);
+    }
+
+    /// Issue #935: the failure the user sees names the encoders and their error.
+    #[test]
+    fn a_failing_encoder_is_named_with_its_error_when_the_check_gives_up() {
+      let (mut encoder_loop, mut first_picture) = idle_loop();
+      let layers = encoder_loop.layers.clone();
+      let mut simulcast = SimulcastEncoder::new(&layers, |_| {
+        Ok(Box::new(FakeEncoder::Failing) as Box<dyn VideoEncoder>)
+      })
+      .unwrap();
+      let mut warning = RepeatedWarning::default();
+      encoder_loop.counters.captured.fetch_add(1, Ordering::Relaxed);
+      let frame = test_pattern(VGA, 0, 0).unwrap();
+      assert!(
+        encoder_loop
+          .encode_and_send(&mut simulcast, frame, &mut warning)
+          .is_err()
+      );
+      let start = Instant::now();
+      let overdue = start + FIRST_PICTURE_TIMEOUT;
+      assert_eq!(encoder_loop.check_first_picture(overdue, start), LoopStep::Stop);
+      let error = first_picture.try_recv().unwrap().unwrap_err();
+      assert_eq!(
+        error.to_string(),
+        "the camera delivered 1 pictures, but none could be encoded: fake: video codec: device lost"
+      );
+    }
+
     #[test]
     fn the_failure_says_whether_anything_was_captured() {
       assert_eq!(
-        first_picture_failure("camera", SendProgress::default()),
+        first_picture_failure("camera", SendProgress::default(), None),
         VideoStartError::NoFrames("camera")
       );
       let captured = SendProgress {
@@ -1246,10 +1361,15 @@ mod tests {
         ..SendProgress::default()
       };
       assert_eq!(
-        first_picture_failure("screen capture", captured),
+        first_picture_failure(
+          "screen capture",
+          captured,
+          Some("OpenH264 gave no picture".into())
+        ),
         VideoStartError::NotEncoded {
           source_name: "screen capture",
-          captured: 12
+          captured: 12,
+          detail: "OpenH264 gave no picture".into(),
         }
       );
     }
@@ -1283,12 +1403,19 @@ mod tests {
       fn stop(&mut self) {}
     }
 
-    /// One picture per frame and layer.
-    struct FakeEncoder;
+    /// One picture per frame and layer, or an error for every frame.
+    enum FakeEncoder {
+      Working,
+      Failing,
+    }
 
     impl VideoEncoder for FakeEncoder {
       fn codec(&self) -> VideoCodec {
         VideoCodec::H264
+      }
+
+      fn name(&self) -> &'static str {
+        "fake"
       }
 
       fn encode(
@@ -1296,15 +1423,18 @@ mod tests {
         _frame: &VideoFrame,
         is_keyframe_forced: bool,
       ) -> Result<Option<crate::video_codec::EncodedPicture>, VideoCodecError> {
-        Ok(Some(crate::video_codec::EncodedPicture {
-          is_keyframe: is_keyframe_forced,
-          data: vec![0, 0, 0, 1, 0x65],
-        }))
+        match self {
+          Self::Working => Ok(Some(crate::video_codec::EncodedPicture {
+            is_keyframe: is_keyframe_forced,
+            data: vec![0, 0, 0, 1, 0x65],
+          })),
+          Self::Failing => Err(VideoCodecError::Codec("device lost".into())),
+        }
       }
     }
 
     pub(super) fn fake_encoders() -> EncoderFactory {
-      Arc::new(|_, _| Ok(Box::new(FakeEncoder) as Box<dyn VideoEncoder>))
+      Arc::new(|_, _| Ok(Box::new(FakeEncoder::Working) as Box<dyn VideoEncoder>))
     }
 
     pub(super) fn manual_capture() -> ManualCapture {
@@ -1357,6 +1487,7 @@ mod tests {
         encoded,
         counters: Arc::default(),
         maybe_first_picture: Some(first_picture),
+        maybe_no_picture: None,
         black: BlackWatch::new(oneshot::channel().0),
         stall: StallWatch::new(None),
       };

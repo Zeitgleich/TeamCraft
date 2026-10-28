@@ -534,6 +534,11 @@ Settings → Chats).
 - Audio first: own video layers follow the uplink estimate (screen shares before cameras), keeping
   48 kbit/s for the microphone (more while the screen's sound is shared); a layer comes back with a
   15 % margin. The start estimate is a guess, so limits apply only after the estimator cut the rate.
+  A new own track (a camera turned on mid-call) starts the same way: the uplink is measured afresh
+  from at least the start estimate, as an estimate made while only sound went out says nothing
+  about video (#935: one lossy moment had cut it below every camera layer, and nothing was sent).
+  A track whose layers are all held back still proves its encoder with one unsent picture, so the
+  start check doesn't take held-back pictures for a failing encoder.
 - Opus in-band FEC is planned for the measured uplink loss (5 % floor, 30 % cap; the native encoder
   and WebCodecs' `packetlossperc`). Native receivers recover a lost packet from the next packet's FEC
   data; WebCodecs can't, browsers conceal.
