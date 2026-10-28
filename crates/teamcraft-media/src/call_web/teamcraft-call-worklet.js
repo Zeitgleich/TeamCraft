@@ -49,5 +49,25 @@ class TeamcraftPlayback extends AudioWorkletProcessor {
   }
 }
 
+// The call's clock (call_web/cadence.rs): a message every `everyFrames` frames of audio. The audio
+// thread runs while the call's audio does, also in a hidden tab, where the page's timers are
+// throttled. The message carries nothing; the page reads its own clock.
+class TeamcraftClock extends AudioWorkletProcessor {
+  constructor(options) {
+    super();
+    this.everyFrames = options.processorOptions.everyFrames;
+    this.nextFrame = 0;
+  }
+
+  process() {
+    if (currentFrame >= this.nextFrame) {
+      this.port.postMessage(null);
+      this.nextFrame = currentFrame + this.everyFrames;
+    }
+    return true;
+  }
+}
+
 registerProcessor("teamcraft-capture", TeamcraftCapture);
 registerProcessor("teamcraft-playback", TeamcraftPlayback);
+registerProcessor("teamcraft-clock", TeamcraftClock);

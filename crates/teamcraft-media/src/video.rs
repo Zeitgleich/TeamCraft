@@ -4,7 +4,7 @@
 //! MediaCodec, VA-API); these types are what they plug into.
 
 use teamcraft_proto::{
-  MAX_SIMULCAST_LAYERS, MediaCapabilities, ScreenContentMode, VideoCodec, VideoLayerInfo,
+  MAX_SIMULCAST_LAYERS, MediaCapabilities, ScreenContentMode, VideoCodec, VideoLayerInfo, VideoTrackKind,
 };
 use thiserror::Error;
 
@@ -13,6 +13,9 @@ use crate::rtp::RtpTimestamp;
 
 /// RTP clock rate of video.
 pub const VIDEO_CLOCK_RATE_HZ: u32 = 90_000;
+/// A subscription's `max_layer` that means "the top layer", whatever the track has (the SFU caps
+/// it by the receiver's downlink).
+pub const TOP_LAYER: u8 = u8::MAX;
 
 /// One uncompressed frame from capture, in I420 (planar Y, U, V; chroma subsampled 2x2).
 #[derive(Clone, PartialEq, Eq)]
@@ -281,6 +284,31 @@ pub fn screen_layers(source: VideoResolution, framerate: u8, mode: ScreenContent
   )
 }
 
+/// The simulcast layer a viewer asks for (a subscription's `max_layer`) for a picture shown
+/// `shown` device pixels large (CSS size × `devicePixelRatio`): the smallest layer that covers it,
+/// so a picture is never scaled up while a sharper layer exists, and [`TOP_LAYER`] when none does.
+/// A tile crops its picture to fill (`object-fit: cover`), so a layer covers it when both its sides
+/// are at least the shown ones. Screen shares always get the top layer, as on the desktop: text has
+/// to stay readable. A picture not shown (zero size, not laid out yet) gets the lowest layer; a
+/// track whose layers are unknown gets the top one (the SFU still caps it by the downlink).
+pub fn layer_for_view(kind: &VideoTrackKind, layers: &[VideoLayerInfo], shown: VideoResolution) -> u8 {
+  if *kind == VideoTrackKind::Screen {
+    return TOP_LAYER;
+  }
+  let mut by_layer: Vec<&VideoLayerInfo> = layers.iter().collect();
+  by_layer.sort_by_key(|info| info.layer);
+  let Some(lowest) = by_layer.first() else {
+    return TOP_LAYER;
+  };
+  if shown.width == 0 || shown.height == 0 {
+    return lowest.layer;
+  }
+  by_layer
+    .into_iter()
+    .find(|info| info.width >= shown.width && info.height >= shown.height)
+    .map_or(TOP_LAYER, |info| info.layer)
+}
+
 /// The best video codec a sender can use so that every receiver decodes it: encodable by the
 /// sender, decodable by all `receivers`, preferring AV1, then VP9, then H.264.
 pub fn choose_video_codec(
@@ -451,6 +479,88 @@ mod tests {
       let limited = simulcast_layers(HD, 30, 1_600_000, 1);
       assert_eq!(limited.len(), 1);
       assert_eq!((limited[0].layer, limited[0].width), (0, 1280));
+    }
+  }
+
+  mod layer_choice {
+    use super::*;
+
+    #[test]
+    fn camera_tile_gets_the_smallest_layer_that_covers_it() {
+      let layers = camera_layers();
+      // A thumbnail on a standard display: the quarter-size layer is enough.
+      assert_eq!(layer_for_view(&VideoTrackKind::Camera, &layers, res(240, 135)), 0);
+      assert_eq!(layer_for_view(&VideoTrackKind::Camera, &layers, res(320, 180)), 0);
+      // The same thumbnail at devicePixelRatio 1.5.
+      assert_eq!(layer_for_view(&VideoTrackKind::Camera, &layers, res(360, 203)), 1);
+      // A grid tile, then an enlarged speaker.
+      assert_eq!(layer_for_view(&VideoTrackKind::Camera, &layers, res(640, 360)), 1);
+      assert_eq!(layer_for_view(&VideoTrackKind::Camera, &layers, res(900, 506)), 2);
+    }
+
+    #[test]
+    fn a_tile_larger_than_every_layer_gets_the_top_layer() {
+      let layers = camera_layers();
+      assert_eq!(
+        layer_for_view(&VideoTrackKind::Camera, &layers, res(1920, 1080)),
+        TOP_LAYER
+      );
+      assert_eq!(
+        layer_for_view(&VideoTrackKind::Camera, &layers, res(2560, 1440)),
+        TOP_LAYER
+      );
+    }
+
+    #[test]
+    fn a_cropped_tile_needs_both_sides_covered() {
+      let layers = camera_layers();
+      // A square tile crops the 16:9 picture: its height decides.
+      assert_eq!(layer_for_view(&VideoTrackKind::Camera, &layers, res(300, 300)), 1);
+      // A tall tile (portrait phone layout).
+      assert_eq!(layer_for_view(&VideoTrackKind::Camera, &layers, res(360, 640)), 2);
+    }
+
+    #[test]
+    fn screen_shares_always_get_the_top_layer() {
+      let layers = simulcast_layers(res(2560, 1440), 30, 6_000_000, 2);
+      assert_eq!(
+        layer_for_view(&VideoTrackKind::Screen, &layers, res(320, 180)),
+        TOP_LAYER
+      );
+      assert_eq!(
+        layer_for_view(&VideoTrackKind::Screen, &layers, res(0, 0)),
+        TOP_LAYER
+      );
+    }
+
+    #[test]
+    fn hidden_tiles_get_the_lowest_layer_and_unknown_tracks_the_top() {
+      let layers = camera_layers();
+      assert_eq!(layer_for_view(&VideoTrackKind::Camera, &layers, res(0, 0)), 0);
+      assert_eq!(layer_for_view(&VideoTrackKind::Camera, &layers, res(640, 0)), 0);
+      assert_eq!(
+        layer_for_view(&VideoTrackKind::Camera, &[], res(320, 180)),
+        TOP_LAYER
+      );
+    }
+
+    #[test]
+    fn a_single_layer_track_is_received_whole() {
+      let layers = simulcast_layers(res(640, 360), 30, 500_000, 1);
+      assert_eq!(layer_for_view(&VideoTrackKind::Camera, &layers, res(160, 90)), 0);
+      assert_eq!(
+        layer_for_view(&VideoTrackKind::Camera, &layers, res(1280, 720)),
+        TOP_LAYER
+      );
+    }
+
+    fn camera_layers() -> Vec<VideoLayerInfo> {
+      // 320×180, 640×360, 1280×720.
+      simulcast_layers(res(1280, 720), 30, 1_500_000, 3)
+    }
+
+    fn res(width: u16, height: u16) -> VideoResolution {
+      VideoResolution { width, height }
     }
   }
 

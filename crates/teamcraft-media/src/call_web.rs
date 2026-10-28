@@ -11,8 +11,9 @@
 //! Screen share and remote video live in [`video`].
 //!
 //! Every input (network, worklet, codecs, timers, app commands) is funneled into one channel that
-//! a single task drains, so the engine needs no locking. Timers use `setInterval`, which browsers
-//! do not throttle in tabs that play audio.
+//! a single task drains, so the engine needs no locking. Periodic work (audio frames, feedback,
+//! video capture) runs on pulses of the audio clock, which keeps going in a hidden tab whose page
+//! timers the browser throttles, with a page timer as the fallback ([`cadence`], issue #923).
 //!
 //! Browsers can't migrate a WebTransport session to another network. When the session closes
 //! without the call being over, the driver opens a new one with a fresh join ticket and the engine
@@ -30,11 +31,12 @@
 //! the driver closes its sessions in the `pagehide` handler itself: the SFU frees the slot at
 //! once instead of the others seeing "reconnecting" until the grace period ends.
 
+mod cadence;
 mod meter;
 mod session_watch;
 mod video;
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::future::Future;
 use std::pin::{Pin, pin};
@@ -48,7 +50,7 @@ use futures::future::{Either, select};
 use js_sys::{Array, Float32Array, Function, Object, Promise, Reflect, Uint8Array};
 use teamcraft_proto::{
   CallClientMessage, CallServerMessage, DeviceId, MediaStreamId, SFU_GOING_AWAY_CLOSE_CODE,
-  ScreenContentMode, VideoCodec, VideoTrackKind,
+  ScreenContentMode, VideoCodec, VideoTrack, VideoTrackKind,
 };
 use thiserror::Error;
 use tracing::{debug, error, info, warn};
@@ -63,6 +65,7 @@ use web_sys::{
 };
 use web_time::Instant;
 
+use self::cadence::Cadence;
 pub use self::meter::MicrophoneMeter;
 use self::session_watch::{NetworkVerdict, PacketCount, PathVerdict, Reading, SessionWatch, may_hurry};
 use self::video::{EncoderGaveUp, FrameDecoder, Publication, TrackSender, VideoView};
@@ -85,16 +88,22 @@ use crate::call_video::ReceivedVideoFrame;
 use crate::datagram::SimulcastLayer;
 use crate::jitter::{JitterBuffer, JitterBufferConfig, Playout};
 use crate::rtp::AudioLevel;
-use crate::video::EncodedVideoFrame;
+use crate::video::{EncodedVideoFrame, TOP_LAYER, VideoResolution, layer_for_view};
 use crate::web_api::{
   AudioData, AudioDecoder, AudioEncoder, EncodedAudioChunk, WORKLET_SOURCE, WebTransport,
   WebTransportBidirectionalStream, datagram_writable, dictionary, has_global,
 };
 
 /// Audio frame period.
-const FRAME_INTERVAL_MS: i32 = 20;
+const FRAME_INTERVAL: Duration = Duration::from_millis(20);
+/// Audio frames one late pulse may catch up on (more are skipped); the playback holds 200 ms.
+const MAX_FRAMES_PER_PULSE: u32 = 5;
 /// Feedback and allocation period.
-const TIMER_INTERVAL_MS: i32 = 100;
+const TIMER_INTERVAL: Duration = Duration::from_millis(100);
+/// The page timer's pulse period (the fallback clock; throttled in hidden tabs).
+const PULSE_INTERVAL_MS: i32 = 10;
+/// The audio clock pulses every this many frames of audio (10 ms at 48 kHz).
+const CLOCK_EVERY_FRAMES: u32 = SAMPLE_RATE_HZ / 100;
 /// Upper bound of one signaling message.
 const MAX_SIGNALING_BYTES: usize = 1024 * 1024;
 /// At most this much audio waits in the playback worklet (latency bound).
@@ -277,9 +286,8 @@ enum Input {
     context: &'static str,
     message: String,
   },
-  FrameTick,
-  TimerTick,
-  VideoTick(VideoTrackKind),
+  /// A pulse of the audio clock or the page timer: periodic work that fell due runs.
+  Pulse,
   VideoEncoded {
     kind: VideoTrackKind,
     layer: u8,
@@ -302,6 +310,11 @@ enum Input {
     stream_id: MediaStreamId,
     generation: u64,
     message: String,
+  },
+  /// A watched track's canvas is now shown this large (device pixels).
+  VideoResized {
+    stream_id: MediaStreamId,
+    shown: VideoResolution,
   },
   Command(Command),
 }
@@ -369,6 +382,22 @@ struct WebAudio {
   maybe_playback: Option<AudioWorkletNode>,
 }
 
+/// Wakes the call task for its periodic work ([`Input::Pulse`]). Pulses of both clocks coalesce
+/// while one waits in the channel, so a busy task (a permission prompt, a slow capture) doesn't
+/// find a backlog of them.
+#[derive(Clone)]
+struct Pulses {
+  inputs: mpsc::UnboundedSender<Input>,
+  is_pending: Rc<Cell<bool>>,
+}
+
+/// The audio clock: a worklet that pulses every [`CLOCK_EVERY_FRAMES`] of audio, also in a hidden
+/// tab; disconnected on drop.
+struct AudioClock {
+  node: AudioWorkletNode,
+  _on_message: Closure<dyn FnMut(MessageEvent)>,
+}
+
 struct Capture {
   stream: MediaStream,
   _source: MediaStreamAudioSourceNode,
@@ -402,7 +431,7 @@ struct RemoteAudio {
   _error: Closure<dyn FnMut(JsValue)>,
 }
 
-/// A `setInterval` timer, cleared on drop.
+/// A `setInterval` timer that pulses, cleared on drop (the fallback clock).
 struct Interval {
   handle: i32,
   _callback: Closure<dyn FnMut()>,
@@ -740,9 +769,18 @@ async fn run_call(
     senders: Vec::new(),
     encoded_kinds: Vec::new(),
     views: HashMap::new(),
+    remote_tracks: HashMap::new(),
+    pulses: Pulses {
+      inputs: inputs.clone(),
+      is_pending: Rc::new(Cell::new(false)),
+    },
+    frame_cadence: Cadence::new(FRAME_INTERVAL, MAX_FRAMES_PER_PULSE, Instant::now()),
+    timer_cadence: Cadence::new(TIMER_INTERVAL, 1, Instant::now()),
   };
-  let _frame_timer = Interval::start(FRAME_INTERVAL_MS, &inputs, || Input::FrameTick)?;
-  let _feedback_timer = Interval::start(TIMER_INTERVAL_MS, &inputs, || Input::TimerTick)?;
+  let _audio_clock = AudioClock::start(&audio.context, state.pulses.clone())
+    .inspect_err(|error| warn!(%error, "no audio clock; video and timers slow down in a hidden tab"))
+    .ok();
+  let _pulse_timer = Interval::start(PULSE_INTERVAL_MS, state.pulses.clone())?;
   engine.join(config.token.clone());
   state.flush(&mut engine)?;
 
@@ -822,7 +860,22 @@ struct CallState<'a> {
   senders: Vec<TrackSender>,
   /// Kinds whose running own track encoded a picture: one that ends before did not start.
   encoded_kinds: Vec<VideoTrackKind>,
-  views: HashMap<MediaStreamId, VideoView>,
+  views: HashMap<MediaStreamId, Watched>,
+  /// Other devices' published tracks: their kind and layers decide which layer a tile asks for.
+  remote_tracks: HashMap<MediaStreamId, VideoTrack>,
+  pulses: Pulses,
+  frame_cadence: Cadence,
+  timer_cadence: Cadence,
+}
+
+/// A watched track: its tile's decoder, and which layer its size asks for.
+struct Watched {
+  view: VideoView,
+  /// The canvas' size as last reported (device pixels).
+  shown: VideoResolution,
+  max_layer: u8,
+  /// Reports the canvas' size as [`Input::VideoResized`]; `None` where the browser can't.
+  _maybe_size_watch: Option<video::SizeWatch>,
 }
 
 impl CallState<'_> {
@@ -895,32 +948,7 @@ impl CallState<'_> {
         }
       },
       Input::CodecFailed { context, message } => warn!(context, %message, "codec error"),
-      Input::FrameTick => {
-        self.on_frame_tick(audio)?;
-        if self.is_ending_lost && !self.cues.is_playing(CallCue::ConnectionLost) {
-          return Err(WebCallError::ConnectionLost);
-        }
-      },
-      Input::TimerTick => {
-        engine.on_timer(Instant::now());
-        self.timer_ticks = self.timer_ticks.wrapping_add(1);
-        if self.timer_ticks.is_multiple_of(STATS_EVERY_TICKS) {
-          self.request_path_stats();
-        }
-        let tick = self.watch.on_tick(Instant::now());
-        if let Some(id) = tick.maybe_ping {
-          self.send_ping(id)?;
-        }
-        return Ok(self.on_path_verdict(engine, tick.verdict));
-      },
-      // A video error stays with its track or tile: it never ends the call (issue #919).
-      Input::VideoTick(kind) => {
-        if let Some(sender) = self.sender_of_kind(&kind)
-          && let Err(gave_up) = sender.capture().await
-        {
-          self.on_encoders_gave_up(engine, &kind, gave_up);
-        }
-      },
+      Input::Pulse => return self.on_pulse(engine, audio).await,
       Input::VideoEncoded {
         kind,
         layer,
@@ -952,13 +980,79 @@ impl CallState<'_> {
         generation,
         message,
       } => {
-        if let Some(view) = self.views.get_mut(&stream_id) {
-          recover_decoder(view, stream_id, generation, &message, engine);
+        if let Some(watched) = self.views.get_mut(&stream_id) {
+          recover_decoder(&mut watched.view, stream_id, generation, &message, engine);
         }
+      },
+      Input::VideoResized { stream_id, shown } => {
+        if let Some(watched) = self.views.get_mut(&stream_id) {
+          watched.shown = shown;
+        }
+        self.update_layer(engine, stream_id);
       },
       Input::Command(command) => return self.on_command(command, engine, audio).await,
     }
     Ok(Flow::Continue)
+  }
+
+  /// Runs what fell due since the last pulse: audio frames, the feedback timer, video captures.
+  async fn on_pulse(&mut self, engine: &mut CallEngine, audio: &WebAudio) -> Result<Flow, WebCallError> {
+    self.pulses.taken();
+    let now = Instant::now();
+    for _ in 0..self.frame_cadence.due(now) {
+      self.on_frame_tick(audio)?;
+      if self.is_ending_lost && !self.cues.is_playing(CallCue::ConnectionLost) {
+        return Err(WebCallError::ConnectionLost);
+      }
+    }
+    if self.timer_cadence.due(now) > 0
+      && let Flow::Leave = self.on_timer_tick(engine, now)?
+    {
+      return Ok(Flow::Leave);
+    }
+    let due: Vec<VideoTrackKind> = self
+      .senders
+      .iter_mut()
+      .filter_map(|sender| sender.is_due(now).then(|| sender.publication.kind.clone()))
+      .collect();
+    // A video error stays with its track or tile: it never ends the call (issue #919).
+    for kind in due {
+      if let Some(sender) = self.sender_of_kind(&kind)
+        && let Err(gave_up) = sender.capture().await
+      {
+        self.on_encoders_gave_up(engine, &kind, gave_up);
+      }
+    }
+    Ok(Flow::Continue)
+  }
+
+  fn on_timer_tick(&mut self, engine: &mut CallEngine, now: Instant) -> Result<Flow, WebCallError> {
+    engine.on_timer(now);
+    self.timer_ticks = self.timer_ticks.wrapping_add(1);
+    if self.timer_ticks.is_multiple_of(STATS_EVERY_TICKS) {
+      self.request_path_stats();
+    }
+    let tick = self.watch.on_tick(now);
+    if let Some(id) = tick.maybe_ping {
+      self.send_ping(id)?;
+    }
+    Ok(self.on_path_verdict(engine, tick.verdict))
+  }
+
+  /// Asks for the layer a watched track's tile size calls for, when it changed.
+  fn update_layer(&mut self, engine: &mut CallEngine, stream_id: MediaStreamId) {
+    let Some(watched) = self.views.get_mut(&stream_id) else {
+      return;
+    };
+    let Some(track) = self.remote_tracks.get(&stream_id) else {
+      return;
+    };
+    let max_layer = layer_for_view(&track.kind, &track.layers, watched.shown);
+    if max_layer != watched.max_layer {
+      debug!(stream_id = stream_id.0, max_layer, shown = ?watched.shown, "video tile asks for another layer");
+      watched.max_layer = max_layer;
+      engine.set_video_max_layer(stream_id, max_layer);
+    }
   }
 
   fn flush(&mut self, engine: &mut CallEngine) -> Result<(), WebCallError> {
@@ -991,8 +1085,8 @@ impl CallState<'_> {
           remote.jitter.push(sequence_number, opus);
         },
         EngineOutput::Event(CallEngineEvent::VideoFrame(frame)) => {
-          if let Some(view) = self.views.get_mut(&frame.stream_id) {
-            decode_video(view, &frame, engine);
+          if let Some(watched) = self.views.get_mut(&frame.stream_id) {
+            decode_video(&mut watched.view, &frame, engine);
           }
         },
         EngineOutput::Event(event) => {
@@ -1006,9 +1100,12 @@ impl CallState<'_> {
             } => {
               self.remotes.remove(&(*device_id, AudioOrigin::Screen));
             },
-            CallEngineEvent::VideoPublished(_) | CallEngineEvent::VideoUnpublished(_) => {
+            CallEngineEvent::VideoPublished(track) => {
               self.on_publication(&event);
+              // A tile may have been watching before its layers were known.
+              self.update_layer(engine, track.stream_id);
             },
+            CallEngineEvent::VideoUnpublished(_) => self.on_publication(&event),
             CallEngineEvent::KeyframeRequested { stream_id, layer } => {
               if let Some(sender) = self.sender_of(*stream_id) {
                 sender.request_keyframe(*layer);
@@ -1299,9 +1396,25 @@ impl CallState<'_> {
         }
       },
       Command::WatchVideo { stream_id, canvas } => {
+        let shown = video::shown_size(&canvas);
+        let maybe_size_watch = video::SizeWatch::start(stream_id, &canvas, self.inputs)
+          .inspect_err(|error| debug!(%error, "tile sizes unknown; the video keeps its first layer"))
+          .ok();
+        // Unknown layers (not published yet): the top, like the desktop; the SFU caps by downlink.
+        let max_layer = self.remote_tracks.get(&stream_id).map_or(TOP_LAYER, |track| {
+          layer_for_view(&track.kind, &track.layers, shown)
+        });
         let view = VideoView::new(stream_id, canvas, self.inputs);
-        self.views.insert(stream_id, view);
-        engine.subscribe_video(stream_id, Some(0));
+        self.views.insert(
+          stream_id,
+          Watched {
+            view,
+            shown,
+            max_layer,
+            _maybe_size_watch: maybe_size_watch,
+          },
+        );
+        engine.subscribe_video(stream_id, Some(max_layer));
       },
       Command::SetStatusCues(status_cues) => self.cues.set_setting(status_cues),
       Command::UnwatchVideo(stream_id) => {
@@ -1380,8 +1493,15 @@ impl CallState<'_> {
   /// Own tracks follow their publications ([`follow_publication`]); a track that is gone loses
   /// its view.
   fn on_publication(&mut self, event: &CallEngineEvent) {
-    if let CallEngineEvent::VideoUnpublished(stream_id) = event {
-      self.views.remove(stream_id);
+    match event {
+      CallEngineEvent::VideoUnpublished(stream_id) => {
+        self.views.remove(stream_id);
+        self.remote_tracks.remove(stream_id);
+      },
+      CallEngineEvent::VideoPublished(track) if track.device_id != self.own_device => {
+        self.remote_tracks.insert(track.stream_id, track.clone());
+      },
+      _ => {},
     }
     let publications = self.senders.iter_mut().map(|sender| &mut sender.publication);
     if let Some(index) = follow_publication(publications, self.own_device, event)
@@ -1726,6 +1846,55 @@ impl WebAudio {
   }
 }
 
+impl Pulses {
+  fn send(&self) {
+    if !self.is_pending.replace(true) {
+      // The call task may be gone; its clocks stop when it drops them.
+      let _ = self.inputs.unbounded_send(Input::Pulse);
+    }
+  }
+
+  /// The call task took the waiting pulse: the next one goes out again.
+  fn taken(&self) {
+    self.is_pending.set(false);
+  }
+}
+
+impl AudioClock {
+  /// Starts the clock worklet. It fails with a worklet module from before the clock (a page that
+  /// cached an old one); the page timer pulses alone then.
+  fn start(context: &AudioContext, pulses: Pulses) -> Result<Self, WebCallError> {
+    let options = AudioWorkletNodeOptions::new();
+    options.set_number_of_inputs(0);
+    options.set_output_channel_count(&Array::of1(&JsValue::from(1)));
+    let processor_options =
+      dictionary(&[("everyFrames", JsValue::from(CLOCK_EVERY_FRAMES))]).map_err(browser("clock worklet"))?;
+    options.set_processor_options(Some(&processor_options));
+    let node = AudioWorkletNode::new_with_options(context, "teamcraft-clock", &options)
+      .map_err(browser("clock worklet"))?;
+    let on_message = Closure::<dyn FnMut(MessageEvent)>::new(move |_: MessageEvent| pulses.send());
+    node
+      .port()
+      .map_err(browser("clock worklet"))?
+      .set_onmessage(Some(on_message.as_ref().unchecked_ref()));
+    // Connected to the output so the browser runs it; the processor writes silence.
+    node
+      .connect_with_audio_node(&context.destination())
+      .map_err(browser("clock graph"))?;
+    Ok(Self {
+      node,
+      _on_message: on_message,
+    })
+  }
+}
+
+impl Drop for AudioClock {
+  fn drop(&mut self) {
+    // Already detached with its closed context: nothing to undo.
+    let _ = self.node.disconnect();
+  }
+}
+
 impl Capture {
   async fn open(
     context: &AudioContext,
@@ -1975,15 +2144,8 @@ impl Drop for RemoteAudio {
 }
 
 impl Interval {
-  fn start(
-    period_ms: i32,
-    inputs: &mpsc::UnboundedSender<Input>,
-    make_input: fn() -> Input,
-  ) -> Result<Self, WebCallError> {
-    let sender = inputs.clone();
-    let callback = Closure::<dyn FnMut()>::new(move || {
-      let _ = sender.unbounded_send(make_input());
-    });
+  fn start(period_ms: i32, pulses: Pulses) -> Result<Self, WebCallError> {
+    let callback = Closure::<dyn FnMut()>::new(move || pulses.send());
     let handle = window()?
       .set_interval_with_callback_and_timeout_and_arguments_0(callback.as_ref().unchecked_ref(), period_ms)
       .map_err(browser("setInterval"))?;

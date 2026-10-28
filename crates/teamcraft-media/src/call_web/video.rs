@@ -5,8 +5,13 @@
 //! H.264 Constrained Baseline in Annex B, like the native encoder, so browsers and desktops decode
 //! each other. A `<video>` element plays the captured stream and frames are taken from it at a
 //! fixed rate, which works in every browser with WebCodecs (Firefox has no
-//! MediaStreamTrackProcessor). Each simulcast layer has its own encoder configured at the layer's
-//! size; WebCodecs scales the frame to it.
+//! MediaStreamTrackProcessor, Safari has it only in workers). The rate is kept by the call's
+//! [`Cadence`] on the audio clock's pulses, not by a page timer, so a screen shared from a hidden
+//! tab keeps its frame rate (issue #923). Each simulcast layer has its own encoder configured at the
+//! layer's size; WebCodecs scales the frame to it.
+//!
+//! A watched track's canvas reports its shown size ([`SizeWatch`]), from which the call picks the
+//! layer to receive ([`crate::video::layer_for_view`]).
 //!
 //! A codec error stays with its track or tile, never ends the call (issue #919): WebCodecs closes
 //! a failed encoder or decoder for good, so a failed encoder is replaced by a new one that starts
@@ -24,10 +29,11 @@ use web_sys::{
   DisplayMediaStreamConstraints, HtmlCanvasElement, HtmlVideoElement, MediaStream, MediaStreamConstraints,
   MediaStreamTrack, MediaTrackConstraints,
 };
+use web_time::Instant;
 
+use super::cadence::Cadence;
 use super::{
-  Input, Interval, MediaAccessReason, MediaInput, WebCallError, browser, dictionary, js_message,
-  media_access, window,
+  Input, MediaAccessReason, MediaInput, WebCallError, browser, dictionary, js_message, media_access, window,
 };
 use crate::call_video::ReceivedVideoFrame;
 use crate::video::{VideoResolution, fit_within, screen_bitrate_bps, screen_limits, simulcast_layers};
@@ -66,7 +72,8 @@ pub(super) struct TrackSender {
   failed_pictures_in_a_row: u32,
   #[cfg(feature = "effects")]
   maybe_effects: Option<effects::WebEffects>,
-  _timer: Interval,
+  /// When the next picture is due, at the track's frame rate.
+  cadence: Cadence,
   _ended: Closure<dyn FnMut()>,
 }
 
@@ -114,6 +121,13 @@ pub(super) trait FrameEncoder {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) struct EncoderGaveUp {
   pub layer: u8,
+}
+
+/// Reports a watched track's canvas size as [`Input::VideoResized`] when it changes (the tile is
+/// laid out, enlarged, or the window resized); stops on drop.
+pub(super) struct SizeWatch {
+  observer: web_sys::ResizeObserver,
+  _on_resize: Closure<dyn FnMut()>,
 }
 
 /// A WebCodecs H.264 encoder for one layer; closed on drop.
@@ -209,13 +223,6 @@ impl TrackSender {
       let _ = ended_sender.unbounded_send(Input::VideoEnded(ended_kind.clone()));
     });
     track.set_onended(Some(ended.as_ref().unchecked_ref()));
-    let period_ms = 1000 / i32::from(plan.framerate.max(1));
-    let timer = match plan.kind {
-      VideoTrackKind::Screen => {
-        Interval::start(period_ms, inputs, || Input::VideoTick(VideoTrackKind::Screen))?
-      },
-      _ => Interval::start(period_ms, inputs, || Input::VideoTick(VideoTrackKind::Camera))?,
-    };
     Ok(Self {
       publication: Publication {
         kind: plan.kind,
@@ -230,13 +237,18 @@ impl TrackSender {
       failed_pictures_in_a_row: 0,
       #[cfg(feature = "effects")]
       maybe_effects: plan.maybe_effects.map(effects::WebEffects::new).transpose()?,
-      _timer: timer,
+      cadence: Cadence::per_second(plan.framerate, Instant::now()),
       _ended: ended,
     })
   }
 
   pub fn layers(&self) -> Vec<VideoLayerInfo> {
     self.encoders.infos()
+  }
+
+  /// Whether the next picture is due at `now` ([`TrackSender::capture`] it then).
+  pub fn is_due(&mut self, now: Instant) -> bool {
+    self.cadence.due(now) > 0
   }
 
   pub fn request_keyframe(&mut self, layer: u8) {
@@ -454,6 +466,35 @@ impl<E: FrameEncoder> LayerEncoders<E> {
 
   fn layer_mut(&mut self, layer: u8) -> Option<&mut Layer<E>> {
     self.layers.iter_mut().find(|current| current.info.layer == layer)
+  }
+}
+
+impl SizeWatch {
+  pub fn start(
+    stream_id: MediaStreamId,
+    canvas: &HtmlCanvasElement,
+    inputs: &mpsc::UnboundedSender<Input>,
+  ) -> Result<Self, WebCallError> {
+    let sender = inputs.clone();
+    let observed = canvas.clone();
+    let on_resize = Closure::<dyn FnMut()>::new(move || {
+      let shown = shown_size(&observed);
+      // The call task may be gone; the watch stops when the tile does.
+      let _ = sender.unbounded_send(Input::VideoResized { stream_id, shown });
+    });
+    let observer =
+      web_sys::ResizeObserver::new(on_resize.as_ref().unchecked_ref()).map_err(browser("ResizeObserver"))?;
+    observer.observe(canvas);
+    Ok(Self {
+      observer,
+      _on_resize: on_resize,
+    })
+  }
+}
+
+impl Drop for SizeWatch {
+  fn drop(&mut self) {
+    self.observer.disconnect();
   }
 }
 
@@ -736,6 +777,17 @@ impl FrameDecoder for Decoder {
 impl Drop for Decoder {
   fn drop(&mut self) {
     let _ = self.decoder.close();
+  }
+}
+
+/// How large `canvas` is shown, in device pixels (CSS size × `devicePixelRatio`); zero while it
+/// isn't laid out.
+pub(super) fn shown_size(canvas: &HtmlCanvasElement) -> VideoResolution {
+  let ratio = window().map_or(1.0, |window| window.device_pixel_ratio());
+  let side = |css: i32| (f64::from(css.max(0)) * ratio).round().min(f64::from(u16::MAX)) as u16;
+  VideoResolution {
+    width: side(canvas.client_width()),
+    height: side(canvas.client_height()),
   }
 }
 
