@@ -12,6 +12,13 @@ use crate::{DeviceId, MediaStreamId};
 
 /// Highest number of simulcast layers per video track (the datagram header has 4 bits).
 pub const MAX_SIMULCAST_LAYERS: u8 = 3;
+/// The most fragments (RTP packets) one video frame may have: about 4.5 MB in 1100 byte
+/// fragments, far above a keyframe of the largest picture sent (1440p), and a bound on what a
+/// receiver holds for one frame.
+pub const MAX_VIDEO_FRAME_FRAGMENTS: u16 = 4096;
+/// What clients from before the fragment extension's long form reassemble (issue #941): 255
+/// fragments, about 280 KB, less than a keyframe of a text-heavy screen share at 1440p.
+pub const SHORT_VIDEO_FRAME_FRAGMENTS: u16 = 255;
 
 wire_enum! {
   /// Audio codecs. Opus is the only one, but the list keeps room for others.
@@ -47,6 +54,10 @@ pub struct MediaCapabilities {
   pub video_decoders: Vec<VideoCodec>,
   /// Simulcast layers the client can send per video track.
   pub max_simulcast_layers: u8,
+  /// The most fragments of one video frame the client reassembles; the SFU forwards it no layer
+  /// with larger frames. Clients that don't send it take [`SHORT_VIDEO_FRAME_FRAGMENTS`].
+  #[serde(default = "short_video_frame_fragments")]
+  pub max_frame_fragments: u16,
 }
 
 /// One simulcast layer of a published video track.
@@ -99,8 +110,13 @@ impl Default for MediaCapabilities {
       video_encoders: Vec::new(),
       video_decoders: Vec::new(),
       max_simulcast_layers: 0,
+      max_frame_fragments: MAX_VIDEO_FRAME_FRAGMENTS,
     }
   }
+}
+
+fn short_video_frame_fragments() -> u16 {
+  SHORT_VIDEO_FRAME_FRAGMENTS
 }
 
 impl VideoCodec {
@@ -126,12 +142,27 @@ mod tests {
       video_encoders: vec![VideoCodec::H264],
       video_decoders: vec![VideoCodec::Av1, VideoCodec::H264],
       max_simulcast_layers: 3,
+      max_frame_fragments: MAX_VIDEO_FRAME_FRAGMENTS,
     };
     assert_eq!(
       serde_json::to_string(&capabilities).unwrap(),
-      r#"{"audio_codecs":["opus"],"video_encoders":["h264"],"video_decoders":["av1","h264"],"max_simulcast_layers":3}"#
+      r#"{"audio_codecs":["opus"],"video_encoders":["h264"],"video_decoders":["av1","h264"],"max_simulcast_layers":3,"max_frame_fragments":4096}"#
     );
     assert!(MediaCapabilities::default().video_decoders.is_empty());
+    assert_eq!(
+      MediaCapabilities::default().max_frame_fragments,
+      MAX_VIDEO_FRAME_FRAGMENTS
+    );
+  }
+
+  /// Clients from before #941 send no `max_frame_fragments`: they take frames of up to 255.
+  #[test]
+  fn capabilities_without_frame_fragments_take_the_short_form() {
+    let older: MediaCapabilities = serde_json::from_str(
+      r#"{"audio_codecs":["opus"],"video_encoders":[],"video_decoders":["h264"],"max_simulcast_layers":3}"#,
+    )
+    .unwrap();
+    assert_eq!(older.max_frame_fragments, SHORT_VIDEO_FRAME_FRAGMENTS);
   }
 
   #[test]

@@ -263,6 +263,7 @@ async fn join(port: u16, certificate_hash: [u8; 32], device: i64, other: i64) ->
       video_encoders: vec![VideoCodec::H264],
       video_decoders: vec![VideoCodec::H264],
       max_simulcast_layers: 3,
+      max_frame_fragments: teamcraft_proto::MAX_VIDEO_FRAME_FRAGMENTS,
     },
     bwe: BweConfig::default(),
   };

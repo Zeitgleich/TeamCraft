@@ -1015,6 +1015,7 @@ fn native_config(preparation: CallPreparation) -> Result<NativeCallConfig, TeamC
       video_encoders: vec![VideoCodec::H264],
       video_decoders,
       max_simulcast_layers: CAMERA_LAYERS,
+      max_frame_fragments: teamcraft_proto::MAX_VIDEO_FRAME_FRAGMENTS,
     },
     bwe: BweConfig::default(),
   };

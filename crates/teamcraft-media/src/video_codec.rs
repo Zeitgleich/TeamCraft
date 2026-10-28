@@ -22,6 +22,13 @@ use crate::video::{EncodedVideoFrame, VideoError, VideoFrame, VideoResolution};
 
 /// A keyframe at least this often, so receivers recover from losses without asking.
 const KEYFRAME_INTERVAL_FRAMES: u32 = 300;
+/// The frame rate OpenH264's rate control plans a screen share's pictures with. A screen
+/// delivers a picture only when something changes, mostly a few a second; planned for the
+/// layer's 30, every picture got a thirtieth of a second's bits: after a keyframe of text the
+/// encoder skipped pictures for seconds, and a keyframe asked for later came out blurred and
+/// took ten seconds to sharpen (issue #941). The rate control follows the pictures' timestamps,
+/// so a screen that does change 30 times a second still stays within the layer's bitrate.
+const SCREEN_PLANNED_FRAMERATE: u8 = 5;
 /// A hardware encoder that took this many frames in a row without giving a picture...
 const STALL_MIN_FRAMES: u32 = 10;
 /// ...over at least this much capture time has stalled; software takes over. Short enough that
@@ -140,15 +147,23 @@ pub enum VideoCodecError {
 
 impl OpenH264Encoder {
   pub fn new(layer: &VideoLayerInfo, content: VideoContent) -> Result<Self, VideoCodecError> {
-    let usage = match content {
-      VideoContent::Camera => UsageType::CameraVideoRealTime,
-      VideoContent::Screen => UsageType::ScreenContentRealTime,
+    let (usage, rate_control, framerate) = match content {
+      VideoContent::Camera => (
+        UsageType::CameraVideoRealTime,
+        RateControlMode::Bitrate,
+        layer.max_framerate,
+      ),
+      VideoContent::Screen => (
+        UsageType::ScreenContentRealTime,
+        RateControlMode::Timestamp,
+        layer.max_framerate.min(SCREEN_PLANNED_FRAMERATE),
+      ),
     };
     let config = EncoderConfig::new()
       .bitrate(BitRate::from_bps(layer.max_bitrate_bps))
-      .max_frame_rate(FrameRate::from_hz(f32::from(layer.max_framerate.max(1))))
+      .max_frame_rate(FrameRate::from_hz(f32::from(framerate.max(1))))
       .usage_type(usage)
-      .rate_control_mode(RateControlMode::Bitrate)
+      .rate_control_mode(rate_control)
       .intra_frame_period(IntraFramePeriod::from_num_frames(KEYFRAME_INTERVAL_FRAMES));
     let encoder = Encoder::with_api_config(openh264_library::api()?, config).map_err(codec_error)?;
     Ok(Self {
@@ -562,8 +577,10 @@ pub(crate) fn starts_with_sps(data: &[u8]) -> bool {
 
 #[cfg(test)]
 mod tests {
+  use teamcraft_proto::ScreenContentMode;
+
   use super::*;
-  use crate::video::simulcast_layers;
+  use crate::video::{screen_layers, simulcast_layers};
 
   const HD: VideoResolution = VideoResolution {
     width: 1280,
@@ -688,6 +705,38 @@ mod tests {
     let (original, decoded) = last.unwrap();
     let psnr = luma_psnr(&original, &decoded);
     assert!(psnr > 30.0, "PSNR {psnr:.1} dB");
+  }
+
+  /// Issue #941: a still screen delivers a picture only when something changes, here twice a
+  /// second. Planned for 30 pictures a second, OpenH264 skipped the pictures after a keyframe of
+  /// text for seconds, and a keyframe asked for later came out blurred.
+  #[test]
+  #[cfg_attr(
+    not(feature = "openh264-source"),
+    ignore = "needs OpenH264: --features openh264-source"
+  )]
+  fn a_still_screen_of_text_stays_sharp_through_keyframes() {
+    let layer = *screen_layers(HD, 30, ScreenContentMode::Detail).last().unwrap();
+    let mut encoder = OpenH264Encoder::new(&layer, VideoContent::Screen).unwrap();
+    let mut decoder = OpenH264Decoder::new().unwrap();
+    let mut skipped = Vec::new();
+    for index in 0..12u32 {
+      let frame = text_page(HD, index % 2 == 0).with_timestamp_us(u64::from(index) * 500_000);
+      let is_keyframe_forced = index == 0 || index == 6;
+      let Some(picture) = encoder.encode(&frame, is_keyframe_forced).unwrap() else {
+        skipped.push(index);
+        continue;
+      };
+      assert_eq!(picture.is_keyframe, is_keyframe_forced, "picture {index}");
+      if let Some(decoded) = decoder.decode(&picture.data, frame.timestamp_us()).unwrap() {
+        let psnr = luma_psnr(&frame, &decoded);
+        // Dense 1 pixel strokes are the hardest case for H.264; 32 dB keeps them readable.
+        assert!(psnr > 32.0, "picture {index}: PSNR {psnr:.1} dB");
+      }
+    }
+    // At most the picture right after the first keyframe gives way to it (before: every
+    // picture but the keyframes was skipped, and the second keyframe came out at 31 dB).
+    assert!(skipped.iter().all(|index| *index == 1), "skipped {skipped:?}");
   }
 
   #[test]
@@ -1011,6 +1060,39 @@ mod tests {
     data.extend(std::iter::repeat_n(110, width * height / 4));
     data.extend(std::iter::repeat_n(150, width * height / 4));
     VideoFrame::new(resolution, u64::from(index) * 33_333, data).unwrap()
+  }
+
+  /// Lines of small print on white: pseudo-random 5×7 glyphs with 1 pixel strokes and gaps
+  /// between words; a cursor blinks.
+  fn text_page(resolution: VideoResolution, has_cursor: bool) -> VideoFrame {
+    let (width, height) = (usize::from(resolution.width), usize::from(resolution.height));
+    let mut luma = vec![235u8; width * height];
+    let mut random = 0x9E37_79B9_7F4A_7C15u64;
+    for top in (24..height - 24).step_by(18) {
+      for left in (40..width - 40).step_by(6) {
+        random ^= random << 13;
+        random ^= random >> 7;
+        random ^= random << 17;
+        if random.is_multiple_of(5) {
+          continue;
+        }
+        for row in 0..7 {
+          for column in 0..5 {
+            if column == 0 || (random >> (row * 5 + column)) & 1 == 1 {
+              luma[(top + row) * width + left + column] = 30;
+            }
+          }
+        }
+      }
+    }
+    if has_cursor {
+      for row in 10..20 {
+        luma[row * width + 40] = 16;
+      }
+    }
+    let mut data = luma;
+    data.extend(std::iter::repeat_n(128, width * height / 2));
+    VideoFrame::new(resolution, 0, data).unwrap()
   }
 
   fn luma_psnr(a: &VideoFrame, b: &VideoFrame) -> f64 {

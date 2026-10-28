@@ -5,10 +5,11 @@
 //! except tracks that may not be paused (screen shares by default: without simulcast there is no
 //! lower layer, and their traffic is what lets the estimate grow), which keep their lowest layer
 //! even over budget; then tracks are upgraded one layer at a time in priority order up to the layer the receiver asked
-//! for. Downgrades apply at once; an upgrade only when the budget covers the new layer with
-//! `upswitch_headroom` for `upswitch_hold`, so a noisy estimate doesn't make layers flap. A paused
-//! track resumes its lowest layer every `resume_probe_interval` as a probe: without traffic there is
-//! no feedback, and the estimate would never recover.
+//! for. Downgrades apply at once (a screen share's after `screen_downswitch_hold`); an upgrade only
+//! when the budget covers the new layer with `upswitch_headroom` for `upswitch_hold`, so a noisy
+//! estimate doesn't make layers flap. A paused track resumes its lowest layer every
+//! `resume_probe_interval` as a probe: without traffic there is no feedback, and the estimate
+//! would never recover.
 
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
@@ -29,6 +30,13 @@ pub struct LayerAllocationConfig {
   pub resume_probe_interval: Duration,
   /// Whether screen shares may be paused for lack of bandwidth like cameras.
   pub can_pause_screen_shares: bool,
+  /// How long the budget has to stay below a screen share's layer before it drops. A still
+  /// screen sends almost nothing but keyframes of hundreds of kilobytes, and the estimate
+  /// reacts to such a burst with a cut it recovers from within a second or two; dropping the
+  /// layer at once sent a viewer back to the blurred half-size picture right after the sharp one
+  /// arrived, and every switch costs another such keyframe (issue #941). A link that really
+  /// can't carry the share stays below for longer.
+  pub screen_downswitch_hold: Duration,
 }
 
 /// One subscribed track as the allocator sees it.
@@ -43,6 +51,8 @@ pub struct TrackDemand<'a> {
   pub layers: &'a [VideoLayerInfo],
   /// `false`: the lowest layer is forwarded even over budget.
   pub can_pause: bool,
+  /// How long the budget has to stay below the current layer before it drops (zero: at once).
+  pub downswitch_hold: Duration,
 }
 
 /// Remembers the current allocation of one receiver for hysteresis.
@@ -50,6 +60,8 @@ pub struct TrackDemand<'a> {
 pub struct LayerAllocator {
   current: HashMap<StreamId, Option<u8>>,
   upgrade_pending_since: HashMap<StreamId, Instant>,
+  /// Since when the budget is below the layer of a track with a [`TrackDemand::downswitch_hold`].
+  downgrade_pending_since: HashMap<StreamId, Instant>,
   paused_since: HashMap<StreamId, Instant>,
   /// Resume probes in progress: the lowest layer is kept until then, whatever the estimate says,
   /// so its feedback can lift the estimate.
@@ -64,6 +76,7 @@ impl Default for LayerAllocationConfig {
       upswitch_hold: Duration::from_secs(2),
       resume_probe_interval: Duration::from_secs(5),
       can_pause_screen_shares: false,
+      screen_downswitch_hold: Duration::from_secs(3),
     }
   }
 }
@@ -91,13 +104,17 @@ impl LayerAllocator {
       let current = self.current.get(&stream_id).copied().flatten();
       let wanted = ideal.get(&stream_id).copied().flatten();
       let affordable_with_headroom = with_headroom.get(&stream_id).copied().flatten();
+      if layer_rank(wanted) >= layer_rank(current) {
+        // The budget covers the current layer (again).
+        self.downgrade_pending_since.remove(&stream_id);
+      }
       let chosen = if current.is_none() && !self.current.contains_key(&stream_id) {
         // New subscription: start where the budget allows.
         wanted
       } else if layer_rank(wanted) <= layer_rank(current) {
-        // Same or lower: apply immediately.
+        // Same or lower: apply immediately, unless the track holds its layer through a dip.
         self.upgrade_pending_since.remove(&stream_id);
-        wanted
+        self.downgrade_after_hold(demand, current, wanted, now)
       } else if layer_rank(affordable_with_headroom) > layer_rank(current) {
         let since = *self.upgrade_pending_since.entry(stream_id).or_insert(now);
         if now.saturating_duration_since(since) >= config.upswitch_hold {
@@ -124,7 +141,37 @@ impl LayerAllocator {
     self
       .paused_since
       .retain(|stream_id, _| result.contains_key(stream_id));
+    self
+      .downgrade_pending_since
+      .retain(|stream_id, _| result.contains_key(stream_id));
     result
+  }
+
+  /// `wanted` (at most `current`) once the budget has been below `current` for the track's
+  /// [`TrackDemand::downswitch_hold`]; `current` until then.
+  fn downgrade_after_hold(
+    &mut self,
+    demand: &TrackDemand<'_>,
+    current: Option<u8>,
+    wanted: Option<u8>,
+    now: Instant,
+  ) -> Option<u8> {
+    // The receiver asks for less, or the layer isn't there to have any more (the publisher's
+    // uplink dropped it, its frames are too large for the receiver): no reason to wait.
+    let is_still_there = current
+      .is_some_and(|layer| layer <= demand.max_layer && demand.layers.iter().any(|info| info.layer == layer));
+    if wanted == current || demand.downswitch_hold.is_zero() || !is_still_there {
+      return wanted;
+    }
+    let since = *self
+      .downgrade_pending_since
+      .entry(demand.stream_id)
+      .or_insert(now);
+    if now.saturating_duration_since(since) < demand.downswitch_hold {
+      return current;
+    }
+    self.downgrade_pending_since.remove(&demand.stream_id);
+    wanted
   }
 
   fn probe_if_paused_too_long(
@@ -338,6 +385,55 @@ mod tests {
       );
     }
 
+    /// Issue #941: a screen share's keyframe makes the estimate dip; the sharp layer stays
+    /// through the dip, and drops only when the budget stays below it.
+    #[test]
+    fn a_screen_share_keeps_its_layer_through_a_dip() {
+      let layers = three_layers();
+      let screen = TrackDemand {
+        can_pause: false,
+        downswitch_hold: Duration::from_secs(3),
+        ..demand(1, 0, 2, &layers)
+      };
+      let demands = [screen];
+      let mut allocator = LayerAllocator::new();
+      let start = Instant::now();
+      assert_eq!(
+        allocator.allocate(&config(), 10_000_000, &demands, start)[&StreamId(1)],
+        Some(2)
+      );
+      let layer_at = |allocator: &mut LayerAllocator, millis: u64, estimate: u32| {
+        allocator.allocate(
+          &config(),
+          estimate,
+          &demands,
+          start + Duration::from_millis(millis),
+        )[&StreamId(1)]
+      };
+      // A dip of two seconds, then the estimate covers the layer again.
+      assert_eq!(layer_at(&mut allocator, 100, 1_000_000), Some(2));
+      assert_eq!(layer_at(&mut allocator, 2_100, 1_000_000), Some(2));
+      assert_eq!(layer_at(&mut allocator, 2_200, 2_000_000), Some(2));
+      // A dip that lasts: down after the hold, which starts afresh.
+      assert_eq!(layer_at(&mut allocator, 3_000, 1_000_000), Some(2));
+      assert_eq!(layer_at(&mut allocator, 5_900, 1_000_000), Some(2));
+      assert_eq!(layer_at(&mut allocator, 6_000, 1_000_000), Some(1));
+      // Asking for less applies at once.
+      let lower = [TrackDemand {
+        max_layer: 0,
+        ..demands[0].clone()
+      }];
+      assert_eq!(
+        allocator.allocate(
+          &config(),
+          10_000_000,
+          &lower,
+          start + Duration::from_millis(6_100)
+        )[&StreamId(1)],
+        Some(0)
+      );
+    }
+
     #[test]
     fn upgrade_needs_headroom() {
       let layers = three_layers();
@@ -393,6 +489,7 @@ mod tests {
       max_layer,
       layers,
       can_pause: true,
+      downswitch_hold: Duration::ZERO,
     }
   }
 

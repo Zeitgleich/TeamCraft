@@ -5,13 +5,17 @@
 //! cameras. The estimate's start value is a guess, so layers are only limited once the estimator
 //! has actually cut the rate; layers come back with a margin so the allocation doesn't flap. A new
 //! own track starts the same way ([`UplinkLayers::measure_afresh`]): a cut while the call sent
-//! less (only sound) doesn't hold its layers back (#935).
+//! less (only sound) doesn't hold its layers back (#935). A screen share keeps its layers through
+//! a short dip ([`UplinkPolicy::screen_downswitch_hold`]), as at the SFU (#941).
 //!
 //! Pure policy: the call engine feeds estimates and its tracks, and asks which layers may be sent.
 
 use std::collections::HashMap;
+use std::time::Duration;
 
 use teamcraft_proto::{VideoLayerInfo, VideoTrackKind};
+// `std::time::Instant` on native; the browser clock on wasm, where `std` has none.
+use web_time::Instant;
 
 use crate::datagram::StreamId;
 
@@ -25,6 +29,12 @@ pub struct UplinkPolicy {
   pub screen_audio_reserve_bps: u32,
   /// A layer comes back only when the estimate exceeds what it needs by this factor.
   pub upgrade_margin: f64,
+  /// How long the estimate has to stay below a screen share's layers before one stops. A still
+  /// screen sends almost nothing but keyframes of hundreds of kilobytes, and the estimate reacts
+  /// to such a burst with a cut it recovers from within seconds: stopping the sharp layer at
+  /// once sent its viewers back to the blurred half-size picture right after the sharp one
+  /// arrived (issue #941). An uplink that really can't carry the share stays below for longer.
+  pub screen_downswitch_hold: Duration,
 }
 
 /// One own video track as the allocation sees it.
@@ -42,6 +52,8 @@ pub struct UplinkLayers {
   is_limited: bool,
   last_estimate_bps: u32,
   top_layers: HashMap<StreamId, Option<u8>>,
+  /// Since when the estimate is below a screen share's current layers.
+  downgrade_pending_since: HashMap<StreamId, Instant>,
 }
 
 impl Default for UplinkPolicy {
@@ -50,6 +62,7 @@ impl Default for UplinkPolicy {
       audio_reserve_bps: 48_000,
       screen_audio_reserve_bps: 80_000,
       upgrade_margin: 1.15,
+      screen_downswitch_hold: Duration::from_secs(3),
     }
   }
 }
@@ -61,16 +74,18 @@ impl UplinkLayers {
       is_limited: false,
       last_estimate_bps: start_bps,
       top_layers: HashMap::new(),
+      downgrade_pending_since: HashMap::new(),
     }
   }
 
-  /// Applies a new estimate. Returns whether the allocation changed.
+  /// Applies a new estimate at `now`. Returns whether the allocation changed.
   pub fn on_estimate(
     &mut self,
     estimate_bps: u32,
     tracks: &[OwnTrack<'_>],
     is_sending_screen_audio: bool,
     policy: &UplinkPolicy,
+    now: Instant,
   ) -> bool {
     let has_dropped = estimate_bps < self.last_estimate_bps;
     self.last_estimate_bps = estimate_bps;
@@ -81,7 +96,7 @@ impl UplinkLayers {
       self.is_limited = false;
     }
     let before: Vec<Option<u8>> = tracks.iter().map(|track| self.top_of(track)).collect();
-    self.allocate(estimate_bps, tracks, is_sending_screen_audio, policy);
+    self.allocate(estimate_bps, tracks, is_sending_screen_audio, policy, now);
     tracks
       .iter()
       .zip(before)
@@ -97,6 +112,7 @@ impl UplinkLayers {
     self.is_limited = false;
     self.last_estimate_bps = estimate_bps;
     self.top_layers.clear();
+    self.downgrade_pending_since.clear();
   }
 
   /// Whether `layer` of `stream` may be sent. Tracks the allocation hasn't seen are not limited.
@@ -110,6 +126,7 @@ impl UplinkLayers {
   /// Forgets a track that is no longer published.
   pub fn remove(&mut self, stream: StreamId) {
     self.top_layers.remove(&stream);
+    self.downgrade_pending_since.remove(&stream);
   }
 
   /// The highest layer of `track` that may be sent; tracks not allocated yet send everything.
@@ -126,12 +143,14 @@ impl UplinkLayers {
     tracks: &[OwnTrack<'_>],
     is_sending_screen_audio: bool,
     policy: &UplinkPolicy,
+    now: Instant,
   ) {
     if !self.is_limited {
       self.top_layers = tracks
         .iter()
         .map(|track| (track.stream, top_index(track.layers)))
         .collect();
+      self.downgrade_pending_since.clear();
       return;
     }
     let reserve = policy.audio_reserve_bps
@@ -166,6 +185,7 @@ impl UplinkLayers {
         }
         maybe_top = Some(info.layer);
       }
+      let maybe_top = self.after_screen_hold(track, maybe_current, maybe_top, policy, now);
       let used = track
         .layers
         .iter()
@@ -176,6 +196,36 @@ impl UplinkLayers {
       allocation.insert(track.stream, maybe_top);
     }
     self.top_layers = allocation;
+    self
+      .downgrade_pending_since
+      .retain(|stream, _| tracks.iter().any(|track| track.stream == *stream));
+  }
+
+  /// `maybe_top` for `track`, unless it is a screen share whose layers drop below
+  /// `maybe_current` for less than [`UplinkPolicy::screen_downswitch_hold`]: then
+  /// `maybe_current`.
+  fn after_screen_hold(
+    &mut self,
+    track: &OwnTrack<'_>,
+    maybe_current: Option<u8>,
+    maybe_top: Option<u8>,
+    policy: &UplinkPolicy,
+    now: Instant,
+  ) -> Option<u8> {
+    let rank = |maybe_layer: Option<u8>| maybe_layer.map_or(-1, i16::from);
+    let is_screen = *track.kind == VideoTrackKind::Screen;
+    let is_still_there =
+      maybe_current.is_some_and(|current| track.layers.iter().any(|info| info.layer == current));
+    if !is_screen || !is_still_there || rank(maybe_top) >= rank(maybe_current) {
+      self.downgrade_pending_since.remove(&track.stream);
+      return maybe_top;
+    }
+    let since = *self.downgrade_pending_since.entry(track.stream).or_insert(now);
+    if now.saturating_duration_since(since) < policy.screen_downswitch_hold {
+      return maybe_current;
+    }
+    self.downgrade_pending_since.remove(&track.stream);
+    maybe_top
   }
 }
 
@@ -213,9 +263,9 @@ mod tests {
     let tracks = [camera(&layers)];
     let mut uplink = UplinkLayers::new(300_000);
     // The start estimate is below the full demand, but it is only a guess.
-    assert!(!uplink.on_estimate(300_000, &tracks, false, &policy()));
+    assert!(!uplink.on_estimate(300_000, &tracks, false, &policy(), now()));
     assert!(uplink.allows(CAMERA, 2));
-    uplink.on_estimate(400_000, &tracks, false, &policy());
+    uplink.on_estimate(400_000, &tracks, false, &policy(), now());
     assert!(uplink.allows(CAMERA, 2));
   }
 
@@ -224,13 +274,13 @@ mod tests {
     let layers = camera_layers();
     let tracks = [camera(&layers)];
     let mut uplink = UplinkLayers::new(300_000);
-    uplink.on_estimate(2_000_000, &tracks, false, &policy());
+    uplink.on_estimate(2_000_000, &tracks, false, &policy(), now());
     // 48k audio + 150k + 500k fit into 800k, the 1.5M layer doesn't.
-    assert!(uplink.on_estimate(800_000, &tracks, false, &policy()));
+    assert!(uplink.on_estimate(800_000, &tracks, false, &policy(), now()));
     assert!(uplink.allows(CAMERA, 1));
     assert!(!uplink.allows(CAMERA, 2));
     // Too little for even the lowest layer: video pauses, audio goes on.
-    uplink.on_estimate(150_000, &tracks, false, &policy());
+    uplink.on_estimate(150_000, &tracks, false, &policy(), now());
     assert!(!uplink.allows(CAMERA, 0));
   }
 
@@ -242,17 +292,17 @@ mod tests {
     let layers = camera_layers();
     let mut uplink = UplinkLayers::new(300_000);
     // Sound only: a lossy moment cuts the estimate below what the sound is given.
-    uplink.on_estimate(300_000, &[], false, &policy());
-    uplink.on_estimate(40_000, &[], false, &policy());
+    uplink.on_estimate(300_000, &[], false, &policy(), now());
+    uplink.on_estimate(40_000, &[], false, &policy(), now());
     let tracks = [camera(&layers)];
-    uplink.on_estimate(42_000, &tracks, false, &policy());
+    uplink.on_estimate(42_000, &tracks, false, &policy(), now());
     assert!(!uplink.allows(CAMERA, 0), "the old cut holds the new camera back");
     uplink.measure_afresh(300_000);
     assert!(uplink.allows(CAMERA, 2));
-    assert!(!uplink.on_estimate(310_000, &tracks, false, &policy()));
+    assert!(!uplink.on_estimate(310_000, &tracks, false, &policy(), now()));
     assert!(uplink.allows(CAMERA, 2));
     // A cut with the camera sending: the layers that fit.
-    assert!(uplink.on_estimate(250_000, &tracks, false, &policy()));
+    assert!(uplink.on_estimate(250_000, &tracks, false, &policy(), now()));
     assert!(uplink.allows(CAMERA, 0));
     assert!(!uplink.allows(CAMERA, 1));
   }
@@ -262,19 +312,19 @@ mod tests {
     let layers = camera_layers();
     let tracks = [camera(&layers)];
     let mut uplink = UplinkLayers::new(300_000);
-    uplink.on_estimate(2_000_000, &tracks, false, &policy());
-    uplink.on_estimate(100_000, &tracks, false, &policy());
+    uplink.on_estimate(2_000_000, &tracks, false, &policy(), now());
+    uplink.on_estimate(100_000, &tracks, false, &policy(), now());
     assert!(!uplink.allows(CAMERA, 0));
     // Exactly enough for layer 0 is not enough to bring it back...
-    uplink.on_estimate(198_000, &tracks, false, &policy());
+    uplink.on_estimate(198_000, &tracks, false, &policy(), now());
     assert!(!uplink.allows(CAMERA, 0));
     // ...with the margin it is, and once on it stays at the same estimate.
-    uplink.on_estimate(230_000, &tracks, false, &policy());
+    uplink.on_estimate(230_000, &tracks, false, &policy(), now());
     assert!(uplink.allows(CAMERA, 0));
-    uplink.on_estimate(200_000, &tracks, false, &policy());
+    uplink.on_estimate(200_000, &tracks, false, &policy(), now());
     assert!(uplink.allows(CAMERA, 0));
     // Enough for everything ends the limit.
-    uplink.on_estimate(3_000_000, &tracks, false, &policy());
+    uplink.on_estimate(3_000_000, &tracks, false, &policy(), now());
     assert!(uplink.allows(CAMERA, 2));
   }
 
@@ -291,11 +341,40 @@ mod tests {
       },
     ];
     let mut uplink = UplinkLayers::new(300_000);
-    uplink.on_estimate(5_000_000, &tracks, true, &policy());
+    uplink.on_estimate(5_000_000, &tracks, true, &policy(), now());
     // Audio (48k + 80k screen sound) and the screen (400k) fit, the camera doesn't.
-    uplink.on_estimate(600_000, &tracks, true, &policy());
+    uplink.on_estimate(600_000, &tracks, true, &policy(), now());
     assert!(uplink.allows(SCREEN, 0));
     assert!(!uplink.allows(CAMERA, 0));
+  }
+
+  /// Issue #941: the keyframe of a still screen's sharp layer makes the estimate dip; the layer
+  /// stays through the dip, and stops only when the estimate stays below it.
+  #[test]
+  fn a_screen_share_keeps_its_layers_through_a_dip() {
+    let screen_layers = [layer(0, 1_600_000), layer(1, 6_600_000)];
+    let tracks = [OwnTrack {
+      stream: SCREEN,
+      kind: &VideoTrackKind::Screen,
+      layers: &screen_layers,
+    }];
+    let start = Instant::now();
+    let at = |millis: u64| start + Duration::from_millis(millis);
+    let mut uplink = UplinkLayers::new(300_000);
+    uplink.on_estimate(8_300_000, &tracks, false, &policy(), at(0));
+    // A cut below the full demand: held for now.
+    assert!(!uplink.on_estimate(7_000_000, &tracks, false, &policy(), at(100)));
+    assert!(uplink.allows(SCREEN, 1));
+    assert!(!uplink.on_estimate(7_500_000, &tracks, false, &policy(), at(2_000)));
+    // Back above what the layers need: the hold starts afresh with the next dip.
+    assert!(!uplink.on_estimate(8_300_000, &tracks, false, &policy(), at(2_500)));
+    assert!(!uplink.on_estimate(7_000_000, &tracks, false, &policy(), at(3_000)));
+    assert!(!uplink.on_estimate(7_000_000, &tracks, false, &policy(), at(5_900)));
+    assert!(uplink.allows(SCREEN, 1));
+    // Below for the whole hold: the sharp layer stops.
+    assert!(uplink.on_estimate(7_000_000, &tracks, false, &policy(), at(6_000)));
+    assert!(!uplink.allows(SCREEN, 1));
+    assert!(uplink.allows(SCREEN, 0));
   }
 
   #[test]
@@ -308,6 +387,11 @@ mod tests {
 
   fn policy() -> UplinkPolicy {
     UplinkPolicy::default()
+  }
+
+  /// Any time: the hold matters only for screen shares, which the tests above don't hold.
+  fn now() -> Instant {
+    Instant::now()
   }
 
   fn camera(layers: &[VideoLayerInfo]) -> OwnTrack<'_> {

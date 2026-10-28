@@ -12,9 +12,13 @@
 //!   allocation stays below them. A layer that stops arriving while a lower one keeps coming
 //!   (older publishers, an encoder that fails) is replaced by the best lower one that flows, until
 //!   it comes back: receivers never wait on a layer nobody sends.
+//! - **Large frames (#941):** a layer whose frames have more fragments than a receiver reassembles
+//!   ([`MediaCapabilities::max_frame_fragments`], 255 for clients from before the long form) is
+//!   left out of that receiver's allocation, and such frames don't go to it.
 //! - **Bandwidth estimation:** every forwarded datagram gets a per-receiver transport sequence
-//!   number; the receiver's feedback drives a [`SendSideEstimator`]. Incoming datagrams with a
-//!   transport sequence number are recorded for the sender's own (uplink) estimation.
+//!   number; the receiver's feedback drives a [`SendSideEstimator`]. A new subscription measures
+//!   the receiver's downlink afresh (#941). Incoming datagrams with a transport sequence number
+//!   are recorded for the sender's own (uplink) estimation.
 //!
 //! - **Reconnecting participants** keep their streams and subscriptions but receive nothing until
 //!   they are back ([`Forwarder::suspend`], [`Forwarder::resume`]); a new path starts with fresh
@@ -138,6 +142,9 @@ struct VideoTrackRoute {
   uplink_layers: usize,
   /// The latest run of packets per layer.
   arrivals: LayerArrivals,
+  /// The most fragments a frame of each layer had: a receiver that reassembles fewer (clients
+  /// from before #941 take 255) doesn't get the layer, it would wait for its keyframes forever.
+  frame_fragments: [u16; MAX_SIMULCAST_LAYERS as usize],
 }
 
 /// The latest run of packets per layer; `None` before the first.
@@ -424,6 +431,7 @@ impl Forwarder {
       subscribers: BTreeMap::new(),
       layers_needed: Vec::new(),
       arrivals: [None; MAX_SIMULCAST_LAYERS as usize],
+      frame_fragments: [0; MAX_SIMULCAST_LAYERS as usize],
     };
     self.video_tracks.insert(stream_id, route);
     Ok(track)
@@ -501,6 +509,7 @@ impl Forwarder {
     {
       return Err(ForwardError::UnsupportedCodec(route.track.codec.clone()));
     }
+    let is_new = maybe_max_layer.is_some() && !route.subscribers.contains_key(&receiver);
     match maybe_max_layer {
       Some(max_layer) => {
         let subscription = route.subscribers.entry(receiver).or_insert(VideoSubscription {
@@ -514,6 +523,9 @@ impl Forwarder {
       None => {
         route.subscribers.remove(&receiver);
       },
+    }
+    if is_new {
+      self.measure_downlink_afresh(receiver);
     }
     let mut effects = self.reallocate(receiver, now);
     // Subscribing again (a video shown anew) brings a new decoder that needs a keyframe, also
@@ -706,9 +718,20 @@ impl Forwarder {
       return Ok(Vec::new());
     };
     record_arrival(&mut route.arrivals, layer, now, stalled_after);
+    if let Some(most) = route.frame_fragments.get_mut(usize::from(layer)) {
+      *most = (*most).max(fragment.count);
+    }
     let arrivals = route.arrivals;
     let mut receivers = Vec::new();
     for (&receiver, subscription) in &mut route.subscribers {
+      let can_reassemble = self
+        .participants
+        .get(&receiver)
+        .is_some_and(|participant| participant.capabilities.max_frame_fragments >= fragment.count);
+      if !can_reassemble {
+        // Its next allocation leaves this layer out.
+        continue;
+      }
       let maybe_live = subscription
         .target
         .map(|target| live_layer(&arrivals, target, stalled_after));
@@ -734,6 +757,7 @@ impl Forwarder {
     // Without any feedback yet (older clients) the estimate is just the start value; it still
     // grants the lowest layers.
     let estimate = participant.downlink.estimate_bps();
+    let max_frame_fragments = participant.capabilities.max_frame_fragments;
     let speakers = self.speakers.selected();
     let demands: Vec<TrackDemand<'_>> = self
       .video_tracks
@@ -750,9 +774,19 @@ impl Forwarder {
           stream_id,
           priority,
           max_layer: subscription.max_layer,
-          // Layers the publisher's uplink doesn't carry aren't there to have.
-          layers: route.track.layers.get(..route.uplink_layers).unwrap_or_default(),
+          // Layers the publisher's uplink doesn't carry, or with frames larger than the receiver
+          // reassembles, aren't there to have.
+          layers: route
+            .track
+            .layers
+            .get(..route.uplink_layers.min(route.layers_within(max_frame_fragments)))
+            .unwrap_or_default(),
           can_pause: !is_screen || self.config.layers.can_pause_screen_shares,
+          downswitch_hold: if is_screen {
+            self.config.layers.screen_downswitch_hold
+          } else {
+            Duration::ZERO
+          },
         })
       })
       .collect();
@@ -788,6 +822,18 @@ impl Forwarder {
       }
     }
     effects
+  }
+
+  /// `receiver` is about to get far more than so far (a new video track, often after a call of
+  /// sound only): its downlink estimate grew only as far as the smaller traffic let it, and one
+  /// lossy moment cut it to what the sound got through. A screen share subscribed then came on
+  /// its half-size layer and took minutes to the sharp one (issue #941). As for a publisher's new
+  /// track (#935), the estimate is measured afresh: from at least the start value, without the
+  /// old loss and delay, growing fast until the path shows congestion.
+  fn measure_downlink_afresh(&mut self, receiver: DeviceId) {
+    if let Some(participant) = self.participants.get_mut(&receiver) {
+      participant.downlink.measure_afresh();
+    }
   }
 
   /// The publisher of `stream_id` and the layer `receiver` gets (or is about to get) of it.
@@ -861,6 +907,17 @@ impl Forwarder {
   }
 }
 
+impl VideoTrackRoute {
+  /// How many of the lowest layers have had no frame of more than `max_frame_fragments`.
+  fn layers_within(&self, max_frame_fragments: u16) -> usize {
+    self
+      .frame_fragments
+      .iter()
+      .take_while(|most| **most <= max_frame_fragments)
+      .count()
+  }
+}
+
 /// Notes a packet of `layer`: it continues the layer's run, or starts a new one after a gap.
 fn record_arrival(arrivals: &mut LayerArrivals, layer: u8, now: Instant, stalled_after: Duration) {
   if let Some(slot) = arrivals.get_mut(usize::from(layer)) {
@@ -910,6 +967,7 @@ mod tests {
     fragment::fragment_frame,
     rtp::{PayloadType, RtpPacket, RtpTimestamp, SequenceNumber, Ssrc},
   };
+  use teamcraft_proto::{MAX_VIDEO_FRAME_FRAGMENTS, SHORT_VIDEO_FRAME_FRAGMENTS};
 
   use super::*;
 
@@ -1320,6 +1378,36 @@ mod tests {
       );
     }
 
+    /// Issue #941: a keyframe of a text-heavy share has more than 255 fragments. A receiver
+    /// from before the long form can't reassemble it: it gets the best layer without such
+    /// frames instead of waiting for keyframes forever. A current one gets the layer.
+    #[test]
+    fn a_layer_with_frames_too_large_for_a_receiver_is_left_out_for_it() {
+      let (mut forwarder, now) = wide_video_room();
+      let older = MediaCapabilities {
+        max_frame_fragments: SHORT_VIDEO_FRAME_FRAGMENTS,
+        ..forwarder.participants[&device(2)].capabilities.clone()
+      };
+      forwarder.resume(device(2), older.clone(), now);
+      on_top_layer(&mut forwarder, now);
+      assert!(send_fragment(&mut forwarder, 2, true, 300, now).is_empty());
+      let effects = forwarder.on_timer(device(2), now);
+      assert!(effects.contains(&keyframe_request(1)), "{effects:?}");
+      assert_eq!(send_frame(&mut forwarder, 1, true, now), devices(&[2]));
+      assert!(send_frame(&mut forwarder, 2, false, now).is_empty());
+      let effects = forwarder.on_timer(device(2), now);
+      assert!(effects.contains(&layers_needed(&[1])), "{effects:?}");
+      // A receiver that reassembles them gets the top layer.
+      let current = MediaCapabilities {
+        max_frame_fragments: MAX_VIDEO_FRAME_FRAGMENTS,
+        ..older
+      };
+      forwarder.resume(device(2), current, now);
+      let effects = forwarder.on_timer(device(2), now);
+      assert!(effects.contains(&keyframe_request(2)), "{effects:?}");
+      assert_eq!(send_fragment(&mut forwarder, 2, true, 300, now), devices(&[2]));
+    }
+
     /// Device 2 receives layer 2 of [`VIDEO`] from `now` on.
     fn on_top_layer(forwarder: &mut Forwarder, now: Instant) {
       forwarder.subscribe(device(2), VIDEO, Some(2), now).unwrap();
@@ -1474,6 +1562,48 @@ mod tests {
       forwarder.suspend(device(2), now);
       forwarder.resume(device(2), MediaCapabilities::default(), now);
       assert_eq!(forwarder.downlink_estimate_bps(device(2)), Some(start));
+    }
+
+    /// Issue #941: a call of sound only, and a lossy moment cut the estimate of a receiver's
+    /// downlink to what the sound got through. Subscribing to a share measures it afresh, so the
+    /// share isn't held on its half-size layer for minutes; changing the layer asked for doesn't.
+    #[test]
+    fn a_new_subscription_measures_the_downlink_afresh() {
+      let (mut forwarder, now) = video_room();
+      let start = forwarder.downlink_estimate_bps(device(2)).unwrap();
+      let mut at = lossy_sound(&mut forwarder, now, 0);
+      let cut = forwarder.downlink_estimate_bps(device(2)).unwrap();
+      assert!(cut < start, "{cut}");
+      forwarder.subscribe(device(2), VIDEO, Some(2), at).unwrap();
+      assert_eq!(forwarder.downlink_estimate_bps(device(2)), Some(start));
+      at = lossy_sound(&mut forwarder, at, 300);
+      let cut = forwarder.downlink_estimate_bps(device(2)).unwrap();
+      assert!(cut < start, "{cut}");
+      forwarder.subscribe(device(2), VIDEO, Some(1), at).unwrap();
+      assert_eq!(forwarder.downlink_estimate_bps(device(2)), Some(cut));
+    }
+
+    /// Three seconds of sound to device 2, numbered from `base`, of which half is lost; when
+    /// they ended.
+    fn lossy_sound(forwarder: &mut Forwarder, from: Instant, base: u16) -> Instant {
+      let epoch = forwarder.participants[&device(2)].feedback_epoch;
+      let mut at = from;
+      for round in 0..30u16 {
+        at = from + Duration::from_millis(100 * u64::from(round));
+        for _ in 0..10 {
+          forwarder.route(device(1), &audio(1, 10), at).unwrap();
+        }
+        let since_epoch = u64::try_from(at.saturating_duration_since(epoch).as_micros()).unwrap();
+        let arrivals_us = (0..10u64)
+          .map(|i| (i % 2 == 0).then_some(since_epoch + i * 1_000))
+          .collect();
+        let feedback = TransportFeedback {
+          base_seq: base.wrapping_add(round * 10),
+          arrivals_us,
+        };
+        forwarder.on_transport_feedback(device(2), &feedback, at);
+      }
+      at
     }
   }
 
@@ -1812,11 +1942,23 @@ mod tests {
 
   /// Sends one single-fragment frame on `layer` of [`VIDEO`]; returns who receives it.
   fn send_frame(forwarder: &mut Forwarder, layer: u8, is_keyframe: bool, now: Instant) -> Vec<DeviceId> {
+    send_fragment(forwarder, layer, is_keyframe, 1, now)
+  }
+
+  /// Sends the first fragment of a frame of `count` on `layer` of [`VIDEO`]; returns who
+  /// receives it.
+  fn send_fragment(
+    forwarder: &mut Forwarder,
+    layer: u8,
+    is_keyframe: bool,
+    count: u16,
+    now: Instant,
+  ) -> Vec<DeviceId> {
     let mut rtp = header();
     FrameFragment {
       frame_number: 1,
       index: 0,
-      count: 1,
+      count,
       is_keyframe,
     }
     .write_to(&mut rtp);

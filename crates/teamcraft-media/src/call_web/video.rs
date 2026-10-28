@@ -48,8 +48,13 @@ use crate::web_api::{
   Canvas2d, EncodedVideoChunk, VideoDecoder, VideoEncoder, VideoFrame as WebVideoFrame, count_picture_drawn,
 };
 
-/// WebCodecs codec string: H.264 Constrained Baseline, level 4.0 (up to 1080p).
+/// WebCodecs codec string: H.264 Constrained Baseline, level 4.0 (up to 1080p). Decoders take
+/// larger pictures under it; encoders don't ([`h264_encoder_codec`]).
 const H264_CODEC: &str = "avc1.42e028";
+/// Constrained Baseline, level 5.1: up to 4K, for a screen share's top layer above 1080p.
+const H264_CODEC_LEVEL_5_1: &str = "avc1.42e033";
+/// The largest picture of level 4.0, in macroblocks of 16×16 pixels (H.264 table A-1, MaxFS).
+const LEVEL_4_0_MAX_MACROBLOCKS: u32 = 8192;
 /// WebCodecs codec string: VP9 profile 0 (older browser clients).
 const VP9_CODEC: &str = "vp09.00.10.08";
 const CAMERA_WIDTH: u32 = 1280;
@@ -600,7 +605,10 @@ impl LayerEncoder {
     encoder
       .configure(
         &dictionary(&[
-          ("codec", JsValue::from_str(H264_CODEC)),
+          (
+            "codec",
+            JsValue::from_str(h264_encoder_codec(info.width, info.height)),
+          ),
           ("avc", avc.into()),
           ("width", JsValue::from(info.width)),
           ("height", JsValue::from(info.height)),
@@ -861,6 +869,19 @@ pub(super) fn camera_plan() -> TrackPlan {
 
 /// The plan for a screen share: the mode's largest picture and rate (1440p30 for detail, 1080p60
 /// for motion) plus a half-size layer for weak links; a smaller source is sent as it is.
+/// The codec string an H.264 encoder of `width`×`height` is configured with: level 4.0 up to
+/// 1080p, level 5.1 above. Chrome refuses to encode a picture larger than the level allows
+/// ("exceeds the maximum coded area"), so a 1440p screen share's top layer failed, and the
+/// others saw only its half-size layer (issue #941).
+fn h264_encoder_codec(width: u16, height: u16) -> &'static str {
+  let macroblocks = u32::from(width).div_ceil(16) * u32::from(height).div_ceil(16);
+  if macroblocks <= LEVEL_4_0_MAX_MACROBLOCKS {
+    H264_CODEC
+  } else {
+    H264_CODEC_LEVEL_5_1
+  }
+}
+
 pub(super) fn screen_plan(mode: ScreenContentMode) -> TrackPlan {
   let (limit, framerate) = screen_limits(mode);
   TrackPlan {
@@ -1089,6 +1110,15 @@ mod tests {
   use super::*;
   use crate::datagram::SimulcastLayer;
   use crate::rtp::RtpTimestamp;
+
+  /// Issue #941: Chrome encodes a 1440p share only with a level that allows it.
+  #[test]
+  fn the_h264_level_follows_the_picture_size() {
+    assert_eq!(h264_encoder_codec(1920, 1080), "avc1.42e028");
+    assert_eq!(h264_encoder_codec(1280, 720), "avc1.42e028");
+    assert_eq!(h264_encoder_codec(2216, 1440), "avc1.42e033");
+    assert_eq!(h264_encoder_codec(2560, 1440), "avc1.42e033");
+  }
 
   mod layer_encoders {
     use super::*;
