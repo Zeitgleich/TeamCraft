@@ -35,6 +35,7 @@ use crate::components::settings_tabs::apply_call_prefs;
 #[cfg(target_arch = "wasm32")]
 use crate::components::share_download::ShareDownloadPage;
 use crate::components::sidebar::Sidebar;
+use crate::components::sidebar_resizer::SidebarResizer;
 use crate::components::storage_banner::StorageBanner;
 use crate::components::thread_panel::ThreadPanel;
 use crate::components::top_bar::TopBar;
@@ -279,6 +280,10 @@ pub fn Shell(backend: Rc<dyn Backend>, settings: Settings) -> impl IntoView {
             RailEntry::Space => view! { <Sidebar /> }.into_any(),
             RailEntry::Activity => lazy_area(Place::Sidebar, || areas::activity_list(())),
           }}
+          // Drag the sidebar's edge to resize it (#842); the phone layout has its own panes.
+          <Show when=move || !state.is_compact() fallback=|| ()>
+            <SidebarResizer />
+          </Show>
         </Show>
         <main id="main-content" class="main" tabindex="-1">
           {move || match main_view.get() {

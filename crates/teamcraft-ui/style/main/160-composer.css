@@ -26,7 +26,9 @@
   display: block;
   width: 100%;
   min-height: 44px;
-  max-height: 220px;
+  /* Grows with the window: 220px at least (as before), up to 480px in a tall window, so a long
+     message or a code block stays readable while it is written (#842). */
+  max-height: clamp(220px, 40dvh, 480px);
   padding: 11px 12px 4px;
   border: 0;
   background: transparent;
@@ -35,7 +37,8 @@
   outline: none;
 }
 
-/* The rich-text editor: spaces are kept as typed, it grows up to max-height and then scrolls. */
+/* The rich-text editor: spaces are kept as typed, it grows up to max-height and then scrolls. Only
+   the text scrolls: the formatting buttons sit above it, outside this box, and stay in view. */
 .composer-editor {
   position: relative;
   overflow-y: auto;

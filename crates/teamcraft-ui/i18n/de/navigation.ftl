@@ -67,6 +67,7 @@ sidebar-item-unread-mentions = { $name }, { $unread } ungelesene Nachrichten, { 
     [one] 1 Erwähnung
    *[other] { $count } Erwähnungen
   }
+sidebar-resize = Größe der Seitenleiste ändern
 sidebar-item-muted = Benachrichtigungen stummgeschaltet
 sidebar-item-muted-label = { $label }, Benachrichtigungen stummgeschaltet
 sidebar-item-catching-up = { $name }, wird nachgeladen
