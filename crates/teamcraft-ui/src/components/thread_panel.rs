@@ -113,7 +113,7 @@ pub fn ThreadPanel(
         }}
         <MessageToolbar host=toolbar />
       </div>
-      <TypingIndicator conversation=conversation />
+      <TypingIndicator conversation=conversation maybe_thread=thread />
       <DropStrip zone=zone />
       <Composer
         conversation=conversation

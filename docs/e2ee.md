@@ -390,7 +390,8 @@ flag. Reactions are encrypted messages, so not even reaction counts are visible.
 Encrypted: text, attachments, attachment names, reactions, edits, polls, link previews, drafts.
 
 Typing indicators are plaintext metadata too: a `typing` gateway frame tells the server that a user
-types in a conversation (never what), and it forwards that to the other members (gateway.md). Clients
+types in a conversation, and for a reply in which thread (thread IDs are visible metadata anyway), never
+what, and it forwards that to the other members (gateway.md). Clients
 send at most one every 3 s while there is text in the composer, and none when the user turned "Show
 when I'm typing" off (a preference of each device, on by default). Nothing about typing is stored, on
 the server or the clients.

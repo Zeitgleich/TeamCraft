@@ -216,6 +216,8 @@ struct State {
   invites: Vec<(SpaceId, PendingInvite)>,
   /// Changes to a conversation (archived, an admin who joined) that messages report.
   workspace_events: HashMap<MessageId, WorkspaceEvent>,
+  /// Who types where (tests set it; the demo has nobody typing).
+  typing: Vec<crate::model::TypingNow>,
 }
 
 impl MockBackend {
@@ -286,6 +288,7 @@ impl MockBackend {
         },
       )],
       workspace_events: HashMap::new(),
+      typing: Vec::new(),
     };
     state.seed_messages(now);
     state.refresh_space_badges();
@@ -322,9 +325,19 @@ impl MockBackend {
   pub fn set_workspace_event(&self, message: MessageId, event: WorkspaceEvent) {
     self.state.borrow_mut().workspace_events.insert(message, event);
   }
+
+  /// Who types where from now on, as the core would answer after `typing_start` frames.
+  #[cfg(test)]
+  pub fn set_typing(&self, typing: Vec<crate::model::TypingNow>) {
+    self.state.borrow_mut().typing = typing;
+  }
 }
 
 impl ChatBackend for MockBackend {
+  fn typing_now(&self) -> Vec<crate::model::TypingNow> {
+    self.state.borrow().typing.clone()
+  }
+
   /// Like the server: channel members must be in the channel's space (here: in one of its
   /// conversations), or the add is refused with `not_space_member`.
   fn add_member_with_history(&self, conversation: ConversationId, user: UserId, _history: HistoryPolicy) {

@@ -343,14 +343,20 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
   pub fn typing_frame(conversation: ConversationId) -> GatewayClientMessage {
     GatewayClientMessage::Typing {
       conversation_id: conversation,
+      maybe_thread_id: None,
     }
   }
 
-  /// Other users currently typing in a conversation.
+  /// Other users currently typing in a conversation itself (replies in its threads are not).
   pub fn typing_users(&self, conversation: ConversationId) -> Vec<UserId> {
     self
       .typing
       .users(conversation, self.account.user_id, self.now_ms())
+  }
+
+  /// Other users typing anywhere right now, per conversation and thread ([`TypingState::everywhere`]).
+  pub fn typing_everywhere(&self) -> Vec<(crate::typing::TypingPlace, Vec<UserId>)> {
+    self.typing.everywhere(self.account.user_id, self.now_ms())
   }
 
   /// The typing state, shared: a UI adapter reads it while the sync loop owns the client.
@@ -369,8 +375,13 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     self.typing.drop_expired(self.now_ms())
   }
 
-  pub(crate) fn note_typing(&mut self, conversation: ConversationId, user: UserId) {
-    self.typing.note(conversation, user, self.now_ms());
+  pub(crate) fn note_typing(
+    &mut self,
+    conversation: ConversationId,
+    maybe_thread: Option<teamcraft_proto::ThreadId>,
+    user: UserId,
+  ) {
+    self.typing.note(conversation, maybe_thread, user, self.now_ms());
   }
 
   /// A message from someone ends their typing indicator.

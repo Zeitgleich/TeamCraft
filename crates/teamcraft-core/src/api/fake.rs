@@ -4664,7 +4664,10 @@ impl GatewayConnection for FakeGateway {
         state.heartbeats += 1;
         let _ = sender.unbounded_send(GatewayServerMessage::HeartbeatAck);
       },
-      GatewayClientMessage::Typing { conversation_id } => {
+      GatewayClientMessage::Typing {
+        conversation_id,
+        maybe_thread_id,
+      } => {
         state
           .typing_reports
           .entry(self.user)
@@ -4689,6 +4692,7 @@ impl GatewayConnection for FakeGateway {
           &GatewayEvent::TypingStart {
             conversation_id: *conversation_id,
             user_id: self.user,
+            maybe_thread_id: *maybe_thread_id,
           },
         );
       },

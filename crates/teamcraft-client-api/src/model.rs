@@ -665,6 +665,16 @@ pub struct Message {
   pub maybe_thread: Option<ThreadId>,
 }
 
+/// Other people typing in one place right now (#882): a conversation itself, or with
+/// `maybe_thread` a reply in one of its threads.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TypingNow {
+  pub conversation: ConversationId,
+  #[serde(default)]
+  pub maybe_thread: Option<ThreadId>,
+  pub users: Vec<UserId>,
+}
+
 /// A followed thread as listed in the threads inbox.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ThreadSummary {

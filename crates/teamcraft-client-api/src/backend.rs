@@ -153,12 +153,19 @@ pub trait ChatBackend {
   fn link_request_mark(&self) -> u64 {
     0
   }
-  /// Other people typing in a conversation right now (the indicator lasts a few seconds).
+  /// Other people typing in a conversation itself right now, not in its threads (the indicator
+  /// lasts a few seconds).
   fn typing_users(&self, _conversation: ConversationId) -> Vec<UserId> {
     Vec::new()
   }
-  /// The user types in a conversation: tell the other members (the core throttles).
-  fn notify_typing(&self, _conversation: ConversationId) {}
+  /// Everywhere other people type right now, in every conversation and thread (#882): the chat
+  /// list, the headers and the typing lines all read this one answer.
+  fn typing_now(&self) -> Vec<crate::model::TypingNow> {
+    Vec::new()
+  }
+  /// The user types in a conversation, or with `maybe_thread` a reply in that thread: tell the
+  /// other members (the core throttles).
+  fn notify_typing(&self, _conversation: ConversationId, _maybe_thread: Option<crate::model::ThreadId>) {}
 
   /// Whether this backend holds the keys to sign workspace policy and add the admin to channels
   /// (the client core on the desktop; the browser build has none).

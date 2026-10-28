@@ -4,7 +4,7 @@ use std::time::Duration;
 use axum::extract::ws::{CloseFrame, Message, WebSocket};
 use teamcraft_proto::{
   ConversationId, DeviceActivity, DeviceId, ErrorBody, GatewayClientMessage, GatewayEvent,
-  GatewayServerMessage, Permission, UserId,
+  GatewayServerMessage, Permission, ThreadId, UserId,
 };
 use tokio::time::{Instant, sleep_until, timeout};
 use tracing::{debug, warn};
@@ -17,7 +17,7 @@ use crate::services::access::{load_conversation, require};
 use crate::services::{accounts, presence};
 use crate::state::AppState;
 
-/// Minimum time between two typing events of one connection for the same conversation.
+/// Minimum time between two typing events of one connection for the same conversation (or thread).
 const TYPING_THROTTLE: Duration = Duration::from_secs(3);
 /// Conversations a connection tracks typing for; more is ignored until entries age out.
 const MAX_TRACKED_TYPING: usize = 256;
@@ -304,13 +304,18 @@ async fn handle_client_message(
       }
       true
     },
-    GatewayClientMessage::Typing { conversation_id } => {
+    GatewayClientMessage::Typing {
+      conversation_id,
+      maybe_thread_id,
+    } => {
       let maybe_woken = state.hub.touch_activity(&attached.session_id);
       refresh_if_woken(state, maybe_woken).await;
       let now = Instant::now();
+      // Throttled per place: a reply in a thread right after the conversation still goes out.
+      let place = (conversation_id, maybe_thread_id);
       let last_typing = &mut connection.last_typing;
       if last_typing
-        .get(&conversation_id)
+        .get(&place)
         .is_some_and(|at| now.duration_since(*at) < TYPING_THROTTLE)
       {
         return true;
@@ -323,13 +328,13 @@ async fn handle_client_message(
       }
       // Only conversations the caller may type in are remembered: made-up IDs cost a lookup each
       // (bounded by the frame limit) but never grow the map.
-      if let Err(error) = publish_typing(state, caller, conversation_id).await {
+      if let Err(error) = publish_typing(state, caller, conversation_id, maybe_thread_id).await {
         let body = ErrorBody::new(error.error_code(), error.public_message());
         return send(socket, &GatewayServerMessage::Error { error: body })
           .await
           .is_ok();
       }
-      last_typing.insert(conversation_id, now);
+      last_typing.insert(place, now);
       true
     },
     // A second identify/resume or a frame this version doesn't know: ignore, stay compatible.
@@ -362,10 +367,13 @@ async fn refresh_if_woken(state: &AppState, maybe_woken: Option<UserId>) {
   }
 }
 
+/// The thread goes out as given, to the conversation's members only: it is no secret from them, and
+/// clients show it only in that conversation's thread of that ID (#882).
 async fn publish_typing(
   state: &AppState,
   caller: &AuthenticatedUser,
   conversation: ConversationId,
+  maybe_thread: Option<ThreadId>,
 ) -> Result<(), ApiError> {
   let access = load_conversation(state, caller, conversation).await?;
   require(state, caller, Permission::CreatePost, &access.target())?;
@@ -375,6 +383,7 @@ async fn publish_typing(
     &GatewayEvent::TypingStart {
       conversation_id: conversation,
       user_id: caller.user.id,
+      maybe_thread_id: maybe_thread,
     },
   );
   Ok(())
@@ -418,7 +427,8 @@ async fn next_client_message(socket: &mut WebSocket) -> Option<GatewayClientMess
 /// What one connection remembers between frames.
 #[derive(Default)]
 struct ConnectionState {
-  last_typing: HashMap<ConversationId, Instant>,
+  /// Per conversation, and per thread for replies.
+  last_typing: HashMap<(ConversationId, Option<ThreadId>), Instant>,
   maybe_last_activity_change: Option<Instant>,
 }
 
