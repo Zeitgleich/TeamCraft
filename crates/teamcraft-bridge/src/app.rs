@@ -20,6 +20,7 @@ use crate::config::BridgeConfig;
 use crate::file_hooks::FileSettings;
 use crate::http::{HttpState, Submission, router};
 use crate::idempotency::IdempotencyStore;
+use crate::ingest::IngestSettings;
 use crate::sources::SourceRegistry;
 use crate::worker::{AppSourceSettings, Worker, WorkerSettings};
 
@@ -159,7 +160,7 @@ pub async fn start_endpoints(
     );
   }
   let keys = IdempotencyStore::new(&config.idempotency);
-  let state = HttpState::new(sources, sender, files, keys);
+  let state = HttpState::new(sources, sender, files, keys, IngestSettings::from_config(config));
   let (stop, stopped) = watch::channel(false);
   let mut listeners: Vec<TcpListener> = Vec::new();
   for addr in &config.listen.addrs {

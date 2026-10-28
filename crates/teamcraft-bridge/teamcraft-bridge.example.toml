@@ -43,11 +43,16 @@ passphrase_file = "/run/secrets/teamcraft-bridge-passphrase"
 # source token is the only credential and travels in the URL.
 [listen]
 addrs = ["127.0.0.1:8088", "[::1]:8088"]
+# Webhook bodies (and the fields of a form); for log streams (/ingest) the longest line, since a
+# stream as a whole has no limit.
 max_body_bytes = 1048576
 # Webhook requests and log lines per minute of all sources together (each source has its own limit too).
 total_rate_limit_per_minute = 12000
 # On shutdown, requests still running after this many seconds are cut off.
 drain_timeout_secs = 10
+# A log stream that sends nothing for this many seconds is cut off; 0 never cuts it off. Empty lines
+# count as activity, so a producer can send them as a keep-alive.
+ingest_idle_timeout_secs = 0
 
 # Webhooks with files (multipart/form-data, docs/bridge.md "Files"): each file is encrypted with its
 # own key; the files of a message are uploaded, and completed together, before the message is sent.

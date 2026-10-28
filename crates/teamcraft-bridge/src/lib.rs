@@ -12,7 +12,8 @@
 //! - [`render`]: webhook payloads and log lines to message text.
 //! - [`batch`], [`limiter`]: collecting lines into messages, rate limits.
 //! - [`sources`]: the sources the endpoints accept: announced in the app, or in the file.
-//! - [`http`]: the endpoints; [`idempotency`]: retries with an `Idempotency-Key` are answered once.
+//! - [`http`]: the endpoints; [`idempotency`]: retries with an `Idempotency-Key` are answered once;
+//!   [`ingest`]: log streams are read line by line as they arrive.
 //! - [`multipart`], [`form`], [`spool`], [`file_hooks`], [`file_jobs`]: webhooks with files, from
 //!   the form as it arrives to the encrypted uploads.
 //! - [`worker`]: the task that owns the client (gateway, sending, uploads, index segments).
@@ -26,6 +27,7 @@ pub mod file_jobs;
 pub mod form;
 pub mod http;
 pub mod idempotency;
+pub mod ingest;
 pub mod limiter;
 pub mod multipart;
 pub mod render;

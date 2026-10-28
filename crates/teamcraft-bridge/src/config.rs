@@ -107,6 +107,9 @@ pub struct ListenSection {
   /// On shutdown, requests still running after this long are cut off (a producer that stalls
   /// can't hold the bridge up).
   pub drain_timeout_secs: u64,
+  /// A log stream (`/ingest`) that sends nothing for this long is cut off; 0 waits for as long as
+  /// the connection stands. A producer can send empty lines as a keep-alive.
+  pub ingest_idle_timeout_secs: u64,
 }
 
 /// How log lines are collected into messages.
@@ -495,6 +498,7 @@ impl Default for ListenSection {
       max_body_bytes: 1024 * 1024,
       total_rate_limit_per_minute: 12_000,
       drain_timeout_secs: 10,
+      ingest_idle_timeout_secs: 0,
     }
   }
 }

@@ -23,7 +23,7 @@ the VPS that runs the server.
 | Endpoint               | Accepts                                                                                                                                                         |
 |------------------------|-----------------------------------------------------------------------------------------------------------------------------------------------------------------|
 | `POST /hooks/<token>`  | Slack/Mattermost incoming-webhook JSON (`text`, `username`, `attachments`, ...) or the form `payload=<json>`; with files as `multipart/form-data` (see "Files") |
-| `POST /ingest/<token>` | Log lines: plain text, or NDJSON with `Content-Type: application/x-ndjson`                                                                                      |
+| `POST /ingest/<token>` | Log lines: plain text, or NDJSON with `Content-Type: application/x-ndjson`; the body is read as a stream (see "Log streams")                                    |
 | `GET /healthz`         | `200 ok`, for the container health check                                                                                                                        |
 
   `icon_url`, `channel` and blocks of the Slack format are ignored: the source's token decides the
@@ -32,8 +32,49 @@ the VPS that runs the server.
 
 ```sh
 curl -d '{"text":"Deploy finished","username":"ci"}' http://127.0.0.1:8088/hooks/<token>
-journalctl -f | curl -T - -H 'Content-Type: text/plain' http://127.0.0.1:8088/ingest/<token>
+journalctl -f | curl -sS -X POST -T - -H 'Content-Type: text/plain' http://127.0.0.1:8088/ingest/<token>
 ```
+
+(`curl -T` sends a PUT unless `-X POST` says otherwise.)
+
+## Log streams
+
+`/ingest` does not wait for the end of the body: a request may stay open for as long as its producer
+runs, and every complete line is handed on as it arrives (batched as described below). Live system
+logs are one long request:
+
+```sh
+# systemd: the journal of one unit, from now on.
+journalctl -u myservice -f -n 0 -o short-iso | curl -sS -X POST -T - \
+  -H 'Content-Type: text/plain' "$TEAMCRAFT_INGEST"
+
+# Docker: stdout and stderr of a container.
+docker logs -f --since 1s myservice 2>&1 | curl -sS -X POST -T - \
+  -H 'Content-Type: text/plain' "$TEAMCRAFT_INGEST"
+```
+
+Run it as a service that restarts: a stream ends when the bridge restarts or the connection
+breaks, and a lost connection loses the lines in flight. A unit with `Restart=always` and
+`RestartSec=5` is enough; `journalctl --cursor-file=/var/lib/shipper/cursor` (or `--since`)
+continues where the last run stopped. The journal's `-o json` lines carry `MESSAGE` and a numeric
+`PRIORITY`, not `message` and `level`, so the bridge shows them as raw JSON and finds no alert level;
+for readable lines with levels use `-o short-iso` as plain text, or `-o cat` for the message only.
+
+- **Lines.** A line ends with `\n`. The last line of a stream without one is taken when the stream
+  ends. A line longer than `listen.max_body_bytes` ends the stream with `413 payload_too_large`;
+  lines before it are already sent. The stream as a whole has no size limit.
+- **Rate limit.** Lines over the source's limit are dropped while the stream goes on; the channel is
+  told once a second how many ("dropped N lines"). A stream that gets no line through at all is
+  answered `429` when it ends.
+- **Slow bridge.** When the bridge is behind, it stops reading and the producer's pipe fills up, so
+  `journalctl` waits; nothing is dropped for that reason.
+- **Quiet streams.** With `listen.ingest_idle_timeout_secs = 0` (default) a stream that sends nothing
+  stays open. A positive value cuts it off with `408 request_timeout` after that many silent
+  seconds; empty lines are ignored but count as activity, so a producer can send them as a
+  keep-alive. Behind a reverse proxy, `proxy_request_buffering off` and a `proxy_read_timeout` above
+  the longest quiet time are needed, or the proxy holds the body back or closes the stream.
+- **Shutdown.** Streams still open when the bridge stops are cut off after
+  `listen.drain_timeout_secs`.
 
 ## Behaviour
 
@@ -154,6 +195,7 @@ Limits (`max_file_bytes` <= `source_bytes_per_minute` <= `total_bytes_per_minute
 | `files.max_message_bytes`                  | 1 MiB                        | The server's message limit (`[limits] max_ciphertext_bytes`); text and files that won't fit are refused before any upload                                           |
 | `files.max_thumbnail_pixels`               | 16 MP                        | Larger pictures get no thumbnail                                                                                                                                    |
 | `listen.max_body_bytes`                    | 1 MiB                        | The form's fields besides files together (the message), at most 32 of them                                                                                          |
+| `listen.ingest_idle_timeout_secs`          | 0 (never)                    | A log stream (`/ingest`) that sends nothing for this long is cut off; for `/ingest`, `listen.max_body_bytes` is the longest line                                  |
 | `listen.drain_timeout_secs`                | 10                           | On shutdown, requests still running after this long are cut off                                                                                                     |
 | `files.spool_dir`                          | `spool` next to the database | Where files wait while they go up; the container image uses `/var/spool/teamcraft-bridge`, a volume of its own                                                      |
 
