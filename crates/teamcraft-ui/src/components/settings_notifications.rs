@@ -266,16 +266,22 @@ fn ThisDeviceCard() -> impl IntoView {
   let allowing = PendingAction::new();
   let testing = PendingAction::new();
   let has_tested = RwSignal::new(false);
+  // The last click on "Turn on" got no prompt from the browser: say where to look.
+  let has_no_prompt = RwSignal::new(false);
   let is_granted = move || is_desktop || page_permission.get().as_deref() == Some("granted");
 
   // Read here, inside the reactive owner: the spawned future has no context to find it in.
   let maybe_session = crate::session::use_session();
   // Allowing notifications also subscribes to Web Push, so they arrive with no page open.
   let allow = move |_| {
+    // Started inside the click: the browser only prompts for a request made in this task (#893).
+    let request = tauri::request_notification_permission();
     allowing.spawn(async move {
-      let result = notification_prompt::allow_notifications(me, maybe_session).await;
+      let result = notification_prompt::allow_notifications(me, maybe_session, request).await;
       page_permission.set_if_alive(tauri::notification_permission());
-      if result? {
+      let outcome = result?;
+      has_no_prompt.set_if_alive(outcome == notification_prompt::AllowOutcome::NoPrompt);
+      if outcome == notification_prompt::AllowOutcome::On {
         is_push_on.set_if_alive(true);
       }
       Ok(())
@@ -312,6 +318,7 @@ fn ThisDeviceCard() -> impl IntoView {
         Some("granted") if is_push_on.get() => i18n.t("notif-browser-background"),
         Some("granted") => i18n.t("notif-browser-granted"),
         Some("denied") => i18n.t("notif-browser-denied"),
+        Some(_) if has_no_prompt.get() => i18n.t("notif-prompt-no-prompt"),
         Some(_) => i18n.t("notif-browser-hint"),
         None => i18n.t("notif-browser-unsupported"),
       }

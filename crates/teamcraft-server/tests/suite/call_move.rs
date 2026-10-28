@@ -353,6 +353,7 @@ fn calls_config() -> CallsConfig {
     maybe_sfu_certificate_sha256: None,
     roster_grace_secs: 60,
     roster_timeout_secs: 120,
+    max_devices_per_user_per_call: 3,
   }
 }
 

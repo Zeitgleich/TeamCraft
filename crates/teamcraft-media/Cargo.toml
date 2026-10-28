@@ -224,6 +224,11 @@ required-features = ["openh264-source", "segmentation"]
 name = "portal_capture"
 required-features = ["pipewire"]
 
+# Captures the camera or a display on macOS, encodes, decodes and reports what the pictures show.
+[[example]]
+name = "macos_capture"
+required-features = ["avfoundation", "screencapturekit", "openh264-source"]
+
 # Captures the computer's sound through PipeWire and checks that our own playback is left out.
 [[example]]
 name = "system_audio_capture"

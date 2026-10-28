@@ -229,6 +229,8 @@ pub struct CallStats {
 pub struct VideoStats {
   /// Frames the own capture delivered.
   pub frames_captured: u64,
+  /// Of those, frames that showed nothing but black (`picture_check`).
+  pub frames_black: u64,
   /// Pictures the own encoders produced.
   pub pictures_encoded: u64,
   /// Own pictures sent to the SFU.

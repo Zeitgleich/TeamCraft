@@ -34,7 +34,6 @@ use crate::components::call_prejoin::PreJoinScreen;
 use crate::components::call_screen::CallScreen;
 use crate::components::calls_unavailable::CallsUnavailableDialog;
 use crate::components::calls_view::CallsView;
-use crate::components::channel_preview::ChannelPreview;
 use crate::components::composer_toolbar::{ActiveFormats, FormatAction, FormatToolbarPanel};
 use crate::components::date_jump::{DateJumpMenu, DateJumpPanel};
 use crate::components::directory_view::DirectoryView;
@@ -147,8 +146,6 @@ areas! {
   browse_spaces(maybe_highlight: Option<SpaceId>) => workspace: view! { <BrowseSpacesDialog maybe_highlight=maybe_highlight /> };
   invite_people(space: SpaceId) => workspace: view! { <InvitePeopleDialog space=space /> };
   add_to_channel(conversation: ConversationId) => workspace: view! { <AddToChannelDialog conversation=conversation /> };
-  /// A channel of a space before joining it, opened from browsing the channels.
-  channel_preview(space: SpaceId, channel: ConversationId) => workspace: view! { <ChannelPreview space=space channel=channel /> };
   /// The call screens (the incoming call card stays in the app, so a call rings at once).
   call_prejoin(request: CallRequest) => calls: view! { <PreJoinScreen request=request /> };
   call_screen(request: CallRequest) => calls: view! { <CallScreen request=request /> };

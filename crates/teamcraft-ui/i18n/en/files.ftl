@@ -144,19 +144,6 @@ crop-preview-sidebar = Sidebar
 crop-apply = Apply
 crop-retry = Try again
 crop-uploading = Saving…
-preview-label = Preview of { $name }
-preview-badge = Preview
-preview-title = Join to read along
-preview-body = Messages are end-to-end encrypted for the members of this channel. Once you've joined, you can read and write here.
-preview-bar = You're previewing #{ $name }
-preview-details-button = Details
-preview-join = Join channel
-preview-joining = Joining…
-preview-topic = Topic
-preview-no-topic = No topic set.
-preview-archived = This channel is archived and can't be joined.
-preview-missing-title = Channel not found
-preview-missing = It may have been made private or deleted.
 
 ## Daily-use improvements (docs/ux-backlog.md)
 drop-files-here = Drop to attach

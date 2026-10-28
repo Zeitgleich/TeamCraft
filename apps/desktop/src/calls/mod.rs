@@ -51,7 +51,7 @@ use teamcraft_media::effects::{BackgroundImage, EffectHandle};
 use teamcraft_media::ringtone;
 use teamcraft_media::system_audio::SystemAudioCapture;
 use teamcraft_media::video_capture::{CameraInfo, CaptureError};
-use teamcraft_media::video_pipeline::{VideoSendConfig, VideoStartError, preferred_encoders};
+use teamcraft_media::video_pipeline::{BlackReport, VideoSendConfig, VideoStartError, preferred_encoders};
 use teamcraft_proto::{
   AudioCodec, ConversationId, DeviceId, GatewayEvent, MediaCapabilities, MediaStreamId, ScreenContentMode,
   VideoCodec, VideoTrackKind,
@@ -88,6 +88,22 @@ pub struct CallHost {
   preview: tokio::sync::Mutex<Preview>,
   /// Where the pre-join check's microphone level goes.
   levels: LevelWatch,
+  /// The screen picker a share start waits on, if one is open.
+  screen_picker: OpenPicker,
+}
+
+/// The system's screen picker while a share start waits for the user's choice in it: stopping
+/// the share or leaving the call ends the wait (and closes the picker where the system lets us),
+/// and a second share start doesn't open another (issue #683: a picker nobody answered held the
+/// call's other actions).
+#[derive(Default)]
+struct OpenPicker(Mutex<Option<Arc<tokio::sync::Notify>>>);
+
+/// A share start's wait for the picker; marks the picker closed when dropped (the start answered,
+/// failed or was given up).
+struct PickerWait<'a> {
+  picker: &'a OpenPicker,
+  cancelled: Arc<tokio::sync::Notify>,
 }
 
 /// Files the calls need from the app's directories.
@@ -208,6 +224,7 @@ impl CallHost {
       maybe_segmentation_model: files.maybe_segmentation_model,
       preview: tokio::sync::Mutex::default(),
       levels: LevelWatch::default(),
+      screen_picker: OpenPicker::default(),
     }
   }
 
@@ -335,6 +352,7 @@ impl CallHost {
   }
 
   pub async fn leave(&self) {
+    self.screen_picker.cancel();
     if let Some(call) = self.media.lock().await.take() {
       call.leave().await;
     }
@@ -650,10 +668,22 @@ impl CallHost {
   /// the call state says so.
   pub async fn start_screen_share(&self, has_sound: bool, mode: ScreenContentMode) -> Result<(), String> {
     self.ensure_video_codec().await?;
+    let Some(wait) = self.screen_picker.open() else {
+      tracing::info!("a screen picker is open already");
+      return Ok(());
+    };
     let maybe_token = lock(&self.state).maybe_screen_token.clone();
-    let opened = tokio::task::spawn_blocking(move || video::open_screen(maybe_token.as_deref(), mode))
-      .await
-      .map_err(|error| error.to_string())?;
+    let picking = tokio::task::spawn_blocking(move || video::open_screen(maybe_token.as_deref(), mode));
+    let opened = tokio::select! {
+      opened = picking => opened.map_err(|error| error.to_string())?,
+      () = wait.cancelled.notified() => {
+        // The picker's thread ends with the user's answer, which nobody takes any more.
+        tracing::info!("screen share stopped while its picker was open");
+        video::close_screen_picker();
+        return Ok(());
+      },
+    };
+    drop(wait);
     let (capture, maybe_new_token) = match opened {
       Ok(opened) => opened,
       // Closing the picker is a choice, not a failure: nothing is shared, nothing to report.
@@ -700,6 +730,7 @@ impl CallHost {
   }
 
   pub async fn stop_screen_share(&self) {
+    self.screen_picker.cancel();
     self.control(Control::StopScreenAudio).await;
     self.control(Control::StopVideo(VideoTrackKind::Screen)).await;
     self.update_active(|active| {
@@ -933,6 +964,43 @@ impl CallHost {
   }
 }
 
+impl OpenPicker {
+  /// Marks a picker open until the wait is dropped; `None` while another one is open.
+  fn open(&self) -> Option<PickerWait<'_>> {
+    let mut maybe_open = lock(&self.0);
+    if maybe_open.is_some() {
+      return None;
+    }
+    let cancelled = Arc::new(tokio::sync::Notify::new());
+    *maybe_open = Some(Arc::clone(&cancelled));
+    Some(PickerWait {
+      picker: self,
+      cancelled,
+    })
+  }
+
+  /// Ends the wait of the open picker, if there is one. A permit is kept: a wait that starts
+  /// right after still ends.
+  fn cancel(&self) {
+    if let Some(cancelled) = lock(&self.0).take() {
+      cancelled.notify_one();
+    }
+  }
+}
+
+impl Drop for PickerWait<'_> {
+  fn drop(&mut self) {
+    let mut maybe_open = lock(&self.picker.0);
+    // Only this wait's own mark: a cancel took it already, and another may have opened since.
+    if maybe_open
+      .as_ref()
+      .is_some_and(|open| Arc::ptr_eq(open, &self.cancelled))
+    {
+      *maybe_open = None;
+    }
+  }
+}
+
 impl MediaCall {
   async fn leave(self) {
     let _ = self.controls.send(Control::Leave);
@@ -1001,6 +1069,7 @@ async fn run_media(
   let mut roster = CallRoster::new(own_device);
   let mut video_starts = VideoStarts::default();
   let (failed, mut failed_rx) = mpsc::unbounded_channel::<VideoStartFailure>();
+  let (black, mut black_rx) = mpsc::unbounded_channel::<VideoBlack>();
   loop {
     tokio::select! {
       maybe_control = controls.recv() => match maybe_control {
@@ -1014,16 +1083,25 @@ async fn run_media(
         Some(Control::StartVideo(config, done)) => {
           let kind = config.kind.clone();
           let result = match call.start_video_checked(config).await {
-            Ok(first_picture) => {
+            Ok(mut first_picture) => {
               // The answer doesn't wait for the first picture (up to seconds): other call actions
-              // queue behind this one. The check reports later (`failed_rx`).
+              // queue behind this one. The check reports later (`failed_rx`), and so does a track
+              // that then shows nothing but black (`black_rx`, issue #683).
               let start = video_starts.started(&kind);
               set_video_flag(&state, &kind, true);
-              let failed = failed.clone();
+              let (failed, black) = (failed.clone(), black.clone());
+              let maybe_black_pictures = first_picture.take_black_pictures();
               tokio::spawn(async move {
                 if let Err(error) = first_picture.wait().await {
                   // The call ended meanwhile: nobody to tell.
                   let _ = failed.send(VideoStartFailure { start, error });
+                  return;
+                }
+                let Some(black_pictures) = maybe_black_pictures else {
+                  return;
+                };
+                if let Some(report) = black_pictures.wait().await {
+                  let _ = black.send(VideoBlack { start, report });
                 }
               });
               Ok(())
@@ -1073,6 +1151,14 @@ async fn run_media(
         set_video_flag(&state, &kind, false);
         report_failure(video::start_failure_wire(&kind, &NativeCallError::from(failure.error)));
         notify();
+      },
+      Some(black) = black_rx.recv() => {
+        // The track goes on (black may be what is shared); the user hears why it may be black.
+        if video_starts.is_current(&black.start) {
+          let kind = &black.start.kind;
+          tracing::warn!(?kind, frames = black.report.frames, "own video shows nothing but black");
+          report_failure(video::black_pictures_wire(kind, black.report));
+        }
       },
       maybe_event = call.next_event() => match maybe_event {
         Some(CallEngineEvent::VideoFrame(frame)) => {
@@ -1131,6 +1217,12 @@ struct VideoStart {
 struct VideoStartFailure {
   start: VideoStart,
   error: VideoStartError,
+}
+
+/// A running track that showed nothing but black for a while.
+struct VideoBlack {
+  start: VideoStart,
+  report: BlackReport,
 }
 
 impl VideoStarts {
@@ -1319,6 +1411,46 @@ mod tests {
     assert!(!host.is_camera_on());
   }
 
+  /// Issue #683: a share start waiting in the picker must not hold the call.
+  mod screen_picker {
+    use std::time::Duration;
+
+    use super::*;
+
+    #[test]
+    fn one_picker_at_a_time_until_its_wait_ends() {
+      let picker = OpenPicker::default();
+      let wait = picker.open().unwrap();
+      assert!(
+        picker.open().is_none(),
+        "a second share start opens no second picker"
+      );
+      drop(wait);
+      assert!(picker.open().is_some(), "the answered picker is closed");
+    }
+
+    #[tokio::test]
+    async fn stopping_the_share_ends_the_wait_and_a_new_picker_may_open() {
+      let picker = OpenPicker::default();
+      let first = picker.open().unwrap();
+      picker.cancel();
+      // The permit is kept: the wait ends even though it starts after the cancel.
+      tokio::time::timeout(Duration::from_secs(1), first.cancelled.notified())
+        .await
+        .unwrap();
+      let second = picker.open().unwrap();
+      // The cancelled wait going away leaves the new picker's mark alone.
+      drop(first);
+      assert!(picker.open().is_none());
+      drop(second);
+      picker.cancel();
+      assert!(
+        picker.open().is_some(),
+        "cancelling without a picker changes nothing"
+      );
+    }
+  }
+
   mod video_starts {
     use super::*;
 
@@ -1447,6 +1579,30 @@ mod tests {
       tokio::time::timeout(PROMPT, media.task).await.unwrap().unwrap();
     }
 
+    /// Issue #683: a share that macOS blanks (the permission not applied yet) tells the user why,
+    /// and stays on.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_black_screen_share_says_why_and_stays_on() {
+      let mut media = start_media().await;
+      let answer = start_video(&media, VideoTrackKind::Screen, Box::new(BlackCapture::default()));
+      assert_eq!(
+        tokio::time::timeout(PROMPT, answer).await.unwrap().unwrap(),
+        Ok(())
+      );
+      let wait = teamcraft_media::video_pipeline::BLACK_PICTURES_REPORT_AFTER + PROMPT;
+      let reported = tokio::time::timeout(wait, media.reported.recv())
+        .await
+        .unwrap()
+        .unwrap();
+      assert_eq!(
+        ActionFailure::from_wire(&reported).kind,
+        FailureKind::Call(CallFailure::ScreenBlack)
+      );
+      assert!(media.flags().1, "the share stays on");
+      media.controls.send(Control::Leave).unwrap();
+      tokio::time::timeout(PROMPT, media.task).await.unwrap().unwrap();
+    }
+
     /// A running media task and what it shares.
     struct Media {
       controls: mpsc::UnboundedSender<Control>,
@@ -1482,6 +1638,32 @@ mod tests {
       }
 
       fn stop(&mut self) {}
+    }
+
+    /// A screen that shows one black picture and then stands still.
+    #[derive(Default)]
+    struct BlackCapture {
+      maybe_frames: Option<FrameSender>,
+    }
+
+    impl VideoCapture for BlackCapture {
+      fn format(&self) -> CaptureFormat {
+        FORMAT
+      }
+
+      fn start(&mut self, frames: FrameSender) -> Result<(), CaptureError> {
+        let resolution = FORMAT.resolution;
+        let pixels = usize::from(resolution.width) * usize::from(resolution.height);
+        let mut data = vec![16; pixels];
+        data.resize(pixels * 3 / 2, 128);
+        frames.send(teamcraft_media::video::VideoFrame::new(resolution, 0, data).unwrap());
+        self.maybe_frames = Some(frames);
+        Ok(())
+      }
+
+      fn stop(&mut self) {
+        self.maybe_frames = None;
+      }
     }
 
     async fn start_media() -> Media {

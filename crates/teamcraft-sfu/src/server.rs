@@ -329,6 +329,7 @@ async fn handle_session(incoming: IncomingSession, shared: &Shared) -> Result<()
       let code = match error {
         RoomError::Locked => ErrorCode::CallLocked,
         RoomError::Removed => ErrorCode::RemovedFromCall,
+        RoomError::TooManyDevices(_) => ErrorCode::CallDeviceLimit,
         _ => ErrorCode::AlreadyJoined,
       };
       reject(&mut send, code, &error.to_string()).await;

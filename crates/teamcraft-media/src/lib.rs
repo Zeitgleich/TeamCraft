@@ -20,6 +20,7 @@ pub mod jitter;
 pub mod message_sounds;
 #[cfg(feature = "native")]
 pub mod openh264_library;
+pub mod picture_check;
 pub mod ringtone;
 pub mod rtp;
 #[cfg(feature = "sound-files")]

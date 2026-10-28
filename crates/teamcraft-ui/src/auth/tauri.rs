@@ -861,15 +861,42 @@ pub fn notification_permission() -> Option<String> {
     .as_string()
 }
 
-/// Asks the user to allow notifications (must run from a click). Returns the new permission.
-pub async fn request_notification_permission() -> Option<String> {
+/// A `Notification.requestPermission()` that is running. Browsers show their prompt only when the
+/// request is made inside the click's own task (Safari and Chrome check the user gesture there and
+/// otherwise refuse without a prompt, #893), so [`request_notification_permission`] starts it
+/// synchronously and [`Self::answer`] waits for the user's reply afterwards.
+pub struct NotificationPermissionRequest {
+  maybe_promise: Option<js_sys::Promise>,
+}
+
+/// Starts the browser's permission prompt. Call it first thing in the click handler, before any
+/// `.await` or `spawn_local`. Nothing is asked where the permission is granted or denied already.
+pub fn request_notification_permission() -> NotificationPermissionRequest {
+  let maybe_promise = (notification_permission().as_deref() == Some("default"))
+    .then(start_permission_request)
+    .flatten();
+  NotificationPermissionRequest { maybe_promise }
+}
+
+impl NotificationPermissionRequest {
+  /// The permission once the user answered (or the browser gave none): `granted`, `denied`, or
+  /// `default` when no prompt was shown. `None` where the browser has no notifications.
+  pub async fn answer(self) -> Option<String> {
+    if let Some(promise) = self.maybe_promise {
+      // A rejected request is the same as no answer; the permission below says what is the case.
+      let _ = JsFuture::from(promise).await;
+    }
+    notification_permission()
+  }
+}
+
+fn start_permission_request() -> Option<js_sys::Promise> {
   let constructor = notification_constructor()?;
   let request: js_sys::Function = js_sys::Reflect::get(&constructor, &JsValue::from_str("requestPermission"))
     .ok()?
     .dyn_into()
     .ok()?;
-  let promise: js_sys::Promise = request.call0(&constructor).ok()?.dyn_into().ok()?;
-  JsFuture::from(promise).await.ok()?.as_string()
+  request.call0(&constructor).ok()?.dyn_into().ok()
 }
 
 thread_local! {

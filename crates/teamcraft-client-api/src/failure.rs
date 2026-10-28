@@ -156,6 +156,12 @@ pub enum CallFailure {
   CameraNoPicture,
   /// The screen share started, but no picture of it could be sent.
   ScreenNoPicture,
+  /// The camera sends, but only black (covered, a privacy shutter, a camera that doesn't wake
+  /// up). The video stays on.
+  CameraBlack,
+  /// The screen share sends, but only black: on macOS before the Screen Recording permission
+  /// applies, which needs an app restart (issue #683), or protected content. The share stays on.
+  ScreenBlack,
   /// The browser lacks what calls need (WebTransport, WebCodecs, AudioWorklet).
   Unsupported,
   /// The call server (SFU) can't be reached, while the chat server can: often a network that
@@ -180,7 +186,7 @@ pub enum CallFailure {
 }
 
 impl CallFailure {
-  const ALL: [Self; 20] = [
+  const ALL: [Self; 22] = [
     Self::MicrophoneDenied,
     Self::MicrophoneMissing,
     Self::MicrophoneInUse,
@@ -193,6 +199,8 @@ impl CallFailure {
     Self::ScreenUnavailable,
     Self::CameraNoPicture,
     Self::ScreenNoPicture,
+    Self::CameraBlack,
+    Self::ScreenBlack,
     Self::Unsupported,
     Self::ServerUnreachable,
     Self::BackgroundRequired,
@@ -218,6 +226,8 @@ impl CallFailure {
       Self::ScreenUnavailable => "screen_unavailable",
       Self::CameraNoPicture => "camera_no_picture",
       Self::ScreenNoPicture => "screen_no_picture",
+      Self::CameraBlack => "camera_black",
+      Self::ScreenBlack => "screen_black",
       Self::Unsupported => "unsupported",
       Self::ServerUnreachable => "server_unreachable",
       Self::BackgroundRequired => "background_required",
@@ -242,6 +252,7 @@ impl CallFailure {
         | Self::CameraNotConnected
         | Self::CameraUnavailable
         | Self::CameraNoPicture
+        | Self::CameraBlack
         | Self::CameraMissing
     )
   }
