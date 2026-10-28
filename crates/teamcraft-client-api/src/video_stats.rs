@@ -9,6 +9,13 @@
 use serde::{Deserialize, Serialize};
 use teamcraft_proto::{MediaStreamId, VideoCodec, VideoTrackKind};
 
+/// A [`VideoStatsReport`] as the media layer answered it (JSON), read with
+/// [`VideoStatsJson::read`] where the stats are shown: the web client's call screen loads with
+/// its own chunk, and the reading goes there with it instead of into every first visit
+/// (robustness.md, "Download size").
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct VideoStatsJson(pub String);
+
 /// The video of the active call at one moment.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct VideoStatsReport {
@@ -131,6 +138,15 @@ pub struct VideoSize {
   pub height: u16,
 }
 
+impl VideoStatsJson {
+  /// The report; `None` for text that isn't one (`null` outside a call).
+  pub fn read(&self) -> Option<VideoStatsReport> {
+    serde_json::from_str::<Option<VideoStatsReport>>(&self.0)
+      .ok()
+      .flatten()
+  }
+}
+
 impl VideoStatsReport {
   /// The own track of `kind`; the newest while a replaced one is still listed.
   pub fn sent(&self, kind: &VideoTrackKind) -> Option<&SentVideoStats> {
@@ -206,7 +222,13 @@ mod tests {
     let wire = serde_json::to_string(&report).unwrap();
     assert!(wire.contains(r#""side":"sent""#), "{wire}");
     assert!(wire.contains(r#""implementation":"hardware""#), "{wire}");
-    assert_eq!(serde_json::from_str::<VideoStatsReport>(&wire).unwrap(), report);
+    assert_eq!(VideoStatsJson(wire).read(), Some(report));
+  }
+
+  #[test]
+  fn no_report_reads_as_none() {
+    assert_eq!(VideoStatsJson("null".to_owned()).read(), None);
+    assert_eq!(VideoStatsJson("{".to_owned()).read(), None);
   }
 
   #[test]

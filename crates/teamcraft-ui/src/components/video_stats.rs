@@ -58,7 +58,8 @@ impl VideoStatsHub {
   fn poll(&self, state: AppState) {
     let window = self.window;
     state.read(|backend| {
-      backend.fetch_call_video_stats(Box::new(move |maybe_report| {
+      backend.fetch_call_video_stats(Box::new(move |maybe_json| {
+        let maybe_report = maybe_json.and_then(|json| json.read());
         // The call screen may have gone meanwhile.
         let _ = window.try_update(|window| match maybe_report {
           Some(report) => window.push(report),

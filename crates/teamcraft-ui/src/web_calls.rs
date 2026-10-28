@@ -27,7 +27,6 @@ use teamcraft_client_api::page_calls::{
   EXPORT_VIDEO_STATS, EXPORT_WATCH_VIDEO, MODULE_META, PreparedCall, WORKLET_META,
 };
 use teamcraft_client_api::remote::{CallAction, CallActionAnswer, CallSnapshot};
-use teamcraft_client_api::video_stats::VideoStatsReport;
 use teamcraft_core::CallKeySigner;
 use teamcraft_crypto::call_binding::{CallBindingError, CallId as CryptoCallId, SignedCallKeyBinding};
 use teamcraft_media::call_auth::{CallBindingSigner, CallKeyAuthenticator, DeviceCallKeyAuthenticator};
@@ -201,14 +200,11 @@ pub fn preview_level() -> f32 {
     .map_or(0.0, |level| level as f32)
 }
 
-/// What the call's video does now (stats for nerds, #938); `None` outside a call or before the
-/// call module loaded.
-pub async fn video_stats() -> Option<VideoStatsReport> {
+/// What the call's video does now (stats for nerds, #938), as the module's `VideoStatsReport`
+/// JSON; `None` outside a call or before the call module loaded.
+pub async fn video_stats() -> Option<String> {
   let module = current()?.loaded_module()?;
-  let json = module.call(EXPORT_VIDEO_STATS, &[]).await.ok()?.as_string()?;
-  serde_json::from_str(&json)
-    .inspect_err(|error| tracing::debug!(%error, "unreadable video stats"))
-    .ok()
+  module.call(EXPORT_VIDEO_STATS, &[]).await.ok()?.as_string()
 }
 
 fn current() -> Option<Rc<WebCallHost>> {
