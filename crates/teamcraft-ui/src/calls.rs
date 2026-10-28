@@ -86,6 +86,8 @@ pub struct CallState {
   pub is_camera_menu_open: RwSignal<bool>,
   /// "Stats for nerds" (#938) over every video of the call.
   pub shows_video_stats: RwSignal<bool>,
+  /// The chat panel next to the call's video (#936); it stays open while the call is minimized.
+  pub is_chat_open: RwSignal<bool>,
   /// The camera the backend was told about or uses on its own ([`CallState::send_camera_choice`]).
   sent_camera: StoredValue<String>,
   /// Carries the user's actions to the call backend; set once by the shell.
@@ -116,6 +118,7 @@ impl CallState {
       move_offer: RwSignal::new(None),
       is_camera_menu_open: RwSignal::new(false),
       shows_video_stats: RwSignal::new(false),
+      is_chat_open: RwSignal::new(false),
       sent_camera: StoredValue::new(String::new()),
       handler: StoredValue::new_local(None),
     }
@@ -274,8 +277,19 @@ impl CallState {
     self.maybe_request.set(None);
     self.is_sharing_screen.set(false);
     self.has_hand_raised.set(false);
+    self.is_chat_open.set(false);
     if was_active {
       self.emit(CallEvent::Leave);
+    }
+  }
+
+  /// Whether a call screen (the pre-join screen or the call itself) covers the app: what the app
+  /// shows below it is out of sight, so its messages don't count as read (#936).
+  pub fn covers_app(&self) -> bool {
+    match self.phase.get() {
+      CallPhase::PreJoin => true,
+      CallPhase::Active => !self.is_minimized.get(),
+      CallPhase::Idle => false,
     }
   }
 
@@ -359,6 +373,28 @@ mod tests {
     assert!(!is_rear_camera("Front Camera"));
     assert!(!is_rear_camera("camera2 1, facing front"));
     assert!(!is_rear_camera(""));
+  }
+
+  /// #936: the app is out of sight below the pre-join screen and the call, not below a minimized
+  /// call; leaving the call closes its chat panel.
+  #[test]
+  fn call_screens_cover_the_app_and_leaving_closes_the_chat() {
+    let owner = Owner::new();
+    owner.with(|| {
+      let call = CallState::new();
+      let covers = || untrack(|| call.covers_app());
+      assert!(!covers());
+      call.phase.set(CallPhase::PreJoin);
+      assert!(covers());
+      call.phase.set(CallPhase::Active);
+      assert!(covers());
+      call.is_minimized.set(true);
+      assert!(!covers());
+      call.is_chat_open.set(true);
+      call.leave();
+      assert!(!covers());
+      assert!(!call.is_chat_open.get_untracked());
+    });
   }
 
   /// #453: the pre-join choice goes with the join, in one event; no camera action follows it.

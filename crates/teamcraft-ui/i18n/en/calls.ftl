@@ -113,6 +113,17 @@ stats-value-uplink-loss = { $loss } (uplink)
 stats-value-network = RTT { $rtt } · jitter { $jitter }
 stats-value-frames = dropped { $dropped } · black { $black }
 stats-waiting = Waiting for the first numbers…
+# The chat next to the video (#936)
+call-chat = Chat
+call-chat-label = Chat of the call
+call-chat-show = Show chat
+call-chat-hide = Hide chat
+call-chat-show-unread = { $count ->
+    [one] Show chat, { $count } unread message
+   *[other] Show chat, { $count } unread messages
+  }
+call-chat-toast-open = New message from { $name }. Show chat
+call-chat-toast-files = Sent files
 
 ## Pre-join screen
 prejoin-quick-controls = Microphone and camera
