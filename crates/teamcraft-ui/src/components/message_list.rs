@@ -20,7 +20,7 @@ use crate::components::message_row::MessageRow;
 use crate::components::message_toolbar::{MessageToolbar, ToolbarHost};
 use crate::components::skeleton::MessageSkeleton;
 use crate::feed_motion::{FeedMotion, Shown, newest_confirmed};
-use crate::i18n::use_i18n;
+use crate::i18n::{I18n, use_i18n};
 use crate::model::{ConversationId, ConversationKind, Message, as_chat_message};
 use crate::reactive::SetIfAlive;
 use crate::state::{AppState, Overlay, use_app_state};
@@ -437,7 +437,13 @@ pub fn MessageList(
   // Rows grow after they were measured (reactions, edits, late-loading content). While following,
   // stay at the bottom so the newest line is never cut off. Corrected in the same frame, before it
   // is painted: a frame later the rows would visibly jump and jump back (#642).
-  observe_row_growth(list_id, rows, move || {
+  // The list itself shrinks or grows when the composer does (it grows with its text, and with the
+  // window): the viewport height follows, and a following reader stays at the newest line instead
+  // of having it slide behind the composer.
+  observe_size_changes(list_id, [rows, container], move || {
+    if let Some(element) = container.get_untracked() {
+      viewport.set(f64::from(element.client_height()));
+    }
     if stick_to_bottom.get_untracked() {
       scroll_to_bottom();
     }
@@ -601,21 +607,29 @@ pub fn MessageList(
       <Show when=move || !stick_to_bottom.get() fallback=|| ()>
         <button
           class="jump-latest"
+          aria-label=move || jump_latest_label(i18n, new_below())
+          title=move || jump_latest_label(i18n, new_below())
           on:click=move |_| {
             stick_to_bottom.set(true);
             scroll_to_bottom();
           }
         >
           <Icon name=IconName::ArrowDown />
-          <span>
-            {move || match new_below() {
-              0 => i18n.t("jump-to-latest"),
-              count => i18n.t_count("jump-to-latest-new", count),
-            }}
-          </span>
+          {move || match new_below() {
+            0 => None,
+            count => Some(view! { <span class="badge-count jump-latest-count">{count}</span> }),
+          }}
         </button>
       </Show>
     </div>
+  }
+}
+
+/// The name of the round "jump to latest" button, which has no text of its own.
+fn jump_latest_label(i18n: I18n, new_below: usize) -> String {
+  match new_below {
+    0 => i18n.t("jump-to-latest"),
+    count => i18n.t_count("jump-to-latest-new", count),
   }
 }
 
@@ -949,9 +963,14 @@ fn is_window_focused() -> bool {
     .is_some_and(|document| !document.hidden() && document.has_focus().unwrap_or(true))
 }
 
-/// Calls `on_change` whenever the rendered rows change size: after layout, before the frame is
-/// painted, unless the list that asked for it was unmounted in the meantime.
-fn observe_row_growth(list_id: u64, rows: NodeRef<html::Div>, on_change: impl Fn() + Copy + 'static) {
+/// Calls `on_change` whenever one of the `targets` changes size (the rendered rows, the scrolling
+/// list around them): after layout, before the frame is painted, unless the list that asked for it
+/// was unmounted in the meantime.
+fn observe_size_changes<const N: usize>(
+  list_id: u64,
+  targets: [NodeRef<html::Div>; N],
+  on_change: impl Fn() + Copy + 'static,
+) {
   let callback = Closure::<dyn FnMut()>::new(move || {
     if is_live(list_id) {
       on_change();
@@ -962,11 +981,13 @@ fn observe_row_growth(list_id: u64, rows: NodeRef<html::Div>, on_change: impl Fn
     return;
   };
   let handle = StoredValue::new_local((observer, callback));
-  Effect::new(move |_| {
-    if let Some(element) = rows.get() {
-      handle.with_value(|(observer, _)| observer.observe(&element));
-    }
-  });
+  for target in targets {
+    Effect::new(move |_| {
+      if let Some(element) = target.get() {
+        handle.with_value(|(observer, _)| observer.observe(&element));
+      }
+    });
+  }
   on_cleanup(move || {
     handle.try_with_value(|(observer, _)| observer.disconnect());
   });
