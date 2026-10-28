@@ -46,6 +46,8 @@ use crate::speakers::{SpeakerSelectionConfig, SpeakerSelector};
 
 /// Video tracks (camera, screen share) one participant may publish at the same time.
 const MAX_VIDEO_TRACKS_PER_PARTICIPANT: usize = 4;
+/// The upswitch hold while a receiver's downlink estimate is in its fast start.
+const FAST_START_UPSWITCH_HOLD: Duration = Duration::from_millis(500);
 
 /// Routing state of one room.
 #[derive(Debug)]
@@ -792,9 +794,22 @@ impl Forwarder {
       .collect();
     let maybe_demand = (!demands.is_empty()).then(|| full_demand_bps(&self.config.layers, &demands));
     participant.downlink.set_demand_bps(maybe_demand);
+    // While the downlink estimate is in its fast start, it only grows, from feedback of traffic
+    // far below it: holding an upswitch for the usual time validates nothing, it only keeps a
+    // viewer on a lower layer (a screen share's sharp layer came 2 s after the estimate covered
+    // it; on a CI runner that missed the test's deadline, #939). A short hold still rides out a
+    // step back.
+    let layers_config = if participant.downlink.is_in_fast_start() {
+      LayerAllocationConfig {
+        upswitch_hold: FAST_START_UPSWITCH_HOLD.min(self.config.layers.upswitch_hold),
+        ..self.config.layers
+      }
+    } else {
+      self.config.layers
+    };
     let allocation = participant
       .allocator
-      .allocate(&self.config.layers, estimate, &demands, now);
+      .allocate(&layers_config, estimate, &demands, now);
 
     let stalled_after = self.config.layer_stalled_after;
     let mut effects = Vec::new();
@@ -1581,6 +1596,52 @@ mod tests {
       assert!(cut < start, "{cut}");
       forwarder.subscribe(device(2), VIDEO, Some(1), at).unwrap();
       assert_eq!(forwarder.downlink_estimate_bps(device(2)), Some(cut));
+    }
+
+    /// Issue #939: while a receiver's downlink estimate is in its fast start, a layer comes
+    /// about half a second after the estimate covers it, not after the usual two.
+    #[test]
+    fn during_the_fast_start_a_layer_comes_soon_after_the_estimate_covers_it() {
+      let (mut forwarder, now) = video_room();
+      forwarder.subscribe(device(2), VIDEO, Some(2), now).unwrap();
+      let epoch = forwarder.participants[&device(2)].feedback_epoch;
+      let config = LayerAllocationConfig::default();
+      // What the middle layer (500 kbit/s) needs.
+      let covered_bps = f64::from(config.audio_reserve_bps) + 500_000.0 * config.upswitch_headroom;
+      let (mut maybe_covered_at, mut maybe_switched_at) = (None, None);
+      for round in 0..60u16 {
+        let at = now + Duration::from_millis(100 * u64::from(round));
+        for _ in 0..10 {
+          forwarder.route(device(1), &audio(1, 10), at).unwrap();
+        }
+        let since_epoch = u64::try_from(at.saturating_duration_since(epoch).as_micros()).unwrap();
+        let feedback = TransportFeedback {
+          base_seq: round * 10,
+          arrivals_us: (0..10u64).map(|i| Some(since_epoch + i * 1_000)).collect(),
+        };
+        let mut effects = forwarder.on_transport_feedback(device(2), &feedback, at);
+        effects.extend(forwarder.on_timer(device(2), at));
+        let estimate = forwarder.downlink_estimate_bps(device(2)).unwrap();
+        if maybe_covered_at.is_none() && f64::from(estimate) >= covered_bps {
+          maybe_covered_at = Some(at);
+        }
+        let middle_keyframe = Effect::KeyframeRequest {
+          publisher: device(1),
+          stream_id: VIDEO,
+          layer: 1,
+        };
+        if maybe_switched_at.is_none() && effects.contains(&middle_keyframe) {
+          maybe_switched_at = Some(at);
+        }
+      }
+      let (Some(covered_at), Some(switched_at)) = (maybe_covered_at, maybe_switched_at) else {
+        panic!("covered {maybe_covered_at:?}, switched {maybe_switched_at:?}");
+      };
+      let delay = switched_at.saturating_duration_since(covered_at);
+      assert!(
+        delay <= Duration::from_millis(700),
+        "switched {delay:?} after the estimate covered it"
+      );
     }
 
     /// Three seconds of sound to device 2, numbered from `base`, of which half is lost; when

@@ -591,9 +591,10 @@ Settings → Chats).
 
   *SFU* (`layers`): per viewer, its downlink estimate less 120 kbit/s for sound is the budget;
   the layer is the highest whose bitrate fits, at most the one the tile asks for (#927). Down at
-  once, up one layer at a time once the budget covered it with 15 % headroom for 2 s; a paused
-  camera is tried again at its lowest layer every 5 s. Other viewers of the same camera are not
-  affected.
+  once, up one layer at a time once the budget covered it with 15 % headroom for 2 s (0.5 s while
+  the estimate is in its fast start: it only grows then, and the hold validates nothing; a screen
+  share's viewer got the sharp layer 2 s after the estimate covered it); a paused camera is
+  tried again at its lowest layer every 5 s. Other viewers of the same camera are not affected.
 
   Measured (`bandwidth_limits` in the SFU's test suite: real SFU, a 720p camera with sensor noise,
   a bottleneck with a 250 ms queue; OpenH264, laptop, release build):
