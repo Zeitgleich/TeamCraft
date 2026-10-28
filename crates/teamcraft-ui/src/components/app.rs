@@ -295,7 +295,6 @@ pub fn Shell(backend: Rc<dyn Backend>, settings: Settings) -> impl IntoView {
             MainView::Home => view! { <HomeStart /> }.into_any(),
             // Only the compact layout shows a space without a channel; its list is the sidebar.
             MainView::Space => ().into_any(),
-            MainView::ChannelPreview(space, channel) => lazy_area(Place::Pane, move || areas::channel_preview(space, channel)),
           }}
         </main>
         <Show when=move || matches!(state.view.get(), MainView::Conversation(_)) fallback=|| ()>

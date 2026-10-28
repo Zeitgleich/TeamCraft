@@ -171,7 +171,6 @@ browse-join-requested = Requested
 browse-join-requested-hint = The channel's owners decide. The request expires if nobody does.
 browse-join-withdraw = Withdraw
 browse-leave = Leave
-browse-preview = Preview
 invite-title = Invite people
 invite-role = Invite as
 invite-role-member = Member: sees the space's public channels

@@ -704,7 +704,7 @@ it, and moved out:
 - **More areas:** the account menu and the custom status (`account`), a person's profile, a new
   direct message, linking and approving a device, "calls unavailable" (`dialogs`), the Saved, Files
   and Calls pages and a conversation's members and pins (`places`), Activity (`activity`), an
-  integration channel's log view (`log`) and a channel's preview before joining (`workspace`).
+  integration channel's log view (`log`).
 
 Release `trunk build` on macOS (trunk 0.22.0, Rust 1.99.1, wasm-opt 131, the CI job's commands; the
 before is 128 B from CI's), gzip -9:

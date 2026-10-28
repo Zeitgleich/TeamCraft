@@ -144,19 +144,6 @@ crop-preview-sidebar = Seitenleiste
 crop-apply = Übernehmen
 crop-retry = Erneut versuchen
 crop-uploading = Wird gespeichert …
-preview-label = Vorschau von { $name }
-preview-badge = Vorschau
-preview-title = Beitreten zum Mitlesen
-preview-body = Nachrichten sind für die Mitglieder dieses Kanals Ende-zu-Ende-verschlüsselt. Sobald du beigetreten bist, kannst du hier lesen und schreiben.
-preview-bar = Du siehst eine Vorschau von #{ $name }
-preview-details-button = Details
-preview-join = Kanal beitreten
-preview-joining = Wird beigetreten…
-preview-topic = Thema
-preview-no-topic = Kein Thema festgelegt.
-preview-archived = Dieser Kanal ist archiviert; beitreten ist nicht möglich.
-preview-missing-title = Kanal nicht gefunden
-preview-missing = Er wurde vielleicht privat gemacht oder gelöscht.
 
 ## Daily-use improvements (docs/ux-backlog.md)
 drop-files-here = Zum Anhängen hier ablegen
