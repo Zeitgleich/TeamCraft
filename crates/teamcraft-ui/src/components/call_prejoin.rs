@@ -9,7 +9,7 @@ use crate::calls::{
   selected_camera_is_rear,
 };
 use crate::components::avatar::{Avatar, AvatarSize};
-use crate::components::call_video::{BackgroundPicker, VideoSource, VideoTile, can_show_video};
+use crate::components::call_video::{BackgroundPicker, PickerSize, VideoSource, VideoTile, can_show_video};
 use crate::components::icons::{Icon, IconName};
 use crate::i18n::{I18n, use_i18n};
 use crate::meetings::MeetingsHub;
@@ -299,7 +299,7 @@ pub fn PreJoinScreen(request: CallRequest) -> impl IntoView {
         {has_effects.then(|| view! {
           <div class="field">
             <span class="field-title" id="prejoin-effects-title">{move || i18n.t("prejoin-effects")}</span>
-            <BackgroundPicker effect=call.effect />
+            <BackgroundPicker effect=call.effect size=PickerSize::Compact />
             <p class="muted-text small">{move || i18n.t("prejoin-effects-hint")}</p>
           </div>
         })}

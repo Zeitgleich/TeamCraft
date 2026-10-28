@@ -10,7 +10,7 @@ use crate::calls::{
 };
 use crate::components::call_prejoin::call_heading;
 use crate::components::call_video::{
-  BackgroundPicker, LiveVideo, VideoSource, VideoTile, can_share_screen, can_show_video,
+  BackgroundPicker, LiveVideo, PickerSize, VideoSource, VideoTile, can_share_screen, can_show_video,
 };
 use crate::components::icons::{Icon, IconName};
 use crate::i18n::use_i18n;
@@ -488,7 +488,7 @@ pub fn CallScreen(request: CallRequest) -> impl IntoView {
       <Show when=move || effects_open.get() fallback=|| ()>
         <div class="effects-popover" role="dialog" aria-label=move || i18n.t("call-effects")>
           <h2>{move || i18n.t("call-effects")}</h2>
-          <BackgroundPicker effect=call.effect />
+          <BackgroundPicker effect=call.effect size=PickerSize::Compact />
         </div>
       </Show>
       <Show when=move || call.is_camera_menu_open.get() fallback=|| ()>

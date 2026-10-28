@@ -390,4 +390,4 @@ fn hide(_host: &web_sys::HtmlDivElement, _source: VideoSource) {}
 #[cfg(not(target_arch = "wasm32"))]
 fn stop_watching(_source: VideoSource) {}
 
-pub use crate::components::background_picker::BackgroundPicker;
+pub use crate::components::background_picker::{BackgroundPicker, PickerSize};
