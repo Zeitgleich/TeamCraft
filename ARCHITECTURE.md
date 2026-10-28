@@ -539,6 +539,18 @@ Settings → Chats).
   about video (#935: one lossy moment had cut it below every camera layer, and nothing was sent).
   A track whose layers are all held back still proves its encoder with one unsent picture, so the
   start check doesn't take held-back pictures for a failing encoder.
+- Estimates start fast: from the start value (and after measuring afresh) they triple per second
+  until the first overuse or loss, then grow 8 %/s. The SFU measures a receiver's downlink afresh
+  when it subscribes to a new track, so a viewer of a share started after a call of sound only gets
+  the sharp layer within about five seconds instead of minutes (#941). A screen share keeps its
+  layer through a dip shorter than three seconds (its keyframes are bursts the estimate reacts to).
+- Large frames: a frame of more than 255 fragments (a 1440p keyframe of text is about 450 KB)
+  carries the fragment extension's long form (16-bit index and count, up to 4096 fragments); the
+  short form stays for every other frame. Before, such keyframes could not be sent, and the top
+  layer of a text-heavy share never arrived (#941).
+- Screen content in OpenH264 uses timestamp-based rate control planned for 5 pictures a second: a
+  screen changes a few times a second, and planned for 30, keyframes of text starved the pictures
+  after them.
 - Opus in-band FEC is planned for the measured uplink loss (5 % floor, 30 % cap; the native encoder
   and WebCodecs' `packetlossperc`). Native receivers recover a lost packet from the next packet's FEC
   data; WebCodecs can't, browsers conceal.

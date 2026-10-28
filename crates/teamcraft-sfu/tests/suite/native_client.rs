@@ -160,6 +160,7 @@ async fn screen_share_reaches_a_subscriber_through_the_sfu() {
         video_encoders: vec![VideoCodec::Vp9],
         video_decoders: vec![VideoCodec::Vp9],
         max_simulcast_layers: 1,
+        max_frame_fragments: teamcraft_proto::MAX_VIDEO_FRAME_FRAGMENTS,
       },
       bwe: BweConfig::default(),
     };

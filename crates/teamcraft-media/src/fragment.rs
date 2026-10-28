@@ -8,18 +8,32 @@
 //! frame number (16 bits) | fragment index (8) | fragment count (8) | flags (8, bit 0 = keyframe)
 //! ```
 //!
+//! A frame of more than 255 fragments (a keyframe of a text-heavy screen share at 1440p is about
+//! 400 KB, issue #941) uses the long form, with 16-bit index and count:
+//!
+//! ```text
+//! frame number (16 bits) | fragment index (16) | fragment count (16) | flags (8)
+//! ```
+//!
+//! Every other frame keeps the short form, so receivers and SFUs that only know it get those as
+//! before; they drop the packets of a long one as malformed (such frames couldn't be sent at
+//! all before).
+//!
 //! The SFU reads it to switch simulcast layers on keyframes and to drop whole frames; it never
 //! reads the payload. A frame is complete when all `count` fragments arrived; incomplete frames are
 //! dropped once a newer frame completes (the decoder then needs a keyframe or tolerates the gap).
 
 use std::collections::BTreeMap;
 
+use teamcraft_proto::MAX_VIDEO_FRAME_FRAGMENTS;
 use thiserror::Error;
 
 use crate::rtp::{FRAME_FRAGMENT_EXTENSION_ID, RtpHeader};
 
-/// Bytes of the fragment extension.
-const FRAGMENT_EXTENSION_BYTES: usize = 5;
+/// Bytes of the fragment extension in its short form (up to 255 fragments)...
+const SHORT_EXTENSION_BYTES: usize = 5;
+/// ...and in its long form.
+const LONG_EXTENSION_BYTES: usize = 7;
 /// Keyframe bit in the flags byte.
 const KEYFRAME_FLAG: u8 = 0x01;
 /// At most this many frames are reassembled at the same time.
@@ -29,8 +43,8 @@ const MAX_FRAMES_IN_FLIGHT: usize = 8;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FrameFragment {
   pub frame_number: u16,
-  pub index: u8,
-  pub count: u8,
+  pub index: u16,
+  pub count: u16,
   pub is_keyframe: bool,
 }
 
@@ -59,7 +73,9 @@ struct PartialFrame {
 
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum FragmentError {
-  #[error("frame of {frame_bytes} bytes needs more than 255 fragments of {max_payload_bytes} bytes")]
+  #[error(
+    "frame of {frame_bytes} bytes needs more than {MAX_VIDEO_FRAME_FRAGMENTS} fragments of {max_payload_bytes} bytes"
+  )]
   FrameTooLarge {
     frame_bytes: usize,
     max_payload_bytes: usize,
@@ -70,41 +86,68 @@ pub enum FragmentError {
   MissingExtension,
   #[error("fragment extension is malformed")]
   MalformedExtension,
-  #[error("fragment index {index} is not below count {count}")]
-  IndexOutOfRange { index: u8, count: u8 },
+  #[error("fragment index {index} is not below count {count} (at most {MAX_VIDEO_FRAME_FRAGMENTS})")]
+  IndexOutOfRange { index: u16, count: u16 },
   #[error("fragment count changed within frame {0}")]
   InconsistentFrame(u16),
 }
 
 impl FrameFragment {
-  /// Reads the fragment extension of a packet header.
+  /// Reads the fragment extension of a packet header (short or long form).
   pub fn from_header(header: &RtpHeader) -> Result<Self, FragmentError> {
     let data = header
       .extension(FRAME_FRAGMENT_EXTENSION_ID)
       .ok_or(FragmentError::MissingExtension)?;
-    let [frame_high, frame_low, index, count, flags] = data else {
-      return Err(FragmentError::MalformedExtension);
+    let (frame_number, index, count, flags) = match data {
+      [frame_high, frame_low, index, count, flags] => (
+        u16::from_be_bytes([*frame_high, *frame_low]),
+        u16::from(*index),
+        u16::from(*count),
+        *flags,
+      ),
+      [
+        frame_high,
+        frame_low,
+        index_high,
+        index_low,
+        count_high,
+        count_low,
+        flags,
+      ] => (
+        u16::from_be_bytes([*frame_high, *frame_low]),
+        u16::from_be_bytes([*index_high, *index_low]),
+        u16::from_be_bytes([*count_high, *count_low]),
+        *flags,
+      ),
+      _ => return Err(FragmentError::MalformedExtension),
     };
-    if *count == 0 || index >= count {
-      return Err(FragmentError::IndexOutOfRange {
-        index: *index,
-        count: *count,
-      });
+    if count == 0 || index >= count || count > MAX_VIDEO_FRAME_FRAGMENTS {
+      return Err(FragmentError::IndexOutOfRange { index, count });
     }
     Ok(Self {
-      frame_number: u16::from_be_bytes([*frame_high, *frame_low]),
-      index: *index,
-      count: *count,
+      frame_number,
+      index,
+      count,
       is_keyframe: flags & KEYFRAME_FLAG != 0,
     })
   }
 
-  /// Writes the fragment extension into a packet header.
+  /// Writes the fragment extension into a packet header: the short form while the frame has at
+  /// most 255 fragments, the long form otherwise.
   pub fn write_to(&self, header: &mut RtpHeader) {
     let [frame_high, frame_low] = self.frame_number.to_be_bytes();
     let flags = if self.is_keyframe { KEYFRAME_FLAG } else { 0 };
-    let data = vec![frame_high, frame_low, self.index, self.count, flags];
-    debug_assert_eq!(data.len(), FRAGMENT_EXTENSION_BYTES);
+    let data = match (u8::try_from(self.index), u8::try_from(self.count)) {
+      (Ok(index), Ok(count)) => vec![frame_high, frame_low, index, count, flags],
+      _ => {
+        let ([index_high, index_low], [count_high, count_low]) =
+          (self.index.to_be_bytes(), self.count.to_be_bytes());
+        vec![
+          frame_high, frame_low, index_high, index_low, count_high, count_low, flags,
+        ]
+      },
+    };
+    debug_assert!([SHORT_EXTENSION_BYTES, LONG_EXTENSION_BYTES].contains(&data.len()));
     header.set_extension(FRAME_FRAGMENT_EXTENSION_ID, data);
   }
 
@@ -124,10 +167,13 @@ pub fn fragment_frame(
     return Err(FragmentError::ZeroPayloadSize);
   }
   let chunk_count = frame.len().div_ceil(max_payload_bytes).max(1);
-  let count = u8::try_from(chunk_count).map_err(|_| FragmentError::FrameTooLarge {
-    frame_bytes: frame.len(),
-    max_payload_bytes,
-  })?;
+  let count = u16::try_from(chunk_count)
+    .ok()
+    .filter(|count| *count <= MAX_VIDEO_FRAME_FRAGMENTS)
+    .ok_or(FragmentError::FrameTooLarge {
+      frame_bytes: frame.len(),
+      max_payload_bytes,
+    })?;
   if frame.is_empty() {
     let fragment = FrameFragment {
       frame_number,
@@ -140,7 +186,7 @@ pub fn fragment_frame(
   Ok(
     frame
       .chunks(max_payload_bytes)
-      .zip(0u8..)
+      .zip(0u16..)
       .map(|(chunk, index)| {
         let fragment = FrameFragment {
           frame_number,
@@ -270,11 +316,11 @@ mod tests {
 
     #[test]
     fn oversized_frame_and_zero_payload_are_rejected() {
-      let frame = vec![0u8; 256 * 10];
+      let frame = vec![0u8; (usize::from(MAX_VIDEO_FRAME_FRAGMENTS) + 1) * 10];
       assert_eq!(
         fragment_frame(&frame, 1, false, 10),
         Err(FragmentError::FrameTooLarge {
-          frame_bytes: 2560,
+          frame_bytes: frame.len(),
           max_payload_bytes: 10
         })
       );
@@ -286,23 +332,55 @@ mod tests {
 
     #[test]
     fn extension_round_trips_through_rtp_header() {
-      let mut header = RtpHeader::new(
-        PayloadType::new(100).unwrap(),
-        SequenceNumber(1),
-        RtpTimestamp(0),
-        Ssrc(1),
-      );
       let fragment = FrameFragment {
         frame_number: 0xBEEF,
         index: 2,
         count: 5,
         is_keyframe: true,
       };
+      let parsed = through_header(fragment);
+      assert_eq!(
+        parsed.extension(FRAME_FRAGMENT_EXTENSION_ID).map(<[u8]>::len),
+        Some(5)
+      );
+      assert_eq!(FrameFragment::from_header(&parsed).unwrap(), fragment);
+    }
+
+    /// Issue #941: a text-heavy keyframe at 1440p (about 400 KB) needs more than 255 fragments;
+    /// such a frame couldn't be sent at all, so the top layer of a share never arrived.
+    #[test]
+    fn a_frame_of_more_than_255_fragments_uses_the_long_form() {
+      let frame: Vec<u8> = (0..400_000u32).map(|i| (i % 251) as u8).collect();
+      let fragments = fragment_frame(&frame, 9, true, 1100).unwrap();
+      assert_eq!(fragments.len(), 364);
+      let mut assembler = FrameAssembler::new();
+      let mut maybe_complete = None;
+      for (fragment, payload) in &fragments {
+        let parsed = through_header(*fragment);
+        assert_eq!(
+          parsed.extension(FRAME_FRAGMENT_EXTENSION_ID).map(<[u8]>::len),
+          Some(7)
+        );
+        let fragment = FrameFragment::from_header(&parsed).unwrap();
+        maybe_complete = assembler.push(fragment, payload).unwrap().or(maybe_complete);
+      }
+      let complete = maybe_complete.unwrap();
+      assert_eq!(complete.data, frame);
+      assert!(complete.is_keyframe);
+    }
+
+    /// `fragment` written into an RTP header and parsed back.
+    fn through_header(fragment: FrameFragment) -> RtpHeader {
+      let mut header = RtpHeader::new(
+        PayloadType::new(100).unwrap(),
+        SequenceNumber(1),
+        RtpTimestamp(0),
+        Ssrc(1),
+      );
       fragment.write_to(&mut header);
       let mut bytes = Vec::new();
       header.write_to(&mut bytes).unwrap();
-      let (parsed, _) = RtpHeader::parse(&bytes).unwrap();
-      assert_eq!(FrameFragment::from_header(&parsed).unwrap(), fragment);
+      RtpHeader::parse(&bytes).unwrap().0
     }
   }
 
@@ -393,6 +471,22 @@ mod tests {
       );
       header.set_extension(FRAME_FRAGMENT_EXTENSION_ID, vec![0, 1, 0, 0, 0]);
       assert!(FrameFragment::from_header(&header).is_err());
+      // Long form: index beyond count, more fragments than any frame has, a length in between.
+      header.set_extension(FRAME_FRAGMENT_EXTENSION_ID, vec![0, 1, 1, 0, 1, 0, 0]);
+      assert_eq!(
+        FrameFragment::from_header(&header),
+        Err(FragmentError::IndexOutOfRange {
+          index: 256,
+          count: 256
+        })
+      );
+      header.set_extension(FRAME_FRAGMENT_EXTENSION_ID, vec![0, 1, 0, 0, 0xFF, 0xFF, 0]);
+      assert!(FrameFragment::from_header(&header).is_err());
+      header.set_extension(FRAME_FRAGMENT_EXTENSION_ID, vec![0, 1, 0, 0, 1, 0]);
+      assert_eq!(
+        FrameFragment::from_header(&header),
+        Err(FragmentError::MalformedExtension)
+      );
     }
   }
 }

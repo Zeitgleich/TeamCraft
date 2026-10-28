@@ -22,8 +22,9 @@ mod wire_enum;
 pub use api::*;
 pub use bytes::{Base64Bytes, ClientMessageId, ClientMessageIdError, IdempotencyKey, UnixMillis};
 pub use call_media::{
-  AudioCodec, MAX_SIMULCAST_LAYERS, MediaCapabilities, TransportFeedback, VideoCodec, VideoLayerInfo,
-  VideoPublicationId, VideoTrack, VideoTrackKind,
+  AudioCodec, MAX_SIMULCAST_LAYERS, MAX_VIDEO_FRAME_FRAGMENTS, MediaCapabilities,
+  SHORT_VIDEO_FRAME_FRAGMENTS, TransportFeedback, VideoCodec, VideoLayerInfo, VideoPublicationId, VideoTrack,
+  VideoTrackKind,
 };
 pub use calls::{
   CALL_JOIN_TOKEN_AUDIENCE, CallClientMessage, CallEvent, CallJoinClaims, CallParticipant, CallServerMessage,

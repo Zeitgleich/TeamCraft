@@ -405,6 +405,7 @@ impl Host {
           video_encoders: vec![VideoCodec::H264],
           video_decoders: vec![VideoCodec::H264],
           max_simulcast_layers: MAX_SIMULCAST_LAYERS,
+          max_frame_fragments: teamcraft_proto::MAX_VIDEO_FRAME_FRAGMENTS,
         },
         bwe: BweConfig::default(),
       },

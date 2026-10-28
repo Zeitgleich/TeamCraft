@@ -10,10 +10,11 @@
 //!   what was actually delivered.
 //! - **Loss:** above 10 % loss the rate shrinks with the loss; between 2 % and 10 % it holds.
 //!
-//! Otherwise the rate grows multiplicatively (8 %/s by default), capped at 1.5× the delivered rate
-//! so an application-limited sender doesn't drift upwards, unless the sender declares a higher
-//! demand ([`SendSideEstimator::set_demand_bps`]): then the estimate may grow up to it, and sending
-//! more (e.g. the SFU switching to the next simulcast layer) is the probe. A probe that causes
+//! Otherwise the rate grows multiplicatively (8 %/s by default; at the start, until the first sign
+//! of congestion, much faster: see [`BweConfig::start_increase_per_second`]), capped at 1.5× the
+//! delivered rate so an application-limited sender doesn't drift upwards, unless the sender
+//! declares a higher demand ([`SendSideEstimator::set_demand_bps`]): then the estimate may grow up
+//! to it, and sending more (e.g. the SFU switching to the next simulcast layer) is the probe. A probe that causes
 //! congestion is cut back by the delay detector like any other overuse. The same estimator runs in clients
 //! (uplink) and in the SFU per receiver (downlink). Time is passed in; nothing reads a clock.
 
@@ -59,6 +60,13 @@ pub struct BweConfig {
   pub max_bps: u32,
   /// Multiplicative growth per second while the path is not congested.
   pub increase_per_second: f64,
+  /// Growth per second at the start (and after [`SendSideEstimator::measure_afresh`]) until the
+  /// first sign of congestion (a decrease, or loss that holds the rate): the start value is a
+  /// guess, and what is sent may need far more at once. A viewer of a shared screen waited about
+  /// 45 seconds at 8 %/s from 300 kbit/s for the sharp layer and saw the half-size one scaled up
+  /// meanwhile (issue #941). Like GCC's start-up probes (3× and 6× the start rate), a path that
+  /// can't carry it is cut back by the first overuse or loss.
+  pub start_increase_per_second: f64,
   /// Factor applied to the delivered rate on overuse.
   pub decrease_factor: f64,
 }
@@ -82,6 +90,9 @@ pub struct SendSideEstimator {
   /// After a delay-based decrease, no further one until the detector reported normal again (the
   /// queue needs time to drain; cutting on every report would spiral down).
   is_holding_after_decrease: bool,
+  /// No sign of congestion since the start or [`SendSideEstimator::measure_afresh`]: growth at
+  /// [`BweConfig::start_increase_per_second`].
+  is_starting: bool,
 }
 
 /// Receiver side: records arrival times and produces [`TransportFeedback`].
@@ -138,6 +149,8 @@ impl Default for BweConfig {
       min_bps: 30_000,
       max_bps: 10_000_000,
       increase_per_second: 0.08,
+      // Triples every second: 300 kbit/s reach a 1440p screen share's 8 Mbit/s in three seconds.
+      start_increase_per_second: 2.0,
       decrease_factor: 0.85,
     }
   }
@@ -159,6 +172,7 @@ impl SendSideEstimator {
       last_loss_ratio: 0.0,
       maybe_demand_bps: None,
       is_holding_after_decrease: false,
+      is_starting: true,
     }
   }
 
@@ -225,7 +239,8 @@ impl SendSideEstimator {
   /// as far as that traffic let it, and one lossy or jittery moment cut it to what the sound got
   /// through, far below any video (#935). Measured afresh, as at the start: the estimate is at
   /// least the start value again, and the loss, delay and delivered rate seen so far are
-  /// forgotten. Packets in flight still meet their feedback.
+  /// forgotten, and the estimate grows as fast as at the start until the path shows congestion.
+  /// Packets in flight still meet their feedback.
   pub fn measure_afresh(&mut self) {
     self.estimate_bps = self
       .estimate_bps
@@ -238,6 +253,7 @@ impl SendSideEstimator {
     self.maybe_last_update_at = None;
     self.maybe_last_decrease_at = None;
     self.is_holding_after_decrease = false;
+    self.is_starting = true;
   }
 
   pub fn estimate_bps(&self) -> u32 {
@@ -259,6 +275,10 @@ impl SendSideEstimator {
       .map_or(Duration::ZERO, |last| now.saturating_duration_since(last));
     self.maybe_last_update_at = Some(now);
     let acked_bps = self.acked_bps();
+    // Congestion (a queue building up, loss that holds or cuts the rate) ends the start.
+    if self.delay.usage == BandwidthUsage::Overusing || self.last_loss_ratio >= 0.02 {
+      self.is_starting = false;
+    }
     match self.delay.usage {
       BandwidthUsage::Overusing => {
         if acked_bps > 0.0
@@ -274,7 +294,12 @@ impl SendSideEstimator {
       BandwidthUsage::Normal => {
         self.is_holding_after_decrease = false;
         if self.last_loss_ratio < 0.02 {
-          let growth = (1.0 + self.config.increase_per_second).powf(elapsed.as_secs_f64());
+          let increase = if self.is_starting {
+            self.config.start_increase_per_second
+          } else {
+            self.config.increase_per_second
+          };
+          let growth = (1.0 + increase).powf(elapsed.as_secs_f64());
           let app_limited_ceiling = if acked_bps > 0.0 {
             1.5 * acked_bps + 10_000.0
           } else {
@@ -535,6 +560,24 @@ mod tests {
       let estimate = sim.estimator.estimate_bps();
       assert!((700_000..=1_200_000).contains(&estimate), "estimate {estimate}");
       assert!(sim.link.queue_delay(sim.now) < Duration::from_millis(150));
+    }
+
+    /// Issue #941: from the start value, a viewer of a 1440p screen share needs about 8 Mbit/s.
+    /// At 8 %/s that took 45 seconds; the start triples per second until the path shows
+    /// congestion, then the estimate settles at the capacity as before.
+    #[test]
+    fn the_start_grows_fast_until_the_path_shows_congestion() {
+      let mut sim = Simulation::new(Link::new(12_000_000, 40, 0));
+      sim.run(Duration::from_secs(4));
+      let estimate = sim.estimator.estimate_bps();
+      assert!(estimate >= 8_000_000, "estimate {estimate} after four seconds");
+      sim.run(Duration::from_secs(20));
+      let settled = sim.estimator.estimate_bps();
+      assert!(
+        (8_000_000..=13_000_000).contains(&settled),
+        "settled at {settled}"
+      );
+      assert!(sim.link.queue_delay(sim.now) < Duration::from_millis(250));
     }
 
     #[test]

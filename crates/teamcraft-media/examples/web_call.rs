@@ -71,6 +71,7 @@ pub async fn join_dev_call(
       video_encoders: vec![VideoCodec::H264],
       video_decoders: vec![VideoCodec::H264, VideoCodec::Vp9],
       max_simulcast_layers: 1,
+      max_frame_fragments: teamcraft_proto::MAX_VIDEO_FRAME_FRAGMENTS,
     },
     bwe: BweConfig::default(),
   };
