@@ -9,7 +9,9 @@ use crate::calls::{
   selected_camera_is_rear,
 };
 use crate::components::avatar::{Avatar, AvatarSize};
-use crate::components::call_video::{BackgroundPicker, VideoSource, VideoTile, can_show_video};
+use crate::components::call_video::{
+  BackgroundPicker, PickerSize, VideoSource, VideoTile, can_choose_speakers, can_show_video,
+};
 use crate::components::icons::{Icon, IconName};
 use crate::i18n::{I18n, use_i18n};
 use crate::meetings::MeetingsHub;
@@ -285,9 +287,17 @@ pub fn PreJoinScreen(request: CallRequest) -> impl IntoView {
           </Show>
         </div>
         <div class="field">
-          <label for="prejoin-speaker">{move || i18n.t("prejoin-speaker")}</label>
+          // A browser that can't route sound (Safari) has no choice to offer; the test still plays
+          // on the system's output.
+          {if can_choose_speakers() {
+            view! { <label for="prejoin-speaker">{move || i18n.t("prejoin-speaker")}</label> }.into_any()
+          } else {
+            view! { <span class="field-title">{move || i18n.t("prejoin-speaker")}</span> }.into_any()
+          }}
           <div class="field-row">
-            <DeviceSelect id="prejoin-speaker" kind=InputKind::Speakers offer=speakers selected=call.speaker_id on_pick=Callback::new(move |id: String| call.emit(CallEvent::Speakers(id))) />
+            {can_choose_speakers().then(|| view! {
+              <DeviceSelect id="prejoin-speaker" kind=InputKind::Speakers offer=speakers selected=call.speaker_id on_pick=Callback::new(move |id: String| call.emit(CallEvent::Speakers(id))) />
+            })}
             <button type="button" class="btn" on:click=test_speaker disabled=move || is_testing_speaker.get()>
               <Icon name=IconName::Volume />
               <span>
@@ -299,7 +309,7 @@ pub fn PreJoinScreen(request: CallRequest) -> impl IntoView {
         {has_effects.then(|| view! {
           <div class="field">
             <span class="field-title" id="prejoin-effects-title">{move || i18n.t("prejoin-effects")}</span>
-            <BackgroundPicker effect=call.effect />
+            <BackgroundPicker effect=call.effect size=PickerSize::Compact />
             <p class="muted-text small">{move || i18n.t("prejoin-effects-hint")}</p>
           </div>
         })}

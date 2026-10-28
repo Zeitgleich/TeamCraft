@@ -11,6 +11,7 @@ use teamcraft_proto::BrandLinks;
 use crate::auth::tauri;
 use crate::components::background_picker::{BackgroundPicker, effect_from_slug, effect_slug};
 use crate::components::bundle_banner::AboutSection;
+use crate::components::call_video::can_choose_speakers;
 use crate::components::icons::{Icon, IconName};
 use crate::components::message_actions::copy_and_confirm;
 use crate::components::settings_rows::{
@@ -569,12 +570,15 @@ pub fn AudioVideoSection() -> impl IntoView {
             value=Signal::derive(move || calls.get().microphone_id)
             on_change=Callback::new(move |id: String| prefs.update(|all| all.calls.microphone_id = id))
           />
-          <DeviceRow
-            label="prejoin-speaker"
-            options=device_options(&devices.speakers)
-            value=Signal::derive(move || calls.get().speaker_id)
-            on_change=Callback::new(move |id: String| prefs.update(|all| all.calls.speaker_id = id))
-          />
+          // Not in a browser that can't route sound (Safari): the choice would do nothing (#841).
+          {can_choose_speakers().then(|| view! {
+            <DeviceRow
+              label="prejoin-speaker"
+              options=device_options(&devices.speakers)
+              value=Signal::derive(move || calls.get().speaker_id)
+              on_change=Callback::new(move |id: String| prefs.update(|all| all.calls.speaker_id = id))
+            />
+          })}
         }
       }}
     </SettingsCard>

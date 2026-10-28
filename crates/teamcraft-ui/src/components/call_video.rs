@@ -164,6 +164,30 @@ fn has_display_media() -> bool {
     .is_ok_and(|function| function.is_function())
 }
 
+/// Whether the user can choose the speakers: the desktop app always (its calls run natively), a
+/// browser only with `AudioContext.setSinkId`, which routes the call's and the speaker test's
+/// sound. Safari has none, so a choice there would do nothing (#841).
+pub fn can_choose_speakers() -> bool {
+  #[cfg(target_arch = "wasm32")]
+  {
+    crate::auth::tauri::is_available() || has_sink_id()
+  }
+  #[cfg(not(target_arch = "wasm32"))]
+  {
+    true
+  }
+}
+
+#[cfg(target_arch = "wasm32")]
+fn has_sink_id() -> bool {
+  use js_sys::Reflect;
+  // Looked up by name on the prototype: the context itself is only made inside a click.
+  Reflect::get(&js_sys::global(), &"AudioContext".into())
+    .and_then(|context| Reflect::get(&context, &"prototype".into()))
+    .and_then(|prototype| Reflect::has(&prototype, &"setSinkId".into()))
+    .unwrap_or(false)
+}
+
 /// Real call video: another device's track drawn into a canvas, or the own camera; the call
 /// module (browser) or the shell's video (desktop) makes the element. A track is watched only
 /// while its tile is on screen and the window is visible, so tracks nobody looks at aren't
@@ -390,4 +414,4 @@ fn hide(_host: &web_sys::HtmlDivElement, _source: VideoSource) {}
 #[cfg(not(target_arch = "wasm32"))]
 fn stop_watching(_source: VideoSource) {}
 
-pub use crate::components::background_picker::BackgroundPicker;
+pub use crate::components::background_picker::{BackgroundPicker, PickerSize};

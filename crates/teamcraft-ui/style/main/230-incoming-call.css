@@ -116,9 +116,26 @@ html.call-window body {
   font-size: var(--text-base);
 }
 
+/* Two columns: the own picture stays in view while the settings scroll, so a background that is
+   picked from the full gallery can be seen at once. */
+@media (min-width: 901px) {
+  .prejoin-preview {
+    position: sticky;
+    top: 0;
+    align-self: start;
+  }
+}
+
 @media (max-width: 900px) {
   .prejoin {
-    grid-template-columns: 1fr;
+    /* `minmax(0, …)`: a plain `1fr` grows to the widest control and pushes the buttons off the
+       screen on a phone. */
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  /* One column: the two buttons share the width, easy to hit with a thumb. */
+  .prejoin-actions .btn {
+    flex: 1;
   }
 
   .stage-share {
