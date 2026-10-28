@@ -3,9 +3,10 @@
 //! (`v4l2h264enc`) on ARM boards.
 //!
 //! GStreamer is LGPL and linked dynamically from the system; the Rust bindings are safe. One
-//! pipeline per layer: `appsrc` (NV12 frames) → hardware encoder → Constrained Baseline caps →
-//! `h264parse` (SPS/PPS before every keyframe, and Annex B from encoders that only give AVC, like
-//! VideoToolbox) → `appsink` (Annex B access units). Encoders that can't be built (no plugin, no
+//! pipeline per layer: `appsrc` (NV12 frames) → hardware encoder → Baseline caps (in the profile
+//! name the element accepts, [`HardwareElement::profile`]) → `h264parse` (SPS/PPS before every
+//! keyframe, and Annex B from encoders that only give AVC, like VideoToolbox) → `appsink` (Annex B
+//! access units). Encoders that can't be built (no plugin, no
 //! GPU, unsupported size) return `None`, and [`FallbackEncoder`] switches to OpenH264 if one fails
 //! or stops giving pictures later.
 //!
@@ -42,6 +43,11 @@ pub struct GstreamerEncoder {
 /// The platform's hardware encoder element and its settings.
 struct HardwareElement {
   name: &'static str,
+  /// The H.264 profile asked for downstream of the encoder, as the element names it: VA-API takes
+  /// `constrained-baseline`, VideoToolbox (`vtenc_h264`) only `baseline` and fails to negotiate
+  /// with anything else, so no picture ever came out of it (issue #683). Both encode without
+  /// B-frames, which is what every receiver decodes.
+  profile: &'static str,
   /// `gst-launch` style properties for the layer's bitrate (kbit/s).
   properties: fn(bitrate_kbps: u32) -> String,
 }
@@ -65,10 +71,11 @@ impl GstreamerEncoder {
       }
       let description = format!(
         "appsrc name=source is-live=true format=time ! {} {} ! \
-         video/x-h264,profile=constrained-baseline ! h264parse config-interval=-1 ! \
+         video/x-h264,profile={} ! h264parse config-interval=-1 ! \
          video/x-h264,stream-format=byte-stream,alignment=au ! appsink name=sink sync=false",
         element.name,
         (element.properties)(bitrate_kbps),
+        element.profile,
       );
       match Self::build(&description, element.name, layer, content) {
         Ok(encoder) => return Some(encoder),
@@ -232,6 +239,7 @@ impl Drop for GstreamerEncoder {
 const HARDWARE_ELEMENTS: &[HardwareElement] = &[
   HardwareElement {
     name: "vah264enc",
+    profile: "constrained-baseline",
     properties: |bitrate_kbps| {
       format!(
         "bitrate={bitrate_kbps} rate-control=cbr key-int-max={KEYFRAME_INTERVAL_FRAMES} b-frames=0 \
@@ -241,6 +249,7 @@ const HARDWARE_ELEMENTS: &[HardwareElement] = &[
   },
   HardwareElement {
     name: "v4l2h264enc",
+    profile: "constrained-baseline",
     properties: |bitrate_kbps| {
       let bitrate_bps = u64::from(bitrate_kbps) * 1000;
       format!(
@@ -250,10 +259,12 @@ const HARDWARE_ELEMENTS: &[HardwareElement] = &[
   },
 ];
 
-// Compiles for macOS; untested (no Mac in development so far).
+/// macOS: VideoToolbox. Tested on Apple silicon with GStreamer 1.28 (the release bundles the same
+/// version).
 #[cfg(target_os = "macos")]
 const HARDWARE_ELEMENTS: &[HardwareElement] = &[HardwareElement {
   name: "vtenc_h264",
+  profile: "baseline",
   properties: |bitrate_kbps| {
     format!(
       "bitrate={bitrate_kbps} realtime=true allow-frame-reordering=false \
@@ -267,6 +278,7 @@ const HARDWARE_ELEMENTS: &[HardwareElement] = &[HardwareElement {
 #[cfg(target_os = "windows")]
 const HARDWARE_ELEMENTS: &[HardwareElement] = &[HardwareElement {
   name: "mfh264enc",
+  profile: "constrained-baseline",
   properties: |bitrate_kbps| {
     format!(
       "bitrate={bitrate_kbps} rc-mode=cbr low-latency=true bframes=0 gop-size={KEYFRAME_INTERVAL_FRAMES}"
@@ -303,6 +315,7 @@ fn gstreamer_error(error: impl std::fmt::Debug) -> VideoCodecError {
 #[cfg(test)]
 mod tests {
   use super::*;
+  use crate::picture_check::{PictureContent, picture_content};
   use crate::video::simulcast_layers;
   use crate::video_capture::test_pattern;
   use crate::video_codec::{OpenH264Decoder, VideoDecoder};
@@ -330,11 +343,13 @@ mod tests {
     };
     let mut decoder = OpenH264Decoder::new().unwrap();
     let mut pictures = Vec::new();
+    let mut sources = Vec::new();
     for index in 0..40u64 {
       let frame = test_pattern(HD, index, index * 33_333).unwrap();
       if let Some(picture) = encoder.encode(&frame, index == 20).unwrap() {
         pictures.push((index, picture));
       }
+      sources.push(frame);
     }
     assert!(
       pictures.len() >= 35,
@@ -355,6 +370,15 @@ mod tests {
     for (index, picture) in &pictures {
       if let Some(frame) = decoder.decode(&picture.data, index * 33_333).unwrap() {
         assert_eq!(frame.resolution(), HD);
+        // The picture itself, not just a stream that decodes (issue #683: video arrived black):
+        // an encoder may give a frame's picture a frame or two later.
+        assert_eq!(picture_content(&frame), PictureContent::Detailed, "frame {index}");
+        let first_source = usize::try_from(index.saturating_sub(2)).unwrap();
+        let psnr = sources[first_source..=usize::try_from(*index).unwrap()]
+          .iter()
+          .map(|source| luma_psnr(source, &frame))
+          .fold(0.0, f64::max);
+        assert!(psnr > 28.0, "frame {index}: PSNR {psnr:.1} dB");
         decoded += 1;
       }
     }
@@ -404,5 +428,16 @@ mod tests {
     };
     assert_eq!(layout(1280, 720), (1280, 720));
     assert_eq!(layout(682, 384), (684, 384));
+  }
+
+  fn luma_psnr(a: &VideoFrame, b: &VideoFrame) -> f64 {
+    let (ya, yb) = (a.planes().0, b.planes().0);
+    let mse = ya
+      .iter()
+      .zip(yb)
+      .map(|(x, y)| (f64::from(*x) - f64::from(*y)).powi(2))
+      .sum::<f64>()
+      / ya.len() as f64;
+    10.0 * (255.0f64.powi(2) / mse.max(1e-9)).log10()
   }
 }

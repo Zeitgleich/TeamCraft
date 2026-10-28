@@ -14,6 +14,7 @@ use tokio::sync::{mpsc, oneshot};
 use tracing::{debug, info, warn};
 
 use crate::call_video::ReceivedVideoFrame;
+use crate::picture_check::{PictureContent, picture_content};
 use crate::video::{EncodedVideoFrame, VideoFrame, VideoResolution, fit_within};
 use crate::video_capture::{CaptureError, FrameReceiver, VideoCapture, frame_queue};
 use crate::video_codec::{
@@ -37,6 +38,9 @@ const KEYFRAME_REFRESH_DELAY: Duration = Duration::from_millis(150);
 /// The default [`VideoSendConfig::maybe_idle_refresh`] of screen shares: a still screen's
 /// picture again about once a second, so a viewer never waits long for one.
 pub const SCREEN_IDLE_REFRESH: Duration = Duration::from_secs(1);
+/// How long an own track may show nothing but black before it is reported: longer than a camera
+/// takes to adjust to the light when it starts, short enough to tell the user while they look.
+pub const BLACK_PICTURES_REPORT_AFTER: Duration = Duration::from_secs(3);
 /// How long stopping a track waits for its encoder thread, which stops the capture (cameras wait
 /// up to half a second for theirs, `camera_thread`). Bounded: a capture stuck in its driver must
 /// not stop the call (issue #683).
@@ -99,7 +103,24 @@ pub struct VideoSender {
 /// Resolves once a started track encoded its first picture, or with why it never will. While
 /// nobody waits for it (dropped), the track gets as long as it needs.
 #[derive(Debug)]
-pub struct FirstPicture(oneshot::Receiver<Result<(), VideoStartError>>);
+pub struct FirstPicture {
+  started: oneshot::Receiver<Result<(), VideoStartError>>,
+  maybe_black: Option<BlackPictures>,
+}
+
+/// Resolves when a running track has shown nothing but black for
+/// [`BLACK_PICTURES_REPORT_AFTER`] (issue #683): a covered camera, a screen capture that macOS
+/// blanks until the app restarts after the Screen Recording permission was granted, protected
+/// video. Once per track; the track goes on (black may be what the user shares).
+#[derive(Debug)]
+pub struct BlackPictures(oneshot::Receiver<BlackReport>);
+
+/// What a [`BlackPictures`] notice says.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BlackReport {
+  /// Black frames in a row so far.
+  pub frames: u64,
+}
 
 /// Why a started track sends nothing.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
@@ -124,6 +145,8 @@ pub enum VideoStartError {
 struct SendCounters {
   captured: AtomicU64,
   encoded: AtomicU64,
+  /// Captured frames that were (nearly) black ([`PictureContent::Black`]).
+  black: AtomicU64,
   /// Waits for a frame that ended without one: lets tests know the thread idled.
   #[cfg(test)]
   idle_polls: AtomicU64,
@@ -135,6 +158,8 @@ struct SendCounters {
 pub struct SendProgress {
   pub frames_captured: u64,
   pub pictures_encoded: u64,
+  /// Captured frames that showed nothing but black.
+  pub frames_black: u64,
 }
 
 /// Logs a failure that may repeat every frame: the first at once, then at most once per
@@ -234,6 +259,7 @@ impl VideoSender {
     capture.start(frames)?;
     let (controls, control_rx) = std_mpsc::channel();
     let (first_picture, first_picture_rx) = oneshot::channel();
+    let (black_notice, black_rx) = oneshot::channel();
     let counters = Arc::new(SendCounters::default());
     let encoder_loop = EncoderLoop {
       kind: kind.clone(),
@@ -249,6 +275,7 @@ impl VideoSender {
       encoded,
       counters: Arc::clone(&counters),
       maybe_first_picture: Some(first_picture),
+      black: BlackWatch::new(black_notice),
     };
     let thread = WorkerThread::spawn("video-encoder", move || {
       encoder_loop.run();
@@ -262,7 +289,11 @@ impl VideoSender {
       counters,
       thread: Some(thread),
     };
-    Ok((sender, FirstPicture(first_picture_rx)))
+    let first_picture = FirstPicture {
+      started: first_picture_rx,
+      maybe_black: Some(BlackPictures(black_rx)),
+    };
+    Ok((sender, first_picture))
   }
 
   pub fn request_keyframe(&self, layer: u8) {
@@ -309,6 +340,25 @@ struct EncoderLoop {
   encoded: mpsc::UnboundedSender<(VideoTrackKind, EncodedVideoFrame)>,
   counters: Arc<SendCounters>,
   maybe_first_picture: Option<oneshot::Sender<Result<(), VideoStartError>>>,
+  black: BlackWatch,
+}
+
+/// Notices a track that shows nothing but black, from the content of its captured pictures.
+#[derive(Debug)]
+struct BlackWatch {
+  maybe_black_since: Option<Instant>,
+  black_in_a_row: u64,
+  is_reported: bool,
+  maybe_notice: Option<oneshot::Sender<BlackReport>>,
+}
+
+/// A change [`BlackWatch`] noticed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BlackChange {
+  /// Only black for [`BLACK_PICTURES_REPORT_AFTER`].
+  Black(BlackReport),
+  /// A picture with content after a report.
+  Recovered,
 }
 
 /// Whether the encoder thread goes on.
@@ -361,6 +411,10 @@ impl EncoderLoop {
       if self.check_first_picture(Instant::now(), started_at) == LoopStep::Stop {
         return;
       }
+      // A still screen delivers no frames: its black is noticed with time passing.
+      if let Some(change) = self.black.poll(Instant::now()) {
+        self.report_black(change);
+      }
       if let Some(frame) = self.due_refresh(&simulcast, maybe_last.as_ref(), Instant::now()) {
         match self.encode_and_send(&mut simulcast, frame, &mut encode_warning) {
           Ok(last) => maybe_last = Some(last),
@@ -392,6 +446,7 @@ impl EncoderLoop {
         return;
       }
       self.counters.captured.fetch_add(1, Ordering::Relaxed);
+      self.check_content(&frame);
       // A camera may deliver 60 fps; the call sends at most its layers' rate.
       if !limiter.is_due(frame.timestamp_us()) {
         continue;
@@ -523,6 +578,35 @@ impl EncoderLoop {
     LoopStep::Stop
   }
 
+  /// Counts a black frame and reports when the track turned black or recovered. A few
+  /// microseconds per frame (`picture_check` samples a grid).
+  fn check_content(&mut self, frame: &VideoFrame) {
+    let content = picture_content(frame);
+    if content == PictureContent::Black {
+      self.counters.black.fetch_add(1, Ordering::Relaxed);
+    }
+    if let Some(change) = self.black.observe(content, Instant::now()) {
+      self.report_black(change);
+    }
+  }
+
+  fn report_black(&mut self, change: BlackChange) {
+    let kind = &self.kind;
+    let source_name = self.source_name();
+    match change {
+      BlackChange::Black(report) => {
+        warn!(
+          ?kind,
+          frames = report.frames,
+          hint = black_hint(kind),
+          "the {source_name} shows nothing but black"
+        );
+        self.black.send_notice(report);
+      },
+      BlackChange::Recovered => info!(?kind, "the {source_name} shows pictures again"),
+    }
+  }
+
   fn report_start(&mut self, result: Result<(), VideoStartError>) {
     if let Some(first_picture) = self.maybe_first_picture.take() {
       if result.is_ok() {
@@ -557,6 +641,61 @@ fn source_name(kind: &VideoTrackKind) -> &'static str {
   }
 }
 
+/// What usually makes a track of `kind` black, for the log.
+fn black_hint(kind: &VideoTrackKind) -> &'static str {
+  match kind {
+    VideoTrackKind::Screen if cfg!(target_os = "macos") => {
+      "macOS blanks screen captures until the app restarts after the Screen Recording permission \
+       was granted; protected video captures black as well"
+    },
+    VideoTrackKind::Screen => "a minimized window or protected video captures black",
+    _ => "the camera may be covered, closed with a privacy shutter or still adjusting to the light",
+  }
+}
+
+impl BlackWatch {
+  fn new(notice: oneshot::Sender<BlackReport>) -> Self {
+    Self {
+      maybe_black_since: None,
+      black_in_a_row: 0,
+      is_reported: false,
+      maybe_notice: Some(notice),
+    }
+  }
+
+  /// Takes the content of a picture captured at `now`.
+  fn observe(&mut self, content: PictureContent, now: Instant) -> Option<BlackChange> {
+    if content != PictureContent::Black {
+      let was_black = self.maybe_black_since.take().is_some();
+      self.black_in_a_row = 0;
+      return (was_black && self.is_reported).then_some(BlackChange::Recovered);
+    }
+    self.black_in_a_row += 1;
+    self.maybe_black_since.get_or_insert(now);
+    self.poll(now)
+  }
+
+  /// [`BlackChange::Black`] once the pictures have been black for
+  /// [`BLACK_PICTURES_REPORT_AFTER`] at `now` (once per track).
+  fn poll(&mut self, now: Instant) -> Option<BlackChange> {
+    let since = self.maybe_black_since?;
+    if self.is_reported || now.saturating_duration_since(since) < BLACK_PICTURES_REPORT_AFTER {
+      return None;
+    }
+    self.is_reported = true;
+    Some(BlackChange::Black(BlackReport {
+      frames: self.black_in_a_row,
+    }))
+  }
+
+  fn send_notice(&mut self, report: BlackReport) {
+    if let Some(notice) = self.maybe_notice.take() {
+      // Nobody listens (a caller that doesn't check): the log says it.
+      let _ = notice.send(report);
+    }
+  }
+}
+
 impl Refresh {
   /// Whether the last picture, encoded at `last_encoded_at`, is due again at `now`: a keyframe
   /// request has waited [`KEYFRAME_REFRESH_DELAY`] for a new frame, or the track idled for its
@@ -569,15 +708,28 @@ impl Refresh {
 }
 
 impl FirstPicture {
+  /// The track's later notice of showing nothing but black; once (`None` after).
+  pub fn take_black_pictures(&mut self) -> Option<BlackPictures> {
+    self.maybe_black.take()
+  }
+
   /// Waits for the first encoded picture. Bounded: a capture thread that hangs counts as failed
   /// shortly after [`FIRST_PICTURE_TIMEOUT`].
   pub async fn wait(self) -> Result<(), VideoStartError> {
     let backstop = FIRST_PICTURE_TIMEOUT + Duration::from_secs(5);
-    match tokio::time::timeout(backstop, self.0).await {
+    match tokio::time::timeout(backstop, self.started).await {
       Ok(Ok(result)) => result,
       Ok(Err(_)) => Err(VideoStartError::ThreadEnded),
       Err(_) => Err(VideoStartError::NoFrames("video source")),
     }
+  }
+}
+
+impl BlackPictures {
+  /// The report once the track has shown nothing but black long enough; `None` when the track
+  /// ended without.
+  pub async fn wait(self) -> Option<BlackReport> {
+    self.0.await.ok()
   }
 }
 
@@ -586,6 +738,7 @@ impl SendCounters {
     SendProgress {
       frames_captured: self.captured.load(Ordering::Relaxed),
       pictures_encoded: self.encoded.load(Ordering::Relaxed),
+      frames_black: self.black.load(Ordering::Relaxed),
     }
   }
 }
@@ -825,7 +978,8 @@ mod tests {
         sender.finish(),
         SendProgress {
           frames_captured: 1,
-          pictures_encoded: 1
+          pictures_encoded: 1,
+          frames_black: 0,
         }
       );
     }
@@ -911,7 +1065,7 @@ mod tests {
       );
       let captured = SendProgress {
         frames_captured: 12,
-        pictures_encoded: 0,
+        ..SendProgress::default()
       };
       assert_eq!(
         first_picture_failure("screen capture", captured),
@@ -1023,6 +1177,7 @@ mod tests {
         encoded,
         counters: Arc::default(),
         maybe_first_picture: Some(first_picture),
+        black: BlackWatch::new(oneshot::channel().0),
       };
       (encoder_loop, first_picture_rx)
     }
@@ -1112,6 +1267,117 @@ mod tests {
         .expect("a picture in time")
         .unwrap()
         .1
+    }
+  }
+
+  /// A track that shows nothing but black is reported, once (issue #683).
+  mod black_pictures {
+    use super::first_picture::{fake_encoders, manual_capture};
+    use super::*;
+
+    #[test]
+    fn black_for_long_enough_is_reported_once_and_content_ends_it() {
+      let mut watch = BlackWatch::new(oneshot::channel().0);
+      let start = Instant::now();
+      assert_eq!(watch.observe(PictureContent::Black, start), None);
+      let almost = start + BLACK_PICTURES_REPORT_AFTER - Duration::from_millis(1);
+      assert_eq!(watch.observe(PictureContent::Black, almost), None);
+      let due = start + BLACK_PICTURES_REPORT_AFTER;
+      assert_eq!(
+        watch.poll(due),
+        Some(BlackChange::Black(BlackReport { frames: 2 }))
+      );
+      let later = due + Duration::from_secs(10);
+      assert_eq!(watch.observe(PictureContent::Black, later), None, "reported once");
+      assert_eq!(
+        watch.observe(PictureContent::Detailed, later),
+        Some(BlackChange::Recovered)
+      );
+      assert_eq!(watch.observe(PictureContent::Detailed, later), None);
+    }
+
+    #[test]
+    fn a_dark_start_is_no_black_track_and_black_later_counts_from_then() {
+      let mut watch = BlackWatch::new(oneshot::channel().0);
+      let start = Instant::now();
+      // A camera adjusting to the light: dark for a second, then a picture.
+      assert_eq!(watch.observe(PictureContent::Black, start), None);
+      let second = start + Duration::from_secs(1);
+      assert_eq!(watch.observe(PictureContent::Detailed, second), None);
+      // Covered later: the time counts from the first black picture since.
+      let covered = start + Duration::from_secs(2);
+      assert_eq!(watch.observe(PictureContent::Black, covered), None);
+      assert_eq!(watch.poll(covered + BLACK_PICTURES_REPORT_AFTER / 2), None);
+      assert!(watch.poll(covered + BLACK_PICTURES_REPORT_AFTER).is_some());
+    }
+
+    #[test]
+    fn flat_pictures_and_no_pictures_are_not_black() {
+      let mut watch = BlackWatch::new(oneshot::channel().0);
+      let start = Instant::now();
+      assert_eq!(
+        watch.poll(start + Duration::from_secs(60)),
+        None,
+        "nothing captured"
+      );
+      for second in 0..10 {
+        let at = start + Duration::from_secs(second);
+        assert_eq!(watch.observe(PictureContent::Flat, at), None);
+      }
+    }
+
+    #[tokio::test]
+    async fn a_track_sending_black_is_reported_and_counted() {
+      let pushed = Arc::new(Mutex::new(None));
+      let (encoded, _encoded_rx) = mpsc::unbounded_channel();
+      let config = VideoSendConfig {
+        kind: VideoTrackKind::Screen,
+        capture: Box::new(SharedCapture(manual_capture(), Arc::clone(&pushed))),
+        layers: simulcast_layers(VGA, 30, 800_000, 1),
+        encoders: fake_encoders(),
+        maybe_filter: None,
+        maybe_idle_refresh: None,
+      };
+      let (sender, mut first_picture) = VideoSender::start(config, encoded).unwrap();
+      let black_pictures = first_picture.take_black_pictures().unwrap();
+      assert!(first_picture.take_black_pictures().is_none(), "taken once");
+      let frames = pushed.lock().unwrap().clone().unwrap();
+      // A screen that stays black after its first picture (a still screen sends no more).
+      assert!(frames.send(black_frame()));
+      assert_eq!(first_picture.wait().await, Ok(()));
+      let report = tokio::time::timeout(BLACK_PICTURES_REPORT_AFTER * 3, black_pictures.wait())
+        .await
+        .expect("reported in time");
+      assert_eq!(report, Some(BlackReport { frames: 1 }));
+      assert_eq!(sender.finish().frames_black, 1);
+    }
+
+    #[tokio::test]
+    async fn the_notice_of_a_track_that_ends_without_black_resolves_empty() {
+      let pushed = Arc::new(Mutex::new(None));
+      let (encoded, _encoded_rx) = mpsc::unbounded_channel();
+      let config = VideoSendConfig {
+        kind: VideoTrackKind::Camera,
+        capture: Box::new(SharedCapture(manual_capture(), Arc::clone(&pushed))),
+        layers: simulcast_layers(VGA, 30, 800_000, 1),
+        encoders: fake_encoders(),
+        maybe_filter: None,
+        maybe_idle_refresh: None,
+      };
+      let (sender, mut first_picture) = VideoSender::start(config, encoded).unwrap();
+      let black_pictures = first_picture.take_black_pictures().unwrap();
+      let frames = pushed.lock().unwrap().clone().unwrap();
+      assert!(frames.send(test_pattern(VGA, 0, 0).unwrap()));
+      assert_eq!(first_picture.wait().await, Ok(()));
+      assert_eq!(sender.finish().frames_black, 0);
+      assert_eq!(black_pictures.wait().await, None);
+    }
+
+    fn black_frame() -> VideoFrame {
+      let pixels = usize::from(VGA.width) * usize::from(VGA.height);
+      let mut data = vec![16; pixels];
+      data.resize(pixels * 3 / 2, 128);
+      VideoFrame::new(VGA, 0, data).unwrap()
     }
   }
 

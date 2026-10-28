@@ -6,7 +6,9 @@
 //! Actions run one after the other, in the order the user took them: a camera turned on right
 //! after joining reaches the media layer after the join. A failed action reaches the user
 //! (issue #322), and so does a part of one that failed without undoing it (a join whose camera
-//! didn't start, #453).
+//! didn't start, #453). Starting a screen share is the exception once its turn comes: it waits
+//! for the user's choice in the system's picker for as long as they take, and mute, leaving or
+//! stopping the share must not wait with it (issue #683), so it runs beside the queue.
 
 use std::cell::{Cell, RefCell};
 use std::collections::VecDeque;
@@ -34,6 +36,8 @@ pub struct RemoteCalls {
   /// Actions waiting for the one in flight.
   queue: Rc<RefCell<VecDeque<CallAction>>>,
   is_draining: Rc<Cell<bool>>,
+  /// Screen share starts running beside the queue (their picker is open); pending all the same.
+  screen_shares_starting: Rc<Cell<u32>>,
   join_failures: Rc<Cell<u64>>,
   /// The pre-join check's microphone level from the desktop shell (#442).
   #[cfg(target_arch = "wasm32")]
@@ -87,6 +91,7 @@ impl RemoteCalls {
       notify: Rc::new(RefCell::new(None)),
       link,
       queue: Rc::default(),
+      screen_shares_starting: Rc::default(),
       is_draining: Rc::default(),
       join_failures: Rc::default(),
       #[cfg(target_arch = "wasm32")]
@@ -108,7 +113,7 @@ impl RemoteCalls {
   }
 
   pub fn has_pending_actions(&self) -> bool {
-    self.is_draining.get() || !self.queue.borrow().is_empty()
+    self.is_draining.get() || !self.queue.borrow().is_empty() || self.screen_shares_starting.get() > 0
   }
 
   pub fn video_tracks(&self) -> Vec<RemoteVideoTrack> {
@@ -184,24 +189,51 @@ impl RemoteCalls {
         let Some(action) = maybe_action else {
           break;
         };
-        let is_join = matches!(action, CallAction::Join { .. });
-        match calls.carry_out(action).await {
-          Ok(None) => {},
-          // The action went through (the call runs); only a part of it didn't.
-          Ok(Some(partial)) => crate::feedback::report_failure(ActionFailure::from_wire(&partial)),
-          Err(error) => {
-            if is_join {
-              // async-ok: a Cell the calls share, not a signal.
-              calls.join_failures.set(calls.join_failures.get() + 1);
-            }
-            crate::feedback::report_failure(ActionFailure::from_wire(&error));
-          },
+        if is_carried_out_beside(&action) {
+          calls.carry_out_beside(action);
+          continue;
         }
+        let is_join = matches!(action, CallAction::Join { .. });
+        let result = calls.carry_out(action).await;
+        calls.report_outcome(result, is_join);
       }
       // async-ok: a Cell the calls share, not a signal.
       calls.is_draining.set(false);
       calls.refresh();
     });
+  }
+
+  /// Carries out `action` without holding the queue (see [`is_carried_out_beside`]).
+  fn carry_out_beside(&self, action: CallAction) {
+    let calls = self.clone();
+    calls
+      .screen_shares_starting
+      .set(calls.screen_shares_starting.get() + 1);
+    spawn_local(async move {
+      let result = calls.carry_out(action).await;
+      // async-ok: a Cell the calls share, not a signal.
+      let starting = calls.screen_shares_starting.get();
+      // async-ok: a Cell the calls share, not a signal.
+      calls.screen_shares_starting.set(starting.saturating_sub(1));
+      calls.report_outcome(result, false);
+      calls.refresh();
+    });
+  }
+
+  /// Tells the user about a failed action, or the part of one that failed.
+  fn report_outcome(&self, result: Result<CallActionAnswer, String>, is_join: bool) {
+    match result {
+      Ok(None) => {},
+      // The action went through (the call runs); only a part of it didn't.
+      Ok(Some(partial)) => crate::feedback::report_failure(ActionFailure::from_wire(&partial)),
+      Err(error) => {
+        if is_join {
+          // async-ok: a Cell the calls share, not a signal.
+          self.join_failures.set(self.join_failures.get() + 1);
+        }
+        crate::feedback::report_failure(ActionFailure::from_wire(&error));
+      },
+    }
   }
 
   /// Plays the speaker test, outside the action queue: a join right after it doesn't wait for the
@@ -331,11 +363,36 @@ fn roster_of(snapshot: &CallSnapshot, conversation: ConversationId) -> Vec<UserI
   users
 }
 
+/// Whether `action` runs beside the queue once its turn comes: a screen share's start waits for
+/// the user in the system's picker, which nobody may answer for a long time (issue #683: every
+/// later action, leaving included, waited with it).
+fn is_carried_out_beside(action: &CallAction) -> bool {
+  matches!(action, CallAction::StartScreenShare { .. })
+}
+
 #[cfg(test)]
 mod tests {
   use super::*;
   use teamcraft_client_api::calls::{BackgroundEffect, CallKind, RunningCall};
   use teamcraft_client_api::model::id_from_raw;
+
+  #[test]
+  fn only_a_screen_share_start_runs_beside_the_queue() {
+    use teamcraft_proto::ScreenContentMode;
+
+    assert!(is_carried_out_beside(&CallAction::StartScreenShare {
+      has_sound: true,
+      content_mode: ScreenContentMode::Detail,
+    }));
+    for action in [
+      CallAction::StopScreenShare,
+      CallAction::Leave,
+      CallAction::SetMuted { is_muted: true },
+      CallAction::SetCamera { is_on: true },
+    ] {
+      assert!(!is_carried_out_beside(&action), "{action:?}");
+    }
+  }
 
   #[test]
   fn the_roster_comes_from_the_server_and_the_media_layer() {

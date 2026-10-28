@@ -30,7 +30,7 @@ use teamcraft_media::video::{VideoResolution, fit_within, screen_limits, simulca
 use teamcraft_media::video_capture::{CameraInfo, CaptureError, CaptureFormat, VideoCapture};
 use teamcraft_media::video_codec::OpenH264Decoder;
 use teamcraft_media::video_jpeg::JpegTranscoder;
-use teamcraft_media::video_pipeline::FrameFilter;
+use teamcraft_media::video_pipeline::{BlackReport, FrameFilter};
 use teamcraft_proto::{MediaStreamId, ScreenContentMode, VideoCodec, VideoLayerInfo, VideoTrackKind};
 use tracing::{debug, info, warn};
 
@@ -114,6 +114,18 @@ pub(super) fn start_failure_wire(kind: &VideoTrackKind, error: &NativeCallError)
     NativeCallError::Capture(capture) => camera_failure_wire(capture),
     other => other.to_string(),
   }
+}
+
+/// An own track that sends nothing but black (issue #683), as the UI reads it: a hint, the track
+/// stays on.
+pub(super) fn black_pictures_wire(kind: &VideoTrackKind, report: BlackReport) -> String {
+  let failure = if *kind == VideoTrackKind::Screen {
+    CallFailure::ScreenBlack
+  } else {
+    CallFailure::CameraBlack
+  };
+  let detail = format!("{} black pictures in a row", report.frames);
+  ActionFailure::new(FailureKind::Call(failure), detail).to_wire()
 }
 
 /// A screen capture that couldn't start, as the UI reads it.
@@ -208,18 +220,35 @@ pub(super) fn open_screen(
 }
 
 /// What the user picks in the system's picker each time (a window, an application or a display;
-/// never TeamCraft's own windows). The first share asks for the Screen Recording permission. Runs on a blocking thread: the picker waits for the
-/// user.
+/// never TeamCraft's own windows, left out by the app's bundle id). The picker grants the capture
+/// of what was picked: no Screen Recording permission is asked for here (it applies only after an
+/// app restart, issue #683). Runs on a blocking thread: the picker waits for the user.
 #[cfg(target_os = "macos")]
 pub(super) fn open_screen(
   _maybe_restore_token: Option<&str>,
   mode: ScreenContentMode,
 ) -> Result<(Box<dyn VideoCapture>, Option<String>), CaptureError> {
+  use objc2_foundation::NSBundle;
   use teamcraft_media::capture_screencapturekit::ScreenCaptureKitScreen;
 
-  ScreenCaptureKitScreen::pick(screen_format(mode))
+  // `None` when not run from the app bundle (development).
+  let maybe_bundle_id = NSBundle::mainBundle()
+    .bundleIdentifier()
+    .map(|bundle_id| bundle_id.to_string());
+  ScreenCaptureKitScreen::pick(screen_format(mode), maybe_bundle_id.as_deref())
     .map(|capture| (Box::new(capture) as Box<dyn VideoCapture>, None))
 }
+
+/// Closes the system's screen picker of a share that was stopped while it was open. macOS hides
+/// ScreenCaptureKit's picker; the Linux portal's dialog stays until the user answers it, which
+/// then goes nowhere.
+#[cfg(target_os = "macos")]
+pub(super) fn close_screen_picker() {
+  teamcraft_media::capture_screencapturekit::ScreenCaptureKitScreen::close_picker();
+}
+
+#[cfg(not(target_os = "macos"))]
+pub(super) fn close_screen_picker() {}
 
 #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
 pub(super) fn open_screen(
@@ -594,6 +623,21 @@ mod tests {
     assert_eq!(
       start_failure_wire(&VideoTrackKind::Camera, &NativeCallError::TaskEnded),
       NativeCallError::TaskEnded.to_string()
+    );
+  }
+
+  /// Issue #683: a track that sends only black tells the user why it may be black, per kind.
+  #[test]
+  fn black_video_reaches_the_user_per_kind() {
+    let report = BlackReport { frames: 90 };
+    let screen = ActionFailure::from_wire(&black_pictures_wire(&VideoTrackKind::Screen, report));
+    assert_eq!(screen.kind, FailureKind::Call(CallFailure::ScreenBlack));
+    assert_eq!(screen.detail, "90 black pictures in a row");
+    let camera = ActionFailure::from_wire(&black_pictures_wire(&VideoTrackKind::Camera, report));
+    assert_eq!(camera.kind, FailureKind::Call(CallFailure::CameraBlack));
+    assert!(
+      CallFailure::CameraBlack.is_camera_failure(),
+      "offers another camera"
     );
   }
 
