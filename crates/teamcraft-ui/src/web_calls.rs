@@ -86,6 +86,7 @@ struct Callbacks {
   _prepare: Closure<dyn Fn(String) -> Promise>,
   _sign: Closure<dyn Fn(String, Uint8Array) -> Result<Uint8Array, JsValue>>,
   _verify: Closure<dyn Fn(String, String, Uint8Array) -> Result<Uint8Array, JsValue>>,
+  _failed: Closure<dyn Fn(String)>,
 }
 
 /// Lets the media layer's authenticator sign with the core's signer.
@@ -525,6 +526,10 @@ impl Callbacks {
         },
       )
     };
+    // A failure no action waits for (a camera that stopped mid-call), as `ActionFailure` wire text.
+    let failed = Closure::<dyn Fn(String)>::new(|wire: String| {
+      crate::feedback::report_failure(ActionFailure::from_wire(&wire));
+    });
     let object = Object::new();
     let worklet = meta_content(WORKLET_META).ok_or("the page names no call worklet")?;
     Reflect::set(
@@ -538,6 +543,7 @@ impl Callbacks {
       ("prepare", prepare.as_ref()),
       ("sign", sign.as_ref()),
       ("verify", verify.as_ref()),
+      ("failed", failed.as_ref()),
     ] {
       Reflect::set(&object, &JsValue::from_str(name), function).map_err(|error| js_text(&error))?;
     }
@@ -547,6 +553,7 @@ impl Callbacks {
       _prepare: prepare,
       _sign: sign,
       _verify: verify,
+      _failed: failed,
     })
   }
 }

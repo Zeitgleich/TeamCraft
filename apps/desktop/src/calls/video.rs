@@ -116,6 +116,15 @@ pub(super) fn start_failure_wire(kind: &VideoTrackKind, error: &NativeCallError)
   }
 }
 
+/// A camera that stopped by itself mid-call (issue #920), as the UI reads it: the video is off.
+pub(super) fn camera_stopped_wire() -> String {
+  ActionFailure::new(
+    FailureKind::Call(CallFailure::CameraStopped),
+    "the camera ended by itself",
+  )
+  .to_wire()
+}
+
 /// An own track that sends nothing but black (issue #683), as the UI reads it: a hint, the track
 /// stays on.
 pub(super) fn black_pictures_wire(kind: &VideoTrackKind, report: BlackReport) -> String {

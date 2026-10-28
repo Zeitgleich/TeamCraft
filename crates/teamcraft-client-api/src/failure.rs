@@ -157,6 +157,9 @@ pub enum CallFailure {
   /// The camera started, but no picture of it could be sent (it delivered nothing, or nothing
   /// could be encoded).
   CameraNoPicture,
+  /// The camera stopped by itself mid-call (unplugged, taken by the system or another app, or its
+  /// pictures could no longer be encoded); the video is off (#920).
+  CameraStopped,
   /// The screen share started, but no picture of it could be sent.
   ScreenNoPicture,
   /// The camera sends, but only black (covered, a privacy shutter, a camera that doesn't wake
@@ -202,6 +205,7 @@ impl CallFailure {
     Self::ScreenUnavailable,
     Self::ScreenNeedsClick,
     Self::CameraNoPicture,
+    Self::CameraStopped,
     Self::ScreenNoPicture,
     Self::CameraBlack,
     Self::ScreenBlack,
@@ -230,6 +234,7 @@ impl CallFailure {
       Self::ScreenUnavailable => "screen_unavailable",
       Self::ScreenNeedsClick => "screen_needs_click",
       Self::CameraNoPicture => "camera_no_picture",
+      Self::CameraStopped => "camera_stopped",
       Self::ScreenNoPicture => "screen_no_picture",
       Self::CameraBlack => "camera_black",
       Self::ScreenBlack => "screen_black",
@@ -257,6 +262,7 @@ impl CallFailure {
         | Self::CameraNotConnected
         | Self::CameraUnavailable
         | Self::CameraNoPicture
+        | Self::CameraStopped
         | Self::CameraBlack
         | Self::CameraMissing
     )
