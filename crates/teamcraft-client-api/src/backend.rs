@@ -678,9 +678,10 @@ pub trait CallBackend {
     false
   }
 
-  /// Whether the camera image can get a background effect here. Without, the UI offers none.
-  fn has_background_effects(&self) -> bool {
-    true
+  /// Which background effects the camera image can get here (#439). Without any, the UI offers
+  /// none.
+  fn effects_offer(&self) -> crate::calls::EffectsOffer {
+    crate::calls::EffectsOffer::Full
   }
 
   /// Counts joins that failed since the app started (a refused microphone, an unreachable call

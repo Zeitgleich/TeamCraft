@@ -37,6 +37,9 @@ mod screen_sound;
 mod session_watch;
 mod video;
 
+#[cfg(feature = "effects")]
+pub use video::CameraEffects;
+
 use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::future::Future;
@@ -595,9 +598,19 @@ impl WebCall {
   pub async fn start_camera_with_effects(
     &self,
     maybe_device: Option<&str>,
-    effects: crate::effects::EffectsPipeline,
+    effects: CameraEffects,
   ) -> Result<(), WebCallError> {
     let stream = video::capture_camera(maybe_device).await?;
+    self.share_camera_stream_with_effects(stream, effects).await
+  }
+
+  /// [`WebCall::share_camera_stream`] through background effects (#439).
+  #[cfg(feature = "effects")]
+  pub async fn share_camera_stream_with_effects(
+    &self,
+    stream: MediaStream,
+    effects: CameraEffects,
+  ) -> Result<(), WebCallError> {
     let plan = video::TrackPlan {
       maybe_effects: Some(effects),
       ..video::camera_plan()

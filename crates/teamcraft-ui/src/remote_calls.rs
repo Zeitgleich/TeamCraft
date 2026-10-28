@@ -21,8 +21,8 @@ use js_sys::Promise;
 use leptos::task::spawn_local;
 use serde_json::json;
 use teamcraft_client_api::calls::{
-  ActiveCall, CallPreview, CallRequest, CameraFallback, HuddleInfo, IncomingCall, JoinMedia, MediaDevices,
-  Participant, PreviewCamera, RemoteVideoTrack,
+  ActiveCall, CallPreview, CallRequest, CameraFallback, EffectsOffer, HuddleInfo, IncomingCall, JoinMedia,
+  MediaDevices, Participant, PreviewCamera, RemoteVideoTrack,
 };
 use teamcraft_client_api::failure::ActionFailure;
 use teamcraft_client_api::model::{ConversationId, UserId};
@@ -118,9 +118,19 @@ impl RemoteCalls {
     *self.notify.borrow_mut() = Some(notify);
   }
 
-  /// Whether the media runs in this page (the browser), which has no background effects.
+  /// Whether the media runs in this page (the browser).
   pub fn is_in_page(&self) -> bool {
     !matches!(self.link, CallLink::Shell)
+  }
+
+  /// Which background effects the camera gets: every one through the shell; in the browser those
+  /// the page can run, where it can run them at all (#439).
+  pub fn effects_offer(&self) -> EffectsOffer {
+    match &self.link {
+      CallLink::Shell => EffectsOffer::Full,
+      #[cfg(target_arch = "wasm32")]
+      CallLink::Page(_) => browser_effects_offer(crate::web_calls::applies_effects()),
+    }
   }
 
   pub fn join_failures(&self) -> u64 {
@@ -455,11 +465,31 @@ fn is_carried_out_beside(action: &CallAction) -> bool {
   matches!(action, CallAction::StartScreenShare { .. })
 }
 
+/// The effects of calls in the page: in the call, without the photos (their full pictures are
+/// only in the apps) and without the pre-join preview, where the browser runs them at all.
+#[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
+fn browser_effects_offer(applies_effects: bool) -> EffectsOffer {
+  if applies_effects {
+    EffectsOffer::InCall
+  } else {
+    EffectsOffer::Unavailable
+  }
+}
+
 #[cfg(test)]
 mod tests {
   use super::*;
   use teamcraft_client_api::calls::{BackgroundEffect, CallKind, RunningCall};
   use teamcraft_client_api::model::id_from_raw;
+
+  /// #439: the browser's call module runs the effects in the call where the page can.
+  #[test]
+  fn the_browser_offers_effects_only_where_it_runs_them() {
+    assert_eq!(browser_effects_offer(true), EffectsOffer::InCall);
+    assert_eq!(browser_effects_offer(false), EffectsOffer::Unavailable);
+    assert!(!browser_effects_offer(false).has_picker());
+    assert!(!browser_effects_offer(true).has_preview());
+  }
 
   #[test]
   fn only_a_screen_share_start_runs_beside_the_queue() {

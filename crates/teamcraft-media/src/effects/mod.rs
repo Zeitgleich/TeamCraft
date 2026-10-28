@@ -7,8 +7,13 @@
 //! Segmentation is a [`PersonSegmenter`]; platforms with their own (Apple Vision, ML Kit) plug in
 //! there.
 
+mod cadence;
+#[cfg(feature = "call-view")]
+mod chosen;
 mod compositor;
 mod image_file;
+#[cfg(feature = "segmentation")]
+mod model_file;
 #[cfg(feature = "photo-backgrounds")]
 mod photos;
 mod presets;
@@ -16,10 +21,16 @@ mod segmentation;
 
 use std::sync::Arc;
 
+pub use cadence::MaskCadence;
+#[cfg(feature = "call-view")]
+pub use chosen::{chosen_background, needs_picture};
+
 pub use compositor::Compositor;
 pub use image_file::{
   BACKGROUND_MAX_HEIGHT, BACKGROUND_MAX_WIDTH, MAX_DECODED_DIMENSION, normalize_background_file,
 };
+#[cfg(feature = "segmentation")]
+pub use model_file::{ModelCache, SEGMENTATION_MODEL_FILE, check_segmentation_model, model_url};
 #[cfg(feature = "photo-backgrounds")]
 pub use photos::PhotoBackground;
 pub use presets::{PRESET_HEIGHT, PRESET_WIDTH, PresetBackground};
@@ -70,6 +81,9 @@ pub struct EffectsPipeline {
   segmenter: Box<dyn PersonSegmenter>,
   compositor: Compositor,
   effect: BackgroundEffect,
+  /// How often the segmenter runs; the last mask serves the frames in between.
+  cadence: MaskCadence,
+  maybe_mask: Option<SegmentationMask>,
 }
 
 #[derive(Debug, Error)]
@@ -128,15 +142,32 @@ impl Default for EffectsConfig {
 }
 
 impl EffectsPipeline {
+  /// Segments every frame; [`EffectsPipeline::with_cadence`] changes that.
   pub fn new(segmenter: Box<dyn PersonSegmenter>, compositor: Compositor, effect: BackgroundEffect) -> Self {
     Self {
       segmenter,
       compositor,
       effect,
+      cadence: MaskCadence::EVERY_FRAME,
+      maybe_mask: None,
     }
   }
 
+  /// Runs the segmenter as often as `cadence` says (the browser: within a share of the frame time).
+  pub fn with_cadence(mut self, cadence: MaskCadence) -> Self {
+    self.cadence = cadence;
+    self
+  }
+
+  pub fn effect(&self) -> &BackgroundEffect {
+    &self.effect
+  }
+
   pub fn set_effect(&mut self, effect: BackgroundEffect) {
+    if effect != self.effect {
+      // A mask from before a pause would show where the person was then.
+      self.maybe_mask = None;
+    }
     self.effect = effect;
   }
 
@@ -145,8 +176,18 @@ impl EffectsPipeline {
     if self.effect == BackgroundEffect::None {
       return Ok(frame);
     }
-    let mask = self.segmenter.segment(&frame)?;
-    self.compositor.apply(&frame, &mask, &self.effect).await
+    let mask = match self.maybe_mask.take() {
+      Some(mask) if !self.cadence.is_due() => mask,
+      _ => {
+        let started = web_time::Instant::now();
+        let mask = self.segmenter.segment(&frame)?;
+        self.cadence.observe(started.elapsed());
+        mask
+      },
+    };
+    let result = self.compositor.apply(&frame, &mask, &self.effect).await;
+    self.maybe_mask = Some(mask);
+    result
   }
 
   /// [`EffectsPipeline::apply`] for synchronous callers (the native encoder thread).

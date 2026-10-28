@@ -656,6 +656,9 @@ The app is split into wasm chunks (`crates/teamcraft-ui/src/areas.rs`, built by
   is downloaded once.
 - The call engine (`teamcraft-web-calls`, #330) stays a module of its own that loads in the
   background after sign-in; the budget doesn't count it.
+- The background effects (#439) are part of it: tract's person segmentation (about 2 MB gzip) and
+  the WebGPU compositor. The segmentation model (0.46 MB, 0.26 MB gzip) is a file of its own,
+  downloaded when the first effect starts.
 - A signed release's service worker installs without the chunks (the signed-in app's included) and
   fetches each one, checked against its signed hash, when it is first used or in the background
   about 15 s after a page loaded; not for a guest's meeting page (e2ee.md §9.3).

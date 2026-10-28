@@ -10,14 +10,24 @@
 //! The module exports [`EXPORT_START`] and the other `EXPORT_*` functions. `start` takes an object
 //! with the page's callbacks and the `worklet` URL:
 //!
-//! | Callback  | Arguments                                  | Answer                                  |
-//! |-----------|--------------------------------------------|-----------------------------------------|
-//! | `changed` | `CallSnapshot` as JSON                     | –                                       |
-//! | `prepare` | conversation id (JSON)                     | promise of a [`PreparedCall`] (JSON)    |
-//! | `sign`    | call id (JSON), DAVE public key (bytes)    | signed binding (bytes), or throws       |
-//! | `verify`  | call id, device id (JSON), binding (bytes) | the bound DAVE key (bytes), or throws   |
+//! | Callback             | Arguments                                  | Answer                                |
+//! |----------------------|--------------------------------------------|---------------------------------------|
+//! | `changed`            | `CallSnapshot` as JSON                     | –                                     |
+//! | `prepare`            | conversation id (JSON)                     | promise of a [`PreparedCall`] (JSON)  |
+//! | `sign`               | call id (JSON), DAVE public key (bytes)    | signed binding (bytes), or throws     |
+//! | `verify`             | call id, device id (JSON), binding (bytes) | the bound DAVE key (bytes), or throws |
+//! | `background_rule`    | –                                          | promise of `OrgBackgrounds` (JSON)    |
+//! | `background_picture` | a `BackgroundEffect` (JSON)                | promise of the picture file (bytes)   |
 //!
 //! A rejoin after a lost connection prepares again (fresh token, current devices).
+//!
+//! Background effects (#439): before the camera starts, and when the user picks another effect,
+//! the module asks `background_rule` for the organization's rule ([`crate::calls::OrgBackgrounds`])
+//! and `background_picture` for the picture the effect the rule leaves needs (the user's own,
+//! decrypted, or the organization's, hash-checked: the core has both). A page without them gets no
+//! effects. The segmentation model is a file of the build ([`SEGMENTATION_MODEL_META`]), fetched
+//! by the module when the first effect starts and checked against the SHA-256 the module was built
+//! with.
 //!
 //! Sharing the screen takes two steps (issue #930): Safari opens the screen picker only while the
 //! click's user activation lasts, which the action queue and the module's tasks outlast. So the
@@ -40,6 +50,10 @@ pub const MODULE_META: &str = "teamcraft-calls";
 /// web client's Content-Security-Policy allows no blob: scripts). The page hands it to the module
 /// as the `worklet` property of the callbacks.
 pub const WORKLET_META: &str = "teamcraft-call-worklet";
+/// `<meta name>` with the URL of the person segmentation model for background effects
+/// (`crates/teamcraft-media/models`), named after its content by the build
+/// (`scripts/finish-calls.sh`). A build without the model has none: no effects then.
+pub const SEGMENTATION_MODEL_META: &str = "teamcraft-segmentation-model";
 /// `start(callbacks)`: once, after the module is initialized.
 pub const EXPORT_START: &str = "start";
 /// `act(CallAction JSON) -> Promise<undefined | string>` (see the module docs).
@@ -87,13 +101,22 @@ pub struct PreparedCall {
   pub device_id: DeviceId,
   /// The other devices whose certificates verified: only they may be in the call's DAVE group.
   pub trusted_devices: Vec<DeviceId>,
-  /// The workspace requires an organization background behind the camera image (admin.md §3.5),
-  /// which the browser can't apply: the camera stays off.
+  /// The workspace requires an organization background behind the camera image (admin.md §3.5):
+  /// the camera starts only with one applied. The module asks `background` for the rule itself;
+  /// this is what a page without that callback tells it (the camera stays off then).
   #[serde(default)]
   pub requires_background: bool,
   /// The SFU certificates' SHA-256s (hex) when they are self-signed (development, tests).
   #[serde(default)]
   pub certificate_sha256: Vec<String>,
+}
+
+/// Whether this browser runs the background effects (#439): they need WebGPU for the compositing.
+/// Firefox has it, but reads a frame back from the GPU only about every 100 ms (measured with the
+/// effects' compositor, 720p), far too slow for video, so it gets none. `user_agent` is
+/// `navigator.userAgent`.
+pub fn browser_applies_effects(has_webgpu: bool, user_agent: &str) -> bool {
+  has_webgpu && !user_agent.contains("Firefox/")
 }
 
 // The join token doesn't belong in logs.
@@ -110,6 +133,20 @@ impl std::fmt::Debug for PreparedCall {
 mod tests {
   use super::*;
   use crate::model::id_from_raw;
+
+  #[test]
+  fn effects_run_where_webgpu_reads_back_in_time() {
+    let chrome = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/156.0.0.0 Safari/537.36";
+    let safari = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/26.6.2 Safari/605.1.15";
+    let firefox = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:147.0) Gecko/20100101 Firefox/147.0";
+    assert!(browser_applies_effects(true, chrome));
+    assert!(browser_applies_effects(true, safari));
+    assert!(!browser_applies_effects(true, firefox));
+    assert!(
+      !browser_applies_effects(false, chrome),
+      "no WebGPU (older Safari)"
+    );
+  }
 
   #[test]
   fn a_prepared_call_round_trips_and_hides_its_token() {

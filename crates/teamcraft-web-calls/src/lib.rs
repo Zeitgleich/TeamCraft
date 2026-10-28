@@ -10,6 +10,7 @@
 //! through JavaScript, is in `teamcraft_client_api::page_calls`.
 #![cfg(target_arch = "wasm32")]
 
+mod effects;
 mod ringtone;
 
 use std::cell::{Cell, RefCell};
@@ -24,10 +25,11 @@ use js_sys::{Function, Promise, Reflect, Uint8Array};
 use teamcraft_client_api::call_view::{CallSignal, CallView};
 use teamcraft_client_api::calls::{
   ActiveCall, BackgroundEffect, BrowserPermission, CallEndReason, CallPreview, CallRequest, CallStatusSounds,
-  DevicePresence, JoinMedia, MediaDevice, MediaDevices, PreviewCamera, PushToTalk, ScreenShareSound,
+  CameraBackground, DevicePresence, EffectsOffer, JoinMedia, MediaDevice, MediaDevices, OrgBackgrounds,
+  PreviewCamera, PushToTalk, ScreenShareSound,
 };
 use teamcraft_client_api::failure::{ActionFailure, CallFailure, FailureKind};
-use teamcraft_client_api::page_calls::PreparedCall;
+use teamcraft_client_api::page_calls::{PreparedCall, browser_applies_effects};
 use teamcraft_client_api::remote::{CallAction, CallActionAnswer, CallSnapshot};
 use teamcraft_client_api::video_stats::VideoStatsReport;
 use teamcraft_media::audio_io::{AudioDeviceChoice, AudioDeviceId, AudioDeviceInfo, AudioSink, AudioSource};
@@ -39,9 +41,10 @@ use teamcraft_media::call_resilience::{
 };
 use teamcraft_media::call_view::{CallRoster, started_screen_sound, status_cues};
 use teamcraft_media::call_web::{
-  self, LocalTicketFuture, MediaAccessReason, MediaInput, MicrophoneMeter, WebCall, WebCallConfig,
-  WebCallError, WebJoinTicketSource,
+  self, CameraEffects, LocalTicketFuture, MediaAccessReason, MediaInput, MicrophoneMeter, WebCall,
+  WebCallConfig, WebCallError, WebJoinTicketSource,
 };
+use teamcraft_media::effects::{BackgroundEffect as MediaEffect, needs_picture};
 use teamcraft_media::jitter::JitterBufferConfig;
 use teamcraft_proto::{
   AudioCodec, CallId, DeviceId, MediaCapabilities, MediaStreamId, ScreenContentMode, VideoCodec,
@@ -82,6 +85,8 @@ struct Host {
   worklet_url: String,
   /// The last state handed to the page: an unchanged one isn't handed again.
   last_sent: RefCell<String>,
+  /// The segmentation model and the last background, for the session (#439).
+  effects: effects::Effects,
 }
 
 /// The page's functions (see `page_calls`).
@@ -93,6 +98,10 @@ struct Callbacks {
   /// Shows a failure that no action waits for (`ActionFailure` wire text). A page from before it
   /// existed gives none: the failure is only logged then.
   maybe_failed: Option<Function>,
+  /// The organization's background rule and the pictures (`page_calls`, #439). A page from before
+  /// them gives none: no background effects then.
+  maybe_background_rule: Option<Function>,
+  maybe_background_picture: Option<Function>,
 }
 
 #[derive(Default)]
@@ -104,8 +113,15 @@ struct State {
   microphone: AudioDeviceChoice,
   speakers: AudioDeviceChoice,
   maybe_camera: Option<String>,
-  /// The workspace requires a background the browser can't apply (from the last preparation).
+  /// The workspace requires an organization background (from the last preparation): what a page
+  /// without the background callbacks tells.
   requires_background: bool,
+  /// The background the user chose; the organization's rule may put another one behind the camera.
+  background: BackgroundEffect,
+  /// Whether the camera the call sends goes through the effects (it was started with an effect).
+  is_camera_through_effects: bool,
+  /// What the effects send, for the self view (a canvas' stream); the camera itself without them.
+  maybe_effects_view: Option<MediaStream>,
   /// The camera the self view shows: the one the call sends, or the pre-join check's.
   maybe_local_camera: Option<MediaStream>,
   /// The self view: one `<video>` for the whole session, playing whichever camera is on.
@@ -139,8 +155,12 @@ enum Control {
   },
   Camera {
     stream: MediaStream,
+    // Boxed: the effects pipeline dwarfs the other controls.
+    maybe_effects: Option<Box<CameraEffects>>,
     done: Done,
   },
+  /// Another effect for a camera that goes through the effects.
+  SetEffect(MediaEffect),
   StopCamera,
   Screen {
     mode: ScreenContentMode,
@@ -185,6 +205,8 @@ pub fn start(callbacks: JsValue) -> Result<(), JsValue> {
     sign: function(&callbacks, "sign")?,
     verify: function(&callbacks, "verify")?,
     maybe_failed: function(&callbacks, "failed").ok(),
+    maybe_background_rule: function(&callbacks, "background_rule").ok(),
+    maybe_background_picture: function(&callbacks, "background_picture").ok(),
   };
   let on_device_change = Closure::<dyn FnMut()>::new(|| {
     if let Ok(host) = host() {
@@ -200,6 +222,7 @@ pub fn start(callbacks: JsValue) -> Result<(), JsValue> {
     permission_statuses: RefCell::new(Vec::new()),
     worklet_url,
     last_sent: RefCell::new(String::new()),
+    effects: effects::Effects::default(),
   });
   HOST.with(|slot| *slot.borrow_mut() = Some(host.clone()));
   spawn_local(watch_permissions(Rc::downgrade(&host)));
@@ -327,7 +350,7 @@ pub fn camera_view() -> Option<HtmlVideoElement> {
     state.maybe_camera_view = Some(video);
   }
   let video = state.maybe_camera_view.clone()?;
-  video.set_src_object(state.maybe_local_camera.as_ref());
+  video.set_src_object(state.shown_camera());
   Some(video)
 }
 
@@ -437,9 +460,12 @@ impl Host {
       maybe_worklet_url: Some(self.worklet_url.clone()),
       is_muted_at_start,
     };
+    let requires_background = prepared.requires_background;
     let call = WebCall::join(config).await.map_err(failure)?;
     {
-      let view = &mut self.state.borrow_mut().view;
+      let state = &mut *self.state.borrow_mut();
+      state.requires_background = requires_background;
+      let view = &mut state.view;
       view.start_active(request, BackgroundEffect::None);
       if let Some(active) = view.maybe_active.as_mut() {
         active.is_muted = is_muted_at_start;
@@ -573,8 +599,9 @@ impl Host {
         self.control(Control::Mute(!is_talking));
         self.changed();
       },
-      // The browser has no background effects (the UI offers none) and no system effects panel.
-      CallAction::SetBackgroundEffect { .. } | CallAction::OpenSystemVideoEffects => {},
+      CallAction::SetBackgroundEffect { effect } => self.set_background(effect).await?,
+      // The browser has no system effects panel.
+      CallAction::OpenSystemVideoEffects => {},
       CallAction::Join {
         request,
         is_muted,
@@ -636,35 +663,217 @@ impl Host {
       }
       return Ok(());
     }
-    // admin.md §3.5: the browser can't put a background behind the camera image, so where the
-    // organization requires one, the camera stays off.
-    if self.state.borrow().requires_background {
-      if let Some(stream) = &maybe_open {
-        stop_tracks(stream);
-      }
-      return Err(ActionFailure::new(
-        FailureKind::Call(CallFailure::BackgroundRequired),
-        "the organization requires a background, which the browser can't apply",
-      ));
-    }
+    // admin.md §3.5: where the organization requires a background, the camera starts only with
+    // one of its pictures behind the person (#439), or not at all.
+    let (shown, maybe_effects) = match self.camera_effects().await {
+      Ok(plan) => plan,
+      Err(failure) => {
+        if let Some(stream) = &maybe_open {
+          stop_tracks(stream);
+        }
+        return Err(failure);
+      },
+    };
     let stream = match maybe_open {
       Some(stream) => stream,
       None => self.reopen_camera().await?,
     };
+    // The self view shows what the effects send.
+    let maybe_view = maybe_effects.as_ref().and_then(|_| effects::self_view());
+    let maybe_effects = maybe_effects.map(|effects| match &maybe_view {
+      Some((canvas, _)) => Box::new(effects.with_view(canvas.clone())),
+      None => Box::new(effects),
+    });
+    let is_through_effects = maybe_effects.is_some();
     let sent = stream.clone();
-    if let Err(error) = self.ask(|done| Control::Camera { stream: sent, done }).await {
+    let started = self
+      .ask(|done| Control::Camera {
+        stream: sent,
+        maybe_effects,
+        done,
+      })
+      .await;
+    if let Err(error) = started {
       stop_tracks(&stream);
       return Err(error);
     }
     {
       let mut state = self.state.borrow_mut();
-      if let Some(view) = &state.maybe_camera_view {
-        view.set_src_object(Some(&stream));
+      if let Some(old) = state.maybe_effects_view.take() {
+        stop_tracks(&old);
       }
+      state.maybe_effects_view = maybe_view.map(|(_, view)| view);
+      state.is_camera_through_effects = is_through_effects;
       state.maybe_local_camera = Some(stream);
+      if let Some(view) = &state.maybe_camera_view {
+        view.set_src_object(state.shown_camera());
+      }
     }
-    self.update_active(|active| active.is_camera_on = true);
+    self.update_active(|active| {
+      active.is_camera_on = true;
+      active.background = shown;
+    });
     Ok(())
+  }
+
+  /// The user chose another background: a camera through the effects changes it at once, a
+  /// camera without them starts again through them when there is an effect to apply (#439).
+  async fn set_background(&self, effect: BackgroundEffect) -> Result<(), ActionFailure> {
+    self.state.borrow_mut().background = effect;
+    let is_camera_on = self.maybe_media.borrow().is_some() && self.state.borrow().view.is_camera_on();
+    if !is_camera_on {
+      return Ok(());
+    }
+    let plan = match self.background_plan().await {
+      Ok(plan) => plan,
+      // A required background that can't be applied any more: the room must not show.
+      Err(failure) => {
+        self.stop_camera();
+        return Err(failure);
+      },
+    };
+    if self.state.borrow().is_camera_through_effects {
+      // The camera keeps its pipeline; only the effect changes.
+      self.control(Control::SetEffect(plan.maybe_effect.unwrap_or(MediaEffect::None)));
+      self.update_active(|active| active.background = plan.shown);
+      Ok(())
+    } else if plan.maybe_effect.is_some() {
+      self.start_camera().await
+    } else {
+      Ok(())
+    }
+  }
+
+  /// The effects a starting camera goes through, and the background shown (for the call state).
+  /// Effects that can't start leave the camera without them (and say so); where a background is
+  /// required, the camera can't start then.
+  async fn camera_effects(&self) -> Result<(BackgroundEffect, Option<CameraEffects>), ActionFailure> {
+    let plan = self.background_plan().await?;
+    let Some(effect) = plan.maybe_effect else {
+      return Ok((plan.shown, None));
+    };
+    match self.effects.pipeline(effect).await {
+      Ok(pipeline) => {
+        let effects = CameraEffects::new(pipeline);
+        let effects = if plan.is_required {
+          effects.required()
+        } else {
+          effects
+        };
+        Ok((plan.shown, Some(effects)))
+      },
+      Err(error) => {
+        self.effect_failed(plan.is_required, &error.to_string())?;
+        Ok((BackgroundEffect::None, None))
+      },
+    }
+  }
+
+  /// What goes behind the camera under the organization's rule, as the pipeline's effect (an own
+  /// or organization picture is fetched and decoded, an illustration drawn, the first time).
+  async fn background_plan(&self) -> Result<BackgroundPlan, ActionFailure> {
+    // The photos are only in the apps (a choice synced from one of them, say): none here.
+    let requested = Some(self.state.borrow().background)
+      .filter(|requested| EffectsOffer::InCall.offers(*requested))
+      .unwrap_or_default();
+    let rule = self.background_rule().await;
+    let is_required = rule.is_required();
+    let chosen = match rule.camera_background(requested, self.can_apply_effects()) {
+      CameraBackground::Plain => return Ok(BackgroundPlan::plain(is_required)),
+      CameraBackground::Refused => {
+        return Err(background_required("no background can be applied here"));
+      },
+      CameraBackground::Effect(chosen) => chosen,
+    };
+    match self.chosen_effect(chosen).await {
+      Ok(effect) => Ok(BackgroundPlan {
+        shown: chosen,
+        maybe_effect: Some(effect),
+        is_required,
+      }),
+      Err(error) => {
+        self.effect_failed(is_required, &error)?;
+        Ok(BackgroundPlan::plain(is_required))
+      },
+    }
+  }
+
+  /// `chosen` as the pipeline's effect, kept for the next time.
+  async fn chosen_effect(&self, chosen: BackgroundEffect) -> Result<MediaEffect, String> {
+    if let Some(effect) = self.effects.cached(chosen) {
+      return Ok(effect);
+    }
+    let maybe_picture = if needs_picture(chosen) {
+      Some(self.background_picture(chosen).await?)
+    } else {
+      None
+    };
+    self
+      .effects
+      .effect(chosen, maybe_picture.as_deref())
+      .map_err(|error| error.to_string())
+  }
+
+  /// An effect that can't be applied: the camera goes on without it (the user hears why), unless
+  /// the organization requires a background.
+  fn effect_failed(&self, is_required: bool, error: &str) -> Result<(), ActionFailure> {
+    if is_required {
+      return Err(background_required(error));
+    }
+    self.report(&ActionFailure::new(
+      FailureKind::Call(CallFailure::EffectsUnavailable),
+      error,
+    ));
+    Ok(())
+  }
+
+  /// Whether this browser runs the effects and the page hands over what they need.
+  fn can_apply_effects(&self) -> bool {
+    let has_callbacks =
+      self.callbacks.maybe_background_rule.is_some() && self.callbacks.maybe_background_picture.is_some();
+    let Some(window) = web_sys::window() else {
+      return false;
+    };
+    let navigator = window.navigator();
+    let has_webgpu = Reflect::get(&navigator, &JsValue::from_str("gpu")).is_ok_and(|gpu| gpu.is_object());
+    has_callbacks && browser_applies_effects(has_webgpu, &navigator.user_agent().unwrap_or_default())
+  }
+
+  /// The organization's background rule from the page's core. Without the callback (an older page)
+  /// only whether one is required is known; a rule that can't be read restricts nothing beyond
+  /// that, as on desktop.
+  async fn background_rule(&self) -> OrgBackgrounds {
+    let fallback = || required_only(self.state.borrow().requires_background);
+    let Some(rule) = &self.callbacks.maybe_background_rule else {
+      return fallback();
+    };
+    match call_promise(rule, &JsValue::UNDEFINED).await {
+      Ok(answer) => answer
+        .as_string()
+        .and_then(|json| serde_json::from_str(&json).ok())
+        .unwrap_or_else(fallback),
+      Err(failure) => {
+        tracing::warn!(detail = %failure.detail, "the organization's background rule is unknown");
+        fallback()
+      },
+    }
+  }
+
+  /// The file of an own or organization picture from the page's core.
+  async fn background_picture(&self, effect: BackgroundEffect) -> Result<Vec<u8>, String> {
+    let picture = self
+      .callbacks
+      .maybe_background_picture
+      .as_ref()
+      .ok_or("the page hands over no pictures")?;
+    let json = serde_json::to_string(&effect).map_err(|error| error.to_string())?;
+    let answer = call_promise(picture, &JsValue::from_str(&json))
+      .await
+      .map_err(|failure| failure.detail)?;
+    answer
+      .dyn_into::<Uint8Array>()
+      .map(|bytes| bytes.to_vec())
+      .map_err(|_| "the page handed over no picture".to_owned())
   }
 
   /// Opens the chosen camera again (the browser may ask) for the call.
@@ -823,9 +1032,7 @@ impl Host {
 
   fn stop_camera(&self) {
     self.control(Control::StopCamera);
-    if let Some(stream) = self.state.borrow_mut().maybe_local_camera.take() {
-      stop_tracks(&stream);
-    }
+    self.state.borrow_mut().release_camera();
     self.update_active(|active| active.is_camera_on = false);
   }
 
@@ -984,9 +1191,7 @@ impl Host {
   fn on_camera_ended(&self) {
     {
       let mut state = self.state.borrow_mut();
-      if let Some(stream) = state.maybe_local_camera.take() {
-        stop_tracks(&stream);
-      }
+      state.release_camera();
       if let Some(view) = &state.maybe_camera_view {
         view.set_src_object(None);
       }
@@ -1016,9 +1221,7 @@ impl Host {
         state.view.maybe_end_reason = Some(CallEndReason::ConnectionLost);
       }
       state.view.end_active();
-      if let Some(stream) = state.maybe_local_camera.take() {
-        stop_tracks(&stream);
-      }
+      state.release_camera();
     }
     if let Err(error) = result {
       tracing::warn!(%error, "the call ended with an error");
@@ -1116,7 +1319,18 @@ async fn apply(call: &WebCall, control: Control) {
     Control::MoveHere => call.move_here(),
     // The asker may have given up waiting.
     Control::Audio { source, sink, done } => drop(done.send(call.set_audio(source, sink).await)),
-    Control::Camera { stream, done } => drop(done.send(call.share_camera_stream(stream).await)),
+    Control::Camera {
+      stream,
+      maybe_effects,
+      done,
+    } => {
+      let result = match maybe_effects {
+        Some(effects) => call.share_camera_stream_with_effects(stream, *effects).await,
+        None => call.share_camera_stream(stream).await,
+      };
+      drop(done.send(result));
+    },
+    Control::SetEffect(effect) => call.set_background_effect(effect),
     Control::StopCamera => call.stop_camera(),
     Control::Screen {
       mode,
@@ -1192,6 +1406,65 @@ impl WebJoinTicketSource for PageTickets {
       })
     })
   }
+}
+
+/// What goes behind the camera: the background shown (the call state's), the pipeline's effect
+/// (none: the camera as it is) and whether the organization requires one.
+struct BackgroundPlan {
+  shown: BackgroundEffect,
+  maybe_effect: Option<MediaEffect>,
+  is_required: bool,
+}
+
+impl BackgroundPlan {
+  fn plain(is_required: bool) -> Self {
+    Self {
+      shown: BackgroundEffect::None,
+      maybe_effect: None,
+      is_required,
+    }
+  }
+}
+
+impl State {
+  /// The camera stopped: its streams end and the self view has nothing to show.
+  fn release_camera(&mut self) {
+    for stream in [self.maybe_local_camera.take(), self.maybe_effects_view.take()]
+      .into_iter()
+      .flatten()
+    {
+      stop_tracks(&stream);
+    }
+    self.is_camera_through_effects = false;
+  }
+
+  /// What the self view plays: what the effects send, else the camera itself.
+  fn shown_camera(&self) -> Option<&MediaStream> {
+    self
+      .maybe_effects_view
+      .as_ref()
+      .or(self.maybe_local_camera.as_ref())
+  }
+}
+
+/// A rule that only says whether a background is required (an older page's preparation).
+fn required_only(is_required: bool) -> OrgBackgrounds {
+  OrgBackgrounds {
+    mode: if is_required {
+      teamcraft_proto::CallBackgroundMode::Required
+    } else {
+      teamcraft_proto::CallBackgroundMode::Free
+    },
+    applies_to_me: is_required,
+    ..OrgBackgrounds::default()
+  }
+}
+
+fn background_required(detail: &str) -> ActionFailure {
+  ActionFailure::new(
+    FailureKind::Call(CallFailure::BackgroundRequired),
+    format!("the organization requires a background: {detail}"),
+  )
 }
 
 /// How a failed call action reads in the page: what to do about it, then the detail.

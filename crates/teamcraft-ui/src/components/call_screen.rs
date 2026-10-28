@@ -73,7 +73,7 @@ pub fn CallScreen(request: CallRequest) -> impl IntoView {
   // Real calls report who is speaking; the demo rotates the active speaker among people who are not
   // muted.
   let is_real = !untrack(|| state.read(|backend| backend.has_simulated_calls()));
-  let has_effects = untrack(|| state.read(|backend| backend.has_background_effects()));
+  let has_effects = untrack(|| state.read(|backend| backend.effects_offer().has_picker()));
   // Real video where the page shows it: others' tracks by person and kind, and the own camera once
   // the media layer sends it.
   let video_tracks = Memo::new(move |_| state.read(|backend| backend.call_video_tracks()));

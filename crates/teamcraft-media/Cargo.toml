@@ -80,8 +80,9 @@ gstreamer = ["native", "dep:gstreamer", "dep:gstreamer-app", "dep:gstreamer-vide
 effects = ["dep:wgpu", "dep:bytemuck", "dep:futures-channel", "dep:pollster", "dep:zune-jpeg", "dep:zune-png", "dep:jpeg-encoder"]
 # The built-in photo backgrounds, compiled in (about 3.5 MB of JPEG): the desktop app only.
 photo-backgrounds = ["effects"]
-# Person segmentation for the effects with tract (pure-Rust ONNX inference; native and wasm).
-segmentation = ["effects", "dep:tract-onnx"]
+# Person segmentation for the effects with tract (pure-Rust ONNX inference; native and wasm), and
+# the check of a downloaded model against its pinned SHA-256 (teamcraft-crypto).
+segmentation = ["effects", "dep:tract-onnx", "dep:teamcraft-crypto"]
 
 [dependencies]
 teamcraft-proto.workspace = true

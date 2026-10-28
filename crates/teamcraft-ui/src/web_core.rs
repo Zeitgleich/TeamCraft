@@ -28,6 +28,7 @@ use futures_util::{FutureExt, StreamExt};
 use serde::de::DeserializeOwned;
 use serde_json::Value;
 use teamcraft_client_api::backend::ChatBackend;
+use teamcraft_client_api::calls::{BackgroundEffect, OrgBackgrounds};
 use teamcraft_client_api::model::{Message, ThreadId};
 use teamcraft_client_api::remote::{
   AttachmentPriority, ChatAction, ChatAnswer, ChatQuery, ChatSnapshot, ContactKeys, CoreConnection,
@@ -336,10 +337,22 @@ pub async fn prepare_call(conversation: ConversationId) -> Result<CallPreparatio
 /// Whether the workspace requires an organization background behind the camera image for this
 /// user (admin.md §3.5). Unknown restricts nothing, as on desktop.
 pub async fn requires_org_background() -> bool {
+  org_backgrounds().await.is_required()
+}
+
+/// The organization's call backgrounds and their rule for this user; unknown restricts nothing,
+/// as on desktop.
+pub async fn org_backgrounds() -> OrgBackgrounds {
   match ask(|reply| Request::Query(ChatQuery::OrgBackgrounds, reply)).await {
-    Ok(Ok(ChatAnswer::OrgBackgrounds { backgrounds })) => backgrounds.is_required(),
-    _ => false,
+    Ok(Ok(ChatAnswer::OrgBackgrounds { backgrounds })) => backgrounds,
+    _ => OrgBackgrounds::default(),
   }
+}
+
+/// The picture file behind the camera for `effect` (#439): the user's own, decrypted, or the
+/// organization's, hash-checked. Only in the tab that runs the core.
+pub async fn background_picture(effect: BackgroundEffect) -> Result<Vec<u8>, String> {
+  ask(|reply| Request::BackgroundPicture(effect, reply)).await?
 }
 
 /// Deletes the database of a guest device an earlier page left behind (closed without "Leave").
@@ -1011,6 +1024,8 @@ enum Request {
   NetworkChanged,
   /// What joining a conversation's call needs (`web_calls`).
   PrepareCall(ConversationId, oneshot::Sender<Result<CallPreparation, String>>),
+  /// The picture behind a camera: the user's own or the organization's (#439).
+  BackgroundPicture(BackgroundEffect, oneshot::Sender<Result<Vec<u8>, String>>),
   /// The user opened a conversation; a running catch-up takes it next (issue #247).
   Focus(ConversationId),
 }
@@ -1610,6 +1625,21 @@ impl Core {
         let result = match self.client.as_mut() {
           Some(client) => client.prepare_call(conversation).await.map_err(describe_failure),
           None => Err(not_set_up()),
+        };
+        drop(reply.send(result));
+      },
+      Request::BackgroundPicture(effect, reply) => {
+        let result = match (self.client.as_ref(), effect) {
+          (Some(client), BackgroundEffect::Custom(id)) => client
+            .background_picture(id)
+            .await
+            .map(|picture| picture.expose_secret().to_vec())
+            .map_err(describe_failure),
+          (Some(client), BackgroundEffect::Org(id)) => {
+            client.org_background_picture(id).await.map_err(describe_failure)
+          },
+          (Some(_), _) => Err("this background has no picture".into()),
+          (None, _) => Err(not_set_up()),
         };
         drop(reply.send(result));
       },

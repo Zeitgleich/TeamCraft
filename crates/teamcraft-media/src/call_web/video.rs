@@ -196,7 +196,7 @@ pub(super) struct TrackPlan {
   /// encoders scale. `None`: the source size.
   pub maybe_max_resolution: Option<VideoResolution>,
   #[cfg(feature = "effects")]
-  pub maybe_effects: Option<crate::effects::EffectsPipeline>,
+  pub maybe_effects: Option<CameraEffects>,
 }
 
 impl TrackSender {
@@ -1056,8 +1056,42 @@ async fn play_hidden(stream: &MediaStream) -> Result<HtmlVideoElement, WebCallEr
   Ok(video)
 }
 
+/// What the camera's background effects need: the pipeline, and optionally a canvas that shows
+/// each picture as it is sent, for the self view (`captureStream()` of it plays in a `<video>`).
+#[cfg(feature = "effects")]
+pub struct CameraEffects {
+  pipeline: crate::effects::EffectsPipeline,
+  maybe_view: Option<HtmlCanvasElement>,
+  is_required: bool,
+}
+
+#[cfg(feature = "effects")]
+impl CameraEffects {
+  pub fn new(pipeline: crate::effects::EffectsPipeline) -> Self {
+    Self {
+      pipeline,
+      maybe_view: None,
+      is_required: false,
+    }
+  }
+
+  /// The organization requires the background (admin.md §3.5): a picture the effects fail on is
+  /// not sent at all (the video stalls), instead of without the effect.
+  pub fn required(mut self) -> Self {
+    self.is_required = true;
+    self
+  }
+
+  /// Draws every sent picture into `canvas` too, at the picture's size.
+  pub fn with_view(mut self, canvas: HtmlCanvasElement) -> Self {
+    self.maybe_view = Some(canvas);
+    self
+  }
+}
+
 /// Background effects in the browser: the picture goes through a canvas into I420, through the
-/// shared effects pipeline (WebGPU) and back into a `VideoFrame` for the encoders.
+/// shared effects pipeline (WebGPU) and back into a `VideoFrame` for the encoders. Without an
+/// effect the picture goes to the encoders as it is, without that detour.
 #[cfg(feature = "effects")]
 mod effects {
   use js_sys::{Object, Uint8Array};
@@ -1066,18 +1100,24 @@ mod effects {
   use web_sys::{HtmlCanvasElement, HtmlVideoElement};
 
   use super::super::{WebCallError, browser, dictionary, window};
+  use super::CameraEffects;
   use crate::capture_convert::{PixelFormat, RawPicture};
-  use crate::effects::EffectsPipeline;
+  use crate::effects::{BackgroundEffect, EffectsPipeline};
   use crate::web_api::{Canvas2d, VideoFrame as WebVideoFrame};
 
   pub(in super::super) struct WebEffects {
     pub pipeline: EffectsPipeline,
     canvas: HtmlCanvasElement,
     context: Canvas2d,
+    /// The self view's canvas and its context.
+    maybe_view: Option<(HtmlCanvasElement, Canvas2d)>,
+    is_required: bool,
+    /// Pictures in a row the effects failed on (sent without the effect where that is allowed).
+    failures_in_a_row: u32,
   }
 
   impl WebEffects {
-    pub fn new(pipeline: EffectsPipeline) -> Result<Self, WebCallError> {
+    pub fn new(effects: CameraEffects) -> Result<Self, WebCallError> {
       let canvas: HtmlCanvasElement = window()?
         .document()
         .ok_or(WebCallError::Unsupported("a document"))?
@@ -1085,20 +1125,72 @@ mod effects {
         .map_err(browser("canvas"))?
         .unchecked_into();
       let options = dictionary(&[("willReadFrequently", JsValue::TRUE)]).map_err(browser("canvas"))?;
-      let context: Canvas2d = canvas
-        .get_context_with_context_options("2d", &options)
-        .map_err(browser("canvas"))?
-        .ok_or(WebCallError::Unsupported("a 2D canvas"))?
-        .unchecked_into();
+      let context = context_2d(&canvas, &options)?;
+      let maybe_view = match effects.maybe_view {
+        Some(view) => {
+          let context = context_2d(&view, &Object::new())?;
+          Some((view, context))
+        },
+        None => None,
+      };
       Ok(Self {
-        pipeline,
+        pipeline: effects.pipeline,
         canvas,
         context,
+        maybe_view,
+        is_required: effects.is_required,
+        failures_in_a_row: 0,
       })
     }
 
-    /// The current picture with the effect applied, as an I420 `VideoFrame`.
+    /// The current picture with the effect applied (as it is without one), as a `VideoFrame`;
+    /// the self view shows it.
     pub async fn frame(
+      &mut self,
+      video: &HtmlVideoElement,
+      timestamp_us: f64,
+    ) -> Result<WebVideoFrame, WebCallError> {
+      let frame = if *self.pipeline.effect() == BackgroundEffect::None {
+        plain_frame(video, timestamp_us)?
+      } else {
+        match self.apply(video, timestamp_us).await {
+          Ok(frame) => {
+            self.failures_in_a_row = 0;
+            frame
+          },
+          // A required background: the room must not show (the caller skips the picture).
+          Err(error) if self.is_required => return Err(error),
+          // A GPU hiccup or a lost device: the video goes on without the effect.
+          Err(error) => {
+            self.failures_in_a_row = self.failures_in_a_row.saturating_add(1);
+            if self.failures_in_a_row == 1 {
+              tracing::warn!(%error, "background effect skipped");
+            }
+            plain_frame(video, timestamp_us)?
+          },
+        }
+      };
+      self.show(&frame, video);
+      Ok(frame)
+    }
+
+    /// Draws the sent picture into the self view; a picture it misses is no failure.
+    fn show(&self, frame: &WebVideoFrame, video: &HtmlVideoElement) {
+      let Some((view, context)) = &self.maybe_view else {
+        return;
+      };
+      let (width, height) = (video.video_width() & !7, video.video_height() & !1);
+      if view.width() != width || view.height() != height {
+        view.set_width(width);
+        view.set_height(height);
+      }
+      if let Err(error) = context.draw_video_frame(frame, 0.0, 0.0) {
+        tracing::debug!(?error, "the self view missed a picture");
+      }
+    }
+
+    /// The current picture through the effects pipeline, as an I420 `VideoFrame`.
+    async fn apply(
       &mut self,
       video: &HtmlVideoElement,
       timestamp_us: f64,
@@ -1150,6 +1242,24 @@ mod effects {
       .map_err(browser("VideoFrame"))?;
       WebVideoFrame::new(&Uint8Array::from(frame.data()).into(), &init).map_err(browser("VideoFrame"))
     }
+  }
+
+  fn plain_frame(video: &HtmlVideoElement, timestamp_us: f64) -> Result<WebVideoFrame, WebCallError> {
+    WebVideoFrame::new(
+      video.as_ref(),
+      &dictionary(&[("timestamp", JsValue::from(timestamp_us))]).map_err(browser("VideoFrame"))?,
+    )
+    .map_err(browser("VideoFrame"))
+  }
+
+  fn context_2d(canvas: &HtmlCanvasElement, options: &Object) -> Result<Canvas2d, WebCallError> {
+    Ok(
+      canvas
+        .get_context_with_context_options("2d", options)
+        .map_err(browser("canvas"))?
+        .ok_or(WebCallError::Unsupported("a 2D canvas"))?
+        .unchecked_into(),
+    )
   }
 }
 

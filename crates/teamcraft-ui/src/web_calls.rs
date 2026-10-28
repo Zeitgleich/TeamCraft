@@ -19,12 +19,12 @@ use futures_util::FutureExt;
 use futures_util::future::{LocalBoxFuture, Shared};
 use js_sys::{Array, Function, Object, Promise, Reflect, Uint8Array};
 use teamcraft_client_api::call_view::CallSignal;
-use teamcraft_client_api::calls::CallsUnavailableReason;
+use teamcraft_client_api::calls::{BackgroundEffect, CallsUnavailableReason};
 use teamcraft_client_api::failure::ActionFailure;
 use teamcraft_client_api::page_calls::{
   EXPORT_ACT, EXPORT_CAMERA_VIEW, EXPORT_NETWORK_CHANGED, EXPORT_PICK_SCREEN, EXPORT_PREVIEW_LEVEL,
   EXPORT_RING, EXPORT_SHARE_SCREEN, EXPORT_SIGNAL, EXPORT_START, EXPORT_STOP, EXPORT_UNWATCH_VIDEO,
-  EXPORT_VIDEO_STATS, EXPORT_WATCH_VIDEO, MODULE_META, PreparedCall, WORKLET_META,
+  EXPORT_VIDEO_STATS, EXPORT_WATCH_VIDEO, MODULE_META, PreparedCall, WORKLET_META, browser_applies_effects,
 };
 use teamcraft_client_api::remote::{CallAction, CallActionAnswer, CallSnapshot};
 use teamcraft_core::CallKeySigner;
@@ -87,10 +87,24 @@ struct Callbacks {
   _sign: Closure<dyn Fn(String, Uint8Array) -> Result<Uint8Array, JsValue>>,
   _verify: Closure<dyn Fn(String, String, Uint8Array) -> Result<Uint8Array, JsValue>>,
   _failed: Closure<dyn Fn(String)>,
+  _background_rule: Closure<dyn Fn() -> Promise>,
+  _background_picture: Closure<dyn Fn(String) -> Promise>,
 }
 
 /// Lets the media layer's authenticator sign with the core's signer.
 struct CoreSigner(CallKeySigner);
+
+/// Whether the call module can put background effects behind the camera image in this browser
+/// (#439): WebGPU, and one that reads frames back in time.
+pub fn applies_effects() -> bool {
+  let Some(window) = web_sys::window() else {
+    return false;
+  };
+  let navigator = window.navigator();
+  let has_webgpu = Reflect::get(&navigator, &JsValue::from_str("gpu")).is_ok_and(|gpu| gpu.is_object());
+  let user_agent = navigator.user_agent().unwrap_or_default();
+  browser_applies_effects(has_webgpu, &user_agent)
+}
 
 /// Whether this page can make calls, and why not.
 pub fn support() -> Result<(), CallsUnavailableReason> {
@@ -541,6 +555,25 @@ impl Callbacks {
     let failed = Closure::<dyn Fn(String)>::new(|wire: String| {
       crate::feedback::report_failure(ActionFailure::from_wire(&wire));
     });
+    // The organization's background rule and the pictures behind the camera, from the core (#439).
+    let background_rule = Closure::<dyn Fn() -> Promise>::new(|| {
+      future_to_promise(async {
+        let rule = crate::web_core::org_backgrounds().await;
+        serde_json::to_string(&rule)
+          .map(|json| JsValue::from_str(&json))
+          .map_err(|error| JsValue::from_str(&error.to_string()))
+      })
+    });
+    let background_picture = Closure::<dyn Fn(String) -> Promise>::new(|effect: String| {
+      future_to_promise(async move {
+        let effect: BackgroundEffect =
+          serde_json::from_str(&effect).map_err(|error| JsValue::from_str(&error.to_string()))?;
+        let picture = crate::web_core::background_picture(effect)
+          .await
+          .map_err(|error| JsValue::from_str(&error))?;
+        Ok(Uint8Array::from(picture.as_slice()).into())
+      })
+    });
     let object = Object::new();
     let worklet = meta_content(WORKLET_META).ok_or("the page names no call worklet")?;
     Reflect::set(
@@ -555,6 +588,8 @@ impl Callbacks {
       ("sign", sign.as_ref()),
       ("verify", verify.as_ref()),
       ("failed", failed.as_ref()),
+      ("background_rule", background_rule.as_ref()),
+      ("background_picture", background_picture.as_ref()),
     ] {
       Reflect::set(&object, &JsValue::from_str(name), function).map_err(|error| js_text(&error))?;
     }
@@ -565,6 +600,8 @@ impl Callbacks {
       _sign: sign,
       _verify: verify,
       _failed: failed,
+      _background_rule: background_rule,
+      _background_picture: background_picture,
     })
   }
 }

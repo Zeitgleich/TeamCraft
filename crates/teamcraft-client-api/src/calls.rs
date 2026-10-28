@@ -149,6 +149,77 @@ impl OrgBackgrounds {
       });
     fallback.map_or(BackgroundEffect::None, BackgroundEffect::Org)
   }
+
+  /// How the camera starts when the user asked for `requested`: under a required background only
+  /// with one of the organization's pictures applied, else with the allowed effect where this
+  /// device can apply it and without one where it can't.
+  pub fn camera_background(&self, requested: BackgroundEffect, can_apply_effects: bool) -> CameraBackground {
+    match (self.effective(requested), self.is_required()) {
+      (BackgroundEffect::Org(id), true) if can_apply_effects => {
+        CameraBackground::Effect(BackgroundEffect::Org(id))
+      },
+      (_, true) => CameraBackground::Refused,
+      (BackgroundEffect::None, false) => CameraBackground::Plain,
+      (_, false) if !can_apply_effects => CameraBackground::Plain,
+      (effect, false) => CameraBackground::Effect(effect),
+    }
+  }
+}
+
+/// How a camera starts under the organization's rule (admin.md §3.5), from the effect the rule
+/// leaves of the user's choice ([`OrgBackgrounds::effective`]) and whether this device can apply
+/// effects at all.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CameraBackground {
+  /// The camera image as it is: no effect chosen, or one this device can't apply (the camera goes
+  /// on without it).
+  Plain,
+  /// Through the effects, with this effect.
+  Effect(BackgroundEffect),
+  /// The organization requires one of its backgrounds, which this device can't put behind the
+  /// person (no effects, or the picture is missing): the camera stays off.
+  Refused,
+}
+
+/// Which background effects the UI offers on this device (#439).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum EffectsOffer {
+  /// Every effect, in the pre-join check too: the desktop and mobile apps.
+  #[default]
+  Full,
+  /// Blur, the drawn illustrations and the user's own and the organization's pictures, in the
+  /// call: a browser that runs the effects (WebGPU). The photos aren't offered (their full
+  /// pictures are only in the apps) and the pre-join check shows the camera without effects.
+  InCall,
+  /// None: a browser without WebGPU, or with one too slow for video.
+  Unavailable,
+}
+
+impl EffectsOffer {
+  /// Whether the call screen offers the effects.
+  pub fn has_picker(self) -> bool {
+    self != Self::Unavailable
+  }
+
+  /// Whether the pre-join screen offers them (its self view shows the effect).
+  pub fn has_preview(self) -> bool {
+    self == Self::Full
+  }
+
+  /// Whether the photos are among them.
+  pub fn has_photos(self) -> bool {
+    self == Self::Full
+  }
+
+  /// Whether `effect` is one of the offered effects (own and organization pictures always are,
+  /// where effects are offered at all).
+  pub fn offers(self, effect: BackgroundEffect) -> bool {
+    match effect {
+      BackgroundEffect::Preset(preset) if preset.is_photo() => self.has_photos(),
+      BackgroundEffect::None => true,
+      _ => self.has_picker(),
+    }
+  }
 }
 
 /// One of the user's own background pictures, as a picker lists it (encrypted on the server,
@@ -749,6 +820,48 @@ mod tests {
       assert_eq!(with_default.effective(BackgroundEffect::BlurLight), picture("2"));
     }
 
+    /// #439: a browser that can't apply effects keeps the camera off only where a background is
+    /// required; elsewhere the camera goes on without the effect.
+    #[test]
+    fn the_camera_starts_with_a_required_background_or_not_at_all() {
+      let required = org(CallBackgroundMode::Required, Some("2"), true);
+      assert_eq!(
+        required.camera_background(BackgroundEffect::None, true),
+        CameraBackground::Effect(picture("2"))
+      );
+      assert_eq!(
+        required.camera_background(BackgroundEffect::BlurLight, false),
+        CameraBackground::Refused
+      );
+      let without_pictures = OrgBackgrounds {
+        images: Vec::new(),
+        ..org(CallBackgroundMode::Required, None, true)
+      };
+      assert_eq!(
+        without_pictures.camera_background(BackgroundEffect::None, true),
+        CameraBackground::Refused,
+        "required, but nothing to put behind the person"
+      );
+      let free = org(CallBackgroundMode::Free, None, true);
+      assert_eq!(
+        free.camera_background(BackgroundEffect::None, true),
+        CameraBackground::Plain
+      );
+      assert_eq!(
+        free.camera_background(BackgroundEffect::BlurStrong, true),
+        CameraBackground::Effect(BackgroundEffect::BlurStrong)
+      );
+      assert_eq!(
+        free.camera_background(BackgroundEffect::BlurStrong, false),
+        CameraBackground::Plain
+      );
+      assert_eq!(
+        OrgBackgrounds::default().camera_background(BackgroundEffect::BlurLight, true),
+        CameraBackground::Effect(BackgroundEffect::BlurLight),
+        "an unknown rule restricts nothing"
+      );
+    }
+
     #[test]
     fn exempt_users_and_unknown_modes() {
       let guest = org(CallBackgroundMode::Required, None, false);
@@ -757,6 +870,29 @@ mod tests {
       assert_eq!(newer.rule(), CallBackgroundMode::OrgOnly);
       assert!(newer.allows(BackgroundEffect::BlurLight));
     }
+  }
+
+  #[test]
+  fn browsers_offer_effects_in_the_call_without_photos() {
+    let photo = BackgroundEffect::Preset(BackgroundPreset::LivingRoom);
+    let illustration = BackgroundEffect::Preset(BackgroundPreset::Forest);
+    let own = BackgroundEffect::Custom("4".parse().unwrap());
+    let full = EffectsOffer::Full;
+    assert!(full.has_picker() && full.has_preview() && full.has_photos());
+    assert!(
+      [photo, illustration, own]
+        .iter()
+        .all(|effect| full.offers(*effect))
+    );
+    let in_call = EffectsOffer::InCall;
+    assert!(in_call.has_picker() && !in_call.has_preview() && !in_call.has_photos());
+    assert!(!in_call.offers(photo));
+    assert!(
+      in_call.offers(illustration) && in_call.offers(own) && in_call.offers(BackgroundEffect::BlurLight)
+    );
+    let none = EffectsOffer::Unavailable;
+    assert!(!none.has_picker() && !none.has_preview());
+    assert!(!none.offers(BackgroundEffect::BlurLight) && none.offers(BackgroundEffect::None));
   }
 
   #[test]

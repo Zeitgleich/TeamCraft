@@ -134,3 +134,9 @@ lto = true
 codegen-units = 1
 panic = "abort"
 strip = true
+
+# The browser's person segmentation (tract, only in the lazily loaded call module, #439) runs every
+# frame or two on the page's main thread: its kernels are built for speed. 720p in Chrome: 11.5 ms
+# instead of 19 ms a frame, for 0.1 MB (gzip) more of the call module.
+[profile.web-release.package.tract-linalg]
+opt-level = 3

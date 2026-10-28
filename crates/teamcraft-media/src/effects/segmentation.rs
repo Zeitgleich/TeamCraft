@@ -116,6 +116,8 @@ mod tract {
   }
 
   /// A selfie segmentation model run with tract: RGB float input in 0..1, person probabilities out.
+  /// Copies share the parsed model (the browser parses it once per session).
+  #[derive(Clone)]
   pub struct TractSegmenter {
     plan: Plan,
     model: SegmentationModel,
@@ -251,7 +253,7 @@ mod tract {
 pub use tract::{SegmentationModel, TensorLayout, TractSegmenter};
 
 #[cfg(all(test, feature = "segmentation"))]
-mod tests {
+pub(super) mod tests {
   use prost::Message as _;
   use tract_onnx::pb::{
     AttributeProto, GraphProto, ModelProto, NodeProto, OperatorSetIdProto, TypeProto, ValueInfoProto,
@@ -298,7 +300,7 @@ mod tests {
   }
 
   /// `mask = ReduceMean(image, axis 3, keepdims)`: NHWC in, one channel out, like MediaPipe's.
-  fn mean_of_channels_model() -> Vec<u8> {
+  pub(in crate::effects) fn mean_of_channels_model() -> Vec<u8> {
     // Element type 1 is FLOAT; shapes come from the input fact.
     let value = |name: &str| ValueInfoProto {
       name: name.into(),
