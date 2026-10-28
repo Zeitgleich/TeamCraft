@@ -1725,8 +1725,8 @@ keychain is the wrap, nothing is uploaded.
   `run_outside_runtime` like the database key (§9).
 - Used when this computer must set up the same account again (the local database was lost, or set
   aside as unreadable, §9.5): the core opens the server's key bag with it as with a recovery key
-  and checks the identity. A key that no longer opens the bag is ignored and the screen asks for the
-  kit.
+  and checks the identity. A key that no longer opens the bag (the account's backup key changed)
+  fails the restore, and the user takes the kit instead.
 - **Fallback.** Without a usable keychain (Linux without a Secret Service, a denied or locked
   keychain) nothing is kept and the failure is logged; setting the device up again needs the kit or
   another device. (The database key itself has no fallback yet: the app doesn't open its store

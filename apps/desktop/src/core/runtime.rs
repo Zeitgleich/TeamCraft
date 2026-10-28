@@ -13,8 +13,8 @@ use teamcraft_client_api::backend::ChatBackend;
 use teamcraft_client_api::model::{Message, ThreadId};
 use teamcraft_client_api::remote::AttachmentPriority;
 use teamcraft_client_api::remote::{
-  ChatAction, ChatAnswer, ChatQuery, ChatSnapshot, ContactKeys, CoreStatus, EnrollRequest, LinkRequestView,
-  LinkStatus, MessageWindow, SecuritySnapshot, StoreProblem,
+  ChatAction, ChatAnswer, ChatQuery, ChatSnapshot, ContactKeys, CoreStatus, EnrollRequest, EnrollSecret,
+  LinkRequestView, LinkStatus, MessageWindow, SecuritySnapshot, StoreProblem,
 };
 use teamcraft_client_api::snapshot_changes::{SnapshotChanges, SnapshotCursor};
 use teamcraft_core::api::{AccessTokenSource, ApiError, HttpServerApi, ServerApi};
@@ -30,7 +30,8 @@ use teamcraft_core::connection::{
 use teamcraft_core::downloads::Downloads;
 use teamcraft_core::records;
 use teamcraft_core::store::{
-  DatabaseKeySource, KeySourceError, KeyringKeySource, SqlCipherStore, StoreError, StoreLock, TrackedStore,
+  DatabaseKeySource, KeptBackupKey, KeySourceError, KeyringKeySource, SqlCipherStore, StoreError, StoreLock,
+  TrackedStore,
 };
 use teamcraft_core::typing::TypingAnnouncer;
 use teamcraft_core::ui_backend::{CoreChatBackend, CoreCommand};
@@ -38,7 +39,7 @@ use teamcraft_core::ui_snapshot::SnapshotCache;
 use teamcraft_core::upkeep::{self, Upkeep, UploadMode};
 use teamcraft_core::{
   CallPreparation, Client, ClientSettings, CoreError, EnrollmentOptions, EnrollmentSecret, LinkOffer,
-  PendingEnrollment, UnreadableStore,
+  PendingEnrollment, UnreadableStore, parse_recovery_key,
 };
 use teamcraft_crypto::backup::Argon2Settings;
 use teamcraft_crypto::identity::IdentityPublicKey;
@@ -241,6 +242,10 @@ fn waiting_for_refresh() -> ApiError {
   ApiError::Network("waiting for a fresh access token".to_owned())
 }
 
+/// Keychain service of the account's backup key (e2ee.md §6.5.6); the account name is the
+/// database key's.
+const BACKUP_KEY_SERVICE: &str = "de.zeitgleich.teamcraft.backup-key";
+
 /// A database key that comes from the OS keystore, or a fixed one in tests.
 pub enum KeyChoice {
   Keyring {
@@ -250,6 +255,18 @@ pub enum KeyChoice {
   /// A fixed key (tests).
   #[cfg(test)]
   Fixed(Vec<u8>),
+}
+
+impl KeyChoice {
+  /// Where the account's backup key is kept next to the database key (e2ee.md §6.5.6); tests keep
+  /// none, so they never touch the real keychain.
+  fn kept_backup_key(&self) -> Option<KeptBackupKey> {
+    match self {
+      Self::Keyring { account, .. } => Some(KeptBackupKey::new(BACKUP_KEY_SERVICE, account.clone())),
+      #[cfg(test)]
+      Self::Fixed(_) => None,
+    }
+  }
 }
 
 impl DatabaseKeySource for KeyChoice {
@@ -815,6 +832,8 @@ struct Core {
   maybe_open_retry: Option<OpenRetry>,
   /// The unreadable database was set aside: setup explains why it is asked for again.
   was_store_set_aside: bool,
+  /// Whether the OS keychain holds the account's backup key (e2ee.md §6.5.6), read once.
+  maybe_has_kept_backup_key: Option<bool>,
   /// The UI's snapshot, rebuilt per conversation from what the store's writes touched (#246).
   snapshots: SnapshotCache,
   /// Messages were written to the outbox and answered at once; sending them is still to do.
@@ -913,6 +932,7 @@ impl Core {
       typing: TypingAnnouncer::default(),
       maybe_open_retry: None,
       was_store_set_aside: false,
+      maybe_has_kept_backup_key: None,
       snapshots: SnapshotCache::new(SystemClock.now_ms().unsigned_abs()),
       has_queued_sends: false,
       maybe_upload: None,
@@ -1069,6 +1089,7 @@ impl Core {
         Ok(CoreStatus::NeedsEnrollment {
           has_existing_identity,
           was_data_lost: self.was_store_set_aside,
+          can_restore_on_device: has_existing_identity && self.has_kept_backup_key(),
         })
       },
     }
@@ -1139,9 +1160,11 @@ impl Core {
     {
       self.drop_abandoned_setup().await;
       if let Ok(maybe_key) = self.api().identity_key(self.user).await {
+        let has_existing_identity = maybe_key.is_some();
         self.status = CoreStatus::NeedsEnrollment {
-          has_existing_identity: maybe_key.is_some(),
+          has_existing_identity,
           was_data_lost: self.was_store_set_aside,
+          can_restore_on_device: has_existing_identity && self.has_kept_backup_key(),
         };
       }
     }
@@ -1179,6 +1202,7 @@ impl Core {
       Ok(removed) => tracing::info!(removed, "deleted staged upload copies nobody needs"),
       Err(error) => tracing::warn!(%error, "could not sweep the staged upload copies"),
     }
+    self.keep_backup_key(&client);
     let on_call_event = self.on_call_event.clone();
     client.set_call_event_sink(Box::new(move |event| on_call_event(event.clone())));
     client.share_catch_up_focus(self.catch_up_focus.clone());
@@ -1192,6 +1216,58 @@ impl Core {
     );
     self.client = Some(client);
     status
+  }
+
+  /// Keeps the account's backup key in the OS keychain (e2ee.md §6.5.6), on every start when it is
+  /// missing or differs. Without a keychain the recovery kit stays the way back, so a failure is
+  /// only logged.
+  fn keep_backup_key(&mut self, client: &Client<Api, Store>) {
+    let Some(kept) = self.key.kept_backup_key() else {
+      return;
+    };
+    match kept.keep(&client.backup_secret()) {
+      Ok(()) => self.maybe_has_kept_backup_key = Some(true),
+      Err(error) => tracing::warn!(%error, "could not keep the backup key in the OS keychain"),
+    }
+  }
+
+  /// Whether the OS keychain holds a backup key for this account; read once per start, since the
+  /// setup screen asks for the status every second.
+  fn has_kept_backup_key(&mut self) -> bool {
+    if let Some(known) = self.maybe_has_kept_backup_key {
+      return known;
+    }
+    let has_key = self.key.kept_backup_key().is_some_and(|kept| match kept.load() {
+      Ok(maybe_key) => maybe_key.is_some(),
+      Err(error) => {
+        tracing::info!(%error, "no backup key kept in the OS keychain");
+        false
+      },
+    });
+    self.maybe_has_kept_backup_key = Some(has_key);
+    has_key
+  }
+
+  /// What the user chose on the setup screen, as the core takes it.
+  fn enrollment_secret(&self, secret: EnrollSecret) -> Result<EnrollmentSecret, String> {
+    match secret {
+      EnrollSecret::RecoveryKey { recovery_key } => {
+        EnrollmentSecret::recovery_key(&recovery_key).map_err(describe_failure)
+      },
+      EnrollSecret::Passphrase { passphrase } => Ok(EnrollmentSecret::passphrase(passphrase)),
+      EnrollSecret::KeptOnDevice => {
+        let kept = self
+          .key
+          .kept_backup_key()
+          .ok_or("this computer keeps no key for the account")?;
+        match kept.load() {
+          Ok(Some(backup_secret)) => Ok(EnrollmentSecret::KeptBackupKey(backup_secret)),
+          Ok(None) => Err("this computer keeps no key for the account".to_owned()),
+          Err(error) => Err(error.to_string()),
+        }
+      },
+      EnrollSecret::Guest => Err("meeting guests join in the browser".to_owned()),
+    }
   }
 
   fn api(&self) -> Api {
@@ -1468,10 +1544,9 @@ impl Core {
     let store = self.store.clone().ok_or("the local database is not open")?;
     let options = EnrollmentOptions {
       device_name: request.device_name,
-      secret: EnrollmentSecret::Passphrase(SecretBytes::new(request.passphrase.into_bytes())),
+      secret: self.enrollment_secret(request.secret)?,
       argon2: self.config.argon2,
       maybe_attestation: None,
-      // The desktop flow only offers passphrase enrollment so far; linking and org recovery follow.
     };
     let client = PendingEnrollment::new()
       .complete(
@@ -1482,7 +1557,7 @@ impl Core {
         options,
       )
       .await
-      .map_err(describe)?;
+      .map_err(describe_failure)?;
     self.status = self.adopt(client);
     Ok(())
   }
@@ -1730,6 +1805,13 @@ impl Core {
           .await
           .map_err(describe_failure);
       },
+      ChatAction::SetRecoveryKey { recovery_key } => {
+        let recovery_key = parse_recovery_key(recovery_key).map_err(describe_failure)?;
+        return client
+          .set_recovery_key(&recovery_key)
+          .await
+          .map_err(describe_failure);
+      },
       ChatAction::SetActivity { is_idle } => {
         self.send_activity(*is_idle).await;
         return Ok(());
@@ -1793,6 +1875,7 @@ impl Core {
       | ChatAction::OpenGroupDm { .. }
       | ChatAction::AddMember { .. }
       | ChatAction::ChangePassphrase { .. }
+      | ChatAction::SetRecoveryKey { .. }
       | ChatAction::SetActivity { .. }
       | ChatAction::SetAttention { .. }
       | ChatAction::AcceptKeyChange { .. }

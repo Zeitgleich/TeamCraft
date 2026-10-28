@@ -511,8 +511,8 @@ pub(crate) async fn sign_in_as_alice(page: &Page) {
     .unwrap();
 
   // The account already has keys (the test enrolled it): this browser is a new device and unlocks
-  // them with the recovery passphrase.
-  type_until_kept(page, "#enroll-passphrase", PASSPHRASE).await;
+  // them with the recovery passphrase (the field also takes a recovery kit's key).
+  type_until_kept(page, "#enroll-secret", PASSPHRASE).await;
   click_text(page, "Unlock").await;
 }
 

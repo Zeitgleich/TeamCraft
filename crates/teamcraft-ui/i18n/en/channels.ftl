@@ -293,6 +293,7 @@ spaces-browse-invite-only-hint = Invite-only spaces show up here as soon as some
 error-admin-join-request-gone = This request is no longer open: it was decided on another device or by another owner, withdrawn, or it expired.
 error-admin-join-request-too-soon = You asked to join this channel recently, and that request was declined or withdrawn. You can ask again once it would have expired.
 error-guest-dm-not-allowed = Guests can't start conversations on their own. You can answer as soon as someone writes to you first.
+error-recovery-passphrase-not-allowed = Your organization allows only recovery kits, no passphrases. Create a recovery kit instead.
 
 ## Settings: sections, search and rows (#327)
 # Files view and setup checklist (issue #301)

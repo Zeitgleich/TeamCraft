@@ -8,7 +8,7 @@ use leptos::prelude::*;
 use leptos::task::spawn_local;
 use teamcraft_proto::{ErrorBody, ErrorCode, GetMeResponse};
 
-use teamcraft_client_api::remote::{CoreStatus, EnrollRequest, StoreProblem};
+use teamcraft_client_api::remote::{CoreStatus, EnrollRequest, EnrollSecret, StoreProblem};
 
 use crate::auth::tauri::{ServerCheck, ServerProblem, ServerView};
 use crate::auth::{ApiResponse, AuthError, Authenticator, SignInLook, tauri};
@@ -48,12 +48,15 @@ pub enum SessionState {
   /// Signed in, but this device has no keys yet (first device of the account); the web build only
   /// shows a placeholder here.
   NeedsDeviceSetup(GetMeResponse),
-  /// Desktop: this device has to create its encryption keys or recover them with the passphrase.
+  /// This device has to create its encryption keys or recover them with the recovery kit (or a
+  /// legacy passphrase).
   NeedsEnrollment {
     me: GetMeResponse,
     has_existing_identity: bool,
     /// This browser had the account set up, but its data is gone (e2ee.md §9.4).
     was_data_lost: bool,
+    /// Desktop: the OS keychain kept the account's backup key (e2ee.md §6.5.6).
+    can_restore_on_device: bool,
   },
   Ready(GetMeResponse),
 }
@@ -362,11 +365,13 @@ impl SessionControl {
       Ok(CoreStatus::NeedsEnrollment {
         has_existing_identity,
         was_data_lost,
+        can_restore_on_device,
       }) => {
         self.state.set_if_alive(SessionState::NeedsEnrollment {
           me,
           has_existing_identity,
           was_data_lost,
+          can_restore_on_device,
         });
       },
       Ok(CoreStatus::Failed { message }) => self
@@ -432,8 +437,8 @@ impl SessionControl {
     }
   }
 
-  /// Creates this device's keys (or recovers them) with the passphrase, then enters the app.
-  pub fn enroll(&self, passphrase: String, device_name: String) {
+  /// Creates this device's keys (or recovers them) with `secret`, then enters the app.
+  pub fn enroll(&self, secret: EnrollSecret, device_name: String) {
     let control = *self;
     let SessionState::NeedsEnrollment { me, .. } = control.state.get_untracked() else {
       return;
@@ -441,11 +446,7 @@ impl SessionControl {
     control.is_enrolling.set(true);
     control.enroll_error.set(None);
     spawn_local(async move {
-      let request = EnrollRequest {
-        passphrase,
-        device_name,
-        is_guest: false,
-      };
+      let request = EnrollRequest { secret, device_name };
       match remote_backend::enroll(&request).await {
         Ok(()) => control.state.set_if_alive(SessionState::Ready(me)),
         Err(error) => control.enroll_error.set_if_alive(Some(error)),

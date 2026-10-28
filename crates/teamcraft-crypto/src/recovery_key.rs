@@ -146,6 +146,11 @@ impl RecoveryKey {
     Self(self.0)
   }
 
+  /// Equality in constant time, for crates without `subtle`.
+  pub fn is_same_key(&self, other: &Self) -> bool {
+    bool::from(self.ct_eq(other))
+  }
+
   /// The 128-bit secret, for the key derivation of the wrap (e2ee.md §6.5.2).
   pub(crate) fn expose_secret(&self) -> &[u8; RECOVERY_KEY_SECRET_LEN] {
     &self.0

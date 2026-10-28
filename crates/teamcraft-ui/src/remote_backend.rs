@@ -30,7 +30,7 @@ use teamcraft_client_api::model::{
 };
 use teamcraft_client_api::remote::{
   CORE_CHANGED_EVENT, CORE_FAILED_EVENT, ChatAction, ChatAnswer, ChatQuery, ChatSnapshot, CoreConnection,
-  CoreStatus, EnrollRequest, LinkRequestView, LinkStatus, MessageWindow, StoreHealth,
+  CoreStatus, EnrollRequest, EnrollSecret, LinkRequestView, LinkStatus, MessageWindow, StoreHealth,
 };
 use teamcraft_client_api::search::{ParsedQuery, SavedSearch, SearchHit, SearchResults};
 use teamcraft_client_api::snapshot_changes::{SnapshotChanges, SnapshotCursor};
@@ -82,9 +82,8 @@ pub async fn enroll(request: &EnrollRequest) -> Result<(), String> {
 /// A meeting guest's ephemeral device: no passphrase, no backup (browser only).
 pub async fn enroll_guest(device_name: &str) -> Result<(), String> {
   enroll(&EnrollRequest {
-    passphrase: String::new(),
+    secret: EnrollSecret::Guest,
     device_name: device_name.to_owned(),
-    is_guest: true,
   })
   .await
 }
@@ -135,6 +134,16 @@ pub async fn change_passphrase(passphrase: &str) -> Result<(), String> {
   call(
     "core_action",
     &json!({ "action": ChatAction::ChangePassphrase { passphrase: passphrase.to_owned() } }),
+  )
+  .await
+}
+
+/// Wraps the key backup with the recovery key of a new kit the user saved (e2ee.md §6.5.7); the old
+/// kit and a legacy passphrase stop working.
+pub async fn set_recovery_key(recovery_key: &str) -> Result<(), String> {
+  call(
+    "core_action",
+    &json!({ "action": ChatAction::SetRecoveryKey { recovery_key: recovery_key.to_owned() } }),
   )
   .await
 }

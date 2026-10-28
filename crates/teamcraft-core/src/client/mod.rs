@@ -71,7 +71,9 @@ pub use catch_up::{CatchUpFocus, is_catching_up};
 pub use channel_roles::RoleSigning;
 #[cfg(feature = "ui")]
 pub(crate) use channel_roles::channel_roles_key;
-pub use enroll::{EnrollmentOptions, EnrollmentSecret, OrgRecoveryUnlock, PendingEnrollment};
+pub use enroll::{
+  EnrollmentOptions, EnrollmentSecret, OrgRecoveryUnlock, PendingEnrollment, parse_recovery_key,
+};
 pub use gateway::{
   DEFAULT_HANDSHAKE_TIMEOUT, GatewayOutcome, GatewayStart, GatewayTiming, HeldFrames, HeldLimits, KeptAlive,
   keep_alive,

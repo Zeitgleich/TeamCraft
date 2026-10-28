@@ -147,7 +147,7 @@ mod tests {
   #[test]
   fn a_new_passphrase_is_refused() {
     let (kit, passphrase) = wraps();
-    let first_bag = encode_wrapped_key_list(&[passphrase.clone()]).unwrap();
+    let first_bag = encode_wrapped_key_list(std::slice::from_ref(&passphrase)).unwrap();
     assert!(matches!(
       check_passphrase_wraps(&first_bag, None),
       Err(ApiError::RecoveryPassphraseNotAllowed)
@@ -163,11 +163,11 @@ mod tests {
   #[test]
   fn the_unchanged_legacy_passphrase_passes_and_a_changed_one_does_not() {
     let (kit, passphrase) = wraps();
-    let stored = encode_wrapped_key_list(&[passphrase.clone()]).unwrap();
+    let stored = encode_wrapped_key_list(std::slice::from_ref(&passphrase)).unwrap();
     // Another device uploads a content key change: same wraps.
     assert!(check_passphrase_wraps(&stored, Some(&stored)).is_ok());
     // Replaced by a kit: the passphrase wrap goes.
-    let replaced = encode_wrapped_key_list(&[kit.clone()]).unwrap();
+    let replaced = encode_wrapped_key_list(std::slice::from_ref(&kit)).unwrap();
     assert!(check_passphrase_wraps(&replaced, Some(&stored)).is_ok());
     // Kept next to a kit.
     let both = encode_wrapped_key_list(&[passphrase, kit]).unwrap();

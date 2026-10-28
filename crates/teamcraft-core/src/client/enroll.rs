@@ -69,6 +69,22 @@ pub enum EnrollmentSecret {
   },
 }
 
+impl EnrollmentSecret {
+  /// A recovery key as the user typed it or as the kit file holds it (e2ee.md §6.5.1).
+  pub fn recovery_key(text: &str) -> Result<Self, CoreError> {
+    parse_recovery_key(text).map(Self::RecoveryKey)
+  }
+
+  pub fn passphrase(text: String) -> Self {
+    Self::Passphrase(SecretBytes::new(text.into_bytes()))
+  }
+}
+
+/// Reads a recovery key (e2ee.md §6.5.1): a typo or another format is `RecoveryKeyInvalid`.
+pub fn parse_recovery_key(text: &str) -> Result<RecoveryKey, CoreError> {
+  Ok(RecoveryKey::parse(text)?)
+}
+
 /// What a recovering device received from the combining admin.
 pub struct OrgRecoveryUnlock {
   /// The one-time key whose public part the admins sealed to.

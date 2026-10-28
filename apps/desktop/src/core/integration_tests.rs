@@ -11,7 +11,9 @@ use std::time::Duration;
 
 use teamcraft_client_api::model::ConversationKind;
 use teamcraft_client_api::oidc_login::LoginRequest;
-use teamcraft_client_api::remote::{ChatAction, ChatSnapshot, CoreStatus, EnrollRequest, LinkStatus};
+use teamcraft_client_api::remote::{
+  ChatAction, ChatSnapshot, CoreStatus, EnrollRequest, EnrollSecret, LinkStatus,
+};
 use teamcraft_client_api::sign_in_look::SignInLook;
 use teamcraft_crypto::backup::Argon2Settings;
 use teamcraft_proto::{ConversationId, GetMeResponse, SpaceId, UserId};
@@ -350,9 +352,10 @@ async fn the_recovery_passphrase_can_be_changed_and_the_new_one_recovers() {
   let second = second_device(&first, &config);
   let wrong = second
     .enroll(EnrollRequest {
-      passphrase: PASSPHRASE.to_owned(),
+      secret: EnrollSecret::Passphrase {
+        passphrase: PASSPHRASE.to_owned(),
+      },
       device_name: "Laptop".into(),
-      is_guest: false,
     })
     .await;
   assert!(
@@ -361,9 +364,10 @@ async fn the_recovery_passphrase_can_be_changed_and_the_new_one_recovers() {
   );
   second
     .enroll(EnrollRequest {
-      passphrase: NEW_PASSPHRASE.to_owned(),
+      secret: EnrollSecret::Passphrase {
+        passphrase: NEW_PASSPHRASE.to_owned(),
+      },
       device_name: "Laptop".into(),
-      is_guest: false,
     })
     .await
     .expect("the new passphrase recovers the keys");
@@ -394,9 +398,10 @@ pub(super) async fn enroll(person: &Person) {
     other => panic!("{} should need enrollment, got {other:?}", person.name),
   }
   let request = EnrollRequest {
-    passphrase: PASSPHRASE.into(),
+    secret: EnrollSecret::Passphrase {
+      passphrase: PASSPHRASE.into(),
+    },
     device_name: format!("{} e2e", person.name),
-    is_guest: false,
   };
   person.runtime.enroll(request).await.expect("enroll");
   assert!(matches!(person.runtime.status().await, CoreStatus::Ready { .. }));

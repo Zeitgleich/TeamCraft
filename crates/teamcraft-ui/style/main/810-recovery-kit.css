@@ -1,0 +1,65 @@
+/* Making and opening a recovery kit (e2ee.md §6.5): the key in large groups, its buttons, and
+   the check of one group. Shared by the first sign-in and Settings > Security & privacy. */
+.kit-setup {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  margin: var(--space-2) 0;
+}
+
+.kit-setup p {
+  margin: 0;
+}
+
+/* The key: monospace groups that wrap as whole groups on a phone. */
+.kit-key {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2) var(--space-4);
+  padding: var(--space-4);
+  border-radius: var(--radius-lg);
+  background: var(--surface-2);
+  font: 600 var(--text-xl) var(--font-mono);
+  letter-spacing: 0.06em;
+  user-select: all;
+}
+
+.kit-group {
+  white-space: nowrap;
+}
+
+.kit-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  align-items: center;
+}
+
+.kit-actions .btn {
+  display: inline-flex;
+  gap: 6px;
+  align-items: center;
+}
+
+.kit-group-input {
+  max-width: 10ch;
+  font-family: var(--font-mono);
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+/* Desktop: this computer kept the account's backup key in its keychain. */
+.kit-device-restore {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  align-items: flex-start;
+  margin: var(--space-3) 0;
+  padding: var(--space-3);
+  border-radius: var(--radius-md);
+  background: var(--surface-2);
+}
+
+.kit-device-restore p {
+  margin: 0;
+}

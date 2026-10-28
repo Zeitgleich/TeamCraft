@@ -93,6 +93,7 @@ pub mod profile_views;
 pub mod quick_switcher;
 pub mod rail;
 pub mod rail_menus;
+pub mod recovery_kit_setup;
 pub mod rich_text;
 pub mod roster_banner;
 pub mod search_view;

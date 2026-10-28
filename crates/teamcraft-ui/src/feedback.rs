@@ -163,6 +163,7 @@ pub fn failure_message_key(failure: &ActionFailure) -> &'static str {
       ErrorCode::Unavailable | ErrorCode::Internal => "error-server-trouble",
       ErrorCode::Conflict | ErrorCode::EpochConflict | ErrorCode::VersionConflict => "error-conflict",
       ErrorCode::GuestDmNotAllowed => "error-guest-dm-not-allowed",
+      ErrorCode::RecoveryPassphraseNotAllowed => "error-recovery-passphrase-not-allowed",
       ErrorCode::LastOwner => "admin-error-last-owner",
       ErrorCode::CannotDeleteSelf => "admin-error-cannot-delete-self",
       ErrorCode::LastAdmin => "admin-error-last-admin",

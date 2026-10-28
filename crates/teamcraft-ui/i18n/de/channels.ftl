@@ -293,6 +293,7 @@ spaces-browse-invite-only-hint = Spaces, die nur auf Einladung offen sind, ersch
 error-admin-join-request-gone = Diese Anfrage ist nicht mehr offen: Sie wurde auf einem anderen Gerät oder von einem anderen Eigentümer entschieden, zurückgezogen oder ist abgelaufen.
 error-admin-join-request-too-soon = Du hast kürzlich angefragt, diesem Kanal beizutreten, und die Anfrage wurde abgelehnt oder zurückgezogen. Du kannst erneut anfragen, sobald sie abgelaufen wäre.
 error-guest-dm-not-allowed = Gäste können nicht von sich aus Unterhaltungen beginnen. Du kannst antworten, sobald dir jemand zuerst schreibt.
+error-recovery-passphrase-not-allowed = Deine Organisation erlaubt nur Wiederherstellungs-Kits, keine Passphrasen. Erstelle stattdessen ein Wiederherstellungs-Kit.
 
 ## Settings: sections, search and rows (#327)
 # Dateien-Ansicht und Einrichtungs-Checkliste (Issue #301)

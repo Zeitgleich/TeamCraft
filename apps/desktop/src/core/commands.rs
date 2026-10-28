@@ -594,6 +594,7 @@ mod tests {
       CoreStatus::NeedsEnrollment {
         has_existing_identity: false,
         was_data_lost: false,
+        can_restore_on_device: false,
       }
     );
     assert!(

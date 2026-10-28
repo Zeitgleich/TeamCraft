@@ -65,6 +65,9 @@ pub enum CoreError {
   /// (e2ee.md §6.5.8). The message starts with the server's stable code, which the UI localizes.
   #[error("recovery_passphrase_not_allowed: the workspace policy allows only a recovery kit")]
   PassphraseNotAllowed,
+  /// The text is not a recovery key (a typo, another format); never echoes the text.
+  #[error("recovery key: {0}")]
+  RecoveryKeyInvalid(#[from] teamcraft_crypto::recovery_key::RecoveryKeyError),
   /// The two devices speak different versions of the device-linking protocol (e2ee.md §5).
   #[error("the other device uses device linking version {theirs}, this one {ours}; update both apps")]
   LinkVersionMismatch { ours: u32, theirs: u32 },
