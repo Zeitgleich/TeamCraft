@@ -220,7 +220,7 @@ fn PersonRow(user: User) -> impl IntoView {
           {no_devices.then(|| view! { <span class="page-row-detail">{move || i18n.t("directory-no-devices")}</span> })}
         </span>
         <crate::components::profile_views::InMeetingBadge user=id />
-        {user.is_guest.then(|| view! { <span class="badge badge-guest">{move || i18n.t("badge-guest")}</span> })}
+        {(user.is_guest && state.shows_guest_markers()).then(|| view! { <span class="badge badge-guest">{move || i18n.t("badge-guest")}</span> })}
         <crate::components::org_badge::OrgBadge organization=user.maybe_organization.clone() />
       </button>
       {(!is_me).then(|| view! {

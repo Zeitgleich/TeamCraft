@@ -476,9 +476,10 @@ fn ChannelHeader(
       .filter(|topic| !topic.is_empty())
   };
   let has_external = move || {
-    info
-      .get()
-      .is_some_and(|conv| state.read(|backend| has_external_members(backend, &conv)))
+    state.shows_guest_markers()
+      && info
+        .get()
+        .is_some_and(|conv| state.read(|backend| has_external_members(backend, &conv)))
   };
   // Jump to date: the picked day is searched in the feed; unloaded parts load while we wait.
   let jump_target = RwSignal::new(None::<i64>);

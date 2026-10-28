@@ -242,7 +242,7 @@ pub fn PeoplePicker(
               <Avatar user=user.clone() size=AvatarSize::Small show_presence=true />
               <span class="person-name" translate="no">{user.display_name.clone()}</span>
               {(!user.username.is_empty()).then(|| view! { <span class="muted-text person-handle" translate="no">{format!("@{}", user.username)}</span> })}
-              {user.is_guest.then(|| view! { <span class="badge badge-guest">{move || i18n.t("badge-guest")}</span> })}
+              {(user.is_guest && state.shows_guest_markers()).then(|| view! { <span class="badge badge-guest">{move || i18n.t("badge-guest")}</span> })}
               {(user.device_setup == DeviceSetup::NoDevices).then(|| view! { <span class="muted-text">{move || i18n.t("directory-no-devices")}</span> })}
               {is_already_in.then(|| view! { <span class="muted-text person-note">{move || i18n.t(already_in_key)}</span> })}
               <span class="person-check" aria-hidden="true">{is_checked.then(|| view! { <Icon name=IconName::Check /> })}</span>

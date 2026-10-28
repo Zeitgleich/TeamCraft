@@ -79,7 +79,7 @@ pub fn MembersPanel(conversation: ConversationId) -> impl IntoView {
                   </span>
                 </button>
                 <crate::components::profile_views::InMeetingBadge user=id />
-                {move || user.with(|user| user.is_guest).then(|| view! { <span class="badge badge-guest">{move || i18n.t("badge-guest")}</span> })}
+                {move || (state.shows_guest_markers() && user.with(|user| user.is_guest)).then(|| view! { <span class="badge badge-guest">{move || i18n.t("badge-guest")}</span> })}
                 {move || view! { <OrgBadge organization=user.with(|user| user.maybe_organization.clone()) /> }}
                 {move || {
                   user
