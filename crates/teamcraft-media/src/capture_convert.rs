@@ -118,18 +118,35 @@ fn nv12(data: &[u8], stride: usize, rows: usize, width: usize, height: usize, ou
   }
 }
 
+/// Packed 4:2:2 → I420. Whole rows through fixed-size chunks, so the compiler vectorizes it: macOS
+/// cameras deliver this, at 4K too (#537).
 fn yuyv(data: &[u8], stride: usize, width: usize, height: usize, out: &mut Vec<u8>) {
-  for row in 0..height {
-    out.extend(data[row * stride..][..width * 2].iter().step_by(2));
+  let start = out.len();
+  let (luma, chroma) = (width * height, width / 2 * (height / 2));
+  out.resize(start + luma + 2 * chroma, 0);
+  let (y, uv) = out[start..].split_at_mut(luma);
+  let (u, v) = uv.split_at_mut(chroma);
+  let row_of = |row: usize| &data[row * stride..][..width * 2];
+  for (row, y_row) in y.chunks_exact_mut(width).enumerate() {
+    for (value, pair) in y_row.iter_mut().zip(row_of(row).as_chunks::<2>().0) {
+      *value = pair[0];
+    }
   }
   // 4:2:2 → 4:2:0: average the chroma of two rows.
-  for offset in [1, 3] {
-    for row in (0..height).step_by(2) {
-      let (top, bottom) = (&data[row * stride..], &data[(row + 1) * stride..]);
-      for pair in 0..width / 2 {
-        let index = pair * 4 + offset;
-        out.push((u16::from(top[index]) + u16::from(bottom[index])).div_ceil(2) as u8);
-      }
+  let average = |top: u8, bottom: u8| (u16::from(top) + u16::from(bottom)).div_ceil(2) as u8;
+  for ((row, u_row), v_row) in (0..height)
+    .step_by(2)
+    .zip(u.chunks_exact_mut(width / 2))
+    .zip(v.chunks_exact_mut(width / 2))
+  {
+    let pairs = row_of(row)
+      .as_chunks::<4>()
+      .0
+      .iter()
+      .zip(row_of(row + 1).as_chunks::<4>().0);
+    for ((u, v), (top, bottom)) in u_row.iter_mut().zip(v_row.iter_mut()).zip(pairs) {
+      *u = average(top[1], bottom[1]);
+      *v = average(top[3], bottom[3]);
     }
   }
 }
