@@ -30,7 +30,7 @@ pub fn TopBar() -> impl IntoView {
   let has_history_buttons = tauri::is_available();
 
   view! {
-    <header class="top-bar" class:has-history=has_history_buttons data-window-drag="" on:mousedown=on_drag>
+    <header class="top-bar" data-window-drag="" on:mousedown=on_drag>
       <a
         class="brand"
         href="/home"
@@ -54,8 +54,11 @@ pub fn TopBar() -> impl IntoView {
         <BrandLogo class="brand-logo" fallback=|| () />
         <span class="brand-name">{move || brand.with(|view| view.display_name.clone())}</span>
       </a>
-      {has_history_buttons.then(|| view! { <HistoryButtons /> })}
-      <SearchField />
+      // Back and forward sit left of the search, which stays where it was (#874).
+      <div class="top-nav" class:has-history=has_history_buttons>
+        {has_history_buttons.then(|| view! { <HistoryButtons /> })}
+        <SearchField />
+      </div>
       <div class="top-actions">
         <button
           class="icon-btn on-dark"
@@ -112,7 +115,7 @@ fn HistoryButtons() -> impl IntoView {
         prop:disabled=move || !reach.get().can_go_back()
         on:click=move |_| travel(Travel::Back)
       >
-        <Icon name=IconName::ChevronLeft />
+        <Icon name=IconName::ArrowLeft />
       </button>
       <button
         class="icon-btn on-dark"
@@ -121,7 +124,7 @@ fn HistoryButtons() -> impl IntoView {
         prop:disabled=move || !reach.get().can_go_forward()
         on:click=move |_| travel(Travel::Forward)
       >
-        <Icon name=IconName::ChevronRight />
+        <Icon name=IconName::ArrowRight />
       </button>
     </div>
   }

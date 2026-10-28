@@ -33,20 +33,33 @@
   padding-right: 12px;
 }
 
-/* Back and forward (desktop, #874) get a column of their own between the brand and the search. */
-.top-bar.has-history {
-  grid-template-columns: minmax(var(--rail-w), auto) auto minmax(0, 1fr) auto;
+/* The search and, in the desktop app, back and forward to its left (#874): one centred group in the
+   middle column. */
+.top-nav {
+  grid-column: 2;
+  justify-self: center;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: min(560px, 100%);
+  min-width: 0;
 }
 
-.top-bar.has-history .search-field {
-  grid-column: 3;
+.top-nav.has-history {
+  width: min(632px, 100%);
+}
+
+.top-nav .search-field {
+  flex: 1;
+  width: auto;
+  min-width: 0;
 }
 
 .top-bar .history-buttons {
   display: flex;
+  flex: none;
   align-items: center;
   gap: 2px;
-  margin: 0 8px;
 }
 
 .top-bar .history-buttons .icon-btn:disabled {
