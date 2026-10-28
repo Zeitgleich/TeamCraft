@@ -171,7 +171,6 @@ browse-join-requested = Angefragt
 browse-join-requested-hint = Die Eigentümer des Kanals entscheiden. Die Anfrage läuft ab, wenn niemand entscheidet.
 browse-join-withdraw = Zurückziehen
 browse-leave = Verlassen
-browse-preview = Vorschau
 invite-title = Personen einladen
 invite-role = Einladen als
 invite-role-member = Mitglied: sieht die öffentlichen Kanäle des Space

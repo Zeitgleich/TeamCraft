@@ -163,8 +163,6 @@ pub enum MainView {
   /// The space in [`AppState::space`] with nothing open: its channel list in the compact layout
   /// (the wider layouts open its first channel instead).
   Space,
-  /// A public channel of the space the user hasn't joined: what it is about, and "Join".
-  ChannelPreview(SpaceId, ConversationId),
 }
 
 /// What the right-hand panel shows.
@@ -693,7 +691,6 @@ impl AppState {
       | MainView::Directory => true,
       // Activity's main column is its own; the space's channel comes back.
       MainView::Activity => false,
-      MainView::ChannelPreview(previewed, _) => is_grouped || previewed == space,
       MainView::Admin(_) | MainView::GettingStarted | MainView::Home | MainView::Space => false,
     };
     if self.is_compact() {
@@ -862,8 +859,7 @@ impl AppState {
       | MainView::Directory
       | MainView::GettingStarted
       | MainView::Home
-      | MainView::Space
-      | MainView::ChannelPreview(..) => None,
+      | MainView::Space => None,
     }
   }
 
@@ -1389,15 +1385,6 @@ impl AppState {
     self.overlay.set(Overlay::None);
   }
 
-  /// Shows a public channel the user hasn't joined: its name and topic, and the way to join.
-  pub fn open_channel_preview(&self, space: SpaceId, channel: ConversationId) {
-    self.space.set(space);
-    self.rail.set(RailEntry::Space);
-    self.view.set(MainView::ChannelPreview(space, channel));
-    self.panel.set(SidePanel::Closed);
-    self.overlay.set(Overlay::None);
-  }
-
   pub fn open_directory(&self) {
     self.view.set(MainView::Directory);
     self.panel.set(SidePanel::Closed);
@@ -1560,7 +1547,6 @@ impl AppState {
       MainView::Conversation(id) => self
         .read(|backend| backend.conversation(id))
         .and_then(|conversation| conversation.maybe_space),
-      MainView::ChannelPreview(space, _) => Some(space),
       _ => None,
     };
     match maybe_space {
@@ -1670,8 +1656,6 @@ impl AppState {
       MainView::Directory => Route::People,
       MainView::Home => Route::Home,
       MainView::Space => Route::Space(self.space.get()),
-      // Not joined, so not a channel route yet: a reload lands in the space.
-      MainView::ChannelPreview(space, _) => Route::Space(space),
       MainView::GettingStarted => {
         let space = self.space.get();
         let is_known_space = self.rail.get() == RailEntry::Space
