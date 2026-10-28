@@ -282,6 +282,17 @@ pub fn status_cues(sounds: CallStatusSounds) -> StatusCues {
   }
 }
 
+/// What a screen share that just started shows of its sound: off when the user didn't ask for it,
+/// shared when it is sent, and unavailable when it was asked for but the system or browser gave
+/// none (Safari, Firefox, "share audio" unticked in Chromium's picker) or it couldn't be sent.
+pub fn started_screen_sound(is_asked: bool, is_sent: bool) -> ScreenShareSound {
+  match (is_asked, is_sent) {
+    (false, _) => ScreenShareSound::Off,
+    (true, true) => ScreenShareSound::Shared,
+    (true, false) => ScreenShareSound::Unavailable,
+  }
+}
+
 #[cfg(test)]
 mod tests {
   use teamcraft_client_api::calls::{BackgroundEffect, CallKind, CallRequest};
@@ -291,6 +302,27 @@ mod tests {
 
   use super::*;
   use crate::call_engine::OwnVideoEnd;
+
+  mod started_screen_sound {
+    use super::*;
+
+    #[test]
+    fn sound_not_asked_for_is_off() {
+      assert_eq!(started_screen_sound(false, false), ScreenShareSound::Off);
+    }
+
+    #[test]
+    fn sound_asked_for_and_sent_is_shared() {
+      assert_eq!(started_screen_sound(true, true), ScreenShareSound::Shared);
+    }
+
+    /// Safari and Firefox capture no sound, and Chromium's picker lets the user untick it: the
+    /// picture goes alone, and the user sees why there is no sound.
+    #[test]
+    fn sound_asked_for_but_not_given_is_unavailable() {
+      assert_eq!(started_screen_sound(true, false), ScreenShareSound::Unavailable);
+    }
+  }
 
   mod media_events {
     use super::*;

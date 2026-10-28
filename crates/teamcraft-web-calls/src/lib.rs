@@ -37,7 +37,7 @@ use teamcraft_media::call_engine::{CallEngineConfig, CallEngineEvent};
 use teamcraft_media::call_resilience::{
   JoinTicket, JoinTicketError, ResilienceConfig, certificate_hashes_from_hex,
 };
-use teamcraft_media::call_view::{CallRoster, status_cues};
+use teamcraft_media::call_view::{CallRoster, started_screen_sound, status_cues};
 use teamcraft_media::call_web::{
   self, LocalTicketFuture, MediaAccessReason, MediaInput, MicrophoneMeter, WebCall, WebCallConfig,
   WebCallError, WebJoinTicketSource,
@@ -125,6 +125,8 @@ struct Media {
 }
 
 type Done = oneshot::Sender<Result<(), WebCallError>>;
+/// Answers a screen share: whether its sound is sent.
+type ScreenDone = oneshot::Sender<Result<bool, WebCallError>>;
 
 enum Control {
   Mute(bool),
@@ -142,13 +144,14 @@ enum Control {
   StopCamera,
   Screen {
     mode: ScreenContentMode,
-    done: Done,
+    has_sound: bool,
+    done: ScreenDone,
   },
   /// A screen the user already chose in a picker the page opened in the click (issue #930).
   PickedScreen {
     stream: MediaStream,
     mode: ScreenContentMode,
-    done: Done,
+    done: ScreenDone,
   },
   StopScreen,
   Watch {
@@ -229,13 +232,14 @@ pub async fn video_stats() -> Option<String> {
 
 /// Opens the browser's screen picker at once (`ScreenContentMode` JSON) and returns the promise of
 /// the chosen screen, for [`share_screen`]. The page calls it synchronously in the click handler:
-/// Safari opens the picker only while the click's user activation lasts (issue #930). Throws when
-/// the browser can't open one.
+/// Safari opens the picker only while the click's user activation lasts (issue #930). With
+/// `has_sound` (left out by pages from before #441: no sound) the picker also offers the tab's or
+/// the system's sound. Throws when the browser can't open one.
 #[wasm_bindgen]
-pub fn pick_screen(content_mode: String) -> Result<Promise, JsValue> {
+pub fn pick_screen(content_mode: String, has_sound: Option<bool>) -> Result<Promise, JsValue> {
   let mode: ScreenContentMode = serde_json::from_str(&content_mode)
     .map_err(|error| failure_value(ActionFailure::other(format!("unreadable screen mode: {error}"))))?;
-  call_web::request_screen(mode).map_err(|error| failure_value(failure(error)))
+  call_web::request_screen(mode, has_sound.unwrap_or(false)).map_err(|error| failure_value(failure(error)))
 }
 
 /// Shares the screen chosen in a picker [`pick_screen`] opened (`StartScreenShare` with the
@@ -827,7 +831,9 @@ impl Host {
 
   /// Shares a screen or window: the one chosen in `maybe_picked`, the picker the page opened in the
   /// click (issue #930), or else asks for one now. Closing the browser's picker is not a failure.
-  /// Browsers share no system sound with a call yet, so asked-for sound is reported unavailable.
+  /// Asked-for sound goes along where the browser captured it (the tab's or the system's sound in
+  /// Chromium, #441); where it didn't (Safari, Firefox, "share audio" unticked), the picture goes
+  /// alone and the sound shows as unavailable.
   async fn start_screen_share(
     &self,
     has_sound: bool,
@@ -835,30 +841,68 @@ impl Host {
     maybe_picked: Option<Promise>,
   ) -> Result<(), ActionFailure> {
     let result = match maybe_picked {
-      Some(picked) => self.share_picked_screen(picked, mode).await,
-      None => self.ask_media(|done| Control::Screen { mode, done }).await,
+      Some(picked) => self.share_picked_screen(picked, mode, has_sound).await,
+      None => {
+        self
+          .ask_screen(|done| Control::Screen {
+            mode,
+            has_sound,
+            done,
+          })
+          .await
+      },
     };
-    match result {
-      Ok(()) => {},
+    let is_sound_sent = match result {
+      Ok(Some(is_sound_sent)) => is_sound_sent,
+      // The call ended meanwhile.
+      Ok(None) => return Ok(()),
       Err(error) if error.is_screen_picker_closed() => return Ok(()),
       Err(error) => return Err(failure(error)),
-    }
+    };
     self.update_active(|active| {
       active.is_sharing_screen = true;
-      active.screen_sound = if has_sound {
-        ScreenShareSound::Unavailable
-      } else {
-        ScreenShareSound::Off
-      };
+      active.screen_sound = started_screen_sound(has_sound, is_sound_sent);
     });
     Ok(())
   }
 
+  /// Sends a screen control to the call task and waits for whether the share's sound is sent;
+  /// `None` without a call.
+  async fn ask_screen(
+    &self,
+    control: impl FnOnce(ScreenDone) -> Control,
+  ) -> Result<Option<bool>, WebCallError> {
+    let (done, answer) = oneshot::channel();
+    let is_sent = self
+      .maybe_media
+      .borrow()
+      .as_ref()
+      .is_some_and(|media| media.controls.unbounded_send(control(done)).is_ok());
+    if !is_sent {
+      return Ok(None);
+    }
+    // No answer: the call ended meanwhile.
+    answer.await.map_or(Ok(None), |result| result.map(Some))
+  }
+
   /// Waits for the user's choice in a picker the page opened and sends that screen. The stream is
   /// this module's from here: when the call ended meanwhile or the share fails, it stops, so the
-  /// browser doesn't keep capturing (and showing that it does).
-  async fn share_picked_screen(&self, picked: Promise, mode: ScreenContentMode) -> Result<(), WebCallError> {
+  /// browser doesn't keep capturing (and showing that it does). Sound the user didn't ask for is
+  /// not sent.
+  async fn share_picked_screen(
+    &self,
+    picked: Promise,
+    mode: ScreenContentMode,
+    has_sound: bool,
+  ) -> Result<Option<bool>, WebCallError> {
     let stream = call_web::picked_screen(picked).await?;
+    if !has_sound {
+      for track in stream.get_audio_tracks().iter() {
+        let track: MediaStreamTrack = track.unchecked_into();
+        stream.remove_track(&track);
+        track.stop();
+      }
+    }
     let (done, answer) = oneshot::channel();
     let sent = stream.clone();
     let is_sent = self.maybe_media.borrow().as_ref().is_some_and(|media| {
@@ -881,10 +925,10 @@ impl Host {
       Err(WebCallError::Ended)
     };
     match result {
-      Ok(()) => Ok(()),
+      Ok(is_sound_sent) => Ok(Some(is_sound_sent)),
       Err(WebCallError::Ended) => {
         stop_tracks(&stream);
-        Ok(())
+        Ok(None)
       },
       Err(error) => {
         stop_tracks(&stream);
@@ -1074,7 +1118,11 @@ async fn apply(call: &WebCall, control: Control) {
     Control::Audio { source, sink, done } => drop(done.send(call.set_audio(source, sink).await)),
     Control::Camera { stream, done } => drop(done.send(call.share_camera_stream(stream).await)),
     Control::StopCamera => call.stop_camera(),
-    Control::Screen { mode, done } => drop(done.send(call.start_screen_share(mode).await)),
+    Control::Screen {
+      mode,
+      has_sound,
+      done,
+    } => drop(done.send(call.start_screen_share(mode, has_sound).await)),
     Control::PickedScreen { stream, mode, done } => {
       drop(done.send(call.share_screen_stream(stream, mode).await))
     },

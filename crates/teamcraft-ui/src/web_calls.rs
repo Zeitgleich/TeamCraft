@@ -183,11 +183,15 @@ pub fn camera_view() -> Option<Element> {
 /// [`WebCallHost::share_screen`]. Call it synchronously in the click handler: Safari opens the
 /// picker only while the click's user activation lasts, which the action queue outlasts (issue
 /// #930). `None` without a running call module, or when the browser can't open a picker; the share
-/// then goes the usual way, which says why it failed.
-pub fn pick_screen(mode: ScreenContentMode) -> Option<Promise> {
+/// then goes the usual way, which says why it failed. With `has_sound` the picker also offers the
+/// tab's or the system's sound (#441).
+pub fn pick_screen(mode: ScreenContentMode, has_sound: bool) -> Option<Promise> {
   let module = current()?.loaded_module()?;
   module
-    .call_sync(EXPORT_PICK_SCREEN, &[json_value(&mode)])
+    .call_sync(
+      EXPORT_PICK_SCREEN,
+      &[json_value(&mode), JsValue::from_bool(has_sound)],
+    )
     .and_then(|picked| picked.dyn_into().ok())
 }
 
