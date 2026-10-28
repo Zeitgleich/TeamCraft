@@ -12,6 +12,7 @@ use teamcraft_client_api::sign_in_page::SignInPage;
 use teamcraft_proto::{GetMeResponse, SignInMethod};
 use wasm_bindgen::JsCast;
 
+use crate::areas::{self, Place, lazy_area};
 use crate::auth::SignInLook;
 use crate::auth::tauri::{self, ServerCheck, ServerProblem};
 use crate::auth::{self, AppConfig};
@@ -82,16 +83,10 @@ pub fn SessionGate(settings: Settings) -> impl IntoView {
       SessionState::SigningIn => view! { <SigningInScreen control=control /> }.into_any(),
       SessionState::OpeningCore => view! { <OpeningCoreScreen control=control /> }.into_any(),
       SessionState::NeedsEnrollment { me, has_existing_identity, was_data_lost, can_restore_on_device } => {
-        view! {
-          <EnrollScreen
-            name=me.display_name
-            has_existing_identity=has_existing_identity
-            was_data_lost=was_data_lost
-            can_restore_on_device=can_restore_on_device
-            control=control
-          />
-        }
-        .into_any()
+        let name = me.display_name;
+        lazy_area(Place::Screen, move || {
+          areas::enroll_screen(name.clone(), has_existing_identity, was_data_lost, can_restore_on_device, control)
+        })
       },
       SessionState::NeedsDeviceSetup(me) => view! { <WelcomeScreen name=me.display_name control=control /> }.into_any(),
       // A browser tab shows the app only while it is the account's active tab (#744).
@@ -1277,7 +1272,7 @@ fn DataGate(me: GetMeResponse, settings: Settings, control: SessionControl) -> i
 /// (e2ee.md §6.5.4); an account that has keys unlocks them with the kit (or a legacy passphrase),
 /// with the key this computer kept in its keychain, or by linking from another device (§6.5.5).
 #[component]
-fn EnrollScreen(
+pub(crate) fn EnrollScreen(
   name: String,
   has_existing_identity: bool,
   was_data_lost: bool,
