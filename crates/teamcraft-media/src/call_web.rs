@@ -76,6 +76,7 @@ use crate::call_auth::CallKeyAuthenticator;
 use crate::call_cues::{CallCue, CuePlayer, StatusCues};
 use crate::call_engine::{
   AudioOrigin, CallEngine, CallEngineConfig, CallEngineError, CallEngineEvent, CallStats, EngineOutput,
+  OwnVideoEnd,
 };
 use crate::call_resilience::{
   Jitter, JoinTicket, JoinTicketError, ReconnectSchedule, ResilienceConfig, rejoin_attempt,
@@ -722,6 +723,7 @@ async fn run_call(
     stats: CallStats::default(),
     own_device: config.engine.device_id,
     senders: Vec::new(),
+    encoded_kinds: Vec::new(),
     views: HashMap::new(),
   };
   let _frame_timer = Interval::start(FRAME_INTERVAL_MS, &inputs, || Input::FrameTick)?;
@@ -803,6 +805,8 @@ struct CallState<'a> {
   stats: CallStats,
   own_device: DeviceId,
   senders: Vec<TrackSender>,
+  /// Kinds whose running own track encoded a picture: one that ends before did not start.
+  encoded_kinds: Vec<VideoTrackKind>,
   views: HashMap<MediaStreamId, VideoView>,
 }
 
@@ -906,7 +910,7 @@ impl CallState<'_> {
         is_keyframe,
         timestamp_us,
       } => self.send_video_frame(engine, &kind, layer, data, is_keyframe, timestamp_us),
-      Input::VideoEnded(kind) => self.stop_video(engine, &kind),
+      Input::VideoEnded(kind) => self.end_video(engine, &kind),
       Input::VideoDecodeFailed { stream_id, message } => {
         warn!(%message, stream_id = stream_id.0, "video decoder failed; waiting for a keyframe");
         if let Some(view) = self.views.get_mut(&stream_id) {
@@ -1299,6 +1303,7 @@ impl CallState<'_> {
   }
 
   fn stop_video(&mut self, engine: &mut CallEngine, kind: &VideoTrackKind) {
+    self.encoded_kinds.retain(|encoded| encoded != kind);
     let (stopped, kept): (Vec<_>, Vec<_>) = std::mem::take(&mut self.senders)
       .into_iter()
       .partition(|sender| sender.kind == *kind);
@@ -1309,6 +1314,27 @@ impl CallState<'_> {
       }
       sender.stop();
     }
+  }
+
+  /// An own track ended by itself (the browser ended its capture: "Stop sharing" in its bar, an
+  /// unplugged camera, a revoked permission): it stops, and the app hears about it, so the UI
+  /// doesn't show the camera or share on any more (issue #920).
+  fn end_video(&mut self, engine: &mut CallEngine, kind: &VideoTrackKind) {
+    if !self.senders.iter().any(|sender| sender.kind == *kind) {
+      // Stopped already: nothing ended by itself.
+      return;
+    }
+    let end = if self.encoded_kinds.contains(kind) {
+      OwnVideoEnd::WhileSending
+    } else {
+      OwnVideoEnd::BeforeFirstPicture
+    };
+    self.stop_video(engine, kind);
+    // The app may have stopped listening; the call goes on.
+    let _ = self.events.unbounded_send(CallEngineEvent::OwnVideoEnded {
+      kind: kind.clone(),
+      end,
+    });
   }
 
   fn sender_of(&mut self, stream_id: MediaStreamId) -> Option<&mut TrackSender> {
@@ -1327,6 +1353,10 @@ impl CallState<'_> {
     is_keyframe: bool,
     timestamp_us: f64,
   ) {
+    let has_sender = self.senders.iter().any(|sender| sender.kind == *kind);
+    if has_sender && !self.encoded_kinds.contains(kind) {
+      self.encoded_kinds.push(kind.clone());
+    }
     let Some(stream_id) = self
       .senders
       .iter()

@@ -39,7 +39,7 @@ use teamcraft_media::audio_io::{AudioDeviceChoice, AudioDeviceId, AudioDeviceInf
 use teamcraft_media::audio_processing::AudioProcessingConfig;
 use teamcraft_media::bwe::BweConfig;
 use teamcraft_media::call_auth::{CallBindingSigner, DeviceCallKeyAuthenticator};
-use teamcraft_media::call_engine::{CallEngineConfig, CallEngineEvent};
+use teamcraft_media::call_engine::{CallEngineConfig, CallEngineEvent, OwnVideoEnd};
 use teamcraft_media::call_native::{
   JoinTicketSource, NativeCall, NativeCallConfig, NativeCallError, TicketFuture,
 };
@@ -599,19 +599,31 @@ impl CallHost {
   /// stood in), restarts nothing.
   pub async fn select_camera(&self, maybe_device: Option<String>) -> Result<(), String> {
     let maybe_device = maybe_device.filter(|id| !id.is_empty());
-    {
+    let previous = {
       let mut state = lock(&self.state);
       if state.maybe_camera == maybe_device {
         return Ok(());
       }
       let is_in_use = maybe_device.is_some() && state.maybe_camera_in_use == maybe_device;
-      state.maybe_camera = maybe_device;
+      let previous = (
+        std::mem::replace(&mut state.maybe_camera, maybe_device),
+        state.maybe_camera_in_use.clone(),
+      );
       if is_in_use {
         return Ok(());
       }
-    }
-    if self.is_camera_on() {
-      self.set_camera(true).await?;
+      previous
+    };
+    if self.is_camera_on()
+      && let Err(error) = self.set_camera(true).await
+    {
+      // The call keeps the running camera when the new one doesn't start (issue #920): the
+      // choice shows the camera that still sends, and the error says why the switch failed.
+      if self.is_camera_on() {
+        let mut state = lock(&self.state);
+        (state.maybe_camera, state.maybe_camera_in_use) = previous;
+      }
+      return Err(error);
     }
     self.restart_preview_camera().await
   }
@@ -1059,15 +1071,14 @@ async fn run_media(
   mut controls: mpsc::UnboundedReceiver<Control>,
   shared: MediaShared,
 ) {
+  let mut roster = CallRoster::new(shared.own_device);
+  let mut video_starts = VideoStarts::default();
   let MediaShared {
-    own_device,
     state,
     notify,
     report_failure,
-    video_sinks,
-  } = shared;
-  let mut roster = CallRoster::new(own_device);
-  let mut video_starts = VideoStarts::default();
+    ..
+  } = &shared;
   let (failed, mut failed_rx) = mpsc::unbounded_channel::<VideoStartFailure>();
   let (black, mut black_rx) = mpsc::unbounded_channel::<VideoBlack>();
   loop {
@@ -1082,13 +1093,19 @@ async fn run_media(
         },
         Some(Control::StartVideo(config, done)) => {
           let kind = config.kind.clone();
-          let result = match call.start_video_checked(config).await {
+          let started = call.start_video_checked(config).await;
+          // What the call said before its answer comes first: the end of a track it replaced
+          // must not end its successor.
+          while let Some(event) = call.try_next_event() {
+            on_event(event, &mut roster, &mut video_starts, &shared);
+          }
+          let result = match started {
             Ok(mut first_picture) => {
               // The answer doesn't wait for the first picture (up to seconds): other call actions
               // queue behind this one. The check reports later (`failed_rx`), and so does a track
               // that then shows nothing but black (`black_rx`, issue #683).
               let start = video_starts.started(&kind);
-              set_video_flag(&state, &kind, true);
+              set_video_flag(state, &kind, true);
               let (failed, black) = (failed.clone(), black.clone());
               let maybe_black_pictures = first_picture.take_black_pictures();
               tokio::spawn(async move {
@@ -1148,7 +1165,7 @@ async fn run_media(
         if kind == VideoTrackKind::Screen {
           call.stop_screen_audio();
         }
-        set_video_flag(&state, &kind, false);
+        set_video_flag(state, &kind, false);
         report_failure(video::start_failure_wire(&kind, &NativeCallError::from(failure.error)));
         notify();
       },
@@ -1161,19 +1178,7 @@ async fn run_media(
         }
       },
       maybe_event = call.next_event() => match maybe_event {
-        Some(CallEngineEvent::VideoFrame(frame)) => {
-          let maybe_sink = lock(&video_sinks)
-            .get(&frame.stream_id)
-            .map(|watched| Arc::clone(&watched.sink));
-          if let Some(sink) = maybe_sink {
-            sink(&frame);
-          }
-        },
-        Some(event) => {
-          if roster.apply(&mut lock(&state).view, event) {
-            notify();
-          }
-        },
+        Some(event) => on_event(event, &mut roster, &mut video_starts, &shared),
         // The call ended on its own (the SFU closed it or the network failed).
         None => break,
       },
@@ -1189,13 +1194,53 @@ async fn run_media(
     ),
     Err(NativeCallError::ConnectionLost) => {
       tracing::warn!("the connection to the call was lost");
-      lock(&state).view.maybe_end_reason = Some(CallEndReason::ConnectionLost);
+      lock(state).view.maybe_end_reason = Some(CallEndReason::ConnectionLost);
     },
     Err(error) => tracing::warn!(%error, "call ended with an error"),
   }
-  lock(&state).view.end_active();
-  lock(&video_sinks).clear();
+  lock(state).view.end_active();
+  lock(&shared.video_sinks).clear();
   notify();
+}
+
+/// One event of the call: video frames go to their sinks, the rest to the UI's view. An own track
+/// that ended by itself was stopped by the call already; it no longer counts as running, and a
+/// camera that went away mid-call tells the user why it is off (issue #920).
+fn on_event(
+  event: CallEngineEvent,
+  roster: &mut CallRoster,
+  video_starts: &mut VideoStarts,
+  shared: &MediaShared,
+) {
+  match &event {
+    CallEngineEvent::VideoFrame(frame) => {
+      let maybe_sink = lock(&shared.video_sinks)
+        .get(&frame.stream_id)
+        .map(|watched| Arc::clone(&watched.sink));
+      if let Some(sink) = maybe_sink {
+        sink(frame);
+      }
+      return;
+    },
+    // Before its first picture: the start's own check says why (`failed_rx`).
+    CallEngineEvent::OwnVideoEnded {
+      end: OwnVideoEnd::BeforeFirstPicture,
+      ..
+    } => {},
+    CallEngineEvent::OwnVideoEnded { kind, .. } if video_starts.is_running(kind) => {
+      tracing::warn!(?kind, "own video ended by itself; turning it off");
+      video_starts.stopped(kind);
+      set_video_flag(&shared.state, kind, false);
+      // A share ended from the system's indicator was the user's choice; a camera wasn't.
+      if *kind == VideoTrackKind::Camera {
+        (shared.report_failure)(video::camera_stopped_wire());
+      }
+    },
+    _ => {},
+  }
+  if roster.apply(&mut lock(&shared.state).view, event) {
+    (shared.notify)();
+  }
 }
 
 /// Which start of each own track kind is the current one, so that the first-picture check of a
@@ -1480,6 +1525,7 @@ mod tests {
   /// The media task in a real call against a local SFU: what the UI's action queue waits for.
   mod media_task {
     use std::net::{Ipv6Addr, SocketAddr};
+    use std::sync::atomic::{AtomicBool, Ordering};
     use std::time::Duration;
 
     use teamcraft_client_api::calls::{CallKind, CallRequest};
@@ -1603,6 +1649,60 @@ mod tests {
       tokio::time::timeout(PROMPT, media.task).await.unwrap().unwrap();
     }
 
+    /// Issue #920: a camera that goes away mid-call (unplugged, taken by the system) shows as off
+    /// and says why.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_camera_that_stops_while_sending_turns_off_and_says_so() {
+      let mut media = start_media().await;
+      let (camera, _) = GreyCapture::new(Keeps::OneFrame);
+      let answer = start_video(&media, VideoTrackKind::Camera, Box::new(camera));
+      assert_eq!(
+        tokio::time::timeout(PROMPT, answer).await.unwrap().unwrap(),
+        Ok(())
+      );
+      let reported = tokio::time::timeout(PROMPT, media.reported.recv())
+        .await
+        .unwrap()
+        .unwrap();
+      assert_eq!(
+        ActionFailure::from_wire(&reported).kind,
+        FailureKind::Call(CallFailure::CameraStopped)
+      );
+      assert!(!media.flags().0, "the camera shows as off");
+      media.controls.send(Control::Leave).unwrap();
+      tokio::time::timeout(PROMPT, media.task).await.unwrap().unwrap();
+      assert!(media.reported.try_recv().is_err(), "said once");
+    }
+
+    /// Issue #920: a camera switch whose new camera doesn't open keeps the running camera, as the
+    /// UI still shows it.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_failed_camera_switch_keeps_the_running_camera() {
+      let mut media = start_media().await;
+      let (camera, stopped) = GreyCapture::new(Keeps::Running);
+      let answer = start_video(&media, VideoTrackKind::Camera, Box::new(camera));
+      assert_eq!(
+        tokio::time::timeout(PROMPT, answer).await.unwrap().unwrap(),
+        Ok(())
+      );
+      let switch = start_video(&media, VideoTrackKind::Camera, Box::new(BusyCapture));
+      let error = tokio::time::timeout(PROMPT, switch)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap_err();
+      assert_eq!(
+        ActionFailure::from_wire(&error).kind,
+        FailureKind::Call(CallFailure::CameraInUse)
+      );
+      assert!(!stopped.load(Ordering::SeqCst), "the running camera goes on");
+      assert!(media.flags().0, "and shows as on");
+      media.controls.send(Control::Leave).unwrap();
+      tokio::time::timeout(PROMPT, media.task).await.unwrap().unwrap();
+      assert!(media.reported.try_recv().is_err(), "nothing else failed");
+      assert!(stopped.load(Ordering::SeqCst), "leaving stops it");
+    }
+
     /// A running media task and what it shares.
     struct Media {
       controls: mpsc::UnboundedSender<Control>,
@@ -1635,6 +1735,73 @@ mod tests {
       fn start(&mut self, frames: FrameSender) -> Result<(), CaptureError> {
         drop(frames);
         Ok(())
+      }
+
+      fn stop(&mut self) {}
+    }
+
+    /// What a [`GreyCapture`] does after its first picture.
+    #[derive(Clone, Copy)]
+    enum Keeps {
+      /// The capture ends after it, like a camera that is unplugged.
+      OneFrame,
+      /// It stands still and stays open until stopped.
+      Running,
+    }
+
+    /// A camera that shows one grey picture.
+    struct GreyCapture {
+      keeps: Keeps,
+      maybe_frames: Option<FrameSender>,
+      stopped: Arc<AtomicBool>,
+    }
+
+    impl GreyCapture {
+      /// The capture and whether it was stopped.
+      fn new(keeps: Keeps) -> (Self, Arc<AtomicBool>) {
+        let stopped = Arc::new(AtomicBool::new(false));
+        let capture = Self {
+          keeps,
+          maybe_frames: None,
+          stopped: Arc::clone(&stopped),
+        };
+        (capture, stopped)
+      }
+    }
+
+    impl VideoCapture for GreyCapture {
+      fn format(&self) -> CaptureFormat {
+        FORMAT
+      }
+
+      fn start(&mut self, frames: FrameSender) -> Result<(), CaptureError> {
+        let resolution = FORMAT.resolution;
+        let pixels = usize::from(resolution.width) * usize::from(resolution.height);
+        let data = vec![128; pixels * 3 / 2];
+        frames.send(teamcraft_media::video::VideoFrame::new(resolution, 0, data).unwrap());
+        // Ending drops the queue: the encoder takes the queued picture, then ends the track.
+        if matches!(self.keeps, Keeps::Running) {
+          self.maybe_frames = Some(frames);
+        }
+        Ok(())
+      }
+
+      fn stop(&mut self) {
+        self.maybe_frames = None;
+        self.stopped.store(true, Ordering::SeqCst);
+      }
+    }
+
+    /// A camera another app holds.
+    struct BusyCapture;
+
+    impl VideoCapture for BusyCapture {
+      fn format(&self) -> CaptureFormat {
+        FORMAT
+      }
+
+      fn start(&mut self, _frames: FrameSender) -> Result<(), CaptureError> {
+        Err(CaptureError::InUse("held by another app".into()))
       }
 
       fn stop(&mut self) {}

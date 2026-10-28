@@ -48,7 +48,7 @@ use crate::call_auth::{CallKeyAuthenticator, DeviceCallKeyAuthenticator};
 use crate::call_cues::{CallCue, CuePlayer, StatusCues};
 use crate::call_engine::{
   AudioOrigin, CallEngine, CallEngineConfig, CallEngineError, CallEngineEvent, CallStats, EngineOutput,
-  VideoSendOutcome, VideoStats,
+  OwnVideoEnd, VideoSendOutcome, VideoStats,
 };
 use crate::call_resilience::{
   JoinTicket, JoinTicketError, PathMonitor, PathState, ReconnectSchedule, ResilienceConfig, rejoin_attempt,
@@ -467,6 +467,13 @@ impl NativeCall {
     self.events.recv().await
   }
 
+  /// An event that is already there, without waiting. Events the call sent before it answered a
+  /// command are there once the answer is: [`OwnVideoEnded`](CallEngineEvent::OwnVideoEnded) of
+  /// the track a [`NativeCall::start_video`] replaced comes before the new track's answer.
+  pub fn try_next_event(&mut self) -> Option<CallEngineEvent> {
+    self.events.try_recv().ok()
+  }
+
   /// Leaves the call and returns its statistics.
   pub async fn leave(self) -> Result<CallStats, NativeCallError> {
     let _ = self.commands.send(Command::Leave);
@@ -616,14 +623,17 @@ async fn run_call(
           break Err(NativeCallError::ConnectionLost);
         }
         connection.watch_path(&mut engine, now);
-        // A capture the system ended (the share stopped from the OS indicator or menu bar) ends
-        // its track, and a screen share takes the computer's sound with it: nothing keeps sending
-        // after the user saw the share end.
-        for kind in sinks.video.ended_kinds() {
+        // A capture the system ended (the share stopped from the OS indicator or menu bar, a
+        // camera unplugged) ends its track, and a screen share takes the computer's sound with
+        // it: nothing keeps sending after the user saw the share end. The app hears about it, so
+        // the UI doesn't show the camera or share on any more.
+        for (kind, end) in sinks.video.ended_kinds() {
           sinks.video.stop(&mut engine, &kind);
           if kind == VideoTrackKind::Screen {
             stop_screen_audio(&mut engine, &mut maybe_screen_audio);
           }
+          // The app may have stopped listening; the call goes on.
+          let _ = sinks.events.send(CallEngineEvent::OwnVideoEnded { kind, end });
         }
         // The SFU stopped our screen sound (a host's "mute all"): stop capturing it too.
         if maybe_screen_audio.is_some() && !engine.is_sharing_screen_audio() {
@@ -1166,15 +1176,17 @@ fn handle_video(
 ) {
   match command {
     VideoCommand::Start(config, done) => {
-      video.stop(engine, &config.kind);
       let kind = config.kind.clone();
+      // The running track of the kind stops only once its successor started: a camera that
+      // can't be opened (busy, refused) leaves the running one sending, as the UI shows it.
       let result = VideoSender::start(config, encoded.clone())
         .map(|(sender, first_picture)| {
+          video.stop(engine, &kind);
           engine.publish_video(sender.kind.clone(), VideoCodec::H264, sender.layers.clone());
           video.senders.push((sender, None));
           first_picture
         })
-        .inspect_err(|error| warn!(%error, ?kind, "video capture not started"));
+        .inspect_err(|error| warn!(%error, ?kind, "video capture not started; the running one goes on"));
       // The caller may have given up waiting.
       let _ = done.send(result);
     },
@@ -1484,13 +1496,21 @@ impl VideoState {
     }
   }
 
-  /// Kinds of own tracks whose capture ended by itself.
-  fn ended_kinds(&self) -> Vec<VideoTrackKind> {
+  /// Kinds of own tracks whose capture ended by itself, and whether they sent pictures before.
+  fn ended_kinds(&self) -> Vec<(VideoTrackKind, OwnVideoEnd)> {
     self
       .senders
       .iter()
       .filter(|(sender, _)| sender.has_ended())
-      .map(|(sender, _)| sender.kind.clone())
+      .map(|(sender, _)| {
+        // Read after the thread ended: final. A picture encoded is a first picture reported.
+        let end = if sender.progress().pictures_encoded > 0 {
+          OwnVideoEnd::WhileSending
+        } else {
+          OwnVideoEnd::BeforeFirstPicture
+        };
+        (sender.kind.clone(), end)
+      })
       .collect()
   }
 

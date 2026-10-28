@@ -5,7 +5,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use teamcraft_client_api::call_view::CallView;
 use teamcraft_client_api::calls::{
-  CallEndReason, CallStatusSounds, Participant, RemoteVideoTrack, ScreenShareSound,
+  ActiveCall, CallEndReason, CallStatusSounds, Participant, RemoteVideoTrack, ScreenShareSound,
 };
 use teamcraft_proto::{DeviceId, MediaStreamId, UserId, VideoTrackKind};
 
@@ -140,15 +140,27 @@ impl CallRoster {
           roster.maybe_own_screen = Some(track.stream_id);
         }
       },
-      // Our share ended without the stop button (from the system's indicator): its sound stopped
-      // with it, and the UI must not show a share that isn't there.
+      // The SFU lost our share with the slot (a rejoin after its restart): the engine publishes it
+      // again and the driver keeps capturing it, so it still shows as shared (with its sound, which
+      // the engine asks for again too). Showing it stopped would hide a running share. Not marked
+      // shared on the new publication instead: a share stopped meanwhile may still be confirmed.
+      CallEngineEvent::VideoUnpublished(stream_id)
+        if roster.maybe_own_screen == Some(stream_id) && active.is_reconnecting =>
+      {
+        roster.maybe_own_screen = None;
+        return false;
+      },
+      // Our share ended without the stop button (from the system's indicator, or the SFU dropped
+      // it): its sound stopped with it, and the UI must not show a share that isn't there.
       CallEngineEvent::VideoUnpublished(stream_id) if roster.maybe_own_screen == Some(stream_id) => {
         roster.maybe_own_screen = None;
-        if let Some(device) = roster.own_device {
-          roster.sharing_screen.remove(&device);
-        }
-        active.is_sharing_screen = false;
-        active.screen_sound = ScreenShareSound::Off;
+        roster.end_own_screen(active);
+      },
+      // The driver stopped an own track whose camera or share went away by itself.
+      CallEngineEvent::OwnVideoEnded { kind, .. } => match kind {
+        VideoTrackKind::Camera => active.is_camera_on = false,
+        VideoTrackKind::Screen => roster.end_own_screen(active),
+        _ => return false,
       },
       // Remote tracks changed (see update_video_tracks); the snapshot lists them.
       CallEngineEvent::VideoPublished(_) | CallEngineEvent::VideoUnpublished(_) => {},
@@ -165,6 +177,15 @@ impl CallRoster {
     }
     active.participants = roster.participants();
     true
+  }
+
+  /// This device's share ended: neither it nor its sound shows any more.
+  fn end_own_screen(&mut self, active: &mut ActiveCall) {
+    if let Some(device) = self.own_device {
+      self.sharing_screen.remove(&device);
+    }
+    active.is_sharing_screen = false;
+    active.screen_sound = ScreenShareSound::Off;
   }
 
   /// Keeps the list of others' video tracks (and which device sends each) current.
@@ -269,6 +290,7 @@ mod tests {
   };
 
   use super::*;
+  use crate::call_engine::OwnVideoEnd;
 
   mod media_events {
     use super::*;
@@ -380,27 +402,79 @@ mod tests {
 
     #[test]
     fn a_share_ended_from_the_system_ends_in_the_ui_with_its_sound() {
-      let mut view = active_view();
-      if let Some(active) = view.maybe_active.as_mut() {
-        active.is_sharing_screen = true;
-        active.screen_sound = ScreenShareSound::Shared;
-      }
+      let mut view = sharing_view();
       let mut roster = CallRoster::new(device(10));
-      roster.apply(
-        &mut view,
-        CallEngineEvent::VideoPublished(VideoTrack {
-          stream_id: MediaStreamId(8),
-          device_id: device(10),
-          kind: VideoTrackKind::Screen,
-          codec: VideoCodec::H264,
-          layers: Vec::new(),
-        }),
-      );
+      roster.apply(&mut view, own_screen(8));
       // The capture ended without the stop button; the media driver unpublished the track.
       roster.apply(&mut view, CallEngineEvent::VideoUnpublished(MediaStreamId(8)));
       let active = view.maybe_active.as_ref().unwrap();
       assert!(!active.is_sharing_screen);
       assert_eq!(active.screen_sound, ScreenShareSound::Off);
+    }
+
+    /// Issue #920: after an SFU restart the engine publishes the share again on a new stream; the
+    /// UI must not show it stopped while it is sent.
+    #[test]
+    fn a_share_lost_with_the_slot_stays_shown_while_it_is_sent_again() {
+      let mut view = sharing_view();
+      let mut roster = CallRoster::new(device(10));
+      roster.apply(&mut view, own_screen(8));
+      // The engine's rejoin without the slot: the old stream goes, the track is published again.
+      roster.apply(&mut view, CallEngineEvent::Reconnecting);
+      roster.apply(&mut view, CallEngineEvent::VideoUnpublished(MediaStreamId(8)));
+      roster.apply(&mut view, CallEngineEvent::Reconnected);
+      let is_shown = |view: &CallView| {
+        let active = view.maybe_active.as_ref().unwrap();
+        (active.is_sharing_screen, active.screen_sound)
+      };
+      assert_eq!(is_shown(&view), (true, ScreenShareSound::Shared));
+      roster.apply(&mut view, own_screen(9));
+      assert_eq!(is_shown(&view), (true, ScreenShareSound::Shared));
+      // The new stream is the share now: ending it from the system ends it in the UI.
+      roster.apply(&mut view, CallEngineEvent::VideoUnpublished(MediaStreamId(8)));
+      assert_eq!(
+        is_shown(&view),
+        (true, ScreenShareSound::Shared),
+        "the old stream is gone"
+      );
+      roster.apply(&mut view, CallEngineEvent::VideoUnpublished(MediaStreamId(9)));
+      assert_eq!(is_shown(&view), (false, ScreenShareSound::Off));
+    }
+
+    #[test]
+    fn an_own_camera_that_ended_by_itself_shows_off() {
+      let mut view = active_view();
+      if let Some(active) = view.maybe_active.as_mut() {
+        active.is_camera_on = true;
+        active.is_sharing_screen = true;
+      }
+      let mut roster = CallRoster::new(device(10));
+      let ended = CallEngineEvent::OwnVideoEnded {
+        kind: VideoTrackKind::Camera,
+        end: OwnVideoEnd::WhileSending,
+      };
+      assert!(roster.apply(&mut view, ended));
+      let active = view.maybe_active.as_ref().unwrap();
+      assert!(!active.is_camera_on);
+      assert!(active.is_sharing_screen, "the share goes on");
+    }
+
+    #[test]
+    fn an_own_share_that_ended_by_itself_shows_off_with_its_sound() {
+      let mut view = sharing_view();
+      if let Some(active) = view.maybe_active.as_mut() {
+        active.is_camera_on = true;
+      }
+      let mut roster = CallRoster::new(device(10));
+      let ended = CallEngineEvent::OwnVideoEnded {
+        kind: VideoTrackKind::Screen,
+        end: OwnVideoEnd::BeforeFirstPicture,
+      };
+      assert!(roster.apply(&mut view, ended));
+      let active = view.maybe_active.as_ref().unwrap();
+      assert!(!active.is_sharing_screen);
+      assert_eq!(active.screen_sound, ScreenShareSound::Off);
+      assert!(active.is_camera_on, "the camera goes on");
     }
 
     #[test]
@@ -452,6 +526,27 @@ mod tests {
     let mut view = CallView::default();
     view.start_active(request(), BackgroundEffect::None);
     view
+  }
+
+  /// An active call in which this device shares its screen with sound.
+  fn sharing_view() -> CallView {
+    let mut view = active_view();
+    if let Some(active) = view.maybe_active.as_mut() {
+      active.is_sharing_screen = true;
+      active.screen_sound = ScreenShareSound::Shared;
+    }
+    view
+  }
+
+  /// This device's (device 10's) screen track, published on `stream`.
+  fn own_screen(stream: u32) -> CallEngineEvent {
+    CallEngineEvent::VideoPublished(VideoTrack {
+      stream_id: MediaStreamId(stream),
+      device_id: device(10),
+      kind: VideoTrackKind::Screen,
+      codec: VideoCodec::H264,
+      layers: Vec::new(),
+    })
   }
 
   fn request() -> CallRequest {

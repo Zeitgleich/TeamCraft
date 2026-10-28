@@ -208,6 +208,7 @@ error-call-camera-not-connected = Die iPhone-Kamera hat sich nicht verbunden: Si
 error-call-camera-unavailable = Die Kamera lässt sich nicht öffnen. Wähle eine andere Kamera oder versuche es erneut.
 error-call-screen-unavailable = Dein Bildschirm kann von hier aus nicht geteilt werden.
 error-call-camera-no-picture = Deine Kamera ist an, liefert aber kein Bild, daher bleibt dein Video aus. Prüfe, ob eine andere App sie nutzt, oder wähle eine andere Kamera.
+error-call-camera-stopped = Deine Kamera hat aufgehört, daher ist dein Video aus: Sie wurde getrennt, oder das System oder eine andere App hat sie übernommen. Schalte sie wieder ein oder wähle eine andere Kamera.
 error-call-screen-no-picture = Deine Bildschirmfreigabe hat begonnen, liefert aber kein Bild und wurde daher beendet. Teile erneut oder wähle einen anderen Bildschirm oder ein anderes Fenster.
 error-call-camera-black = Deine Kamera liefert nur Schwarz. Prüfe, ob sie verdeckt oder mit einer Abdeckung verschlossen ist, oder wähle eine andere Kamera.
 error-call-screen-black = Deine Bildschirmfreigabe zeigt nur Schwarz. Wenn du die Bildschirmaufnahme gerade erlaubt hast, beende TeamCraft, öffne es erneut und teile noch einmal. Geschützte Videos erscheinen ebenfalls schwarz.

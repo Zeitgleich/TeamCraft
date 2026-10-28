@@ -137,6 +137,7 @@ pub fn failure_message_key(failure: &ActionFailure) -> &'static str {
       CallFailure::CameraUnavailable => "error-call-camera-unavailable",
       CallFailure::ScreenUnavailable => "error-call-screen-unavailable",
       CallFailure::CameraNoPicture => "error-call-camera-no-picture",
+      CallFailure::CameraStopped => "error-call-camera-stopped",
       CallFailure::ScreenNoPicture => "error-call-screen-no-picture",
       CallFailure::CameraBlack => "error-call-camera-black",
       CallFailure::ScreenBlack => "error-call-screen-black",
@@ -391,6 +392,7 @@ mod tests {
         (CallFailure::CameraInUse, "error-call-camera-in-use"),
         (CallFailure::CameraUnsupported, "error-call-camera-unsupported"),
         (CallFailure::CameraUnavailable, "error-call-camera-unavailable"),
+        (CallFailure::CameraStopped, "error-call-camera-stopped"),
       ] {
         assert_eq!(failure_message_key(&camera(failure)), key);
         assert_eq!(failure_action(&camera(failure)), Some(ToastAction::ChooseCamera));

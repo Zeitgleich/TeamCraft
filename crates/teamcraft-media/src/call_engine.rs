@@ -163,6 +163,14 @@ pub enum CallEngineEvent {
   /// on. Subscribe to other devices' tracks with [`CallEngine::subscribe_video`].
   VideoPublished(VideoTrack),
   VideoUnpublished(MediaStreamId),
+  /// Not from the engine but from the media driver: an own track ended by itself (a camera
+  /// unplugged or taken away by the system, a share ended from the system's indicator or the
+  /// browser's bar, an encoder that kept failing). The driver already stopped and unpublished it;
+  /// the UI shows it off. A track the user stopped or replaced is not reported.
+  OwnVideoEnded {
+    kind: VideoTrackKind,
+    end: OwnVideoEnd,
+  },
   /// A device (this one included) started or stopped sending its shared screen's sound.
   ScreenAudioChanged {
     device_id: DeviceId,
@@ -208,6 +216,16 @@ pub enum CallEngineEvent {
   UnauthenticatedKeys,
   /// The SFU rejected a request.
   Error(ErrorBody),
+}
+
+/// When an own track that ended by itself ([`CallEngineEvent::OwnVideoEnded`]) ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OwnVideoEnd {
+  /// Before its first encoded picture: a start that failed. A native caller waiting for the
+  /// first picture (`FirstPicture`) hears about it there too, with the cause.
+  BeforeFirstPicture,
+  /// After it sent pictures: the camera or share went away mid-call.
+  WhileSending,
 }
 
 /// What a driver counts during a call, for tests and diagnostics.
