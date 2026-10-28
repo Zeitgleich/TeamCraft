@@ -41,7 +41,7 @@ use crate::call_video::{IncomingVideo, OutgoingVideo, ReceivedVideoFrame};
 use crate::datagram::{DatagramHeader, MediaDatagram, SimulcastLayer, StreamId};
 use crate::dave::{DaveCallId, DaveError, DaveParticipant, DaveParticipantId, FrameCodec, MediaKind};
 use crate::rtp::{PayloadType, RtpHeader, RtpPacket, RtpTimestamp, SequenceNumber, Ssrc};
-use crate::uplink_layers::{OwnTrack, UplinkLayers, UplinkPolicy, demand_bps};
+use crate::uplink_layers::{OwnTrack, UplinkLayers, UplinkPolicy, probe_demand_bps};
 use crate::video::EncodedVideoFrame;
 
 /// RTP timestamp increment per 20 ms Opus frame at 48 kHz.
@@ -1497,7 +1497,7 @@ impl CallEngine {
     let is_sending_screen_audio = self.screen_audio != ScreenAudioState::Off;
     let tracks = own_track_views(&self.own_tracks, &self.adaptive_tracks);
     let maybe_demand =
-      (!tracks.is_empty()).then(|| demand_bps(&tracks, is_sending_screen_audio, &self.uplink_policy));
+      (!tracks.is_empty()).then(|| probe_demand_bps(&tracks, is_sending_screen_audio, &self.uplink_policy));
     self.uplink.set_demand_bps(maybe_demand);
   }
 

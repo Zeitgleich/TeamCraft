@@ -450,21 +450,44 @@ impl UplinkLayers {
   }
 }
 
-/// What sending everything takes: audio plus every layer of every own track. Lets the estimator
-/// probe up to it while layers are held back.
+/// How far above what sending everything takes the estimate may grow ([`probe_demand_bps`]), on
+/// top of [`UplinkPolicy::upgrade_margin`] (as the SFU's `full_demand_bps`).
+const PROBE_MARGIN: f64 = 1.1;
+
+/// What the estimator may grow to ([`crate::bwe::SendSideEstimator::set_demand_bps`]): what
+/// sending everything takes, with the margin a layer needs to come back and a little more. Capped
+/// at exactly what everything takes, the estimate fell below it with every step cut (the queue of
+/// a keyframe), and a screen share's sharp layer stopped once the estimate took longer than the
+/// hold to grow back: a CI runner's viewer was sent back to the blurred half-size picture (#939,
+/// screen_sharpness). With the margin a step cut leaves every layer in place.
+pub fn probe_demand_bps(
+  tracks: &[OwnTrack<'_>],
+  is_sending_screen_audio: bool,
+  policy: &UplinkPolicy,
+) -> u32 {
+  let audio = f64::from(audio_reserve_bps(is_sending_screen_audio, policy));
+  let video = f64::from(demand_bps(tracks, is_sending_screen_audio, policy)) - audio;
+  // Saturating float-to-int conversion is intended.
+  ((video * policy.upgrade_margin + audio) * PROBE_MARGIN) as u32
+}
+
+fn audio_reserve_bps(is_sending_screen_audio: bool, policy: &UplinkPolicy) -> u32 {
+  policy.audio_reserve_bps
+    + if is_sending_screen_audio {
+      policy.screen_audio_reserve_bps
+    } else {
+      0
+    }
+}
+
+/// What sending everything takes: audio plus every layer of every own track.
 pub fn demand_bps(tracks: &[OwnTrack<'_>], is_sending_screen_audio: bool, policy: &UplinkPolicy) -> u32 {
   let video: u32 = tracks
     .iter()
     .flat_map(|track| track.layers.iter())
     .map(|info| info.max_bitrate_bps)
     .fold(0, u32::saturating_add);
-  let audio = policy.audio_reserve_bps
-    + if is_sending_screen_audio {
-      policy.screen_audio_reserve_bps
-    } else {
-      0
-    };
-  video.saturating_add(audio)
+  video.saturating_add(audio_reserve_bps(is_sending_screen_audio, policy))
 }
 
 fn top_index(layers: &[VideoLayerInfo]) -> Option<u8> {
@@ -727,6 +750,29 @@ mod tests {
     );
     assert!(!uplink.allows(SCREEN, 1));
     assert_eq!(uplink.bitrate_bps(SCREEN, &screen_layers[0]), 1_600_000);
+  }
+
+  /// The estimate may grow far enough above what everything takes that a step cut (to 85 %)
+  /// leaves every layer, the screen share's sharp one too, in place without a hold.
+  #[test]
+  fn a_step_cut_from_the_probe_demand_keeps_every_layer() {
+    let screen_layers = [layer(0, 1_660_000), layer(1, 6_635_000)];
+    let tracks = [OwnTrack {
+      stream: SCREEN,
+      kind: &VideoTrackKind::Screen,
+      layers: &screen_layers,
+      adapts_bitrate: false,
+    }];
+    let cap = probe_demand_bps(&tracks, false, &policy());
+    assert!(cap > demand_bps(&tracks, false, &policy()));
+    let start = Instant::now();
+    let mut uplink = UplinkLayers::new(300_000);
+    uplink.on_estimate(cap, &tracks, false, &policy(), start);
+    // Cut a step, and long after the hold still not grown back.
+    let cut = (f64::from(cap) * 0.85) as u32;
+    uplink.on_estimate(cut, &tracks, false, &policy(), start + Duration::from_millis(100));
+    uplink.on_estimate(cut, &tracks, false, &policy(), start + Duration::from_secs(10));
+    assert!(uplink.allows(SCREEN, 1));
   }
 
   #[test]

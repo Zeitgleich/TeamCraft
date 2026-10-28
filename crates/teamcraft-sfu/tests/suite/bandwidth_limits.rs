@@ -114,14 +114,16 @@ async fn a_camera_follows_a_limited_uplink_down_and_back_up() {
   // what the presenter sent: on a laptop the viewer gets the middle layer throughout, but on a
   // loaded machine QUIC's send buffer may deliver the old top layer's pictures for seconds.
   let settled = limited + SETTLE;
-  let top_kbit = timeline.encoded_kbit(HD.width, settled, lifted);
-  let middle_kbit = timeline.encoded_kbit(640, settled, lifted);
+  // Pictures, not bits: a probe of the top layer can outweigh seconds of the middle one in bits
+  // on a machine that encodes few pictures.
+  let top_pictures = timeline.encoded_pictures(HD.width, settled, lifted);
+  let middle_pictures = timeline.encoded_pictures(640, settled, lifted);
   assert!(
-    top_kbit < middle_kbit,
-    "the top layer ({top_kbit} kbit) went on at 500 kbit/s:\n{summary}"
+    top_pictures < middle_pictures,
+    "the top layer ({top_pictures} pictures) went on at 500 kbit/s:\n{summary}"
   );
   assert!(
-    middle_kbit > 0,
+    middle_pictures > 0,
     "the middle layer wasn't sent at 500 kbit/s:\n{summary}"
   );
   let dropped = timeline.dropped_share(settled, lifted);
@@ -170,7 +172,7 @@ async fn a_limited_viewer_gets_a_lower_layer_and_the_other_viewer_keeps_the_top_
   );
   // Back up: once the limit is lifted, the SFU forwards the top layer to both viewers again.
   assert!(
-    timeline.is_only_top_layer_needed_at_the_end(lifted),
+    timeline.is_only_top_layer_needed_at_the_end(limited),
     "the SFU didn't move the limited viewer back to the top layer:\n{summary}"
   );
   let first_hd = timeline.decoded[other_viewer]
@@ -491,6 +493,15 @@ impl Timeline {
         && *at < to
         && matches!(heard, Heard::LayersNeeded(layers) if layers.iter().any(|layer| *layer < 2))
     })
+  }
+
+  /// How many pictures the presenter encoded on the layer `width` wide from `from` to `to`.
+  fn encoded_pictures(&self, width: u16, from: Duration, to: Duration) -> usize {
+    self
+      .encoded
+      .iter()
+      .filter(|picture| picture.width == width && picture.at >= from && picture.at < to)
+      .count()
   }
 
   /// What the presenter encoded on the layer `width` wide from `from` to `to`, in kbit.

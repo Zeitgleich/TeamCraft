@@ -20,7 +20,8 @@
 //!   the loss before it.
 //! - **Application-limited senders** (sending less than half the estimate): the delay of their own
 //!   bursts doesn't end the fast start, nor count as congestion (GCC's "ALR"), unless it lasts
-//!   with more sent than gets through.
+//!   with more sent than gets through. During the fast start the same holds for every sender: the
+//!   keyframes a new subscription starts with are sent far above the estimate.
 //!
 //! Otherwise the rate grows multiplicatively (8 %/s by default; at the start, until the first sign
 //! of congestion, much faster: see [`BweConfig::start_increase_per_second`]; and faster again
@@ -390,7 +391,14 @@ impl SendSideEstimator {
     if acked_bps > RECOVERED_SHARE * self.congested_at_bps {
       self.recovery_wait = self.config.recovery_after;
     }
-    if (is_overusing && (!is_app_limited || is_overuse_lasting)) || self.last_loss_ratio >= 0.02 {
+    // During the fast start, a queue counts only once it lasts with a backlog: right after
+    // measuring afresh (a new subscription), the keyframes a viewer has to get first are sent
+    // far above the estimate, and a slow receiver queues them. Taken for congestion, that ended
+    // the fast start at a few hundred kbit/s, and a screen share's viewer stayed on the
+    // half-size layer (screen_sharpness, flaky on CI before #939).
+    let is_congested_by_delay =
+      is_overusing && ((!is_app_limited && !self.is_starting) || is_overuse_lasting);
+    if is_congested_by_delay || self.last_loss_ratio >= 0.02 {
       self.is_starting = false;
       self.note_congestion(now, acked_bps);
     }
@@ -937,6 +945,55 @@ mod tests {
         estimate >= 6_000_000,
         "cut to what the burst delivered: {estimate}"
       );
+      assert!(estimator.is_starting, "the burst ends the fast start");
+    }
+
+    /// A new subscription measures the downlink afresh from 300 kbit/s, and the first thing a
+    /// screen share's viewer gets is a keyframe of hundreds of kilobytes, sent far above the
+    /// estimate and queued by a slow receiver. That queue doesn't end the fast start, which the
+    /// sharp layer needs to come within seconds (screen_sharpness, flaky on CI).
+    #[test]
+    fn a_keyframe_burst_right_after_the_start_does_not_end_it() {
+      let mut estimator = SendSideEstimator::new(BweConfig::default());
+      estimator.set_demand_bps(Some(8_500_000));
+      let epoch = Instant::now();
+      // 300 packets within 150 ms, arriving one every 2 ms; then a packet every 100 ms.
+      let mut sent = Vec::new();
+      for index in 0..300u64 {
+        estimator.on_send(PACKET_BYTES, epoch + Duration::from_micros(500 * index));
+        sent.push((index, 20_000 + index * 2_000));
+      }
+      let mut next_seq = 300u64;
+      let mut reported = 0usize;
+      for tick in 1..=50u64 {
+        let now = epoch + Duration::from_millis(100 * tick);
+        if tick > 2 {
+          estimator.on_send(PACKET_BYTES, now);
+          sent.push((next_seq, (100_000 * tick + 20_000).max(640_000)));
+          next_seq += 1;
+        }
+        let first = reported as u64;
+        let count = sent
+          .iter()
+          .skip(reported)
+          .take_while(|(seq, arrival_us)| *arrival_us <= 100_000 * tick && *seq >= first)
+          .count();
+        if count == 0 {
+          continue;
+        }
+        let feedback = TransportFeedback {
+          base_seq: first as u16,
+          arrivals_us: sent[reported..reported + count]
+            .iter()
+            .map(|(_, arrival_us)| Some(*arrival_us))
+            .collect(),
+        };
+        reported += count;
+        estimator.on_feedback(&feedback, now, epoch);
+      }
+      let estimate = estimator.estimate_bps();
+      // Ended, it grew 8 %/s from 350 kbit/s: 680 kbit/s.
+      assert!(estimate >= 2_000_000, "estimate {estimate} after five seconds");
       assert!(estimator.is_starting, "the burst ends the fast start");
     }
 

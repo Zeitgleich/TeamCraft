@@ -566,7 +566,9 @@ Settings → Chats).
   doesn't fill its estimate (layers in steps, keyframes): the queue of one keyframe cut it below
   its top layer. A burst's queue can last as long (a still screen's keyframe read by a slow
   machine), but nothing more is sent meanwhile: cut to what got through of it, a CI runner's
-  screen share viewer stayed on the half-size layer (#946's test). Growth is 8 %/s,
+  screen share viewer stayed on the half-size layer (#946's test). During the fast start only such
+  a lasting backlog (or loss) ends it, for every sender: the keyframes a new subscription starts
+  with are sent far above the start estimate, and a slow receiver queues them. Growth is 8 %/s,
   and 50 %/s once the path showed no congestion for 2 s: simulcast grows in steps, so the next
   step is the probe. A probe that meets congestion doubles that wait (up to 32 s); once 10 % more
   than at the last congestion gets through, it is 2 s again. Before, a camera cut to its middle
@@ -578,12 +580,14 @@ Settings → Chats).
   its bitrate doesn't fit, and the next lower one becomes the top one, at once. A lower share
   waits 1 s, a higher one 2 s (each change rebuilds the layer's encoder, which starts with a
   keyframe), and the way back up goes one step at a time, with a 15 % margin until the estimate
-  covers everything. A step up undone within 4 s was a probe the uplink didn't carry: the next
-  one waits 4 s, doubling up to 32 s, and 4 s again after a step that held (the estimate grows
-  back within seconds after a cut, and every probe costs a keyframe and a moment of congestion).
-  Before, the top layer stopped as soon as its whole bitrate didn't fit: a
-  500 kbit/s uplink carried 320×180 at about 80 kbit/s, a 2 Mbit/s one 640×360 at 300 kbit/s.
-  Browsers' cameras and screen shares send a layer whole or not at all, as before.
+  covers everything. The estimate may grow to 1.15 × 1.1 times what everything takes (as at the
+  SFU): capped at exactly that, every step cut (a keyframe's queue) took a screen share's sharp
+  layer away once regrowing took longer than its 3 s hold. A step up undone within 4 s was a probe
+  the uplink didn't carry: the next one waits 4 s, doubling up to 32 s, and 4 s again after a step
+  that held (the estimate grows back within seconds after a cut, and every probe costs a keyframe
+  and a moment of congestion). Before, the top layer stopped as soon as its whole bitrate didn't
+  fit: a 500 kbit/s uplink carried 320×180 at about 80 kbit/s, a 2 Mbit/s one 640×360 at 300
+  kbit/s. Browsers' cameras and screen shares send a layer whole or not at all, as before.
 
   *SFU* (`layers`): per viewer, its downlink estimate less 120 kbit/s for sound is the budget;
   the layer is the highest whose bitrate fits, at most the one the tile asks for (#927). Down at
