@@ -1442,6 +1442,11 @@ impl Sinks {
                 sender.set_needed_layers(layers.clone());
               }
             },
+            CallEngineEvent::LayerBitrates { stream_id, bitrates } => {
+              if let Some(sender) = self.video.sender_of(*stream_id) {
+                sender.set_layer_bitrates(bitrates.clone());
+              }
+            },
             CallEngineEvent::UplinkEstimate { loss_percent, .. } => {
               capture.set_measured_loss_percent(*loss_percent)?;
             },
@@ -1516,7 +1521,8 @@ impl VideoState {
       .unwrap_or_else(|error| Err(CaptureError::Device(format!("the capture start failed: {error}"))))
       .map(|(sender, first_picture)| {
         self.stop(engine, &kind);
-        engine.publish_video(
+        // The encoders are ours: a camera follows the uplink with its layers' bitrates (#939).
+        engine.publish_adaptive_video(
           publication,
           sender.kind.clone(),
           VideoCodec::H264,

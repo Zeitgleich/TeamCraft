@@ -46,6 +46,8 @@ use crate::speakers::{SpeakerSelectionConfig, SpeakerSelector};
 
 /// Video tracks (camera, screen share) one participant may publish at the same time.
 const MAX_VIDEO_TRACKS_PER_PARTICIPANT: usize = 4;
+/// The upswitch hold while a receiver's downlink estimate is in its fast start.
+const FAST_START_UPSWITCH_HOLD: Duration = Duration::from_millis(500);
 
 /// Routing state of one room.
 #[derive(Debug)]
@@ -80,6 +82,12 @@ pub struct KeyframeRequestConfig {
   pub per_layer_interval: Duration,
   /// One request per receiver and track at most this often ([`Forwarder::request_keyframe`]).
   pub per_receiver_interval: Duration,
+  /// A layer switch that waits for its keyframe asks again only this often (a keyframe that
+  /// starts arriving ends the wait). A large keyframe takes longer than `per_layer_interval` to
+  /// be encoded and to arrive on a slow machine, and each request meanwhile cost one more: on a
+  /// CI runner a screen share's 1440p layer came with three keyframes of 500 KB in three seconds,
+  /// and the viewer's sharp picture only after the third (#939).
+  pub switch_retry_interval: Duration,
 }
 
 /// What to do with one incoming datagram.
@@ -208,6 +216,7 @@ impl Default for KeyframeRequestConfig {
     Self {
       per_layer_interval: Duration::from_millis(500),
       per_receiver_interval: Duration::from_secs(1),
+      switch_retry_interval: Duration::from_secs(2),
     }
   }
 }
@@ -531,7 +540,8 @@ impl Forwarder {
     // Subscribing again (a video shown anew) brings a new decoder that needs a keyframe, also
     // when the layer stays the same and the allocation asked for none.
     if let Some((publisher, layer)) = self.received_layer(receiver, stream_id) {
-      effects.extend(self.keyframe_request(publisher, stream_id, layer, now));
+      let interval = self.config.keyframes.per_layer_interval;
+      effects.extend(self.keyframe_request(publisher, stream_id, layer, interval, now));
     }
     effects.extend(self.update_layers_needed(stream_id));
     Ok(effects)
@@ -559,8 +569,9 @@ impl Forwarder {
     let Some((publisher, layer)) = self.received_layer(receiver, stream_id) else {
       return Vec::new();
     };
+    let interval = self.config.keyframes.per_layer_interval;
     self
-      .keyframe_request(publisher, stream_id, layer, now)
+      .keyframe_request(publisher, stream_id, layer, interval, now)
       .into_iter()
       .collect()
   }
@@ -792,9 +803,22 @@ impl Forwarder {
       .collect();
     let maybe_demand = (!demands.is_empty()).then(|| full_demand_bps(&self.config.layers, &demands));
     participant.downlink.set_demand_bps(maybe_demand);
+    // While the downlink estimate is in its fast start, it only grows, from feedback of traffic
+    // far below it: holding an upswitch for the usual time validates nothing, it only keeps a
+    // viewer on a lower layer (a screen share's sharp layer came 2 s after the estimate covered
+    // it; on a CI runner that missed the test's deadline, #939). A short hold still rides out a
+    // step back.
+    let layers_config = if participant.downlink.is_in_fast_start() {
+      LayerAllocationConfig {
+        upswitch_hold: FAST_START_UPSWITCH_HOLD.min(self.config.layers.upswitch_hold),
+        ..self.config.layers
+      }
+    } else {
+      self.config.layers
+    };
     let allocation = participant
       .allocator
-      .allocate(&self.config.layers, estimate, &demands, now);
+      .allocate(&layers_config, estimate, &demands, now);
 
     let stalled_after = self.config.layer_stalled_after;
     let mut effects = Vec::new();
@@ -815,9 +839,10 @@ impl Forwarder {
       // While the target doesn't flow, the best lower layer that does stands in (it needs a
       // keyframe as well); the target is still asked for, so it starts with one when it's back.
       let live = live_layer(&route.arrivals, layer, stalled_after);
+      let interval = self.config.keyframes.switch_retry_interval;
       for wanted in [live, layer] {
         if current != Some(wanted) {
-          effects.extend(self.keyframe_request(publisher, stream_id, wanted, now));
+          effects.extend(self.keyframe_request(publisher, stream_id, wanted, interval, now));
         }
       }
     }
@@ -850,9 +875,9 @@ impl Forwarder {
     publisher: DeviceId,
     stream_id: StreamId,
     layer: u8,
+    interval: Duration,
     now: Instant,
   ) -> Option<Effect> {
-    let interval = self.config.keyframes.per_layer_interval;
     let key = (stream_id, layer);
     let is_due = self
       .last_keyframe_requests
@@ -1350,6 +1375,33 @@ mod tests {
       assert!(effects.contains(&layers_needed(&[1, 2])), "{effects:?}");
     }
 
+    /// Issue #939: a switch waiting for its keyframe doesn't ask for another every half second:
+    /// a large one takes longer than that to come on a slow machine, and each request cost one
+    /// more keyframe.
+    #[test]
+    fn a_switch_waiting_for_its_keyframe_asks_again_only_after_a_while() {
+      let (mut forwarder, now) = wide_video_room();
+      on_top_layer(&mut forwarder, now);
+      let effects = forwarder
+        .set_uplink_layers(device(1), VIDEO, &[0, 1], now)
+        .unwrap();
+      assert!(effects.contains(&keyframe_request(1)), "{effects:?}");
+      let retry = KeyframeRequestConfig::default().switch_retry_interval;
+      // Not within one and a half seconds (it was every half second, `per_layer_interval`).
+      let mut at = now;
+      while at + Duration::from_millis(100) < now + Duration::from_millis(1_500) {
+        at += Duration::from_millis(100);
+        let effects = forwarder.on_timer(device(2), at);
+        assert!(
+          !effects.contains(&keyframe_request(1)),
+          "asked again after {:?}",
+          at - now
+        );
+      }
+      let effects = forwarder.on_timer(device(2), now + retry);
+      assert!(effects.contains(&keyframe_request(1)), "{effects:?}");
+    }
+
     #[test]
     fn a_publisher_without_any_uplink_layer_pauses_its_receivers() {
       let (mut forwarder, now) = wide_video_room();
@@ -1581,6 +1633,52 @@ mod tests {
       assert!(cut < start, "{cut}");
       forwarder.subscribe(device(2), VIDEO, Some(1), at).unwrap();
       assert_eq!(forwarder.downlink_estimate_bps(device(2)), Some(cut));
+    }
+
+    /// Issue #939: while a receiver's downlink estimate is in its fast start, a layer comes
+    /// about half a second after the estimate covers it, not after the usual two.
+    #[test]
+    fn during_the_fast_start_a_layer_comes_soon_after_the_estimate_covers_it() {
+      let (mut forwarder, now) = video_room();
+      forwarder.subscribe(device(2), VIDEO, Some(2), now).unwrap();
+      let epoch = forwarder.participants[&device(2)].feedback_epoch;
+      let config = LayerAllocationConfig::default();
+      // What the middle layer (500 kbit/s) needs.
+      let covered_bps = f64::from(config.audio_reserve_bps) + 500_000.0 * config.upswitch_headroom;
+      let (mut maybe_covered_at, mut maybe_switched_at) = (None, None);
+      for round in 0..60u16 {
+        let at = now + Duration::from_millis(100 * u64::from(round));
+        for _ in 0..10 {
+          forwarder.route(device(1), &audio(1, 10), at).unwrap();
+        }
+        let since_epoch = u64::try_from(at.saturating_duration_since(epoch).as_micros()).unwrap();
+        let feedback = TransportFeedback {
+          base_seq: round * 10,
+          arrivals_us: (0..10u64).map(|i| Some(since_epoch + i * 1_000)).collect(),
+        };
+        let mut effects = forwarder.on_transport_feedback(device(2), &feedback, at);
+        effects.extend(forwarder.on_timer(device(2), at));
+        let estimate = forwarder.downlink_estimate_bps(device(2)).unwrap();
+        if maybe_covered_at.is_none() && f64::from(estimate) >= covered_bps {
+          maybe_covered_at = Some(at);
+        }
+        let middle_keyframe = Effect::KeyframeRequest {
+          publisher: device(1),
+          stream_id: VIDEO,
+          layer: 1,
+        };
+        if maybe_switched_at.is_none() && effects.contains(&middle_keyframe) {
+          maybe_switched_at = Some(at);
+        }
+      }
+      let (Some(covered_at), Some(switched_at)) = (maybe_covered_at, maybe_switched_at) else {
+        panic!("covered {maybe_covered_at:?}, switched {maybe_switched_at:?}");
+      };
+      let delay = switched_at.saturating_duration_since(covered_at);
+      assert!(
+        delay <= Duration::from_millis(700),
+        "switched {delay:?} after the estimate covered it"
+      );
     }
 
     /// Three seconds of sound to device 2, numbered from `base`, of which half is lost; when
