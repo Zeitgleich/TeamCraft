@@ -1,7 +1,7 @@
 //! Virtualized message feed. Only the rows near the viewport are in the DOM; the rest is represented
 //! by two spacer heights. Row heights are estimated first and corrected by measuring rendered rows.
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::time::Duration;
 
 use leptos::ev;
@@ -46,17 +46,26 @@ const DIVIDER_CONTEXT_PX: f64 = 48.0;
 const MEASURE_EPSILON: f32 = 0.5;
 
 thread_local! {
-  /// ID of the list that is currently mounted; 0 when none is.
-  static ACTIVE_LIST: Cell<u64> = const { Cell::new(0) };
+  /// IDs of the lists that are mounted: usually one, two while a call's chat panel (#936) shows
+  /// next to the conversation below the call screen.
+  static LIVE_LISTS: RefCell<Vec<u64>> = const { RefCell::new(Vec::new()) };
   static NEXT_LIST: Cell<u64> = const { Cell::new(1) };
 }
+
+/// Whether the list `list_id` is still mounted.
+fn is_live(list_id: u64) -> bool {
+  LIVE_LISTS.with_borrow(|lists| lists.contains(&list_id))
+}
+
+/// Placed in the context of a feed that is shown next to a call, not below its screen (#936).
+#[derive(Clone, Copy, Debug)]
+pub struct BesideCall;
 
 /// Runs `callback` on the next animation frame unless the list that asked for it was unmounted in
 /// the meantime. Touching signals of a disposed list would panic.
 fn defer_while_alive(list_id: u64, callback: impl FnOnce() + 'static) {
   request_animation_frame(move || {
-    // async-ok: a thread-local Cell, not a signal.
-    if ACTIVE_LIST.get() == list_id {
+    if is_live(list_id) {
       callback();
     }
   });
@@ -121,12 +130,8 @@ pub fn MessageList(
   let i18n = use_i18n();
   let list_id = NEXT_LIST.get();
   NEXT_LIST.set(list_id + 1);
-  ACTIVE_LIST.set(list_id);
-  on_cleanup(move || {
-    if ACTIVE_LIST.get() == list_id {
-      ACTIVE_LIST.set(0);
-    }
-  });
+  LIVE_LISTS.with_borrow_mut(|lists| lists.push(list_id));
+  on_cleanup(move || LIVE_LISTS.with_borrow_mut(|lists| lists.retain(|live| *live != list_id)));
   let container = NodeRef::<html::Div>::new();
   let rows = NodeRef::<html::Div>::new();
   let toolbar = ToolbarHost::provide(container);
@@ -652,7 +657,10 @@ fn remember_reading(
 fn track_unread_divider(conversation: ConversationId, count: Memo<usize>, is_at_bottom: RwSignal<bool>) {
   let state = use_app_state();
   let is_focused = RwSignal::new(is_window_focused());
-  mark_read_while_watched(conversation, is_at_bottom, is_focused);
+  // A call screen over the app hides the feed below it; the feed next to the call stays in sight.
+  let is_beside_call = use_context::<BesideCall>().is_some();
+  let is_watched = Signal::derive(move || is_focused.get() && (is_beside_call || !state.call.covers_app()));
+  mark_read_while_watched(conversation, is_at_bottom, is_watched);
   // Whether the user was at the bottom (had seen the divider) when they looked away.
   let was_at_bottom_when_away = StoredValue::new(false);
   let on_focus_change = move || {
@@ -676,7 +684,7 @@ fn track_unread_divider(conversation: ConversationId, count: Memo<usize>, is_at_
     let total = count.get();
     if let Some(previous) = previous
       && total > previous
-      && !is_focused.get_untracked()
+      && !is_watched.get_untracked()
     {
       let me = state.me().id;
       let len = (total - previous).min(MAX_NEW_SCAN);
@@ -716,7 +724,7 @@ fn track_unread_divider(conversation: ConversationId, count: Memo<usize>, is_at_
       .unread_marker
       .get()
       .is_some_and(|marker| marker.conversation == conversation);
-    let is_reading = has_divider && is_at_bottom.get() && is_focused.get();
+    let is_reading = has_divider && is_at_bottom.get() && is_watched.get();
     let maybe_dwell = maybe_dwell.get();
     cancel_timer();
     let now = now_ms();
@@ -743,15 +751,15 @@ fn track_unread_divider(conversation: ConversationId, count: Memo<usize>, is_at_
 }
 
 /// Marks the conversation read whenever something in it is unread while the user watches its newest
-/// message: at the bottom of the focused, visible window. Covers messages that arrive while it is
-/// open, coming back to the window and scrolling down to the end; opening it marks it read in
-/// `AppState::open_conversation`. Each newest message is sent once ([`ReadMarkerGate`]):
+/// message: at the bottom of the focused, visible window, and not below a call screen (`is_watched`,
+/// #936). Covers messages that arrive while it is open, coming back to the window and scrolling
+/// down to the end; opening it marks it read in `AppState::open_conversation`. Each newest message is sent once ([`ReadMarkerGate`]):
 /// an `unread_update` the server sent before it applied the new position raises the count again,
 /// and that must not queue another read position for the same message. A new message does.
 fn mark_read_while_watched(
   conversation: ConversationId,
   is_at_bottom: RwSignal<bool>,
-  is_focused: RwSignal<bool>,
+  is_watched: Signal<bool>,
 ) {
   let state = use_app_state();
   // The newest message the server stored while something is unread; looked up only then. A
@@ -771,7 +779,7 @@ fn mark_read_while_watched(
   let gate = StoredValue::new(ReadMarkerGate::default());
   Effect::new(move |_| {
     let (maybe_through, at_bottom, focused) =
-      (maybe_unread_through.get(), is_at_bottom.get(), is_focused.get());
+      (maybe_unread_through.get(), is_at_bottom.get(), is_watched.get());
     let should_mark = gate
       .try_update_value(|gate| gate.should_mark(maybe_through, at_bottom, focused))
       .unwrap_or(false);
@@ -864,8 +872,7 @@ fn listen_to_user_scrolls(
 ) {
   let touch_y = StoredValue::new(None::<i32>);
   let on_wheel = Closure::<dyn FnMut(web_sys::WheelEvent)>::new(move |ev: web_sys::WheelEvent| {
-    // async-ok: a thread-local Cell, not a signal.
-    if ACTIVE_LIST.get() == list_id && ev.delta_y() < 0.0 && !ev.ctrl_key() {
+    if is_live(list_id) && ev.delta_y() < 0.0 && !ev.ctrl_key() {
       on_scroll_up();
     }
   });
@@ -877,8 +884,7 @@ fn listen_to_user_scrolls(
     let (Some(Some(start)), Some(touch)) = (touch_y.try_get_value(), ev.touches().get(0)) else {
       return;
     };
-    // async-ok: a thread-local Cell, not a signal.
-    if ACTIVE_LIST.get() == list_id && touch.client_y() > start {
+    if is_live(list_id) && touch.client_y() > start {
       on_scroll_up();
     }
   });
@@ -947,8 +953,7 @@ fn is_window_focused() -> bool {
 /// painted, unless the list that asked for it was unmounted in the meantime.
 fn observe_row_growth(list_id: u64, rows: NodeRef<html::Div>, on_change: impl Fn() + Copy + 'static) {
   let callback = Closure::<dyn FnMut()>::new(move || {
-    // async-ok: a thread-local Cell, not a signal.
-    if ACTIVE_LIST.get() == list_id {
+    if is_live(list_id) {
       on_change();
     }
   });

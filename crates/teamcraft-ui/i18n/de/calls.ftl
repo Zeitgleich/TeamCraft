@@ -113,6 +113,17 @@ stats-value-uplink-loss = { $loss } (Uplink)
 stats-value-network = RTT { $rtt } · Jitter { $jitter }
 stats-value-frames = verworfen { $dropped } · schwarz { $black }
 stats-waiting = Warte auf die ersten Werte…
+# Der Chat neben dem Video (#936)
+call-chat = Chat
+call-chat-label = Chat des Anrufs
+call-chat-show = Chat anzeigen
+call-chat-hide = Chat ausblenden
+call-chat-show-unread = { $count ->
+    [one] Chat anzeigen, { $count } ungelesene Nachricht
+   *[other] Chat anzeigen, { $count } ungelesene Nachrichten
+  }
+call-chat-toast-open = Neue Nachricht von { $name }. Chat anzeigen
+call-chat-toast-files = Hat Dateien gesendet
 
 ## Vorschau vor dem Beitritt
 prejoin-quick-controls = Mikrofon und Kamera

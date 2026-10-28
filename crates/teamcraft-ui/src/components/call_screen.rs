@@ -8,10 +8,12 @@ use crate::calls::{
   CallEvent, CallKind, CallLayout, CallRequest, MediaDevice, Participant, ScreenContentMode,
   ScreenShareSound, selected_camera_is_rear,
 };
+use crate::components::call_chat::{CallChat, CallChatPanel, CallChatToast};
 use crate::components::call_prejoin::call_heading;
 use crate::components::call_video::{
   BackgroundPicker, LiveVideo, PickerSize, VideoSource, VideoTile, can_share_screen, can_show_video,
 };
+use crate::components::count_badge::CountBadge;
 use crate::components::icons::{Icon, IconName};
 use crate::components::video_stats::{VideoStatsHub, VideoStatsOverlay};
 use crate::i18n::use_i18n;
@@ -149,6 +151,8 @@ pub fn CallScreen(request: CallRequest) -> impl IntoView {
   // Stats for nerds (#938) over the real video; the overlays find the hub.
   let video_stats = VideoStatsHub::provide(call.shows_video_stats);
   let has_video_stats = is_real && can_show_video();
+  // The conversation's chat next to the video (#936).
+  let chat = CallChat::new(state, request.conversation, call.is_chat_open);
   let screen_sound = Memo::new(move |_| {
     state.read(|backend| {
       backend
@@ -453,7 +457,13 @@ pub fn CallScreen(request: CallRequest) -> impl IntoView {
         })
       }}
       <crate::components::add_to_call::CallMoveBanner />
-      <div class="call-stage-wrap">{stage}</div>
+      <div class="call-body">
+        <div class="call-stage-wrap">{stage}</div>
+        <Show when=move || chat.is_open.get() fallback=|| ()>
+          <CallChatPanel chat=chat />
+        </Show>
+        <CallChatToast chat=chat />
+      </div>
       <Show when=move || share_open.get() fallback=|| ()>
         <div class="effects-popover share-popover" role="dialog" aria-label=move || i18n.t("share-options")>
           <h2>{move || i18n.t("share-options")}</h2>
@@ -626,6 +636,18 @@ pub fn CallScreen(request: CallRequest) -> impl IntoView {
           />
         </Show>
         <ControlButton
+          is_active=chat.is_open
+          icon=IconName::Chat
+          label=Signal::derive(move || match (chat.is_open.get(), chat.badge()) {
+            (true, _) => i18n.t("call-chat-hide"),
+            (false, 0) => i18n.t("call-chat-show"),
+            (false, unread) => i18n.t_count("call-chat-show-unread", unread as usize),
+          })
+          on_press=move || chat.toggle()
+        >
+          <CountBadge count=Signal::derive(move || chat.badge()) tone=Signal::derive(move || chat.badge_tone()) is_decorative=true maybe_cap=99 />
+        </ControlButton>
+        <ControlButton
           icon=IconName::Minimize
           label=Signal::derive(move || i18n.t("call-minimize"))
           on_press=move || call.is_minimized.set(true)
@@ -681,6 +703,9 @@ fn ControlButton(
   on_press: impl Fn() + 'static,
   #[prop(into, default = Signal::stored(false))] is_off: Signal<bool>,
   #[prop(into, default = Signal::stored(false))] is_active: Signal<bool>,
+  /// A badge on the button (the chat's unread count).
+  #[prop(optional)]
+  children: Option<Children>,
 ) -> impl IntoView {
   view! {
     <button
@@ -693,6 +718,7 @@ fn ControlButton(
       on:click=move |_| on_press()
     >
       <Icon name=icon />
+      {children.map(|children| children())}
     </button>
   }
 }
