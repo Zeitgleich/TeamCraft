@@ -8,12 +8,16 @@
 //! (issue #322), and so does a part of one that failed without undoing it (a join whose camera
 //! didn't start, #453). Starting a screen share is the exception once its turn comes: it waits
 //! for the user's choice in the system's picker for as long as they take, and mute, leaving or
-//! stopping the share must not wait with it (issue #683), so it runs beside the queue.
+//! stopping the share must not wait with it (issue #683), so it runs beside the queue. In the
+//! browser the picker opens in the click itself, before the action is queued: Safari refuses it
+//! once the click's user activation is gone (issue #930); the chosen screen is shared when the
+//! action's turn comes.
 
 use std::cell::{Cell, RefCell};
 use std::collections::VecDeque;
 use std::rc::Rc;
 
+use js_sys::Promise;
 use leptos::task::spawn_local;
 use serde_json::json;
 use teamcraft_client_api::calls::{
@@ -23,6 +27,7 @@ use teamcraft_client_api::calls::{
 use teamcraft_client_api::failure::ActionFailure;
 use teamcraft_client_api::model::{ConversationId, UserId};
 use teamcraft_client_api::remote::{CALL_CHANGED_EVENT, CallAction, CallActionAnswer, CallSnapshot};
+use teamcraft_proto::ScreenContentMode;
 
 use crate::auth::tauri::{call, listen};
 
@@ -34,7 +39,7 @@ pub struct RemoteCalls {
   notify: Rc<RefCell<Option<ChangeNotifier>>>,
   link: CallLink,
   /// Actions waiting for the one in flight.
-  queue: Rc<RefCell<VecDeque<CallAction>>>,
+  queue: Rc<RefCell<VecDeque<QueuedAction>>>,
   is_draining: Rc<Cell<bool>>,
   /// Screen share starts running beside the queue (their picker is open); pending all the same.
   screen_shares_starting: Rc<Cell<u32>>,
@@ -42,6 +47,15 @@ pub struct RemoteCalls {
   /// The pre-join check's microphone level from the desktop shell (#442).
   #[cfg(target_arch = "wasm32")]
   shell_level: crate::shell_level::ShellLevel,
+}
+
+/// An action waiting for its turn.
+struct QueuedAction {
+  action: CallAction,
+  /// The screen picker the page opened in the click of a `StartScreenShare` (issue #930): the
+  /// promise of the chosen screen. Only in the browser, and only when the call module could open
+  /// one; otherwise the screen is asked for when the action's turn comes.
+  maybe_picked_screen: Option<Promise>,
 }
 
 /// Where the media runs.
@@ -178,23 +192,44 @@ impl RemoteCalls {
 
   /// Queues an action behind those still running.
   pub fn act(&self, action: CallAction) {
-    self.queue.borrow_mut().push_back(action);
+    self.enqueue(QueuedAction {
+      action,
+      maybe_picked_screen: None,
+    });
+  }
+
+  /// Starts sharing the screen. Call it synchronously from the click: in the browser the picker
+  /// opens right here, while the click's user activation lasts (issue #930), and the chosen
+  /// screen is shared in the action's turn.
+  pub fn start_screen_share(&self, has_sound: bool, content_mode: ScreenContentMode) {
+    let maybe_picked_screen = self.pick_screen(content_mode);
+    self.enqueue(QueuedAction {
+      action: CallAction::StartScreenShare {
+        has_sound,
+        content_mode,
+      },
+      maybe_picked_screen,
+    });
+  }
+
+  fn enqueue(&self, queued: QueuedAction) {
+    self.queue.borrow_mut().push_back(queued);
     if self.is_draining.replace(true) {
       return;
     }
     let calls = self.clone();
     spawn_local(async move {
       loop {
-        let maybe_action = calls.queue.borrow_mut().pop_front();
-        let Some(action) = maybe_action else {
+        let maybe_queued = calls.queue.borrow_mut().pop_front();
+        let Some(queued) = maybe_queued else {
           break;
         };
-        if is_carried_out_beside(&action) {
-          calls.carry_out_beside(action);
+        if is_carried_out_beside(&queued.action) {
+          calls.carry_out_beside(queued);
           continue;
         }
-        let is_join = matches!(action, CallAction::Join { .. });
-        let result = calls.carry_out(action).await;
+        let is_join = matches!(queued.action, CallAction::Join { .. });
+        let result = calls.carry_out(queued.action).await;
         calls.report_outcome(result, is_join);
       }
       // async-ok: a Cell the calls share, not a signal.
@@ -203,14 +238,27 @@ impl RemoteCalls {
     });
   }
 
-  /// Carries out `action` without holding the queue (see [`is_carried_out_beside`]).
-  fn carry_out_beside(&self, action: CallAction) {
+  /// Opens the browser's screen picker now (the page's calls only; the desktop shell has its own).
+  #[cfg_attr(
+    not(target_arch = "wasm32"),
+    expect(unused_variables, reason = "only the page's picker takes the mode")
+  )]
+  fn pick_screen(&self, content_mode: ScreenContentMode) -> Option<Promise> {
+    match &self.link {
+      CallLink::Shell => None,
+      #[cfg(target_arch = "wasm32")]
+      CallLink::Page(_) => crate::web_calls::pick_screen(content_mode),
+    }
+  }
+
+  /// Carries out `queued` without holding the queue (see [`is_carried_out_beside`]).
+  fn carry_out_beside(&self, queued: QueuedAction) {
     let calls = self.clone();
     calls
       .screen_shares_starting
       .set(calls.screen_shares_starting.get() + 1);
     spawn_local(async move {
-      let result = calls.carry_out(action).await;
+      let result = calls.carry_out_queued(queued).await;
       // async-ok: a Cell the calls share, not a signal.
       let starting = calls.screen_shares_starting.get();
       // async-ok: a Cell the calls share, not a signal.
@@ -290,6 +338,22 @@ impl RemoteCalls {
       CallLink::Shell => 0.0,
       #[cfg(target_arch = "wasm32")]
       CallLink::Page(_) => crate::web_calls::preview_level(),
+    }
+  }
+
+  /// Carries out an action, with the screen the page's picker chose when there is one.
+  async fn carry_out_queued(&self, queued: QueuedAction) -> Result<CallActionAnswer, String> {
+    match (&self.link, queued.maybe_picked_screen, queued.action) {
+      #[cfg(target_arch = "wasm32")]
+      (
+        CallLink::Page(host),
+        Some(picked),
+        CallAction::StartScreenShare {
+          has_sound,
+          content_mode,
+        },
+      ) => host.share_screen(has_sound, content_mode, picked).await,
+      (_, _, action) => self.carry_out(action).await,
     }
   }
 
@@ -391,6 +455,16 @@ mod tests {
       CallAction::SetCamera { is_on: true },
     ] {
       assert!(!is_carried_out_beside(&action), "{action:?}");
+    }
+  }
+
+  /// The desktop shell opens its own picker; only the page's calls open the browser's in the click
+  /// (issue #930).
+  #[test]
+  fn the_shell_opens_no_browser_picker() {
+    let calls = RemoteCalls::new(CallSnapshot::default(), CallLink::Shell);
+    for mode in [ScreenContentMode::Detail, ScreenContentMode::Motion] {
+      assert!(calls.pick_screen(mode).is_none(), "{mode:?}");
     }
   }
 

@@ -136,6 +136,7 @@ pub fn failure_message_key(failure: &ActionFailure) -> &'static str {
       CallFailure::CameraNotConnected => "error-call-camera-not-connected",
       CallFailure::CameraUnavailable => "error-call-camera-unavailable",
       CallFailure::ScreenUnavailable => "error-call-screen-unavailable",
+      CallFailure::ScreenNeedsClick => "error-call-screen-needs-click",
       CallFailure::CameraNoPicture => "error-call-camera-no-picture",
       CallFailure::ScreenNoPicture => "error-call-screen-no-picture",
       CallFailure::CameraBlack => "error-call-camera-black",

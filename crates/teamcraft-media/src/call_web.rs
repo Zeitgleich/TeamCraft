@@ -216,6 +216,10 @@ pub enum MediaAccessReason {
   /// The device is there but can't be opened, usually because another app holds it
   /// (`NotReadableError`, `AbortError`).
   InUse,
+  /// The screen picker was asked for outside a click: the browser wants `getDisplayMedia` called
+  /// while the click's user activation lasts (`InvalidAccessError` in Safari, `InvalidStateError`
+  /// in the spec and Firefox; issue #930).
+  NoUserActivation,
   Other,
 }
 
@@ -239,6 +243,21 @@ pub enum WebCallError {
   ConnectionLost,
   #[error("the call ended")]
   Ended,
+}
+
+impl WebCallError {
+  /// Whether this is the user closing the screen picker without choosing, which is no failure. A
+  /// refusal by the system or a policy ("Permission denied by system" in Chromium) is one.
+  pub fn is_screen_picker_closed(&self) -> bool {
+    matches!(
+      self,
+      Self::MediaAccess {
+        input: MediaInput::Screen,
+        reason: MediaAccessReason::Denied,
+        message,
+      } if !message.contains("system")
+    )
+  }
 }
 
 /// Everything the call task reacts to.
@@ -548,9 +567,21 @@ impl WebCall {
   }
 
   /// Asks the user for a screen or window and shares it (one H.264 layer, no simulcast). Call it
-  /// from a user gesture, like `join`.
+  /// from a user gesture, like `join`; where the gesture may be gone by the time this runs, open
+  /// the picker with [`request_screen`] in the click and share with
+  /// [`WebCall::share_screen_stream`].
   pub async fn start_screen_share(&self, mode: ScreenContentMode) -> Result<(), WebCallError> {
     let stream = video::capture_screen(mode).await?;
+    self.share_screen_stream(stream, mode).await
+  }
+
+  /// Shares a screen the app asked for itself ([`request_screen`]) as the screen share, replacing
+  /// a running one.
+  pub async fn share_screen_stream(
+    &self,
+    stream: MediaStream,
+    mode: ScreenContentMode,
+  ) -> Result<(), WebCallError> {
     self.start_video(stream, video::screen_plan(mode)).await
   }
 
@@ -632,6 +663,19 @@ impl Drop for WebCall {
 /// from a user gesture.
 pub async fn capture_camera(maybe_device: Option<&str>) -> Result<MediaStream, WebCallError> {
   video::capture_camera(maybe_device).await
+}
+
+/// Opens the browser's screen picker (`getDisplayMedia`) at once and returns its promise. Call it
+/// synchronously in the click handler, before anything is awaited: Safari refuses the picker once
+/// the click's user activation is gone (issue #930). [`picked_screen`] waits for the choice.
+pub fn request_screen(mode: ScreenContentMode) -> Result<Promise, WebCallError> {
+  video::request_screen(mode)
+}
+
+/// The screen the user chose in a picker [`request_screen`] opened (possibly in another wasm
+/// module of the page); closing the picker is a [`MediaAccessReason::Denied`] refusal.
+pub async fn picked_screen(request: Promise) -> Result<MediaStream, WebCallError> {
+  video::picked_screen(request).await
 }
 
 /// Asks for the microphone (`getUserMedia`) with the browser's echo cancellation, noise
@@ -2397,17 +2441,20 @@ fn media_access(input: MediaInput) -> impl Fn(JsValue) -> WebCallError {
       .unwrap_or_default();
     WebCallError::MediaAccess {
       input,
-      reason: media_access_reason(&name),
+      reason: media_access_reason(input, &name),
       message: js_message(&error),
     }
   }
 }
 
-fn media_access_reason(dom_exception_name: &str) -> MediaAccessReason {
-  match dom_exception_name {
-    "NotAllowedError" | "SecurityError" => MediaAccessReason::Denied,
-    "NotFoundError" | "OverconstrainedError" => MediaAccessReason::NotFound,
-    "NotReadableError" | "AbortError" => MediaAccessReason::InUse,
+fn media_access_reason(input: MediaInput, dom_exception_name: &str) -> MediaAccessReason {
+  match (input, dom_exception_name) {
+    (_, "NotAllowedError" | "SecurityError") => MediaAccessReason::Denied,
+    (_, "NotFoundError" | "OverconstrainedError") => MediaAccessReason::NotFound,
+    (_, "NotReadableError" | "AbortError") => MediaAccessReason::InUse,
+    // Only `getDisplayMedia` needs the click's activation; for `getUserMedia` these names mean
+    // something else (a document that isn't active).
+    (MediaInput::Screen, "InvalidAccessError" | "InvalidStateError") => MediaAccessReason::NoUserActivation,
     _ => MediaAccessReason::Other,
   }
 }
@@ -2437,20 +2484,92 @@ mod tests {
 
   const GRACE: Duration = Duration::from_secs(30);
 
-  #[test]
-  fn refused_media_is_classified_by_the_exception_name() {
-    for (name, reason) in [
-      ("NotAllowedError", MediaAccessReason::Denied),
-      ("SecurityError", MediaAccessReason::Denied),
-      ("NotFoundError", MediaAccessReason::NotFound),
-      ("OverconstrainedError", MediaAccessReason::NotFound),
-      ("NotReadableError", MediaAccessReason::InUse),
-      ("AbortError", MediaAccessReason::InUse),
-      ("TypeError", MediaAccessReason::Other),
-      ("", MediaAccessReason::Other),
-      ("SomeFutureError", MediaAccessReason::Other),
-    ] {
-      assert_eq!(media_access_reason(name), reason, "{name}");
+  mod media_access {
+    use super::*;
+
+    #[test]
+    fn refused_media_is_classified_by_the_exception_name() {
+      for input in [MediaInput::Microphone, MediaInput::Camera, MediaInput::Screen] {
+        for (name, reason) in [
+          ("NotAllowedError", MediaAccessReason::Denied),
+          ("SecurityError", MediaAccessReason::Denied),
+          ("NotFoundError", MediaAccessReason::NotFound),
+          ("OverconstrainedError", MediaAccessReason::NotFound),
+          ("NotReadableError", MediaAccessReason::InUse),
+          ("AbortError", MediaAccessReason::InUse),
+          ("TypeError", MediaAccessReason::Other),
+          ("", MediaAccessReason::Other),
+          ("SomeFutureError", MediaAccessReason::Other),
+        ] {
+          assert_eq!(media_access_reason(input, name), reason, "{input:?} {name}");
+        }
+      }
+    }
+
+    /// Issue #930: Safari's refusal of a picker asked for after the click's activation was gone.
+    #[test]
+    fn a_screen_picker_asked_for_without_the_click_is_told_apart() {
+      for name in ["InvalidAccessError", "InvalidStateError"] {
+        assert_eq!(
+          media_access_reason(MediaInput::Screen, name),
+          MediaAccessReason::NoUserActivation,
+          "{name}"
+        );
+        for input in [MediaInput::Microphone, MediaInput::Camera] {
+          assert_eq!(
+            media_access_reason(input, name),
+            MediaAccessReason::Other,
+            "{input:?} {name}"
+          );
+        }
+      }
+    }
+
+    #[test]
+    fn only_the_user_closing_the_screen_picker_counts_as_closed() {
+      let closed = [
+        // Chromium and Firefox.
+        "Permission denied",
+        // Safari.
+        "The request is not allowed by the user agent or the platform in the current context, \
+         possibly because the user denied permission.",
+      ];
+      for message in closed {
+        assert!(
+          screen_refusal(MediaAccessReason::Denied, message).is_screen_picker_closed(),
+          "{message}"
+        );
+      }
+      // Chromium, when macOS's Screen Recording permission or a policy refuses.
+      assert!(
+        !screen_refusal(MediaAccessReason::Denied, "Permission denied by system").is_screen_picker_closed()
+      );
+      for reason in [
+        MediaAccessReason::NoUserActivation,
+        MediaAccessReason::NotFound,
+        MediaAccessReason::InUse,
+        MediaAccessReason::Other,
+      ] {
+        assert!(
+          !screen_refusal(reason, "Permission denied").is_screen_picker_closed(),
+          "{reason:?}"
+        );
+      }
+      let camera = WebCallError::MediaAccess {
+        input: MediaInput::Camera,
+        reason: MediaAccessReason::Denied,
+        message: "Permission denied".into(),
+      };
+      assert!(!camera.is_screen_picker_closed());
+      assert!(!WebCallError::Ended.is_screen_picker_closed());
+    }
+
+    fn screen_refusal(reason: MediaAccessReason, message: &str) -> WebCallError {
+      WebCallError::MediaAccess {
+        input: MediaInput::Screen,
+        reason,
+        message: message.into(),
+      }
     }
   }
 
