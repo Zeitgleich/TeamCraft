@@ -631,6 +631,24 @@ impl CallEngine {
     });
   }
 
+  /// Changes how sharp a received track may come (its tile was resized): unlike
+  /// [`CallEngine::subscribe_video`] the decoder stays, so deltas keep flowing until the SFU
+  /// switches layers on a keyframe. Nothing happens for a track not received or already capped
+  /// there.
+  pub fn set_video_max_layer(&mut self, stream_id: MediaStreamId, max_layer: u8) {
+    let Some(current) = self.subscriptions.get_mut(&StreamId(stream_id.0)) else {
+      return;
+    };
+    if *current == max_layer {
+      return;
+    }
+    *current = max_layer;
+    self.signal(CallClientMessage::Subscribe {
+      stream_id,
+      maybe_max_layer: Some(max_layer),
+    });
+  }
+
   /// The app's decoder of a received track failed or was replaced: deltas are dropped until the
   /// next keyframe, which is asked for (rate-limited).
   pub fn request_keyframe(&mut self, stream_id: MediaStreamId, now: Instant) {
@@ -2446,6 +2464,71 @@ mod tests {
           }),
           EngineOutput::Event(CallEngineEvent::Reconnected),
         ]
+      );
+    }
+
+    #[test]
+    fn a_resized_tile_changes_the_layer_once_and_keeps_it_across_a_rejoin() {
+      let now = Instant::now();
+      let gateway = DaveExternalSender::new().unwrap();
+      let mut alice = joined_engine(1, &[2], &gateway, None, now);
+      let remote = video_track(60, 2, 3);
+      alice
+        .handle_signal(
+          event(
+            3,
+            CallEvent::VideoPublished {
+              track: remote.clone(),
+            },
+          ),
+          now,
+        )
+        .unwrap();
+      drain(&mut alice);
+      // Not received: nothing to change.
+      alice.set_video_max_layer(MediaStreamId(60), 2);
+      assert!(drain(&mut alice).is_empty());
+
+      alice.subscribe_video(MediaStreamId(60), Some(0));
+      drain(&mut alice);
+      alice.set_video_max_layer(MediaStreamId(60), 2);
+      alice.set_video_max_layer(MediaStreamId(60), 2);
+      assert_eq!(
+        drain(&mut alice),
+        vec![EngineOutput::Signal(CallClientMessage::Subscribe {
+          stream_id: MediaStreamId(60),
+          maybe_max_layer: Some(2),
+        })]
+      );
+
+      alice.connection_lost();
+      alice.rejoin("fresh".into(), now);
+      drain(&mut alice);
+      let CallEvent::Joined {
+        call_id,
+        participant,
+        participants,
+        screen_audio_tracks,
+        maybe_reconnect_grace_ms,
+        ..
+      } = joined(1, &[2])
+      else {
+        unreachable!()
+      };
+      let kept = CallEvent::Joined {
+        call_id,
+        participant,
+        participants,
+        video_tracks: vec![remote],
+        screen_audio_tracks,
+        maybe_reconnect_grace_ms,
+      };
+      alice.handle_signal(event(1, kept), now).unwrap();
+      assert!(
+        drain(&mut alice).contains(&EngineOutput::Signal(CallClientMessage::Subscribe {
+          stream_id: MediaStreamId(60),
+          maybe_max_layer: Some(2),
+        }))
       );
     }
 
