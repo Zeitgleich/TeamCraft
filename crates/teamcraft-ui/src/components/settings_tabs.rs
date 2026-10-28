@@ -323,8 +323,9 @@ pub fn PreferencesSection() -> impl IntoView {
     <SettingsCard heading="settings-tab-sidebar">
       <SwitchRow
         label="settings-unreads-group"
-        value=settings.show_unreads_group
-        on_change=Callback::new(move |value: bool| settings.show_unreads_group.set(value))
+        hint="settings-unreads-group-hint"
+        value=Signal::derive(move || prefs.get().sidebar.shows_unreads_section)
+        on_change=Callback::new(move |on: bool| prefs.update(|all| all.sidebar.shows_unreads_section = on))
       />
       <SwitchRow
         label="settings-sidebar-grouped"

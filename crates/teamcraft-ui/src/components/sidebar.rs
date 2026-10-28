@@ -114,9 +114,37 @@ pub fn Sidebar() -> impl IntoView {
         .collect()
     }
   });
-  let sections = Memo::new(move |_| build_sections(&listed.get(), &state.settings.sidebar_options()));
-  let grouped =
-    Memo::new(move |_| build_grouped(&spaces.get(), &listed.get(), &state.settings.sidebar_options()));
+  // The conversation opened while unread stays in the "Unreads" section until another one opens,
+  // so the list doesn't shift under the pointer (#890). Read untracked: the count dropping to
+  // zero because the conversation is being read must not release it.
+  Effect::new(move |_| {
+    let held = match state.view.get() {
+      MainView::Conversation(id) if state.held_unread.get_untracked() == Some(id) => Some(id),
+      MainView::Conversation(id) => untrack(|| {
+        state
+          .read(|backend| backend.conversation(id))
+          .filter(|conversation| conversation.unread_count > 0 && !conversation.is_muted)
+          .map(|conversation| conversation.id)
+      }),
+      _ => None,
+    };
+    if state.held_unread.get_untracked() != held {
+      state.held_unread.set(held);
+    }
+  });
+  let sections = Memo::new(move |_| {
+    build_sections(
+      &listed.get(),
+      &state.settings.sidebar_options(state.held_unread.get()),
+    )
+  });
+  let grouped = Memo::new(move |_| {
+    build_grouped(
+      &spaces.get(),
+      &listed.get(),
+      &state.settings.sidebar_options(state.held_unread.get()),
+    )
+  });
   view! {
     <nav class="sidebar" aria-label=move || i18n.t("sidebar-label")>
       <div class="sidebar-head">

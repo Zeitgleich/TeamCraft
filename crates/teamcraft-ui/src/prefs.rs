@@ -651,6 +651,10 @@ pub struct SidebarPrefs {
   /// Switching to Home or to a space reopens the conversation that was open there. Off: Home
   /// shows its overview and a space opens its first channel (#498).
   pub reopen_last_conversation: bool,
+  /// Conversations with unread messages in their own section at the top. Off by default: they stay
+  /// in their normal place and only the bold name and the count mark them, so the list doesn't
+  /// move under the pointer while the user works through them (#890).
+  pub shows_unreads_section: bool,
 }
 
 impl Default for SidebarPrefs {
@@ -661,6 +665,7 @@ impl Default for SidebarPrefs {
       dm_limit: 0,
       is_grouped_by_space: false,
       reopen_last_conversation: true,
+      shows_unreads_section: false,
     }
   }
 }

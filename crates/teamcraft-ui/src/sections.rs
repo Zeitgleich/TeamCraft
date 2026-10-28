@@ -55,6 +55,9 @@ pub struct Section {
 pub struct SidebarOptions {
   pub show_unreads_group: bool,
   pub sort: SidebarSort,
+  /// The conversation that was unread when the user opened it: it stays in the "Unreads" section
+  /// (shown as read) until they open another one, so the list doesn't shift under the pointer.
+  pub maybe_held_open: Option<ConversationId>,
 }
 
 impl SidebarOptions {
@@ -62,6 +65,7 @@ impl SidebarOptions {
     Self {
       show_unreads_group,
       sort: SidebarSort::Default,
+      maybe_held_open: None,
     }
   }
 }
@@ -82,7 +86,9 @@ pub fn build_sections(conversations: &[Conversation], options: &SidebarOptions) 
     .iter()
     .filter(|conversation| !conversation.kind.is_direct_like())
   {
-    let kind = if options.show_unreads_group && conversation.unread_count > 0 && !conversation.is_muted {
+    let is_unread = conversation.unread_count > 0 && !conversation.is_muted;
+    let is_held_open = options.maybe_held_open == Some(conversation.id);
+    let kind = if options.show_unreads_group && (is_unread || is_held_open) {
       SectionKind::Unreads
     } else if conversation.is_favorite {
       SectionKind::Favorites
@@ -583,6 +589,58 @@ mod tests {
   }
   use crate::model::{ConversationId, ConversationKind, id_from_raw};
 
+  mod held_open {
+    use super::*;
+
+    #[test]
+    fn the_conversation_opened_while_unread_stays_in_the_unreads_section_while_it_is_open() {
+      // Open and already read: without the hold it would jump back to its place.
+      let list = vec![
+        conversation(1, SidebarCategory::Channels, 0, false),
+        conversation(2, SidebarCategory::Channels, 4, false),
+      ];
+      let held = SidebarOptions {
+        maybe_held_open: Some(id_from_raw::<ConversationId>(1)),
+        ..SidebarOptions::plain(true)
+      };
+
+      let sections = build_sections(&list, &held);
+
+      assert_eq!(sections[0].kind, SectionKind::Unreads);
+      let unread_ids: Vec<ConversationId> = sections[0].conversations.iter().map(|c| c.id).collect();
+      assert_eq!(
+        unread_ids,
+        [id_from_raw::<ConversationId>(1), id_from_raw::<ConversationId>(2)]
+      );
+    }
+
+    #[test]
+    fn without_the_section_nothing_is_held_and_the_list_keeps_its_places() {
+      let list = vec![
+        conversation(1, SidebarCategory::Channels, 0, false),
+        conversation(2, SidebarCategory::Channels, 4, false),
+      ];
+      let held = SidebarOptions {
+        maybe_held_open: Some(id_from_raw::<ConversationId>(1)),
+        ..SidebarOptions::plain(false)
+      };
+
+      let sections = build_sections(&list, &held);
+
+      assert_eq!(sections.len(), 1);
+      assert_eq!(sections[0].kind, SectionKind::Channels);
+      assert_eq!(sections[0].conversations.len(), 2);
+    }
+
+    #[test]
+    fn the_unreads_section_is_off_by_default() {
+      assert!(!crate::prefs::SidebarPrefs::default().shows_unreads_section);
+      // Preferences stored before the setting existed read as off.
+      let stored = crate::prefs::Preferences::from_json(r#"{"sidebar":{"sort":"default"}}"#);
+      assert!(!stored.sidebar.shows_unreads_section);
+    }
+  }
+
   #[test]
   fn each_channel_appears_once_and_direct_messages_not_at_all() {
     let list = vec![
@@ -621,6 +679,7 @@ mod tests {
     let options = SidebarOptions {
       show_unreads_group: true,
       sort: SidebarSort::Alphabetical,
+      maybe_held_open: None,
     };
     let names: Vec<String> = build_sections(&list, &options)[0]
       .conversations
