@@ -111,6 +111,7 @@ pub mod share_download;
 pub mod share_link_dialog;
 pub mod sheet;
 pub mod sidebar;
+pub mod sidebar_resizer;
 pub mod skeleton;
 pub mod sliding_indicator;
 pub mod space_invites;

@@ -67,6 +67,7 @@ sidebar-item-unread-mentions = { $name }, { $unread } unread messages, { $count 
     [one] 1 mention
    *[other] { $count } mentions
   }
+sidebar-resize = Resize the sidebar
 sidebar-item-muted = Notifications muted
 sidebar-item-muted-label = { $label }, notifications muted
 sidebar-item-catching-up = { $name }, catching up

@@ -10,6 +10,50 @@
   min-height: 0;
 }
 
+/* The drag handle on the sidebar's right edge (#842): no width of its own, a wider hit area
+   around the edge, and a line that shows on hover, focus and while dragging. */
+.sidebar-resizer {
+  position: relative;
+  flex: none;
+  width: 0;
+  z-index: 2;
+  outline: none;
+}
+
+.sidebar-resizer::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: -4px;
+  width: 8px;
+  cursor: col-resize;
+  touch-action: none;
+}
+
+.sidebar-resizer::after {
+  content: "";
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: -1px;
+  width: 2px;
+  background: transparent;
+  transition: background var(--dur-base) var(--ease-out);
+  pointer-events: none;
+}
+
+.sidebar-resizer:focus-visible::after,
+.sidebar-resizer.is-dragging::after {
+  background: var(--accent);
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .sidebar-resizer:hover::after {
+    background: var(--accent);
+  }
+}
+
 .sidebar-head {
   padding: 12px 16px 8px;
 }
