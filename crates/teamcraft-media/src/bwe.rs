@@ -354,6 +354,12 @@ impl SendSideEstimator {
     self.estimate_bps as u32
   }
 
+  /// Whether the estimate grows at [`BweConfig::start_increase_per_second`], measured by feedback
+  /// (since the start or [`SendSideEstimator::measure_afresh`], before any sign of congestion).
+  pub fn is_in_fast_start(&self) -> bool {
+    self.is_starting && self.maybe_last_update_at.is_some()
+  }
+
   pub fn usage(&self) -> BandwidthUsage {
     self.delay.usage
   }
