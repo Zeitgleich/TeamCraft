@@ -1771,6 +1771,7 @@ mod tests {
       let typing = GatewayEvent::TypingStart {
         conversation_id: ConversationId::from_snowflake(Snowflake::new(1).unwrap()),
         user_id: user(2),
+        maybe_thread_id: None,
       };
       for _ in 0..10 {
         hub.publish([user(1)], &typing);

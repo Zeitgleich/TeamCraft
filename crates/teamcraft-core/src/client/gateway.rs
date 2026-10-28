@@ -549,8 +549,9 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       GatewayEvent::TypingStart {
         conversation_id,
         user_id,
+        maybe_thread_id,
       } => {
-        self.note_typing(conversation_id, user_id);
+        self.note_typing(conversation_id, maybe_thread_id, user_id);
         Ok(())
       },
       GatewayEvent::DeviceAdd { user_id, device_id } => self.queue_device_addition(user_id, device_id),

@@ -213,7 +213,12 @@ async fn typing_goes_out_once_per_interval_and_never_late() {
   let space = api.list_spaces().await.unwrap().spaces[0].id;
   let channel = client.create_channel(space, "general").await.unwrap();
   let other = client.create_channel(space, "random").await.unwrap();
-  let typing = |conversation| RunnerCommand::Ui(CoreCommand::Typing { conversation });
+  let typing = |conversation| {
+    RunnerCommand::Ui(CoreCommand::Typing {
+      conversation,
+      maybe_thread: None,
+    })
+  };
 
   // Handled in order after connecting, all within the interval.
   let (runner, handle) = SyncRunner::new(client, RunnerSettings::default(), Box::new(|| {}));

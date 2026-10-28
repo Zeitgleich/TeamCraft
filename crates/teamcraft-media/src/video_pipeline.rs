@@ -223,6 +223,7 @@ pub struct VideoReceiver {
 enum SenderControl {
   Keyframe(u8),
   NeededLayers(Vec<u8>),
+  Bitrates(Vec<(u8, u32)>),
 }
 
 /// Hardware encoders where the platform has them (Android: MediaCodec; Linux and macOS with the
@@ -349,6 +350,12 @@ impl VideoSender {
 
   pub fn set_needed_layers(&self, layers: Vec<u8>) {
     let _ = self.controls.send(SenderControl::NeededLayers(layers));
+  }
+
+  /// Encodes the layers at `bitrates` (layer, bit/s) from now on; the engine's
+  /// `LayerBitrates`.
+  pub fn set_layer_bitrates(&self, bitrates: Vec<(u8, u32)>) {
+    let _ = self.controls.send(SenderControl::Bitrates(bitrates));
   }
 
   pub fn progress(&self) -> SendProgress {
@@ -685,6 +692,13 @@ impl EncoderLoop {
           }
         },
         Ok(SenderControl::NeededLayers(layers)) => simulcast.set_needed_layers(&layers),
+        Ok(SenderControl::Bitrates(bitrates)) => {
+          let (encoders, content) = (Arc::clone(&self.encoders), self.content);
+          match simulcast.set_bitrates(&bitrates, |layer| encoders(layer, content)) {
+            Ok(()) => debug!(?bitrates, kind = ?self.kind, "layer bitrates follow the uplink"),
+            Err(error) => warn!(%error, ?bitrates, "encoders not rebuilt for new layer bitrates"),
+          }
+        },
         Err(std_mpsc::TryRecvError::Empty) => return LoopStep::Continue,
         Err(std_mpsc::TryRecvError::Disconnected) => return LoopStep::Stop,
       }

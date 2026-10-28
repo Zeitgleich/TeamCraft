@@ -62,6 +62,8 @@ the events they already took are dropped from their buffers.
 
 `typing_start` is ephemeral: it comes with `seq` `0`, is not buffered and is never replayed (a late typing
 indicator is wrong anyway). Clients keep the highest `seq` they saw, so `0` leaves their resume position alone.
+A `typing` frame may name the thread a reply is typed in (`thread_id`, optional); `typing_start` then carries
+it, and clients show it in that thread only (#882). Without it (older clients) typing shows in the conversation.
 
 When the server shuts down (SIGTERM) it closes every gateway and relay socket with close code **1012**
 ("service restart"); clients reconnect at once (with jitter) and resume or, after a restart, sync afresh.
@@ -79,7 +81,7 @@ differs per viewer).
 
 | Frame          | Effect                                                                                       |
 |----------------|----------------------------------------------------------------------------------------------|
-| `typing`       | `typing_start` to the other members (members only, throttled to one per 3 s per conversation) |
+| `typing`       | `typing_start` to the other members (members only, throttled to one per 3 s per conversation and thread) |
 | `set_activity` | the device is `active` or `idle`; feeds presence                                              |
 | `heartbeat`    | keeps the connection alive                                                                    |
 

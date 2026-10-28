@@ -2,6 +2,7 @@
 //! Each module keeps its own `cfg` gates (features, target), so a module that does not apply
 //! here is empty.
 
+mod bandwidth_limits;
 mod camera_call;
 mod camera_start;
 mod dave_call;

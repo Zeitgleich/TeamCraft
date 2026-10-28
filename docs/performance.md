@@ -155,6 +155,87 @@ encoding the three layers in parallel would bring the latency down. The software
 the fallback when no hardware encoder is usable. Segmentation plus blur and the software encoder
 together stay below the 33 ms frame budget on average.
 
+### Cameras larger than the send size (issue #537)
+
+The desktop sender shrinks a camera's frames to the 1280x720 send target on the CPU before the
+effects and encoders (`VideoFrame::scaled`), and each encoder shrinks the lower simulcast layers
+from that the same way. `capture_negotiate` picks the smallest mode at or above 720p, so only
+cameras without one (4K-only, or 1080p-only) pay for it. What that costs, from
+`crates/teamcraft-media/examples/camera_scaling_bench.rs` (synthetic frames: the moving test
+pattern with sensor noise, as packed YUV like AVFoundation delivers it; no camera needed):
+
+```sh
+crates/teamcraft-media/models/fetch.sh
+TEAMCRAFT_SEGMENTATION_MODEL=crates/teamcraft-media/models/selfie_segmentation_landscape.onnx \
+  cargo run --release -p teamcraft-media --example camera_scaling_bench \
+  --features openh264-source,segmentation,gstreamer
+```
+
+macOS only so far: an Apple M4 Max (10 performance + 4 efficiency cores), macOS 26.6, with other
+work on the machine (load average 3 to 4). 300 frames per row. "CPU" is the process's CPU time
+per frame over all threads (encoder threads, GPU driver), "% core" that time against the 33 ms a
+frame has at 30 fps. Linux and Windows are still to be measured.
+
+Per stage, before and after the faster scaler and YUYV conversion of #537:
+
+| Stage (CPU per frame)                                    | Before  | After   | After, % core |
+|----------------------------------------------------------|---------|---------|---------------|
+| 4K: copy out of the camera's buffer                      | 0.21 ms | 0.21 ms | 0.6 %         |
+| 4K: YUYV → I420                                          | 2.84 ms | 1.18 ms | 3.5 %         |
+| 4K → 720p, `VideoFrame::scaled`                          | 2.13 ms | 0.85 ms | 2.6 %         |
+| 1080p: YUYV → I420                                       | 0.70 ms | 0.29 ms | 0.9 %         |
+| 1080p → 720p, `VideoFrame::scaled`                       | 2.07 ms | 1.05 ms | 3.1 %         |
+| 720p: YUYV → I420                                        | 0.31 ms | 0.13 ms | 0.4 %         |
+| 720p: the encoders' own layer scaling (720p, 360p, 180p) | 0.68 ms | 0.15 ms | 0.5 %         |
+| Light blur, compositor only (GPU; 0.6 ms latency)        | 0.25 ms | 0.23 ms | 0.7 %         |
+| Segmentation (tract, CPU)                                | 3.07 ms | 3.06 ms | 9.2 %         |
+
+The whole send path at 30 fps (copy, YUYV → I420, scaling, the effect with segmentation,
+three-layer simulcast), after the change; latency is the wall time from the camera's buffer to the
+last layer's picture:
+
+| Camera | Effect | Encoder             | CPU per frame (before) | % core | Latency, average / worst |
+|--------|--------|---------------------|------------------------|--------|--------------------------|
+| 4K     | none   | OpenH264            | 8.2 ms (10.5 ms)       | 24 %   | 8.2 / 25.7 ms            |
+| 4K     | blur   | OpenH264            | 11.4 ms (14.4 ms)      | 34 %   | 12.6 / 15.9 ms           |
+| 4K     | none   | VideoToolbox        | 7.5 ms (8.6 ms)        | 23 %   | 14.8 / 19.9 ms           |
+| 4K     | blur   | VideoToolbox        | 8.9 ms (11.3 ms)       | 27 %   | 16.7 / 22.2 ms           |
+| 1080p  | none   | OpenH264            | 8.0 ms (9.0 ms)        | 24 %   | 8.0 / 16.0 ms            |
+| 1080p  | blur   | OpenH264            | 10.7 ms (11.9 ms)      | 32 %   | 11.8 / 15.5 ms           |
+| 1080p  | none   | VideoToolbox        | 6.3 ms (8.0 ms)        | 19 %   | 14.5 / 37.2 ms           |
+| 1080p  | blur   | VideoToolbox        | 8.4 ms (9.8 ms)        | 25 %   | 16.2 / 21.7 ms           |
+| 720p   | none   | OpenH264            | 7.4 ms (7.8 ms)        | 22 %   | 7.4 / 14.5 ms            |
+| 720p   | blur   | OpenH264            | 10.0 ms (10.3 ms)      | 30 %   | 11.2 / 16.4 ms           |
+| 720p   | none   | VideoToolbox        | 3.5 ms (5.5 ms)        | 11 %   | 12.4 / 28.1 ms           |
+| 720p   | blur   | VideoToolbox        | 8.0 ms (8.6 ms)        | 24 %   | 16.1 / 21.2 ms           |
+
+What it shows:
+
+- Before, the stages a 4K camera adds over a 720p one (the larger copy and conversion, the
+  scaling) cost about 4.9 ms of CPU per frame (15 % of a core), a 1080p camera's about 2.5 ms
+  (7 %). In the whole chain the difference is smaller (2.8 to 4 ms at 4K), since the encoders
+  spend less on a shrunk picture, whose sensor noise the scaling partly averages out. The
+  scaler worked pixel by pixel in 64-bit arithmetic; it now works out the source positions once
+  per row and column, uses 8-bit weights (within one level of the old output, tested), averages
+  2x2 blocks for the halving the simulcast layers do, and reuses source rows neighbouring target
+  rows share. The YUYV conversion goes through whole rows the compiler vectorizes. Now those
+  stages cost about 2.1 ms at 4K (6 % of a core) and 1.2 ms at 1080p (4 %), and every camera,
+  720p included, saves about 0.7 ms on the encoders' layer scaling and the conversion.
+- Scaling adds no noticeable latency (about 1 ms at 4K). The latency is the encoders': OpenH264
+  encodes the three layers in about 7 ms; VideoToolbox waits for each layer's picture in turn
+  (12 to 15 ms) while the CPU idles, as on Linux with VA-API above.
+- Segmentation (3 ms) is the largest single cost of an effect, the GPU compositor itself is
+  below 1 ms.
+- The hardware rows' CPU time varies by 1 to 2 ms between runs (GStreamer's and VideoToolbox's
+  threads); the OpenH264 rows within a few tenths of a millisecond.
+
+Not done, since the CPU scaling now costs about 1 ms: asking AVFoundation for the send size
+(`AVCaptureVideoDataOutput`'s `videoSettings` width and height let the hardware scale) needs
+calls nokhwa's bindings don't offer and `unsafe` the workspace forbids; scaling on the GPU in the
+effects pipeline would first upload the full 4K picture (12 MB per frame) and only helps when an
+effect is on. Bilinear shrinking by 3 (4K → 720p) samples one source pixel of nine and can
+alias fine patterns; an area filter would look better at about the same cost, if it shows.
+
 ## Clients
 
 How fast and how lean the apps are for the person using them; the budgets they must stay within are

@@ -12,6 +12,7 @@ use crate::components::count_badge::{BadgeTone, CountBadge};
 use crate::components::huddle_bar::CallPill;
 use crate::components::icons::{Icon, IconName};
 use crate::components::space_tile::SpaceTile;
+use crate::components::typing_indicator::{TypingDots, typing_text};
 use crate::i18n::use_i18n;
 use crate::meetings::MeetingsHub;
 use crate::model::{Conversation, ConversationId, ConversationKind, PresenceStatus, SpaceId};
@@ -906,6 +907,8 @@ pub fn SidebarItem(#[prop(into)] conversation: Signal<Conversation>) -> impl Int
       .get()
       .is_some_and(|peer| state.read(|backend| backend.is_in_call(peer)))
   });
+  // "typing…" in a DM, "Alice is typing…" elsewhere (#882); replies in threads don't count.
+  let typing = typing_text(id, None, kind == ConversationKind::Direct);
   let label = move || {
     let aria_name = name.get();
     let mentions = mentions.get();
@@ -929,10 +932,14 @@ pub fn SidebarItem(#[prop(into)] conversation: Signal<Conversation>) -> impl Int
     } else {
       aria_name
     };
-    if is_muted.get() {
+    let label = if is_muted.get() {
       i18n.t_with("sidebar-item-muted-label", &[("label", &label)])
     } else {
       label
+    };
+    match typing.get() {
+      Some(typing) => format!("{label}, {typing}"),
+      None => label,
     }
   };
 
@@ -951,6 +958,16 @@ pub fn SidebarItem(#[prop(into)] conversation: Signal<Conversation>) -> impl Int
       {leading} <span class="sb-name" translate="no">
         {move || name.get()}
       </span> {move || status_emoji.get().map(|emoji| view! { <span class="sb-status" aria-hidden="true">{emoji}</span> })}
+      {move || {
+        typing.get().map(|text| {
+          view! {
+            <span class="sb-typing" aria-hidden="true" translate="no">
+              <TypingDots />
+              <span class="sb-typing-text">{text}</span>
+            </span>
+          }
+        })
+      }}
       {move || {
         has_external
           .get()

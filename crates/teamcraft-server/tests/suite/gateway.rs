@@ -344,15 +344,40 @@ mod events {
     carol
       .send(&GatewayClientMessage::Typing {
         conversation_id: conversation,
+        maybe_thread_id: None,
       })
       .await;
     let typist = alice
       .event_where(|event| match event {
-        GatewayEvent::TypingStart { user_id, .. } => Some(user_id.to_string()),
+        GatewayEvent::TypingStart {
+          user_id,
+          maybe_thread_id: None,
+          ..
+        } => Some(user_id.to_string()),
         _ => None,
       })
       .await;
     assert_eq!(typist, s.carol_id);
+
+    // A reply in a thread right after names the thread, and the conversation's throttle doesn't
+    // hold it back (#882).
+    let thread = serde_json::from_value(json!("4242")).unwrap();
+    carol
+      .send(&GatewayClientMessage::Typing {
+        conversation_id: conversation,
+        maybe_thread_id: Some(thread),
+      })
+      .await;
+    let typed_in = alice
+      .event_where(|event| match event {
+        GatewayEvent::TypingStart {
+          maybe_thread_id: Some(thread),
+          ..
+        } => Some(*thread),
+        _ => None,
+      })
+      .await;
+    assert_eq!(typed_in, thread);
 
     // Somebody who can't even see the channel gets an error frame instead.
     let outsider = member("dave");
@@ -361,6 +386,7 @@ mod events {
     dave
       .send(&GatewayClientMessage::Typing {
         conversation_id: conversation,
+        maybe_thread_id: None,
       })
       .await;
     loop {

@@ -605,7 +605,7 @@ pub fn Composer(
     }
     last_typing_ms.set_value(Some(now));
     // Changes nothing to read: no revision bump, as for the activity reports.
-    state.read(|backend| backend.notify_typing(conversation));
+    state.read(|backend| backend.notify_typing(conversation, maybe_thread));
   };
   let after_edit = move || {
     if let Some(element) = editor.get_untracked() {

@@ -218,6 +218,10 @@ prost = "0.14"
 # Device identities for call key binding tests.
 rand_core.workspace = true
 
+# The process's CPU time in the camera_scaling_bench example (a safe getrusage).
+[target.'cfg(unix)'.dev-dependencies]
+nix = { version = "0.31.3", default-features = false, features = ["resource"] }
+
 [[bin]]
 name = "teamcraft-call"
 required-features = ["native"]
@@ -225,6 +229,11 @@ required-features = ["native"]
 # Per-frame costs of encoding, effects and segmentation (see the example's docs).
 [[example]]
 name = "video_bench"
+required-features = ["openh264-source", "segmentation"]
+
+# CPU time and latency of shrinking 4K and 1080p cameras to the 720p send size (issue #537).
+[[example]]
+name = "camera_scaling_bench"
 required-features = ["openh264-source", "segmentation"]
 
 # Captures through the screencast/camera portal and counts the frames (packaging/linux/portal-test).

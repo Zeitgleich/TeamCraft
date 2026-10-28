@@ -135,6 +135,11 @@ impl VideoFrame {
 }
 
 /// Bilinear resampling of one 8-bit plane, appended to `out`.
+///
+/// It runs per frame on the sender (a 4K or 1080p camera shrunk to 720p, and every encoder's lower
+/// simulcast layers), so the source positions are worked out once per column and row, the weights
+/// are 8-bit so the sums stay in `u32`, and halving, the simulcast step, averages 2x2 blocks
+/// (which is what bilinear gives there). docs/performance.md has the numbers (#537).
 fn scale_plane(
   plane: &[u8],
   width: usize,
@@ -143,21 +148,88 @@ fn scale_plane(
   target_height: usize,
   out: &mut Vec<u8>,
 ) {
-  // 16.16 fixed point source positions of the target pixel centres.
-  let step_x = ((width << 16) / target_width.max(1)) as i64;
-  let step_y = ((height << 16) / target_height.max(1)) as i64;
-  let sample = |x: usize, y: usize| i64::from(plane[y.min(height - 1) * width + x.min(width - 1)]);
-  for target_y in 0..target_height {
-    let source_y = ((target_y as i64 * step_y) + step_y / 2 - (1 << 15)).max(0);
-    let (y0, fraction_y) = ((source_y >> 16) as usize, source_y & 0xffff);
-    for target_x in 0..target_width {
-      let source_x = ((target_x as i64 * step_x) + step_x / 2 - (1 << 15)).max(0);
-      let (x0, fraction_x) = ((source_x >> 16) as usize, source_x & 0xffff);
-      let top = sample(x0, y0) * (0x10000 - fraction_x) + sample(x0 + 1, y0) * fraction_x;
-      let bottom = sample(x0, y0 + 1) * (0x10000 - fraction_x) + sample(x0 + 1, y0 + 1) * fraction_x;
-      let value = (top * (0x10000 - fraction_y) + bottom * fraction_y + (1 << 31)) >> 32;
-      out.push(value.clamp(0, 255) as u8);
+  let start = out.len();
+  out.resize(start + target_width * target_height, 0);
+  let target = &mut out[start..];
+  if target_width == 0 || target_height == 0 {
+    return;
+  }
+  if width == target_width * 2 && height == target_height * 2 {
+    for (target_row, rows) in target
+      .chunks_exact_mut(target_width)
+      .zip(plane.chunks_exact(width * 2))
+    {
+      let (top, bottom) = rows.split_at(width);
+      for ((value, top), bottom) in target_row
+        .iter_mut()
+        .zip(top.as_chunks::<2>().0)
+        .zip(bottom.as_chunks::<2>().0)
+      {
+        let sum = u16::from(top[0]) + u16::from(top[1]) + u16::from(bottom[0]) + u16::from(bottom[1]);
+        *value = ((sum + 2) >> 2) as u8;
+      }
     }
+    return;
+  }
+  let columns = sample_positions(width, target_width);
+  let mut top = vec![0u32; target_width];
+  let mut bottom = vec![0u32; target_width];
+  // The source rows in `top` and `bottom`: neighbouring target rows often share one (enlarging,
+  // or shrinking by less than half).
+  let mut held = (usize::MAX, usize::MAX);
+  for (target_row, (row, next_row, fraction_y)) in target
+    .chunks_exact_mut(target_width)
+    .zip(sample_positions(height, target_height))
+  {
+    if row == held.1 && row != held.0 {
+      std::mem::swap(&mut top, &mut bottom);
+      held = (held.1, held.0);
+    }
+    if row != held.0 {
+      interpolate_row(&plane[row * width..][..width], &columns, &mut top);
+    }
+    if fraction_y == 0 {
+      // On a source row (shrinking by an odd whole factor, like 4K to 720p): no second row.
+      for (value, top) in target_row.iter_mut().zip(&top) {
+        *value = ((top + 128) >> 8) as u8;
+      }
+      held = (row, held.1);
+      continue;
+    }
+    if next_row != held.1 {
+      interpolate_row(&plane[next_row * width..][..width], &columns, &mut bottom);
+    }
+    held = (row, next_row);
+    for ((value, top), bottom) in target_row.iter_mut().zip(&top).zip(&bottom) {
+      // Each input is a pixel times 256, so the blend is a pixel times 65536.
+      *value = ((top * (256 - fraction_y) + bottom * fraction_y + (1 << 15)) >> 16) as u8;
+    }
+  }
+}
+
+/// For each of `target` samples along a side of `source` pixels: the two source pixels it lies
+/// between and its 8-bit fraction towards the second (target pixel centres mapped onto the source;
+/// past the last pixel both are the last).
+fn sample_positions(source: usize, target: usize) -> Vec<(usize, usize, u32)> {
+  // 16.16 fixed point.
+  let step = (source << 16) / target;
+  (0..target)
+    .map(|index| {
+      let position = (index * step + step / 2).saturating_sub(1 << 15);
+      let first = (position >> 16).min(source - 1);
+      (
+        first,
+        (first + 1).min(source - 1),
+        ((position & 0xffff) >> 8) as u32,
+      )
+    })
+    .collect()
+}
+
+/// One source row interpolated horizontally at `columns`, as pixel values times 256.
+fn interpolate_row(row: &[u8], columns: &[(usize, usize, u32)], out: &mut [u32]) {
+  for (value, &(left, right, fraction)) in out.iter_mut().zip(columns) {
+    *value = u32::from(row[left]) * (256 - fraction) + u32::from(row[right]) * fraction;
   }
 }
 
@@ -566,6 +638,70 @@ mod tests {
       assert!(y.iter().all(|value| *value == 200) && u.iter().all(|value| *value == 60));
       assert!(v.iter().all(|value| *value == 180));
       assert_eq!(half.timestamp_us(), 7);
+    }
+
+    /// The scaler before #537 (16-bit weights in `i64`, one pixel at a time): the faster one
+    /// must give the same pictures, give or take one level of rounding.
+    fn reference_scale(
+      plane: &[u8],
+      width: usize,
+      height: usize,
+      target_width: usize,
+      target_height: usize,
+    ) -> Vec<u8> {
+      let step_x = ((width << 16) / target_width) as i64;
+      let step_y = ((height << 16) / target_height) as i64;
+      let sample = |x: usize, y: usize| i64::from(plane[y.min(height - 1) * width + x.min(width - 1)]);
+      let mut out = Vec::new();
+      for target_y in 0..target_height {
+        let source_y = ((target_y as i64 * step_y) + step_y / 2 - (1 << 15)).max(0);
+        let (y0, fraction_y) = ((source_y >> 16) as usize, source_y & 0xffff);
+        for target_x in 0..target_width {
+          let source_x = ((target_x as i64 * step_x) + step_x / 2 - (1 << 15)).max(0);
+          let (x0, fraction_x) = ((source_x >> 16) as usize, source_x & 0xffff);
+          let top = sample(x0, y0) * (0x10000 - fraction_x) + sample(x0 + 1, y0) * fraction_x;
+          let bottom = sample(x0, y0 + 1) * (0x10000 - fraction_x) + sample(x0 + 1, y0 + 1) * fraction_x;
+          out.push(((top * (0x10000 - fraction_y) + bottom * fraction_y + (1 << 31)) >> 32) as u8);
+        }
+      }
+      out
+    }
+
+    #[test]
+    fn scaling_matches_plain_bilinear_within_rounding() {
+      let mut seed = 0x2545_f491_u32;
+      let mut noise = || {
+        seed ^= seed << 13;
+        seed ^= seed >> 17;
+        seed ^= seed << 5;
+        seed as u8
+      };
+      // 4K and 1080p to 720p, the simulcast halves and quarters, a screen's odd ratio, enlarging.
+      for ((width, height), (target_width, target_height)) in [
+        ((384, 216), (128, 72)),
+        ((192, 108), (128, 72)),
+        ((128, 72), (64, 36)),
+        ((128, 72), (32, 18)),
+        ((150, 94), (64, 40)),
+        ((64, 36), (128, 72)),
+        ((2, 2), (2, 2)),
+      ] {
+        let plane: Vec<u8> = (0..width * height).map(|_| noise()).collect();
+        let mut scaled = Vec::new();
+        scale_plane(&plane, width, height, target_width, target_height, &mut scaled);
+        let reference = reference_scale(&plane, width, height, target_width, target_height);
+        assert_eq!(scaled.len(), reference.len());
+        let worst = scaled
+          .iter()
+          .zip(&reference)
+          .map(|(a, b)| a.abs_diff(*b))
+          .max()
+          .unwrap();
+        assert!(
+          worst <= 1,
+          "{width}x{height} -> {target_width}x{target_height}: off by {worst}"
+        );
+      }
     }
 
     #[test]
