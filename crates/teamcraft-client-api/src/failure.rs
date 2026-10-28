@@ -151,6 +151,9 @@ pub enum CallFailure {
   CameraUnavailable,
   /// The screen could not be shared (not offered by the browser, or refused by a policy).
   ScreenUnavailable,
+  /// The browser opens the screen picker only straight from a click, and the click no longer
+  /// counted (Safari, issue #930). Choosing to share again usually works.
+  ScreenNeedsClick,
   /// The camera started, but no picture of it could be sent (it delivered nothing, or nothing
   /// could be encoded).
   CameraNoPicture,
@@ -189,7 +192,7 @@ pub enum CallFailure {
 }
 
 impl CallFailure {
-  const ALL: [Self; 23] = [
+  const ALL: [Self; 24] = [
     Self::MicrophoneDenied,
     Self::MicrophoneMissing,
     Self::MicrophoneInUse,
@@ -200,6 +203,7 @@ impl CallFailure {
     Self::CameraNotConnected,
     Self::CameraUnavailable,
     Self::ScreenUnavailable,
+    Self::ScreenNeedsClick,
     Self::CameraNoPicture,
     Self::CameraStopped,
     Self::ScreenNoPicture,
@@ -228,6 +232,7 @@ impl CallFailure {
       Self::CameraNotConnected => "camera_not_connected",
       Self::CameraUnavailable => "camera_unavailable",
       Self::ScreenUnavailable => "screen_unavailable",
+      Self::ScreenNeedsClick => "screen_needs_click",
       Self::CameraNoPicture => "camera_no_picture",
       Self::CameraStopped => "camera_stopped",
       Self::ScreenNoPicture => "screen_no_picture",

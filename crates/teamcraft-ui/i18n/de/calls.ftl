@@ -208,6 +208,7 @@ error-call-camera-unsupported = Das Bildformat dieser Kamera wird nicht unterst�
 error-call-camera-not-connected = Die iPhone-Kamera hat sich nicht verbunden: Sie wurde auf dem iPhone abgelehnt, oder das iPhone ist gesperrt oder zu weit entfernt. Erlaube sie auf dem iPhone oder wähle eine andere Kamera.
 error-call-camera-unavailable = Die Kamera lässt sich nicht öffnen. Wähle eine andere Kamera oder versuche es erneut.
 error-call-screen-unavailable = Dein Bildschirm kann von hier aus nicht geteilt werden.
+error-call-screen-needs-click = Dein Browser hat die Bildschirmauswahl nicht geöffnet. Wähle erneut „Bildschirm teilen“ und dann, was geteilt wird.
 error-call-camera-no-picture = Deine Kamera ist an, liefert aber kein Bild, daher bleibt dein Video aus. Prüfe, ob eine andere App sie nutzt, oder wähle eine andere Kamera.
 error-call-camera-stopped = Deine Kamera hat aufgehört, daher ist dein Video aus: Sie wurde getrennt, oder das System oder eine andere App hat sie übernommen. Schalte sie wieder ein oder wähle eine andere Kamera.
 error-call-screen-no-picture = Deine Bildschirmfreigabe hat begonnen, liefert aber kein Bild und wurde daher beendet. Teile erneut oder wähle einen anderen Bildschirm oder ein anderes Fenster.

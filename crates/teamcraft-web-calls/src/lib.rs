@@ -143,6 +143,12 @@ enum Control {
     mode: ScreenContentMode,
     done: Done,
   },
+  /// A screen the user already chose in a picker the page opened in the click (issue #930).
+  PickedScreen {
+    stream: MediaStream,
+    mode: ScreenContentMode,
+    done: Done,
+  },
   StopScreen,
   Watch {
     stream_id: MediaStreamId,
@@ -206,6 +212,35 @@ pub async fn act(action: String) -> Result<JsValue, JsValue> {
     .map_err(|error| failure_value(ActionFailure::other(format!("unreadable call action: {error}"))))?;
   let answer = host.act(action).await.map_err(failure_value)?;
   Ok(answer.map_or(JsValue::UNDEFINED, |partial| JsValue::from_str(&partial)))
+}
+
+/// Opens the browser's screen picker at once (`ScreenContentMode` JSON) and returns the promise of
+/// the chosen screen, for [`share_screen`]. The page calls it synchronously in the click handler:
+/// Safari opens the picker only while the click's user activation lasts (issue #930). Throws when
+/// the browser can't open one.
+#[wasm_bindgen]
+pub fn pick_screen(content_mode: String) -> Result<Promise, JsValue> {
+  let mode: ScreenContentMode = serde_json::from_str(&content_mode)
+    .map_err(|error| failure_value(ActionFailure::other(format!("unreadable screen mode: {error}"))))?;
+  call_web::request_screen(mode).map_err(|error| failure_value(failure(error)))
+}
+
+/// Shares the screen chosen in a picker [`pick_screen`] opened (`StartScreenShare` with the
+/// screen already asked for); resolves and rejects like [`act`].
+#[wasm_bindgen]
+pub async fn share_screen(
+  has_sound: bool,
+  content_mode: String,
+  picked: Promise,
+) -> Result<JsValue, JsValue> {
+  let host = host()?;
+  let mode: ScreenContentMode = serde_json::from_str(&content_mode)
+    .map_err(|error| failure_value(ActionFailure::other(format!("unreadable screen mode: {error}"))))?;
+  host
+    .start_screen_share(has_sound, mode, Some(picked))
+    .await
+    .map_err(failure_value)?;
+  Ok(JsValue::UNDEFINED)
 }
 
 /// A call event from the gateway (`CallSignal` JSON).
@@ -475,7 +510,7 @@ impl Host {
       CallAction::StartScreenShare {
         has_sound,
         content_mode,
-      } => self.start_screen_share(has_sound, content_mode).await?,
+      } => self.start_screen_share(has_sound, content_mode, None).await?,
       CallAction::StopScreenShare => {
         self.control(Control::StopScreen);
         self.update_active(|active| {
@@ -776,18 +811,22 @@ impl Host {
     self.update_active(|active| active.is_camera_on = false);
   }
 
-  /// Asks for a screen or window and shares it. Closing the browser's picker is not a failure.
+  /// Shares a screen or window: the one chosen in `maybe_picked`, the picker the page opened in the
+  /// click (issue #930), or else asks for one now. Closing the browser's picker is not a failure.
   /// Browsers share no system sound with a call yet, so asked-for sound is reported unavailable.
-  async fn start_screen_share(&self, has_sound: bool, mode: ScreenContentMode) -> Result<(), ActionFailure> {
-    match self.ask_media(|done| Control::Screen { mode, done }).await {
+  async fn start_screen_share(
+    &self,
+    has_sound: bool,
+    mode: ScreenContentMode,
+    maybe_picked: Option<Promise>,
+  ) -> Result<(), ActionFailure> {
+    let result = match maybe_picked {
+      Some(picked) => self.share_picked_screen(picked, mode).await,
+      None => self.ask_media(|done| Control::Screen { mode, done }).await,
+    };
+    match result {
       Ok(()) => {},
-      // The user closed the picker. A refusal by the system or a policy ("Permission denied by
-      // system" in Chromium) is reported.
-      Err(WebCallError::MediaAccess {
-        input: MediaInput::Screen,
-        reason: MediaAccessReason::Denied,
-        message,
-      }) if !message.contains("system") => return Ok(()),
+      Err(error) if error.is_screen_picker_closed() => return Ok(()),
       Err(error) => return Err(failure(error)),
     }
     self.update_active(|active| {
@@ -799,6 +838,45 @@ impl Host {
       };
     });
     Ok(())
+  }
+
+  /// Waits for the user's choice in a picker the page opened and sends that screen. The stream is
+  /// this module's from here: when the call ended meanwhile or the share fails, it stops, so the
+  /// browser doesn't keep capturing (and showing that it does).
+  async fn share_picked_screen(&self, picked: Promise, mode: ScreenContentMode) -> Result<(), WebCallError> {
+    let stream = call_web::picked_screen(picked).await?;
+    let (done, answer) = oneshot::channel();
+    let sent = stream.clone();
+    let is_sent = self.maybe_media.borrow().as_ref().is_some_and(|media| {
+      media
+        .controls
+        .unbounded_send(Control::PickedScreen {
+          stream: sent,
+          mode,
+          done,
+        })
+        .is_ok()
+    });
+    let result = if is_sent {
+      // No answer: the call ended meanwhile.
+      answer
+        .await
+        .map_err(|_| WebCallError::Ended)
+        .and_then(|result| result)
+    } else {
+      Err(WebCallError::Ended)
+    };
+    match result {
+      Ok(()) => Ok(()),
+      Err(WebCallError::Ended) => {
+        stop_tracks(&stream);
+        Ok(())
+      },
+      Err(error) => {
+        stop_tracks(&stream);
+        Err(error)
+      },
+    }
   }
 
   /// Sends `control` to the call task and waits for its answer; without a call there is none.
@@ -983,6 +1061,9 @@ async fn apply(call: &WebCall, control: Control) {
     Control::Camera { stream, done } => drop(done.send(call.share_camera_stream(stream).await)),
     Control::StopCamera => call.stop_camera(),
     Control::Screen { mode, done } => drop(done.send(call.start_screen_share(mode).await)),
+    Control::PickedScreen { stream, mode, done } => {
+      drop(done.send(call.share_screen_stream(stream, mode).await))
+    },
     Control::StopScreen => call.stop_screen_share(),
     Control::Watch { stream_id, canvas } => call.watch_video(stream_id, canvas),
     Control::Unwatch(stream_id) => call.unwatch_video(stream_id),
@@ -1072,7 +1153,8 @@ fn failure(error: WebCallError) -> ActionFailure {
 /// The call failure a refused device means; `None` when the browser gave no known reason.
 fn media_failure(input: MediaInput, reason: MediaAccessReason) -> Option<CallFailure> {
   Some(match (input, reason) {
-    (_, MediaAccessReason::Other) => return None,
+    (MediaInput::Screen, MediaAccessReason::NoUserActivation) => CallFailure::ScreenNeedsClick,
+    (_, MediaAccessReason::Other | MediaAccessReason::NoUserActivation) => return None,
     (MediaInput::Microphone, MediaAccessReason::Denied) => CallFailure::MicrophoneDenied,
     (MediaInput::Microphone, MediaAccessReason::NotFound) => CallFailure::MicrophoneMissing,
     (MediaInput::Microphone, MediaAccessReason::InUse) => CallFailure::MicrophoneInUse,
