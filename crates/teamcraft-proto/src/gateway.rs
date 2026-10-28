@@ -40,9 +40,12 @@ pub enum GatewayClientMessage {
     device_id: DeviceId,
   },
   Heartbeat,
-  /// The user is typing in a conversation.
+  /// The user is typing in a conversation, or with `thread_id` a reply in one of its threads (#882;
+  /// older clients leave it out and older servers ignore it).
   Typing {
     conversation_id: ConversationId,
+    #[serde(rename = "thread_id", default, skip_serializing_if = "Option::is_none")]
+    maybe_thread_id: Option<ThreadId>,
   },
   /// The device became active or idle.
   SetActivity {
@@ -283,6 +286,10 @@ pub enum GatewayEvent {
   TypingStart {
     conversation_id: ConversationId,
     user_id: UserId,
+    /// The thread the reply is typed in; absent for the conversation itself (and from older
+    /// clients, whose typing then shows in the conversation).
+    #[serde(rename = "thread_id", default, skip_serializing_if = "Option::is_none")]
+    maybe_thread_id: Option<ThreadId>,
   },
   PresenceUpdate {
     user_id: UserId,
@@ -320,9 +327,13 @@ impl fmt::Debug for GatewayClientMessage {
         .field("device_id", device_id)
         .finish(),
       Self::Heartbeat => f.write_str("Heartbeat"),
-      Self::Typing { conversation_id } => f
+      Self::Typing {
+        conversation_id,
+        maybe_thread_id,
+      } => f
         .debug_struct("Typing")
         .field("conversation_id", conversation_id)
+        .field("maybe_thread_id", maybe_thread_id)
         .finish(),
       Self::SetActivity { activity } => f.debug_struct("SetActivity").field("activity", activity).finish(),
       Self::Attention { is_attentive } => f
@@ -351,6 +362,7 @@ mod tests {
   fn client_messages_have_stable_wire_format() {
     let json = serde_json::to_string(&GatewayClientMessage::Typing {
       conversation_id: conversation(),
+      maybe_thread_id: None,
     })
     .unwrap();
     assert_eq!(json, r#"{"type":"typing","conversation_id":"7"}"#);
@@ -364,6 +376,38 @@ mod tests {
       identify,
       GatewayClientMessage::Identify {
         activity: DeviceActivity::Active,
+        ..
+      }
+    ));
+  }
+
+  #[test]
+  fn typing_in_a_thread_names_it_and_stays_readable_without() {
+    let thread = ThreadId::from_snowflake(Snowflake::new(9).unwrap());
+    let json = serde_json::to_string(&GatewayClientMessage::Typing {
+      conversation_id: conversation(),
+      maybe_thread_id: Some(thread),
+    })
+    .unwrap();
+    assert_eq!(json, r#"{"type":"typing","conversation_id":"7","thread_id":"9"}"#);
+    let event = GatewayEvent::TypingStart {
+      conversation_id: conversation(),
+      user_id: UserId::from_snowflake(Snowflake::new(2).unwrap()),
+      maybe_thread_id: Some(thread),
+    };
+    let json = serde_json::to_string(&event).unwrap();
+    assert_eq!(
+      json,
+      r#"{"type":"typing_start","conversation_id":"7","user_id":"2","thread_id":"9"}"#
+    );
+    assert_eq!(serde_json::from_str::<GatewayEvent>(&json).unwrap(), event);
+    // From an older server or client: no thread, typing in the conversation.
+    let old: GatewayEvent =
+      serde_json::from_str(r#"{"type":"typing_start","conversation_id":"7","user_id":"2"}"#).unwrap();
+    assert!(matches!(
+      old,
+      GatewayEvent::TypingStart {
+        maybe_thread_id: None,
         ..
       }
     ));
@@ -428,6 +472,7 @@ mod tests {
       event: GatewayEvent::TypingStart {
         conversation_id: conversation(),
         user_id: UserId::from_snowflake(Snowflake::new(9).unwrap()),
+        maybe_thread_id: None,
       },
     };
     let json = serde_json::to_string(&event).unwrap();

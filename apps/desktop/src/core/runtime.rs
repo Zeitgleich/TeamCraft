@@ -1331,8 +1331,8 @@ impl Core {
       },
       Request::Action(action, reply) => {
         // Typing changes nothing shown: it goes out at once, and the UI is not told of a change.
-        if let Some(conversation) = action.typing_conversation() {
-          self.announce_typing(conversation).await;
+        if let Some((conversation, maybe_thread)) = action.typing_place() {
+          self.announce_typing(conversation, maybe_thread).await;
           drop(reply.send(Ok(())));
           return;
         }
@@ -2089,11 +2089,16 @@ impl Core {
   }
 
   /// Tells the other members that the user types (throttled; dropped while offline).
-  async fn announce_typing(&mut self, conversation: ConversationId) {
+  async fn announce_typing(&mut self, conversation: ConversationId, maybe_thread: Option<ThreadId>) {
     if self.client.is_some() {
       self
         .typing
-        .announce(&mut self.connection, conversation, SystemClock.now_ms())
+        .announce(
+          &mut self.connection,
+          conversation,
+          maybe_thread,
+          SystemClock.now_ms(),
+        )
         .await;
     }
   }
@@ -2366,7 +2371,7 @@ impl ReadsWhileBusy<'_> {
         drop(reply.send(result));
       },
       // Typing arriving while the client is busy would go out late: dropped.
-      Request::Action(action, reply) if action.typing_conversation().is_some() => drop(reply.send(Ok(()))),
+      Request::Action(action, reply) if action.typing_place().is_some() => drop(reply.send(Ok(()))),
       Request::Action(action, reply) if action.is_new_message() => {
         let Some(backend) = self.backend else {
           drop(reply.send(Err(not_set_up())));

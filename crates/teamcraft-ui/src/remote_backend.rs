@@ -1347,11 +1347,23 @@ impl ChatBackend for RemoteChat {
     }
   }
 
+  /// One question for every conversation and thread (#882), however many rows show it: asked
+  /// again whenever the core changed, like [`Self::typing_users`].
+  fn typing_now(&self) -> Vec<crate::model::TypingNow> {
+    match self.ask(ChatQuery::TypingNow) {
+      Some(ChatAnswer::Typing { typing }) => typing,
+      _ => Vec::new(),
+    }
+  }
+
   /// Not an [`Self::act`]: typing changes nothing to read again, and a failure is nothing for the
   /// user to act on (the indicator is passing; the next keystrokes announce it again).
-  fn notify_typing(&self, conversation: ConversationId) {
+  fn notify_typing(&self, conversation: ConversationId, maybe_thread: Option<crate::model::ThreadId>) {
     spawn_local(async move {
-      let action = ChatAction::Typing { conversation };
+      let action = ChatAction::Typing {
+        conversation,
+        maybe_thread,
+      };
       if let Err(error) = call::<()>("core_action", &json!({ "action": action })).await {
         tracing::debug!(%error, "typing not announced");
       }

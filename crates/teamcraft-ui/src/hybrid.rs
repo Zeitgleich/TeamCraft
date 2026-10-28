@@ -906,8 +906,12 @@ impl<C: ChatBackend + 'static> ChatBackend for Hybrid<C> {
     self.chat.typing_users(conversation)
   }
 
-  fn notify_typing(&self, conversation: ConversationId) {
-    self.chat.notify_typing(conversation);
+  fn typing_now(&self) -> Vec<crate::model::TypingNow> {
+    self.chat.typing_now()
+  }
+
+  fn notify_typing(&self, conversation: ConversationId, maybe_thread: Option<crate::model::ThreadId>) {
+    self.chat.notify_typing(conversation, maybe_thread);
   }
 }
 

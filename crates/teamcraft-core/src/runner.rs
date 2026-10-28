@@ -264,8 +264,11 @@ impl<A: ServerApi, S: LocalStore> SyncRunner<A, S> {
         return;
       },
       #[cfg(feature = "ui")]
-      RunnerCommand::Ui(CoreCommand::Typing { conversation }) => {
-        self.announce_typing(conversation).await;
+      RunnerCommand::Ui(CoreCommand::Typing {
+        conversation,
+        maybe_thread,
+      }) => {
+        self.announce_typing(conversation, maybe_thread).await;
         // Nothing to flush: typing changes no stored state.
         return;
       },
@@ -339,11 +342,15 @@ impl<A: ServerApi, S: LocalStore> SyncRunner<A, S> {
   /// Tells the other members that the user types (throttled; offline, it is dropped: a late
   /// indicator would be wrong).
   #[cfg(feature = "ui")]
-  async fn announce_typing(&mut self, conversation: teamcraft_proto::ConversationId) {
+  async fn announce_typing(
+    &mut self,
+    conversation: teamcraft_proto::ConversationId,
+    maybe_thread: Option<teamcraft_proto::ThreadId>,
+  ) {
     let now = self.client.now_ms();
     self
       .typing
-      .announce(&mut self.connection, conversation, now)
+      .announce(&mut self.connection, conversation, maybe_thread, now)
       .await;
   }
 

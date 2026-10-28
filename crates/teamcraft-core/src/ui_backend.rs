@@ -25,7 +25,7 @@ use teamcraft_client_api::model::{
   Bookmark, BookmarkKind, Conversation, ConversationId, ConversationKind, CustomStatus, DeviceSetup,
   JoinableSpace, MembershipIssue, Message, MessageKind, PENDING_ID_BIT, PendingInvite, PresenceStatus,
   Reaction, SidebarCategory, Space, SpaceId, SpaceMember, SpaceRoster, SystemEvent, ThreadId, ThreadSummary,
-  TimestampMs, User, UserId, hue_from_hex,
+  TimestampMs, TypingNow, User, UserId, hue_from_hex,
 };
 use teamcraft_proto::{
   AttachmentId, ClientMessageId, ConversationKind as ConversationKindProto, ConversationResponse,
@@ -56,9 +56,11 @@ use crate::store::{
 pub enum CoreCommand {
   /// New messages or reactions are in the outbox.
   FlushOutbox,
-  /// The user types in a conversation (sent on the gateway by the sync loop, throttled).
+  /// The user types in a conversation, or with `maybe_thread` a reply in that thread (sent on the
+  /// gateway by the sync loop, throttled).
   Typing {
     conversation: ConversationId,
+    maybe_thread: Option<ThreadId>,
   },
   MarkRead {
     conversation: ConversationId,
@@ -1564,6 +1566,19 @@ impl<S: LocalStore> ChatBackend for CoreChatBackend<S> {
     self.typing.users(conversation, self.me, self.clock.now_ms())
   }
 
+  fn typing_now(&self) -> Vec<TypingNow> {
+    self
+      .typing
+      .everywhere(self.me, self.clock.now_ms())
+      .into_iter()
+      .map(|((conversation, maybe_thread), users)| TypingNow {
+        conversation,
+        maybe_thread,
+        users,
+      })
+      .collect()
+  }
+
   fn seen_by(&self, conversation: ConversationId, message: MessageId) -> Vec<UserId> {
     seen_by(&self.read_receipts(conversation), message)
   }
@@ -1597,8 +1612,11 @@ impl<S: LocalStore> ChatBackend for CoreChatBackend<S> {
     self.read(crate::read_state::marks(&self.store)).meetings
   }
 
-  fn notify_typing(&self, conversation: ConversationId) {
-    self.command(CoreCommand::Typing { conversation });
+  fn notify_typing(&self, conversation: ConversationId, maybe_thread: Option<ThreadId>) {
+    self.command(CoreCommand::Typing {
+      conversation,
+      maybe_thread,
+    });
   }
 
   fn retry_send(&self, conversation: ConversationId, message: MessageId) {
@@ -2421,24 +2439,59 @@ mod tests {
       .with_typing(typing.clone());
 
     // What the client records from the gateway; the backend shares the same state.
-    typing.note(conversation, colleague, 9_000);
-    typing.note(conversation, me, 9_000);
+    typing.note(conversation, None, colleague, 9_000);
+    typing.note(conversation, None, me, 9_000);
     assert_eq!(
       backend.typing_users(conversation),
       vec![colleague],
       "never the user themself"
     );
     assert!(backend.typing_users(id::<ConversationId>(11)).is_empty());
-    typing.note(conversation, colleague, 10_000 - crate::typing::TYPING_TIMEOUT_MS);
+    // A reply in a thread: in the answer for everywhere, under its thread only.
+    let thread = id::<ThreadId>(70);
+    let reader = id::<UserId>(3);
+    typing.note(conversation, Some(thread), reader, 9_500);
+    assert_eq!(backend.typing_users(conversation), vec![colleague]);
+    assert_eq!(
+      backend.typing_now(),
+      vec![
+        TypingNow {
+          conversation,
+          maybe_thread: None,
+          users: vec![colleague],
+        },
+        TypingNow {
+          conversation,
+          maybe_thread: Some(thread),
+          users: vec![reader],
+        },
+      ]
+    );
+    typing.note(
+      conversation,
+      None,
+      colleague,
+      10_000 - crate::typing::TYPING_TIMEOUT_MS,
+    );
     assert!(
       backend.typing_users(conversation).is_empty(),
       "indicators run out"
     );
 
-    backend.notify_typing(conversation);
+    backend.notify_typing(conversation, None);
+    backend.notify_typing(conversation, Some(thread));
     assert_eq!(
       backend.drain_commands(),
-      vec![CoreCommand::Typing { conversation }]
+      vec![
+        CoreCommand::Typing {
+          conversation,
+          maybe_thread: None,
+        },
+        CoreCommand::Typing {
+          conversation,
+          maybe_thread: Some(thread),
+        },
+      ]
     );
   }
 

@@ -690,9 +690,12 @@ pub enum ChatAction {
     conversation: ConversationId,
     message: MessageId,
   },
-  /// The user is typing (send while the text changes; the core throttles to one per few seconds).
+  /// The user is typing (send while the text changes; the core throttles to one per few seconds),
+  /// with `maybe_thread` a reply in that thread.
   Typing {
     conversation: ConversationId,
+    #[serde(default)]
+    maybe_thread: Option<ThreadId>,
   },
   DiscardUnsent {
     conversation: ConversationId,
@@ -918,12 +921,16 @@ impl ChatAction {
     matches!(self, Self::SendMessage { .. } | Self::PostMessage { .. })
   }
 
-  /// The conversation of a typing announcement. It is passing and changes nothing stored or shown:
-  /// the host sends it on the open gateway connection right away, tells the UI of no change, and
-  /// drops it while offline or busy connecting (a late indicator would be wrong).
-  pub fn typing_conversation(&self) -> Option<ConversationId> {
+  /// Where a typing announcement is: its conversation, and the thread for a reply. It is passing
+  /// and changes nothing stored or shown: the host sends it on the open gateway connection right
+  /// away, tells the UI of no change, and drops it while offline or busy connecting (a late
+  /// indicator would be wrong).
+  pub fn typing_place(&self) -> Option<(ConversationId, Option<ThreadId>)> {
     match self {
-      Self::Typing { conversation } => Some(*conversation),
+      Self::Typing {
+        conversation,
+        maybe_thread,
+      } => Some((*conversation, *maybe_thread)),
       _ => None,
     }
   }
@@ -1023,7 +1030,10 @@ impl ChatAction {
         conversation,
         message,
       } => backend.retry_send(conversation, message),
-      Self::Typing { conversation } => backend.notify_typing(conversation),
+      Self::Typing {
+        conversation,
+        maybe_thread,
+      } => backend.notify_typing(conversation, maybe_thread),
       Self::DiscardUnsent {
         conversation,
         message,
@@ -1269,6 +1279,8 @@ pub enum ChatQuery {
   TypingUsers {
     conversation: ConversationId,
   },
+  /// Everyone typing anywhere (#882), one answer for the whole chat list.
+  TypingNow,
   HasExternalPeople {
     conversation: ConversationId,
   },
@@ -1299,6 +1311,9 @@ pub enum ChatQuery {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "answer", rename_all = "snake_case")]
 pub enum ChatAnswer {
+  Typing {
+    typing: Vec<crate::model::TypingNow>,
+  },
   CallMoveOffer {
     maybe_offer: Option<CallMoveOffer>,
   },
@@ -1565,6 +1580,9 @@ impl ChatQuery {
       Self::TypingUsers { conversation } => ChatAnswer::Users {
         users: backend.typing_users(conversation),
       },
+      Self::TypingNow => ChatAnswer::Typing {
+        typing: backend.typing_now(),
+      },
       Self::SeenBy {
         conversation,
         message,
@@ -1636,15 +1654,24 @@ mod tests {
     assert_eq!(
       typing,
       ChatAction::Typing {
-        conversation: id_from_raw(7)
+        conversation: id_from_raw(7),
+        maybe_thread: None,
       }
     );
     // Hosts send it at once instead of running it as a command.
-    assert_eq!(typing.typing_conversation(), Some(id_from_raw(7)));
+    assert_eq!(typing.typing_place(), Some((id_from_raw(7), None)));
+    let in_thread: ChatAction =
+      serde_json::from_str(r#"{"action":"typing","conversation":"7","maybe_thread":"9"}"#).expect("parse");
+    assert_eq!(
+      in_thread.typing_place(),
+      Some((id_from_raw(7), Some(id_from_raw(9))))
+    );
     let mark_read = ChatAction::MarkRead {
       conversation: id_from_raw(7),
     };
-    assert_eq!(mark_read.typing_conversation(), None);
+    assert_eq!(mark_read.typing_place(), None);
+    let everywhere: ChatQuery = serde_json::from_str(r#"{"kind":"typing_now"}"#).expect("parse");
+    assert_eq!(everywhere, ChatQuery::TypingNow);
     let query: ChatQuery =
       serde_json::from_str(r#"{"kind":"typing_users","conversation":"7"}"#).expect("parse");
     assert_eq!(

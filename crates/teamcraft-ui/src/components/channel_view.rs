@@ -17,7 +17,7 @@ use crate::components::security_ui::KeyChangeBanner;
 use crate::components::sheet::MenuSurface;
 use crate::components::sliding_indicator::SlidingIndicator;
 use crate::components::tab_list::{on_tab_keys, roving_tabindex};
-use crate::components::typing_indicator::TypingIndicator;
+use crate::components::typing_indicator::{TypingDots, TypingIndicator, typing_text};
 use crate::delivery::ReadIndicator;
 use crate::i18n::{I18n, use_i18n};
 use crate::keys::{SEARCH_IN_CONVERSATION, shortcut_text};
@@ -551,6 +551,8 @@ fn ChannelHeader(
       && access.can_add_members()
   };
   let members_open = move || state.panel.get() == SidePanel::Members;
+  // While the other person of a direct conversation types, the line under the name says so (#882).
+  let peer_typing = typing_text(conversation, None, true);
   let search_label = move || {
     let shortcut = shortcut_text(&SEARCH_IN_CONVERSATION, i18n.locale());
     i18n.t_with("conversation-search", &[("shortcut", &shortcut)])
@@ -568,10 +570,24 @@ fn ChannelHeader(
             maybe_peer.get().map(|other| {
               view! {
                 <div class="header-sub">
-                  <HeaderStatus user=other />
-                  <crate::components::profile_views::InMeetingBadge user=other />
-                  <crate::components::profile_views::LastSeen user=other is_compact=true />
-                  {move || local_time().map(|label| view! { <span class="header-local-time" title=move || i18n.t("profile-local-time")>{label}</span> })}
+                  // The typing line replaces the rest for its few seconds; screen readers hear it
+                  // from the line above the composer.
+                  <Show
+                    when=move || peer_typing.with(Option::is_none)
+                    fallback=move || {
+                      view! {
+                        <span class="header-typing" aria-hidden="true" translate="no">
+                          <TypingDots />
+                          <span>{move || peer_typing.get().unwrap_or_default()}</span>
+                        </span>
+                      }
+                    }
+                  >
+                    <HeaderStatus user=other />
+                    <crate::components::profile_views::InMeetingBadge user=other />
+                    <crate::components::profile_views::LastSeen user=other is_compact=true />
+                    {move || local_time().map(|label| view! { <span class="header-local-time" title=move || i18n.t("profile-local-time")>{label}</span> })}
+                  </Show>
                 </div>
               }
             })
