@@ -764,7 +764,7 @@ The app is split into wasm chunks (`crates/teamcraft-ui/src/areas.rs`, built by
   is downloaded once.
 - The call engine (`teamcraft-web-calls`, #330) stays a module of its own that loads in the
   background after sign-in; the budget doesn't count it.
-- The background effects (#439) add their compositors (WebGPU and WebGL2) to it, about 56 kB gzip;
+- The background effects (#439) add their compositors (WebGPU and WebGL2) to it, about 57 kB gzip;
   pictures are decoded by the browser. The person segmentation is a module of its own,
   `teamcraft-web-segmentation` (tract, built with WebAssembly SIMD: 2.09 MB gzip), which the call
   module runs in a worker, and the model (0.46 MB, 0.26 MB gzip) a file of its own: both are only
