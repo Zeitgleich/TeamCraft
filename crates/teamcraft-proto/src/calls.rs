@@ -104,6 +104,15 @@ pub enum CallClientMessage {
   RequestKeyframe {
     stream_id: MediaStreamId,
   },
+  /// The layers of an own video track this device's uplink carries now (the lowest ones; empty:
+  /// none), whatever [`CallEvent::LayersNeeded`] asks for. The SFU forwards no higher layer of it,
+  /// so receivers move to a layer that is actually sent instead of freezing on a paused one
+  /// (#921). Sent when it changes and for every own track after a rejoin; until then the SFU
+  /// takes every published layer as sent. Older SFUs ignore it.
+  UplinkLayers {
+    stream_id: MediaStreamId,
+    layers: Vec<u8>,
+  },
   /// This device muted or unmuted its microphone; the SFU tells the others
   /// ([`CallEvent::ParticipantMuted`]). Sent again after every (re)join. Metadata only: it changes
   /// nothing about what the SFU forwards.
@@ -360,6 +369,11 @@ impl fmt::Debug for CallClientMessage {
         .debug_struct("RequestKeyframe")
         .field("stream_id", stream_id)
         .finish(),
+      Self::UplinkLayers { stream_id, layers } => f
+        .debug_struct("UplinkLayers")
+        .field("stream_id", stream_id)
+        .field("layers", layers)
+        .finish(),
       Self::MoveHere => f.write_str("MoveHere"),
       Self::Ping { id } => f.debug_struct("Ping").field("id", id).finish(),
       Self::SetMuted { is_muted } => f.debug_struct("SetMuted").field("is_muted", is_muted).finish(),
@@ -571,8 +585,23 @@ mod tests {
   }
 
   #[test]
+  fn uplink_layers_wire_format() {
+    let message = CallClientMessage::UplinkLayers {
+      stream_id: MediaStreamId(7),
+      layers: vec![0, 1],
+    };
+    let json = serde_json::to_string(&message).unwrap();
+    assert_eq!(json, r#"{"type":"uplink_layers","stream_id":7,"layers":[0,1]}"#);
+    assert_eq!(serde_json::from_str::<CallClientMessage>(&json).unwrap(), message);
+  }
+
+  #[test]
   fn unknown_variants_are_tolerated() {
     let client: CallClientMessage = serde_json::from_str(r#"{"type":"raise_hand"}"#).unwrap();
+    assert_eq!(client, CallClientMessage::Unknown);
+    // With fields, as `uplink_layers` reaches an SFU from before it (#921): ignored as well.
+    let client: CallClientMessage =
+      serde_json::from_str(r#"{"type":"layers_paused","stream_id":7,"layers":[0]}"#).unwrap();
     assert_eq!(client, CallClientMessage::Unknown);
     let event: CallServerMessage =
       serde_json::from_str(r#"{"type":"event","seq":2,"event":{"type":"reaction","emoji":"x"}}"#).unwrap();

@@ -138,6 +138,15 @@ struct Release {
   is_room_empty: bool,
 }
 
+/// What taking back a slot on a new connection did.
+#[derive(Default)]
+struct Resumed {
+  /// The others saw the device reconnecting.
+  was_reconnecting: bool,
+  /// Signaling for the device, after its `joined`.
+  effects: Vec<Effect>,
+}
+
 struct Participant {
   user_id: UserId,
   /// The device's microphone is muted (its own report; metadata for the others' tiles).
@@ -503,6 +512,10 @@ impl Room {
         self.request_keyframe(participant_id, stream_id, now);
         Ok(())
       },
+      CallClientMessage::UplinkLayers { stream_id, layers } => rejected(
+        participant_id,
+        self.set_uplink_layers(participant_id, stream_id, &layers, now),
+      ),
       CallClientMessage::SetMuted { is_muted } => {
         self.set_muted(participant_id, is_muted, now);
         Ok(())
@@ -611,6 +624,29 @@ impl Room {
     state.apply(effects);
   }
 
+  /// The publisher's uplink carries only `layers` of its track. A track unpublished meanwhile is
+  /// no error (the message crossed the unpublish).
+  pub fn set_uplink_layers(
+    &self,
+    owner: DeviceId,
+    stream_id: MediaStreamId,
+    layers: &[u8],
+    now: Instant,
+  ) -> Result<(), RoomError> {
+    let mut state = lock(&self.state);
+    match state
+      .forwarder
+      .set_uplink_layers(owner, StreamId(stream_id.0), layers, now)
+    {
+      Ok(effects) => {
+        state.apply(effects);
+        Ok(())
+      },
+      Err(ForwardError::UnknownTrack(_)) => Ok(()),
+      Err(error) => Err(error.into()),
+    }
+  }
+
   pub fn on_transport_feedback(&self, receiver: DeviceId, feedback: &TransportFeedback, now: Instant) {
     let mut state = lock(&self.state);
     let effects = state.forwarder.on_transport_feedback(receiver, feedback, now);
@@ -673,9 +709,11 @@ impl Room {
         return Err(RoomError::AlreadyJoined(participant_id));
       },
       Some(_) => {
-        let was_reconnecting = state.resume(participant_id, capabilities, handle, session, now);
+        let resumed = state.resume(participant_id, capabilities, handle, session, now);
         state.welcome(self.call_id, participant_id, package, self.reconnect_grace);
-        if was_reconnecting {
+        // After `joined`: what its tracks need now, which may have changed while it was away.
+        state.apply(resumed.effects);
+        if resumed.was_reconnecting {
           state.broadcast_except(
             participant_id,
             CallEvent::ParticipantReconnected {
@@ -972,8 +1010,7 @@ impl RoomState {
   }
 
   /// A device that is in the call joined on a new connection: it continues in its slot. A
-  /// connection still thought alive is replaced (the device knows better: it is gone). Returns
-  /// whether the others saw it reconnecting.
+  /// connection still thought alive is replaced (the device knows better: it is gone).
   fn resume(
     &mut self,
     participant_id: DeviceId,
@@ -981,9 +1018,9 @@ impl RoomState {
     handle: ParticipantHandle,
     session: SessionId,
     now: Instant,
-  ) -> bool {
+  ) -> Resumed {
     let Some(participant) = self.participants.get_mut(&participant_id) else {
-      return false;
+      return Resumed::default();
     };
     let previous = std::mem::replace(&mut participant.presence, Presence::Connected(handle));
     participant.session = session;
@@ -1002,8 +1039,11 @@ impl RoomState {
       },
       Presence::Reconnecting => true,
     };
-    self.forwarder.resume(participant_id, capabilities, now);
-    was_reconnecting
+    let effects = self.forwarder.resume(participant_id, capabilities, now);
+    Resumed {
+      was_reconnecting,
+      effects,
+    }
   }
 
   /// Removes a participant for good: its tracks and DAVE leaf go, everyone hears about it.

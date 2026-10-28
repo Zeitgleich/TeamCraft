@@ -7,6 +7,11 @@
 //! - **Video:** published tracks with simulcast layers; each receiver gets one layer per subscribed
 //!   track. The layer comes from the receiver's downlink estimate ([`LayerAllocator`]) and a switch
 //!   happens on a keyframe of the target layer (the SFU asks the publisher for one).
+//! - **Layers that are actually sent (#921):** a publisher on a weak uplink pauses its top layers.
+//!   It says which layers its uplink carries ([`Forwarder::set_uplink_layers`]), and the
+//!   allocation stays below them. A layer that stops arriving while a lower one keeps coming
+//!   (older publishers, an encoder that fails) is replaced by the best lower one that flows, until
+//!   it comes back: receivers never wait on a layer nobody sends.
 //! - **Bandwidth estimation:** every forwarded datagram gets a per-receiver transport sequence
 //!   number; the receiver's feedback drives a [`SendSideEstimator`]. Incoming datagrams with a
 //!   transport sequence number are recorded for the sender's own (uplink) estimation.
@@ -49,12 +54,17 @@ pub struct Forwarder {
 }
 
 /// Settings of the forwarding.
-#[derive(Debug, Clone, Copy, Default, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ForwardingConfig {
   pub speakers: SpeakerSelectionConfig,
   pub layers: LayerAllocationConfig,
   pub bwe: BweConfig,
   pub keyframes: KeyframeRequestConfig,
+  /// A layer counts as stopped when a lower layer of its track arrived this much later than its
+  /// own last packet; receivers get the best lower layer that still flows. Above the gaps of a
+  /// layer that runs (a still screen sends its picture again every second, `SCREEN_IDLE_REFRESH`),
+  /// short enough that a frozen picture doesn't last.
+  pub layer_stalled_after: Duration,
 }
 
 /// How often publishers are asked for keyframes. Keyframes are large: a receiver that keeps
@@ -123,6 +133,21 @@ struct VideoTrackRoute {
   track: VideoTrack,
   subscribers: BTreeMap<DeviceId, VideoSubscription>,
   layers_needed: Vec<u8>,
+  /// How many of the published layers (the lowest ones) the publisher's uplink carries
+  /// ([`Forwarder::set_uplink_layers`]); all of them until it says otherwise.
+  uplink_layers: usize,
+  /// The latest run of packets per layer.
+  arrivals: LayerArrivals,
+}
+
+/// The latest run of packets per layer; `None` before the first.
+type LayerArrivals = [Option<LayerRun>; MAX_SIMULCAST_LAYERS as usize];
+
+/// Packets of one layer without a gap longer than [`ForwardingConfig::layer_stalled_after`].
+#[derive(Debug, Clone, Copy)]
+struct LayerRun {
+  since: Instant,
+  last: Instant,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -130,7 +155,8 @@ struct VideoSubscription {
   max_layer: u8,
   /// Layer the allocation wants, `None` = paused.
   target: Option<u8>,
-  /// Layer being forwarded; changes to `target` on a keyframe.
+  /// Layer being forwarded; changes on a keyframe to `target`, or to the best lower layer that
+  /// flows while `target` doesn't ([`live_layer`]).
   current: Option<u8>,
   /// When this receiver last asked for a keyframe of the track.
   maybe_last_request: Option<Instant>,
@@ -156,6 +182,18 @@ pub enum ForwardError {
   Rtp(#[from] RtpError),
   #[error("invalid video fragment: {0}")]
   Fragment(#[from] FragmentError),
+}
+
+impl Default for ForwardingConfig {
+  fn default() -> Self {
+    Self {
+      speakers: SpeakerSelectionConfig::default(),
+      layers: LayerAllocationConfig::default(),
+      bwe: BweConfig::default(),
+      keyframes: KeyframeRequestConfig::default(),
+      layer_stalled_after: Duration::from_millis(1500),
+    }
+  }
 }
 
 impl Default for KeyframeRequestConfig {
@@ -226,17 +264,35 @@ impl Forwarder {
   }
 
   /// A suspended participant is back on a new connection, possibly over another network: its
-  /// estimates start over; the next allocation resumes its subscriptions (with keyframes).
-  pub fn resume(&mut self, device_id: DeviceId, capabilities: MediaCapabilities, now: Instant) {
+  /// estimates start over; the next allocation resumes its subscriptions (with keyframes). As a
+  /// publisher it hears again which layers of its tracks are needed: changes while it was away
+  /// never reached it (#921).
+  pub fn resume(
+    &mut self,
+    device_id: DeviceId,
+    capabilities: MediaCapabilities,
+    now: Instant,
+  ) -> Vec<Effect> {
     let bwe = self.config.bwe;
-    if let Some(participant) = self.participants.get_mut(&device_id) {
-      participant.capabilities = capabilities;
-      participant.downlink = SendSideEstimator::new(bwe);
-      participant.uplink = FeedbackRecorder::new(now);
-      participant.feedback_epoch = now;
-      participant.allocator = LayerAllocator::new();
-      participant.is_suspended = false;
-    }
+    let Some(participant) = self.participants.get_mut(&device_id) else {
+      return Vec::new();
+    };
+    participant.capabilities = capabilities;
+    participant.downlink = SendSideEstimator::new(bwe);
+    participant.uplink = FeedbackRecorder::new(now);
+    participant.feedback_epoch = now;
+    participant.allocator = LayerAllocator::new();
+    participant.is_suspended = false;
+    self
+      .video_tracks
+      .iter()
+      .filter(|(_, route)| route.track.device_id == device_id)
+      .map(|(&stream_id, route)| Effect::LayersNeeded {
+        publisher: device_id,
+        stream_id,
+        layers: route.layers_needed.clone(),
+      })
+      .collect()
   }
 
   /// Removes a participant with its tracks and subscriptions.
@@ -361,9 +417,11 @@ impl Forwarder {
       layers,
     };
     let route = VideoTrackRoute {
+      uplink_layers: track.layers.len(),
       track: track.clone(),
       subscribers: BTreeMap::new(),
       layers_needed: Vec::new(),
+      arrivals: [None; MAX_SIMULCAST_LAYERS as usize],
     };
     self.video_tracks.insert(stream_id, route);
     Ok(track)
@@ -380,6 +438,42 @@ impl Forwarder {
     self.video_tracks.remove(&stream_id);
     self.forget_keyframe_requests();
     Ok(())
+  }
+
+  /// The publisher's uplink carries `layers` of its track now (the lowest ones; it pauses the
+  /// others): receivers are allocated no higher layer, so they move to one that is sent.
+  pub fn set_uplink_layers(
+    &mut self,
+    owner: DeviceId,
+    stream_id: StreamId,
+    layers: &[u8],
+    now: Instant,
+  ) -> Result<Vec<Effect>, ForwardError> {
+    let route = self
+      .video_tracks
+      .get_mut(&stream_id)
+      .ok_or(ForwardError::UnknownTrack(stream_id))?;
+    if route.track.device_id != owner {
+      return Err(ForwardError::ForeignStream(stream_id));
+    }
+    // The lowest layers in a row: a layer above a gap is no use to a receiver either.
+    let carried = route
+      .track
+      .layers
+      .iter()
+      .take_while(|info| layers.contains(&info.layer))
+      .count();
+    if carried == route.uplink_layers {
+      return Ok(Vec::new());
+    }
+    route.uplink_layers = carried;
+    let receivers: Vec<DeviceId> = route.subscribers.keys().copied().collect();
+    let mut effects = Vec::new();
+    for receiver in receivers {
+      effects.extend(self.reallocate(receiver, now));
+    }
+    effects.extend(self.update_layers_needed(stream_id));
+    Ok(effects)
   }
 
   /// Starts, changes or (with `None`) stops receiving a video track.
@@ -494,7 +588,7 @@ impl Forwarder {
         Vec::new()
       }
     } else {
-      self.video_receivers(header.stream_id, header.layer.value(), &rtp_header)?
+      self.video_receivers(header.stream_id, header.layer.value(), &rtp_header, now)?
     };
     for receiver in receivers {
       if let Some(target) = self.participants.get_mut(&receiver) {
@@ -590,12 +684,14 @@ impl Forwarder {
       .collect()
   }
 
-  /// Receivers of one video packet; switches subscriptions to their target layer on a keyframe.
+  /// Receivers of one video packet; switches subscriptions on a keyframe to the layer they should
+  /// get: their target, or the best lower layer that flows while the target doesn't.
   fn video_receivers(
     &mut self,
     stream_id: StreamId,
     layer: u8,
     rtp_header: &RtpHeader,
+    now: Instant,
   ) -> Result<Vec<DeviceId>, ForwardError> {
     let fragment = FrameFragment::from_header(rtp_header)?;
     let starts_keyframe = fragment.is_keyframe && fragment.index == 0;
@@ -603,12 +699,18 @@ impl Forwarder {
       // The keyframe asked for is here: a receiver that loses it may ask again at once.
       self.last_keyframe_requests.remove(&(stream_id, layer));
     }
+    let stalled_after = self.config.layer_stalled_after;
     let Some(route) = self.video_tracks.get_mut(&stream_id) else {
       return Ok(Vec::new());
     };
+    record_arrival(&mut route.arrivals, layer, now, stalled_after);
+    let arrivals = route.arrivals;
     let mut receivers = Vec::new();
     for (&receiver, subscription) in &mut route.subscribers {
-      if subscription.target == Some(layer) && subscription.current != Some(layer) && starts_keyframe {
+      let maybe_live = subscription
+        .target
+        .map(|target| live_layer(&arrivals, target, stalled_after));
+      if starts_keyframe && maybe_live == Some(layer) && subscription.current != Some(layer) {
         subscription.current = Some(layer);
       }
       if subscription.current == Some(layer) {
@@ -646,7 +748,8 @@ impl Forwarder {
           stream_id,
           priority,
           max_layer: subscription.max_layer,
-          layers: &route.track.layers,
+          // Layers the publisher's uplink doesn't carry aren't there to have.
+          layers: route.track.layers.get(..route.uplink_layers).unwrap_or_default(),
           can_pause: !is_screen || self.config.layers.can_pause_screen_shares,
         })
       })
@@ -657,6 +760,7 @@ impl Forwarder {
       .allocator
       .allocate(&self.config.layers, estimate, &demands, now);
 
+    let stalled_after = self.config.layer_stalled_after;
     let mut effects = Vec::new();
     for (stream_id, target) in allocation {
       let Some(route) = self.video_tracks.get_mut(&stream_id) else {
@@ -666,13 +770,19 @@ impl Forwarder {
         continue;
       };
       subscription.target = target;
-      match target {
-        None => subscription.current = None,
-        Some(layer) if subscription.current != Some(layer) => {
-          let publisher = route.track.device_id;
-          effects.extend(self.keyframe_request(publisher, stream_id, layer, now));
-        },
-        Some(_) => {},
+      let Some(layer) = target else {
+        subscription.current = None;
+        continue;
+      };
+      let current = subscription.current;
+      let publisher = route.track.device_id;
+      // While the target doesn't flow, the best lower layer that does stands in (it needs a
+      // keyframe as well); the target is still asked for, so it starts with one when it's back.
+      let live = live_layer(&route.arrivals, layer, stalled_after);
+      for wanted in [live, layer] {
+        if current != Some(wanted) {
+          effects.extend(self.keyframe_request(publisher, stream_id, wanted, now));
+        }
       }
     }
     effects
@@ -720,11 +830,19 @@ impl Forwarder {
   }
 
   fn update_layers_needed(&mut self, stream_id: StreamId) -> Option<Effect> {
+    let stalled_after = self.config.layer_stalled_after;
     let route = self.video_tracks.get_mut(&stream_id)?;
+    let arrivals = route.arrivals;
+    // A layer standing in for a stopped target is needed as well, or it might stop too.
     let mut needed: Vec<u8> = route
       .subscribers
       .values()
-      .flat_map(|subscription| [subscription.target, subscription.current])
+      .flat_map(|subscription| {
+        let maybe_live = subscription
+          .target
+          .map(|target| live_layer(&arrivals, target, stalled_after));
+        [subscription.target, maybe_live, subscription.current]
+      })
       .flatten()
       .collect();
     needed.sort_unstable();
@@ -739,6 +857,48 @@ impl Forwarder {
       layers: needed,
     })
   }
+}
+
+/// Notes a packet of `layer`: it continues the layer's run, or starts a new one after a gap.
+fn record_arrival(arrivals: &mut LayerArrivals, layer: u8, now: Instant, stalled_after: Duration) {
+  if let Some(slot) = arrivals.get_mut(usize::from(layer)) {
+    *slot = Some(match *slot {
+      Some(run) if now.saturating_duration_since(run.last) <= stalled_after => LayerRun { last: now, ..run },
+      _ => LayerRun {
+        since: now,
+        last: now,
+      },
+    });
+  }
+}
+
+/// The layer a receiver that wants `target` should get: the target, or while it stopped arriving
+/// the best lower layer that still flows. A track nothing arrives of keeps its target: there is
+/// nothing better.
+fn live_layer(arrivals: &LayerArrivals, target: u8, stalled_after: Duration) -> u8 {
+  let mut layer = target;
+  while layer > 0 && has_stopped(arrivals, layer, stalled_after) {
+    layer -= 1;
+  }
+  layer
+}
+
+/// Whether `layer` stopped: a lower layer kept coming for more than `stalled_after` without it. A
+/// layer that never came counts as stopped once a lower one did (one the publisher starts only
+/// now, or never sends). A pause of the whole track (a still screen, a camera that hiccups) is
+/// none: the lower layer's run starts anew with the first packet after it.
+fn has_stopped(arrivals: &LayerArrivals, layer: u8, stalled_after: Duration) -> bool {
+  let index = usize::from(layer);
+  let maybe_last = arrivals.get(index).copied().flatten().map(|run| run.last);
+  arrivals
+    .get(..index)
+    .unwrap_or_default()
+    .iter()
+    .flatten()
+    .any(|lower| {
+      let without = maybe_last.map_or(lower.since, |last| last.max(lower.since));
+      lower.last.saturating_duration_since(without) > stalled_after
+    })
 }
 
 #[cfg(test)]
@@ -1018,8 +1178,211 @@ mod tests {
     }
   }
 
+  mod sent_layers {
+    use super::*;
+
+    #[test]
+    fn a_layer_that_stops_falls_back_to_the_best_lower_one_that_flows() {
+      let (mut forwarder, now) = wide_video_room();
+      on_top_layer(&mut forwarder, now);
+      // The publisher's uplink pauses layer 2; layers 0 and 1 keep coming.
+      let mut at = now;
+      for _ in 0..10 {
+        at += Duration::from_millis(100);
+        send_frame(&mut forwarder, 0, false, at);
+        send_frame(&mut forwarder, 1, false, at);
+      }
+      // A second without layer 2 is no reason yet (a still screen sends once a second).
+      assert!(!forwarder.on_timer(device(2), at).contains(&keyframe_request(1)));
+      for _ in 0..6 {
+        at += Duration::from_millis(100);
+        send_frame(&mut forwarder, 0, false, at);
+        send_frame(&mut forwarder, 1, false, at);
+      }
+      let effects = forwarder.on_timer(device(2), at);
+      assert!(effects.contains(&keyframe_request(1)), "{effects:?}");
+      assert!(effects.contains(&layers_needed(&[1, 2])), "{effects:?}");
+      // The receiver moves to layer 1 on its keyframe, and gets nothing of layer 0.
+      assert!(send_frame(&mut forwarder, 1, false, at).is_empty());
+      assert_eq!(send_frame(&mut forwarder, 1, true, at), devices(&[2]));
+      assert_eq!(send_frame(&mut forwarder, 1, false, at), devices(&[2]));
+      assert!(send_frame(&mut forwarder, 0, false, at).is_empty());
+      // Layer 2 is back: the receiver returns to it on its keyframe (asked for meanwhile).
+      at += Duration::from_millis(500);
+      assert!(forwarder.on_timer(device(2), at).contains(&keyframe_request(2)));
+      assert!(send_frame(&mut forwarder, 2, false, at).is_empty());
+      assert_eq!(send_frame(&mut forwarder, 2, true, at), devices(&[2]));
+      assert!(send_frame(&mut forwarder, 1, false, at).is_empty());
+    }
+
+    #[test]
+    fn a_new_receiver_starts_on_a_layer_that_flows() {
+      let (mut forwarder, now) = wide_video_room();
+      // Only layer 0 was needed so far (and sent); now someone wants layer 2.
+      for step in 0..20 {
+        send_frame(
+          &mut forwarder,
+          0,
+          step == 0,
+          now + Duration::from_millis(100 * step),
+        );
+      }
+      let at = now + Duration::from_secs(2);
+      let effects = forwarder.subscribe(device(2), VIDEO, Some(2), at).unwrap();
+      assert!(effects.contains(&keyframe_request(0)), "{effects:?}");
+      assert!(effects.contains(&keyframe_request(2)), "{effects:?}");
+      assert!(effects.contains(&layers_needed(&[0, 2])), "{effects:?}");
+      assert_eq!(send_frame(&mut forwarder, 0, true, at), devices(&[2]));
+      // Layer 2 starts with the keyframe asked for: the receiver moves up.
+      assert_eq!(send_frame(&mut forwarder, 2, true, at), devices(&[2]));
+      assert!(send_frame(&mut forwarder, 0, false, at).is_empty());
+    }
+
+    #[test]
+    fn a_still_track_keeps_its_layer() {
+      let (mut forwarder, now) = wide_video_room();
+      on_top_layer(&mut forwarder, now);
+      // Nothing of any layer for a while, then the same picture again on every layer.
+      let later = now + Duration::from_secs(5);
+      send_frame(&mut forwarder, 0, false, later);
+      send_frame(&mut forwarder, 1, false, later);
+      let effects = forwarder.on_timer(device(2), later);
+      assert!(
+        !effects
+          .iter()
+          .any(|effect| matches!(effect, Effect::KeyframeRequest { .. })),
+        "{effects:?}"
+      );
+      assert_eq!(
+        send_frame(&mut forwarder, 2, false, later + Duration::from_millis(5)),
+        devices(&[2])
+      );
+    }
+
+    #[test]
+    fn the_publishers_uplink_layers_cap_the_allocation() {
+      let (mut forwarder, now) = wide_video_room();
+      on_top_layer(&mut forwarder, now);
+      let effects = forwarder
+        .set_uplink_layers(device(1), VIDEO, &[0, 1], now)
+        .unwrap();
+      assert!(effects.contains(&keyframe_request(1)), "{effects:?}");
+      assert!(effects.contains(&layers_needed(&[1, 2])), "{effects:?}");
+      assert_eq!(send_frame(&mut forwarder, 1, true, now), devices(&[2]));
+      // Moved: layer 2 is no longer needed, so the publisher may keep it paused.
+      assert!(forwarder.on_timer(device(2), now).contains(&layers_needed(&[1])));
+      // The same report again changes nothing.
+      assert!(
+        forwarder
+          .set_uplink_layers(device(1), VIDEO, &[0, 1], now)
+          .unwrap()
+          .is_empty()
+      );
+      // The uplink recovered: layer 2 comes back after the usual upswitch hold.
+      let effects = forwarder
+        .set_uplink_layers(device(1), VIDEO, &[0, 1, 2], now)
+        .unwrap();
+      assert!(!effects.contains(&keyframe_request(2)));
+      let later = now + LayerAllocationConfig::default().upswitch_hold;
+      let effects = forwarder.on_timer(device(2), later);
+      assert!(effects.contains(&keyframe_request(2)), "{effects:?}");
+      assert!(effects.contains(&layers_needed(&[1, 2])), "{effects:?}");
+    }
+
+    #[test]
+    fn a_publisher_without_any_uplink_layer_pauses_its_receivers() {
+      let (mut forwarder, now) = wide_video_room();
+      on_top_layer(&mut forwarder, now);
+      let effects = forwarder.set_uplink_layers(device(1), VIDEO, &[], now).unwrap();
+      assert!(effects.contains(&layers_needed(&[])), "{effects:?}");
+      assert!(send_frame(&mut forwarder, 2, true, now).is_empty());
+      // Back: the lowest layer, after the usual upswitch hold.
+      forwarder.set_uplink_layers(device(1), VIDEO, &[0], now).unwrap();
+      let later = now + LayerAllocationConfig::default().upswitch_hold;
+      let effects = forwarder.on_timer(device(2), later);
+      assert!(effects.contains(&keyframe_request(0)), "{effects:?}");
+      assert_eq!(send_frame(&mut forwarder, 0, true, later), devices(&[2]));
+    }
+
+    #[test]
+    fn uplink_layers_of_others_and_unknown_tracks_are_rejected() {
+      let (mut forwarder, now) = wide_video_room();
+      assert_eq!(
+        forwarder.set_uplink_layers(device(2), VIDEO, &[0], now),
+        Err(ForwardError::ForeignStream(VIDEO))
+      );
+      assert_eq!(
+        forwarder.set_uplink_layers(device(1), StreamId(999), &[0], now),
+        Err(ForwardError::UnknownTrack(StreamId(999)))
+      );
+    }
+
+    /// Device 2 receives layer 2 of [`VIDEO`] from `now` on.
+    fn on_top_layer(forwarder: &mut Forwarder, now: Instant) {
+      forwarder.subscribe(device(2), VIDEO, Some(2), now).unwrap();
+      send_frame(forwarder, 0, true, now);
+      send_frame(forwarder, 1, true, now);
+      assert_eq!(send_frame(forwarder, 2, true, now), devices(&[2]));
+    }
+
+    /// [`video_room`] with downlinks that fit every layer from the start.
+    fn wide_video_room() -> (Forwarder, Instant) {
+      let mut config = ForwardingConfig::default();
+      config.bwe.start_bps = 10_000_000;
+      config.bwe.max_bps = config.bwe.max_bps.max(10_000_000);
+      let (mut forwarder, now) = video_room();
+      forwarder.config = config;
+      for n in 1..=3 {
+        let capabilities = forwarder.participants[&device(n)].capabilities.clone();
+        forwarder.resume(device(n), capabilities, now);
+      }
+      (forwarder, now)
+    }
+
+    fn keyframe_request(layer: u8) -> Effect {
+      Effect::KeyframeRequest {
+        publisher: device(1),
+        stream_id: VIDEO,
+        layer,
+      }
+    }
+
+    fn layers_needed(layers: &[u8]) -> Effect {
+      Effect::LayersNeeded {
+        publisher: device(1),
+        stream_id: VIDEO,
+        layers: layers.to_vec(),
+      }
+    }
+  }
+
   mod reconnecting {
     use super::*;
+
+    #[test]
+    fn a_resumed_publisher_hears_which_layers_are_needed() {
+      let (mut forwarder, now) = video_room();
+      forwarder.subscribe(device(2), VIDEO, Some(0), now).unwrap();
+      forwarder.suspend(device(1), now);
+      // Changed while the publisher is away: the room can't tell it.
+      let effects = forwarder.subscribe(device(2), VIDEO, None, now).unwrap();
+      assert!(
+        effects
+          .iter()
+          .any(|effect| matches!(effect, Effect::LayersNeeded { .. }))
+      );
+      let effects = forwarder.resume(device(1), capabilities_av1_encoder(), now);
+      assert_eq!(
+        effects,
+        vec![Effect::LayersNeeded {
+          publisher: device(1),
+          stream_id: VIDEO,
+          layers: Vec::new(),
+        }]
+      );
+      // A device without tracks hears nothing.
+      assert!(forwarder.resume(device(2), capabilities_av1(), now).is_empty());
+    }
 
     #[test]
     fn suspended_receiver_gets_nothing_until_it_resumes() {
@@ -1421,6 +1784,13 @@ mod tests {
       )
       .unwrap();
     (forwarder, now)
+  }
+
+  fn capabilities_av1_encoder() -> MediaCapabilities {
+    MediaCapabilities {
+      video_encoders: vec![VideoCodec::Av1, VideoCodec::Vp9],
+      ..capabilities_av1()
+    }
   }
 
   fn capabilities_av1() -> MediaCapabilities {
