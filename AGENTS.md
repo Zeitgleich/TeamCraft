@@ -93,6 +93,9 @@ cargo deny check
 - Work on **feature branches** (`feat/…`, `fix/…`, `docs/…`), one feature or milestone step each.
 - **Commit every meaningful step** on the branch – a working sub-step, not every line. Each commit
   builds and passes `cargo fmt --check` and `clippy`.
+- Pull requests of people with write access get **auto-merge (squash)** on opening
+  (`.github/workflows/auto-merge.yml`): they merge once `ci-gate` passes. Turn it off on a PR that must
+  wait: `gh pr merge --disable-auto <number>`.
 - `main` only receives **squash merges** of reviewed branches; the squash commit message summarizes
   the feature (subject ≤ 72 chars, body explains what and why).
 - **Releases are nightly** (03:00 Berlin, `nightly-release.yml`, [docs/release.md](docs/release.md)):
