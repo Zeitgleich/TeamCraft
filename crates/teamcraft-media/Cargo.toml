@@ -57,7 +57,7 @@ sound-files = ["native", "message-sounds", "dep:symphonia"]
 
 pipewire = ["native", "dep:pipewire", "dep:ashpd"]
 # Cameras on macOS through AVFoundation (via nokhwa).
-avfoundation = ["native", "dep:nokhwa", "dep:nokhwa-bindings-macos"]
+avfoundation = ["native", "dep:nokhwa", "dep:nokhwa-bindings-macos", "dep:flume"]
 # Cameras on Windows through Media Foundation (via nokhwa). Compile-checked only so far.
 mediafoundation = ["native", "dep:nokhwa"]
 # Screen and window capture on Windows through Windows Graphics Capture (safe wrapper crate).
@@ -173,12 +173,15 @@ ashpd = { version = "0.13.13", optional = true, features = ["camera", "screencas
 pipewire = { version = "0.10.1", optional = true }
 
 # Camera capture on macOS: AVFoundation behind a safe API (Apache-2.0). Its own MJPEG decoding
-# (C code) is off; capture_convert decodes MJPEG.
+# (C code) is off; AVFoundation converts MJPEG modes to YUV (capture_nokhwa, #914).
 [target.'cfg(target_os = "macos")'.dependencies]
 nokhwa = { version = "0.10.11", optional = true, default-features = false, features = ["input-avfoundation"] }
 # The modes an AVFoundation camera offers, as nokhwa's own backend reads them (nokhwa's mode list
 # comes back empty on AVFoundation, #819). Already in the tree through nokhwa (Apache-2.0).
 nokhwa-bindings-macos = { version = "0.2.4", optional = true }
+# The frame queue of nokhwa's AVFoundation bindings, for the camera stream that converts MJPEG
+# modes (#914). Already in the tree through those bindings (MIT/Apache-2.0).
+flume = { version = "0.11.1", optional = true, default-features = false }
 # Screen sharing with its sound: ScreenCaptureKit behind a safe API (MIT/Apache-2.0).
 # Screen sharing with its sound: ScreenCaptureKit behind a safe API (MIT/Apache-2.0). Its
 # `macos_14_0` feature only compiles the CGImage pixel helpers in; the bridge itself guards newer

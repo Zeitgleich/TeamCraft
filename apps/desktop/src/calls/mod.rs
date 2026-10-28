@@ -685,7 +685,8 @@ impl CallHost {
       return Ok(());
     };
     let maybe_token = lock(&self.state).maybe_screen_token.clone();
-    let picking = tokio::task::spawn_blocking(move || video::open_screen(maybe_token.as_deref(), mode));
+    let picking =
+      tokio::task::spawn_blocking(move || video::open_screen(maybe_token.as_deref(), mode, has_sound));
     let opened = tokio::select! {
       opened = picking => opened.map_err(|error| error.to_string())?,
       () = wait.cancelled.notified() => {
@@ -696,7 +697,11 @@ impl CallHost {
       },
     };
     drop(wait);
-    let (capture, maybe_new_token) = match opened {
+    let video::OpenedScreen {
+      capture,
+      maybe_token: maybe_new_token,
+      maybe_sound,
+    } = match opened {
       Ok(opened) => opened,
       // Closing the picker is a choice, not a failure: nothing is shared, nothing to report.
       Err(CaptureError::Cancelled(_)) => {
@@ -727,10 +732,9 @@ impl CallHost {
       .as_ref()
       .is_some_and(|active| active.is_sharing_screen);
     // The share may already have ended (no picture): its sound stays off then.
-    let screen_sound = if has_sound && is_sharing {
-      self.start_screen_audio().await
-    } else {
-      ScreenShareSound::Off
+    let screen_sound = match maybe_sound {
+      Some(sound) if is_sharing => self.start_screen_audio(sound).await,
+      _ => ScreenShareSound::Off,
     };
     // A share that ended meanwhile keeps its sound shown as off.
     self.update_active(|active| {
@@ -751,8 +755,8 @@ impl CallHost {
     });
   }
 
-  /// Starts sending the computer's sound with the share.
-  async fn start_screen_audio(&self) -> ScreenShareSound {
+  /// Starts sending the share's sound.
+  async fn start_screen_audio(&self, sound: Box<dyn SystemAudioCapture>) -> ScreenShareSound {
     let (done, done_rx) = oneshot::channel();
     {
       let media = self.media.lock().await;
@@ -761,7 +765,7 @@ impl CallHost {
       };
       if call
         .controls
-        .send(Control::StartScreenAudio(video::open_system_audio(), done))
+        .send(Control::StartScreenAudio(sound, done))
         .is_err()
       {
         return ScreenShareSound::Off;

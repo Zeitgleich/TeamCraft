@@ -7,7 +7,8 @@
 //! Capture for screens and windows (both compile-checked only).
 //!
 //! A screen share's sound (the computer's playback without the call): PipeWire on Linux, WASAPI
-//! process loopback on Windows, ScreenCaptureKit on macOS.
+//! process loopback on Windows. On macOS the share's own ScreenCaptureKit stream captures the
+//! sound of what was picked, so it needs no Screen Recording permission (#914).
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -146,6 +147,15 @@ pub(super) fn screen_failure_wire(error: &CaptureError) -> String {
   .to_wire()
 }
 
+/// A screen or window the user picked, opened.
+pub(super) struct OpenedScreen {
+  pub(super) capture: Box<dyn VideoCapture>,
+  /// Restores the choice next time, where the platform has one.
+  pub(super) maybe_token: Option<String>,
+  /// The share's sound, when it was asked for.
+  pub(super) maybe_sound: Option<Box<dyn SystemAudioCapture>>,
+}
+
 /// Opens the camera (blocking: the portal may ask the user). A chosen device is a V4L2 path; the
 /// portal only offers "the camera", so it is tried for the default (and for a chosen camera that
 /// is no longer listed). V4L2 tries the chosen or first camera and one fallback
@@ -203,40 +213,54 @@ pub(super) fn open_camera(_maybe_id: Option<&str>) -> Result<(Box<dyn VideoCaptu
   Err("cameras are not supported on this platform yet".into())
 }
 
-/// Asks for a screen or window (blocking: the portal shows its picker). Returns the capture and
-/// a token that restores the choice next time.
+/// Asks for a screen or window (blocking: the portal shows its picker), with a token that
+/// restores the choice next time. The sound is the computer's.
 #[cfg(target_os = "linux")]
 pub(super) fn open_screen(
   maybe_restore_token: Option<&str>,
   mode: ScreenContentMode,
-) -> Result<(Box<dyn VideoCapture>, Option<String>), CaptureError> {
-  teamcraft_media::capture_portal::PortalCapture::screen(screen_format(mode), maybe_restore_token)
-    .map(|(capture, maybe_token)| (Box::new(capture) as Box<dyn VideoCapture>, maybe_token))
+  has_sound: bool,
+) -> Result<OpenedScreen, CaptureError> {
+  let (capture, maybe_token) =
+    teamcraft_media::capture_portal::PortalCapture::screen(screen_format(mode), maybe_restore_token)?;
+  Ok(OpenedScreen {
+    capture: Box::new(capture),
+    maybe_token,
+    maybe_sound: has_sound.then(open_system_audio),
+  })
 }
 
-/// The primary display, or the source a stored token names (`monitor:N`, `window:Title`).
+/// The primary display, or the source a stored token names (`monitor:N`, `window:Title`). The
+/// sound is the computer's.
 #[cfg(target_os = "windows")]
 pub(super) fn open_screen(
   maybe_restore_token: Option<&str>,
   mode: ScreenContentMode,
-) -> Result<(Box<dyn VideoCapture>, Option<String>), CaptureError> {
+  has_sound: bool,
+) -> Result<OpenedScreen, CaptureError> {
   use teamcraft_media::capture_windows::{ScreenSource, WindowsScreenCapture};
 
   let source = ScreenSource::from_token(maybe_restore_token);
   let maybe_token = source.to_token();
-  WindowsScreenCapture::open(source, screen_format(mode))
-    .map(|capture| (Box::new(capture) as Box<dyn VideoCapture>, maybe_token))
+  let capture = WindowsScreenCapture::open(source, screen_format(mode))?;
+  Ok(OpenedScreen {
+    capture: Box::new(capture),
+    maybe_token,
+    maybe_sound: has_sound.then(open_system_audio),
+  })
 }
 
 /// What the user picks in the system's picker each time (a window, an application or a display;
 /// never TeamCraft's own windows, left out by the app's bundle id). The picker grants the capture
 /// of what was picked: no Screen Recording permission is asked for here (it applies only after an
-/// app restart, issue #683). Runs on a blocking thread: the picker waits for the user.
+/// app restart, issue #683). The sound is the picked content's, captured by the same stream, so it
+/// needs no permission either (#914). Runs on a blocking thread: the picker waits for the user.
 #[cfg(target_os = "macos")]
 pub(super) fn open_screen(
   _maybe_restore_token: Option<&str>,
   mode: ScreenContentMode,
-) -> Result<(Box<dyn VideoCapture>, Option<String>), CaptureError> {
+  has_sound: bool,
+) -> Result<OpenedScreen, CaptureError> {
   use objc2_foundation::NSBundle;
   use teamcraft_media::capture_screencapturekit::ScreenCaptureKitScreen;
 
@@ -244,8 +268,13 @@ pub(super) fn open_screen(
   let maybe_bundle_id = NSBundle::mainBundle()
     .bundleIdentifier()
     .map(|bundle_id| bundle_id.to_string());
-  ScreenCaptureKitScreen::pick(screen_format(mode), maybe_bundle_id.as_deref())
-    .map(|capture| (Box::new(capture) as Box<dyn VideoCapture>, None))
+  let mut screen = ScreenCaptureKitScreen::pick(screen_format(mode), maybe_bundle_id.as_deref())?;
+  let maybe_sound = has_sound.then(|| Box::new(screen.sound()) as Box<dyn SystemAudioCapture>);
+  Ok(OpenedScreen {
+    capture: Box::new(screen),
+    maybe_token: None,
+    maybe_sound,
+  })
 }
 
 /// Closes the system's screen picker of a share that was stopped while it was open. macOS hides
@@ -263,29 +292,20 @@ pub(super) fn close_screen_picker() {}
 pub(super) fn open_screen(
   _maybe_restore_token: Option<&str>,
   _mode: ScreenContentMode,
-) -> Result<(Box<dyn VideoCapture>, Option<String>), CaptureError> {
+  _has_sound: bool,
+) -> Result<OpenedScreen, CaptureError> {
   Err(CaptureError::NoDevice("screen capture on this platform"))
 }
 
 /// The computer's sound for a screen share, without this app's own playback.
 #[cfg(target_os = "linux")]
-pub(super) fn open_system_audio() -> Box<dyn SystemAudioCapture> {
+fn open_system_audio() -> Box<dyn SystemAudioCapture> {
   Box::new(teamcraft_media::system_audio_pipewire::PipeWireSystemAudio::new())
 }
 
 #[cfg(target_os = "windows")]
-pub(super) fn open_system_audio() -> Box<dyn SystemAudioCapture> {
+fn open_system_audio() -> Box<dyn SystemAudioCapture> {
   Box::new(teamcraft_media::system_audio_wasapi::WasapiSystemAudio::new())
-}
-
-#[cfg(target_os = "macos")]
-pub(super) fn open_system_audio() -> Box<dyn SystemAudioCapture> {
-  Box::new(teamcraft_media::capture_screencapturekit::ScreenCaptureKitAudio::new())
-}
-
-#[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
-pub(super) fn open_system_audio() -> Box<dyn SystemAudioCapture> {
-  Box::new(teamcraft_media::system_audio::UnsupportedSystemAudio)
 }
 
 /// Three simulcast layers for a camera.
