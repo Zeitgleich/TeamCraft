@@ -83,6 +83,12 @@
   max-width: none;
 }
 
+:root[data-layout="compact"] .top-nav {
+  grid-column: 2;
+  justify-self: end;
+  width: auto;
+}
+
 :root[data-layout="compact"] .search-field {
   grid-column: 2;
   justify-self: end;

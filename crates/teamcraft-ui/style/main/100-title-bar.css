@@ -53,16 +53,16 @@
 }
 
 /* However narrow the window, some of the title bar stays free to grab beside the search. */
-:root[data-titlebar="custom"] .search-field {
+:root[data-titlebar="custom"] .top-nav {
   width: min(560px, calc(100% - 32px));
+}
+
+:root[data-titlebar="custom"] .top-nav.has-history {
+  width: min(632px, calc(100% - 32px));
 }
 
 :root[data-platform="macos"][data-titlebar="custom"]:not([data-window="fullscreen"]) .top-bar {
   grid-template-columns: var(--traffic-lights-w) minmax(0, 1fr) auto;
-}
-
-:root[data-platform="macos"][data-titlebar="custom"]:not([data-window="fullscreen"]) .top-bar.has-history {
-  grid-template-columns: var(--traffic-lights-w) auto minmax(0, 1fr) auto;
 }
 
 /* The traffic lights sit where the brand would be; fullscreen hides them and the brand returns. */
