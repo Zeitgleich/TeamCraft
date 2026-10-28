@@ -361,6 +361,29 @@ impl SimulcastEncoder {
     Ok(())
   }
 
+  /// The same layers at a new size (the source changed size, #931): every layer gets a new
+  /// encoder from `make_encoder`, which starts with a keyframe. On an error the old encoders stay.
+  pub fn resize(
+    &mut self,
+    layers: &[VideoLayerInfo],
+    mut make_encoder: impl FnMut(&VideoLayerInfo) -> Result<Box<dyn VideoEncoder>, VideoCodecError>,
+  ) -> Result<(), VideoCodecError> {
+    let mut rebuilt = Vec::with_capacity(self.layers.len());
+    for layer in &self.layers {
+      let info = layers
+        .iter()
+        .find(|info| info.layer == layer.info.layer)
+        .ok_or(VideoCodecError::UnknownLayer(layer.info.layer))?;
+      rebuilt.push((*info, make_encoder(info)?));
+    }
+    for (layer, (info, encoder)) in self.layers.iter_mut().zip(rebuilt) {
+      layer.info = info;
+      layer.encoder = encoder;
+      layer.wants_keyframe = true;
+    }
+    Ok(())
+  }
+
   /// Encodes `frame` for every needed layer.
   pub fn encode(&mut self, frame: &VideoFrame) -> Result<Vec<EncodedVideoFrame>, VideoCodecError> {
     let timestamp = EncodedVideoFrame::rtp_timestamp(frame.timestamp_us());
@@ -547,6 +570,55 @@ mod tests {
       simulcast.request_keyframe(7),
       Err(VideoCodecError::UnknownLayer(7))
     ));
+  }
+
+  #[test]
+  #[cfg_attr(
+    not(feature = "openh264-source"),
+    ignore = "needs OpenH264: --features openh264-source"
+  )]
+  fn a_resized_source_is_encoded_and_decoded_at_its_new_shape() {
+    let layers = simulcast_layers(HD, 30, 2_000_000, 2);
+    let open = |info: &VideoLayerInfo| {
+      Ok(Box::new(OpenH264Encoder::new(info, VideoContent::Screen)?) as Box<dyn VideoEncoder>)
+    };
+    let mut simulcast = SimulcastEncoder::new(&layers, open).unwrap();
+    let mut decoders = [OpenH264Decoder::new().unwrap(), OpenH264Decoder::new().unwrap()];
+    for index in 0..5 {
+      for decoded in decode_layers(&mut simulcast, &mut decoders, &test_pattern(HD, index)) {
+        assert_eq!(decoded.0.resolution(), sizes_of(&layers)[usize::from(decoded.1)]);
+      }
+    }
+    // The shared window turns portrait: the same layers at its shape, starting with keyframes.
+    let portrait = VideoResolution {
+      width: 360,
+      height: 640,
+    };
+    let resized = crate::video::resized_layers(&layers, portrait);
+    simulcast.resize(&resized, open).unwrap();
+    assert!(simulcast.wants_keyframe());
+    let mut last = None;
+    for index in 5..10 {
+      let frame = test_pattern(portrait, index);
+      let encoded = simulcast.encode(&frame).unwrap();
+      assert_eq!(layers_of(&encoded), vec![0, 1]);
+      assert!(encoded.iter().all(|picture| picture.is_keyframe == (index == 5)));
+      for picture in encoded {
+        let layer = usize::from(picture.layer.value());
+        let decoded = decoders[layer]
+          .decode(&picture.data, frame.timestamp_us())
+          .unwrap()
+          .unwrap();
+        assert_eq!(decoded.resolution(), sizes_of(&resized)[layer]);
+        if layer == 1 {
+          last = Some((frame.clone(), decoded));
+        }
+      }
+    }
+    // Not stretched: the decoded picture matches what was captured.
+    let (original, decoded) = last.unwrap();
+    let psnr = luma_psnr(&original, &decoded);
+    assert!(psnr > 30.0, "PSNR {psnr:.1} dB");
   }
 
   #[test]
@@ -755,6 +827,35 @@ mod tests {
       *index += 1;
     }
     frames
+  }
+
+  /// Encodes `frame` and decodes every layer's picture with that layer's decoder.
+  fn decode_layers(
+    simulcast: &mut SimulcastEncoder,
+    decoders: &mut [OpenH264Decoder],
+    frame: &VideoFrame,
+  ) -> Vec<(VideoFrame, u8)> {
+    let mut decoded = Vec::new();
+    for picture in simulcast.encode(frame).unwrap() {
+      let layer = picture.layer.value();
+      if let Some(picture) = decoders[usize::from(layer)]
+        .decode(&picture.data, frame.timestamp_us())
+        .unwrap()
+      {
+        decoded.push((picture, layer));
+      }
+    }
+    decoded
+  }
+
+  fn sizes_of(layers: &[VideoLayerInfo]) -> Vec<VideoResolution> {
+    layers
+      .iter()
+      .map(|layer| VideoResolution {
+        width: layer.width,
+        height: layer.height,
+      })
+      .collect()
   }
 
   fn layers_of(frames: &[EncodedVideoFrame]) -> Vec<u8> {

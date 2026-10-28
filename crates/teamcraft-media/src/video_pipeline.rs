@@ -15,7 +15,7 @@ use tracing::{debug, info, warn};
 
 use crate::call_video::ReceivedVideoFrame;
 use crate::picture_check::{PictureContent, picture_content};
-use crate::video::{EncodedVideoFrame, VideoFrame, VideoResolution, fit_within};
+use crate::video::{EncodedVideoFrame, LayerSizer, VideoFrame, VideoResolution, fit_within};
 use crate::video_capture::{CaptureError, FrameReceiver, VideoCapture, frame_queue};
 use crate::video_codec::{
   FallbackEncoder, OpenH264Decoder, OpenH264Encoder, SimulcastEncoder, VideoCodecError, VideoContent,
@@ -275,6 +275,10 @@ impl VideoSender {
     let encoder_loop = EncoderLoop {
       kind: kind.clone(),
       layers: layers.clone(),
+      sizer: LayerSizer::new(
+        layers.clone(),
+        largest_resolution(&layers).unwrap_or(VideoResolution { width: 0, height: 0 }),
+      ),
       content,
       encoders,
       maybe_filter,
@@ -342,7 +346,10 @@ impl VideoSender {
 /// The encoder thread of one track.
 struct EncoderLoop {
   kind: VideoTrackKind,
+  /// The layers as planned at the start: their top is the largest picture sent.
   layers: Vec<VideoLayerInfo>,
+  /// Keeps the encoders in the shape of the pictures (a shared window resized, #931).
+  sizer: LayerSizer,
   content: VideoContent,
   encoders: EncoderFactory,
   maybe_filter: Option<FrameFilter>,
@@ -415,14 +422,7 @@ impl EncoderLoop {
         return;
       },
     };
-    let send_resolution = self
-      .layers
-      .iter()
-      .map(|layer| VideoResolution {
-        width: layer.width,
-        height: layer.height,
-      })
-      .max_by_key(|resolution| u32::from(resolution.width) * u32::from(resolution.height));
+    let send_resolution = largest_resolution(&self.layers);
     let mut limiter = FrameLimiter::new(self.layers.iter().map(|layer| layer.max_framerate).max());
     let mut encode_warning = RepeatedWarning::default();
     let started_at = Instant::now();
@@ -542,6 +542,7 @@ impl EncoderLoop {
     frame: VideoFrame,
     encode_warning: &mut RepeatedWarning,
   ) -> Result<LastPicture, LoopStep> {
+    self.follow_source_size(simulcast, frame.resolution());
     let encoded_frames = match simulcast.encode(&frame) {
       Ok(encoded_frames) => encoded_frames,
       Err(error) => {
@@ -565,6 +566,25 @@ impl EncoderLoop {
       frame,
       encoded_at: Instant::now(),
     })
+  }
+
+  /// Rebuilds the encoders at the pictures' size once it changed for good (a shared window was
+  /// resized), so the picture keeps its shape instead of being stretched into the old size.
+  /// Checked on repeated pictures too: a window that stopped changing may deliver no new frame.
+  fn follow_source_size(&mut self, simulcast: &mut SimulcastEncoder, size: VideoResolution) {
+    let Some(layers) = self.sizer.observe(size, Instant::now()) else {
+      return;
+    };
+    let (encoders, content, kind) = (Arc::clone(&self.encoders), self.content, &self.kind);
+    match simulcast.resize(&layers, |layer| encoders(layer, content)) {
+      Ok(()) => info!(
+        ?kind,
+        width = size.width,
+        height = size.height,
+        "the video source changed size; the encoders follow"
+      ),
+      Err(error) => warn!(%error, ?kind, "encoders not rebuilt for the new size; the picture is scaled"),
+    }
   }
 
   /// Applies every queued control; [`LoopStep::Stop`] once the sender is gone (the track was
@@ -662,6 +682,17 @@ impl EncoderLoop {
 }
 
 /// Why no first picture came: nothing captured, or nothing of it encoded.
+/// The largest of `layers`' sizes: what the track sends at most.
+fn largest_resolution(layers: &[VideoLayerInfo]) -> Option<VideoResolution> {
+  layers
+    .iter()
+    .map(|layer| VideoResolution {
+      width: layer.width,
+      height: layer.height,
+    })
+    .max_by_key(|resolution| u32::from(resolution.width) * u32::from(resolution.height))
+}
+
 fn first_picture_failure(source_name: &'static str, progress: SendProgress) -> VideoStartError {
   if progress.frames_captured == 0 {
     VideoStartError::NoFrames(source_name)
@@ -1033,6 +1064,58 @@ mod tests {
     assert!((120..=136).contains(&average), "filtered grey, got {average}");
   }
 
+  #[tokio::test]
+  #[cfg_attr(
+    not(feature = "openh264-source"),
+    ignore = "needs OpenH264: --features openh264-source"
+  )]
+  async fn a_window_of_another_shape_is_sent_in_its_shape_not_stretched() {
+    let capture = ManualCapture::new(CaptureFormat {
+      resolution: VGA,
+      framerate: 30,
+    });
+    let (encoded, mut encoded_rx) = mpsc::unbounded_channel();
+    let pushed = Arc::new(Mutex::new(None));
+    let config = VideoSendConfig {
+      kind: VideoTrackKind::Screen,
+      capture: Box::new(SharedCapture(capture, Arc::clone(&pushed))),
+      // Planned for a landscape picture...
+      layers: simulcast_layers(VGA, 30, 800_000, 1),
+      encoders: software_encoders(),
+      maybe_filter: None,
+      maybe_idle_refresh: None,
+    };
+    let (sender, _first_picture) = VideoSender::start(config, encoded).unwrap();
+    let frames = pushed.lock().unwrap().clone().unwrap();
+    // ...but the shared window is portrait.
+    let portrait = VideoResolution {
+      width: 360,
+      height: 640,
+    };
+    let mut decoder = OpenH264Decoder::new().unwrap();
+    let mut decoded_sizes = Vec::new();
+    for index in 0..5u64 {
+      assert!(frames.send(test_pattern(portrait, index, index * 33_333).unwrap()));
+      let Ok(Some((_, frame))) = tokio::time::timeout(Duration::from_secs(5), encoded_rx.recv()).await else {
+        panic!("frame {index} not encoded");
+      };
+      if let Some(picture) = decoder.decode(&frame.data, index * 33_333).unwrap() {
+        decoded_sizes.push(picture.resolution());
+      }
+    }
+    drop(sender);
+    // Within the 640×360 limit, in the window's shape.
+    let expected = VideoResolution {
+      width: 202,
+      height: 360,
+    };
+    assert!(!decoded_sizes.is_empty());
+    assert!(
+      decoded_sizes.iter().all(|size| *size == expected),
+      "{decoded_sizes:?}"
+    );
+  }
+
   #[test]
   fn a_sender_whose_capture_or_encoder_ends_reports_it() {
     let (encoded, _encoded_rx) = mpsc::unbounded_channel();
@@ -1258,9 +1341,11 @@ mod tests {
       let (_controls, control_rx) = std_mpsc::channel();
       let (encoded, _encoded_rx) = mpsc::unbounded_channel();
       let (first_picture, first_picture_rx) = oneshot::channel();
+      let layers = simulcast_layers(VGA, 30, 800_000, 1);
       let encoder_loop = EncoderLoop {
         kind: VideoTrackKind::Camera,
-        layers: simulcast_layers(VGA, 30, 800_000, 1),
+        sizer: LayerSizer::new(layers.clone(), VGA),
+        layers,
         content: VideoContent::Camera,
         encoders: fake_encoders(),
         maybe_filter: None,

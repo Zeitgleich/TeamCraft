@@ -7,6 +7,7 @@ use teamcraft_proto::{
   MAX_SIMULCAST_LAYERS, MediaCapabilities, ScreenContentMode, VideoCodec, VideoLayerInfo, VideoTrackKind,
 };
 use thiserror::Error;
+use web_time::{Duration, Instant};
 
 use crate::datagram::SimulcastLayer;
 use crate::rtp::RtpTimestamp;
@@ -16,6 +17,13 @@ pub const VIDEO_CLOCK_RATE_HZ: u32 = 90_000;
 /// A subscription's `max_layer` that means "the top layer", whatever the track has (the SFU caps
 /// it by the receiver's downlink).
 pub const TOP_LAYER: u8 = u8::MAX;
+/// A changed source size is followed once it held this long (#931): dragging a window's edge
+/// changes the size with every frame, and every rebuild of the encoders costs a keyframe.
+pub const RESIZE_SETTLE: Duration = Duration::from_millis(300);
+/// A side differs from the layers' only when it is off by more than this share (per mille) and...
+const RESIZE_TOLERANCE_PER_MILLE: u32 = 20;
+/// ...this many pixels: rounding to even sides and a window's shadow don't rebuild the encoders.
+const RESIZE_TOLERANCE_PIXELS: u32 = 4;
 
 /// One uncompressed frame from capture, in I420 (planar Y, U, V; chroma subsampled 2x2).
 #[derive(Clone, PartialEq, Eq)]
@@ -282,6 +290,124 @@ pub fn screen_layers(source: VideoResolution, framerate: u8, mode: ScreenContent
     screen_bitrate_bps(resolution, framerate),
     2,
   )
+}
+
+/// Keeps a track's layers in the shape of its source (#931): a shared window that is resized or
+/// turned from landscape to portrait gets layers of its new size, within the size it started with
+/// as the limit, instead of being stretched into the old ones. A new size takes over once it held
+/// for [`RESIZE_SETTLE`], so a window being dragged rebuilds the encoders once, not every frame;
+/// the first picture's size takes over at once (nothing was sent yet).
+#[derive(Debug, Clone)]
+pub struct LayerSizer {
+  configured: Vec<VideoLayerInfo>,
+  limit: VideoResolution,
+  current: VideoResolution,
+  maybe_pending: Option<PendingSize>,
+  has_seen_source: bool,
+}
+
+/// A source size seen but not followed yet.
+#[derive(Debug, Clone, Copy)]
+struct PendingSize {
+  size: VideoResolution,
+  since: Instant,
+}
+
+impl LayerSizer {
+  /// Follows the size of a source whose layers were planned as `configured`; the top layer never
+  /// grows beyond `limit` (the track's largest picture).
+  pub fn new(configured: Vec<VideoLayerInfo>, limit: VideoResolution) -> Self {
+    let current = largest_layer(&configured).map_or(limit, |top| VideoResolution {
+      width: top.width,
+      height: top.height,
+    });
+    Self {
+      configured,
+      limit,
+      current,
+      maybe_pending: None,
+      has_seen_source: false,
+    }
+  }
+
+  /// The source delivered a picture of `source` at `now`: the new layers when the encoders have to
+  /// follow it, `None` while they fit (or a new size hasn't settled yet).
+  pub fn observe(&mut self, source: VideoResolution, now: Instant) -> Option<Vec<VideoLayerInfo>> {
+    if source.width < 2 || source.height < 2 || self.configured.is_empty() {
+      return None;
+    }
+    let is_first = !std::mem::replace(&mut self.has_seen_source, true);
+    let top = even(fit_within(source, self.limit));
+    if !is_resized(self.current, top) {
+      self.maybe_pending = None;
+      return None;
+    }
+    let is_settled = match self.maybe_pending {
+      Some(pending) if !is_resized(pending.size, top) => {
+        now.saturating_duration_since(pending.since) >= RESIZE_SETTLE
+      },
+      _ => {
+        self.maybe_pending = Some(PendingSize {
+          size: top,
+          since: now,
+        });
+        false
+      },
+    };
+    if !is_first && !is_settled {
+      return None;
+    }
+    self.current = top;
+    self.maybe_pending = None;
+    Some(resized_layers(&self.configured, top))
+  }
+}
+
+/// `configured` layers for a top layer of `top`: every layer keeps its share of the top layer's
+/// size, with even sides (I420), its id, rate and bitrate cap.
+pub fn resized_layers(configured: &[VideoLayerInfo], top: VideoResolution) -> Vec<VideoLayerInfo> {
+  let Some(full) = largest_layer(configured) else {
+    return Vec::new();
+  };
+  let full_width = u32::from(full.width.max(1));
+  configured
+    .iter()
+    .map(|layer| {
+      // One factor for both sides keeps the aspect ratio; a layer is at most the top's size.
+      let side = |top_side: u16| {
+        let scaled = (u32::from(top_side) * u32::from(layer.width) / full_width).min(u32::from(top_side));
+        u16::try_from(scaled & !1).unwrap_or(top_side).max(2)
+      };
+      VideoLayerInfo {
+        width: side(top.width),
+        height: side(top.height),
+        ..*layer
+      }
+    })
+    .collect()
+}
+
+fn largest_layer(layers: &[VideoLayerInfo]) -> Option<&VideoLayerInfo> {
+  layers
+    .iter()
+    .max_by_key(|layer| u32::from(layer.width) * u32::from(layer.height))
+}
+
+/// Whether `new` differs from `current` by more than the tolerance on either side.
+fn is_resized(current: VideoResolution, new: VideoResolution) -> bool {
+  let differs = |current: u16, new: u16| {
+    let tolerance = (u32::from(current) * RESIZE_TOLERANCE_PER_MILLE / 1000).max(RESIZE_TOLERANCE_PIXELS);
+    u32::from(current.abs_diff(new)) > tolerance
+  };
+  differs(current.width, new.width) || differs(current.height, new.height)
+}
+
+/// `resolution` with even sides of at least 2 (I420).
+fn even(resolution: VideoResolution) -> VideoResolution {
+  VideoResolution {
+    width: (resolution.width & !1).max(2),
+    height: (resolution.height & !1).max(2),
+  }
 }
 
 /// The simulcast layer a viewer asks for (a subscription's `max_layer`) for a picture shown
@@ -557,6 +683,102 @@ mod tests {
     fn camera_layers() -> Vec<VideoLayerInfo> {
       // 320×180, 640×360, 1280×720.
       simulcast_layers(res(1280, 720), 30, 1_500_000, 3)
+    }
+
+    fn res(width: u16, height: u16) -> VideoResolution {
+      VideoResolution { width, height }
+    }
+  }
+
+  mod layer_sizer {
+    use super::*;
+
+    #[test]
+    fn resized_layers_keep_the_aspect_ratio_their_shares_and_caps() {
+      let configured = screen_layers(res(2560, 1440), 30, ScreenContentMode::Detail);
+      let portrait = resized_layers(&configured, res(810, 1440));
+      let summary: Vec<_> = portrait
+        .iter()
+        .map(|layer| (layer.layer, layer.width, layer.height, layer.max_bitrate_bps))
+        .collect();
+      assert_eq!(
+        summary,
+        vec![
+          (0, 404, 720, configured[0].max_bitrate_bps),
+          (1, 810, 1440, configured[1].max_bitrate_bps)
+        ]
+      );
+      // Tiny sources still give valid I420 sides.
+      let tiny = resized_layers(&configured, res(2, 2));
+      assert!(tiny.iter().all(|layer| layer.width == 2 && layer.height == 2));
+    }
+
+    #[test]
+    fn the_first_picture_of_another_shape_is_followed_at_once() {
+      let (mut sizer, now) = screen_sizer();
+      // A portrait window, captured within the 1440p limit.
+      let layers = sizer.observe(res(1000, 1600), now).unwrap();
+      assert_eq!(sides(&layers), vec![(450, 720), (900, 1440)]);
+      assert_eq!(sizer.observe(res(1000, 1600), now), None);
+    }
+
+    #[test]
+    fn a_source_within_the_tolerance_or_beyond_the_limit_keeps_the_layers() {
+      let (mut sizer, now) = screen_sizer();
+      assert_eq!(sizer.observe(res(2550, 1438), now), None);
+      // Larger than the limit: shrunk to it, which is what the layers already are.
+      assert_eq!(sizer.observe(res(3840, 2160), now), None);
+      // Odd sides are rounded to even ones.
+      let layers = sizer
+        .observe(res(1001, 601), now + RESIZE_SETTLE)
+        .or_else(|| sizer.observe(res(1001, 601), now + RESIZE_SETTLE * 2))
+        .unwrap();
+      assert_eq!(sides(&layers), vec![(500, 300), (1000, 600)]);
+    }
+
+    #[test]
+    fn a_new_size_is_followed_once_it_held_for_the_settle_time() {
+      let (mut sizer, now) = screen_sizer();
+      assert_eq!(sizer.observe(res(2560, 1440), now), None);
+      assert_eq!(sizer.observe(res(1600, 1200), now), None);
+      assert_eq!(sizer.observe(res(1600, 1200), now + RESIZE_SETTLE / 2), None);
+      let layers = sizer.observe(res(1600, 1200), now + RESIZE_SETTLE).unwrap();
+      assert_eq!(sides(&layers), vec![(800, 600), (1600, 1200)]);
+    }
+
+    #[test]
+    fn a_window_being_dragged_rebuilds_once_it_rests() {
+      let (mut sizer, start) = screen_sizer();
+      assert_eq!(sizer.observe(res(2560, 1440), start), None);
+      let frame = Duration::from_millis(16);
+      let mut now = start;
+      for step in 0..60u16 {
+        now = start + frame * u32::from(step);
+        assert_eq!(sizer.observe(res(2000 - step * 10, 1200), now), None);
+      }
+      // The last size rests (a still window repeats its picture).
+      assert_eq!(sizer.observe(res(1410, 1200), now + RESIZE_SETTLE / 2), None);
+      let layers = sizer.observe(res(1410, 1200), now + RESIZE_SETTLE).unwrap();
+      assert_eq!(sides(&layers), vec![(704, 600), (1410, 1200)]);
+    }
+
+    #[test]
+    fn a_window_growing_back_returns_to_the_full_layers() {
+      let (mut sizer, now) = screen_sizer();
+      sizer.observe(res(800, 600), now).unwrap();
+      assert_eq!(sizer.observe(res(2560, 1440), now), None);
+      let layers = sizer.observe(res(2560, 1440), now + RESIZE_SETTLE).unwrap();
+      assert_eq!(sides(&layers), vec![(1280, 720), (2560, 1440)]);
+    }
+
+    fn screen_sizer() -> (LayerSizer, Instant) {
+      let limit = res(2560, 1440);
+      let configured = screen_layers(limit, 30, ScreenContentMode::Detail);
+      (LayerSizer::new(configured, limit), Instant::now())
+    }
+
+    fn sides(layers: &[VideoLayerInfo]) -> Vec<(u16, u16)> {
+      layers.iter().map(|layer| (layer.width, layer.height)).collect()
     }
 
     fn res(width: u16, height: u16) -> VideoResolution {

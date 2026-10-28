@@ -8,7 +8,9 @@
 //! MediaStreamTrackProcessor, Safari has it only in workers). The rate is kept by the call's
 //! [`Cadence`] on the audio clock's pulses, not by a page timer, so a screen shared from a hidden
 //! tab keeps its frame rate (issue #923). Each simulcast layer has its own encoder configured at the
-//! layer's size; WebCodecs scales the frame to it.
+//! layer's size; WebCodecs scales the frame to it. When the source changes shape for good (a shared
+//! window resized), every layer gets a new encoder at the new shape ([`LayerSizer`], #931), so the
+//! picture isn't stretched.
 //!
 //! A watched track's canvas reports its shown size ([`SizeWatch`]), from which the call picks the
 //! layer to receive ([`crate::video::layer_for_view`]).
@@ -36,7 +38,9 @@ use super::{
   Input, MediaAccessReason, MediaInput, WebCallError, browser, dictionary, js_message, media_access, window,
 };
 use crate::call_video::ReceivedVideoFrame;
-use crate::video::{VideoResolution, fit_within, screen_bitrate_bps, screen_limits, simulcast_layers};
+use crate::video::{
+  LayerSizer, VideoResolution, fit_within, screen_bitrate_bps, screen_limits, simulcast_layers,
+};
 use crate::web_api::{
   Canvas2d, EncodedVideoChunk, VideoDecoder, VideoEncoder, VideoFrame as WebVideoFrame, count_picture_drawn,
 };
@@ -65,6 +69,8 @@ pub(super) struct TrackSender {
   stream: MediaStream,
   video: HtmlVideoElement,
   encoders: LayerEncoders<LayerEncoder>,
+  /// Follows the source's size with the layers' (a shared window resized).
+  sizer: LayerSizer,
   framerate: u8,
   frames_since_keyframe: u32,
   timestamp_us: f64,
@@ -207,11 +213,11 @@ impl TrackSender {
         .and_then(|height| u16::try_from(height & !1).ok())
         .unwrap_or(720),
     };
-    let resolution = plan
-      .maybe_max_resolution
-      .map_or(resolution, |limit| fit_within(resolution, limit));
+    let limit = plan.maybe_max_resolution.unwrap_or(resolution);
+    let resolution = fit_within(resolution, limit);
     let video = play_hidden(&stream).await?;
     let infos = simulcast_layers(resolution, plan.framerate, plan.bitrate_bps, plan.max_layers);
+    let sizer = LayerSizer::new(infos.clone(), limit);
     let (kind, framerate, encoder_inputs) = (plan.kind.clone(), plan.framerate, inputs.clone());
     let encoders = LayerEncoders::new(infos, move |info, generation| {
       LayerEncoder::new(info, kind.clone(), framerate, generation, &encoder_inputs)
@@ -231,6 +237,7 @@ impl TrackSender {
       stream,
       video,
       encoders,
+      sizer,
       framerate: plan.framerate,
       frames_since_keyframe: 0,
       timestamp_us: 0.0,
@@ -280,6 +287,7 @@ impl TrackSender {
     if self.publication.maybe_stream_id.is_none() || self.video.video_width() == 0 {
       return Ok(());
     }
+    self.follow_source_size()?;
     let frame = match self.next_frame().await {
       Ok(frame) => frame,
       Err(error) => {
@@ -309,6 +317,21 @@ impl TrackSender {
   /// WebCodecs reported that an encoder failed (and closed it).
   pub fn on_encoder_failed(&mut self, layer: u8, generation: u64) -> Result<(), EncoderGaveUp> {
     self.encoders.on_failed(layer, generation)
+  }
+
+  /// New encoders at the source's size once it changed for good (a shared window resized or
+  /// turned), so the picture keeps its shape instead of being stretched into the old size.
+  fn follow_source_size(&mut self) -> Result<(), EncoderGaveUp> {
+    let side = |pixels: u32| u16::try_from(pixels).unwrap_or(u16::MAX);
+    let source = VideoResolution {
+      width: side(self.video.video_width()),
+      height: side(self.video.video_height()),
+    };
+    let Some(infos) = self.sizer.observe(source, Instant::now()) else {
+      return Ok(());
+    };
+    debug!(kind = ?self.publication.kind, width = source.width, height = source.height, "the video source changed size; new encoders");
+    self.encoders.resize(&infos)
   }
 
   /// The picture to encode: straight from the `<video>`, or through the effects.
@@ -415,6 +438,32 @@ impl<E: FrameEncoder> LayerEncoders<E> {
       if let Err(error) = layer.encoder.encode(frame, is_keyframe) {
         warn!(%error, layer = layer.info.layer, "encoding a video frame failed");
         self.restart(index)?;
+      }
+    }
+    Ok(())
+  }
+
+  /// The same layers at a new size (`infos`; the source changed size): every layer gets a new
+  /// encoder that starts with a keyframe. One that fails to open is replaced as after a failure.
+  pub fn resize(&mut self, infos: &[VideoLayerInfo]) -> Result<(), EncoderGaveUp> {
+    for index in 0..self.layers.len() {
+      let layer = &mut self.layers[index];
+      let Some(info) = infos.iter().find(|info| info.layer == layer.info.layer) else {
+        continue;
+      };
+      layer.info = *info;
+      let generation = self.next_generation;
+      self.next_generation += 1;
+      match (self.open)(*info, generation) {
+        Ok(encoder) => {
+          layer.encoder = encoder;
+          layer.generation = generation;
+          layer.wants_keyframe = true;
+        },
+        Err(error) => {
+          warn!(%error, layer = info.layer, "opening a video encoder at the new size failed");
+          self.restart(index)?;
+        },
       }
     }
     Ok(())
@@ -1112,6 +1161,42 @@ mod tests {
       encoders.on_failed(0, 0).unwrap();
       assert_eq!(bench.borrow().opened, vec![(0, 0), (0, 3)]);
       assert_eq!(encoders.on_failed(0, 3), Err(EncoderGaveUp { layer: 0 }));
+    }
+
+    #[test]
+    fn a_resized_source_gets_new_encoders_at_its_size_starting_with_keyframes() {
+      let (bench, mut encoders) = encoders(2);
+      encoders.encode(&(), false).unwrap();
+      let portrait = crate::video::resized_layers(
+        &encoders.infos(),
+        VideoResolution {
+          width: 360,
+          height: 640,
+        },
+      );
+      encoders.resize(&portrait).unwrap();
+      assert_eq!(encoders.infos(), portrait);
+      assert_eq!(bench.borrow().opened, vec![(0, 0), (1, 1), (0, 2), (1, 3)]);
+      encoders.encode(&(), false).unwrap();
+      encoders.encode(&(), false).unwrap();
+      assert_eq!(
+        bench.borrow().coded[2..],
+        [(0, 2, true), (1, 3, true), (0, 2, false), (1, 3, false)]
+      );
+      // A late failure report of a replaced encoder is stale.
+      encoders.on_failed(1, 1).unwrap();
+      assert_eq!(bench.borrow().opened.len(), 4);
+    }
+
+    #[test]
+    fn a_resize_whose_encoder_fails_to_open_is_tried_again() {
+      let (bench, mut encoders) = encoders(1);
+      let infos = encoders.infos();
+      bench.borrow_mut().failing_opens = 1;
+      encoders.resize(&infos).unwrap();
+      assert_eq!(bench.borrow().opened, vec![(0, 0), (0, 2)]);
+      encoders.encode(&(), false).unwrap();
+      assert_eq!(bench.borrow().coded, vec![(0, 2, true)]);
     }
 
     #[test]
