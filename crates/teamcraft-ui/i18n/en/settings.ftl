@@ -290,6 +290,10 @@ notif-browser-background = Notifications also arrive when TeamCraft is closed.
 notif-prompt-text = Turn on notifications so you don't miss messages.
 notif-prompt-allow = Turn on
 notif-prompt-later = Not now
+notif-prompt-on = Notifications are on.
+notif-prompt-blocked = Notifications are blocked in this browser. Allow them in the site settings next to the address bar, then turn them on again in Settings.
+notif-prompt-no-prompt = Your browser didn't ask. Look for a bell or lock icon in the address bar and allow notifications there, then try again.
+notif-prompt-close = Close
 
 # Composer: mentions, slash commands, formatting
 settings-composer = Writing

@@ -290,6 +290,10 @@ notif-browser-background = Benachrichtigungen kommen auch an, wenn TeamCraft ges
 notif-prompt-text = Aktiviere Benachrichtigungen, damit du keine Nachricht verpasst.
 notif-prompt-allow = Aktivieren
 notif-prompt-later = Nicht jetzt
+notif-prompt-on = Benachrichtigungen sind aktiviert.
+notif-prompt-blocked = Benachrichtigungen sind in diesem Browser blockiert. Erlaube sie in den Website-Einstellungen neben der Adressleiste und aktiviere sie dann in den Einstellungen erneut.
+notif-prompt-no-prompt = Dein Browser hat nicht nachgefragt. Suche in der Adressleiste nach einem Glocken- oder Schloss-Symbol, erlaube dort Benachrichtigungen und versuche es erneut.
+notif-prompt-close = Schließen
 
 # Composer: mentions, slash commands, formatting
 settings-composer = Schreiben
