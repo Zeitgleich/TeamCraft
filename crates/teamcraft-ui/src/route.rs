@@ -242,6 +242,47 @@ impl HistoryStep {
   }
 }
 
+/// How far Back and Forward can go from the current history entry, for the top bar's buttons
+/// (#874). The History API doesn't tell, so the app counts: `depth` is the entry's depth in its own
+/// stack (0 for the entry the page was opened on, the same number kept in `history.state`) and
+/// `furthest` the deepest entry seen since, which Forward can still reach.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct HistoryReach {
+  depth: u32,
+  furthest: u32,
+}
+
+impl HistoryReach {
+  /// The page is open on an entry at `depth` (after a reload the ones ahead are unknown).
+  pub fn at(depth: u32) -> Self {
+    Self {
+      depth,
+      furthest: depth,
+    }
+  }
+
+  /// The app pushed an entry: the ones ahead are gone.
+  pub fn pushed(self) -> Self {
+    Self::at(self.depth + 1)
+  }
+
+  /// The user moved to the entry at `depth` (`popstate`).
+  pub fn moved_to(self, depth: u32) -> Self {
+    Self {
+      depth,
+      furthest: self.furthest.max(depth),
+    }
+  }
+
+  pub fn can_go_back(self) -> bool {
+    self.depth > 0
+  }
+
+  pub fn can_go_forward(self) -> bool {
+    self.depth < self.furthest
+  }
+}
+
 /// A canonical ID: digits only, no sign or leading zero, so every ID has exactly one path.
 fn id<T: std::str::FromStr + std::fmt::Display>(text: &str) -> Option<T> {
   if text.is_empty() || !text.bytes().all(|byte| byte.is_ascii_digit()) {
@@ -267,6 +308,30 @@ mod tests {
   const MESSAGE: u64 = 3_000_003;
   const THREAD: u64 = 4_000_004;
   const MEETING: u64 = 5_000_005;
+
+  mod reach {
+    use super::*;
+
+    #[test]
+    fn back_and_forward_follow_the_entries_the_app_pushed() {
+      let start = HistoryReach::at(0);
+      assert!(!start.can_go_back() && !start.can_go_forward());
+
+      let two_deep = start.pushed().pushed();
+      assert!(two_deep.can_go_back() && !two_deep.can_go_forward());
+
+      let back_once = two_deep.moved_to(1);
+      assert!(back_once.can_go_back() && back_once.can_go_forward());
+      let back_twice = back_once.moved_to(0);
+      assert!(!back_twice.can_go_back() && back_twice.can_go_forward());
+
+      // Going somewhere new from the middle drops the entries ahead.
+      let branched = back_once.pushed();
+      assert!(branched.can_go_back() && !branched.can_go_forward());
+      // A reload keeps the entry's depth but forgets what is ahead.
+      assert!(HistoryReach::at(2).can_go_back() && !HistoryReach::at(2).can_go_forward());
+    }
+  }
 
   mod round_trip {
     use super::*;

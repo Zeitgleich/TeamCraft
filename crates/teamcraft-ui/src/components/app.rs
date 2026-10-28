@@ -575,6 +575,20 @@ fn handle_global_shortcut(ev: &web_sys::KeyboardEvent, state: AppState) {
       return;
     }
   }
+  // Cmd+[ and Cmd+] go back and forward on the Mac, as in Safari and Finder; the desktop webview
+  // does not map them itself. In a text field they stay the editor's.
+  if ev.meta_key()
+    && !ev.ctrl_key()
+    && !ev.alt_key()
+    && !ev.shift_key()
+    && tauri::is_available()
+    && !is_text_input_focused()
+    && matches!(key.as_str(), "[" | "]")
+  {
+    ev.prevent_default();
+    travel(if key == "[" { Travel::Back } else { Travel::Forward });
+    return;
+  }
   // In a browser, Ctrl/Cmd + +/-/0 stays the browser's own zoom (it reflows the layout properly).
   if modifier
     && !ev.alt_key()

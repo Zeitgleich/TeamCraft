@@ -61,6 +61,10 @@
   grid-template-columns: var(--traffic-lights-w) minmax(0, 1fr) auto;
 }
 
+:root[data-platform="macos"][data-titlebar="custom"]:not([data-window="fullscreen"]) .top-bar.has-history {
+  grid-template-columns: var(--traffic-lights-w) auto minmax(0, 1fr) auto;
+}
+
 /* The traffic lights sit where the brand would be; fullscreen hides them and the brand returns. */
 :root[data-platform="macos"][data-titlebar="custom"]:not([data-window="fullscreen"]) .top-bar .brand {
   visibility: hidden;

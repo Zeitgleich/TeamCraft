@@ -17,7 +17,7 @@ use crate::model::{
 use crate::navigation::{Step, divider_index, next_unread};
 use crate::prefs::SidebarSort;
 use crate::reactive::{SetIfAlive, get_if_observed};
-use crate::route::Route;
+use crate::route::{HistoryReach, Route};
 use crate::sections::{HomeFilter, apply_favorite_order, build_direct, build_sections};
 use crate::security::DeviceApproval;
 use crate::settings::{LastOpenPlace, Settings, last_open, remember_last_open};
@@ -280,6 +280,8 @@ pub struct AppState {
   /// The open conversation that was unread when it was opened: the sidebar keeps it in its
   /// "Unreads" section until the user opens another conversation (#890). Kept by the sidebar.
   pub held_unread: RwSignal<Option<ConversationId>>,
+  /// How far the top bar's Back and Forward can go; kept by `history.rs` (#874).
+  pub history_reach: RwSignal<HistoryReach>,
   pub panel: RwSignal<SidePanel>,
   pub overlay: RwSignal<Overlay>,
   /// The filter of the activity list; "Threads" is one of them (#752).
@@ -416,6 +418,7 @@ impl AppState {
       rail: RwSignal::new(rail),
       view: RwSignal::new(view),
       held_unread: RwSignal::new(None),
+      history_reach: RwSignal::new(HistoryReach::default()),
       panel: RwSignal::new(SidePanel::Closed),
       overlay: RwSignal::new(Overlay::None),
       activity_filter: RwSignal::new(ActivityFilter::default()),

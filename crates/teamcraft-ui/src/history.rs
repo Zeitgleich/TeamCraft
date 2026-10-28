@@ -31,7 +31,7 @@ use crate::i18n::I18n;
 use crate::last_place::{self, LastPlace, ReadingPosition};
 use crate::model::{TimestampMs, UserId};
 use crate::reactive::OwnerLiveness;
-use crate::route::{HistoryStep, Route};
+use crate::route::{HistoryReach, HistoryStep, Route};
 use crate::state::{AppState, RouteOutcome};
 
 /// How long a URL that names something not loaded yet is waited for before Home shows instead.
@@ -78,6 +78,9 @@ pub fn start(state: AppState, i18n: I18n) {
     Some(user) if current_path() == "/" => restore_last_place(state, bar, user),
     _ => follow_location(state, bar),
   });
+  state
+    .history_reach
+    .set(HistoryReach::at(depth_of_current_entry()));
   let route = Memo::new(move |_| state.route());
   Effect::new(move |previous: Option<()>| {
     let next = route.get();
@@ -98,7 +101,12 @@ pub fn start(state: AppState, i18n: I18n) {
     count
   });
   on_window("popstate", move || {
-    untrack(|| with_pop_motion(state, || follow_location(state, bar)))
+    untrack(|| {
+      state
+        .history_reach
+        .update(|reach| *reach = reach.moved_to(depth_of_current_entry()));
+      with_pop_motion(state, || follow_location(state, bar))
+    })
   });
   if tauri::is_available() {
     handle_mouse_buttons();
@@ -266,6 +274,9 @@ fn sync_address_bar(state: AppState, bar: AddressBar, next: Route, is_waiting: b
     bar.maybe_below_settings.set_value(None);
   }
   write_address_bar(step, &next.path());
+  if step == HistoryStep::Push {
+    state.history_reach.update(|reach| *reach = reach.pushed());
+  }
   bar.shown.set_value(next);
 }
 
