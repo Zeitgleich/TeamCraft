@@ -351,6 +351,13 @@ The same approach Fluxer announced for its new voice system (see https://fluxer.
   (a still screen) answers a keyframe request with its last picture after 150 ms, and screen
   shares send their last picture again about once a second while the screen doesn't change
   (`VideoSendConfig::maybe_idle_refresh`).
+- **Layers that are sent (#921):** a publisher's uplink budget pauses its top layers; it tells the
+  SFU which layers it carries (`uplink_layers`), and the SFU allocates no higher one. A layer that
+  stops arriving while a lower one keeps coming (an older publisher, a failing encoder) is
+  replaced for its receivers by the best lower layer that flows (`layer_stalled_after`, 1.5 s),
+  until it is back. A publisher back from a lost connection hears `layers_needed` again, and
+  sends every layer its new uplink carries until then. A viewer's tile whose video got no new
+  picture for 3 s says so ("Video paused: weak connection").
 - **Screen share:** separate session/stream, so a heavy share cannot degrade the call.
 - **Screen share quality** (`teamcraft_media::video::screen_layers`): two content modes, chosen per
   share (remembered): *detail* (default) keeps text sharp, up to 1440p at 30 fps; *motion* keeps

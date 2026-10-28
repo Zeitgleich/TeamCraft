@@ -72,6 +72,9 @@ pub struct CallEngine {
   /// Layers of own tracks the driver was last told to send.
   sent_layers: HashMap<StreamId, Vec<u8>>,
   uplink_layers: UplinkLayers,
+  /// Layers of own tracks the SFU was last told the uplink carries (it starts with all of them);
+  /// without an entry, unknown to it (after a rejoin).
+  uplink_announced: HashMap<StreamId, Vec<u8>>,
   uplink_policy: UplinkPolicy,
   /// Other devices' tracks this device receives, with the highest layer asked for.
   subscriptions: HashMap<StreamId, u8>,
@@ -336,6 +339,7 @@ impl CallEngine {
       sfu_layers: HashMap::new(),
       sent_layers: HashMap::new(),
       uplink_layers,
+      uplink_announced: HashMap::new(),
       uplink_policy: UplinkPolicy::default(),
       subscriptions: HashMap::new(),
       maybe_reconnect_grace: None,
@@ -933,7 +937,16 @@ impl CallEngine {
     self.reconcile_participants(state.participants);
     self.reconcile_remote_video(&state.video_tracks);
     self.reconcile_screen_audio(&state.screen_audio_tracks);
+    // What the SFU needed and what the uplink carried belong to the old connection (#921): the
+    // tracks the SFU kept send every layer the new uplink carries until the SFU says which it
+    // needs (it does so right after `joined`), and the SFU hears what the uplink carries.
+    self.sfu_layers.clear();
+    self.sent_layers.clear();
+    self.uplink_announced.clear();
     self.reconcile_own_video(&state.video_tracks);
+    // No keyframes yet: nothing goes out before the call is secured, which asks for them.
+    self.announce_layers(false);
+    self.announce_uplink_layers();
     // Subscriptions to tracks that are still there; the SFU may have kept them, which is fine.
     let mut subscriptions: Vec<(StreamId, u8)> = self.subscriptions.iter().map(|(s, l)| (*s, *l)).collect();
     subscriptions.sort_unstable();
@@ -1104,6 +1117,7 @@ impl CallEngine {
     self.own_tracks.remove(&stream);
     self.sfu_layers.remove(&stream);
     self.sent_layers.remove(&stream);
+    self.uplink_announced.remove(&stream);
     self.uplink_layers.remove(stream);
     self.update_uplink_demand();
     was_published
@@ -1129,6 +1143,7 @@ impl CallEngine {
         .on_estimate(bps, &tracks, is_sending_screen_audio, &self.uplink_policy);
     if has_changed {
       self.announce_layers(true);
+      self.announce_uplink_layers();
     }
     let loss_percent = loss_percent(self.uplink.loss_ratio());
     self.event(CallEngineEvent::UplinkEstimate { bps, loss_percent });
@@ -1172,6 +1187,40 @@ impl CallEngine {
           self.event(CallEngineEvent::KeyframeRequested { stream_id, layer });
         }
       }
+    }
+  }
+
+  /// Tells the SFU which layers of each own track the uplink carries, where that changed: it then
+  /// keeps receivers off the paused ones, which would freeze their picture (#921). Only while in
+  /// the call; a rejoin tells it about every track.
+  fn announce_uplink_layers(&mut self) {
+    if !self.is_in_call() {
+      return;
+    }
+    let mut streams: Vec<StreamId> = self.own_tracks.keys().copied().collect();
+    streams.sort_unstable();
+    for stream in streams {
+      let Some(track) = self
+        .own_tracks
+        .get(&stream)
+        .filter(|track| !track.layers.is_empty())
+      else {
+        continue;
+      };
+      let layers: Vec<u8> = track
+        .layers
+        .iter()
+        .map(|info| info.layer)
+        .filter(|layer| self.uplink_layers.allows(stream, *layer))
+        .collect();
+      if self.uplink_announced.get(&stream) == Some(&layers) {
+        continue;
+      }
+      self.uplink_announced.insert(stream, layers.clone());
+      self.signal(CallClientMessage::UplinkLayers {
+        stream_id: MediaStreamId(stream.0),
+        layers,
+      });
     }
   }
 
@@ -1453,11 +1502,12 @@ impl CallEngine {
         stream,
         OutgoingVideo::new(track.kind.clone(), track.codec.clone()),
       );
-      // Drivers start with every layer. A track without layer list isn't limited.
+      // Drivers start with every layer, and the SFU takes every layer as carried. A track
+      // without layer list isn't limited.
       if !track.layers.is_empty() {
-        self
-          .sent_layers
-          .insert(stream, track.layers.iter().map(|info| info.layer).collect());
+        let all: Vec<u8> = track.layers.iter().map(|info| info.layer).collect();
+        self.sent_layers.insert(stream, all.clone());
+        self.uplink_announced.insert(stream, all);
       }
       self.own_tracks.insert(stream, track.clone());
       self.update_uplink_demand();
@@ -2458,6 +2508,15 @@ mod tests {
       assert_eq!(
         drain(&mut alice),
         vec![
+          // The kept track starts over with every layer, and the SFU hears they are carried.
+          EngineOutput::Event(CallEngineEvent::LayersNeeded {
+            stream_id: MediaStreamId(50),
+            layers: vec![0, 1, 2],
+          }),
+          EngineOutput::Signal(CallClientMessage::UplinkLayers {
+            stream_id: MediaStreamId(50),
+            layers: vec![0, 1, 2],
+          }),
           EngineOutput::Signal(CallClientMessage::Subscribe {
             stream_id: MediaStreamId(60),
             maybe_max_layer: Some(0),
@@ -2529,6 +2588,82 @@ mod tests {
           stream_id: MediaStreamId(60),
           maybe_max_layer: Some(2),
         }))
+      );
+    }
+
+    #[test]
+    fn layers_paused_before_the_loss_come_back_after_the_rejoin() {
+      let now = Instant::now();
+      let (mut alice, _bob) = secured_pair(now);
+      let own = video_track(50, 1, 3);
+      alice
+        .handle_signal(event(6, CallEvent::VideoPublished { track: own.clone() }), now)
+        .unwrap();
+      // The uplink degrades before the network goes: the top layer is paused.
+      let mut seq = 7;
+      degrade_uplink(&mut alice, &mut seq, now);
+      drain(&mut alice);
+      let top = EncodedVideoFrame {
+        layer: SimulcastLayer::new(2).unwrap(),
+        ..video_frame()
+      };
+      assert_eq!(
+        alice.send_video(MediaStreamId(50), &top, now),
+        VideoSendOutcome::LayerPaused
+      );
+
+      alice.connection_lost();
+      alice.rejoin("fresh".into(), now);
+      drain(&mut alice);
+      let CallEvent::Joined {
+        call_id,
+        participant,
+        participants,
+        screen_audio_tracks,
+        maybe_reconnect_grace_ms,
+        ..
+      } = joined(1, &[2])
+      else {
+        unreachable!()
+      };
+      let kept = CallEvent::Joined {
+        call_id,
+        participant,
+        participants,
+        video_tracks: vec![own],
+        screen_audio_tracks,
+        maybe_reconnect_grace_ms,
+      };
+      alice.handle_signal(event(1, kept), now).unwrap();
+      let outputs = drain(&mut alice);
+      // A good network now: every layer goes out again, without waiting for the uplink estimate
+      // to change, and the SFU stops holding receivers below them.
+      assert!(
+        outputs.contains(&EngineOutput::Event(CallEngineEvent::LayersNeeded {
+          stream_id: MediaStreamId(50),
+          layers: vec![0, 1, 2],
+        })),
+        "{outputs:?}"
+      );
+      assert!(
+        outputs.contains(&EngineOutput::Signal(CallClientMessage::UplinkLayers {
+          stream_id: MediaStreamId(50),
+          layers: vec![0, 1, 2],
+        })),
+        "{outputs:?}"
+      );
+      // The SFU's resent `layers_needed` narrows it again.
+      let needed = CallEvent::LayersNeeded {
+        stream_id: MediaStreamId(50),
+        layers: vec![0, 2],
+      };
+      alice.handle_signal(event(2, needed), now).unwrap();
+      assert_eq!(
+        drain(&mut alice),
+        vec![EngineOutput::Event(CallEngineEvent::LayersNeeded {
+          stream_id: MediaStreamId(50),
+          layers: vec![0, 2],
+        })]
       );
     }
 
@@ -2699,6 +2834,42 @@ mod tests {
     }
 
     #[test]
+    fn the_sfu_hears_which_layers_the_uplink_carries_when_that_changes() {
+      let now = Instant::now();
+      let (mut alice, _bob) = secured_pair(now);
+      alice
+        .handle_signal(
+          event(
+            6,
+            CallEvent::VideoPublished {
+              track: video_track(50, 1, 3),
+            },
+          ),
+          now,
+        )
+        .unwrap();
+      // A new track is taken as carried whole: nothing to say yet.
+      assert!(!drain(&mut alice).iter().any(is_uplink_layers));
+      let mut seq = 7;
+      let outputs = degrade_uplink(&mut alice, &mut seq, now);
+      let announced: Vec<Vec<u8>> = outputs
+        .iter()
+        .filter_map(|output| match output {
+          EngineOutput::Signal(CallClientMessage::UplinkLayers { stream_id, layers }) => {
+            assert_eq!(*stream_id, MediaStreamId(50));
+            Some(layers.clone())
+          },
+          _ => None,
+        })
+        .collect();
+      // Told once per change, down to nothing on this link.
+      assert_eq!(announced.last(), Some(&Vec::new()), "{announced:?}");
+      let mut deduped = announced.clone();
+      deduped.dedup();
+      assert_eq!(deduped, announced);
+    }
+
+    #[test]
     fn layers_the_sfu_needs_are_narrowed_to_what_the_uplink_carries() {
       let now = Instant::now();
       let gateway = DaveExternalSender::new().unwrap();
@@ -2864,6 +3035,49 @@ mod tests {
 
   /// Alice and Bob in one DAVE group, as the SFU's coordinator would set it up, with call key
   /// bindings verified on both sides.
+  /// Two seconds of an uplink that loses every other datagram, with feedback events from `seq`
+  /// on; returns everything the engine put out meanwhile.
+  fn degrade_uplink(engine: &mut CallEngine, seq: &mut u64, now: Instant) -> Vec<EngineOutput> {
+    let mut outputs = Vec::new();
+    for round in 0..20u16 {
+      let at = now + Duration::from_millis(100 * u64::from(round));
+      for _ in 0..10 {
+        engine.send_audio(&frame(), at);
+      }
+      drain(engine);
+      let arrivals_us = (0..10u64)
+        .map(|i| (i % 2 == 0).then_some(u64::from(round) * 100_000 + i * 2_000))
+        .collect();
+      let feedback = TransportFeedback {
+        base_seq: round * 10,
+        arrivals_us,
+      };
+      engine
+        .handle_signal(event(*seq, CallEvent::TransportFeedback { feedback }), at)
+        .unwrap();
+      *seq += 1;
+      outputs.extend(drain(engine));
+    }
+    outputs
+  }
+
+  fn is_uplink_layers(output: &EngineOutput) -> bool {
+    matches!(
+      output,
+      EngineOutput::Signal(CallClientMessage::UplinkLayers { .. })
+    )
+  }
+
+  fn video_frame() -> EncodedVideoFrame {
+    EncodedVideoFrame {
+      codec: VideoCodec::H264,
+      layer: SimulcastLayer::BASE,
+      timestamp: RtpTimestamp(0),
+      is_keyframe: true,
+      data: vec![1; 100],
+    }
+  }
+
   fn secured_pair(now: Instant) -> (CallEngine, CallEngine) {
     let authenticators = authenticators(&[1, 2]);
     let gateway = DaveExternalSender::new().unwrap();

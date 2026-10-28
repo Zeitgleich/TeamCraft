@@ -4,6 +4,8 @@
 //! pre-join screen) a stylised camera image, so the layouts and effects can be reviewed without
 //! media.
 
+use std::time::Duration;
+
 use leptos::prelude::*;
 use teamcraft_proto::MediaStreamId;
 
@@ -11,7 +13,15 @@ use crate::calls::BackgroundEffect;
 use crate::components::icons::{Icon, IconName};
 use crate::i18n::use_i18n;
 use crate::model::User;
-use crate::reactive::use_page_visible;
+use crate::reactive::{use_interval_while, use_page_visible};
+
+/// How long a shown video of another device may go without a new picture before its tile says so
+/// (#921): the publisher's uplink or this device's downlink paused it, or it froze on the way.
+/// Above the gaps of a video that runs: a still screen sends its picture again every second
+/// (`SCREEN_IDLE_REFRESH`), a browser at its frame rate; a camera turned off has no video at all.
+const PICTURES_STALLED_AFTER: Duration = Duration::from_secs(3);
+/// How often a shown video's count of pictures is looked at.
+const PICTURE_CHECK_INTERVAL_MS: u64 = 1_000;
 
 /// A participant tile (or the self preview). `effect` only applies to the user's own camera.
 #[component]
@@ -192,12 +202,18 @@ fn has_sink_id() -> bool {
 /// module (browser) or the shell's video (desktop) makes the element. A track is watched only
 /// while its tile is on screen and the window is visible, so tracks nobody looks at aren't
 /// received or decoded (robustness.md, "Performance and resources").
+///
+/// Another device's video that gets no new picture for [`PICTURES_STALLED_AFTER`] says so with a
+/// short hint (#921), and on the desktop asks for a keyframe once more.
 #[component]
 pub fn LiveVideo(source: VideoSource, #[prop(into)] is_mirrored: Signal<bool>) -> impl IntoView {
+  let i18n = use_i18n();
   let host = NodeRef::<leptos::html::Div>::new();
   let is_page_visible = use_page_visible();
   let is_on_screen = RwSignal::new(true);
-  let is_shown = StoredValue::new(false);
+  let is_shown = RwSignal::new(false);
+  let is_stalled = RwSignal::new(false);
+  let picture_watch = StoredValue::new(None::<PictureWatch>);
   let observer = StoredValue::new_local(None::<OnScreenObserver>);
   Effect::new(move |_| {
     let Some(element) = host.get() else {
@@ -207,8 +223,11 @@ pub fn LiveVideo(source: VideoSource, #[prop(into)] is_mirrored: Signal<bool>) -
       observer.set_value(OnScreenObserver::new(&element, is_on_screen));
     }
     let should_show = is_page_visible.get() && is_on_screen.get();
-    if should_show != is_shown.get_value() {
-      is_shown.set_value(should_show);
+    if should_show != is_shown.get_untracked() {
+      is_shown.set(should_show);
+      // Watched afresh from now on: a hidden video gets no pictures by design.
+      picture_watch.set_value(None);
+      is_stalled.set(false);
       if should_show {
         show(&element, source);
       } else {
@@ -216,15 +235,88 @@ pub fn LiveVideo(source: VideoSource, #[prop(into)] is_mirrored: Signal<bool>) -
       }
     }
   });
+  if let VideoSource::Remote(_) = source {
+    use_interval_while(
+      PICTURE_CHECK_INTERVAL_MS,
+      move || is_shown.get(),
+      move || {
+        let Some(element) = host.get_untracked() else {
+          return;
+        };
+        let Some(drawn) = pictures_drawn(&element) else {
+          return;
+        };
+        let now = crate::motion::now();
+        let flow = picture_watch
+          .try_update_value(|maybe_watch| {
+            maybe_watch
+              .get_or_insert_with(|| PictureWatch::new(now))
+              .observe(drawn, now)
+          })
+          .unwrap_or(PictureFlow::Flowing);
+        let has_stalled = flow == PictureFlow::Stalled;
+        if has_stalled != is_stalled.get_untracked() {
+          is_stalled.set(has_stalled);
+          if has_stalled {
+            ask_for_keyframe(source);
+          }
+        }
+      },
+    );
+  }
   on_cleanup(move || {
     if let Some(Some(observer)) = observer.try_update_value(Option::take) {
       observer.disconnect();
     }
-    if is_shown.try_get_value() == Some(true) {
+    if is_shown.try_get_untracked() == Some(true) {
       stop_watching(source);
     }
   });
-  view! { <div class="live-video" class:mirrored=move || is_mirrored.get() node_ref=host aria-hidden="true"></div> }
+  view! {
+    <div class="live-video" class:mirrored=move || is_mirrored.get() node_ref=host aria-hidden="true"></div>
+    <Show when=move || is_stalled.get() fallback=|| ()>
+      <span class="video-stalled" role="status">{move || i18n.t("video-stalled")}</span>
+    </Show>
+  }
+}
+
+/// Whether a shown video still gets pictures, from its count of pictures drawn, looked at now and
+/// then: stalled once the count stood still for [`PICTURES_STALLED_AFTER`] since the watch began
+/// or since it last moved. Time is passed in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct PictureWatch {
+  maybe_last_count: Option<u64>,
+  /// When the count last moved, or the watch began.
+  since: Duration,
+}
+
+/// What a [`PictureWatch`] makes of a video.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PictureFlow {
+  Flowing,
+  Stalled,
+}
+
+impl PictureWatch {
+  fn new(now: Duration) -> Self {
+    Self {
+      maybe_last_count: None,
+      since: now,
+    }
+  }
+
+  /// Takes the count of pictures drawn so far, read at `now`.
+  fn observe(&mut self, count: u64, now: Duration) -> PictureFlow {
+    if self.maybe_last_count.is_some_and(|last| last != count) {
+      self.since = now;
+    }
+    self.maybe_last_count = Some(count);
+    if now.saturating_sub(self.since) >= PICTURES_STALLED_AFTER {
+      PictureFlow::Stalled
+    } else {
+      PictureFlow::Flowing
+    }
+  }
 }
 
 /// Follows whether an element is on screen (not scrolled out of a filmstrip).
@@ -295,6 +387,22 @@ fn hide(host: &web_sys::HtmlDivElement, source: VideoSource) {
 #[cfg(target_arch = "wasm32")]
 fn stop_watching(source: VideoSource) {
   shown::hide(source);
+}
+
+/// The pictures drawn so far into the element `host` shows; `None` where nothing counts them.
+#[cfg(target_arch = "wasm32")]
+fn pictures_drawn(host: &web_sys::HtmlDivElement) -> Option<u64> {
+  let element = host.first_element_child()?;
+  teamcraft_media::web_api::pictures_drawn(&element)
+}
+
+/// A shown track stopped getting pictures: the desktop shell asks for a keyframe once more. (The
+/// browser's call module asks by itself whenever it can't decode.)
+#[cfg(target_arch = "wasm32")]
+fn ask_for_keyframe(source: VideoSource) {
+  if crate::shell_video::can_show_video() {
+    crate::shell_video::request_keyframe(source);
+  }
 }
 
 /// The video elements tiles show, one per source, from the shell on the desktop and from the call
@@ -414,4 +522,87 @@ fn hide(_host: &web_sys::HtmlDivElement, _source: VideoSource) {}
 #[cfg(not(target_arch = "wasm32"))]
 fn stop_watching(_source: VideoSource) {}
 
+#[cfg(not(target_arch = "wasm32"))]
+fn pictures_drawn(_host: &web_sys::HtmlDivElement) -> Option<u64> {
+  None
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn ask_for_keyframe(_source: VideoSource) {}
+
 pub use crate::components::background_picker::{BackgroundPicker, PickerSize};
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  const START: Duration = Duration::from_secs(100);
+
+  #[test]
+  fn a_video_whose_pictures_keep_coming_flows() {
+    let mut watch = PictureWatch::new(START);
+    for second in 0..10u64 {
+      let flow = watch.observe(second * 30, START + Duration::from_secs(second));
+      assert_eq!(flow, PictureFlow::Flowing);
+    }
+  }
+
+  #[test]
+  fn a_still_screen_refreshed_every_second_flows() {
+    let mut watch = PictureWatch::new(START);
+    // Checked every second; the picture is sent again about as often, sometimes a bit later.
+    let counts = [0, 1, 1, 2, 3, 3, 4, 5, 5, 6];
+    for (second, count) in (0..).zip(counts) {
+      let flow = watch.observe(count, START + Duration::from_secs(second));
+      assert_eq!(flow, PictureFlow::Flowing, "at {second} s");
+    }
+  }
+
+  #[test]
+  fn a_video_without_new_pictures_stalls_and_recovers() {
+    let mut watch = PictureWatch::new(START);
+    assert_eq!(watch.observe(40, START), PictureFlow::Flowing);
+    assert_eq!(
+      watch.observe(40, START + Duration::from_secs(2)),
+      PictureFlow::Flowing
+    );
+    assert_eq!(
+      watch.observe(40, START + PICTURES_STALLED_AFTER),
+      PictureFlow::Stalled
+    );
+    // A picture again: flowing at once.
+    assert_eq!(
+      watch.observe(41, START + Duration::from_secs(4)),
+      PictureFlow::Flowing
+    );
+  }
+
+  #[test]
+  fn a_video_that_never_got_a_picture_stalls() {
+    // A late viewer waiting on a layer nobody sends: black, and now it says so.
+    let mut watch = PictureWatch::new(START);
+    assert_eq!(
+      watch.observe(0, START + Duration::from_secs(1)),
+      PictureFlow::Flowing
+    );
+    assert_eq!(
+      watch.observe(0, START + PICTURES_STALLED_AFTER),
+      PictureFlow::Stalled
+    );
+  }
+
+  #[test]
+  fn a_reused_element_counts_from_the_first_look() {
+    // A canvas kept for a moment after its tile went (`shown::LINGER`) carries its old count.
+    let mut watch = PictureWatch::new(START);
+    assert_eq!(watch.observe(500, START), PictureFlow::Flowing);
+    assert_eq!(
+      watch.observe(501, START + Duration::from_secs(2)),
+      PictureFlow::Flowing
+    );
+    assert_eq!(
+      watch.observe(501, START + Duration::from_secs(4)),
+      PictureFlow::Flowing
+    );
+  }
+}

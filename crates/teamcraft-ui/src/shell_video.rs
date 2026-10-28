@@ -12,7 +12,7 @@ use std::collections::BTreeMap;
 use thiserror::Error;
 
 #[cfg(target_arch = "wasm32")]
-pub use self::view::{can_show_video, hide, show};
+pub use self::view::{can_show_video, hide, request_keyframe, show};
 
 /// Version of the frame message this page reads.
 const MESSAGE_VERSION: u8 = 1;
@@ -138,7 +138,8 @@ mod view {
   use leptos::task::spawn_local;
   use serde_json::json;
   use teamcraft_media::web_api::{
-    Canvas2d, EncodedVideoChunk, VideoDecoder, VideoFrame as WebVideoFrame, dictionary, has_global,
+    Canvas2d, EncodedVideoChunk, VideoDecoder, VideoFrame as WebVideoFrame, count_picture_drawn, dictionary,
+    has_global,
   };
   use wasm_bindgen::JsCast;
   use wasm_bindgen::prelude::*;
@@ -188,6 +189,15 @@ mod view {
   pub fn hide(source: VideoSource) {
     if let Some(view) = VIEWS.with(|views| views.borrow_mut().remove(&source)) {
       view.stop();
+    }
+  }
+
+  /// A shown track stopped getting pictures: asks the shell for a keyframe once more (#921), in
+  /// case what is missing is one the view never saw.
+  pub fn request_keyframe(source: VideoSource) {
+    if let Some(view) = VIEWS.with(|views| views.borrow().get(&source).cloned()) {
+      view.has_asked_for_keyframe.set(false);
+      view.ask_for_keyframe();
     }
   }
 
@@ -403,8 +413,10 @@ mod view {
         if self
           .context
           .draw_image_with_image_bitmap(&bitmap, 0.0, 0.0)
-          .is_err()
+          .is_ok()
         {
+          count_picture_drawn(&self.canvas);
+        } else {
           tracing::debug!("video image not drawn");
         }
       }
@@ -565,7 +577,9 @@ mod view {
       let drawn = Rc::downgrade(view);
       let output = Closure::<dyn FnMut(WebVideoFrame)>::new(move |frame: WebVideoFrame| {
         fit_canvas(&canvas, frame.display_width(), frame.display_height());
-        if context.draw_video_frame(&frame, 0.0, 0.0).is_err() {
+        if context.draw_video_frame(&frame, 0.0, 0.0).is_ok() {
+          count_picture_drawn(&canvas);
+        } else {
           tracing::debug!("video frame not drawn");
         }
         frame.close();
