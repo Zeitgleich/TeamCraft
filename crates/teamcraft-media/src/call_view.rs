@@ -319,6 +319,7 @@ mod tests {
           kind: VideoTrackKind::Screen,
           codec: VideoCodec::Vp9,
           layers: Vec::new(),
+          maybe_publication_id: None,
         }),
       );
       assert!(roster.apply(
@@ -384,6 +385,7 @@ mod tests {
             kind: VideoTrackKind::Camera,
             codec: VideoCodec::H264,
             layers: Vec::new(),
+            maybe_publication_id: None,
           }),
         );
       }
@@ -546,6 +548,7 @@ mod tests {
       kind: VideoTrackKind::Screen,
       codec: VideoCodec::H264,
       layers: Vec::new(),
+      maybe_publication_id: None,
     })
   }
 

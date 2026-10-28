@@ -20,7 +20,9 @@
 
 use futures::channel::mpsc;
 use js_sys::Uint8Array;
-use teamcraft_proto::{MediaStreamId, ScreenContentMode, VideoCodec, VideoLayerInfo, VideoTrackKind};
+use teamcraft_proto::{
+  MediaStreamId, ScreenContentMode, VideoCodec, VideoLayerInfo, VideoPublicationId, VideoTrackKind,
+};
 use tracing::{debug, warn};
 use wasm_bindgen::JsCast;
 use wasm_bindgen::prelude::*;
@@ -35,6 +37,7 @@ use super::cadence::Cadence;
 use super::{
   Input, MediaAccessReason, MediaInput, WebCallError, browser, dictionary, js_message, media_access, window,
 };
+use crate::call_engine::OwnPublication;
 use crate::call_video::ReceivedVideoFrame;
 use crate::video::{VideoResolution, fit_within, screen_bitrate_bps, screen_limits, simulcast_layers};
 use crate::web_api::{
@@ -81,9 +84,8 @@ pub(super) struct TrackSender {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct Publication {
   pub kind: VideoTrackKind,
-  /// `None` until the SFU published the track, and again once it dropped it (a rejoin without the
-  /// slot) until the engine's new publication is confirmed.
-  pub maybe_stream_id: Option<MediaStreamId>,
+  /// The id the track is published under, and the stream the SFU confirmed for it (#929).
+  pub own: OwnPublication,
 }
 
 /// The encoders of one own track, one per simulcast layer. A failed encoder is replaced by a new
@@ -185,10 +187,11 @@ pub(super) struct TrackPlan {
 }
 
 impl TrackSender {
-  /// Starts encoding the stream's video track as `plan.kind`.
+  /// Starts encoding the stream's video track as `plan.kind`, to be published under `publication`.
   pub async fn start(
     stream: MediaStream,
     plan: TrackPlan,
+    publication: VideoPublicationId,
     inputs: &mpsc::UnboundedSender<Input>,
   ) -> Result<Self, WebCallError> {
     let track: MediaStreamTrack = stream
@@ -226,7 +229,7 @@ impl TrackSender {
     Ok(Self {
       publication: Publication {
         kind: plan.kind,
-        maybe_stream_id: None,
+        own: OwnPublication::new(publication),
       },
       stream,
       video,
@@ -277,7 +280,7 @@ impl TrackSender {
   /// track has no stream to go out on. A picture that can't be taken is skipped; only encoders
   /// that keep failing end the track.
   pub async fn capture(&mut self) -> Result<(), EncoderGaveUp> {
-    if self.publication.maybe_stream_id.is_none() || self.video.video_width() == 0 {
+    if self.publication.own.maybe_stream_id.is_none() || self.video.video_width() == 0 {
       return Ok(());
     }
     let frame = match self.next_frame().await {

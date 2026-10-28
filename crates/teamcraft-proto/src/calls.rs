@@ -17,7 +17,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
   Base64Bytes, CallId, ConversationId, DeviceId, ErrorBody, MediaCapabilities, TransportFeedback, UserId,
-  VideoCodec, VideoLayerInfo, VideoTrack, VideoTrackKind,
+  VideoCodec, VideoLayerInfo, VideoPublicationId, VideoTrack, VideoTrackKind,
 };
 
 /// `aud` of call join tokens.
@@ -74,11 +74,14 @@ pub enum CallClientMessage {
     commit: Base64Bytes,
     maybe_welcome: Option<Base64Bytes>,
   },
-  /// Starts sending a video track; the SFU answers with [`CallEvent::VideoPublished`].
+  /// Starts sending a video track; the SFU answers with [`CallEvent::VideoPublished`], whose track
+  /// echoes `maybe_publication_id` (#929). Older clients send none; older SFUs ignore it.
   PublishVideo {
     kind: VideoTrackKind,
     codec: VideoCodec,
     layers: Vec<VideoLayerInfo>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    maybe_publication_id: Option<VideoPublicationId>,
   },
   UnpublishVideo {
     stream_id: MediaStreamId,
@@ -338,11 +341,17 @@ impl fmt::Debug for CallClientMessage {
         .field("commit", commit)
         .field("maybe_welcome", maybe_welcome)
         .finish(),
-      Self::PublishVideo { kind, codec, layers } => f
+      Self::PublishVideo {
+        kind,
+        codec,
+        layers,
+        maybe_publication_id,
+      } => f
         .debug_struct("PublishVideo")
         .field("kind", kind)
         .field("codec", codec)
         .field("layers", layers)
+        .field("maybe_publication_id", maybe_publication_id)
         .finish(),
       Self::TransportFeedback { feedback } => f
         .debug_struct("TransportFeedback")
@@ -582,6 +591,52 @@ mod tests {
     let json = serde_json::to_string(&pong).unwrap();
     assert_eq!(json, r#"{"type":"pong","id":3}"#);
     assert_eq!(serde_json::from_str::<CallServerMessage>(&json).unwrap(), pong);
+  }
+
+  #[test]
+  fn publish_video_wire_format_with_and_without_publication_id() {
+    let publish = CallClientMessage::PublishVideo {
+      kind: VideoTrackKind::Screen,
+      codec: VideoCodec::H264,
+      layers: Vec::new(),
+      maybe_publication_id: Some(VideoPublicationId(4)),
+    };
+    let json = serde_json::to_string(&publish).unwrap();
+    assert_eq!(
+      json,
+      r#"{"type":"publish_video","kind":"screen","codec":"h264","layers":[],"maybe_publication_id":4}"#
+    );
+    assert_eq!(serde_json::from_str::<CallClientMessage>(&json).unwrap(), publish);
+    // Older clients send none: the SFU echoes none.
+    let older = r#"{"type":"publish_video","kind":"screen","codec":"h264","layers":[]}"#;
+    assert_eq!(
+      serde_json::from_str::<CallClientMessage>(older).unwrap(),
+      CallClientMessage::PublishVideo {
+        kind: VideoTrackKind::Screen,
+        codec: VideoCodec::H264,
+        layers: Vec::new(),
+        maybe_publication_id: None,
+      }
+    );
+    // An SFU from before the field reads the request as before: unknown fields of a known message
+    // are ignored, as a field newer than this one is here.
+    let newer = r#"{"type":"publish_video","kind":"screen","codec":"h264","layers":[],"priority":1}"#;
+    assert!(matches!(
+      serde_json::from_str::<CallClientMessage>(newer).unwrap(),
+      CallClientMessage::PublishVideo {
+        maybe_publication_id: None,
+        ..
+      }
+    ));
+    // The answer echoes the id in its track.
+    let answer: CallEvent = serde_json::from_str(
+      r#"{"type":"video_published","track":{"stream_id":7,"device_id":"5","kind":"screen","codec":"h264","layers":[],"maybe_publication_id":4}}"#,
+    )
+    .unwrap();
+    assert!(matches!(
+      answer,
+      CallEvent::VideoPublished { track } if track.maybe_publication_id == Some(VideoPublicationId(4))
+    ));
   }
 
   #[test]

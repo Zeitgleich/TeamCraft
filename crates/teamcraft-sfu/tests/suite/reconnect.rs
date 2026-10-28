@@ -1,7 +1,8 @@
 //! Calls that survive lost connections and lossy paths, without a network: the SFU's rooms and
 //! real call engines exchange signaling and datagrams through in-memory links, and time is
 //! passed in. Deterministic: losses follow fixed patterns. Simulcast layers a publisher pauses
-//! or resumes on the way (#921) are here too.
+//! or resumes on the way (#921), and tracks stopped before the SFU confirmed them (#929), are
+//! here too.
 
 // clippy.toml only relaxes these lints inside #[test] functions; the helpers below are test code too.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
@@ -20,7 +21,8 @@ use teamcraft_media::uplink_layers::UplinkPolicy;
 use teamcraft_media::video::EncodedVideoFrame;
 use teamcraft_proto::{
   AudioCodec, CallClientMessage, CallEvent, CallId, CallServerMessage, DeviceId, Id, MediaCapabilities,
-  MediaStreamId, SFU_GOING_AWAY_CLOSE_CODE, Snowflake, UserId, VideoCodec, VideoLayerInfo, VideoTrackKind,
+  MediaStreamId, SFU_GOING_AWAY_CLOSE_CODE, Snowflake, UserId, VideoCodec, VideoLayerInfo,
+  VideoPublicationId, VideoTrackKind,
 };
 use teamcraft_sfu::auth::JoinGrant;
 use teamcraft_sfu::config::SfuConfig;
@@ -288,6 +290,70 @@ mod simulcast_layers {
   }
 }
 
+/// Issue #929: a track stopped before the SFU confirmed it must not stay published, a black tile
+/// with the camera shown on for everyone else.
+mod own_publications {
+  use super::*;
+
+  #[test]
+  fn a_camera_stopped_and_started_again_before_the_answer_leaves_one_track() {
+    let mut network = Network::with_secured(&[ALICE, BOB]);
+    // On, off and on again within one round trip: no answer has arrived in between.
+    let first = network.ask_for(ALICE, VideoTrackKind::Camera);
+    network.client_mut(ALICE).engine.withdraw_video(first);
+    let second = network.ask_for(ALICE, VideoTrackKind::Camera);
+    network.pump();
+
+    let live = network.live_tracks(BOB, ALICE);
+    assert_eq!(live.len(), 1, "Bob sees {live:?}");
+    assert_eq!(network.confirmed(ALICE, second), Some(live[0]));
+    assert_eq!(network.confirmed(ALICE, first), None);
+    // The one left is the one Alice sends on: Bob gets pictures.
+    network.subscribe(BOB, live[0], 0);
+    network.send_video(ALICE, live[0], 10);
+    assert!(!network.pictures(BOB, live[0]).is_empty());
+  }
+
+  /// The long window: the SFU answered just before the connection went, the answer was lost with
+  /// it, and the camera was turned off meanwhile. The track the SFU kept with the slot goes.
+  #[test]
+  fn a_camera_stopped_while_its_answer_was_lost_is_unpublished_after_the_rejoin() {
+    let mut network = Network::with_secured(&[ALICE, BOB]);
+    let camera = network.ask_for(ALICE, VideoTrackKind::Camera);
+    // The SFU takes the request and answers; the connection dies before the answer arrives.
+    network.drain_client(ALICE);
+    network.lose(ALICE);
+    network.client_mut(ALICE).engine.withdraw_video(camera);
+    assert_eq!(network.rejoin(ALICE), JoinOutcome::Resumed);
+    network.pump();
+    assert_eq!(network.live_tracks(BOB, ALICE), Vec::new());
+    assert_eq!(network.confirmed(ALICE, camera), None);
+  }
+
+  /// Toggling the camera twice while reconnecting: only the last request is still wanted.
+  #[test]
+  fn toggling_the_camera_twice_while_reconnecting_leaves_one_track() {
+    let mut network = Network::with_secured(&[ALICE, BOB]);
+    let stream = network.publish(ALICE, VideoTrackKind::Camera);
+    let first = network.confirmed_publication(ALICE, stream);
+    network.lose(ALICE);
+    // Off and on, twice, while away: nothing reaches the SFU.
+    network.client_mut(ALICE).engine.withdraw_video(first);
+    let second = network.ask_for(ALICE, VideoTrackKind::Camera);
+    network.client_mut(ALICE).engine.withdraw_video(second);
+    let third = network.ask_for(ALICE, VideoTrackKind::Camera);
+    network.pump();
+    assert_eq!(network.rejoin(ALICE), JoinOutcome::Resumed);
+    network.pump();
+
+    let live = network.live_tracks(BOB, ALICE);
+    assert_eq!(live.len(), 1, "Bob sees {live:?}");
+    assert_ne!(live[0], stream, "the camera from before the loss is gone");
+    assert_eq!(network.confirmed(ALICE, third), Some(live[0]));
+    assert_eq!(network.confirmed(ALICE, second), None);
+  }
+}
+
 /// Clients and the SFU's rooms, connected in memory.
 struct Network {
   rooms: Rooms,
@@ -304,6 +370,8 @@ struct Client {
   /// Drop every n-th datagram on the way to the SFU.
   uplink_loss_every: Option<u64>,
   uplink_sent: u64,
+  /// The id of the client's next video publication.
+  next_publication: u32,
 }
 
 /// What sending a client's outputs did.
@@ -369,6 +437,7 @@ impl Network {
           events: Vec::new(),
           uplink_loss_every: None,
           uplink_sent: 0,
+          next_publication: 0,
         },
       );
       network.pump();
@@ -481,12 +550,21 @@ impl Network {
     self.pump();
   }
 
+  /// The client asks for a three-layer track, as its driver does when a camera or share starts;
+  /// nothing is delivered yet. Returns the publication's id.
+  fn ask_for(&mut self, id: i64, kind: VideoTrackKind) -> VideoPublicationId {
+    let client = self.client_mut(id);
+    let publication = VideoPublicationId(client.next_publication);
+    client.next_publication += 1;
+    client
+      .engine
+      .publish_video(publication, kind, VideoCodec::H264, small_layers());
+    publication
+  }
+
   /// The client publishes a three-layer track; returns its stream id.
   fn publish(&mut self, id: i64, kind: VideoTrackKind) -> MediaStreamId {
-    self
-      .client_mut(id)
-      .engine
-      .publish_video(kind.clone(), VideoCodec::H264, small_layers());
+    self.ask_for(id, kind.clone());
     self.pump();
     self
       .client(id)
@@ -536,6 +614,58 @@ impl Network {
       self.pump();
       self.advance(Duration::from_millis(33));
     }
+  }
+
+  /// The streams of `owner`'s tracks that `viewer` was told about and that weren't unpublished.
+  fn live_tracks(&self, viewer: i64, owner: i64) -> Vec<MediaStreamId> {
+    let mut live = Vec::new();
+    for event in &self.client(viewer).events {
+      match event {
+        CallEngineEvent::VideoPublished(track) if track.device_id == device(owner) => {
+          live.push(track.stream_id);
+        },
+        CallEngineEvent::VideoUnpublished(stream_id) => live.retain(|stream| stream != stream_id),
+        _ => {},
+      }
+    }
+    live
+  }
+
+  /// The stream the client's engine last confirmed for its `publication`, unless it was
+  /// unpublished since.
+  fn confirmed(&self, id: i64, publication: VideoPublicationId) -> Option<MediaStreamId> {
+    let mut maybe_stream = None;
+    for event in &self.client(id).events {
+      match event {
+        CallEngineEvent::VideoPublished(track)
+          if track.device_id == device(id) && track.maybe_publication_id == Some(publication) =>
+        {
+          maybe_stream = Some(track.stream_id);
+        },
+        CallEngineEvent::VideoUnpublished(stream_id) if maybe_stream == Some(*stream_id) => {
+          maybe_stream = None;
+        },
+        _ => {},
+      }
+    }
+    maybe_stream
+  }
+
+  /// The publication a confirmed own track of the client answers.
+  fn confirmed_publication(&self, id: i64, stream: MediaStreamId) -> VideoPublicationId {
+    self
+      .client(id)
+      .events
+      .iter()
+      .find_map(|event| match event {
+        CallEngineEvent::VideoPublished(track)
+          if track.device_id == device(id) && track.stream_id == stream =>
+        {
+          track.maybe_publication_id
+        },
+        _ => None,
+      })
+      .expect("the engine names the publication")
   }
 
   /// Layers of the pictures of `stream` the client received since the last call.
