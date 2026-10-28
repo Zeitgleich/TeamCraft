@@ -43,4 +43,5 @@ pub mod sign_in_look;
 pub mod sign_in_page;
 pub mod snapshot_changes;
 pub mod updates;
+pub mod video_stats;
 pub mod window_chrome;

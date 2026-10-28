@@ -2,9 +2,9 @@
 //! encoding, [`VideoReceiver`] decodes one received track for the app. Encoding and decoding take
 //! milliseconds per frame, so they stay off the call's async task.
 
-use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::mpsc::{self as std_mpsc, RecvTimeoutError};
+use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
@@ -46,6 +46,9 @@ pub const BLACK_PICTURES_REPORT_AFTER: Duration = Duration::from_secs(3);
 /// not leave a thread waiting for good (issue #683); the call's task doesn't wait for it at all
 /// ([`VideoSender::stop_in_background`]).
 const SENDER_STOP_WAIT: Duration = Duration::from_secs(1);
+/// How often the encoder thread notes which encoders work, for the call's stats (#938): an
+/// encoder falls back to software rarely, and the stats are read once a second.
+const ENCODER_NAMES_INTERVAL: Duration = Duration::from_secs(1);
 
 /// Makes the encoder for one layer; hardware where available (see [`software_encoders`]).
 pub type EncoderFactory =
@@ -160,6 +163,10 @@ struct SendCounters {
   encoded: AtomicU64,
   /// Captured frames that were (nearly) black ([`PictureContent::Black`]).
   black: AtomicU64,
+  /// The size of the last captured frame, `width << 16 | height`; 0 before the first.
+  capture_size: AtomicU32,
+  /// The encoders at work ([`SimulcastEncoder::encoder_names`]), noted now and then.
+  encoder_names: Mutex<String>,
   /// Waits for a frame that ended without one: lets tests know the thread idled.
   #[cfg(test)]
   idle_polls: AtomicU64,
@@ -173,6 +180,16 @@ pub struct SendProgress {
   pub pictures_encoded: u64,
   /// Captured frames that showed nothing but black.
   pub frames_black: u64,
+}
+
+/// What an own track's encoder thread works with now (stats for nerds, #938).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SenderDetails {
+  /// The size the capture delivers, once a frame came.
+  pub maybe_capture: Option<VideoResolution>,
+  /// The encoders at work, e.g. `vtenc_h264` or `vtenc_h264, OpenH264` once a layer fell back;
+  /// empty until the first picture.
+  pub encoder_names: String,
 }
 
 /// Logs a failure that may repeat every frame: the first at once, then at most once per
@@ -294,6 +311,7 @@ impl VideoSender {
       counters: Arc::clone(&counters),
       maybe_first_picture: Some(first_picture),
       maybe_no_picture: None,
+      maybe_names_noted_at: None,
       black: BlackWatch::new(black_notice),
       stall,
     };
@@ -336,6 +354,10 @@ impl VideoSender {
   pub fn progress(&self) -> SendProgress {
     self.counters.progress()
   }
+
+  pub fn details(&self) -> SenderDetails {
+    self.counters.details()
+  }
 }
 
 impl VideoSender {
@@ -366,6 +388,8 @@ struct EncoderLoop {
   /// Why the last frame gave no picture, while the first picture is pending: the start check's
   /// failure names the encoders and their error (#935).
   maybe_no_picture: Option<String>,
+  /// When the encoders at work were last noted for the stats ([`ENCODER_NAMES_INTERVAL`]).
+  maybe_names_noted_at: Option<Instant>,
   black: BlackWatch,
   stall: StallWatch,
 }
@@ -480,6 +504,7 @@ impl EncoderLoop {
         return;
       }
       self.counters.captured.fetch_add(1, Ordering::Relaxed);
+      self.counters.note_capture(frame.resolution());
       self.check_content(&frame);
       // A camera may deliver 60 fps; the call sends at most its layers' rate.
       if !limiter.is_due(frame.timestamp_us()) {
@@ -564,6 +589,14 @@ impl EncoderLoop {
       },
     };
     let has_pictures = !encoded_frames.is_empty();
+    let now = Instant::now();
+    let is_names_due = self
+      .maybe_names_noted_at
+      .is_none_or(|noted_at| now.saturating_duration_since(noted_at) >= ENCODER_NAMES_INTERVAL);
+    if has_pictures && is_names_due {
+      self.counters.note_encoder_names(simulcast.encoder_names());
+      self.maybe_names_noted_at = Some(now);
+    }
     for encoded_frame in encoded_frames {
       self.counters.encoded.fetch_add(1, Ordering::Relaxed);
       if self.encoded.send((self.kind.clone(), encoded_frame)).is_err() {
@@ -892,6 +925,34 @@ impl SendCounters {
       frames_captured: self.captured.load(Ordering::Relaxed),
       pictures_encoded: self.encoded.load(Ordering::Relaxed),
       frames_black: self.black.load(Ordering::Relaxed),
+    }
+  }
+
+  fn details(&self) -> SenderDetails {
+    let size = self.capture_size.load(Ordering::Relaxed);
+    let maybe_capture = (size != 0).then(|| VideoResolution {
+      width: (size >> 16) as u16,
+      height: (size & 0xffff) as u16,
+    });
+    let encoder_names = self
+      .encoder_names
+      .lock()
+      .map(|names| names.clone())
+      .unwrap_or_default();
+    SenderDetails {
+      maybe_capture,
+      encoder_names,
+    }
+  }
+
+  fn note_capture(&self, size: VideoResolution) {
+    let packed = u32::from(size.width) << 16 | u32::from(size.height);
+    self.capture_size.store(packed, Ordering::Relaxed);
+  }
+
+  fn note_encoder_names(&self, names: String) {
+    if let Ok(mut noted) = self.encoder_names.lock() {
+      *noted = names;
     }
   }
 }
@@ -1323,6 +1384,30 @@ mod tests {
       assert_eq!(sender.finish().pictures_encoded, 2);
     }
 
+    /// Stats for nerds (#938): the track tells the size the capture delivers and the encoders at
+    /// work once a picture came.
+    #[tokio::test]
+    async fn a_sending_track_tells_its_capture_size_and_encoders() {
+      let pushed = Arc::new(Mutex::new(None));
+      let (sender, first_picture, mut encoded_rx) = start_sender(
+        Box::new(SharedCapture(manual_capture(), Arc::clone(&pushed))),
+        fake_encoders(),
+      );
+      assert_eq!(sender.details(), SenderDetails::default());
+      let frames = pushed.lock().unwrap().clone().unwrap();
+      assert!(frames.send(test_pattern(VGA, 0, 0).unwrap()));
+      assert_eq!(first_picture.wait().await, Ok(()));
+      encoded_rx.recv().await.unwrap();
+      assert_eq!(
+        sender.details(),
+        SenderDetails {
+          maybe_capture: Some(VGA),
+          encoder_names: "fake".to_owned(),
+        }
+      );
+      sender.finish();
+    }
+
     /// Issue #935: the failure the user sees names the encoders and their error.
     #[test]
     fn a_failing_encoder_is_named_with_its_error_when_the_check_gives_up() {
@@ -1488,6 +1573,7 @@ mod tests {
         counters: Arc::default(),
         maybe_first_picture: Some(first_picture),
         maybe_no_picture: None,
+        maybe_names_noted_at: None,
         black: BlackWatch::new(oneshot::channel().0),
         stall: StallWatch::new(None),
       };

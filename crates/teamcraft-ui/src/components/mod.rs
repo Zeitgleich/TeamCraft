@@ -126,5 +126,6 @@ pub mod top_bar;
 pub mod typing_indicator;
 pub mod update_notice;
 pub mod video_player;
+pub mod video_stats;
 pub mod window_controls;
 pub mod workspace_dialogs;

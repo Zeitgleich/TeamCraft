@@ -72,6 +72,8 @@ pub enum VideoContent {
 
 /// The name of [`OpenH264Encoder`].
 const OPENH264: &str = "OpenH264";
+/// The name of the software encoder every platform has; the others are hardware encoders.
+pub const SOFTWARE_ENCODER_NAME: &str = OPENH264;
 
 /// Software H.264 (OpenH264).
 pub struct OpenH264Encoder {

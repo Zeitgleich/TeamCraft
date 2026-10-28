@@ -27,6 +27,7 @@ use teamcraft_client_api::calls::{
 use teamcraft_client_api::failure::ActionFailure;
 use teamcraft_client_api::model::{ConversationId, UserId};
 use teamcraft_client_api::remote::{CALL_CHANGED_EVENT, CallAction, CallActionAnswer, CallSnapshot};
+use teamcraft_client_api::video_stats::VideoStatsReport;
 use teamcraft_proto::ScreenContentMode;
 
 use crate::auth::tauri::{call, listen};
@@ -304,6 +305,24 @@ impl RemoteCalls {
       if let Err(failure) = result {
         crate::feedback::report_failure(failure);
       }
+    });
+  }
+
+  /// Reads what the call's video does (stats for nerds, #938), outside the action queue: the
+  /// overlay reads it every second and must not wait behind a join or a screen picker.
+  pub fn fetch_video_stats(&self, done: Box<dyn FnOnce(Option<VideoStatsReport>)>) {
+    let link = self.link.clone();
+    spawn_local(async move {
+      let maybe_report = match link {
+        CallLink::Shell => call::<Option<VideoStatsReport>>("call_video_stats", &json!({}))
+          .await
+          .inspect_err(|error| tracing::debug!(%error, "video stats not read"))
+          .ok()
+          .flatten(),
+        #[cfg(target_arch = "wasm32")]
+        CallLink::Page(_) => crate::web_calls::video_stats().await,
+      };
+      done(maybe_report);
     });
   }
 

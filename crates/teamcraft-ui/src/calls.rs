@@ -84,6 +84,8 @@ pub struct CallState {
   /// Asks for the camera choice: the call screen's camera menu, or the pre-join screen's camera
   /// field (the "Choose camera" of a camera error, #819).
   pub is_camera_menu_open: RwSignal<bool>,
+  /// "Stats for nerds" (#938) over every video of the call.
+  pub shows_video_stats: RwSignal<bool>,
   /// The camera the backend was told about or uses on its own ([`CallState::send_camera_choice`]).
   sent_camera: StoredValue<String>,
   /// Carries the user's actions to the call backend; set once by the shell.
@@ -113,6 +115,7 @@ impl CallState {
       is_deafened: RwSignal::new(false),
       move_offer: RwSignal::new(None),
       is_camera_menu_open: RwSignal::new(false),
+      shows_video_stats: RwSignal::new(false),
       sent_camera: StoredValue::new(String::new()),
       handler: StoredValue::new_local(None),
     }

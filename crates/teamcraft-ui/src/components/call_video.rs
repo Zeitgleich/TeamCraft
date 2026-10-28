@@ -11,9 +11,11 @@ use teamcraft_proto::MediaStreamId;
 
 use crate::calls::BackgroundEffect;
 use crate::components::icons::{Icon, IconName};
+use crate::components::video_stats::VideoStatsOverlay;
 use crate::i18n::use_i18n;
 use crate::model::User;
 use crate::reactive::{use_interval_while, use_page_visible};
+use crate::video_stats::StatsTarget;
 
 /// How long a shown video of another device may go without a new picture before its tile says so
 /// (#921): the publisher's uplink or this device's downlink paused it, or it froze on the way.
@@ -272,11 +274,16 @@ pub fn LiveVideo(source: VideoSource, #[prop(into)] is_mirrored: Signal<bool>) -
       stop_watching(source);
     }
   });
+  let stats_target = match source {
+    VideoSource::Remote(stream_id) => StatsTarget::Received(stream_id),
+    VideoSource::OwnCamera => StatsTarget::OwnCamera,
+  };
   view! {
     <div class="live-video" class:mirrored=move || is_mirrored.get() node_ref=host aria-hidden="true"></div>
     <Show when=move || is_stalled.get() fallback=|| ()>
       <span class="video-stalled" role="status">{move || i18n.t("video-stalled")}</span>
     </Show>
+    <VideoStatsOverlay target=stats_target maybe_host=host />
   }
 }
 

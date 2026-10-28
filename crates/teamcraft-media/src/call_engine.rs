@@ -22,6 +22,8 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::sync::Arc;
 use std::time::Duration;
 
+#[cfg(feature = "call-view")]
+use teamcraft_client_api::video_stats::VideoStatsReport;
 use teamcraft_proto::{
   Base64Bytes, CallClientMessage, CallEvent, CallId, CallParticipant, CallServerMessage, DaveKeyBinding,
   DeviceId, ErrorBody, MediaCapabilities, MediaStreamId, ScreenAudioTrack, TransportFeedback, UserId,
@@ -97,6 +99,8 @@ pub struct CallEngine {
   downlink_feedback: FeedbackRecorder,
   /// Base for the SFU's arrival times in uplink feedback (only differences matter).
   uplink_feedback_epoch: Instant,
+  /// When the engine was made: the base of arrival times for the jitter of received video.
+  started_at: Instant,
   microphone_rtp: AudioRtpState,
   screen_rtp: AudioRtpState,
   last_event_seq: u64,
@@ -396,6 +400,7 @@ impl CallEngine {
       uplink,
       downlink_feedback: FeedbackRecorder::new(now),
       uplink_feedback_epoch: now,
+      started_at: now,
       microphone_rtp: AudioRtpState::new(),
       screen_rtp: AudioRtpState::new(),
       last_event_seq: 0,
@@ -768,12 +773,14 @@ impl CallEngine {
       return VideoSendOutcome::LayerPaused;
     }
     let Some(dave) = self.maybe_dave.as_mut().filter(|dave| dave.is_ready()) else {
+      self.count_dropped_video(stream);
       return VideoSendOutcome::NotSecured;
     };
     let encrypted = match dave.encrypt_frame(MediaKind::Video, frame_codec(&frame.codec), &frame.data) {
       Ok(encrypted) => encrypted.into_owned(),
       Err(error) => {
         warn!(%error, "video frame not encrypted, dropped");
+        self.count_dropped_video(stream);
         return VideoSendOutcome::Failed;
       },
     };
@@ -790,13 +797,108 @@ impl CallEngine {
       Ok(packets) => packets,
       Err(error) => {
         warn!(%error, "video frame dropped");
+        track.count_dropped();
         return VideoSendOutcome::Failed;
       },
     };
+    track.count_sent(frame.layer, &packets);
     for rtp in packets {
       self.send_media(stream, frame.layer, &rtp, now);
     }
     VideoSendOutcome::Sent
+  }
+
+  /// What the call's video does (stats for nerds, #938): the counters of every own and received
+  /// track, read at `at_ms`. What only the driver knows (encoders, capture, round trip) it adds.
+  #[cfg(feature = "call-view")]
+  pub fn video_stats(&self, at_ms: u64) -> VideoStatsReport {
+    use teamcraft_client_api::video_stats::{
+      OfferedLayer, ReceivedVideoStats, SentLayerStats, SentVideoStats, UplinkStats, VideoSize,
+      VideoTrackStats,
+    };
+
+    let size = |info: &VideoLayerInfo| VideoSize {
+      width: info.width,
+      height: info.height,
+    };
+    let mut own: Vec<(&StreamId, &OutgoingVideo)> = self.own_video.iter().collect();
+    own.sort_unstable_by_key(|(stream, _)| **stream);
+    let sent = own.into_iter().map(|(stream, track)| {
+      let infos = self
+        .own_tracks
+        .get(stream)
+        .map(|announced| announced.layers.as_slice())
+        .unwrap_or_default();
+      let maybe_target = self.sent_layers.get(stream);
+      let layers = infos
+        .iter()
+        .map(|info| {
+          let counted = track
+            .counters
+            .layers
+            .iter()
+            .find(|counted| counted.layer == info.layer)
+            .copied()
+            .unwrap_or_default();
+          SentLayerStats {
+            layer: info.layer,
+            size: size(info),
+            is_target: maybe_target.is_none_or(|target| target.contains(&info.layer)),
+            pictures: counted.pictures,
+            bytes: counted.bytes,
+          }
+        })
+        .collect();
+      VideoTrackStats::Sent(SentVideoStats {
+        stream_id: MediaStreamId(stream.0),
+        kind: track.kind.clone(),
+        codec: track.codec.clone(),
+        maybe_encoder: None,
+        maybe_capture: None,
+        layers,
+        packets: track.counters.packets,
+        bytes: track.counters.bytes,
+        maybe_frames_captured: None,
+        pictures_dropped: track.counters.pictures_dropped,
+        maybe_frames_black: None,
+      })
+    });
+    let mut remote: Vec<(&StreamId, &IncomingVideo)> = self.remote_video.iter().collect();
+    remote.sort_unstable_by_key(|(stream, _)| **stream);
+    let received = remote.into_iter().map(|(stream, track)| {
+      let counters = &track.counters;
+      VideoTrackStats::Received(ReceivedVideoStats {
+        stream_id: MediaStreamId(stream.0),
+        kind: track.kind.clone(),
+        codec: track.codec.clone(),
+        layers: track
+          .layers
+          .iter()
+          .map(|info| OfferedLayer {
+            layer: info.layer,
+            size: size(info),
+          })
+          .collect(),
+        maybe_layer: track.layer().map(|layer| layer.value()),
+        maybe_max_layer: self.subscriptions.get(stream).copied(),
+        packets: counters.packets,
+        bytes: counters.bytes,
+        packets_lost: counters.packets_lost,
+        frames: counters.frames,
+        frames_discarded: counters.frames_discarded,
+        // Milliseconds don't need more than f32.
+        maybe_jitter_ms: counters.jitter_ms().map(|jitter| jitter as f32),
+      })
+    });
+    VideoStatsReport {
+      at_ms,
+      maybe_rtt_ms: None,
+      maybe_uplink: Some(UplinkStats {
+        estimate_bps: self.uplink.estimate_bps(),
+        loss_percent: loss_percent(self.uplink.loss_ratio()),
+      }),
+      tracks: sent.chain(received).collect(),
+    }
   }
 
   /// Periodic work (every ~100 ms): reports arrival times of received datagrams to the SFU.
@@ -1508,6 +1610,11 @@ impl CallEngine {
     let Some(track) = self.remote_video.get_mut(&stream) else {
       return Ok(());
     };
+    track.count_arrival(
+      rtp.len(),
+      packet.header.timestamp,
+      now.saturating_duration_since(self.started_at),
+    );
     let maybe_complete = track
       .push(layer, &packet)
       .map_err(|_| CallEngineError::Protocol("bad video fragment"))?;
@@ -1520,6 +1627,7 @@ impl CallEngine {
       },
       // A delta whose reference went missing: the decoder can't use it.
       Some(_) => {
+        track.count_frame(false);
         needs_keyframe = true;
         None
       },
@@ -1537,12 +1645,16 @@ impl CallEngine {
       MediaKind::Video,
       &complete.data,
     );
+    let is_decrypted = decrypted.is_ok();
+    if let Some(track) = self.remote_video.get_mut(&stream) {
+      track.count_frame(is_decrypted);
+      if !is_decrypted {
+        track.wait_for_keyframe();
+      }
+    }
     let data = match decrypted {
       Ok(data) => data,
       Err(error) => {
-        if let Some(track) = self.remote_video.get_mut(&stream) {
-          track.wait_for_keyframe();
-        }
         self.ask_for_keyframe(stream, now);
         return Err(error.into());
       },
@@ -1557,6 +1669,13 @@ impl CallEngine {
       data,
     }));
     Ok(())
+  }
+
+  /// Counts an own picture that was meant to go out but didn't (stats).
+  fn count_dropped_video(&mut self, stream: StreamId) {
+    if let Some(track) = self.own_video.get_mut(&stream) {
+      track.count_dropped();
+    }
   }
 
   /// Asks the SFU for a keyframe of a received track, at most once per
@@ -2441,6 +2560,72 @@ mod tests {
       assert_eq!(frames[0].data, data);
       assert!(frames[0].is_keyframe);
       assert_eq!(frames[0].sender, device(1));
+    }
+
+    /// Stats for nerds (#938): both sides count what went out and came in, per track and layer.
+    #[cfg(feature = "call-view")]
+    #[test]
+    fn video_stats_count_what_each_side_sent_and_received() {
+      use teamcraft_client_api::video_stats::VideoTrackStats;
+
+      let now = Instant::now();
+      let (mut alice, mut bob) = secured_pair(now);
+      let track = video_track(60, 1, 2);
+      ask_for(&mut alice, &track);
+      let published = CallEvent::VideoPublished { track: track.clone() };
+      alice.handle_signal(event(6, published.clone()), now).unwrap();
+      bob.handle_signal(event(4, published), now).unwrap();
+      bob.subscribe_video(track.stream_id, Some(1));
+      drain(&mut alice);
+      drain(&mut bob);
+
+      for timestamp in [0, 3000] {
+        let frame = EncodedVideoFrame {
+          timestamp: RtpTimestamp(timestamp),
+          ..video_frame()
+        };
+        alice.send_video(track.stream_id, &frame, now);
+      }
+      let datagrams: Vec<Vec<u8>> = drain(&mut alice)
+        .into_iter()
+        .filter_map(|output| match output {
+          EngineOutput::Datagram(bytes) => Some(bytes),
+          _ => None,
+        })
+        .collect();
+      for datagram in &datagrams {
+        bob.handle_datagram(datagram, now + Duration::from_millis(5));
+      }
+
+      let sent_report = alice.video_stats(1_000);
+      assert_eq!(sent_report.at_ms, 1_000);
+      assert!(sent_report.maybe_uplink.is_some());
+      let sent = sent_report.sent(&VideoTrackKind::Camera).expect("the own camera");
+      assert_eq!(sent.stream_id, track.stream_id);
+      assert_eq!(sent.packets, 2);
+      let layers: Vec<(u8, u64, bool)> = sent
+        .layers
+        .iter()
+        .map(|layer| (layer.layer, layer.pictures, layer.is_target))
+        .collect();
+      assert_eq!(layers, [(0, 2, true), (1, 0, true)]);
+      assert_eq!(sent.layers[1].size.width, 640);
+      assert!(matches!(
+        sent_report.tracks.as_slice(),
+        [VideoTrackStats::Sent(_)]
+      ));
+
+      let received_report = bob.video_stats(1_000);
+      let received = received_report.received(track.stream_id).expect("alice's camera");
+      assert_eq!(
+        (received.packets, received.frames, received.packets_lost),
+        (2, 2, 0)
+      );
+      assert_eq!(received.bytes, sent.bytes);
+      assert_eq!(received.maybe_layer, Some(0));
+      assert_eq!(received.maybe_max_layer, Some(1));
+      assert_eq!(received.layers.len(), 2);
+      assert!(received.maybe_jitter_ms.is_some());
     }
 
     #[test]

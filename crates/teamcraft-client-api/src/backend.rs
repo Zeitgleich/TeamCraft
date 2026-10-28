@@ -39,6 +39,7 @@ use crate::model::{
 };
 use crate::privacy::{LastSeenVisibility, PrivacySettings};
 use crate::search::{ParsedQuery, SavedSearch, SearchHit, SearchResults};
+use crate::video_stats::VideoStatsReport;
 
 /// A list that depends on a server round trip, so it can be "not loaded yet" as well as empty.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -697,6 +698,12 @@ pub trait CallBackend {
   /// Others' video in the active call.
   fn call_video_tracks(&self) -> Vec<RemoteVideoTrack> {
     Vec::new()
+  }
+
+  /// Reads what the active call's video does (stats for nerds, #938) and hands it to `done`
+  /// once the media layer answered; `None` outside a call or where the media layer can't tell.
+  fn fetch_call_video_stats(&self, done: Box<dyn FnOnce(Option<VideoStatsReport>)>) {
+    done(None);
   }
 
   /// The call this device is in.
