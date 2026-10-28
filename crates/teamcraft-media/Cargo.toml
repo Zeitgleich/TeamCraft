@@ -150,7 +150,7 @@ web-sys = { version = "0.3.106", optional = true, features = [
   "Navigator", "ReadableStream", "ReadableStreamDefaultReader", "Url", "Window", "Worklet",
   "WritableStream", "WritableStreamDefaultWriter", "DisplayMediaStreamConstraints",
   "Document", "Element", "EventTarget", "HtmlCanvasElement", "HtmlElement", "HtmlMediaElement",
-  "HtmlVideoElement", "MediaTrackSettings", "Node", "ImageData",
+  "HtmlVideoElement", "MediaTrackSettings", "Node", "ImageData", "ResizeObserver",
 ] }
 futures = { version = "0.3.34", optional = true, default-features = false, features = ["std", "async-await"] }
 # Log output and error reporting of the headless teamcraft-call client.
