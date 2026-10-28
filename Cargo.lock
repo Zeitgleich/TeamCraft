@@ -10943,6 +10943,7 @@ dependencies = [
  "ndk",
  "nokhwa",
  "nokhwa-bindings-macos",
+ "objc2-core-graphics",
  "openh264",
  "openmls",
  "openmls_basic_credential",

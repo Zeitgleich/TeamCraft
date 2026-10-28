@@ -63,7 +63,7 @@ mediafoundation = ["native", "dep:nokhwa"]
 # Screen and window capture on Windows through Windows Graphics Capture (safe wrapper crate).
 graphics-capture = ["native", "dep:windows-capture"]
 # Screen sharing and its sound on macOS through ScreenCaptureKit (macOS 13+).
-screencapturekit = ["native", "dep:screencapturekit"]
+screencapturekit = ["native", "dep:screencapturekit", "dep:objc2-core-graphics"]
 # A screen share's sound on Windows: WASAPI process loopback without our own process (safe
 # wrapper crate).
 wasapi-loopback = ["native", "dep:wasapi"]
@@ -187,6 +187,10 @@ flume = { version = "0.11.1", optional = true, default-features = false }
 # `macos_14_0` feature only compiles the CGImage pixel helpers in; the bridge itself guards newer
 # APIs at runtime and needs macOS 13.
 screencapturekit = { version = "11.0.0", optional = true, features = ["macos_14_0"] }
+# Whether the Screen Recording permission applies, asked without a prompt
+# (`CGPreflightScreenCaptureAccess`), through a safe Core Graphics binding (Zlib/Apache-2.0/MIT;
+# already in the tree through the media stack).
+objc2-core-graphics = { version = "0.3.2", optional = true, default-features = false, features = ["std", "CGWindow"] }
 
 # Camera capture on Windows: Media Foundation behind nokhwa's safe API (Apache-2.0).
 [target.'cfg(target_os = "windows")'.dependencies]

@@ -95,10 +95,11 @@ pub fn failure_message(i18n: I18n, failure: &ActionFailure) -> String {
 }
 
 /// The next step a failure's toast offers, if one helps: another camera for a camera that didn't
-/// open or deliver (#819).
+/// open or deliver (#819), the system's settings for a share macOS refused (#940).
 pub fn failure_action(failure: &ActionFailure) -> Option<ToastAction> {
   match failure.kind {
     FailureKind::Call(call) if call.is_camera_failure() => Some(ToastAction::ChooseCamera),
+    FailureKind::Call(CallFailure::ScreenDenied) => Some(ToastAction::OpenScreenSettings),
     _ => None,
   }
 }
@@ -136,6 +137,7 @@ pub fn failure_message_key(failure: &ActionFailure) -> &'static str {
       CallFailure::CameraNotConnected => "error-call-camera-not-connected",
       CallFailure::CameraUnavailable => "error-call-camera-unavailable",
       CallFailure::ScreenUnavailable => "error-call-screen-unavailable",
+      CallFailure::ScreenDenied => "error-call-screen-denied",
       CallFailure::ScreenNeedsClick => "error-call-screen-needs-click",
       CallFailure::CameraNoPicture => "error-call-camera-no-picture",
       CallFailure::CameraStopped => "error-call-camera-stopped",
@@ -399,7 +401,29 @@ mod tests {
         assert_eq!(failure_action(&camera(failure)), Some(ToastAction::ChooseCamera));
       }
       assert_eq!(failure_action(&camera(CallFailure::CameraDenied)), None);
+      assert_eq!(failure_action(&camera(CallFailure::ScreenUnavailable)), None);
       assert_eq!(failure_action(&ActionFailure::other("x")), None);
+    }
+
+    /// #940: a share macOS refused says how to renew the permission and opens its settings,
+    /// keeping the steps on screen meanwhile.
+    #[test]
+    fn a_refused_share_explains_the_fix_and_opens_the_settings() {
+      let refused = ActionFailure::new(
+        FailureKind::Call(CallFailure::ScreenDenied),
+        "the user or the system denied access to the screen",
+      );
+      assert_eq!(failure_message_key(&refused), "error-call-screen-denied");
+      assert_eq!(failure_action(&refused), Some(ToastAction::OpenScreenSettings));
+      assert_eq!(
+        ToastAction::OpenScreenSettings.label_key(),
+        "call-screen-settings-open"
+      );
+      assert!(ToastAction::OpenScreenSettings.keeps_toast());
+      assert!(!ToastAction::ChooseCamera.keeps_toast());
+      let wire = refused.to_wire();
+      assert!(wire.starts_with("call_screen_denied: "), "{wire}");
+      assert_eq!(ActionFailure::from_wire(&wire), refused);
     }
 
     #[test]
@@ -456,6 +480,7 @@ mod tests {
         FailureKind::Call(CallFailure::CameraNotConnected),
         FailureKind::Call(CallFailure::CameraUnavailable),
         FailureKind::Call(CallFailure::ScreenNeedsClick),
+        FailureKind::Call(CallFailure::ScreenDenied),
       ];
       for kind in kinds {
         let key = failure_message_key(&ActionFailure::new(kind, "x"));
