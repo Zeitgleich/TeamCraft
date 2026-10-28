@@ -3,7 +3,9 @@
 //! - `POST /hooks/{token}`: Slack/Mattermost-compatible incoming webhook (JSON, or the original form
 //!   with `payload=`), one message per request; as `multipart/form-data` with files, like Discord's
 //!   and Slack's (`file_hooks.rs`).
-//! - `POST /ingest/{token}`: log lines, plain text or NDJSON, batched by the worker.
+//! - `POST /ingest/{token}`: log lines, plain text or NDJSON, batched by the worker. The body is a
+//!   stream: lines are taken as they arrive, so one request can stay open for as long as its
+//!   producer runs (`ingest.rs`).
 //! - `GET /healthz`: for the container health check.
 //!
 //! The token selects the source, and so the conversation and the limits (`sources.rs`). Unknown
@@ -17,13 +19,14 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use axum::body::Bytes;
+use axum::body::{Body, Bytes};
 use axum::extract::{DefaultBodyLimit, FromRequest, Path, Request, State};
 use axum::http::header::{CONTENT_LENGTH, CONTENT_TYPE, RETRY_AFTER};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
+use futures_util::StreamExt;
 use serde_json::json;
 use teamcraft_crypto::fingerprint::Fingerprint;
 use tokio::sync::mpsc;
@@ -37,6 +40,7 @@ use crate::idempotency::{
   IDEMPOTENT_REPLAYED_HEADER, IdempotencyKey, IdempotencyStore, InvalidKey, KeyGuard, KeyUse,
   MessageFingerprint,
 };
+use crate::ingest::{IngestSettings, LineSplitter, LineTooLong};
 use crate::render::{PayloadError, WebhookMessage, parse_log_lines, parse_webhook};
 use crate::sources::{Endpoint, Source, SourceRegistry};
 
@@ -66,6 +70,7 @@ pub struct HttpState {
   sender: mpsc::Sender<Submission>,
   files: Arc<FileSettings>,
   keys: IdempotencyStore,
+  ingest: IngestSettings,
 }
 
 /// How an accepted webhook was taken.
@@ -157,12 +162,14 @@ impl HttpState {
     sender: mpsc::Sender<Submission>,
     files: FileSettings,
     keys: IdempotencyStore,
+    ingest: IngestSettings,
   ) -> Self {
     Self {
       sources,
       sender,
       files: Arc::new(files),
       keys,
+      ingest,
     }
   }
 
@@ -287,46 +294,135 @@ fn fingerprint(message: &WebhookMessage) -> Fingerprint {
 async fn ingest_handler(
   State(state): State<HttpState>,
   Path(token): Path<String>,
-  headers: HeaderMap,
-  WholeBody(body): WholeBody,
+  request: Request,
 ) -> Response {
   let Some(source) = state.sources.find(&token, Endpoint::Ingest) else {
     return StatusCode::NOT_FOUND.into_response();
   };
-  let mut lines = parse_log_lines(&content_type(&headers), &body, &source.rules);
-  if lines.is_empty() {
-    return (StatusCode::OK, "accepted 0 lines").into_response();
+  let content_type = content_type(request.headers());
+  let mut intake = LogIntake::new(&state, source);
+  let read = intake.read(&content_type, request.into_body()).await;
+  intake.report_dropped();
+  match read {
+    Ok(()) => intake.answer(),
+    Err(error) => error.into_response(),
   }
-  let total = lines.len();
-  let wanted = u32::try_from(total).unwrap_or(u32::MAX);
-  let allowed = state.sources.take_up_to(&source, wanted, Instant::now()) as usize;
-  if allowed == 0 {
-    // Everything was refused; tell the channel once per request, and the sender to slow down.
-    let _ = state.sender.try_send(Submission::Dropped {
-      source: source.clone(),
-      count: total,
-    });
-    return too_many_requests(&state, &source);
+}
+
+/// How often lines refused by the rate limit are reported in the channel while a stream runs.
+const DROPPED_REPORT_INTERVAL: Duration = Duration::from_secs(1);
+
+/// One `/ingest` request: reads its body as a stream and hands the lines to the worker as they
+/// complete, within the source's rate limit.
+struct LogIntake<'a> {
+  state: &'a HttpState,
+  source: Arc<Source>,
+  accepted_lines: usize,
+  dropped_lines: usize,
+  /// Dropped lines the channel has not been told about yet.
+  unreported_lines: usize,
+  last_report_at: Instant,
+}
+
+impl<'a> LogIntake<'a> {
+  fn new(state: &'a HttpState, source: Arc<Source>) -> Self {
+    Self {
+      state,
+      source,
+      accepted_lines: 0,
+      dropped_lines: 0,
+      unreported_lines: 0,
+      last_report_at: Instant::now(),
+    }
   }
-  lines.truncate(allowed);
-  if allowed < total {
-    let _ = state.sender.try_send(Submission::Dropped {
-      source: source.clone(),
-      count: total - allowed,
-    });
+
+  /// Reads the body to its end, or until it breaks off. Lines already handed on stay sent.
+  async fn read(&mut self, content_type: &str, body: Body) -> Result<(), HookError> {
+    let settings = self.state.ingest;
+    let mut splitter = LineSplitter::new(settings.max_line_bytes);
+    let mut stream = body.into_data_stream();
+    loop {
+      let next = match settings.maybe_idle_timeout {
+        Some(idle) => tokio::time::timeout(idle, stream.next())
+          .await
+          .map_err(|_| HookError::RequestTimeout)?,
+        None => stream.next().await,
+      };
+      let Some(chunk) = next else {
+        break;
+      };
+      let chunk = chunk.map_err(|_| HookError::UnreadableBody)?;
+      let lines = splitter.push(&chunk)?;
+      self.take(content_type, &lines).await?;
+    }
+    self.take(content_type, &splitter.finish()).await
   }
-  if let Err(error) = submit(&state, Submission::Lines { source, lines }) {
-    return error.into_response();
+
+  /// Hands complete lines to the worker. When its queue is full this waits, so a producer that is
+  /// faster than the bridge is slowed down by the connection instead of losing lines.
+  async fn take(&mut self, content_type: &str, complete_lines: &[u8]) -> Result<(), HookError> {
+    let mut lines = parse_log_lines(content_type, complete_lines, &self.source.rules);
+    if lines.is_empty() {
+      return Ok(());
+    }
+    let total = lines.len();
+    let wanted = u32::try_from(total).unwrap_or(u32::MAX);
+    let allowed = self
+      .state
+      .sources
+      .take_up_to(&self.source, wanted, Instant::now()) as usize;
+    self.dropped_lines += total - allowed;
+    self.unreported_lines += total - allowed;
+    lines.truncate(allowed);
+    if allowed > 0 {
+      self.accepted_lines += allowed;
+      let submission = Submission::Lines {
+        source: self.source.clone(),
+        lines,
+      };
+      if self.state.sender.send(submission).await.is_err() {
+        return Err(HookError::ShuttingDown);
+      }
+    }
+    if self.unreported_lines > 0 && self.last_report_at.elapsed() >= DROPPED_REPORT_INTERVAL {
+      self.report_dropped();
+    }
+    Ok(())
   }
-  let answer = if allowed < total {
-    format!(
-      "accepted {allowed} lines, dropped {} (rate limit)",
-      total - allowed
-    )
-  } else {
-    "ok".to_owned()
-  };
-  (StatusCode::OK, answer).into_response()
+
+  /// Tells the channel, once, how many lines were dropped since the last report.
+  fn report_dropped(&mut self) {
+    self.last_report_at = Instant::now();
+    if self.unreported_lines == 0 {
+      return;
+    }
+    let report = Submission::Dropped {
+      source: self.source.clone(),
+      count: std::mem::take(&mut self.unreported_lines),
+    };
+    // Best effort: the notice is dropped itself when the queue is full.
+    let _ = self.state.sender.try_send(report);
+  }
+
+  /// The answer for a stream that ended cleanly: refused when the rate limit took every line.
+  fn answer(&self) -> Response {
+    match (self.accepted_lines, self.dropped_lines) {
+      (0, 0) => (StatusCode::OK, "accepted 0 lines").into_response(),
+      (0, _) => too_many_requests(self.state, &self.source),
+      (_, 0) => (StatusCode::OK, "ok").into_response(),
+      (accepted, dropped) => (
+        StatusCode::OK,
+        format!("accepted {accepted} lines, dropped {dropped} (rate limit)"),
+      )
+        .into_response(),
+    }
+  }
+}
+
+impl From<LineTooLong> for HookError {
+  fn from(_: LineTooLong) -> Self {
+    Self::BodyTooLarge
+  }
 }
 
 fn refuse_if_limited(state: &HttpState, source: &Source, count: u32) -> Option<Response> {
@@ -572,6 +668,7 @@ mod tests {
       sender,
       FileSettings::from_config(&config),
       IdempotencyStore::new(&config.idempotency),
+      IngestSettings::from_config(&config),
     );
     let app = router(state.clone(), config.listen.max_body_bytes);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -750,6 +847,167 @@ mod tests {
       let (status, ..) = post(format!("{base}/ingest/{TOKEN_A}"), "text/plain", "\n\n").await;
       assert_eq!(status, StatusCode::OK);
       assert!(receiver.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn lines_reach_the_worker_while_the_request_is_still_open() {
+      let (base, mut receiver) = start(60).await;
+      let mut stream = open_stream(&base, TOKEN_A, "text/plain").await;
+      // The second line is cut in the middle: only the complete first one is handed on.
+      send_chunk(&mut stream, b"first\nsec").await;
+      assert_eq!(next_lines(&mut receiver).await, ["first"]);
+      send_chunk(&mut stream, b"ond\nERROR third\n").await;
+      assert_eq!(next_lines(&mut receiver).await, ["second", "ERROR third"]);
+      assert!(receiver.try_recv().is_err());
+      assert_eq!(finish_stream(stream).await, "HTTP/1.1 200 OK / ok");
+    }
+
+    #[tokio::test]
+    async fn a_last_line_without_a_line_break_is_taken_at_the_end() {
+      let (base, mut receiver) = start(60).await;
+      let mut stream = open_stream(&base, TOKEN_A, "text/plain").await;
+      send_chunk(&mut stream, b"done\nlast").await;
+      assert_eq!(next_lines(&mut receiver).await, ["done"]);
+      let answer = finish_stream(stream).await;
+      assert_eq!(next_lines(&mut receiver).await, ["last"]);
+      assert_eq!(answer, "HTTP/1.1 200 OK / ok");
+    }
+
+    #[tokio::test]
+    async fn a_stream_may_be_far_longer_than_the_body_limit() {
+      // `max_body_bytes` is 4096 in the test configuration.
+      let (base, mut receiver) = start(10_000).await;
+      let mut stream = open_stream(&base, TOKEN_A, "text/plain").await;
+      for round in 0..20 {
+        let chunk = format!("{}\n", format!("{round:02}").repeat(200)).repeat(5);
+        send_chunk(&mut stream, chunk.as_bytes()).await;
+        assert_eq!(next_lines(&mut receiver).await.len(), 5, "round {round}");
+      }
+      assert_eq!(finish_stream(stream).await, "HTTP/1.1 200 OK / ok");
+    }
+
+    #[tokio::test]
+    async fn an_ndjson_stream_is_flattened_line_by_line() {
+      let (base, mut receiver) = start(60).await;
+      let mut stream = open_stream(&base, TOKEN_A, "application/x-ndjson").await;
+      send_chunk(&mut stream, b"{\"level\":\"info\",\"msg\":\"up\"}\n").await;
+      assert_eq!(next_lines(&mut receiver).await, ["[INFO] up"]);
+      send_chunk(&mut stream, b"{\"level\":\"error\",\"msg\":\"down\"}\n").await;
+      assert_eq!(next_lines(&mut receiver).await, ["[ERROR] down"]);
+      finish_stream(stream).await;
+    }
+
+    #[tokio::test]
+    async fn a_line_over_the_limit_ends_the_stream_with_413() {
+      let (base, mut receiver) = start(60).await;
+      let mut stream = open_stream(&base, TOKEN_A, "text/plain").await;
+      send_chunk(&mut stream, b"short\n").await;
+      assert_eq!(next_lines(&mut receiver).await, ["short"]);
+      send_chunk(&mut stream, "x".repeat(5000).as_bytes()).await;
+      let answer = finish_stream(stream).await;
+      assert!(answer.starts_with("HTTP/1.1 413"), "{answer}");
+      assert!(answer.contains("payload_too_large"), "{answer}");
+    }
+
+    #[tokio::test]
+    async fn dropped_lines_of_a_stream_are_reported_once_when_it_ends() {
+      let (base, mut receiver) = start(2).await;
+      let mut stream = open_stream(&base, TOKEN_A, "text/plain").await;
+      send_chunk(&mut stream, b"1\n2\n").await;
+      assert_eq!(next_lines(&mut receiver).await, ["1", "2"]);
+      send_chunk(&mut stream, b"3\n4\n5\n").await;
+      let answer = finish_stream(stream).await;
+      assert!(
+        answer.contains("accepted 2") && answer.contains("dropped 3"),
+        "{answer}"
+      );
+      let Some(Submission::Dropped { count, .. }) = receiver.recv().await else {
+        panic!("no report of the dropped lines")
+      };
+      assert_eq!(count, 3);
+      assert!(receiver.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn a_silent_stream_is_cut_off_only_when_a_timeout_is_set() {
+      let mut with_timeout = config(60);
+      with_timeout.listen.ingest_idle_timeout_secs = 1;
+      let (base, mut receiver) = start_with(with_timeout).await;
+      let mut stream = open_stream(&base, TOKEN_A, "text/plain").await;
+      send_chunk(&mut stream, b"alive\n").await;
+      assert_eq!(next_lines(&mut receiver).await, ["alive"]);
+      let answer = read_answer(&mut stream).await;
+      assert!(answer.starts_with("HTTP/1.1 408"), "{answer}");
+      assert!(answer.contains("request_timeout"), "{answer}");
+
+      let (base, mut receiver) = start(60).await;
+      let mut stream = open_stream(&base, TOKEN_A, "text/plain").await;
+      send_chunk(&mut stream, b"quiet\n").await;
+      assert_eq!(next_lines(&mut receiver).await, ["quiet"]);
+      tokio::time::sleep(Duration::from_millis(1500)).await;
+      send_chunk(&mut stream, b"still here\n").await;
+      assert_eq!(next_lines(&mut receiver).await, ["still here"]);
+      finish_stream(stream).await;
+    }
+
+    /// Opens a request with a body that is sent in chunks, as `curl -T -` does.
+    async fn open_stream(base: &str, token: &str, content_type: &str) -> tokio::net::TcpStream {
+      let mut stream = tokio::net::TcpStream::connect(base.trim_start_matches("http://"))
+        .await
+        .unwrap();
+      let head = format!(
+        "POST /ingest/{token} HTTP/1.1\r\nhost: bridge\r\ncontent-type: {content_type}\r\n\
+         connection: close\r\ntransfer-encoding: chunked\r\n\r\n"
+      );
+      tokio::io::AsyncWriteExt::write_all(&mut stream, head.as_bytes())
+        .await
+        .unwrap();
+      stream
+    }
+
+    async fn send_chunk(stream: &mut tokio::net::TcpStream, bytes: &[u8]) {
+      let mut chunk = format!("{:x}\r\n", bytes.len()).into_bytes();
+      chunk.extend_from_slice(bytes);
+      chunk.extend_from_slice(b"\r\n");
+      tokio::io::AsyncWriteExt::write_all(stream, &chunk).await.unwrap();
+    }
+
+    /// Ends the body and returns the answer as `HTTP/1.1 <status> / <body>`, or the whole answer
+    /// for a refusal.
+    async fn finish_stream(mut stream: tokio::net::TcpStream) -> String {
+      // The bridge may already have answered and closed (a refusal), so the end may not go out.
+      let _ = tokio::io::AsyncWriteExt::write_all(&mut stream, b"0\r\n\r\n").await;
+      let answer = read_answer(&mut stream).await;
+      match answer.strip_prefix("HTTP/1.1 200 OK") {
+        Some(rest) => format!(
+          "HTTP/1.1 200 OK / {}",
+          rest.rsplit("\r\n\r\n").next().unwrap_or("")
+        ),
+        None => answer,
+      }
+    }
+
+    async fn read_answer(stream: &mut tokio::net::TcpStream) -> String {
+      let mut answer = Vec::new();
+      let _ = tokio::time::timeout(
+        Duration::from_secs(10),
+        tokio::io::AsyncReadExt::read_to_end(stream, &mut answer),
+      )
+      .await
+      .expect("an answer");
+      String::from_utf8_lossy(&answer).into_owned()
+    }
+
+    /// The texts of the next lines the worker is given.
+    async fn next_lines(receiver: &mut mpsc::Receiver<Submission>) -> Vec<String> {
+      let submission = tokio::time::timeout(Duration::from_secs(5), receiver.recv())
+        .await
+        .expect("lines while the request is open")
+        .unwrap();
+      match submission {
+        Submission::Lines { lines, .. } => lines.into_iter().map(|line| line.text).collect(),
+        other => panic!("{other:?}"),
+      }
     }
   }
 
