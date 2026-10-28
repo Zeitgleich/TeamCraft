@@ -2,7 +2,9 @@
 //! track the page shows it sends the frames over a Tauri channel, one binary message per frame
 //! (`video_message` in `apps/desktop/src/calls/video.rs`): H.264 (or VP9 from older browsers)
 //! that WebCodecs decodes here, or JPEG images where the webview can't decode H.264 (WebKitGTK
-//! without the codec). The own camera comes as JPEG images, as the call sends it (with effects).
+//! without the codec). The own camera comes as JPEG images of the capture (with effects), drawn at
+//! the size the tile covers in device pixels; the shell is told that size, so the images just
+//! cover it (#937).
 //!
 //! [`LiveVideo`](crate::components::call_video::LiveVideo) shows the canvases made here, the same
 //! way it shows the browser's call module's, and decides when a track is watched.
@@ -90,6 +92,39 @@ impl FrameHeader {
   }
 }
 
+/// The size a canvas of `css_width` x `css_height` CSS pixels covers on a display of `scale`
+/// device pixels per CSS pixel, in device pixels; `None` while it has no box (not in the page).
+fn drawn_size(css_width: f64, css_height: f64, scale: f64) -> Option<(u32, u32)> {
+  let scale = if scale.is_finite() && scale > 0.0 {
+    scale
+  } else {
+    1.0
+  };
+  // Bounded far below `u32::MAX`, so the casts are exact.
+  let device = |css: f64| (css * scale).round().clamp(0.0, 65_535.0) as u32;
+  let (width, height) = (device(css_width), device(css_height));
+  (width > 0 && height > 0).then_some((width, height))
+}
+
+/// The part of an `image` (width, height) a `canvas` (width, height) shows when it is filled like
+/// `object-fit: cover`: the centre, cut to the canvas's aspect ratio, as (x, y, width, height) in
+/// image pixels.
+fn cover_crop(image: (u32, u32), canvas: (u32, u32)) -> (f64, f64, f64, f64) {
+  let (image_width, image_height) = (f64::from(image.0), f64::from(image.1));
+  let (canvas_width, canvas_height) = (f64::from(canvas.0.max(1)), f64::from(canvas.1.max(1)));
+  let (width, height) = if image_width * canvas_height > image_height * canvas_width {
+    (image_height * canvas_width / canvas_height, image_height)
+  } else {
+    (image_width, image_width * canvas_height / canvas_width)
+  };
+  (
+    (image_width - width) / 2.0,
+    (image_height - height) / 2.0,
+    width,
+    height,
+  )
+}
+
 impl<T> InOrder<T> {
   fn new() -> Self {
     Self {
@@ -146,7 +181,7 @@ mod view {
   use wasm_bindgen_futures::JsFuture;
   use web_sys::{Blob, BlobPropertyBag, CanvasRenderingContext2d, Element, HtmlCanvasElement, ImageBitmap};
 
-  use super::{Delivery, FrameCodec, FrameHeader, HEADER_BYTES, InOrder};
+  use super::{Delivery, FrameCodec, FrameHeader, HEADER_BYTES, InOrder, cover_crop, drawn_size};
   use crate::auth::tauri::{call, close_channel, open_channel};
   use crate::components::call_video::VideoSource;
 
@@ -224,6 +259,8 @@ mod view {
     images_in_flight: Cell<u32>,
     image_sequence: Cell<u64>,
     last_drawn_image: Cell<u64>,
+    /// The size in device pixels the shell was last told the self view is drawn in.
+    maybe_told_size: Cell<Option<(u32, u32)>>,
   }
 
   struct FrameChannel {
@@ -263,6 +300,7 @@ mod view {
         images_in_flight: Cell::new(0),
         image_sequence: Cell::new(0),
         last_drawn_image: Cell::new(0),
+        maybe_told_size: Cell::new(None),
       });
       let starting = Rc::clone(&view);
       spawn_local(async move {
@@ -409,18 +447,83 @@ mod view {
       };
       if !self.is_stopped.get() && sequence > self.last_drawn_image.get() {
         self.last_drawn_image.set(sequence);
-        fit_canvas(&self.canvas, bitmap.width(), bitmap.height());
-        if self
-          .context
-          .draw_image_with_image_bitmap(&bitmap, 0.0, 0.0)
-          .is_ok()
-        {
+        let is_drawn = match self.source {
+          VideoSource::OwnCamera => self.draw_self_view(&bitmap),
+          VideoSource::Remote(_) => {
+            fit_canvas(&self.canvas, bitmap.width(), bitmap.height());
+            self
+              .context
+              .draw_image_with_image_bitmap(&bitmap, 0.0, 0.0)
+              .is_ok()
+          },
+        };
+        if is_drawn {
           count_picture_drawn(&self.canvas);
         } else {
           tracing::debug!("video image not drawn");
         }
       }
       bitmap.close();
+    }
+
+    /// Draws an image of the own camera at the size the canvas covers on screen, in device
+    /// pixels (#937): the shell's image is cropped and scaled once, here, with the browser's best
+    /// filter, not again by CSS. The shell learns that size, so its next images just cover it.
+    fn draw_self_view(&self, bitmap: &ImageBitmap) -> bool {
+      let image = (bitmap.width(), bitmap.height());
+      let maybe_size = web_sys::window().and_then(|window| {
+        let rect = self.canvas.get_bounding_client_rect();
+        drawn_size(rect.width(), rect.height(), window.device_pixel_ratio())
+      });
+      // Not in the page (lingering after its tile went): drawn as it is.
+      let size = maybe_size.unwrap_or(image);
+      if let Some(size) = maybe_size {
+        self.tell_drawn_size(size);
+      }
+      fit_canvas(&self.canvas, size.0, size.1);
+      if size == image {
+        return self
+          .context
+          .draw_image_with_image_bitmap(bitmap, 0.0, 0.0)
+          .is_ok();
+      }
+      // A canvas's size change resets its context: set every time.
+      self.context.set_image_smoothing_enabled(true);
+      // By name: web-sys has no binding for `imageSmoothingQuality`. Without it, the default filter.
+      let _ = Reflect::set(
+        &self.context,
+        &JsValue::from_str("imageSmoothingQuality"),
+        &JsValue::from_str("high"),
+      );
+      let (x, y, width, height) = cover_crop(image, size);
+      self
+        .context
+        .draw_image_with_image_bitmap_and_sw_and_sh_and_dx_and_dy_and_dw_and_dh(
+          bitmap,
+          x,
+          y,
+          width,
+          height,
+          0.0,
+          0.0,
+          f64::from(size.0),
+          f64::from(size.1),
+        )
+        .is_ok()
+    }
+
+    /// Tells the shell the self view's size in device pixels when it changed.
+    fn tell_drawn_size(&self, size: (u32, u32)) {
+      if self.maybe_told_size.replace(Some(size)) == Some(size) {
+        return;
+      }
+      spawn_local(async move {
+        let args = json!({ "width": size.0, "height": size.1 });
+        if let Err(error) = call::<()>("call_size_camera", &args).await {
+          // The images keep their size; the self view stays as sharp as before.
+          tracing::debug!(%error, "self view size not told");
+        }
+      });
     }
 
     /// Decodes a frame. Deltas are skipped before the first keyframe, after a lost frame or a
@@ -710,6 +813,71 @@ mod tests {
         FrameHeader::parse(&message),
         Err(FrameMessageError::UnknownCodec(0))
       );
+    }
+  }
+
+  mod self_view_size {
+    use super::*;
+
+    #[test]
+    fn the_drawn_size_is_the_box_in_device_pixels() {
+      // The pre-join tile on a Retina display.
+      assert_eq!(drawn_size(760.0, 475.0, 2.0), Some((1520, 950)));
+      // Fractional boxes and scales round to whole device pixels.
+      assert_eq!(drawn_size(219.5, 137.2, 2.0), Some((439, 274)));
+      assert_eq!(drawn_size(640.0, 400.0, 1.25), Some((800, 500)));
+      // A broken scale counts as 1.
+      assert_eq!(drawn_size(640.0, 400.0, 0.0), Some((640, 400)));
+      assert_eq!(drawn_size(640.0, 400.0, f64::NAN), Some((640, 400)));
+    }
+
+    #[test]
+    fn a_canvas_without_a_box_has_no_drawn_size() {
+      assert_eq!(drawn_size(0.0, 0.0, 2.0), None);
+      assert_eq!(drawn_size(320.0, 0.2, 2.0), None);
+      assert_eq!(drawn_size(-5.0, 100.0, 2.0), None);
+    }
+
+    #[test]
+    fn huge_boxes_are_clamped() {
+      assert_eq!(drawn_size(1e9, 1e9, 2.0), Some((65_535, 65_535)));
+    }
+
+    #[test]
+    fn an_image_of_the_canvas_shape_is_drawn_whole() {
+      assert_eq!(cover_crop((1280, 720), (1280, 720)), (0.0, 0.0, 1280.0, 720.0));
+      assert_eq!(cover_crop((1280, 720), (2560, 1440)), (0.0, 0.0, 1280.0, 720.0));
+    }
+
+    #[test]
+    fn a_wider_image_loses_its_sides_and_a_taller_one_its_top_and_bottom() {
+      // 16:9 capture in a 16:10 tile, as the shell sends it for a 440x276 filmstrip tile.
+      let (x, y, width, height) = cover_crop((492, 276), (440, 276));
+      assert_eq!((x, y, width, height), (26.0, 0.0, 440.0, 276.0));
+      // The pre-join tile at 2x: 1280x720 shown in 1520x950.
+      let (x, y, width, height) = cover_crop((1280, 720), (1520, 950));
+      assert_eq!((y, height), (0.0, 720.0));
+      assert!((width - 1152.0).abs() < 1e-9 && (x - 64.0).abs() < 1e-9);
+      // A portrait tile of a landscape capture: the middle.
+      let (x, y, width, height) = cover_crop((1280, 720), (400, 800));
+      assert_eq!((y, width, height), (0.0, 360.0, 720.0));
+      assert_eq!(x, 460.0);
+      // A wide strip: top and bottom go.
+      let (x, y, width, height) = cover_crop((1280, 720), (1280, 360));
+      assert_eq!((x, y, width, height), (0.0, 180.0, 1280.0, 360.0));
+    }
+
+    #[test]
+    fn the_crop_has_the_canvas_aspect_ratio_and_stays_inside_the_image() {
+      for image in [(1280, 720), (640, 480), (720, 1280), (492, 276)] {
+        for canvas in [(1, 1), (440, 276), (1520, 950), (300, 1200), (2400, 1500)] {
+          let (x, y, width, height) = cover_crop(image, canvas);
+          assert!(x >= 0.0 && y >= 0.0);
+          assert!(x + width <= f64::from(image.0) + 1e-9 && y + height <= f64::from(image.1) + 1e-9);
+          let aspect = f64::from(canvas.0) / f64::from(canvas.1);
+          assert!((width / height - aspect).abs() < 1e-9, "{image:?} in {canvas:?}");
+        }
+      }
     }
   }
 

@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-call-size-camera"
+description = "Enables the call_size_camera command without any pre-configured scope."
+commands.allow = ["call_size_camera"]
+
+[[permission]]
+identifier = "deny-call-size-camera"
+description = "Denies the call_size_camera command without any pre-configured scope."
+commands.deny = ["call_size_camera"]

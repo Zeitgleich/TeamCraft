@@ -59,8 +59,9 @@ pub async fn call_watch_video(
   Ok(())
 }
 
-/// Streams the own camera, as the call sends it (with background effects), to the webview's self
-/// view through `frames`: JPEG images in the format of `call_watch_video`.
+/// Streams the own camera's capture (with background effects) to the webview's self
+/// view through `frames`: JPEG images in the format of `call_watch_video`, sized by
+/// `call_size_camera`.
 #[tauri::command(rename_all = "snake_case")]
 pub fn call_watch_camera(calls: State<'_, Arc<CallHost>>, frames: Channel) {
   let channel = ChannelId(frames.id());
@@ -79,6 +80,13 @@ pub fn call_watch_camera(calls: State<'_, Arc<CallHost>>, frames: Channel) {
 #[tauri::command(rename_all = "snake_case")]
 pub fn call_unwatch_camera(calls: State<'_, Arc<CallHost>>, channel: u32) {
   calls.unwatch_camera(ChannelId(channel));
+}
+
+/// The size the webview draws the self view in, in device pixels (the tile's size times the
+/// display's scale): the images of `call_watch_camera` are made just large enough to cover it.
+#[tauri::command(rename_all = "snake_case")]
+pub fn call_size_camera(calls: State<'_, Arc<CallHost>>, width: u32, height: u32) {
+  calls.size_camera(width, height);
 }
 
 /// Sends the pre-join check's microphone level (0.0 to 1.0) through `levels`, about ten times a
