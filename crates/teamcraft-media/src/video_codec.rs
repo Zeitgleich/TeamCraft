@@ -31,6 +31,9 @@ const STALL_MIN_SPAN_US: u64 = 1_500_000;
 /// Encodes raw frames of one fixed resolution.
 pub trait VideoEncoder {
   fn codec(&self) -> VideoCodec;
+  /// Which encoder this is (`OpenH264`, the GStreamer element, `MediaCodec`), for logs and for
+  /// the detail of a track that encodes nothing (#935).
+  fn name(&self) -> &'static str;
   /// Encodes one frame; `None` when the encoder dropped it (rate control).
   fn encode(
     &mut self,
@@ -60,6 +63,9 @@ pub enum VideoContent {
   Screen,
 }
 
+/// The name of [`OpenH264Encoder`].
+const OPENH264: &str = "OpenH264";
+
 /// Software H.264 (OpenH264).
 pub struct OpenH264Encoder {
   encoder: Encoder,
@@ -75,6 +81,10 @@ pub struct OpenH264Decoder {
 /// receivers recover right away.
 pub struct FallbackEncoder {
   maybe_hardware: Option<Box<dyn VideoEncoder>>,
+  /// The hardware encoder's name, also once it is gone.
+  hardware_name: &'static str,
+  /// Why the hardware encoder was given up, for the error when software can't take over either.
+  maybe_hardware_failure: Option<String>,
   maybe_software: Option<Box<dyn VideoEncoder>>,
   make_software: SoftwareEncoderFactory,
   layer: VideoLayerInfo,
@@ -156,6 +166,10 @@ impl VideoEncoder for OpenH264Encoder {
     VideoCodec::H264
   }
 
+  fn name(&self) -> &'static str {
+    OPENH264
+  }
+
   fn encode(
     &mut self,
     frame: &VideoFrame,
@@ -228,7 +242,9 @@ impl FallbackEncoder {
     make_software: SoftwareEncoderFactory,
   ) -> Self {
     Self {
+      hardware_name: hardware.name(),
       maybe_hardware: Some(hardware),
+      maybe_hardware_failure: None,
       maybe_software: None,
       make_software,
       layer: *layer,
@@ -255,26 +271,53 @@ impl FallbackEncoder {
         HardwareAnswer::Encoded(Some(picture))
       },
       Ok(None) if self.stall.is_stalled_after(frame.timestamp_us()) => {
+        let encoder = self.hardware_name;
         warn!(
+          encoder,
           ?layer,
           "hardware encoder gives no pictures; continuing in software"
         );
-        self.maybe_hardware = None;
-        HardwareAnswer::Gone
+        self.give_up_hardware("it gave no pictures".into())
       },
       Ok(None) => HardwareAnswer::Encoded(None),
       Err(error) => {
-        warn!(%error, ?layer, "hardware encoder failed; continuing in software");
-        self.maybe_hardware = None;
-        HardwareAnswer::Gone
+        let encoder = self.hardware_name;
+        warn!(%error, encoder, ?layer, "hardware encoder failed; continuing in software");
+        self.give_up_hardware(error.to_string())
       },
     }
+  }
+
+  /// Drops the hardware encoder, which failed for `reason`; software takes over.
+  fn give_up_hardware(&mut self, reason: String) -> HardwareAnswer {
+    self.maybe_hardware = None;
+    self.maybe_hardware_failure = Some(reason);
+    HardwareAnswer::Gone
+  }
+
+  /// Why neither encoder works: what became of the hardware one, and `error` of the software one
+  /// that couldn't be built (#935: the failure the user sees names both).
+  fn without_software(&self, error: &VideoCodecError) -> VideoCodecError {
+    let hardware = self.hardware_name;
+    let why = self.maybe_hardware_failure.as_deref().unwrap_or("it is gone");
+    VideoCodecError::Codec(format!(
+      "{hardware} failed ({why}), and {OPENH264} could not take over: {error}"
+    ))
   }
 }
 
 impl VideoEncoder for FallbackEncoder {
   fn codec(&self) -> VideoCodec {
     VideoCodec::H264
+  }
+
+  /// The encoder doing the work: the hardware's until it is gone, then the software's.
+  fn name(&self) -> &'static str {
+    match (&self.maybe_hardware, &self.maybe_software) {
+      (Some(hardware), _) => hardware.name(),
+      (None, Some(software)) => software.name(),
+      (None, None) => OPENH264,
+    }
   }
 
   fn encode(
@@ -287,12 +330,13 @@ impl VideoEncoder for FallbackEncoder {
       return Ok(maybe_picture);
     }
     let is_switching = was_hardware;
-    let software = match &mut self.maybe_software {
+    let software = match self.maybe_software.take() {
       Some(software) => software,
-      None => self
-        .maybe_software
-        .insert((self.make_software)(&self.layer, self.content)?),
+      None => {
+        (self.make_software)(&self.layer, self.content).map_err(|error| self.without_software(&error))?
+      },
     };
+    let software = self.maybe_software.insert(software);
     software.encode(frame, is_keyframe_forced || is_switching)
   }
 }
@@ -349,6 +393,31 @@ impl SimulcastEncoder {
   /// Whether anybody receives a layer; with none, encoding is wasted.
   pub fn has_needed_layers(&self) -> bool {
     self.layers.iter().any(|layer| layer.is_needed)
+  }
+
+  /// Encodes `frame` on the lowest layer although no layer is needed, only to learn whether the
+  /// encoders work: a started track's first picture says so, also while nobody takes a layer yet
+  /// or the uplink holds them all back (#935: such a track was taken for one whose encoder
+  /// failed). The picture is dropped; `true` if one came out. The layer starts with a keyframe
+  /// once it is needed.
+  pub fn encode_unsent(&mut self, frame: &VideoFrame) -> Result<bool, VideoCodecError> {
+    let Some(layer) = self.layers.first_mut() else {
+      return Ok(false);
+    };
+    layer.wants_keyframe = true;
+    Ok(layer.encoder.encode(frame, false)?.is_some())
+  }
+
+  /// The encoders at work, e.g. `vtenc_h264`, or `vtenc_h264, OpenH264` once a layer fell back.
+  pub fn encoder_names(&self) -> String {
+    let mut names: Vec<&'static str> = Vec::new();
+    for layer in &self.layers {
+      let name = layer.encoder.name();
+      if !names.contains(&name) {
+        names.push(name);
+      }
+    }
+    names.join(", ")
   }
 
   pub fn request_keyframe(&mut self, layer: u8) -> Result<(), VideoCodecError> {
@@ -691,6 +760,66 @@ mod tests {
       assert!(!encoder.is_hardware());
       assert!(outputs.iter().all(Option::is_some));
       assert_eq!(*software_log.lock().unwrap(), vec![true, false, false]);
+      assert_eq!(encoder.name(), "fake software");
+    }
+
+    /// Issue #935: when software can't take over either, the error names both encoders and why
+    /// each one failed.
+    #[test]
+    fn a_failure_without_software_names_both_encoders() {
+      let layer = simulcast_layers(
+        VideoResolution {
+          width: 32,
+          height: 32,
+        },
+        30,
+        100_000,
+        1,
+      )[0];
+      let mut encoder = FallbackEncoder::with_software(
+        Box::new(FakeEncoder::Failing),
+        &layer,
+        VideoContent::Camera,
+        Box::new(|_, _| Err(VideoCodecError::Library(OpenH264LibraryError::NotInstalled))),
+      );
+      assert_eq!(encoder.name(), "fake hardware");
+      let error = encoder.encode(&frame(0), true).unwrap_err();
+      assert_eq!(
+        error.to_string(),
+        "video codec: fake hardware failed (video codec: device lost), and OpenH264 could not \
+         take over: OpenH264 is not installed; video needs Cisco's OpenH264 library"
+      );
+    }
+
+    /// Issue #935: with no layer needed, the lowest one is still encoded to learn whether the
+    /// encoder works; it starts with a keyframe once it is needed.
+    #[test]
+    fn an_unsent_picture_proves_the_encoder_and_the_layer_starts_with_a_keyframe() {
+      let layers = simulcast_layers(
+        VideoResolution {
+          width: 320,
+          height: 180,
+        },
+        30,
+        100_000,
+        2,
+      );
+      assert_eq!(layers.len(), 2);
+      let encoded: Arc<Mutex<Vec<bool>>> = Arc::default();
+      let log = Arc::clone(&encoded);
+      let mut simulcast = SimulcastEncoder::new(&layers, |_| {
+        Ok(Box::new(RecordingEncoder(Arc::clone(&log))) as Box<dyn VideoEncoder>)
+      })
+      .unwrap();
+      assert_eq!(simulcast.encoder_names(), "fake software");
+      simulcast.set_needed_layers(&[]);
+      assert!(simulcast.encode(&frame(0)).unwrap().is_empty());
+      assert!(simulcast.encode_unsent(&frame(1)).unwrap());
+      assert_eq!(*encoded.lock().unwrap(), vec![false], "the lowest layer only");
+      simulcast.set_needed_layers(&[0]);
+      let pictures = simulcast.encode(&frame(2)).unwrap();
+      assert_eq!(pictures.len(), 1);
+      assert!(pictures[0].is_keyframe);
     }
 
     #[test]
@@ -731,6 +860,10 @@ mod tests {
     impl VideoEncoder for FakeEncoder {
       fn codec(&self) -> VideoCodec {
         VideoCodec::H264
+      }
+
+      fn name(&self) -> &'static str {
+        "fake hardware"
       }
 
       fn encode(
@@ -790,6 +923,10 @@ mod tests {
     impl VideoEncoder for RecordingEncoder {
       fn codec(&self) -> VideoCodec {
         VideoCodec::H264
+      }
+
+      fn name(&self) -> &'static str {
+        "fake software"
       }
 
       fn encode(

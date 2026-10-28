@@ -148,6 +148,10 @@ impl VideoEncoder for MediaCodecEncoder {
     VideoCodec::H264
   }
 
+  fn name(&self) -> &'static str {
+    "MediaCodec"
+  }
+
   fn encode(
     &mut self,
     frame: &VideoFrame,

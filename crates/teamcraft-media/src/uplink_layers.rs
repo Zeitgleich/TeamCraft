@@ -3,7 +3,9 @@
 //! Audio comes first: when the uplink estimate drops (a congested or lossy mobile network), the
 //! highest video layers stop before audio suffers, down to no video at all. Screen shares go before
 //! cameras. The estimate's start value is a guess, so layers are only limited once the estimator
-//! has actually cut the rate; layers come back with a margin so the allocation doesn't flap.
+//! has actually cut the rate; layers come back with a margin so the allocation doesn't flap. A new
+//! own track starts the same way ([`UplinkLayers::measure_afresh`]): a cut while the call sent
+//! less (only sound) doesn't hold its layers back (#935).
 //!
 //! Pure policy: the call engine feeds estimates and its tracks, and asks which layers may be sent.
 
@@ -84,6 +86,17 @@ impl UplinkLayers {
       .iter()
       .zip(before)
       .any(|(track, top)| self.top_of(track) != top)
+  }
+
+  /// The estimator measures afresh from `estimate_bps` (a new own track,
+  /// [`crate::bwe::SendSideEstimator::measure_afresh`]): as at the start, every layer is sent
+  /// until it cuts the rate again. A limit found while the call sent less said nothing about the
+  /// new track: a camera turned on after a cut while only sound went out had every layer held
+  /// back, and nothing was sent until it was given up on (#935).
+  pub fn measure_afresh(&mut self, estimate_bps: u32) {
+    self.is_limited = false;
+    self.last_estimate_bps = estimate_bps;
+    self.top_layers.clear();
   }
 
   /// Whether `layer` of `stream` may be sent. Tracks the allocation hasn't seen are not limited.
@@ -219,6 +232,29 @@ mod tests {
     // Too little for even the lowest layer: video pauses, audio goes on.
     uplink.on_estimate(150_000, &tracks, false, &policy());
     assert!(!uplink.allows(CAMERA, 0));
+  }
+
+  /// Issue #935: a cut while only sound went out held every layer of a camera turned on later
+  /// back; measured afresh for the new track, it starts with every layer, and only a cut with the
+  /// camera sending limits it again.
+  #[test]
+  fn a_new_track_measured_afresh_is_not_held_back_by_a_cut_while_sending_less() {
+    let layers = camera_layers();
+    let mut uplink = UplinkLayers::new(300_000);
+    // Sound only: a lossy moment cuts the estimate below what the sound is given.
+    uplink.on_estimate(300_000, &[], false, &policy());
+    uplink.on_estimate(40_000, &[], false, &policy());
+    let tracks = [camera(&layers)];
+    uplink.on_estimate(42_000, &tracks, false, &policy());
+    assert!(!uplink.allows(CAMERA, 0), "the old cut holds the new camera back");
+    uplink.measure_afresh(300_000);
+    assert!(uplink.allows(CAMERA, 2));
+    assert!(!uplink.on_estimate(310_000, &tracks, false, &policy()));
+    assert!(uplink.allows(CAMERA, 2));
+    // A cut with the camera sending: the layers that fit.
+    assert!(uplink.on_estimate(250_000, &tracks, false, &policy()));
+    assert!(uplink.allows(CAMERA, 0));
+    assert!(!uplink.allows(CAMERA, 1));
   }
 
   #[test]

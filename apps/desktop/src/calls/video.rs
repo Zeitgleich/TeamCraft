@@ -641,6 +641,7 @@ mod tests {
     let not_encoded = NativeCallError::VideoStart(VideoStartError::NotEncoded {
       source_name: "screen capture",
       captured: 3,
+      detail: "OpenH264 gave no picture".into(),
     });
     assert!(
       start_failure_wire(&VideoTrackKind::Screen, &not_encoded).starts_with("call_screen_no_picture: ")

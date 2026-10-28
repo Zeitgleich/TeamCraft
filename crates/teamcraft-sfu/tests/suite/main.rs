@@ -3,6 +3,7 @@
 //! here is empty.
 
 mod camera_call;
+mod camera_start;
 mod dave_call;
 mod handover;
 mod host_controls;

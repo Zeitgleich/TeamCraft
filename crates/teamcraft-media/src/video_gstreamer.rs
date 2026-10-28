@@ -161,6 +161,10 @@ impl VideoEncoder for GstreamerEncoder {
     VideoCodec::H264
   }
 
+  fn name(&self) -> &'static str {
+    self.element
+  }
+
   fn encode(
     &mut self,
     frame: &VideoFrame,
