@@ -317,11 +317,6 @@
   padding-bottom: var(--space-3);
 }
 
-/* While the list is scrolled up, its "jump to the latest" bar takes the bottom edge. */
-.message-list-wrap:has(> .jump-latest) + .typing-anchor .typing-line {
-  bottom: 30px;
-}
-
 .typing-text {
   min-width: 0;
   overflow: hidden;
