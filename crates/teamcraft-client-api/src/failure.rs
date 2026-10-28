@@ -192,7 +192,7 @@ pub enum CallFailure {
 }
 
 impl CallFailure {
-  const ALL: [Self; 23] = [
+  const ALL: [Self; 24] = [
     Self::MicrophoneDenied,
     Self::MicrophoneMissing,
     Self::MicrophoneInUse,
