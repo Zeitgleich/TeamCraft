@@ -208,6 +208,7 @@ error-call-screen-unavailable = Your screen can't be shared from here.
 error-call-camera-no-picture = Your camera turned on but sends no picture, so your video stays off. Check that no other app uses it, or choose another camera.
 error-call-screen-no-picture = Your screen share started but sends no picture, so it was stopped. Try sharing again, or choose another screen or window.
 error-call-unsupported = This browser can't make calls. Use a current Chrome, Edge, Firefox or Safari, or the TeamCraft app.
+error-call-device-limit = Your account is already in this call on as many devices as are allowed. Leave the call on one of them first, then join from this device.
 error-call-server-unreachable = The call server can't be reached. The network may block calls (UDP); try another network or ask your admin.
 error-call-background-required = Your organization requires a background behind your camera, which the browser can't add yet. Turn your camera on in the TeamCraft app.
 error-call-encryption-pending = This device can't join the call yet: it is still being let into the conversation's encryption. Keep TeamCraft open on another of your devices, or wait for a member to come online, then join again. For a meeting, its organizer may have to open it once first.

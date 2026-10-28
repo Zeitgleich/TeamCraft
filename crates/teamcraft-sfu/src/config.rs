@@ -22,6 +22,10 @@ pub struct SfuConfig {
   pub join_timeout: Duration,
   /// Unjoined sessions one source address may hold at the same time.
   pub max_prejoin_sessions_per_ip: usize,
+  /// Devices of one account that may be in the same call at once. A further device is refused
+  /// (`call_device_limit`); each one is a member of the call's DAVE group. The server enforces the
+  /// same limit when it issues join tokens (`calls.max_devices_per_user_per_call`).
+  pub max_devices_per_user_per_call: usize,
   /// Signaling events queued for one slow participant before it is disconnected.
   pub signaling_queue_len: usize,
   /// Mute changes one participant may report at once; more are ignored until the rate refills.
@@ -60,6 +64,7 @@ impl Default for SfuConfig {
       forwarding: ForwardingConfig::default(),
       join_timeout: Duration::from_secs(10),
       max_prejoin_sessions_per_ip: 16,
+      max_devices_per_user_per_call: 3,
       signaling_queue_len: 256,
       mute_report_burst: 10,
       mute_reports_per_second: 2,

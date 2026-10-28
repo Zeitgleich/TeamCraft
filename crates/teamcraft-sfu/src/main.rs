@@ -25,6 +25,8 @@
 //! - `TEAMCRAFT_SFU_SHUTDOWN_DRAIN_SECS`: on SIGTERM every call connection is closed as "going
 //!   away" (clients rejoin, ARCHITECTURE.md §6.5); how long those closes get to reach the clients
 //!   before the process exits, default 2
+//! - `TEAMCRAFT_SFU_MAX_DEVICES_PER_USER_PER_CALL`: devices of one account in the same call at once,
+//!   default 3 (keep it equal to `calls.max_devices_per_user_per_call` of the server)
 //! - `TEAMCRAFT_SFU_ROSTER_INTERVAL_SECS`: how often the whole call roster is reported to the
 //!   server (also at start), which drops participants the SFU no longer has, default 30
 
@@ -99,6 +101,9 @@ async fn run() -> anyhow::Result<()> {
   }
   if let Some(interval) = env_duration_secs("TEAMCRAFT_SFU_ROSTER_INTERVAL_SECS")? {
     config.roster_interval = interval;
+  }
+  if let Some(devices) = env_count("TEAMCRAFT_SFU_MAX_DEVICES_PER_USER_PER_CALL")? {
+    config.max_devices_per_user_per_call = devices;
   }
 
   let identity = load_identity().await?;
@@ -224,6 +229,18 @@ fn env_addr(name: &str) -> anyhow::Result<Option<SocketAddr>> {
         .parse()
         .with_context(|| format!("{name} is not a socket address"))?,
     )),
+    Err(_) => Ok(None),
+  }
+}
+
+/// A count of at least one; zero would keep every device out of every call.
+fn env_count(name: &str) -> anyhow::Result<Option<usize>> {
+  match std::env::var(name) {
+    Ok(value) => {
+      let count: usize = value.parse().with_context(|| format!("{name} is not a number"))?;
+      anyhow::ensure!(count >= 1, "{name} must be at least 1");
+      Ok(Some(count))
+    },
     Err(_) => Ok(None),
   }
 }

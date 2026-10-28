@@ -77,6 +77,7 @@ pub struct Room {
   started_by: UserId,
   started_at: UnixMillis,
   reconnect_grace: Duration,
+  max_devices_per_user: usize,
   mute_report_burst: u32,
   mute_reports_per_second: u32,
   state: Mutex<RoomState>,
@@ -166,6 +167,8 @@ pub enum RoomError {
   Locked,
   #[error("the meeting host removed this user from the call")]
   Removed,
+  #[error("the account already has {0} devices in the call")]
+  TooManyDevices(usize),
   #[error("call {0} is not on this SFU")]
   CallNotFound(CallId),
 }
@@ -425,6 +428,7 @@ impl Room {
       started_by: first.user_id,
       started_at: now,
       reconnect_grace: config.reconnect_grace,
+      max_devices_per_user: config.max_devices_per_user_per_call,
       mute_report_burst: config.mute_report_burst,
       mute_reports_per_second: config.mute_reports_per_second,
       state: Mutex::new(state),
@@ -680,6 +684,15 @@ impl Room {
         JoinOutcome::Resumed
       },
       None => {
+        // A device that holds its slot while reconnecting counts: it comes back to it.
+        let devices_of_user = state
+          .participants
+          .values()
+          .filter(|participant| participant.user_id == grant.user_id)
+          .count();
+        if devices_of_user >= self.max_devices_per_user {
+          return Err(RoomError::TooManyDevices(devices_of_user));
+        }
         let audio_stream_id = state.allocate_stream_id();
         state
           .forwarder
@@ -1241,6 +1254,27 @@ mod tests {
 
       assert_eq!((other, unnamed), (id(56), id(57)));
       assert_eq!(rooms.roster().len(), 3);
+    }
+
+    #[tokio::test]
+    async fn an_account_may_have_only_so_many_devices_in_one_call() {
+      let rooms = Rooms::new(SfuConfig {
+        max_devices_per_user_per_call: 2,
+        ..SfuConfig::default()
+      });
+      join(&rooms, 1, 10);
+      let (_, phone_session) = join(&rooms, 1, 11);
+
+      let third = join_with(&rooms, grant(CALL, Some(CONVERSATION), 1, 12));
+      let other_account = join_with(&rooms, grant(CALL, Some(CONVERSATION), 2, 20));
+
+      assert!(matches!(third, Err(RoomError::TooManyDevices(2))));
+      assert!(other_account.is_ok(), "the limit is per account");
+
+      // A device that is in the call already rejoins, also while it holds its slot reconnecting.
+      let room = lock(&rooms.rooms).get(&id(CALL)).cloned().unwrap();
+      assert!(rooms.disconnect(&room, id(11), phone_session, Instant::now()));
+      assert!(join_with(&rooms, grant(CALL, Some(CONVERSATION), 1, 11)).is_ok());
     }
 
     #[tokio::test]

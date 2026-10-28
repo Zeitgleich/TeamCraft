@@ -208,6 +208,7 @@ error-call-screen-unavailable = Dein Bildschirm kann von hier aus nicht geteilt 
 error-call-camera-no-picture = Deine Kamera ist an, liefert aber kein Bild, daher bleibt dein Video aus. Prüfe, ob eine andere App sie nutzt, oder wähle eine andere Kamera.
 error-call-screen-no-picture = Deine Bildschirmfreigabe hat begonnen, liefert aber kein Bild und wurde daher beendet. Teile erneut oder wähle einen anderen Bildschirm oder ein anderes Fenster.
 error-call-unsupported = Dieser Browser kann keine Anrufe führen. Nutze ein aktuelles Chrome, Edge, Firefox oder Safari oder die TeamCraft-App.
+error-call-device-limit = Dein Konto ist bereits auf so vielen Geräten im Anruf, wie erlaubt sind. Verlasse den Anruf zuerst auf einem davon und tritt dann von diesem Gerät bei.
 error-call-server-unreachable = Der Anrufserver ist nicht erreichbar. Das Netzwerk blockiert vielleicht Anrufe (UDP); versuche ein anderes Netzwerk oder frag deinen Admin.
 error-call-background-required = Deine Organisation verlangt einen Hintergrund hinter deinem Kamerabild, den der Browser noch nicht einfügen kann. Schalte deine Kamera in der TeamCraft-App ein.
 error-call-encryption-pending = Dieses Gerät kann dem Anruf noch nicht beitreten: Es wird gerade in die Verschlüsselung der Unterhaltung aufgenommen. Lass TeamCraft auf einem anderen deiner Geräte geöffnet oder warte, bis ein Mitglied online ist, und tritt dann erneut bei. Bei einem Meeting muss eventuell zuerst der Organisator es einmal öffnen.

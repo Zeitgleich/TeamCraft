@@ -305,6 +305,7 @@ impl TestApp {
       maybe_sfu_certificate_sha256: None,
       roster_grace_secs: 60,
       roster_timeout_secs: 120,
+      max_devices_per_user_per_call: 3,
     };
     Self::start_with_calls_config(&config, signing_key_pem).await
   }

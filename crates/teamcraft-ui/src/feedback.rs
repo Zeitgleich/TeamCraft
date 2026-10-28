@@ -162,6 +162,7 @@ pub fn failure_message_key(failure: &ActionFailure) -> &'static str {
       ErrorCode::LastAdmin => "admin-error-last-admin",
       ErrorCode::AdminJoinRequestNotFound => "error-admin-join-request-gone",
       ErrorCode::AdminJoinRequestTooSoon => "error-admin-join-request-too-soon",
+      ErrorCode::CallDeviceLimit => "error-call-device-limit",
       // All `*_not_found` codes, including ones this version doesn't know yet.
       other if other.as_str().ends_with("_not_found") => "error-not-found",
       _ => "error-generic",
@@ -441,6 +442,7 @@ mod tests {
         FailureKind::Server(ErrorCode::Conflict),
         FailureKind::Server(ErrorCode::LastOwner),
         FailureKind::Server(ErrorCode::UserNotFound),
+        FailureKind::Server(ErrorCode::CallDeviceLimit),
         FailureKind::Server(ErrorCode::GuestDmNotAllowed),
         FailureKind::Call(CallFailure::SpeakersUnavailable),
         FailureKind::Call(CallFailure::SpeakersMissing),
