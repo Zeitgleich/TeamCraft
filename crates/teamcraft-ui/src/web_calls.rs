@@ -24,7 +24,7 @@ use teamcraft_client_api::failure::ActionFailure;
 use teamcraft_client_api::page_calls::{
   EXPORT_ACT, EXPORT_CAMERA_VIEW, EXPORT_NETWORK_CHANGED, EXPORT_PICK_SCREEN, EXPORT_PREVIEW_LEVEL,
   EXPORT_RING, EXPORT_SHARE_SCREEN, EXPORT_SIGNAL, EXPORT_START, EXPORT_STOP, EXPORT_UNWATCH_VIDEO,
-  EXPORT_WATCH_VIDEO, MODULE_META, PreparedCall, WORKLET_META,
+  EXPORT_VIDEO_STATS, EXPORT_WATCH_VIDEO, MODULE_META, PreparedCall, WORKLET_META,
 };
 use teamcraft_client_api::remote::{CallAction, CallActionAnswer, CallSnapshot};
 use teamcraft_core::CallKeySigner;
@@ -198,6 +198,13 @@ pub fn preview_level() -> f32 {
     .and_then(|module| module.call_sync(EXPORT_PREVIEW_LEVEL, &[]))
     .and_then(|level| level.as_f64())
     .map_or(0.0, |level| level as f32)
+}
+
+/// What the call's video does now (stats for nerds, #938), as the module's `VideoStatsReport`
+/// JSON; `None` outside a call or before the call module loaded.
+pub async fn video_stats() -> Option<String> {
+  let module = current()?.loaded_module()?;
+  module.call(EXPORT_VIDEO_STATS, &[]).await.ok()?.as_string()
 }
 
 fn current() -> Option<Rc<WebCallHost>> {

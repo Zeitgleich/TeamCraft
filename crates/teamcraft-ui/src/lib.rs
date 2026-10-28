@@ -109,6 +109,7 @@ pub mod toast_motion;
 pub mod toast_timer;
 pub mod unread_divider;
 pub mod video_controls;
+pub mod video_stats;
 pub mod viewport;
 #[cfg(target_arch = "wasm32")]
 pub mod web_calls;

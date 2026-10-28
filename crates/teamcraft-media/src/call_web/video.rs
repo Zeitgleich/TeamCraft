@@ -84,6 +84,8 @@ pub(super) struct TrackSender {
   timestamp_us: f64,
   /// Pictures in a row that couldn't be taken; only the first of a run is a warning.
   failed_pictures_in_a_row: u32,
+  /// Pictures taken from the source for encoding (stats).
+  frames_captured: u64,
   #[cfg(feature = "effects")]
   maybe_effects: Option<effects::WebEffects>,
   /// When the next picture is due, at the track's frame rate.
@@ -250,6 +252,7 @@ impl TrackSender {
       frames_since_keyframe: 0,
       timestamp_us: 0.0,
       failed_pictures_in_a_row: 0,
+      frames_captured: 0,
       #[cfg(feature = "effects")]
       maybe_effects: plan.maybe_effects.map(effects::WebEffects::new).transpose()?,
       cadence: Cadence::per_second(plan.framerate, Instant::now()),
@@ -259,6 +262,23 @@ impl TrackSender {
 
   pub fn layers(&self) -> Vec<VideoLayerInfo> {
     self.encoders.infos()
+  }
+
+  /// The size the camera or screen delivers now; `None` before it plays.
+  #[cfg(feature = "call-view")]
+  pub fn source_size(&self) -> Option<VideoResolution> {
+    let side = |pixels: u32| u16::try_from(pixels).unwrap_or(u16::MAX);
+    let (width, height) = (self.video.video_width(), self.video.video_height());
+    (width > 0 && height > 0).then(|| VideoResolution {
+      width: side(width),
+      height: side(height),
+    })
+  }
+
+  /// Pictures taken from the source for encoding so far.
+  #[cfg(feature = "call-view")]
+  pub fn frames_captured(&self) -> u64 {
+    self.frames_captured
   }
 
   /// Whether the next picture is due at `now` ([`TrackSender::capture`] it then).
@@ -304,6 +324,7 @@ impl TrackSender {
       },
     };
     self.failed_pictures_in_a_row = 0;
+    self.frames_captured += 1;
     self.timestamp_us += 1_000_000.0 / f64::from(self.framerate.max(1));
     let is_periodic_keyframe =
       self.frames_since_keyframe >= KEYFRAME_INTERVAL_SECONDS * u32::from(self.framerate);

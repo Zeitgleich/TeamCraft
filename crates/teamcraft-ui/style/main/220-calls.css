@@ -577,6 +577,92 @@
   display: none;
 }
 
+/* Stats for nerds (#938): compact monospace numbers over the video's top left corner, readable on
+   any picture; a small tile scrolls them. */
+.video-stats {
+  position: absolute;
+  top: 8px;
+  left: 8px;
+  z-index: 1;
+  max-width: calc(100% - 16px);
+  max-height: calc(100% - 52px);
+  overflow: auto;
+  padding: 6px 8px;
+  border-radius: var(--radius-sm);
+  background: rgb(0 0 0 / 0.72);
+  color: var(--on-fill);
+  font-family: var(--font-mono);
+  font-size: var(--text-2xs);
+  line-height: 1.35;
+  font-variant-numeric: tabular-nums;
+  text-align: start;
+  user-select: text;
+}
+
+.video-stats-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 4px;
+}
+
+.video-stats-title {
+  font-weight: var(--weight-semibold);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.video-stats-copy {
+  flex: none;
+  display: grid;
+  place-items: center;
+  width: 22px;
+  height: 22px;
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: rgb(255 255 255 / 0.12);
+  color: inherit;
+  cursor: pointer;
+}
+
+.video-stats-copy svg {
+  width: 14px;
+  height: 14px;
+}
+
+.video-stats-copy:hover {
+  background: rgb(255 255 255 / 0.24);
+}
+
+.video-stats-copy:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+.video-stats-rows {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  column-gap: 10px;
+  margin: 0;
+}
+
+.video-stats-rows dt {
+  color: rgb(255 255 255 / 0.66);
+  white-space: nowrap;
+}
+
+.video-stats-rows dd {
+  margin: 0;
+  white-space: nowrap;
+}
+
+.video-stats-waiting {
+  margin: 0;
+  color: rgb(255 255 255 / 0.66);
+}
+
 .silhouette::before,
 .silhouette::after {
   content: "";

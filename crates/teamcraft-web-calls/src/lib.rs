@@ -29,6 +29,7 @@ use teamcraft_client_api::calls::{
 use teamcraft_client_api::failure::{ActionFailure, CallFailure, FailureKind};
 use teamcraft_client_api::page_calls::PreparedCall;
 use teamcraft_client_api::remote::{CallAction, CallActionAnswer, CallSnapshot};
+use teamcraft_client_api::video_stats::VideoStatsReport;
 use teamcraft_media::audio_io::{AudioDeviceChoice, AudioDeviceId, AudioDeviceInfo, AudioSink, AudioSource};
 use teamcraft_media::bwe::BweConfig;
 use teamcraft_media::call_auth::{CallKeyAuthenticator, CallKeyError};
@@ -157,6 +158,7 @@ enum Control {
   Unwatch(MediaStreamId),
   StatusSounds(CallStatusSounds),
   NetworkChanged,
+  VideoStats(oneshot::Sender<Option<VideoStatsReport>>),
   Leave,
 }
 
@@ -212,6 +214,17 @@ pub async fn act(action: String) -> Result<JsValue, JsValue> {
     .map_err(|error| failure_value(ActionFailure::other(format!("unreadable call action: {error}"))))?;
   let answer = host.act(action).await.map_err(failure_value)?;
   Ok(answer.map_or(JsValue::UNDEFINED, |partial| JsValue::from_str(&partial)))
+}
+
+/// What the call's video does now (stats for nerds, #938): `VideoStatsReport` JSON, or nothing
+/// outside a call.
+#[wasm_bindgen]
+pub async fn video_stats() -> Option<String> {
+  let host = host().ok()?;
+  let (done, done_rx) = oneshot::channel();
+  host.control(Control::VideoStats(done));
+  let report = done_rx.await.ok()??;
+  serde_json::to_string(&report).ok()
 }
 
 /// Opens the browser's screen picker at once (`ScreenContentMode` JSON) and returns the promise of
@@ -1070,6 +1083,7 @@ async fn apply(call: &WebCall, control: Control) {
     Control::Unwatch(stream_id) => call.unwatch_video(stream_id),
     Control::StatusSounds(sounds) => call.set_status_cues(status_cues(sounds)),
     Control::NetworkChanged => call.network_changed(),
+    Control::VideoStats(done) => drop(done.send(call.video_stats().await)),
     Control::Leave => {},
   }
 }

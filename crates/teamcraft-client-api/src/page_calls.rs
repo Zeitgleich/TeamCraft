@@ -58,6 +58,9 @@ pub const EXPORT_CAMERA_VIEW: &str = "camera_view";
 /// `preview_level() -> number`: the microphone's level in the pre-join check (#442), from 0
 /// (silence, or no check running) to 1.
 pub const EXPORT_PREVIEW_LEVEL: &str = "preview_level";
+/// `video_stats() -> Promise<string | undefined>`: what the call's video does now, as
+/// [`crate::video_stats::VideoStatsReport`] JSON (stats for nerds, #938); nothing outside a call.
+pub const EXPORT_VIDEO_STATS: &str = "video_stats";
 /// `network_changed()`: the page's core saw the network come back or change, or the page woke up
 /// (`online`, `visibilitychange`, `pageshow`, `resume`); a running call checks its session.
 pub const EXPORT_NETWORK_CHANGED: &str = "network_changed";

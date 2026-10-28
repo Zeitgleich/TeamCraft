@@ -335,6 +335,10 @@ enum Input {
     stream_id: MediaStreamId,
     shown: VideoResolution,
   },
+  /// The session's round trip (`getStats().smoothedRtt`), for the next video stats; `None` where
+  /// the browser doesn't tell.
+  #[cfg(feature = "call-view")]
+  RoundTrip(Option<u32>),
   Command(Command),
 }
 
@@ -362,6 +366,9 @@ enum Command {
   },
   UnwatchVideo(MediaStreamId),
   SetStatusCues(StatusCues),
+  /// Reads what the call's video does (stats for nerds, #938).
+  #[cfg(feature = "call-view")]
+  VideoStats(oneshot::Sender<teamcraft_client_api::video_stats::VideoStatsReport>),
   Leave,
 }
 
@@ -618,6 +625,15 @@ impl WebCall {
     let _ = self.command(Command::UnwatchVideo(stream_id));
   }
 
+  /// What the call's video does now: every own and received track's counters and the round trip
+  /// to the SFU (stats for nerds, #938). `None` once the call ended.
+  #[cfg(feature = "call-view")]
+  pub async fn video_stats(&self) -> Option<teamcraft_client_api::video_stats::VideoStatsReport> {
+    let (done, done_rx) = oneshot::channel();
+    self.command(Command::VideoStats(done)).ok()?;
+    done_rx.await.ok()
+  }
+
   /// Which call status sounds play from now on.
   pub fn set_status_cues(&self, status_cues: StatusCues) {
     // The call already ended if this fails.
@@ -821,6 +837,10 @@ async fn run_call(
     },
     frame_cadence: Cadence::new(FRAME_INTERVAL, MAX_FRAMES_PER_PULSE, Instant::now()),
     timer_cadence: Cadence::new(TIMER_INTERVAL, 1, Instant::now()),
+    #[cfg(feature = "call-view")]
+    started_at: Instant::now(),
+    #[cfg(feature = "call-view")]
+    maybe_rtt_ms: None,
   };
   let _audio_clock = AudioClock::start(&audio.context, state.pulses.clone())
     .inspect_err(|error| warn!(%error, "no audio clock; video and timers slow down in a hidden tab"))
@@ -913,6 +933,12 @@ struct CallState<'a> {
   pulses: Pulses,
   frame_cadence: Cadence,
   timer_cadence: Cadence,
+  /// The base of the video stats' clock.
+  #[cfg(feature = "call-view")]
+  started_at: Instant,
+  /// The session's round trip as last read, for the video stats.
+  #[cfg(feature = "call-view")]
+  maybe_rtt_ms: Option<u32>,
 }
 
 /// A watched track: its tile's decoder, and which layer its size asks for.
@@ -1037,9 +1063,57 @@ impl CallState<'_> {
         }
         self.update_layer(engine, stream_id);
       },
+      #[cfg(feature = "call-view")]
+      Input::RoundTrip(maybe_rtt_ms) => self.maybe_rtt_ms = maybe_rtt_ms,
       Input::Command(command) => return self.on_command(command, engine, audio).await,
     }
     Ok(Flow::Continue)
+  }
+
+  /// The engine's video stats with what the browser adds: the encoders, the capture size and
+  /// frames taken, and the round trip as last read. Starts the next reading of the round trip:
+  /// the stats are read once a second while someone looks at them.
+  #[cfg(feature = "call-view")]
+  fn video_stats(&self, engine: &CallEngine) -> teamcraft_client_api::video_stats::VideoStatsReport {
+    use teamcraft_client_api::video_stats::{
+      EncoderImplementation, VideoEncoderInfo, VideoSize, VideoTrackStats,
+    };
+
+    let at_ms = u64::try_from(self.started_at.elapsed().as_millis()).unwrap_or(u64::MAX);
+    let mut report = engine.video_stats(at_ms);
+    report.maybe_rtt_ms = self.maybe_rtt_ms;
+    for track in &mut report.tracks {
+      let VideoTrackStats::Sent(sent) = track else {
+        continue;
+      };
+      let Some(sender) = self
+        .senders
+        .iter()
+        .find(|sender| sender.publication.own.maybe_stream_id == Some(sent.stream_id))
+      else {
+        continue;
+      };
+      // WebCodecs picks hardware or software itself and doesn't say which.
+      sent.maybe_encoder = Some(VideoEncoderInfo {
+        name: "WebCodecs".to_owned(),
+        implementation: EncoderImplementation::Browser,
+      });
+      sent.maybe_capture = sender.source_size().map(|size| VideoSize {
+        width: size.width,
+        height: size.height,
+      });
+      sent.maybe_frames_captured = Some(sender.frames_captured());
+    }
+    if let Some(transport) = &self.maybe_transport {
+      let session = transport.transport.clone();
+      let inputs = self.inputs.clone();
+      spawn_local(async move {
+        let maybe_rtt_ms = round_trip_ms(&session).await;
+        // The call ended meanwhile if nobody reads the inputs.
+        let _ = inputs.unbounded_send(Input::RoundTrip(maybe_rtt_ms));
+      });
+    }
+    report
   }
 
   /// Runs what fell due since the last pulse: audio frames, the feedback timer, video captures.
@@ -1464,6 +1538,11 @@ impl CallState<'_> {
         engine.subscribe_video(stream_id, Some(max_layer));
       },
       Command::SetStatusCues(status_cues) => self.cues.set_setting(status_cues),
+      #[cfg(feature = "call-view")]
+      Command::VideoStats(done) => {
+        // The caller may have given up waiting.
+        let _ = done.send(self.video_stats(engine));
+      },
       Command::UnwatchVideo(stream_id) => {
         if self.views.remove(&stream_id).is_some() {
           engine.subscribe_video(stream_id, None);
@@ -1779,6 +1858,18 @@ async fn received_packets(session: &WebTransport) -> PacketCount {
       .ok()
       .and_then(|count| count.as_f64()),
   )
+}
+
+/// The session's smoothed round trip in milliseconds (`getStats().smoothedRtt`); `None` where the
+/// browser has no such statistic.
+#[cfg(feature = "call-view")]
+async fn round_trip_ms(session: &WebTransport) -> Option<u32> {
+  let stats = JsFuture::from(session.get_stats().ok()?).await.ok()?;
+  let rtt = Reflect::get(&stats, &JsValue::from_str("smoothedRtt"))
+    .ok()?
+    .as_f64()?;
+  // A positive duration in milliseconds; the conversion saturates.
+  (rtt.is_finite() && rtt >= 0.0).then(|| rtt.round() as u32)
 }
 
 /// How a session whose signaling stream ended was closed: `closed` resolves with the SFU's close

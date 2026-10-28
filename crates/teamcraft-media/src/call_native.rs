@@ -182,6 +182,9 @@ enum Command {
   StopScreenAudio,
   NetworkChanged,
   SetStatusCues(StatusCues),
+  /// Reads what the call's video does (stats for nerds, #938).
+  #[cfg(feature = "call-view")]
+  VideoStats(oneshot::Sender<teamcraft_client_api::video_stats::VideoStatsReport>),
   Leave,
 }
 
@@ -512,6 +515,15 @@ impl NativeCall {
     let _ = self.commands.send(Command::SetStatusCues(status_cues));
   }
 
+  /// What the call's video does now: every own and received track's counters, the encoders and
+  /// the round trip to the SFU (stats for nerds, #938). `None` once the call ended.
+  #[cfg(feature = "call-view")]
+  pub async fn video_stats(&self) -> Option<teamcraft_client_api::video_stats::VideoStatsReport> {
+    let (done, done_rx) = oneshot::channel();
+    self.commands.send(Command::VideoStats(done)).ok()?;
+    done_rx.await.ok()
+  }
+
   fn video(&self, command: VideoCommand) {
     // A closed channel means the call already ended.
     let _ = self.commands.send(Command::Video(command));
@@ -746,6 +758,18 @@ async fn run_call(
           Some(Command::StopScreenAudio) => stop_screen_audio(&mut engine, &mut maybe_screen_audio),
           Some(Command::NetworkChanged) => connection.on_network_changed(Instant::now()),
           Some(Command::SetStatusCues(status_cues)) => sinks.cues.set_setting(status_cues),
+          #[cfg(feature = "call-view")]
+          Some(Command::VideoStats(done)) => {
+            let at_ms = u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX);
+            let mut report = engine.video_stats(at_ms);
+            report.maybe_rtt_ms = connection
+              .maybe_link
+              .as_ref()
+              .map(|link| u32::try_from(link.connection.rtt().as_millis()).unwrap_or(u32::MAX));
+            sinks.video.add_sender_stats(&mut report);
+            // The caller may have given up waiting.
+            let _ = done.send(report);
+          },
           Some(Command::Leave) | None => break Ok(()),
         }
       },
@@ -1635,6 +1659,30 @@ impl VideoState {
     self.maybe_last_log = Some((now, totals));
   }
 
+  /// Adds what only the encoder threads know to the engine's report: the encoders, the capture
+  /// size, frames captured and black.
+  #[cfg(feature = "call-view")]
+  fn add_sender_stats(&self, report: &mut teamcraft_client_api::video_stats::VideoStatsReport) {
+    use teamcraft_client_api::video_stats::{VideoSize, VideoTrackStats};
+
+    for track in &mut report.tracks {
+      let VideoTrackStats::Sent(sent) = track else {
+        continue;
+      };
+      let Some(sender) = self.sender_of(sent.stream_id) else {
+        continue;
+      };
+      let (details, progress) = (sender.details(), sender.progress());
+      sent.maybe_encoder = encoder_info(&details.encoder_names);
+      sent.maybe_capture = details.maybe_capture.map(|capture| VideoSize {
+        width: capture.width,
+        height: capture.height,
+      });
+      sent.maybe_frames_captured = Some(progress.frames_captured);
+      sent.maybe_frames_black = Some(progress.frames_black);
+    }
+  }
+
   fn stream_of(&self, kind: &VideoTrackKind) -> Option<MediaStreamId> {
     self
       .senders
@@ -1690,6 +1738,29 @@ impl VideoState {
       self.stopping.push(sender.stop_in_background());
     }
   }
+}
+
+/// The encoders an own track names ([`crate::video_codec::SimulcastEncoder::encoder_names`]):
+/// hardware unless one of them is the software encoder (OpenH264, also the fallback of a layer
+/// whose hardware encoder gave up). `None` before the first picture named them.
+#[cfg(feature = "call-view")]
+fn encoder_info(names: &str) -> Option<teamcraft_client_api::video_stats::VideoEncoderInfo> {
+  use teamcraft_client_api::video_stats::{EncoderImplementation, VideoEncoderInfo};
+
+  if names.is_empty() {
+    return None;
+  }
+  let is_software = names
+    .split(", ")
+    .any(|name| name == crate::video_codec::SOFTWARE_ENCODER_NAME);
+  Some(VideoEncoderInfo {
+    name: names.to_owned(),
+    implementation: if is_software {
+      EncoderImplementation::Software
+    } else {
+      EncoderImplementation::Hardware
+    },
+  })
 }
 
 /// Whether an own track of `kind` stalled between two readings of its counters.
@@ -2014,6 +2085,30 @@ mod tests {
     assert!(
       route.on_route(None, start + 3 * ROUTE_CHECK_INTERVAL),
       "no route at all"
+    );
+  }
+
+  /// Stats for nerds (#938): a layer that fell back to software makes the track's encoding
+  /// software; none named yet is unknown.
+  #[cfg(feature = "call-view")]
+  #[test]
+  fn encoders_are_told_hardware_or_software_by_their_names() {
+    use teamcraft_client_api::video_stats::EncoderImplementation;
+
+    let implementation = |names: &str| encoder_info(names).map(|info| info.implementation);
+    assert_eq!(
+      implementation("vtenc_h264"),
+      Some(EncoderImplementation::Hardware)
+    );
+    assert_eq!(implementation("OpenH264"), Some(EncoderImplementation::Software));
+    assert_eq!(
+      implementation("vtenc_h264, OpenH264"),
+      Some(EncoderImplementation::Software)
+    );
+    assert_eq!(implementation(""), None);
+    assert_eq!(
+      encoder_info("mfh264enc").map(|info| info.name).as_deref(),
+      Some("mfh264enc")
     );
   }
 

@@ -13,10 +13,12 @@ use crate::components::call_video::{
   BackgroundPicker, LiveVideo, PickerSize, VideoSource, VideoTile, can_share_screen, can_show_video,
 };
 use crate::components::icons::{Icon, IconName};
+use crate::components::video_stats::{VideoStatsHub, VideoStatsOverlay};
 use crate::i18n::use_i18n;
 use crate::model::{User, UserId};
 use crate::reactive::use_interval;
 use crate::state::{Overlay, use_app_state};
+use crate::video_stats::StatsTarget;
 
 const SPEAKER_ROTATE_MS: u64 = 2400;
 const CLOCK_TICK_MS: u64 = 1000;
@@ -144,6 +146,9 @@ pub fn CallScreen(request: CallRequest) -> impl IntoView {
 
   let effects_open = RwSignal::new(false);
   let share_open = RwSignal::new(false);
+  // Stats for nerds (#938) over the real video; the overlays find the hub.
+  let video_stats = VideoStatsHub::provide(call.shows_video_stats);
+  let has_video_stats = is_real && can_show_video();
   let screen_sound = Memo::new(move |_| {
     state.read(|backend| {
       backend
@@ -327,6 +332,8 @@ pub fn CallScreen(request: CallRequest) -> impl IntoView {
               </Show>
             </div>
             <div class="shared-screen" role="img" aria-label=label>
+              // The own share shows no picture here; its stats do (send side).
+              {is_me_sharing.then(|| view! { <VideoStatsOverlay target=StatsTarget::OwnScreen /> })}
               {match maybe_screen {
                 Some(source) => view! { <LiveVideo source=source is_mirrored=false /> }.into_any(),
                 None => view! {
@@ -607,6 +614,15 @@ pub fn CallScreen(request: CallRequest) -> impl IntoView {
             icon=IconName::UserPlus
             label=Signal::derive(move || i18n.t("call-add-people"))
             on_press=move || state.overlay.set(Overlay::AddToCall(request.conversation))
+          />
+        </Show>
+        // A phone's control bar keeps to what a call needs.
+        <Show when=move || has_video_stats && !state.is_compact() fallback=|| ()>
+          <ControlButton
+            is_active=call.shows_video_stats
+            icon=IconName::Info
+            label=Signal::derive(move || i18n.t("stats-title"))
+            on_press=move || video_stats.toggle()
           />
         </Show>
         <ControlButton

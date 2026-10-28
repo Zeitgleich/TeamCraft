@@ -83,6 +83,37 @@ tile-speaking = speaking
 tile-reconnecting = reconnecting
 video-stalled = Video paused: weak connection
 
+## Stats for nerds (#938): an overlay with technical details on every video of the call
+stats-title = Stats for nerds
+stats-copy = Copy stats
+stats-copied = Stats copied
+stats-sent-camera = Your camera, sent
+stats-sent-screen = Your screen, sent
+stats-received = Received video (stream { $stream })
+stats-resolution = Resolution
+stats-frame-rate = Frame rate
+stats-bitrate = Bitrate
+stats-codec = Codec
+stats-encoder = Encoder
+stats-layers = Simulcast layers
+stats-layer = Simulcast layer
+stats-loss = Packet loss
+stats-network = Network
+stats-frames = Frames
+stats-encoder-hardware = { $name } (hardware)
+stats-encoder-software = { $name } (software)
+stats-encoder-browser = { $name } (chosen by the browser)
+stats-value-sent-resolution = { $sent } (capture { $capture })
+stats-value-sent-frame-rate = { $fps } fps (capture { $capture })
+stats-value-received-frame-rate = { $fps } fps (drawn { $drawn })
+stats-value-sent-bitrate = { $rate } (estimate { $estimate })
+stats-value-sent-layers = { $active } (target { $target })
+stats-value-received-layer = { $layer } of { $offered } (asked ≤ { $max })
+stats-value-uplink-loss = { $loss } (uplink)
+stats-value-network = RTT { $rtt } · jitter { $jitter }
+stats-value-frames = dropped { $dropped } · black { $black }
+stats-waiting = Waiting for the first numbers…
+
 ## Pre-join screen
 prejoin-quick-controls = Microphone and camera
 prejoin-direct-hint = Check your devices before you start the call.

@@ -8,7 +8,7 @@
 
 use std::time::Duration;
 
-use teamcraft_proto::{DeviceId, MediaStreamId, VideoCodec, VideoTrack, VideoTrackKind};
+use teamcraft_proto::{DeviceId, MediaStreamId, VideoCodec, VideoLayerInfo, VideoTrack, VideoTrackKind};
 // `std::time::Instant` on native; the browser clock on wasm, where `std` has none.
 use web_time::Instant;
 
@@ -23,14 +23,57 @@ pub const MAX_FRAGMENT_PAYLOAD_BYTES: usize = 1100;
 const MAX_LAYERS: usize = 16;
 /// Skipped packets a receiver waits for (they may come late); more missing at once is a loss.
 const MAX_TRACKED_MISSING_PACKETS: usize = 64;
+/// The RTP clock of video per millisecond, for the jitter in milliseconds.
+const VIDEO_TICKS_PER_MS: f64 = crate::video::VIDEO_CLOCK_RATE_HZ as f64 / 1000.0;
+/// A change of transit time this large (10 s) is a wrap of the RTP clock or a restart of the
+/// sender, not jitter: the estimate goes on from the new value.
+const JITTER_RESTART_TICKS: f64 = 10.0 * crate::video::VIDEO_CLOCK_RATE_HZ as f64;
 
 /// A track this device publishes.
 #[derive(Debug)]
 pub struct OutgoingVideo {
   pub kind: VideoTrackKind,
   pub codec: VideoCodec,
+  pub counters: SentCounters,
   frame_number: u16,
   sequences: [SequenceNumber; MAX_LAYERS],
+}
+
+/// What an own track sent so far (stats for nerds, #938).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SentCounters {
+  pub packets: u64,
+  pub bytes: u64,
+  /// Pictures that were meant to go out but didn't: the call not secured yet, or encryption or
+  /// packetization failed.
+  pub pictures_dropped: u64,
+  /// Each layer that sent anything, in the order they first did.
+  pub layers: Vec<LayerCounters>,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct LayerCounters {
+  pub layer: u8,
+  pub pictures: u64,
+  pub bytes: u64,
+}
+
+/// What arrived of another device's track so far (stats for nerds, #938).
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct ReceivedCounters {
+  pub packets: u64,
+  pub bytes: u64,
+  /// Packets that never came: gaps in a layer's sequence numbers that weren't filled.
+  pub packets_lost: u64,
+  /// Complete frames handed on to decryption and the decoder.
+  pub frames: u64,
+  /// Complete frames that couldn't be used: a picture they build on went missing, or they didn't
+  /// decrypt.
+  pub frames_discarded: u64,
+  /// Interarrival jitter (RFC 3550, 6.4.1) in RTP ticks, once two packets arrived.
+  maybe_jitter_ticks: Option<f64>,
+  /// Arrival minus RTP time of the last packet, in ticks.
+  maybe_last_transit: Option<f64>,
 }
 
 /// A track another device publishes.
@@ -39,6 +82,9 @@ pub struct IncomingVideo {
   pub sender: DeviceId,
   pub kind: VideoTrackKind,
   pub codec: VideoCodec,
+  /// The layers the sender offers.
+  pub layers: Vec<VideoLayerInfo>,
+  pub counters: ReceivedCounters,
   maybe_layer: Option<SimulcastLayer>,
   assembler: FrameAssembler,
   /// Sequence number the next packet of the received layer should have (each layer counts its
@@ -79,6 +125,7 @@ impl OutgoingVideo {
     Self {
       kind,
       codec,
+      counters: SentCounters::default(),
       frame_number: 0,
       sequences: [SequenceNumber(0); MAX_LAYERS],
     }
@@ -109,6 +156,30 @@ impl OutgoingVideo {
     }
     Ok(packets)
   }
+
+  /// Counts a picture of `layer` that went out as `packets`.
+  pub fn count_sent(&mut self, layer: SimulcastLayer, packets: &[Vec<u8>]) {
+    let bytes: u64 = packets.iter().map(|packet| packet.len() as u64).sum();
+    let counters = &mut self.counters;
+    counters.packets += packets.len() as u64;
+    counters.bytes += bytes;
+    let layer = layer.value();
+    if !counters.layers.iter().any(|counted| counted.layer == layer) {
+      counters.layers.push(LayerCounters {
+        layer,
+        ..LayerCounters::default()
+      });
+    }
+    if let Some(counted) = counters.layers.iter_mut().find(|counted| counted.layer == layer) {
+      counted.pictures += 1;
+      counted.bytes += bytes;
+    }
+  }
+
+  /// Counts a picture that was meant to go out but didn't.
+  pub fn count_dropped(&mut self) {
+    self.counters.pictures_dropped += 1;
+  }
 }
 
 impl IncomingVideo {
@@ -117,6 +188,8 @@ impl IncomingVideo {
       sender: track.device_id,
       kind: track.kind.clone(),
       codec: track.codec.clone(),
+      layers: track.layers.clone(),
+      counters: ReceivedCounters::default(),
       maybe_layer: None,
       assembler: FrameAssembler::new(),
       maybe_expected_sequence: None,
@@ -125,6 +198,30 @@ impl IncomingVideo {
       is_waiting_for_keyframe: true,
       maybe_last_keyframe_request: None,
     }
+  }
+
+  /// Counts a packet of `bytes` (the whole RTP packet) with RTP time `timestamp` that arrived
+  /// `since_start` after a fixed instant (any, the same for every packet).
+  pub fn count_arrival(&mut self, bytes: usize, timestamp: RtpTimestamp, since_start: Duration) {
+    let counters = &mut self.counters;
+    counters.packets += 1;
+    counters.bytes += bytes as u64;
+    let arrival_ticks = since_start.as_secs_f64() * 1000.0 * VIDEO_TICKS_PER_MS;
+    counters.on_transit(arrival_ticks - f64::from(timestamp.0));
+  }
+
+  /// Counts a complete frame: handed on (`is_used`), or discarded.
+  pub fn count_frame(&mut self, is_used: bool) {
+    if is_used {
+      self.counters.frames += 1;
+    } else {
+      self.counters.frames_discarded += 1;
+    }
+  }
+
+  /// The layer arriving now.
+  pub fn layer(&self) -> Option<SimulcastLayer> {
+    self.maybe_layer
   }
 
   /// Adds one packet; returns the still encrypted frame once all its fragments arrived.
@@ -147,6 +244,7 @@ impl IncomingVideo {
     let maybe_complete = self.assembler.push(fragment, packet.payload)?;
     // All of this frame arrived, so what is still missing belonged to an earlier one.
     if maybe_complete.is_some() && !self.missing.is_empty() {
+      self.counters.packets_lost += self.missing.len() as u64;
       self.missing.clear();
       self.note_loss();
     }
@@ -189,6 +287,8 @@ impl IncomingVideo {
   /// a gap too large to track is a loss at once.
   fn watch_sequence(&mut self, sequence: SequenceNumber, fragment: &FrameFragment) {
     if fragment.is_keyframe && fragment.index == 0 {
+      // Not needed any more, but lost all the same.
+      self.counters.packets_lost += self.missing.len() as u64;
       self.missing.clear();
     }
     let Some(expected) = self.maybe_expected_sequence else {
@@ -201,6 +301,7 @@ impl IncomingVideo {
     }
     let skipped = sequence.0.wrapping_sub(expected.0);
     if self.missing.len() + usize::from(skipped) > MAX_TRACKED_MISSING_PACKETS {
+      self.counters.packets_lost += self.missing.len() as u64 + u64::from(skipped);
       self.missing.clear();
       self.note_loss();
     } else {
@@ -214,6 +315,26 @@ impl IncomingVideo {
   fn note_loss(&mut self) {
     self.is_loss = true;
     self.is_waiting_for_keyframe = true;
+  }
+}
+
+impl ReceivedCounters {
+  /// The jitter in milliseconds, once two packets arrived.
+  pub fn jitter_ms(&self) -> Option<f64> {
+    self.maybe_jitter_ticks.map(|ticks| ticks / VIDEO_TICKS_PER_MS)
+  }
+
+  /// RFC 3550's estimator: the deviation of the transit time difference of consecutive packets,
+  /// smoothed by 1/16.
+  fn on_transit(&mut self, transit: f64) {
+    if let Some(last) = self.maybe_last_transit {
+      let difference = (transit - last).abs();
+      if difference < JITTER_RESTART_TICKS {
+        let jitter = self.maybe_jitter_ticks.unwrap_or(0.0);
+        self.maybe_jitter_ticks = Some(jitter + (difference - jitter) / 16.0);
+      }
+    }
+    self.maybe_last_transit = Some(transit);
   }
 }
 
@@ -319,6 +440,57 @@ mod tests {
     // The keyframe ends the wait; what went missing before it no longer matters.
     assert_eq!(push(&mut incoming, &next_keyframe), vec![true]);
     assert!(!incoming.take_loss());
+    // The stats (#938) count the lost delta's two packets once.
+    assert_eq!(incoming.counters.packets_lost, 2);
+  }
+
+  #[test]
+  fn sent_pictures_are_counted_per_layer() {
+    let mut outgoing = OutgoingVideo::new(VideoTrackKind::Camera, VideoCodec::H264);
+    let high = SimulcastLayer::new(2).unwrap();
+    for (layer, bytes) in [(SimulcastLayer::BASE, 500), (high, 2000), (high, 2000)] {
+      let packets = outgoing
+        .packetize(StreamId(7), layer, RtpTimestamp(0), false, &vec![0; bytes])
+        .unwrap();
+      outgoing.count_sent(layer, &packets);
+    }
+    outgoing.count_dropped();
+    let counters = &outgoing.counters;
+    assert_eq!(counters.packets, 5);
+    assert_eq!(counters.pictures_dropped, 1);
+    let layers: Vec<(u8, u64)> = counters
+      .layers
+      .iter()
+      .map(|layer| (layer.layer, layer.pictures))
+      .collect();
+    assert_eq!(layers, [(0, 1), (2, 2)]);
+    assert!(counters.layers[1].bytes > 4000, "with the headers");
+    assert_eq!(
+      counters.bytes,
+      counters.layers.iter().map(|layer| layer.bytes).sum::<u64>()
+    );
+  }
+
+  #[test]
+  fn jitter_follows_the_variation_of_transit_times() {
+    let mut steady = IncomingVideo::new(&track());
+    let mut shaky = IncomingVideo::new(&track());
+    assert_eq!(steady.counters.jitter_ms(), None);
+    // 30 frames per second (3000 ticks apart); the shaky ones arrive up to 20 ms late.
+    for frame in 0..60u32 {
+      let timestamp = RtpTimestamp(frame * 3000);
+      let on_time = Duration::from_micros(u64::from(frame) * 33_333);
+      steady.count_arrival(1000, timestamp, on_time);
+      let late = Duration::from_millis(if frame % 2 == 0 { 0 } else { 20 });
+      shaky.count_arrival(1000, timestamp, on_time + late);
+    }
+    assert!(steady.counters.jitter_ms().unwrap() < 0.1);
+    let jitter = shaky.counters.jitter_ms().unwrap();
+    assert!((15.0..=21.0).contains(&jitter), "{jitter}");
+    assert_eq!((shaky.counters.packets, shaky.counters.bytes), (60, 60_000));
+    // A jump of the RTP clock (a restarted sender) is no jitter.
+    shaky.count_arrival(1000, RtpTimestamp(u32::MAX / 2), Duration::from_secs(3));
+    assert!(shaky.counters.jitter_ms().unwrap() <= jitter);
   }
 
   #[test]

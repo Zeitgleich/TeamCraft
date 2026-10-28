@@ -63,6 +63,7 @@ const COMMANDS: &[&str] = &[
   "call_background_preview",
   "call_unwatch_video",
   "call_request_keyframe",
+  "call_video_stats",
   "call_watch_camera",
   "call_unwatch_camera",
   "call_size_camera",

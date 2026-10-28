@@ -32,6 +32,7 @@ use teamcraft_client_api::calls::{
 };
 use teamcraft_client_api::failure::{ActionFailure, CallFailure, FailureKind};
 use teamcraft_client_api::remote::CallSnapshot;
+use teamcraft_client_api::video_stats::VideoStatsReport;
 use teamcraft_core::CallKeySigner;
 use teamcraft_crypto::call_binding::{CallBindingError, CallId as CryptoCallId, SignedCallKeyBinding};
 use teamcraft_media::audio_device::{AudioDeviceError, list_input_devices, list_output_devices};
@@ -174,6 +175,8 @@ enum Control {
   },
   /// The webview's decoder of a watched track failed.
   RequestKeyframe(MediaStreamId),
+  /// Reads what the call's video does (stats for nerds, #938).
+  VideoStats(oneshot::Sender<Option<VideoStatsReport>>),
   Leave,
 }
 
@@ -473,6 +476,13 @@ impl CallHost {
   /// Asks for a keyframe of a watched track whose decoder in the webview failed.
   pub async fn request_keyframe(&self, stream_id: MediaStreamId) {
     self.control(Control::RequestKeyframe(stream_id)).await;
+  }
+
+  /// What the active call's video does (stats for nerds, #938); `None` outside a call.
+  pub async fn video_stats(&self) -> Option<VideoStatsReport> {
+    let (done, done_rx) = oneshot::channel();
+    self.control(Control::VideoStats(done)).await;
+    done_rx.await.ok().flatten()
   }
 
   /// Stops receiving a track, if `channel` is the one it is sent through.
@@ -1159,6 +1169,8 @@ async fn run_media(
         Some(Control::StopScreenAudio) => call.stop_screen_audio(),
         Some(Control::Subscribe { stream_id, maybe_max_layer }) => call.subscribe_video(stream_id, maybe_max_layer),
         Some(Control::RequestKeyframe(stream_id)) => call.request_keyframe(stream_id),
+        // The asker may have given up waiting.
+        Some(Control::VideoStats(done)) => drop(done.send(call.video_stats().await)),
         Some(Control::StatusSounds(sounds)) => call.set_status_cues(status_cues(sounds)),
         Some(Control::NetworkChanged) => call.network_changed(),
         Some(Control::Leave) | None => break,

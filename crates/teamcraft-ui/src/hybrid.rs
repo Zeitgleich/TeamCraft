@@ -56,6 +56,7 @@ use crate::security::KeyChange;
 use crate::settings::{load_string, store_string};
 use teamcraft_client_api::custom_status::shown_status;
 use teamcraft_client_api::remote::CallAction;
+use teamcraft_client_api::video_stats::VideoStatsJson;
 
 pub struct Hybrid<C> {
   chat: Rc<C>,
@@ -995,6 +996,13 @@ impl<C: ChatBackend> CallBackend for Hybrid<C> {
       .maybe_calls
       .as_ref()
       .map_or_else(Vec::new, RemoteCalls::video_tracks)
+  }
+
+  fn fetch_call_video_stats(&self, done: Box<dyn FnOnce(Option<VideoStatsJson>)>) {
+    match &self.maybe_calls {
+      Some(calls) => calls.fetch_video_stats(done),
+      None => done(None),
+    }
   }
 
   fn huddle(&self, conversation: ConversationId) -> Option<HuddleInfo> {

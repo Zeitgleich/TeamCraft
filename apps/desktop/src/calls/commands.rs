@@ -7,6 +7,7 @@ use tauri::{AppHandle, State};
 use teamcraft_client_api::calls::{BackgroundEffect as UiBackgroundEffect, MediaDevices, OrgBackgrounds};
 use teamcraft_client_api::remote::{CallAction, CallActionAnswer, CallSnapshot};
 use teamcraft_client_api::remote::{ChatAnswer, ChatQuery};
+use teamcraft_client_api::video_stats::VideoStatsReport;
 use teamcraft_media::effects::BackgroundImage;
 use teamcraft_proto::MediaStreamId;
 
@@ -128,6 +129,15 @@ pub async fn call_request_keyframe(
 ) -> Result<(), CommandError> {
   calls.request_keyframe(stream_id).await;
   Ok(())
+}
+
+/// What the active call's video does (stats for nerds, #938): the counters of every own and
+/// received track, the encoders and the round trip; `None` outside a call.
+#[tauri::command(rename_all = "snake_case")]
+pub async fn call_video_stats(
+  calls: State<'_, Arc<CallHost>>,
+) -> Result<Option<VideoStatsReport>, CommandError> {
+  Ok(calls.video_stats().await)
 }
 
 /// Applies `requested` as far as the organization's rule allows (admin.md §3.5) and loads the
