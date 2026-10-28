@@ -92,7 +92,7 @@ async fn a_ping_is_answered_without_taking_an_event_number() {
   let (port, certificate_hash) = start_sfu().await;
   let connection = connect(SocketAddr::new(V4, port), certificate_hash).await;
   let (mut send, mut recv) = connection.open_bi().await.unwrap().await.unwrap();
-  let token = format!("dev:{CALL_ID}:{USER_ID}:{}", device(9));
+  let token = format!("dev:{CALL_ID}:{id}:{id}", id = device(9));
   write_message(
     &mut send,
     &CallClientMessage::Join {
