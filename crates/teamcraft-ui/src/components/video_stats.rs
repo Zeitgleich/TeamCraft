@@ -7,7 +7,7 @@ use leptos::prelude::*;
 
 use crate::components::icons::{Icon, IconName};
 use crate::i18n::use_i18n;
-use crate::reactive::use_interval_while;
+use crate::reactive::{use_interval_while, use_page_visible};
 use crate::state::{AppState, use_app_state};
 use crate::video_stats::{DrawnRate, StatsTarget, StatsWindow, TileMeasure, stats_rows, stats_text};
 
@@ -22,12 +22,17 @@ pub struct VideoStatsHub {
 }
 
 impl VideoStatsHub {
-  /// Stats that show while `is_on`: the media layer is asked every second then, and not at all
-  /// otherwise. Provided as context for the tiles' overlays.
+  /// Stats that show while `is_on`: the media layer is asked every second then (while the window
+  /// is visible), and not at all otherwise. Provided as context for the tiles' overlays.
   pub fn provide(is_on: RwSignal<bool>) -> Self {
     let state = use_app_state();
+    let is_page_visible = use_page_visible();
     let hub = Self::new(is_on);
-    use_interval_while(STATS_INTERVAL_MS, move || is_on.get(), move || hub.poll(state));
+    use_interval_while(
+      STATS_INTERVAL_MS,
+      move || is_on.get() && is_page_visible.get(),
+      move || hub.poll(state),
+    );
     provide_context(hub);
     hub
   }
@@ -65,7 +70,7 @@ impl VideoStatsHub {
 }
 
 /// The overlay on one video while the stats show. `maybe_host` is the element the video is drawn
-/// into (another device's), whose pictures and size the tile measures itself.
+/// into; for another device's video the tile measures how often it draws and how large.
 #[component]
 pub fn VideoStatsOverlay(
   target: StatsTarget,
@@ -74,6 +79,8 @@ pub fn VideoStatsOverlay(
   let Some(hub) = use_context::<VideoStatsHub>() else {
     return ().into_any();
   };
+  // The own video's numbers all come from the media layer.
+  let maybe_host = maybe_host.filter(|_| matches!(target, StatsTarget::Received(_)));
   let i18n = use_i18n();
   let state = use_app_state();
   let measure = RwSignal::new(TileMeasure::default());

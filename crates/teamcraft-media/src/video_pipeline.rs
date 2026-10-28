@@ -930,7 +930,8 @@ impl SendCounters {
 
   fn details(&self) -> SenderDetails {
     let size = self.capture_size.load(Ordering::Relaxed);
-    let maybe_capture = (size != 0).then(|| VideoResolution {
+    // Unpacked as packed by `note_capture`: each half is one side.
+    let maybe_capture = (size != 0).then_some(VideoResolution {
       width: (size >> 16) as u16,
       height: (size & 0xffff) as u16,
     });
