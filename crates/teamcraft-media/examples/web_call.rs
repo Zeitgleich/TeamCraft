@@ -205,7 +205,10 @@ async fn pump(
       future::Either::Left(Some(Control::StartScreenShare { maybe_stream, done })) => {
         let result = match maybe_stream {
           Some(stream) => call.share_video_stream(stream).await,
-          None => call.start_screen_share(Default::default()).await,
+          None => call
+            .start_screen_share(Default::default(), false)
+            .await
+            .map(|_| ()),
         }
         .map_err(|error| error.to_string());
         let _ = done.send(result);

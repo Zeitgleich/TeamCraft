@@ -936,6 +936,7 @@
 }
 
 .control-btn {
+  position: relative;
   display: grid;
   place-items: center;
   width: 46px;
@@ -965,6 +966,120 @@
 .control-btn .icon {
   width: 20px;
   height: 20px;
+}
+
+/* The chat's unread count on its button (#936); plain unread is light on the dark bar. */
+.control-btn .badge-count {
+  position: absolute;
+  top: -3px;
+  right: -3px;
+}
+
+.control-btn .badge-count.is-quiet {
+  background: var(--call-text);
+  color: var(--call-bg);
+}
+
+/* The chat next to the video (#936): the stage and the panel side by side. On a phone the panel
+   covers the stage, and the control bar below stays to close it. The panel has the app's colours,
+   not the call's, since its messages and composer are the conversation's. */
+.call-body {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+  display: flex;
+}
+
+.call-chat {
+  flex: none;
+  width: var(--panel-w);
+  max-width: 45vw;
+  min-height: 0;
+  margin-right: 20px;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  border-radius: var(--radius-md);
+  background: var(--surface);
+  color: var(--text);
+  animation: motion-panel-in var(--dur-base) var(--ease-emphasized);
+}
+
+.call-chat .muted-text {
+  color: var(--text-muted);
+}
+
+.call-chat :focus-visible {
+  outline-color: var(--focus);
+}
+
+:root[data-layout="compact"] .call-chat {
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  width: auto;
+  max-width: none;
+  margin: 0;
+  border-radius: 0;
+}
+
+.call-chat-toasts {
+  position: absolute;
+  right: 20px;
+  bottom: 12px;
+  z-index: 2;
+  pointer-events: none;
+}
+
+:root[data-layout="compact"] .call-chat-toasts {
+  left: 16px;
+  right: 16px;
+}
+
+.call-chat-toast {
+  pointer-events: auto;
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  width: min(360px, 100%);
+  padding: 10px 14px;
+  border: 1px solid var(--call-border);
+  border-radius: var(--radius-md);
+  background: var(--call-surface);
+  color: var(--call-text);
+  box-shadow: var(--shadow);
+  text-align: left;
+  animation: motion-toast-in var(--dur-base) var(--ease-emphasized);
+}
+
+.call-chat-toast .icon {
+  flex: none;
+  width: 18px;
+  height: 18px;
+  margin-top: 2px;
+  color: var(--accent);
+}
+
+.call-chat-toast-text {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  font-size: var(--text-sm);
+}
+
+.call-chat-toast-text > span {
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  color: var(--call-muted);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .call-chat,
+  .call-chat-toast {
+    animation: motion-fade-in var(--dur-fast) var(--ease-standard);
+  }
 }
 
 .leave-btn {
