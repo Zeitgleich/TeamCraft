@@ -203,7 +203,7 @@ impl RemoteCalls {
   /// opens right here, while the click's user activation lasts (issue #930), and the chosen
   /// screen is shared in the action's turn.
   pub fn start_screen_share(&self, has_sound: bool, content_mode: ScreenContentMode) {
-    let maybe_picked_screen = self.pick_screen(content_mode);
+    let maybe_picked_screen = self.pick_screen(content_mode, has_sound);
     self.enqueue(QueuedAction {
       action: CallAction::StartScreenShare {
         has_sound,
@@ -242,13 +242,13 @@ impl RemoteCalls {
   /// Opens the browser's screen picker now (the page's calls only; the desktop shell has its own).
   #[cfg_attr(
     not(target_arch = "wasm32"),
-    expect(unused_variables, reason = "only the page's picker takes the mode")
+    expect(unused_variables, reason = "only the page's picker takes the mode and sound")
   )]
-  fn pick_screen(&self, content_mode: ScreenContentMode) -> Option<Promise> {
+  fn pick_screen(&self, content_mode: ScreenContentMode, has_sound: bool) -> Option<Promise> {
     match &self.link {
       CallLink::Shell => None,
       #[cfg(target_arch = "wasm32")]
-      CallLink::Page(_) => crate::web_calls::pick_screen(content_mode),
+      CallLink::Page(_) => crate::web_calls::pick_screen(content_mode, has_sound),
     }
   }
 
@@ -485,7 +485,12 @@ mod tests {
   fn the_shell_opens_no_browser_picker() {
     let calls = RemoteCalls::new(CallSnapshot::default(), CallLink::Shell);
     for mode in [ScreenContentMode::Detail, ScreenContentMode::Motion] {
-      assert!(calls.pick_screen(mode).is_none(), "{mode:?}");
+      for has_sound in [false, true] {
+        assert!(
+          calls.pick_screen(mode, has_sound).is_none(),
+          "{mode:?} {has_sound}"
+        );
+      }
     }
   }
 

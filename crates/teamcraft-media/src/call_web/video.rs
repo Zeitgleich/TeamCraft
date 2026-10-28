@@ -959,14 +959,34 @@ async fn request_camera(constraints: &MediaStreamConstraints) -> Result<MediaStr
   )
 }
 
-/// Asks the user what to share (`getDisplayMedia`). Needs a recent user gesture.
-pub(super) async fn capture_screen(mode: ScreenContentMode) -> Result<MediaStream, WebCallError> {
-  picked_screen(request_screen(mode)?).await
+/// Asks the user what to share (`getDisplayMedia`), with its sound if `has_sound`. Needs a recent
+/// user gesture.
+pub(super) async fn capture_screen(
+  mode: ScreenContentMode,
+  has_sound: bool,
+) -> Result<MediaStream, WebCallError> {
+  picked_screen(request_screen(mode, has_sound)?).await
 }
 
 /// Opens the screen picker now (synchronously, so a click's user activation still counts) and
-/// returns `getDisplayMedia`'s promise.
-pub(super) fn request_screen(mode: ScreenContentMode) -> Result<Promise, WebCallError> {
+/// returns `getDisplayMedia`'s promise. With `has_sound` the picker also offers the tab's or the
+/// system's sound ([`super::screen_sound`]); a browser that throws at the sound request at once is
+/// asked again, still in the click, for the picture alone.
+pub(super) fn request_screen(mode: ScreenContentMode, has_sound: bool) -> Result<Promise, WebCallError> {
+  let maybe_sound = super::screen_sound::sound_request(has_sound);
+  match display_media(mode, maybe_sound) {
+    Err(error) if maybe_sound.is_some() => {
+      warn!(%error, "the browser refused to capture the screen's sound; sharing the picture alone");
+      display_media(mode, None)
+    },
+    result => result,
+  }
+}
+
+fn display_media(
+  mode: ScreenContentMode,
+  maybe_sound: Option<super::screen_sound::SoundRequest>,
+) -> Result<Promise, WebCallError> {
   let (limit, framerate) = screen_limits(mode);
   let video = dictionary(&[
     ("frameRate", maximum(u32::from(framerate))?),
@@ -976,6 +996,19 @@ pub(super) fn request_screen(mode: ScreenContentMode) -> Result<Promise, WebCall
   .map_err(browser("getDisplayMedia"))?;
   let constraints = DisplayMediaStreamConstraints::new();
   constraints.set_video(&video);
+  if let Some(sound) = maybe_sound {
+    let track: Vec<(&str, JsValue)> = sound
+      .track
+      .iter()
+      .map(|(name, value)| (*name, JsValue::from_bool(*value)))
+      .collect();
+    let audio = dictionary(&track).map_err(browser("getDisplayMedia"))?;
+    constraints.set_audio(&audio);
+    for (name, value) in sound.options {
+      js_sys::Reflect::set(&constraints, &JsValue::from_str(name), &JsValue::from_str(value))
+        .map_err(browser("getDisplayMedia"))?;
+    }
+  }
   window()?
     .navigator()
     .media_devices()

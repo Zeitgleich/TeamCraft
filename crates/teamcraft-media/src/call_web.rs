@@ -8,7 +8,7 @@
 //! second worklet plays the mix. The browser's own echo cancellation, noise suppression and gain
 //! control run on the microphone (`getUserMedia` constraints).
 //!
-//! Screen share and remote video live in [`video`].
+//! Screen share and remote video live in [`video`]; a shared screen's sound in [`screen_sound`].
 //!
 //! Every input (network, worklet, codecs, timers, app commands) is funneled into one channel that
 //! a single task drains, so the engine needs no locking. Periodic work (audio frames, feedback,
@@ -33,6 +33,7 @@
 
 mod cadence;
 mod meter;
+mod screen_sound;
 mod session_watch;
 mod video;
 
@@ -67,6 +68,7 @@ use web_time::Instant;
 
 use self::cadence::Cadence;
 pub use self::meter::MicrophoneMeter;
+use self::screen_sound::ScreenSound;
 use self::session_watch::{NetworkVerdict, PacketCount, PathVerdict, Reading, SessionWatch, may_hurry};
 use self::video::{EncoderGaveUp, FrameDecoder, Publication, TrackSender, VideoView};
 
@@ -112,6 +114,9 @@ const MAX_PLAYBACK_SAMPLES: u32 = 48_000 / 5;
 const MAX_DECODED_SAMPLES: usize = 5 * FRAME_SAMPLES_PER_CHANNEL;
 /// Opus bitrate for voice.
 const OPUS_BITRATE_BPS: u32 = 32_000;
+/// Opus bitrate of a shared screen's sound: music and video sound need more than speech (as on
+/// the desktop, `OpusEncoderConfig::screen_audio`).
+const SCREEN_SOUND_BITRATE_BPS: u32 = 64_000;
 /// Loss Opus plans in-band FEC for until the uplink is measured (as on native clients).
 const OPUS_LOSS_FLOOR_PERCENT: u8 = 5;
 /// The planned loss changes the encoder's configuration only in steps this big.
@@ -294,8 +299,18 @@ enum Input {
     generation: u64,
     bytes: Vec<u8>,
   },
-  Captured(Vec<f32>),
-  Encoded(Vec<u8>),
+  /// Samples of the microphone or of a shared screen's sound.
+  Captured {
+    origin: AudioOrigin,
+    samples: Vec<f32>,
+  },
+  /// An Opus packet of the microphone or of a shared screen's sound.
+  Encoded {
+    origin: AudioOrigin,
+    opus: Vec<u8>,
+  },
+  /// The browser ended the shared screen's sound by itself.
+  ScreenSoundEnded,
   Decoded {
     stream: RemoteStream,
     samples: Vec<f32>,
@@ -358,6 +373,11 @@ enum Command {
     done: oneshot::Sender<Result<(), WebCallError>>,
   },
   StopVideo(VideoTrackKind),
+  /// Sends the running screen share's sound (an audio track of its stream).
+  StartScreenSound {
+    track: MediaStreamTrack,
+    done: oneshot::Sender<Result<(), WebCallError>>,
+  },
   #[cfg(feature = "effects")]
   SetEffect(crate::effects::BackgroundEffect),
   WatchVideo {
@@ -426,14 +446,34 @@ struct AudioClock {
 
 struct Capture {
   stream: MediaStream,
-  _source: MediaStreamAudioSourceNode,
+  source: MediaStreamAudioSourceNode,
   node: AudioWorkletNode,
   _on_message: Closure<dyn FnMut(MessageEvent)>,
 }
 
-/// Microphone or tone samples → 20 ms frames → WebCodecs Opus.
+/// How a captured stream's channels reach the (mono) encoder.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CaptureMix {
+  /// The first channel (a microphone, asked for in mono).
+  FirstChannel,
+  /// Every channel mixed down (a shared tab's stereo sound).
+  DownToMono,
+}
+
+/// What an Opus encoder is tuned for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum OpusProfile {
+  /// The microphone: speech at a variable bitrate.
+  Voice,
+  /// A shared screen's sound: music and video at a constant bitrate (packet sizes would tell what
+  /// plays), like the desktop's.
+  ScreenSound,
+}
+
+/// Microphone, tone or screen sound samples → 20 ms frames → WebCodecs Opus.
 struct OpusEncoder {
   encoder: AudioEncoder,
+  profile: OpusProfile,
   /// The loss the encoder's in-band FEC is planned for.
   planned_loss_percent: u8,
   pending: Vec<f32>,
@@ -578,19 +618,42 @@ impl WebCall {
   /// from a user gesture, like `join`; where the gesture may be gone by the time this runs, open
   /// the picker with [`request_screen`] in the click and share with
   /// [`WebCall::share_screen_stream`].
-  pub async fn start_screen_share(&self, mode: ScreenContentMode) -> Result<(), WebCallError> {
-    let stream = video::capture_screen(mode).await?;
+  ///
+  /// With `has_sound` the picker also offers the tab's or the system's sound; answers whether it
+  /// is sent (see [`WebCall::share_screen_stream`]).
+  pub async fn start_screen_share(
+    &self,
+    mode: ScreenContentMode,
+    has_sound: bool,
+  ) -> Result<bool, WebCallError> {
+    let stream = video::capture_screen(mode, has_sound).await?;
     self.share_screen_stream(stream, mode).await
   }
 
   /// Shares a screen the app asked for itself ([`request_screen`]) as the screen share, replacing
-  /// a running one.
+  /// a running one, and its sound when the stream has an audio track (the user shared the tab's
+  /// or the system's sound). Answers whether the sound is sent: a share whose sound can't be
+  /// captured or encoded goes on without it (the track stops).
   pub async fn share_screen_stream(
     &self,
     stream: MediaStream,
     mode: ScreenContentMode,
-  ) -> Result<(), WebCallError> {
-    self.start_video(stream, video::screen_plan(mode)).await
+  ) -> Result<bool, WebCallError> {
+    let maybe_sound = screen_sound::sound_track(&stream);
+    self.start_video(stream, video::screen_plan(mode)).await?;
+    let Some(track) = maybe_sound else {
+      return Ok(false);
+    };
+    let (done, done_rx) = oneshot::channel();
+    self.command(Command::StartScreenSound { track, done })?;
+    match done_rx.await.map_err(|_| WebCallError::Ended)? {
+      Ok(()) => Ok(true),
+      Err(WebCallError::Ended) => Err(WebCallError::Ended),
+      Err(error) => {
+        warn!(%error, "the screen's sound can't be sent; sharing the picture alone");
+        Ok(false)
+      },
+    }
   }
 
   /// Shares any video stream as the screen share (e.g. a canvas' `captureStream()`), replacing a
@@ -684,9 +747,11 @@ pub async fn capture_camera(maybe_device: Option<&str>) -> Result<MediaStream, W
 
 /// Opens the browser's screen picker (`getDisplayMedia`) at once and returns its promise. Call it
 /// synchronously in the click handler, before anything is awaited: Safari refuses the picker once
-/// the click's user activation is gone (issue #930). [`picked_screen`] waits for the choice.
-pub fn request_screen(mode: ScreenContentMode) -> Result<Promise, WebCallError> {
-  video::request_screen(mode)
+/// the click's user activation is gone (issue #930). [`picked_screen`] waits for the choice. With
+/// `has_sound` the picker also offers the tab's or the system's sound, where the browser can
+/// capture it (Chromium).
+pub fn request_screen(mode: ScreenContentMode, has_sound: bool) -> Result<Promise, WebCallError> {
+  video::request_screen(mode, has_sound)
 }
 
 /// The screen the user chose in a picker [`request_screen`] opened (possibly in another wasm
@@ -818,7 +883,8 @@ async fn run_call(
     inputs: &inputs,
     events: &events,
     jitter: config.jitter,
-    encoder: OpusEncoder::new(&inputs)?,
+    encoder: OpusEncoder::new(&inputs, OpusProfile::Voice)?,
+    maybe_screen_sound: None,
     remotes: BTreeMap::new(),
     source: config.source.clone(),
     tone_position: 0,
@@ -871,6 +937,9 @@ async fn run_call(
     }
   };
 
+  if let Some(sound) = state.maybe_screen_sound.take() {
+    sound.stop();
+  }
   audio.close();
   // The camera and the shared screen stop with the call (the browser's indicators go off).
   for sender in std::mem::take(&mut state.senders) {
@@ -915,6 +984,8 @@ struct CallState<'a> {
   events: &'a mpsc::UnboundedSender<CallEngineEvent>,
   jitter: JitterBufferConfig,
   encoder: OpusEncoder,
+  /// The running screen share's sound, while it is sent.
+  maybe_screen_sound: Option<ScreenSound>,
   remotes: BTreeMap<RemoteStream, RemoteAudio>,
   source: AudioSource,
   tone_position: u64,
@@ -1002,16 +1073,51 @@ impl CallState<'_> {
           engine.handle_datagram(&bytes, now);
         }
       },
-      Input::Captured(samples) => {
+      Input::Captured {
+        origin: AudioOrigin::Microphone,
+        samples,
+      } => {
         if !self.is_muted {
           self.encoder.push(&samples)?;
         }
       },
-      Input::Encoded(opus) => {
+      // Not muted with the microphone, like the desktop's.
+      Input::Captured {
+        origin: AudioOrigin::Screen,
+        samples,
+      } => {
+        // A sound that can't be encoded stops; it never ends the call.
+        if let Some(sound) = &mut self.maybe_screen_sound
+          && let Err(error) = sound.encoder.push(&samples)
+        {
+          warn!(%error, "the shared screen's sound can't be encoded; the picture goes on without it");
+          self.end_screen_sound(engine);
+        }
+      },
+      Input::Encoded {
+        origin: AudioOrigin::Microphone,
+        opus,
+      } => {
         // One output per input frame; a stray extra output (encoder flush) counts as silence.
         let level = self.encoder.levels.pop_front().unwrap_or(AudioLevel::SILENCE);
         engine.send_audio(&EncodedAudioFrame { opus, level }, Instant::now());
         self.stats.frames_sent += 1;
+      },
+      Input::Encoded {
+        origin: AudioOrigin::Screen,
+        opus,
+      } => {
+        // A packet a stopped sound's encoder still put out goes nowhere.
+        if let Some(sound) = &mut self.maybe_screen_sound {
+          let level = sound.encoder.levels.pop_front().unwrap_or(AudioLevel::SILENCE);
+          engine.send_screen_audio(&EncodedAudioFrame { opus, level }, Instant::now());
+        }
+      },
+      Input::ScreenSoundEnded => {
+        if self.maybe_screen_sound.is_some() {
+          info!("the browser ended the shared screen's sound; the picture goes on");
+          self.end_screen_sound(engine);
+        }
       },
       Input::Decoded { stream, samples } => {
         if let Some(remote) = self.remotes.get_mut(&stream) {
@@ -1239,6 +1345,12 @@ impl CallState<'_> {
             },
             CallEngineEvent::UplinkEstimate { loss_percent, .. } => {
               self.encoder.set_measured_loss_percent(*loss_percent)?;
+              if let Some(sound) = &mut self.maybe_screen_sound
+                && let Err(error) = sound.encoder.set_measured_loss_percent(*loss_percent)
+              {
+                // Its encoder failed: the next samples stop the sound.
+                debug!(%error, "the shared screen's sound encoder takes no new configuration");
+              }
             },
             _ => {},
           }
@@ -1247,6 +1359,10 @@ impl CallState<'_> {
           let _ = self.events.unbounded_send(event);
         },
       }
+    }
+    // The SFU stopped our shared sound (a host's "mute all"): the picture goes on without it.
+    if self.maybe_screen_sound.is_some() && !engine.is_sharing_screen_audio() {
+      self.stop_screen_sound(engine);
     }
     Ok(())
   }
@@ -1510,6 +1626,11 @@ impl CallState<'_> {
         let _ = done.send(result);
       },
       Command::StopVideo(kind) => self.stop_video(engine, &kind),
+      Command::StartScreenSound { track, done } => {
+        let result = self.start_screen_sound(engine, audio, track);
+        // The caller may have given up waiting.
+        let _ = done.send(result);
+      },
       #[cfg(feature = "effects")]
       Command::SetEffect(effect) => {
         for sender in &mut self.senders {
@@ -1572,7 +1693,55 @@ impl CallState<'_> {
     Ok(())
   }
 
+  /// Sends the screen share's sound. Only with a running share: a share stopped meanwhile took its
+  /// sound with it.
+  fn start_screen_sound(
+    &mut self,
+    engine: &mut CallEngine,
+    audio: &WebAudio,
+    track: MediaStreamTrack,
+  ) -> Result<(), WebCallError> {
+    self.stop_screen_sound(engine);
+    if self.sender_of_kind(&VideoTrackKind::Screen).is_none() {
+      track.stop();
+      return Err(WebCallError::Ended);
+    }
+    match ScreenSound::start(&audio.context, track.clone(), self.inputs) {
+      Ok(sound) => {
+        self.maybe_screen_sound = Some(sound);
+        engine.publish_screen_audio();
+        Ok(())
+      },
+      Err(error) => {
+        track.stop();
+        Err(error)
+      },
+    }
+  }
+
+  fn stop_screen_sound(&mut self, engine: &mut CallEngine) {
+    if let Some(sound) = self.maybe_screen_sound.take() {
+      sound.stop();
+      engine.unpublish_screen_audio();
+    }
+  }
+
+  /// The shared sound ended by itself (the browser ended its capture, or it can't be encoded): it
+  /// stops, the picture goes on, and the app hears so (the UI shows the share without sound).
+  fn end_screen_sound(&mut self, engine: &mut CallEngine) {
+    self.stop_screen_sound(engine);
+    // The app may have stopped listening; the call goes on.
+    let _ = self.events.unbounded_send(CallEngineEvent::ScreenAudioChanged {
+      device_id: self.own_device,
+      is_shared: false,
+    });
+  }
+
   fn stop_video(&mut self, engine: &mut CallEngine, kind: &VideoTrackKind) {
+    // The sound goes with its share.
+    if *kind == VideoTrackKind::Screen {
+      self.stop_screen_sound(engine);
+    }
     self.encoded_kinds.retain(|encoded| encoded != kind);
     let (stopped, kept): (Vec<_>, Vec<_>) = std::mem::take(&mut self.senders)
       .into_iter()
@@ -2041,18 +2210,46 @@ impl Capture {
     inputs: &mpsc::UnboundedSender<Input>,
   ) -> Result<Self, WebCallError> {
     let stream = capture_microphone(choice).await?;
+    Self::from_stream(context, stream, CaptureMix::FirstChannel, inputs)
+  }
+
+  /// Captures an audio stream; its samples arrive as [`Input::Captured`]: the first channel as the
+  /// microphone's, or every channel mixed down as a shared screen's sound.
+  fn from_stream(
+    context: &AudioContext,
+    stream: MediaStream,
+    mix: CaptureMix,
+    inputs: &mpsc::UnboundedSender<Input>,
+  ) -> Result<Self, WebCallError> {
+    let origin = match mix {
+      CaptureMix::FirstChannel => AudioOrigin::Microphone,
+      CaptureMix::DownToMono => AudioOrigin::Screen,
+    };
     let source = context
       .create_media_stream_source(&stream)
-      .map_err(browser("microphone source"))?;
+      .map_err(browser("audio source"))?;
     let options = AudioWorkletNodeOptions::new();
     options.set_number_of_outputs(1);
+    if mix == CaptureMix::DownToMono {
+      // Web Audio mixes the input down to the one channel the worklet takes ("speakers" rules).
+      for (name, value) in [
+        ("channelCount", JsValue::from(1)),
+        ("channelCountMode", JsValue::from_str("explicit")),
+        ("channelInterpretation", JsValue::from_str("speakers")),
+      ] {
+        Reflect::set(&options, &JsValue::from_str(name), &value).map_err(browser("capture worklet"))?;
+      }
+    }
     let node = AudioWorkletNode::new_with_options(context, "teamcraft-capture", &options)
       .map_err(browser("capture worklet"))?;
     let sender = inputs.clone();
     let on_message = Closure::<dyn FnMut(MessageEvent)>::new(move |event: MessageEvent| {
       let samples: Float32Array = event.data().unchecked_into();
       // The call task may be gone; the capture stops when it drops this closure.
-      let _ = sender.unbounded_send(Input::Captured(samples.to_vec()));
+      let _ = sender.unbounded_send(Input::Captured {
+        origin,
+        samples: samples.to_vec(),
+      });
     });
     node
       .port()
@@ -2067,13 +2264,15 @@ impl Capture {
       .map_err(browser("capture graph"))?;
     Ok(Self {
       stream,
-      _source: source,
+      source,
       node,
       _on_message: on_message,
     })
   }
 
   fn close(self) {
+    // Already detached with a closed context: nothing to undo.
+    let _ = self.source.disconnect();
     let _ = self.node.disconnect();
     for track in self.stream.get_tracks().iter() {
       track.unchecked_into::<MediaStreamTrack>().stop();
@@ -2082,13 +2281,17 @@ impl Capture {
 }
 
 impl OpusEncoder {
-  fn new(inputs: &mpsc::UnboundedSender<Input>) -> Result<Self, WebCallError> {
+  fn new(inputs: &mpsc::UnboundedSender<Input>, profile: OpusProfile) -> Result<Self, WebCallError> {
+    let origin = profile.origin();
     let sender = inputs.clone();
     let output = Closure::<dyn FnMut(EncodedAudioChunk)>::new(move |chunk: EncodedAudioChunk| {
       let bytes = Uint8Array::new_with_length(chunk.byte_length());
       match chunk.copy_to(&bytes) {
         Ok(()) => {
-          let _ = sender.unbounded_send(Input::Encoded(bytes.to_vec()));
+          let _ = sender.unbounded_send(Input::Encoded {
+            origin,
+            opus: bytes.to_vec(),
+          });
         },
         Err(error) => {
           let _ = sender.unbounded_send(Input::CodecFailed {
@@ -2106,10 +2309,11 @@ impl OpusEncoder {
     .map_err(browser("AudioEncoder"))?;
     let encoder = AudioEncoder::new(&init).map_err(browser("AudioEncoder"))?;
     encoder
-      .configure(&opus_config(OPUS_LOSS_FLOOR_PERCENT)?)
+      .configure(&opus_config(profile, OPUS_LOSS_FLOOR_PERCENT)?)
       .map_err(browser("AudioEncoder"))?;
     Ok(Self {
       encoder,
+      profile,
       planned_loss_percent: OPUS_LOSS_FLOOR_PERCENT,
       pending: Vec::with_capacity(2 * FRAME_SAMPLES_PER_CHANNEL),
       levels: VecDeque::new(),
@@ -2128,7 +2332,7 @@ impl OpusEncoder {
     self.planned_loss_percent = planned;
     self
       .encoder
-      .configure(&opus_config(planned)?)
+      .configure(&opus_config(self.profile, planned)?)
       .map_err(browser("AudioEncoder"))
   }
 
@@ -2162,23 +2366,92 @@ impl OpusEncoder {
   }
 }
 
-/// Voice at 32 kbit/s in 20 ms frames with in-band FEC planned for `loss_percent` (WebCodecs'
+impl OpusProfile {
+  /// Which of this device's streams the packets go out on.
+  fn origin(self) -> AudioOrigin {
+    match self {
+      Self::Voice => AudioOrigin::Microphone,
+      Self::ScreenSound => AudioOrigin::Screen,
+    }
+  }
+
+  fn bitrate_bps(self) -> u32 {
+    match self {
+      Self::Voice => OPUS_BITRATE_BPS,
+      Self::ScreenSound => SCREEN_SOUND_BITRATE_BPS,
+    }
+  }
+
+  /// Members of the `AudioEncoderConfig` beside codec, rate, channels and bitrate, and of its
+  /// `opus` (`OpusEncoderConfig`) beside frame duration and FEC. Voice keeps the browser's
+  /// defaults; a shared screen's sound is tuned for music at a constant bitrate. Browsers that
+  /// don't know a member ignore it.
+  fn tuning(self) -> OpusTuning {
+    match self {
+      Self::Voice => OpusTuning::default(),
+      Self::ScreenSound => OpusTuning {
+        config: &[("bitrateMode", TuningValue::Text("constant"))],
+        opus: &[
+          ("application", TuningValue::Text("audio")),
+          ("signal", TuningValue::Text("music")),
+          // Quiet passages of music are not silence.
+          ("usedtx", TuningValue::Flag(false)),
+        ],
+      },
+    }
+  }
+}
+
+/// See [`OpusProfile::tuning`].
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+struct OpusTuning {
+  config: &'static [(&'static str, TuningValue)],
+  opus: &'static [(&'static str, TuningValue)],
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TuningValue {
+  Text(&'static str),
+  Flag(bool),
+}
+
+fn tuning_value(value: TuningValue) -> JsValue {
+  match value {
+    TuningValue::Text(text) => JsValue::from_str(text),
+    TuningValue::Flag(flag) => JsValue::from_bool(flag),
+  }
+}
+
+/// Mono Opus for `profile` in 20 ms frames with in-band FEC planned for `loss_percent` (WebCodecs'
 /// Opus registration).
-fn opus_config(loss_percent: u8) -> Result<Object, WebCallError> {
-  let opus = dictionary(&[
+fn opus_config(profile: OpusProfile, loss_percent: u8) -> Result<Object, WebCallError> {
+  let tuning = profile.tuning();
+  let mut opus_entries = vec![
     ("frameDuration", JsValue::from(20_000)),
     ("useinbandfec", JsValue::TRUE),
     ("packetlossperc", JsValue::from(loss_percent)),
-  ])
-  .map_err(browser("AudioEncoder"))?;
-  dictionary(&[
+  ];
+  opus_entries.extend(
+    tuning
+      .opus
+      .iter()
+      .map(|(name, value)| (*name, tuning_value(*value))),
+  );
+  let opus = dictionary(&opus_entries).map_err(browser("AudioEncoder"))?;
+  let mut entries = vec![
     ("codec", JsValue::from_str("opus")),
     ("sampleRate", JsValue::from(SAMPLE_RATE_HZ)),
     ("numberOfChannels", JsValue::from(1)),
-    ("bitrate", JsValue::from(OPUS_BITRATE_BPS)),
+    ("bitrate", JsValue::from(profile.bitrate_bps())),
     ("opus", opus.into()),
-  ])
-  .map_err(browser("AudioEncoder"))
+  ];
+  entries.extend(
+    tuning
+      .config
+      .iter()
+      .map(|(name, value)| (*name, tuning_value(*value))),
+  );
+  dictionary(&entries).map_err(browser("AudioEncoder"))
 }
 
 /// Waits on the page's event loop.
@@ -2597,6 +2870,48 @@ mod tests {
   use crate::call_engine::{OwnPublication, VideoSendOutcome};
 
   const GRACE: Duration = Duration::from_secs(30);
+
+  mod opus_profiles {
+    use super::*;
+
+    #[test]
+    fn the_microphone_keeps_its_voice_configuration() {
+      let voice = OpusProfile::Voice;
+      assert_eq!(voice.origin(), AudioOrigin::Microphone);
+      assert_eq!(voice.bitrate_bps(), 32_000);
+      assert_eq!(voice.tuning(), OpusTuning::default());
+    }
+
+    #[test]
+    fn screen_sound_goes_out_tuned_for_music() {
+      let sound = OpusProfile::ScreenSound;
+      assert_eq!(sound.origin(), AudioOrigin::Screen);
+      assert_eq!(sound.bitrate_bps(), 64_000);
+      let tuning = sound.tuning();
+      // A constant bitrate: packet sizes would tell what plays.
+      assert!(
+        tuning
+          .config
+          .contains(&("bitrateMode", TuningValue::Text("constant")))
+      );
+      assert!(tuning.opus.contains(&("application", TuningValue::Text("audio"))));
+      // Quiet passages are sent, not suppressed.
+      assert!(tuning.opus.contains(&("usedtx", TuningValue::Flag(false))));
+    }
+
+    /// Browsers send a shared screen's sound like the desktop does, so either side hears the same.
+    #[cfg(feature = "native")]
+    #[test]
+    fn screen_sound_matches_the_desktops() {
+      let desktop = crate::audio_codec::OpusEncoderConfig::screen_audio();
+      assert_eq!(
+        i32::try_from(OpusProfile::ScreenSound.bitrate_bps()).ok(),
+        Some(desktop.bitrate_bps)
+      );
+      assert!(!desktop.has_dtx && !desktop.has_variable_bitrate);
+      assert_eq!(desktop.channels, crate::audio_codec::AudioChannels::Mono);
+    }
+  }
 
   mod media_access {
     use super::*;
