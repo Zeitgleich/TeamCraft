@@ -60,8 +60,8 @@ pub struct ForwardingConfig {
   pub layers: LayerAllocationConfig,
   pub bwe: BweConfig,
   pub keyframes: KeyframeRequestConfig,
-  /// A layer counts as stopped when a lower layer of its track arrived this much later than its
-  /// own last packet; receivers get the best lower layer that still flows. Above the gaps of a
+  /// A layer counts as stopped when a lower layer of its track kept arriving this long without
+  /// it; receivers get the best lower layer that still flows. Above the gaps of a
   /// layer that runs (a still screen sends its picture again every second, `SCREEN_IDLE_REFRESH`),
   /// short enough that a frozen picture doesn't last.
   pub layer_stalled_after: Duration,
