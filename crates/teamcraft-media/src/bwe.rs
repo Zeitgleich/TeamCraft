@@ -6,18 +6,23 @@
 //! 100 ms over the signaling stream. The sender then combines two signals:
 //!
 //! - **Delay:** if packets arrive increasingly later than they were sent (a queue builds up), a
-//!   trendline over the one-way delay variation turns positive. Overuse cuts the rate to 85 % of
-//!   what was actually delivered.
-//! - **Loss:** above 10 % loss the rate shrinks with the loss; between 2 % and 10 % it holds.
-//! - **Application-limited senders** (sending less than half the estimate, like a still shared
-//!   screen that sends little but keyframes of hundreds of kilobytes): what got through says
-//!   nothing about the path, so a delay-based decrease starts from the estimate instead, and the
-//!   delay of their own bursts doesn't end the fast start (GCC's "ALR", #941). Loss still cuts
-//!   to what got through.
+//!   trendline over the one-way delay variation turns positive. Overuse cuts the rate a step, to
+//!   85 % of the estimate; a queue that lasts longer than the window the delivered rate is
+//!   measured over cuts it to 85 % of what got through over it, the path's rate. GCC cuts to
+//!   what got through at once, which assumes a sender that fills the estimate: a camera's layers
+//!   and keyframes don't (the queue of a keyframe sent into a link half used cut a camera's
+//!   estimate to below its middle layer), nor does a still shared screen that sends little but
+//!   keyframes of hundreds of kilobytes (#941, #939).
+//! - **Loss:** above 10 % loss the rate shrinks with the loss; between 2 % and 10 % it holds. Only
+//!   the loss of packets sent after the last cut to what got through counts: that cut answered
+//!   the loss before it.
+//! - **Application-limited senders** (sending less than half the estimate): the delay of their own
+//!   bursts doesn't end the fast start, nor count as congestion (GCC's "ALR"), unless it lasts.
 //!
 //! Otherwise the rate grows multiplicatively (8 %/s by default; at the start, until the first sign
-//! of congestion, much faster: see [`BweConfig::start_increase_per_second`]), capped at 1.5× the
-//! delivered rate so an application-limited sender doesn't drift upwards, unless the sender
+//! of congestion, much faster: see [`BweConfig::start_increase_per_second`]; and faster again
+//! after a while without congestion: see [`BweConfig::recovery_increase_per_second`]), capped at
+//! 1.5× the delivered rate so an application-limited sender doesn't drift upwards, unless the sender
 //! declares a higher demand ([`SendSideEstimator::set_demand_bps`]): then the estimate may grow up
 //! to it, and sending more (e.g. the SFU switching to the next simulcast layer) is the probe. A probe that causes
 //! congestion is cut back by the delay detector like any other overuse. The same estimator runs in clients
@@ -59,6 +64,14 @@ const APP_LIMITED_WINDOW: Duration = Duration::from_secs(2);
 /// A sender that sent less than this share of the estimate over [`APP_LIMITED_WINDOW`] is
 /// application-limited.
 const APP_LIMITED_SHARE: f64 = 0.5;
+/// An overuse that lasts this long is a queue the delivered rate's window ([`ACKED_RATE_WINDOW`])
+/// saw all along: what got through is the path's rate, also for an application-limited sender.
+const LASTING_OVERUSE: Duration = ACKED_RATE_WINDOW;
+/// The longest wait before growing at [`BweConfig::recovery_increase_per_second`] after probes
+/// that met congestion.
+const MAX_RECOVERY_WAIT: Duration = Duration::from_secs(32);
+/// A recovery succeeded once this much more than before the last congestion gets through.
+const RECOVERED_SHARE: f64 = 1.1;
 /// Largest feedback the recorder produces in one message.
 const MAX_FEEDBACK_ENTRIES: usize = 1000;
 
@@ -77,8 +90,19 @@ pub struct BweConfig {
   /// meanwhile (issue #941). Like GCC's start-up probes (3× and 6× the start rate), a path that
   /// can't carry it is cut back by the first overuse or loss.
   pub start_increase_per_second: f64,
-  /// Factor applied to the delivered rate on overuse.
+  /// Factor of a cut on overuse (of the estimate, or of what got through).
   pub decrease_factor: f64,
+  /// Growth per second once the path showed no congestion for [`BweConfig::recovery_after`]
+  /// (until the next sign of it): the path may have more room than when it was last congested
+  /// (a limit was lifted, cross traffic ended). At 8 %/s, a camera that a 500 kbit/s limit had
+  /// cut to its middle layer needed about 20 seconds back to its top layer once the limit was
+  /// lifted (#939), and a viewer as long at the SFU. Simulcast layers grow in large steps, so a
+  /// sender can't fill the estimate on its way up: the next layer is the probe. A probe that
+  /// meets congestion doubles the wait before the next one (up to [`MAX_RECOVERY_WAIT`]), so a
+  /// path that stays limited isn't probed every few seconds; once more gets through than before
+  /// the congestion, the wait is short again.
+  pub recovery_increase_per_second: f64,
+  pub recovery_after: Duration,
 }
 
 /// Sender side: numbers datagrams and turns feedback into a target bitrate.
@@ -93,6 +117,12 @@ pub struct SendSideEstimator {
   estimate_bps: f64,
   maybe_last_update_at: Option<Instant>,
   maybe_last_decrease_at: Option<Instant>,
+  /// The last cut to (a share of) what got through; a step from the estimate doesn't count.
+  maybe_last_delivered_cut_at: Option<Instant>,
+  /// Loss counts for packets sent from then on: the last cut to what got through answered the
+  /// loss of those sent before. Counted again a second later, the loss of a probe that met a
+  /// limit cut the rate a second time, to half of what the path carried (#939).
+  maybe_loss_counts_from: Option<Instant>,
   /// (feedback time, lost, reported) of the last [`LOSS_WINDOW`].
   loss_history: VecDeque<(Instant, usize, usize)>,
   last_loss_ratio: f64,
@@ -103,6 +133,20 @@ pub struct SendSideEstimator {
   /// No sign of congestion since the start or [`SendSideEstimator::measure_afresh`]: growth at
   /// [`BweConfig::start_increase_per_second`].
   is_starting: bool,
+  /// The last sign of congestion (a queue building up, loss), for
+  /// [`BweConfig::recovery_increase_per_second`].
+  maybe_last_congestion_at: Option<Instant>,
+  /// What got through at the last sign of congestion.
+  congested_at_bps: f64,
+  /// How long the path has to show no congestion before the estimate grows faster.
+  recovery_wait: Duration,
+  /// The estimate grew at [`BweConfig::recovery_increase_per_second`] since the last congestion:
+  /// the next congestion is a probe that failed.
+  has_grown_recovering: bool,
+  /// Since when the delay detector reports overuse, without a break.
+  maybe_overuse_since: Option<Instant>,
+  /// The current overuse already cut the rate to what got through ([`LASTING_OVERUSE`]).
+  has_cut_to_delivered: bool,
   /// (send time, bytes) of the last [`APP_LIMITED_WINDOW`], and their sum.
   recent_sends: VecDeque<(Instant, usize)>,
   recent_sent_bytes: usize,
@@ -166,6 +210,11 @@ impl Default for BweConfig {
       // Triples every second: 300 kbit/s reach a 1440p screen share's 8 Mbit/s in three seconds.
       start_increase_per_second: 2.0,
       decrease_factor: 0.85,
+      // Slow enough that a probe of the next step (a whole layer more) shows congestion before
+      // the estimate reached the step after it; from a 500 kbit/s limit, a camera's 2 Mbit/s
+      // are about three and a half seconds after the wait.
+      recovery_increase_per_second: 0.5,
+      recovery_after: Duration::from_secs(2),
     }
   }
 }
@@ -182,11 +231,19 @@ impl SendSideEstimator {
       estimate_bps: f64::from(config.start_bps),
       maybe_last_update_at: None,
       maybe_last_decrease_at: None,
+      maybe_last_delivered_cut_at: None,
+      maybe_loss_counts_from: None,
       loss_history: VecDeque::new(),
       last_loss_ratio: 0.0,
       maybe_demand_bps: None,
       is_holding_after_decrease: false,
       is_starting: true,
+      maybe_last_congestion_at: None,
+      congested_at_bps: 0.0,
+      recovery_wait: config.recovery_after,
+      has_grown_recovering: false,
+      maybe_overuse_since: None,
+      has_cut_to_delivered: false,
       recent_sends: VecDeque::new(),
       recent_sent_bytes: 0,
       maybe_first_send_at: None,
@@ -220,14 +277,16 @@ impl SendSideEstimator {
       let Some(sent) = self.sent.remove(&(base + offset as u64)) else {
         continue;
       };
-      reported += 1;
+      // Loss of packets sent before the last cut to what got through was answered by it.
+      let is_counted = self.maybe_loss_counts_from.is_none_or(|from| sent.at >= from);
+      reported += usize::from(is_counted);
       match maybe_arrival_us {
         Some(arrival_us) => {
           let arrival = receiver_epoch + Duration::from_micros(*arrival_us);
           self.delay.on_packet(sent.at, arrival, now);
           self.acked.push_back((arrival, sent.bytes));
         },
-        None => lost += 1,
+        None => lost += usize::from(is_counted),
       }
     }
     if reported > 0 {
@@ -272,8 +331,16 @@ impl SendSideEstimator {
     self.last_loss_ratio = 0.0;
     self.maybe_last_update_at = None;
     self.maybe_last_decrease_at = None;
+    self.maybe_last_delivered_cut_at = None;
+    self.maybe_loss_counts_from = None;
     self.is_holding_after_decrease = false;
     self.is_starting = true;
+    self.maybe_last_congestion_at = None;
+    self.congested_at_bps = 0.0;
+    self.recovery_wait = self.config.recovery_after;
+    self.has_grown_recovering = false;
+    self.maybe_overuse_since = None;
+    self.has_cut_to_delivered = false;
   }
 
   pub fn estimate_bps(&self) -> u32 {
@@ -296,25 +363,49 @@ impl SendSideEstimator {
     self.maybe_last_update_at = Some(now);
     let acked_bps = self.acked_bps();
     let is_app_limited = self.is_app_limited(now);
-    // What got through is the path's rate only while the sender filled it.
-    let decrease_base = if is_app_limited {
-      self.estimate_bps
-    } else {
-      acked_bps
-    };
     // Congestion (a queue building up, loss that holds or cuts the rate) ends the start; the
     // queue of an application-limited sender's own burst doesn't.
     let is_overusing = self.delay.usage == BandwidthUsage::Overusing;
-    if (is_overusing && !is_app_limited) || self.last_loss_ratio >= 0.02 {
+    let overuse_since = if is_overusing {
+      Some(*self.maybe_overuse_since.get_or_insert(now))
+    } else {
+      self.has_cut_to_delivered = false;
+      None
+    };
+    self.maybe_overuse_since = overuse_since;
+    let is_overuse_lasting =
+      overuse_since.is_some_and(|since| now.saturating_duration_since(since) >= LASTING_OVERUSE);
+    let is_recovering = self
+      .maybe_last_congestion_at
+      .is_some_and(|last| now.saturating_duration_since(last) >= self.recovery_wait);
+    if acked_bps > RECOVERED_SHARE * self.congested_at_bps {
+      self.recovery_wait = self.config.recovery_after;
+    }
+    if (is_overusing && (!is_app_limited || is_overuse_lasting)) || self.last_loss_ratio >= 0.02 {
       self.is_starting = false;
+      self.note_congestion(now, acked_bps);
     }
     match self.delay.usage {
       BandwidthUsage::Overusing => {
-        if acked_bps > 0.0
+        if is_overuse_lasting
+          && !self.has_cut_to_delivered
+          && acked_bps > 0.0
+          && self.may_decrease(now, DELAY_DECREASE_INTERVAL)
+        {
+          // The queue outlasted the delivered rate's window: what got through is the path's
+          // rate, whatever the sender planned.
+          self.estimate_bps = self.estimate_bps.min(self.config.decrease_factor * acked_bps);
+          self.maybe_last_decrease_at = Some(now);
+          self.note_cut_to_delivered(now);
+          self.is_holding_after_decrease = true;
+          self.has_cut_to_delivered = true;
+        } else if acked_bps > 0.0
           && !self.is_holding_after_decrease
           && self.may_decrease(now, DELAY_DECREASE_INTERVAL)
         {
-          self.estimate_bps = self.estimate_bps.min(self.config.decrease_factor * decrease_base);
+          // A step: what got through so far says little while the sender didn't fill the
+          // estimate, and a queue that stays is cut to it above.
+          self.estimate_bps *= self.config.decrease_factor;
           self.maybe_last_decrease_at = Some(now);
           self.is_holding_after_decrease = true;
         }
@@ -325,6 +416,9 @@ impl SendSideEstimator {
         if self.last_loss_ratio < 0.02 {
           let increase = if self.is_starting {
             self.config.start_increase_per_second
+          } else if is_recovering {
+            self.has_grown_recovering = true;
+            self.config.recovery_increase_per_second
           } else {
             self.config.increase_per_second
           };
@@ -339,16 +433,41 @@ impl SendSideEstimator {
         }
       },
     }
-    if self.last_loss_ratio > 0.10 && acked_bps > 0.0 && self.may_decrease(now, LOSS_WINDOW) {
+    // Timed apart from other cuts to what got through (they answer the same congestion, and
+    // what gets through shrinks after them), but not from a step down from the estimate: that
+    // held the loss cut back for a second (#939).
+    let may_cut_for_loss = self
+      .maybe_last_delivered_cut_at
+      .is_none_or(|last| now.saturating_duration_since(last) >= LOSS_WINDOW);
+    if self.last_loss_ratio > 0.10 && acked_bps > 0.0 && may_cut_for_loss {
       // Based on what got through, not on the previous estimate, so repeated reports of the same
       // loss episode don't compound. Loss is damage also to an application-limited sender.
       let loss_based = acked_bps * (1.0 - 0.5 * self.last_loss_ratio);
       self.estimate_bps = self.estimate_bps.min(loss_based);
       self.maybe_last_decrease_at = Some(now);
+      self.note_cut_to_delivered(now);
     }
     self.estimate_bps = self
       .estimate_bps
       .clamp(f64::from(self.config.min_bps), f64::from(self.config.max_bps));
+  }
+
+  /// The rate was cut to (a share of) what got through at `now`.
+  fn note_cut_to_delivered(&mut self, now: Instant) {
+    self.maybe_last_delivered_cut_at = Some(now);
+    self.maybe_loss_counts_from = Some(now);
+    self.loss_history.clear();
+    self.last_loss_ratio = 0.0;
+  }
+
+  /// A sign of congestion at `now` with `acked_bps` getting through; after growth at the
+  /// recovery rate, the probe failed and the next one waits twice as long.
+  fn note_congestion(&mut self, now: Instant, acked_bps: f64) {
+    if std::mem::take(&mut self.has_grown_recovering) {
+      self.recovery_wait = (self.recovery_wait * 2).min(MAX_RECOVERY_WAIT);
+    }
+    self.maybe_last_congestion_at = Some(now);
+    self.congested_at_bps = acked_bps;
   }
 
   /// Whether the sender sent less than [`APP_LIMITED_SHARE`] of the estimate lately (over
@@ -644,6 +763,47 @@ mod tests {
     }
   }
 
+  mod recovery {
+    use super::*;
+
+    /// Issue #939: a limit lifted from a path is found within seconds, not at 8 %/s (about 20
+    /// seconds from 500 kbit/s to 2 Mbit/s).
+    #[test]
+    fn a_lifted_limit_is_found_within_seconds() {
+      let mut sim = Simulation::new(Link::new(500_000, 20, 0));
+      sim.run(Duration::from_secs(20));
+      assert!(sim.estimator.estimate_bps() < 650_000);
+      sim.link.capacity_bps = 5_000_000;
+      sim.run(Duration::from_secs(8));
+      let estimate = sim.estimator.estimate_bps();
+      assert!(
+        estimate >= 2_000_000,
+        "estimate {estimate} eight seconds after the limit"
+      );
+    }
+
+    /// A camera whose next layer doesn't fit a path that stays limited probes it ever less
+    /// often: each probe that meets congestion doubles the wait before the next, until the
+    /// estimate's usual growth comes first.
+    #[test]
+    fn probes_into_a_path_that_stays_limited_back_off() {
+      let mut sim = Simulation::new(Link::new(600_000, 20, 0));
+      sim.estimator.set_demand_bps(Some(1_500_000));
+      sim.sending = Sending::Steps(vec![300_000, 1_200_000]);
+      sim.run(Duration::from_secs(10));
+      let mut probes = 0;
+      let mut was_probing = false;
+      for _ in 0..600 {
+        sim.run(Duration::from_millis(100));
+        let is_probing = sim.sending_bps() > 600_000;
+        probes += usize::from(is_probing && !was_probing);
+        was_probing = is_probing;
+      }
+      // Without the back-off, one every four to five seconds.
+      assert!((1..=6).contains(&probes), "{probes} probes in a minute");
+    }
+  }
+
   mod loss {
     use super::*;
 
@@ -692,6 +852,22 @@ mod tests {
 
   mod app_limited {
     use super::*;
+
+    /// Issue #939: a camera sends 1.2 Mbit/s while its estimate grew to its demand of 2 Mbit/s,
+    /// and its path drops to 500 kbit/s. A step of 15 % at a time held the picture up for
+    /// seconds; the queue that stays cuts the estimate to what the path carries.
+    #[test]
+    fn a_queue_that_stays_cuts_to_what_gets_through() {
+      let mut sim = Simulation::new(Link::new(10_000_000, 20, 0));
+      sim.estimator.set_demand_bps(Some(2_000_000));
+      sim.sending = Sending::Fixed(1_200_000);
+      sim.run(Duration::from_secs(5));
+      assert!(sim.estimator.estimate_bps() >= 1_900_000);
+      sim.link.capacity_bps = 500_000;
+      sim.run(Duration::from_millis(1_200));
+      let estimate = sim.estimator.estimate_bps();
+      assert!(estimate <= 500_000, "estimate {estimate} 1.2 s after the drop");
+    }
 
     /// Issue #941: a still screen share sends little but bursts of keyframes, and the queue of a
     /// burst reads as overuse. What got through is far below the path's rate then: the cut
@@ -828,6 +1004,18 @@ mod tests {
     feedback_in_flight: VecDeque<(Instant, TransportFeedback)>,
     next_feedback_at: Instant,
     budget_bytes: f64,
+    sending: Sending,
+  }
+
+  /// What the simulated sender sends.
+  enum Sending {
+    /// Paced at the estimate.
+    Estimate,
+    /// A camera's encoders: a fixed rate, whatever the estimate.
+    Fixed(u32),
+    /// A camera with simulcast layers: the most of these rates the estimate covers with a
+    /// margin of 15 %, the first one otherwise.
+    Steps(Vec<u32>),
   }
 
   impl Simulation {
@@ -843,6 +1031,7 @@ mod tests {
         feedback_in_flight: VecDeque::new(),
         next_feedback_at: now + FEEDBACK_INTERVAL,
         budget_bytes: 0.0,
+        sending: Sending::Estimate,
       }
     }
 
@@ -857,13 +1046,27 @@ mod tests {
     }
 
     fn send_paced(&mut self) {
-      self.budget_bytes += f64::from(self.estimator.estimate_bps()) / 8.0 * TICK.as_secs_f64();
+      self.budget_bytes += f64::from(self.sending_bps()) / 8.0 * TICK.as_secs_f64();
       while self.budget_bytes >= PACKET_BYTES as f64 {
         self.budget_bytes -= PACKET_BYTES as f64;
         let seq = self.estimator.on_send(PACKET_BYTES, self.now);
         if let Some(arrival) = self.link.send(PACKET_BYTES, self.now) {
           self.in_flight.push_back((arrival, seq));
         }
+      }
+    }
+
+    fn sending_bps(&self) -> u32 {
+      let estimate = self.estimator.estimate_bps();
+      match &self.sending {
+        Sending::Estimate => estimate,
+        Sending::Fixed(bps) => *bps,
+        Sending::Steps(steps) => steps
+          .iter()
+          .copied()
+          .filter(|step| f64::from(*step) * 1.15 <= f64::from(estimate))
+          .max()
+          .unwrap_or(steps[0]),
       }
     }
 

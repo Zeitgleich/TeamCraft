@@ -18,7 +18,7 @@
 //! reconciles everything else with the SFU's fresh `joined` (ARCHITECTURE.md §6.5). Video layers
 //! of own tracks follow the uplink estimate, so audio keeps flowing when bandwidth drops.
 
-use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -74,6 +74,12 @@ pub struct CallEngine {
   /// Layers of own tracks the driver was last told to send.
   sent_layers: HashMap<StreamId, Vec<u8>>,
   uplink_layers: UplinkLayers,
+  /// Own tracks whose encoders follow the uplink's bitrate per layer
+  /// ([`CallEngine::publish_adaptive_video`]).
+  adaptive_tracks: HashSet<StreamId>,
+  /// Bitrates per layer the driver was last told to encode adaptive own tracks at (it starts
+  /// with the layers' own).
+  bitrates_announced: HashMap<StreamId, Vec<(u8, u32)>>,
   /// Layers of own tracks the SFU was last told the uplink carries (it starts with all of them);
   /// without an entry, unknown to it (after a rejoin).
   uplink_announced: HashMap<StreamId, Vec<u8>>,
@@ -194,6 +200,13 @@ pub enum CallEngineEvent {
   LayersNeeded {
     stream_id: MediaStreamId,
     layers: Vec<u8>,
+  },
+  /// Encode the layers of an own track of [`CallEngine::publish_adaptive_video`] at these
+  /// bitrates, (layer, bit/s) for every layer: a camera's top sent layer at less than its own
+  /// while the uplink can't carry all of it (#939), each layer at its own again once it can.
+  LayerBitrates {
+    stream_id: MediaStreamId,
+    bitrates: Vec<(u8, u32)>,
   },
   MuteChanged(bool),
   DeafenChanged(bool),
@@ -339,6 +352,8 @@ struct PendingPublication {
   /// The driver stopped the track before the answer came: the track the answer brings has no
   /// sender and is unpublished at once (#929).
   is_withdrawn: bool,
+  /// The driver's encoders follow [`CallEngineEvent::LayerBitrates`].
+  adapts_bitrate: bool,
 }
 
 /// What the SFU's `joined` says about the call when this device comes back.
@@ -385,6 +400,8 @@ impl CallEngine {
       sfu_layers: HashMap::new(),
       sent_layers: HashMap::new(),
       uplink_layers,
+      adaptive_tracks: HashSet::new(),
+      bitrates_announced: HashMap::new(),
       uplink_announced: HashMap::new(),
       uplink_policy: UplinkPolicy::default(),
       subscriptions: HashMap::new(),
@@ -660,6 +677,31 @@ impl CallEngine {
     codec: VideoCodec,
     layers: Vec<VideoLayerInfo>,
   ) {
+    self.publish(publication, kind, codec, layers, false);
+  }
+
+  /// [`Self::publish_video`] for a track whose encoders follow [`CallEngineEvent::LayerBitrates`]:
+  /// a camera's top sent layer is then encoded at less than its bitrate on a limited uplink,
+  /// before it stops and the picture drops to the next lower layer (#939). Other kinds are sent
+  /// as by [`Self::publish_video`].
+  pub fn publish_adaptive_video(
+    &mut self,
+    publication: VideoPublicationId,
+    kind: VideoTrackKind,
+    codec: VideoCodec,
+    layers: Vec<VideoLayerInfo>,
+  ) {
+    self.publish(publication, kind, codec, layers, true);
+  }
+
+  fn publish(
+    &mut self,
+    publication: VideoPublicationId,
+    kind: VideoTrackKind,
+    codec: VideoCodec,
+    layers: Vec<VideoLayerInfo>,
+    adapts_bitrate: bool,
+  ) {
     let is_in_use = self
       .pending_publications
       .iter()
@@ -675,6 +717,7 @@ impl CallEngine {
       codec,
       layers,
       is_withdrawn: false,
+      adapts_bitrate,
     });
   }
 
@@ -1264,6 +1307,7 @@ impl CallEngine {
       .collect();
     lost.sort_by_key(|(id, _)| *id);
     for (id, track) in lost {
+      let adapts_bitrate = self.adaptive_tracks.contains(&StreamId(track.stream_id.0));
       self.forget_own_track(StreamId(track.stream_id.0));
       self.event(CallEngineEvent::VideoUnpublished(track.stream_id));
       self.request_publication(PendingPublication {
@@ -1272,6 +1316,7 @@ impl CallEngine {
         codec: track.codec,
         layers: track.layers,
         is_withdrawn: false,
+        adapts_bitrate,
       });
     }
     // Requests the SFU never answered (lost with the connection, or dropped with the slot): asked
@@ -1307,6 +1352,8 @@ impl CallEngine {
     self.sent_layers.remove(&stream);
     self.uplink_announced.remove(&stream);
     self.uplink_layers.remove(stream);
+    self.adaptive_tracks.remove(&stream);
+    self.bitrates_announced.remove(&stream);
     self.update_uplink_demand();
     was_published
   }
@@ -1316,15 +1363,7 @@ impl CallEngine {
   fn on_uplink_feedback(&mut self, feedback: &TransportFeedback, now: Instant) {
     let bps = self.uplink.on_feedback(feedback, now, self.uplink_feedback_epoch);
     let is_sending_screen_audio = self.screen_audio != ScreenAudioState::Off;
-    let tracks: Vec<OwnTrack<'_>> = self
-      .own_tracks
-      .iter()
-      .map(|(stream, track)| OwnTrack {
-        stream: *stream,
-        kind: &track.kind,
-        layers: &track.layers,
-      })
-      .collect();
+    let tracks = own_track_views(&self.own_tracks, &self.adaptive_tracks);
     let has_changed =
       self
         .uplink_layers
@@ -1354,10 +1393,26 @@ impl CallEngine {
         Some(layers) => layers.clone(),
         None => track.layers.iter().map(|info| info.layer).collect(),
       };
-      let layers: Vec<u8> = wanted
-        .into_iter()
+      let mut layers: Vec<u8> = wanted
+        .iter()
+        .copied()
         .filter(|layer| self.uplink_layers.allows(stream, *layer))
         .collect();
+      // Receivers of a layer the uplink stopped move to the highest one it carries (#921): sent
+      // at once, it doesn't wait for the SFU to ask for it while their picture stands still (#939).
+      let maybe_carried_top = track
+        .layers
+        .iter()
+        .map(|info| info.layer)
+        .filter(|layer| self.uplink_layers.allows(stream, *layer))
+        .max();
+      if let Some(top) = maybe_carried_top
+        && layers.len() < wanted.len()
+        && !layers.contains(&top)
+      {
+        layers.push(top);
+        layers.sort_unstable();
+      }
       let previous = self.sent_layers.get(&stream).cloned().unwrap_or_default();
       if layers == previous {
         continue;
@@ -1375,6 +1430,31 @@ impl CallEngine {
           self.event(CallEngineEvent::KeyframeRequested { stream_id, layer });
         }
       }
+    }
+    self.announce_bitrates();
+  }
+
+  /// Tells the driver the bitrate per layer of each adaptive own track, where that changed.
+  fn announce_bitrates(&mut self) {
+    let mut streams: Vec<StreamId> = self.adaptive_tracks.iter().copied().collect();
+    streams.sort_unstable();
+    for stream in streams {
+      let Some(track) = self.own_tracks.get(&stream) else {
+        continue;
+      };
+      let bitrates: Vec<(u8, u32)> = track
+        .layers
+        .iter()
+        .map(|info| (info.layer, self.uplink_layers.bitrate_bps(stream, info)))
+        .collect();
+      if self.bitrates_announced.get(&stream) == Some(&bitrates) {
+        continue;
+      }
+      self.bitrates_announced.insert(stream, bitrates.clone());
+      self.event(CallEngineEvent::LayerBitrates {
+        stream_id: MediaStreamId(stream.0),
+        bitrates,
+      });
     }
   }
 
@@ -1415,15 +1495,7 @@ impl CallEngine {
   /// Lets the uplink estimate grow to what all own layers need, even while some are held back.
   fn update_uplink_demand(&mut self) {
     let is_sending_screen_audio = self.screen_audio != ScreenAudioState::Off;
-    let tracks: Vec<OwnTrack<'_>> = self
-      .own_tracks
-      .iter()
-      .map(|(stream, track)| OwnTrack {
-        stream: *stream,
-        kind: &track.kind,
-        layers: &track.layers,
-      })
-      .collect();
+    let tracks = own_track_views(&self.own_tracks, &self.adaptive_tracks);
     let maybe_demand =
       (!tracks.is_empty()).then(|| demand_bps(&tracks, is_sending_screen_audio, &self.uplink_policy));
     self.uplink.set_demand_bps(maybe_demand);
@@ -1713,7 +1785,20 @@ impl CallEngine {
       return;
     }
     match self.take_answered_publication(&track) {
-      Some(pending) if !pending.is_withdrawn => self.add_own_track(pending.id, track),
+      Some(pending) if !pending.is_withdrawn => {
+        if pending.adapts_bitrate {
+          let stream = StreamId(track.stream_id.0);
+          self.adaptive_tracks.insert(stream);
+          // Drivers start with the layers' own bitrates.
+          let own: Vec<(u8, u32)> = track
+            .layers
+            .iter()
+            .map(|info| (info.layer, info.max_bitrate_bps))
+            .collect();
+          self.bitrates_announced.insert(stream, own);
+        }
+        self.add_own_track(pending.id, track);
+      },
       maybe_withdrawn => {
         debug!(
           stream_id = track.stream_id.0,
@@ -2031,6 +2116,22 @@ impl AudioRtpState {
 }
 
 /// Measured loss as a whole percentage.
+/// The own tracks as the uplink allocation sees them.
+fn own_track_views<'a>(
+  own_tracks: &'a HashMap<StreamId, VideoTrack>,
+  adaptive_tracks: &HashSet<StreamId>,
+) -> Vec<OwnTrack<'a>> {
+  own_tracks
+    .iter()
+    .map(|(stream, track)| OwnTrack {
+      stream: *stream,
+      kind: &track.kind,
+      layers: &track.layers,
+      adapts_bitrate: adaptive_tracks.contains(stream),
+    })
+    .collect()
+}
+
 fn loss_percent(ratio: f64) -> u8 {
   // Invariant: clamped to 0..=100 first, so the cast is lossless.
   (ratio * 100.0).round().clamp(0.0, 100.0) as u8
@@ -3269,6 +3370,116 @@ mod tests {
       assert_eq!(deduped, announced);
     }
 
+    /// Issue #939: the SFU forwards the top layer, which the uplink doesn't carry. Its receivers
+    /// move to the highest layer the uplink carries, so that layer is encoded at once rather than
+    /// after the SFU asked for it, with nothing sent meanwhile.
+    #[test]
+    fn the_highest_layer_carried_stands_in_for_the_one_the_sfu_forwards() {
+      let now = Instant::now();
+      let (mut alice, _bob) = secured_pair(now);
+      ask_for(&mut alice, &video_track(50, 1, 3));
+      alice
+        .handle_signal(
+          event(
+            6,
+            CallEvent::VideoPublished {
+              track: video_track(50, 1, 3),
+            },
+          ),
+          now,
+        )
+        .unwrap();
+      let needed = CallEvent::LayersNeeded {
+        stream_id: MediaStreamId(50),
+        layers: vec![2],
+      };
+      alice.handle_signal(event(7, needed), now).unwrap();
+      drain(&mut alice);
+      let mut seq = 8;
+      let mut outputs = degrade_uplink(&mut alice, &mut seq, now);
+      // The uplink recovers: layers come back from the lowest.
+      outputs.extend(recover_uplink(&mut alice, &mut seq, now + Duration::from_secs(2)));
+      let carried: Vec<Vec<u8>> = outputs
+        .iter()
+        .filter_map(|output| match output {
+          EngineOutput::Signal(CallClientMessage::UplinkLayers { layers, .. }) => Some(layers.clone()),
+          _ => None,
+        })
+        .collect();
+      let encoded: Vec<Vec<u8>> = outputs
+        .iter()
+        .filter_map(|output| match output {
+          EngineOutput::Event(CallEngineEvent::LayersNeeded { layers, .. }) => Some(layers.clone()),
+          _ => None,
+        })
+        .collect();
+      assert!(
+        carried
+          .iter()
+          .any(|layers| layers.contains(&0) && !layers.contains(&2)),
+        "{carried:?}"
+      );
+      // Whatever the uplink carries, its highest layer is encoded; nothing only while it carries
+      // nothing.
+      let tops: Vec<Vec<u8>> = carried
+        .iter()
+        .map(|layers| layers.iter().max().map(|top| vec![*top]).unwrap_or_default())
+        .collect();
+      assert_eq!(encoded, tops, "carried: {carried:?}");
+    }
+
+    /// Issue #939: the driver of an adaptive camera hears the bitrate per layer whenever it
+    /// changes: on the way back up, the top sent layer at a share of its own, the ones below
+    /// whole. A camera the app encodes itself hears none.
+    #[test]
+    fn an_adaptive_camera_hears_its_layer_bitrates() {
+      let bitrates_heard = |is_adaptive: bool| {
+        let now = Instant::now();
+        let (mut alice, _bob) = secured_pair(now);
+        let track = video_track(50, 1, 3);
+        let publish = if is_adaptive {
+          CallEngine::publish_adaptive_video
+        } else {
+          CallEngine::publish_video
+        };
+        publish(
+          &mut alice,
+          VideoPublicationId(50),
+          track.kind.clone(),
+          track.codec.clone(),
+          track.layers.clone(),
+        );
+        alice
+          .handle_signal(event(6, CallEvent::VideoPublished { track }), now)
+          .unwrap();
+        drain(&mut alice);
+        let mut seq = 7;
+        let mut outputs = degrade_uplink(&mut alice, &mut seq, now);
+        outputs.extend(recover_uplink(&mut alice, &mut seq, now + Duration::from_secs(2)));
+        outputs
+          .into_iter()
+          .filter_map(|output| match output {
+            EngineOutput::Event(CallEngineEvent::LayerBitrates { bitrates, .. }) => Some(bitrates),
+            _ => None,
+          })
+          .collect::<Vec<_>>()
+      };
+      let heard = bitrates_heard(true);
+      assert!(
+        heard
+          .iter()
+          .any(|bitrates| bitrates.iter().any(|(layer, bps)| *layer == 1 && *bps < 500_000)),
+        "{heard:?}"
+      );
+      // The top layer is back, at half its bitrate.
+      assert_eq!(
+        heard.last(),
+        Some(&vec![(0, 150_000), (1, 500_000), (2, 750_000)]),
+        "{heard:?}"
+      );
+      assert!(bitrates_heard(false).is_empty());
+    }
+
     /// Issue #935: a call that sent only sound through a lossy moment left an estimate cut below
     /// every camera layer. A camera turned on then starts with every layer and sends, instead of
     /// having them all held back (nothing was encoded, and the camera was turned off).
@@ -3780,6 +3991,42 @@ mod tests {
         .unwrap();
       *seq += 1;
       outputs.extend(drain(engine));
+    }
+    outputs
+  }
+
+  /// Feedback of an uplink that delivers everything, after [`degrade_uplink`] (which sent 200
+  /// datagrams), from `from` on, until it carries the top layer again (at most a minute).
+  fn recover_uplink(engine: &mut CallEngine, seq: &mut u64, from: Instant) -> Vec<EngineOutput> {
+    let mut outputs = Vec::new();
+    for round in 0..600u16 {
+      let at = from + Duration::from_millis(100 * u64::from(round));
+      for _ in 0..10 {
+        engine.send_audio(&frame(), at);
+      }
+      drain(engine);
+      let arrivals_us = (0..10u64)
+        .map(|i| Some(2_000_000 + u64::from(round) * 100_000 + i * 2_000))
+        .collect();
+      let feedback = TransportFeedback {
+        base_seq: 200u16.wrapping_add(round.wrapping_mul(10)),
+        arrivals_us,
+      };
+      engine
+        .handle_signal(event(*seq, CallEvent::TransportFeedback { feedback }), at)
+        .unwrap();
+      *seq += 1;
+      let round_outputs = drain(engine);
+      let is_whole = round_outputs.iter().any(|output| {
+        matches!(
+          output,
+          EngineOutput::Signal(CallClientMessage::UplinkLayers { layers, .. }) if layers.contains(&2)
+        )
+      });
+      outputs.extend(round_outputs);
+      if is_whole {
+        break;
+      }
     }
     outputs
   }

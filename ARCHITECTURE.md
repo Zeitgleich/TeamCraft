@@ -544,9 +544,69 @@ Settings → Chats).
   when it subscribes to a new track, so a viewer of a share started after a call of sound only gets
   the sharp layer within about five seconds instead of minutes (#941). A still screen sends little
   but keyframe bursts: while a sender sends less than half its estimate, the queue of its own
-  burst cuts the estimate one step from where it is (not to what got through) and doesn't end the
-  fast start, and a screen share keeps its layers through a dip shorter than three seconds, at
-  the SFU and on the presenter's uplink.
+  burst doesn't end the fast start, and a screen share keeps its layers through a dip shorter
+  than three seconds, at the SFU and on the presenter's uplink.
+- Cameras on limited and changing links (#939): the ladder and its rules below, the same estimator
+  on the uplink (client) and on each viewer's downlink (SFU).
+
+  | Camera layer | Desktop, browser (720p30, 1.5 Mbit/s) | Phones (2 layers, 800 kbit/s) |
+  |--------------|---------------------------------------|-------------------------------|
+  | 0            | 320×180, 94 kbit/s                    | half size, 200 kbit/s         |
+  | 1            | 640×360, 375 kbit/s                   | full size, 800 kbit/s         |
+  | 2            | 1280×720, 1.5 Mbit/s                  | –                             |
+
+  Bitrates are the encoders' targets; a busy camera picture comes out at about 80 % of them, and
+  every layer keeps the camera's frame rate (resolution goes before frame rate).
+
+  *Estimator* (`teamcraft_media::bwe`): a queue building up (delay trend) cuts the estimate a
+  step, to 85 % of itself; a queue that lasts 500 ms (the window the delivered rate is measured
+  over) cuts it to 85 % of what got through, as does loss above 10 % (to what got through less
+  half the loss; only loss of packets sent after the last such cut counts); loss of 2–10 % holds
+  it. GCC cuts to what got through at once, but a camera doesn't fill its estimate (layers in
+  steps, keyframes): the queue of one keyframe cut it below the middle layer. Growth is 8 %/s,
+  and 50 %/s once the path showed no congestion for 2 s: simulcast grows in steps, so the next
+  step is the probe. A probe that meets congestion doubles that wait (up to 32 s); once 10 % more
+  than at the last congestion gets through, it is 2 s again. Before, a camera cut to its middle
+  layer by a 500 kbit/s limit needed about 20 s back to 720p once the limit was gone.
+
+  *Sender* (`uplink_layers`, cameras the call encodes itself: desktop and phones): after 48 kbit/s
+  for the microphone, the top sent layer may be encoded at 50, 70 or 100 % of its bitrate; lower
+  layers keep theirs (other viewers on weak links take them). A layer stops only when even half
+  its bitrate doesn't fit, and the next lower one becomes the top one, at once. A lower share
+  waits 1 s, a higher one 2 s (each change rebuilds the layer's encoder, which starts with a
+  keyframe), and the way back up goes one step at a time, with a 15 % margin until the estimate
+  covers everything. Before, the top layer stopped as soon as its whole bitrate didn't fit: a
+  500 kbit/s uplink carried 320×180 at about 80 kbit/s, a 2 Mbit/s one 640×360 at 300 kbit/s.
+  Browsers' cameras and screen shares send a layer whole or not at all, as before.
+
+  *SFU* (`layers`): per viewer, its downlink estimate less 120 kbit/s for sound is the budget;
+  the layer is the highest whose bitrate fits, at most the one the tile asks for (#927). Down at
+  once, up one layer at a time once the budget covered it with 15 % headroom for 2 s; a paused
+  camera is tried again at its lowest layer every 5 s. Other viewers of the same camera are not
+  affected.
+
+  Measured (`bandwidth_limits` in the SFU's test suite: real SFU, a 720p camera with sensor noise,
+  a bottleneck with a 250 ms queue; OpenH264, laptop, release build):
+
+  | Scenario                              | Before (3 runs)                           | After (6 runs)                     |
+  |---------------------------------------|-------------------------------------------|------------------------------------|
+  | Uplink 500 kbit/s                     | 320×180, ~75 kbit/s, 33.8 dB              | 640×360, 200–350 kbit/s, 35.8 dB   |
+  | Uplink 2 Mbit/s, after 500 kbit/s     | 320×180 or 640×360, at most 300 kbit/s    | 720p 2–9 s after the step          |
+  | Uplink limit lifted                   | 720p 6 s later, or not within 10 s        | 720p already                       |
+  | Uplink drops to 500 kbit/s            | longest stall 0.2–0.3 s                   | longest stall 0.3–0.9 s            |
+  | Viewer's downlink drops to 500 kbit/s | longest stall 2.2–3.4 s, then 320×180     | 0.6–1.0 s, then 320×180 or 640×360 |
+  | Viewer's downlink limit lifted        | 640×360 after 1–2 s, 720p not within 14 s | 720p after 2–9 s                   |
+  | The other viewer                      | 720p throughout                           | 720p throughout                    |
+
+  (dB: luma PSNR of the picture as a large tile shows it, a lower layer scaled up to 720p.) A
+  sudden drop stalls a little longer than before: the top layer keeps its share for the hold
+  until the estimator's cut to what got through. While a limit stays, the next layer is tried
+  now and then (the probe: a few seconds apart at first, then about every 15 s), which can hold
+  the picture up for up to a second. Not yet: the SFU's QUIC send buffer keeps up to
+  1 MiB of datagrams, so after a sudden drop it still delivers the old layer's queue before the
+  lower one; browsers' cameras don't adapt their bitrate (WebCodecs would need a reconfigured
+  encoder per change); the shares aren't told to the SFU, which allocates by the layers' full
+  bitrates.
 - Large frames: a frame of more than 255 fragments (a 1440p keyframe of text is about 450 KB)
   carries the fragment extension's long form (16-bit index and count, up to 4096 fragments); the
   short form stays for every other frame. Before, such keyframes could not be sent, and the top
