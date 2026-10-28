@@ -258,6 +258,32 @@ pub fn datagram_writable(datagrams: &JsValue) -> Result<WritableStream, JsValue>
   Ok(stream.unchecked_into())
 }
 
+/// Property of a call video's canvas that counts the pictures drawn into it, set by whoever draws
+/// (the browser's call module, the desktop page's shell video). The page reads it to notice a
+/// video that stopped (#921) without asking the call module, which runs as a module of its own.
+const PICTURES_DRAWN: &str = "teamcraftPicturesDrawn";
+
+/// Counts one picture drawn into `canvas` ([`pictures_drawn`]).
+pub fn count_picture_drawn(canvas: &JsValue) {
+  let drawn = pictures_drawn(canvas).unwrap_or(0).saturating_add(1);
+  // Exact in an f64 for far longer than any call; a canvas that refuses properties counts nothing.
+  let _ = Reflect::set(
+    canvas,
+    &JsValue::from_str(PICTURES_DRAWN),
+    &JsValue::from(drawn as f64),
+  );
+}
+
+/// The pictures drawn into a call video's element so far; `None` for an element nobody counts on
+/// (a `<video>`, or a canvas of an older call module).
+pub fn pictures_drawn(element: &JsValue) -> Option<u64> {
+  let count = Reflect::get(element, &JsValue::from_str(PICTURES_DRAWN))
+    .ok()?
+    .as_f64()?;
+  // Saturating float-to-int conversion of a count this code wrote.
+  Some(count as u64)
+}
+
 /// Whether the global scope has a constructor of this name (feature detection).
 pub fn has_global(name: &str) -> bool {
   Reflect::has(&js_sys::global(), &JsValue::from_str(name)).unwrap_or(false)

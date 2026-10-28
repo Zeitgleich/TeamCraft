@@ -1,6 +1,7 @@
 //! Calls that survive lost connections and lossy paths, without a network: the SFU's rooms and
 //! real call engines exchange signaling and datagrams through in-memory links, and time is
-//! passed in. Deterministic: losses follow fixed patterns.
+//! passed in. Deterministic: losses follow fixed patterns. Simulcast layers a publisher pauses
+//! or resumes on the way (#921) are here too.
 
 // clippy.toml only relaxes these lints inside #[test] functions; the helpers below are test code too.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
@@ -13,10 +14,13 @@ use std::time::{Duration, Instant};
 use teamcraft_media::audio_frame::EncodedAudioFrame;
 use teamcraft_media::bwe::BweConfig;
 use teamcraft_media::call_engine::{CallEngine, CallEngineConfig, CallEngineEvent, EngineOutput};
-use teamcraft_media::rtp::AudioLevel;
+use teamcraft_media::datagram::SimulcastLayer;
+use teamcraft_media::rtp::{AudioLevel, RtpTimestamp};
+use teamcraft_media::uplink_layers::UplinkPolicy;
+use teamcraft_media::video::EncodedVideoFrame;
 use teamcraft_proto::{
-  CallClientMessage, CallEvent, CallId, CallServerMessage, DeviceId, Id, MediaCapabilities,
-  SFU_GOING_AWAY_CLOSE_CODE, Snowflake, UserId,
+  AudioCodec, CallClientMessage, CallEvent, CallId, CallServerMessage, DeviceId, Id, MediaCapabilities,
+  MediaStreamId, SFU_GOING_AWAY_CLOSE_CODE, Snowflake, UserId, VideoCodec, VideoLayerInfo, VideoTrackKind,
 };
 use teamcraft_sfu::auth::JoinGrant;
 use teamcraft_sfu::config::SfuConfig;
@@ -209,6 +213,77 @@ mod lossy_path {
     assert!(
       last_loss.is_some_and(|loss| (20..=30).contains(&loss)),
       "{last_loss:?}"
+    );
+  }
+}
+
+mod simulcast_layers {
+  use super::*;
+
+  /// A shared screen from a home connection whose uplink can't carry the full layer any more:
+  /// the viewer, on the top layer so far, keeps getting pictures on a layer that is sent.
+  #[test]
+  fn a_viewer_keeps_getting_pictures_when_the_publisher_pauses_the_top_layer() {
+    let mut network = Network::with_secured(&[ALICE, BOB]);
+    let stream = network.publish(ALICE, VideoTrackKind::Screen);
+    network.subscribe(BOB, stream, 2);
+    network.send_video(ALICE, stream, 30);
+    let before = network.pictures(BOB, stream);
+    assert!(before.contains(&2), "on the top layer first: {before:?}");
+
+    // Some of Alice's datagrams are lost until her uplink estimate drops: in memory it falls to
+    // the floor at once, and without an audio reserve that still carries the base layer.
+    network.client_mut(ALICE).engine.set_uplink_policy(UplinkPolicy {
+      audio_reserve_bps: 0,
+      screen_audio_reserve_bps: 0,
+      ..UplinkPolicy::default()
+    });
+    network.client_mut(ALICE).uplink_loss_every = Some(10);
+    let mut rounds = 0;
+    while !network.has_paused_top_layer(ALICE, stream) {
+      rounds += 1;
+      assert!(rounds < 100, "the uplink never paused the top layer");
+      network.send_video(ALICE, stream, 3);
+    }
+    network.client_mut(ALICE).uplink_loss_every = None;
+    network.pictures(BOB, stream);
+
+    // Two seconds of video: Bob moves to a layer Alice sends and sees pictures again.
+    network.send_video(ALICE, stream, 60);
+    let after = network.pictures(BOB, stream);
+    assert!(!after.is_empty(), "the viewer froze on the paused layer");
+    assert!(after.iter().all(|layer| *layer < 2), "{after:?}");
+  }
+
+  /// A publisher that was away while someone started to watch its top layer hears about it when
+  /// it is back, and sends that layer again.
+  #[test]
+  fn a_publisher_back_from_a_lost_connection_sends_the_layers_needed_meanwhile() {
+    let mut network = Network::with_secured(&[ALICE, BOB]);
+    let stream = network.publish(ALICE, VideoTrackKind::Camera);
+    network.subscribe(BOB, stream, 0);
+    network.send_video(ALICE, stream, 10);
+    assert_eq!(network.last_layers_needed(ALICE, stream), Some(vec![0]));
+    assert!(network.pictures(BOB, stream).iter().all(|layer| *layer == 0));
+
+    network.lose(ALICE);
+    // Bob enlarges Alice's tile while she is away (his allocation moves up a layer per upswitch
+    // hold): the SFU can't tell her.
+    network.subscribe(BOB, stream, 2);
+    for _ in 0..50 {
+      network.advance(Duration::from_millis(100));
+    }
+    assert_eq!(network.rejoin(ALICE), JoinOutcome::Resumed);
+    assert!(network.is_secured(ALICE) && network.is_secured(BOB));
+    let needed = network.last_layers_needed(ALICE, stream).unwrap();
+    // What the SFU needs now (its answer after `joined`), not just every layer as a fallback.
+    assert!(needed.contains(&2) && !needed.contains(&1), "{needed:?}");
+
+    network.send_video(ALICE, stream, 30);
+    let after = network.pictures(BOB, stream);
+    assert!(
+      after.contains(&2),
+      "the viewer never got the top layer: {after:?}"
     );
   }
 }
@@ -406,6 +481,91 @@ impl Network {
     self.pump();
   }
 
+  /// The client publishes a three-layer track; returns its stream id.
+  fn publish(&mut self, id: i64, kind: VideoTrackKind) -> MediaStreamId {
+    self
+      .client_mut(id)
+      .engine
+      .publish_video(kind.clone(), VideoCodec::H264, small_layers());
+    self.pump();
+    self
+      .client(id)
+      .events
+      .iter()
+      .find_map(|event| match event {
+        CallEngineEvent::VideoPublished(track) if track.device_id == device(id) && track.kind == kind => {
+          Some(track.stream_id)
+        },
+        _ => None,
+      })
+      .expect("the SFU published the track")
+  }
+
+  fn subscribe(&mut self, id: i64, stream: MediaStreamId, max_layer: u8) {
+    self
+      .client_mut(id)
+      .engine
+      .subscribe_video(stream, Some(max_layer));
+    self.pump();
+  }
+
+  /// The client sends `frames` pictures of every layer at 30 per second, as its driver would:
+  /// a keyframe where one was asked for; the engine drops the layers it paused.
+  fn send_video(&mut self, id: i64, stream: MediaStreamId, frames: u32) {
+    for number in 0..frames {
+      let client = self.client_mut(id);
+      let mut keyframes: Vec<u8> = Vec::new();
+      client.events.retain(|event| match event {
+        CallEngineEvent::KeyframeRequested { stream_id, layer } if *stream_id == stream => {
+          keyframes.push(*layer);
+          false
+        },
+        _ => true,
+      });
+      for layer in 0..3u8 {
+        let frame = EncodedVideoFrame {
+          codec: VideoCodec::H264,
+          layer: SimulcastLayer::new(layer).unwrap(),
+          timestamp: RtpTimestamp(number * 3000),
+          is_keyframe: keyframes.contains(&layer),
+          data: vec![layer; 200],
+        };
+        let now = self.now;
+        self.client_mut(id).engine.send_video(stream, &frame, now);
+      }
+      self.pump();
+      self.advance(Duration::from_millis(33));
+    }
+  }
+
+  /// Layers of the pictures of `stream` the client received since the last call.
+  fn pictures(&mut self, id: i64, stream: MediaStreamId) -> Vec<u8> {
+    let mut layers = Vec::new();
+    self.client_mut(id).events.retain(|event| match event {
+      CallEngineEvent::VideoFrame(frame) if frame.stream_id == stream => {
+        layers.push(frame.layer.value());
+        false
+      },
+      _ => true,
+    });
+    layers
+  }
+
+  /// The layers of its own track the engine last told the client's driver to send.
+  fn last_layers_needed(&self, id: i64, stream: MediaStreamId) -> Option<Vec<u8>> {
+    self.client(id).events.iter().rev().find_map(|event| match event {
+      CallEngineEvent::LayersNeeded { stream_id, layers } if *stream_id == stream => Some(layers.clone()),
+      _ => None,
+    })
+  }
+
+  /// Whether the client's uplink stopped the top layer of its track but still sends a lower one.
+  fn has_paused_top_layer(&self, id: i64, stream: MediaStreamId) -> bool {
+    self
+      .last_layers_needed(id, stream)
+      .is_some_and(|layers| !layers.is_empty() && !layers.contains(&2))
+  }
+
   /// RTP sequence numbers of the audio `listener` received from `speaker` since the last call.
   fn heard(&mut self, listener: i64, speaker: i64) -> Vec<u16> {
     let client = self.client_mut(listener);
@@ -550,9 +710,33 @@ fn engine_config(id: i64) -> CallEngineConfig {
   CallEngineConfig {
     user_id: user(id),
     device_id: device(id),
-    capabilities: MediaCapabilities::default(),
+    capabilities: MediaCapabilities {
+      audio_codecs: vec![AudioCodec::Opus],
+      video_encoders: vec![VideoCodec::H264],
+      video_decoders: vec![VideoCodec::H264],
+      max_simulcast_layers: 3,
+    },
     bwe: BweConfig::default(),
   }
+}
+
+/// Three layers that all fit the start estimates, up and down: the top one is the first to go
+/// when the uplink estimate drops.
+fn small_layers() -> Vec<VideoLayerInfo> {
+  [
+    (0, 320, 180, 20_000),
+    (1, 640, 360, 40_000),
+    (2, 1280, 720, 80_000),
+  ]
+  .into_iter()
+  .map(|(layer, width, height, max_bitrate_bps)| VideoLayerInfo {
+    layer,
+    width,
+    height,
+    max_framerate: 30,
+    max_bitrate_bps,
+  })
+  .collect()
 }
 
 fn frame() -> EncodedAudioFrame {
