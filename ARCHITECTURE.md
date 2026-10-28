@@ -491,10 +491,18 @@ don't rejoin, and the server drops them whatever the SFU answered.
 **Browsers** can't migrate a WebTransport session to another network; when it closes, the
 browser driver rejoins as above, spreading the first attempt when the session's close code
 (`closed`'s `closeCode`) is `SFU_GOING_AWAY_CLOSE_CODE`. Where the browser reports the session's
-received packets (`getStats()`), the SFU's keep-alives (every 2 s) prove the path alive: silence for
-the stall timeout, or for 3 s after the page reported a network change (the core's `online` /
-`visibilitychange` / `pageshow` signal), counts as lost without waiting for QUIC's idle timeout,
-and a network change while rejoining makes the next attempt due at once. Closing or reloading the
+received packets (`getStats()`), the SFU's keep-alives (every 2 s) prove the path alive. The page
+can't see those keep-alives itself, and Safari's counts stay zero, so in every browser the
+datagrams and signaling frames the page reads count too, and a session nothing arrived on for a
+second sends `ping`, which the SFU answers with `pong` (outside the event numbering; older SFUs
+ignore it, and a session whose SFU never answered is watched by counts only, so a quiet call isn't
+taken for dead). Media alone never decides: a muted microphone, a camera that is off or a still
+screen share are quiet, the answers keep them alive. Silence for the stall timeout, or no fresh
+proof (a count after the baseline, an answer to a ping sent after the change) for 3 s after the
+page reported a network change (the core's `online` / `visibilitychange` / `pageshow` signal),
+counts as lost without waiting for QUIC's idle timeout; silence the page slept through (a timer
+gap of 2 s or more) doesn't count. A network change while rejoining makes the next attempt due at
+once. Closing or reloading the
 tab closes the sessions in the `pagehide` handler: a leave, not a lost connection.
 
 Every rejoin connects with what its own fresh join ticket names: the SFU's URL and, for a

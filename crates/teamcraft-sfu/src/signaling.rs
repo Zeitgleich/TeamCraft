@@ -13,6 +13,8 @@ use wtransport::{RecvStream, SendStream};
 pub enum Outgoing {
   Event(CallEvent),
   Error(ErrorBody),
+  /// The answer to a client's ping of this id.
+  Pong(u64),
 }
 
 /// Numbers events per connection, starting at 1 (api-conventions.md).
@@ -44,6 +46,7 @@ impl EventSequence {
         }
       },
       Outgoing::Error(error) => CallServerMessage::Error { error },
+      Outgoing::Pong(id) => CallServerMessage::Pong { id },
     }
   }
 }
@@ -93,7 +96,7 @@ mod tests {
   use super::*;
 
   #[test]
-  fn events_are_numbered_from_one_and_errors_are_not() {
+  fn events_are_numbered_from_one_and_errors_and_pongs_are_not() {
     let mut sequence = EventSequence::default();
     let event = || {
       Outgoing::Event(CallEvent::ActiveSpeakers {
@@ -106,6 +109,10 @@ mod tests {
     ));
     let error = sequence.frame(Outgoing::Error(ErrorBody::new(ErrorCode::ProtocolViolation, "x")));
     assert!(matches!(error, CallServerMessage::Error { .. }));
+    assert_eq!(
+      sequence.frame(Outgoing::Pong(9)),
+      CallServerMessage::Pong { id: 9 }
+    );
     assert!(matches!(
       sequence.frame(event()),
       CallServerMessage::Event { seq: 2, .. }

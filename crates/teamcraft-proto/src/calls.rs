@@ -113,6 +113,12 @@ pub enum CallClientMessage {
   /// Takes the call over to this device: the SFU closes the account's other devices in the call
   /// with [`CallEvent::ConnectionReplaced`] (#505). Only the account's own devices are affected.
   MoveHere,
+  /// Asks the SFU to answer with [`CallServerMessage::Pong`] of the same `id`. A page can't see
+  /// QUIC keep-alives (and Safari's `getStats()` counts nothing), so answered pings are what prove
+  /// a quiet session's path alive in the browser (#841). Older SFUs ignore it.
+  Ping {
+    id: u64,
+  },
   #[serde(other)]
   Unknown,
 }
@@ -128,6 +134,10 @@ pub enum CallServerMessage {
   /// The request failed; for `join` the SFU closes the connection afterwards.
   Error {
     error: ErrorBody,
+  },
+  /// Answer to [`CallClientMessage::Ping`]. Not an event: it takes no sequence number.
+  Pong {
+    id: u64,
   },
   #[serde(other)]
   Unknown,
@@ -351,6 +361,7 @@ impl fmt::Debug for CallClientMessage {
         .field("stream_id", stream_id)
         .finish(),
       Self::MoveHere => f.write_str("MoveHere"),
+      Self::Ping { id } => f.debug_struct("Ping").field("id", id).finish(),
       Self::SetMuted { is_muted } => f.debug_struct("SetMuted").field("is_muted", is_muted).finish(),
       Self::Unknown => f.write_str("Unknown"),
     }
@@ -545,6 +556,18 @@ mod tests {
       serde_json::to_string(&CallClientMessage::MoveHere).unwrap(),
       r#"{"type":"move_here"}"#
     );
+  }
+
+  #[test]
+  fn ping_and_pong_wire_format() {
+    let ping = CallClientMessage::Ping { id: 3 };
+    let json = serde_json::to_string(&ping).unwrap();
+    assert_eq!(json, r#"{"type":"ping","id":3}"#);
+    assert_eq!(serde_json::from_str::<CallClientMessage>(&json).unwrap(), ping);
+    let pong = CallServerMessage::Pong { id: 3 };
+    let json = serde_json::to_string(&pong).unwrap();
+    assert_eq!(json, r#"{"type":"pong","id":3}"#);
+    assert_eq!(serde_json::from_str::<CallServerMessage>(&json).unwrap(), pong);
   }
 
   #[test]

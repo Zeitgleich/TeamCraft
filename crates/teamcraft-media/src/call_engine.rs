@@ -534,6 +534,9 @@ impl CallEngine {
         self.event(CallEngineEvent::Error(error));
         Ok(())
       },
+      // Answers to the driver's pings (browsers watch their session's path with them); the
+      // browser driver takes them before they get here.
+      CallServerMessage::Pong { .. } => Ok(()),
       CallServerMessage::Unknown => {
         debug!("ignoring unknown signaling frame");
         Ok(())
