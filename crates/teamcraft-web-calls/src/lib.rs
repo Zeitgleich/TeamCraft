@@ -44,6 +44,7 @@ use teamcraft_media::call_web::{
 use teamcraft_media::jitter::JitterBufferConfig;
 use teamcraft_proto::{
   AudioCodec, CallId, DeviceId, MediaCapabilities, MediaStreamId, ScreenContentMode, VideoCodec,
+  VideoTrackKind,
 };
 use tracing_subscriber::Layer;
 use tracing_subscriber::filter::LevelFilter;
@@ -88,6 +89,9 @@ struct Callbacks {
   prepare: Function,
   sign: Function,
   verify: Function,
+  /// Shows a failure that no action waits for (`ActionFailure` wire text). A page from before it
+  /// existed gives none: the failure is only logged then.
+  maybe_failed: Option<Function>,
 }
 
 #[derive(Default)]
@@ -169,6 +173,7 @@ pub fn start(callbacks: JsValue) -> Result<(), JsValue> {
     prepare: function(&callbacks, "prepare")?,
     sign: function(&callbacks, "sign")?,
     verify: function(&callbacks, "verify")?,
+    maybe_failed: function(&callbacks, "failed").ok(),
   };
   let on_device_change = Closure::<dyn FnMut()>::new(|| {
     if let Ok(host) = host() {
@@ -823,9 +828,47 @@ impl Host {
   }
 
   fn on_engine_event(&self, roster: &mut CallRoster, event: CallEngineEvent) {
+    if let CallEngineEvent::OwnVideoEnded {
+      kind: VideoTrackKind::Camera,
+      ..
+    } = &event
+    {
+      self.on_camera_ended();
+    }
     let is_changed = roster.apply(&mut self.state.borrow_mut().view, event);
     if is_changed {
       self.changed();
+    }
+  }
+
+  /// The call stopped the camera, which ended by itself (unplugged, the permission revoked,
+  /// another app took it, or its pictures could no longer be encoded; issue #920). The roster
+  /// turns it off in the call state; its stream leaves the self view, and the user hears why the
+  /// video is off. A camera started meanwhile replaces the stream only after this.
+  fn on_camera_ended(&self) {
+    {
+      let mut state = self.state.borrow_mut();
+      if let Some(stream) = state.maybe_local_camera.take() {
+        stop_tracks(&stream);
+      }
+      if let Some(view) = &state.maybe_camera_view {
+        view.set_src_object(None);
+      }
+    }
+    self.report(&ActionFailure::new(
+      FailureKind::Call(CallFailure::CameraStopped),
+      "the camera ended by itself",
+    ));
+  }
+
+  /// Shows a failure no action waits for.
+  fn report(&self, failure: &ActionFailure) {
+    tracing::warn!(detail = %failure.detail, "call failure");
+    let Some(failed) = &self.callbacks.maybe_failed else {
+      return;
+    };
+    if let Err(error) = failed.call1(&JsValue::NULL, &JsValue::from_str(&failure.to_wire())) {
+      tracing::warn!(?error, "the page did not take the failure");
     }
   }
 

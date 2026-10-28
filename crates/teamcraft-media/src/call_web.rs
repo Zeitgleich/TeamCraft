@@ -79,6 +79,7 @@ use crate::call_auth::CallKeyAuthenticator;
 use crate::call_cues::{CallCue, CuePlayer, StatusCues};
 use crate::call_engine::{
   AudioOrigin, CallEngine, CallEngineConfig, CallEngineError, CallEngineEvent, CallStats, EngineOutput,
+  OwnVideoEnd,
 };
 use crate::call_resilience::{
   Jitter, JoinTicket, JoinTicketError, ReconnectSchedule, ResilienceConfig, rejoin_attempt,
@@ -766,6 +767,7 @@ async fn run_call(
     stats: CallStats::default(),
     own_device: config.engine.device_id,
     senders: Vec::new(),
+    encoded_kinds: Vec::new(),
     views: HashMap::new(),
     remote_tracks: HashMap::new(),
     pulses: Pulses {
@@ -856,6 +858,8 @@ struct CallState<'a> {
   stats: CallStats,
   own_device: DeviceId,
   senders: Vec<TrackSender>,
+  /// Kinds whose running own track encoded a picture: one that ends before did not start.
+  encoded_kinds: Vec<VideoTrackKind>,
   views: HashMap<MediaStreamId, Watched>,
   /// Other devices' published tracks: their kind and layers decide which layer a tile asks for.
   remote_tracks: HashMap<MediaStreamId, VideoTrack>,
@@ -957,7 +961,7 @@ impl CallState<'_> {
         }
         self.send_video_frame(engine, &kind, layer, data, is_keyframe, timestamp_us);
       },
-      Input::VideoEnded(kind) => self.stop_video(engine, &kind),
+      Input::VideoEnded(kind) => self.end_video(engine, &kind),
       Input::VideoEncodeFailed {
         kind,
         layer,
@@ -1441,6 +1445,7 @@ impl CallState<'_> {
   }
 
   fn stop_video(&mut self, engine: &mut CallEngine, kind: &VideoTrackKind) {
+    self.encoded_kinds.retain(|encoded| encoded != kind);
     let (stopped, kept): (Vec<_>, Vec<_>) = std::mem::take(&mut self.senders)
       .into_iter()
       .partition(|sender| sender.publication.kind == *kind);
@@ -1453,15 +1458,36 @@ impl CallState<'_> {
     }
   }
 
+  /// An own track ended by itself (the browser ended its capture: "Stop sharing" in its bar, an
+  /// unplugged camera, a revoked permission; or its encoders gave up): it stops, and the app
+  /// hears about it, so the UI doesn't show the camera or share on any more (issue #920).
+  fn end_video(&mut self, engine: &mut CallEngine, kind: &VideoTrackKind) {
+    if self.sender_of_kind(kind).is_none() {
+      // Stopped already: nothing ended by itself.
+      return;
+    }
+    let end = if self.encoded_kinds.contains(kind) {
+      OwnVideoEnd::WhileSending
+    } else {
+      OwnVideoEnd::BeforeFirstPicture
+    };
+    self.stop_video(engine, kind);
+    // The app may have stopped listening; the call goes on.
+    let _ = self.events.unbounded_send(CallEngineEvent::OwnVideoEnded {
+      kind: kind.clone(),
+      end,
+    });
+  }
+
   /// A layer's encoders kept failing: the track stops as if the browser had ended it. Others see
-  /// its tile go, and the SFU's unpublication reaches the app (a screen share shows as stopped).
+  /// its tile go, and the app shows the camera or share off ([`Self::end_video`]).
   fn on_encoders_gave_up(&mut self, engine: &mut CallEngine, kind: &VideoTrackKind, gave_up: EncoderGaveUp) {
     error!(
       ?kind,
       layer = gave_up.layer,
       "the browser can't encode this video; stopping it"
     );
-    self.stop_video(engine, kind);
+    self.end_video(engine, kind);
   }
 
   /// Own tracks follow their publications ([`follow_publication`]); a track that is gone loses
@@ -1509,6 +1535,10 @@ impl CallState<'_> {
     is_keyframe: bool,
     timestamp_us: f64,
   ) {
+    let has_sender = self.sender_of_kind(kind).is_some();
+    if has_sender && !self.encoded_kinds.contains(kind) {
+      self.encoded_kinds.push(kind.clone());
+    }
     let Some(stream_id) = self
       .senders
       .iter()
