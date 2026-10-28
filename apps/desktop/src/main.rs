@@ -281,6 +281,7 @@ fn main() -> anyhow::Result<()> {
       calls::commands::call_watch_level,
       calls::commands::call_unwatch_level,
       external_links::open_external,
+      external_links::open_screen_recording_settings,
       clipboard::clipboard_write_image,
       notifications::notify_user,
       notifications::withdraw_notifications,

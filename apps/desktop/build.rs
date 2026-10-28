@@ -68,6 +68,7 @@ const COMMANDS: &[&str] = &[
   "call_watch_level",
   "call_unwatch_level",
   "open_external",
+  "open_screen_recording_settings",
   "clipboard_write_image",
   "notify_user",
   "withdraw_notifications",

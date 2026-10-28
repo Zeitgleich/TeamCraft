@@ -138,13 +138,37 @@ pub(super) fn black_pictures_wire(kind: &VideoTrackKind, report: BlackReport) ->
   ActionFailure::new(FailureKind::Call(failure), detail).to_wire()
 }
 
-/// A screen capture that couldn't start, as the UI reads it.
+/// A screen capture that couldn't start, as the UI reads it. A capture the system refused gets
+/// its own failure (#940): on macOS the UI then says how to renew the Screen Recording permission
+/// and offers its settings page.
 pub(super) fn screen_failure_wire(error: &CaptureError) -> String {
-  ActionFailure::new(
-    FailureKind::Call(CallFailure::ScreenUnavailable),
-    error.to_string(),
+  let failure = match error {
+    CaptureError::Denied(_) => CallFailure::ScreenDenied,
+    _ => CallFailure::ScreenUnavailable,
+  };
+  let mut detail = error.to_string();
+  if let Some(permission) = screen_permission_note().filter(|_| failure == CallFailure::ScreenDenied) {
+    detail = format!("{detail} ({permission})");
+  }
+  ActionFailure::new(FailureKind::Call(failure), detail).to_wire()
+}
+
+/// What macOS says about the Screen Recording permission, for a refused share's details: refused
+/// although it applies points at a grant macOS no longer matches to this build (#940).
+#[cfg(target_os = "macos")]
+fn screen_permission_note() -> Option<&'static str> {
+  Some(
+    if teamcraft_media::capture_screencapturekit::has_screen_recording_permission() {
+      "Screen Recording permission: granted"
+    } else {
+      "Screen Recording permission: not granted"
+    },
   )
-  .to_wire()
+}
+
+#[cfg(not(target_os = "macos"))]
+fn screen_permission_note() -> Option<&'static str> {
+  None
 }
 
 /// A screen or window the user picked, opened.
@@ -650,6 +674,15 @@ mod tests {
     let busy = NativeCallError::Capture(CaptureError::InUse("busy".into()));
     assert!(start_failure_wire(&VideoTrackKind::Camera, &busy).starts_with("call_camera_in_use: "));
     assert!(start_failure_wire(&VideoTrackKind::Screen, &busy).starts_with("call_screen_unavailable: "));
+    // #940: a share the system refused says how to renew the permission.
+    let refused = NativeCallError::Capture(CaptureError::Denied("screen"));
+    let failure = ActionFailure::from_wire(&start_failure_wire(&VideoTrackKind::Screen, &refused));
+    assert_eq!(failure.kind, FailureKind::Call(CallFailure::ScreenDenied));
+    assert!(
+      failure
+        .detail
+        .starts_with("the user or the system denied access to the screen")
+    );
     assert_eq!(
       start_failure_wire(&VideoTrackKind::Camera, &NativeCallError::TaskEnded),
       NativeCallError::TaskEnded.to_string()

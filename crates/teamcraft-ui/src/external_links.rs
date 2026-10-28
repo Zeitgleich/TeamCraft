@@ -91,6 +91,19 @@ pub fn open(url: &str) {
   }
 }
 
+/// Opens macOS's Screen Recording settings through the shell (#940); the browser has no way there,
+/// and a refused share never reaches it.
+pub fn open_screen_recording_settings() {
+  if !tauri::is_available() {
+    return;
+  }
+  leptos::task::spawn_local(async move {
+    if let Err(error) = tauri::call::<()>("open_screen_recording_settings", &serde_json::json!({})).await {
+      feedback::report_failure(ActionFailure::from_wire(&error));
+    }
+  });
+}
+
 /// The routing decision for a click on an anchor, apart from the DOM so it can be tested.
 pub fn route_click(href: &str, button: i16, is_download: bool) -> LinkRoute {
   // Primary and middle button open links; the context menu's button must stay the webview's.

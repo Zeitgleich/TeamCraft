@@ -151,6 +151,9 @@ pub enum CallFailure {
   CameraUnavailable,
   /// The screen could not be shared (not offered by the browser, or refused by a policy).
   ScreenUnavailable,
+  /// macOS refused the screen capture to the desktop app (Screen & System Audio Recording), also
+  /// while its switch shows on: a grant from an earlier build no longer matches (#940).
+  ScreenDenied,
   /// The browser opens the screen picker only straight from a click, and the click no longer
   /// counted (Safari, issue #930). Choosing to share again usually works.
   ScreenNeedsClick,
@@ -192,7 +195,7 @@ pub enum CallFailure {
 }
 
 impl CallFailure {
-  const ALL: [Self; 24] = [
+  const ALL: [Self; 25] = [
     Self::MicrophoneDenied,
     Self::MicrophoneMissing,
     Self::MicrophoneInUse,
@@ -203,6 +206,7 @@ impl CallFailure {
     Self::CameraNotConnected,
     Self::CameraUnavailable,
     Self::ScreenUnavailable,
+    Self::ScreenDenied,
     Self::ScreenNeedsClick,
     Self::CameraNoPicture,
     Self::CameraStopped,
@@ -232,6 +236,7 @@ impl CallFailure {
       Self::CameraNotConnected => "camera_not_connected",
       Self::CameraUnavailable => "camera_unavailable",
       Self::ScreenUnavailable => "screen_unavailable",
+      Self::ScreenDenied => "screen_denied",
       Self::ScreenNeedsClick => "screen_needs_click",
       Self::CameraNoPicture => "camera_no_picture",
       Self::CameraStopped => "camera_stopped",

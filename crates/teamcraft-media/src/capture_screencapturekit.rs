@@ -6,7 +6,13 @@
 //! capture of what was picked, so a share doesn't list the shareable content first (that asks for
 //! the Screen Recording permission, which macOS applies only after the app restarted, issue
 //! #683); this app's windows are left out by its bundle id instead. Only
-//! [`ScreenCaptureKitScreen::display`] needs the permission.
+//! [`ScreenCaptureKitScreen::display`] needs the permission. Run without an app bundle
+//! (development), the own windows are listed only where the permission already applies, so the
+//! picker never brings up the permission prompt either (#940).
+//!
+//! macOS may still refuse a picked capture when the stream starts (a privacy policy, or a grant
+//! that no longer matches the app's signature, #940): that is [`CaptureError::Denied`], so the
+//! user is told how to renew the permission.
 //!
 //! The capture passes on what macOS reports about its frames: frames it marks blank go on as
 //! black pictures (the call notices a share that stays black and tells the user why), and a
@@ -32,6 +38,7 @@ use screencapturekit::SCFrameStatus;
 use screencapturekit::content_sharing_picker::{
   SCContentSharingPicker, SCContentSharingPickerConfiguration, SCContentSharingPickerMode, SCPickerOutcome,
 };
+use screencapturekit::error::SCStreamErrorCode;
 use screencapturekit::prelude::*;
 use screencapturekit::screenshot_manager::CGImageExt;
 use tracing::{debug, info, warn};
@@ -259,7 +266,7 @@ impl VideoCapture for ScreenCaptureKitScreen {
       .maybe_sound
       .as_ref()
       .is_some_and(|sound| add_sound_output(&mut stream, sound));
-    stream.start_capture().map_err(device_error)?;
+    stream.start_capture().map_err(start_error)?;
     if let Some(sound) = &self.maybe_sound {
       lock(sound).is_captured = has_sound_output;
     }
@@ -473,10 +480,21 @@ fn add_sound_output(stream: &mut SCStream, sound: &SharedSound) -> bool {
   }
 }
 
+/// Whether the Screen Recording permission applies to this process now, asked without a prompt.
+/// A share through the picker doesn't need it; it tells a refused capture apart for support
+/// (granted yet refused: a grant that no longer matches this build, #940).
+pub fn has_screen_recording_permission() -> bool {
+  objc2_core_graphics::CGPreflightScreenCaptureAccess()
+}
+
 /// Development without an app bundle: leaves this process's windows out of the picker, if
-/// ScreenCaptureKit lists them (it may ask for the Screen Recording permission; the picker doesn't
-/// need it, so a refusal only means the windows stay pickable).
+/// ScreenCaptureKit lists them. Listing needs the Screen Recording permission and would ask for
+/// it; the picker doesn't, so without the permission the windows stay pickable instead (#940).
 fn exclude_own_windows(config: &mut SCContentSharingPickerConfiguration) {
+  if !has_screen_recording_permission() {
+    debug!("no Screen Recording permission: own windows not listed, they stay pickable");
+    return;
+  }
   match SCShareableContent::get() {
     Ok(content) => {
       let own_windows: Vec<u32> = own_windows(&content).iter().map(SCWindow::window_id).collect();
@@ -569,6 +587,31 @@ fn device_error(error: SCError) -> CaptureError {
   CaptureError::Device(error.to_string())
 }
 
+/// A stream that didn't start: macOS refusing the capture (its TCC check, `SCStreamErrorUserDeclined`)
+/// is [`CaptureError::Denied`], anything else a device error. The bridge hands a failed start over
+/// as text only (Apple's English description, which ScreenCaptureKit doesn't translate).
+fn start_error(error: SCError) -> CaptureError {
+  let is_refused = match &error {
+    SCError::PermissionDenied(_) => true,
+    SCError::SCStreamError { code, .. } => *code == SCStreamErrorCode::UserDeclined,
+    SCError::CaptureStartFailed(text) | SCError::StreamError(text) => is_refusal_text(text),
+    _ => false,
+  };
+  if is_refused {
+    warn!(%error, "macOS refused the screen capture");
+    CaptureError::Denied("screen")
+  } else {
+    device_error(error)
+  }
+}
+
+/// Whether a failed start's text is macOS refusing the capture ("The user declined TCCs for
+/// application, window, display capture", code -3801).
+fn is_refusal_text(text: &str) -> bool {
+  let text = text.to_ascii_lowercase();
+  text.contains("tcc") || text.contains("declined") || text.contains("-3801")
+}
+
 /// A lock that outlives a panic elsewhere: the queues stay usable.
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
   mutex.lock().unwrap_or_else(PoisonError::into_inner)
@@ -585,6 +628,34 @@ mod tests {
     },
     framerate: 15,
   };
+
+  /// #940: a capture macOS refuses tells the user how to renew the permission.
+  #[test]
+  fn refused_starts_are_denied_and_other_failures_stay_device_errors() {
+    for refused in [
+      SCError::CaptureStartFailed(
+        "Stream error: The user declined TCCs for application, window, display capture".into(),
+      ),
+      SCError::CaptureStartFailed("Stream error: The operation couldn't be completed. (-3801)".into()),
+      SCError::from_stream_error_code(SCStreamErrorCode::UserDeclined),
+      SCError::permission_denied("screen recording"),
+    ] {
+      assert!(
+        matches!(start_error(refused.clone()), CaptureError::Denied("screen")),
+        "{refused}"
+      );
+    }
+    for other in [
+      SCError::CaptureStartFailed("Stream error: Failed to start the stream".into()),
+      SCError::from_stream_error_code(SCStreamErrorCode::NoCaptureSource),
+      SCError::Timeout("start".into()),
+    ] {
+      assert!(
+        matches!(start_error(other.clone()), CaptureError::Device(_)),
+        "{other}"
+      );
+    }
+  }
 
   #[test]
   fn tokens_round_trip() {

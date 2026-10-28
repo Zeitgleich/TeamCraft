@@ -14,6 +14,29 @@ pub fn open_external(app: AppHandle, url: String) -> Result<(), String> {
   open(&app, &url)
 }
 
+/// macOS's settings page for Screen & System Audio Recording, where a refused share is fixed (#940).
+#[cfg(target_os = "macos")]
+const SCREEN_RECORDING_SETTINGS: &str =
+  "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture";
+
+/// Opens the system's Screen Recording settings for a share macOS refused (#940). The address is
+/// fixed here: the page can't hand a settings link of its own to the opener.
+#[tauri::command(rename_all = "snake_case")]
+pub fn open_screen_recording_settings(app: AppHandle) -> Result<(), String> {
+  #[cfg(target_os = "macos")]
+  {
+    app
+      .opener()
+      .open_url(SCREEN_RECORDING_SETTINGS, None::<&str>)
+      .map_err(|error| error.to_string())
+  }
+  #[cfg(not(target_os = "macos"))]
+  {
+    let _ = app;
+    Err("screen recording settings exist only on macOS".to_owned())
+  }
+}
+
 /// Hands `url` to the system if it is a web or mail link.
 pub fn open(app: &AppHandle, url: &str) -> Result<(), String> {
   let url = checked(url)?;

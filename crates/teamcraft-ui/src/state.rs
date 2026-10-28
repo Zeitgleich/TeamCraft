@@ -55,6 +55,8 @@ pub struct Toast {
 pub enum ToastAction {
   /// Opens the camera choice of the call or the pre-join screen (#819).
   ChooseCamera,
+  /// Opens macOS's Screen Recording settings for a share the system refused (#940).
+  OpenScreenSettings,
 }
 
 impl ToastAction {
@@ -62,7 +64,13 @@ impl ToastAction {
   pub fn label_key(self) -> &'static str {
     match self {
       Self::ChooseCamera => "control-camera-choose",
+      Self::OpenScreenSettings => "call-screen-settings-open",
     }
+  }
+
+  /// Whether the toast stays after its button: the settings need the toast's steps (#940).
+  pub fn keeps_toast(self) -> bool {
+    matches!(self, Self::OpenScreenSettings)
   }
 }
 
@@ -1081,11 +1089,14 @@ impl AppState {
     );
   }
 
-  /// Carries out a toast's action and closes the toast.
+  /// Carries out a toast's action and closes the toast, unless its steps stay needed.
   pub fn run_toast_action(&self, toast: u64, action: ToastAction) {
-    self.dismiss_toast(toast);
+    if !action.keeps_toast() {
+      self.dismiss_toast(toast);
+    }
     match action {
       ToastAction::ChooseCamera => self.call.is_camera_menu_open.set(true),
+      ToastAction::OpenScreenSettings => crate::external_links::open_screen_recording_settings(),
     }
   }
 
