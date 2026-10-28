@@ -453,6 +453,7 @@ mod tests {
         FailureKind::Call(CallFailure::CameraInUse),
         FailureKind::Call(CallFailure::CameraNotConnected),
         FailureKind::Call(CallFailure::CameraUnavailable),
+        FailureKind::Call(CallFailure::ScreenNeedsClick),
       ];
       for kind in kinds {
         let key = failure_message_key(&ActionFailure::new(kind, "x"));
