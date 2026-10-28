@@ -33,6 +33,26 @@
   padding-right: 12px;
 }
 
+/* Back and forward (desktop, #874) get a column of their own between the brand and the search. */
+.top-bar.has-history {
+  grid-template-columns: minmax(var(--rail-w), auto) auto minmax(0, 1fr) auto;
+}
+
+.top-bar.has-history .search-field {
+  grid-column: 3;
+}
+
+.top-bar .history-buttons {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  margin: 0 8px;
+}
+
+.top-bar .history-buttons .icon-btn:disabled {
+  opacity: 0.35;
+}
+
 .top-bar .brand {
   /* As wide as it needs, up to the sidebar's width; long names end in an ellipsis. */
   display: flex;

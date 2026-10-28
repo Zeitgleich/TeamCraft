@@ -9,6 +9,8 @@ close = Close
 
 ## Compact layout (phones): bottom navigation, back, menus; calls in the browser
 back = Back
+history-back = Back
+history-forward = Forward
 
 ## Sidebar
 catching-up = Catching up…

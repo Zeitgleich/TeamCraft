@@ -1,12 +1,14 @@
 use leptos::prelude::*;
 
 use crate::areas::{self, Place, lazy_area};
+use crate::auth::tauri;
 use crate::brand::Brand;
 use crate::components::avatar::{Avatar, AvatarSize};
 use crate::components::brand_logo::BrandLogo;
 use crate::components::channel_glyph::ChannelGlyph;
 use crate::components::icons::{Icon, IconName};
 use crate::components::window_controls::{ClickOrDrag, window_drag_handler};
+use crate::history::{Travel, travel};
 use crate::i18n::use_i18n;
 use crate::keys::{QUICK_SWITCHER, ShortcutKeys};
 use crate::model::{Conversation, ConversationId, ConversationKind};
@@ -24,9 +26,11 @@ pub fn TopBar() -> impl IntoView {
   let on_drag = window_drag_handler();
   let brand = Brand::use_current().0;
   let press = ClickOrDrag::new();
+  // The browser has its own buttons; the desktop webview has none (#874).
+  let has_history_buttons = tauri::is_available();
 
   view! {
-    <header class="top-bar" data-window-drag="" on:mousedown=on_drag>
+    <header class="top-bar" class:has-history=has_history_buttons data-window-drag="" on:mousedown=on_drag>
       <a
         class="brand"
         href="/home"
@@ -50,6 +54,7 @@ pub fn TopBar() -> impl IntoView {
         <BrandLogo class="brand-logo" fallback=|| () />
         <span class="brand-name">{move || brand.with(|view| view.display_name.clone())}</span>
       </a>
+      {has_history_buttons.then(|| view! { <HistoryButtons /> })}
       <SearchField />
       <div class="top-actions">
         <button
@@ -87,6 +92,38 @@ pub fn TopBar() -> impl IntoView {
         </div>
       </div>
     </header>
+  }
+}
+
+/// Back and forward through the places the user has been, as in the browser: disabled when there
+/// is nothing to go back or forward to. The same steps as Alt+←/→, ⌘[ / ⌘] and the mouse's back and
+/// forward buttons (`history.rs`).
+#[component]
+fn HistoryButtons() -> impl IntoView {
+  let state = use_app_state();
+  let i18n = use_i18n();
+  let reach = state.history_reach;
+  view! {
+    <div class="history-buttons">
+      <button
+        class="icon-btn on-dark"
+        aria-label=move || i18n.t("history-back")
+        title=move || i18n.t("history-back")
+        prop:disabled=move || !reach.get().can_go_back()
+        on:click=move |_| travel(Travel::Back)
+      >
+        <Icon name=IconName::ChevronLeft />
+      </button>
+      <button
+        class="icon-btn on-dark"
+        aria-label=move || i18n.t("history-forward")
+        title=move || i18n.t("history-forward")
+        prop:disabled=move || !reach.get().can_go_forward()
+        on:click=move |_| travel(Travel::Forward)
+      >
+        <Icon name=IconName::ChevronRight />
+      </button>
+    </div>
   }
 }
 

@@ -9,6 +9,8 @@ close = Schließen
 
 ## Kompaktes Layout (Telefone): untere Navigation, zurück, Menüs; Anrufe im Browser
 back = Zurück
+history-back = Zurück
+history-forward = Vor
 
 ## Seitenleiste
 catching-up = Wird nachgeladen…
