@@ -3,6 +3,8 @@
 //! per-conversation levels. The values live in `NotificationPrefs` (see `prefs.rs`); `notify_sync`
 //! sends the server's share to the server.
 
+use std::collections::HashSet;
+
 use leptos::prelude::*;
 use teamcraft_client_api::admin::format_bytes;
 use teamcraft_client_api::message_sound::{
@@ -17,6 +19,7 @@ use crate::clock::local_time_zone;
 use crate::components::icons::{Icon, IconName};
 use crate::components::notification_prompt;
 use crate::components::pending_button::PendingButton;
+use crate::components::people_picker::PeoplePicker;
 use crate::components::settings_account::WeekdayChips;
 use crate::components::settings_rows::{
   ListFilter, MAX_LIST_ENTRIES, SelectRow, SettingRow, SettingsCard, SwitchRow, matches_filter, row_id,
@@ -647,30 +650,27 @@ fn DndCard() -> impl IntoView {
   let edit =
     move |change: Box<dyn FnOnce(&mut DndSchedule)>| prefs.update(|all| change(&mut all.notifications.dnd));
   let zone = local_time_zone();
-  let people = Memo::new(move |_| {
-    let me = state.me().id;
-    let mut users: Vec<User> = state.read(|backend| backend.users());
-    users.retain(|user| user.id != me && !user.is_bot);
-    users.sort_by_key(|user| user.display_name.to_lowercase());
-    users
-  });
-  let chosen_person = RwSignal::new(String::new());
-  let add_person = move |_| {
-    let Ok(raw) = chosen_person.get_untracked().parse::<UserId>() else {
+  // The shared people picker (search, paged results from the directory) in place of a `<select>`
+  // with every user of the instance (#430). A person picked there goes into the allowed list at
+  // once, which the chips below show and edit; the picker itself starts empty again.
+  let picked = RwSignal::new(Vec::<User>::new());
+  Effect::new(move |_| {
+    let people = picked.get();
+    if people.is_empty() {
       return;
-    };
+    }
+    let ids: Vec<UserId> = people.iter().map(|user| user.id).collect();
     edit(Box::new(move |dnd| {
-      if !dnd.allow_user_ids.contains(&raw) && dnd.allow_user_ids.len() < MAX_DND_ALLOWED_USERS {
-        dnd.allow_user_ids.push(raw);
-      }
+      allow_people(&mut dnd.allow_user_ids, &ids, MAX_DND_ALLOWED_USERS)
     }));
-    chosen_person.set(String::new());
-  };
+    picked.set(Vec::new());
+  });
+  let allowed_ids =
+    Signal::derive(move || dnd.with(|dnd| dnd.allow_user_ids.iter().copied().collect::<HashSet<UserId>>()));
+  let is_allow_list_full = move || dnd.with(|dnd| dnd.allow_user_ids.len() >= MAX_DND_ALLOWED_USERS);
   let name_of = move |id: UserId| {
-    people
-      .get()
-      .into_iter()
-      .find(|user| user.id == id)
+    state
+      .read(|backend| backend.user(id))
       .map_or_else(|| id.to_string(), |user| user.display_name)
   };
   let can_add_range = move || dnd.with(|dnd| dnd.windows.len() < MAX_DND_WINDOWS);
@@ -722,34 +722,18 @@ fn DndCard() -> impl IntoView {
         on_change=Callback::new(move |value: bool| edit(Box::new(move |dnd| dnd.allows_urgent = value)))
       />
       <SettingRow label="notif-dnd-allow" hint="notif-dnd-allow-hint" is_stacked=true>
-        <div class="set-inline-form">
-          <select
-            id="dnd-allow-person"
-            class="input grow"
-            aria-label=move || i18n.t("notif-dnd-allow")
-            prop:value=move || chosen_person.get()
-            on:change=move |ev| chosen_person.set(event_target_value(&ev))
-          >
-            <option value="">{move || i18n.t("notif-dnd-allow-choose")}</option>
-            {move || {
-              let allowed = dnd.get().allow_user_ids;
-              people
-                .get()
-                .into_iter()
-                .filter(|user| !allowed.contains(&user.id))
-                .map(|user| view! { <option value=user.id.to_string()>{user.display_name}</option> })
-                .collect_view()
-            }}
-          </select>
-          <button
-            type="button"
-            class="btn"
-            disabled=move || { chosen_person.get().is_empty() || dnd.get().allow_user_ids.len() >= MAX_DND_ALLOWED_USERS }
-            on:click=add_person
-          >
-            {move || i18n.t("notif-dnd-allow-add")}
-          </button>
-        </div>
+        <Show
+          when=move || !is_allow_list_full()
+          fallback=move || view! { <p class="muted-text">{move || i18n.t_with("notif-dnd-allow-full", &[("max", &MAX_DND_ALLOWED_USERS.to_string())])}</p> }
+        >
+          <PeoplePicker
+            chosen=picked
+            chosen_label_key="notif-dnd-allow"
+            allows_guest_accounts=true
+            already_in=allowed_ids
+            already_in_key="notif-dnd-allow-already"
+          />
+        </Show>
         <ul class="keyword-chips" aria-label=move || i18n.t("notif-dnd-allow")>
           {move || {
             dnd
@@ -778,6 +762,19 @@ fn DndCard() -> impl IntoView {
         </ul>
       </SettingRow>
     </SettingsCard>
+  }
+}
+
+/// Adds `people` to the people who break through do not disturb: each only once, and never more
+/// than `max` altogether.
+fn allow_people(allowed: &mut Vec<UserId>, people: &[UserId], max: usize) {
+  for person in people {
+    if allowed.len() >= max {
+      break;
+    }
+    if !allowed.contains(person) {
+      allowed.push(*person);
+    }
   }
 }
 
@@ -991,6 +988,23 @@ fn set_enabled(notes: &mut NotificationPrefs, is_on: bool) {
 #[cfg(test)]
 mod tests {
   use super::*;
+  use crate::model::id_from_raw;
+
+  #[test]
+  fn people_are_allowed_once_and_never_beyond_the_limit() {
+    let person = |raw| id_from_raw::<UserId>(raw);
+    let mut allowed = vec![person(1)];
+
+    allow_people(&mut allowed, &[person(2), person(1), person(3)], 3);
+    assert_eq!(
+      allowed,
+      [person(1), person(2), person(3)],
+      "no duplicate, in the order picked"
+    );
+
+    allow_people(&mut allowed, &[person(4)], 3);
+    assert_eq!(allowed.len(), 3, "the limit holds");
+  }
 
   #[test]
   fn the_master_switch_silences_and_restores_both_channels() {
