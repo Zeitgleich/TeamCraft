@@ -119,6 +119,12 @@ impl VideoCapture for NokhwaCamera {
       running.stop();
     }
   }
+
+  /// nokhwa's read waits for good once the camera stops delivering (unplugged, its session
+  /// interrupted): only time tells that it went away (#922).
+  fn stall_limit(&self) -> Option<std::time::Duration> {
+    Some(crate::video_capture::CAMERA_STALL_LIMIT)
+  }
 }
 
 impl Drop for NokhwaCamera {

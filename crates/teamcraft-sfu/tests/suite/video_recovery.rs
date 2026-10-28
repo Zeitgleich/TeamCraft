@@ -1,6 +1,8 @@
 //! Video that has to recover through the SFU (issue #683): a viewer that lost a keyframe asks for
 //! a new one instead of waiting for the publisher's periodic keyframe (300 frames, 10 s here), and
-//! a still screen, which delivers no frames, still answers a keyframe request.
+//! a still screen, which delivers no frames, still answers a keyframe request. Own cameras that
+//! misbehave (#683, #922): one that stops delivering ends its track, and a camera that is slow to
+//! open or to stop leaves the call's task free.
 
 // clippy.toml only relaxes these lints inside #[test] functions; the helpers below are test code too.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
@@ -9,8 +11,9 @@ use std::net::{Ipv6Addr, SocketAddr};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use teamcraft_media::audio_io::{AudioSink, AudioSource};
 use teamcraft_media::bwe::BweConfig;
-use teamcraft_media::call_engine::{CallEngineConfig, CallEngineEvent};
+use teamcraft_media::call_engine::{CallEngineConfig, CallEngineEvent, OwnVideoEnd};
 use teamcraft_media::call_native::{NativeCall, NativeCallConfig};
 use teamcraft_media::video::{VideoFrame, VideoResolution, simulcast_layers};
 use teamcraft_media::video_capture::{
@@ -37,6 +40,11 @@ const VIDEO_PACKET_BYTES: usize = 1000;
 const LOSS_WINDOW: Duration = Duration::from_millis(500);
 /// A viewer that subscribes this long after the share started: it missed the first picture.
 const LATE_SUBSCRIBE: Duration = Duration::from_millis(500);
+/// How long a camera of these tests may deliver nothing before its track ends.
+const STALL_LIMIT: Duration = Duration::from_millis(500);
+/// How long the call's task may take to answer a request while a camera opens or stops: far
+/// below the time a stop used to hold it (`SENDER_STOP_WAIT`, 1 s), far above an answer's.
+const RESPONSIVE: Duration = Duration::from_millis(500);
 
 /// A shared screen that doesn't change after its first picture (ScreenCaptureKit and PipeWire
 /// deliver nothing then). The viewer subscribes later; the SFU asks for a keyframe, and the
@@ -174,6 +182,258 @@ async fn a_capture_that_never_stops_does_not_freeze_the_call() {
     matches!(left, Ok(Ok(_))),
     "the call hung behind the camera: {left:?}"
   );
+}
+
+/// A camera that stops delivering without ending, as an unplugged one on macOS (#922): its track
+/// ends after the camera's stall limit, and the app hears that it ended while sending.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_camera_that_stops_delivering_ends_its_track() {
+  let (port, certificate_hash) = start_sfu().await;
+  let sfu = SocketAddr::new(Ipv6Addr::LOCALHOST.into(), port);
+  let mut presenter = join(sfu, certificate_hash, 1, 2).await;
+  let _viewer = join(sfu, certificate_hash, 2, 1).await;
+  let config = VideoSendConfig {
+    kind: VideoTrackKind::Camera,
+    capture: Box::new(GoneCamera::default()),
+    layers: simulcast_layers(VGA, 30, 150_000, 1),
+    encoders: software_encoders(),
+    maybe_filter: None,
+    maybe_idle_refresh: None,
+  };
+  let first_picture = presenter.start_video_checked(config).await.unwrap();
+  first_picture.wait().await.unwrap();
+  let started_at = tokio::time::Instant::now();
+  let deadline = started_at + STALL_LIMIT * 20;
+  let end = loop {
+    let left = deadline.saturating_duration_since(tokio::time::Instant::now());
+    match tokio::time::timeout(left, presenter.next_event()).await {
+      Ok(Some(CallEngineEvent::OwnVideoEnded { kind, end })) => {
+        assert_eq!(kind, VideoTrackKind::Camera);
+        break end;
+      },
+      Ok(Some(_)) => {},
+      Ok(None) => panic!("the call ended"),
+      Err(_) => panic!("the silent camera's track never ended"),
+    }
+  };
+  assert_eq!(end, OwnVideoEnd::WhileSending);
+  assert!(
+    started_at.elapsed() >= STALL_LIMIT,
+    "ended after {:?}, before the camera's limit",
+    started_at.elapsed()
+  );
+  presenter.leave().await.unwrap();
+}
+
+/// A camera that takes long to open (an iPhone camera takes seconds, #922): the call's task
+/// answers other requests meanwhile (its audio and signaling run on the same task), and the start
+/// answers once the camera opened.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_camera_that_is_slow_to_open_leaves_the_call_free() {
+  let (port, certificate_hash) = start_sfu().await;
+  let sfu = SocketAddr::new(Ipv6Addr::LOCALHOST.into(), port);
+  let presenter = join(sfu, certificate_hash, 1, 2).await;
+  let _viewer = join(sfu, certificate_hash, 2, 1).await;
+  let (camera, mut gates) = GatedCamera::new(Gate::Open);
+  let config = VideoSendConfig {
+    kind: VideoTrackKind::Camera,
+    capture: Box::new(camera),
+    layers: simulcast_layers(VGA, 30, 150_000, 1),
+    encoders: software_encoders(),
+    maybe_filter: None,
+    maybe_idle_refresh: None,
+  };
+  {
+    let starting = presenter.start_video(config);
+    tokio::pin!(starting);
+    tokio::select! {
+      started = &mut starting => panic!("the start answered before the camera opened: {started:?}"),
+      () = gates.entered() => {},
+    }
+    // The camera is opening and stays so until released.
+    let answered = tokio::time::timeout(
+      RESPONSIVE,
+      presenter.set_audio(AudioSource::Silence, AudioSink::Discard),
+    )
+    .await;
+    assert!(
+      matches!(answered, Ok(Ok(()))),
+      "the call's task waited for the camera to open: {answered:?}"
+    );
+    gates.release();
+    tokio::time::timeout(Duration::from_secs(10), starting)
+      .await
+      .expect("the start answered once the camera opened")
+      .unwrap();
+  }
+  presenter.stop_video(VideoTrackKind::Camera);
+  presenter.leave().await.unwrap();
+}
+
+/// A camera that takes long to let go: stopping it (or switching away from it) doesn't hold up
+/// the call's task, which used to wait up to a second and a half for it (#922).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_camera_that_is_slow_to_stop_leaves_the_call_free() {
+  let (port, certificate_hash) = start_sfu().await;
+  let sfu = SocketAddr::new(Ipv6Addr::LOCALHOST.into(), port);
+  let presenter = join(sfu, certificate_hash, 1, 2).await;
+  let _viewer = join(sfu, certificate_hash, 2, 1).await;
+  let (camera, mut gates) = GatedCamera::new(Gate::Stop);
+  let config = VideoSendConfig {
+    kind: VideoTrackKind::Camera,
+    capture: Box::new(camera),
+    layers: simulcast_layers(VGA, 30, 150_000, 1),
+    encoders: software_encoders(),
+    maybe_filter: None,
+    maybe_idle_refresh: None,
+  };
+  presenter.start_video(config).await.unwrap();
+  presenter.stop_video(VideoTrackKind::Camera);
+  gates.entered().await;
+  // The camera is stopping and stays so until released.
+  let started_at = tokio::time::Instant::now();
+  let answered = presenter
+    .set_audio(AudioSource::Silence, AudioSink::Discard)
+    .await;
+  let took = started_at.elapsed();
+  assert!(answered.is_ok(), "{answered:?}");
+  assert!(
+    took < RESPONSIVE,
+    "the call's task waited {took:?} for the camera to stop"
+  );
+  gates.release();
+  let left = tokio::time::timeout(Duration::from_secs(10), presenter.leave()).await;
+  assert!(matches!(left, Ok(Ok(_))), "{left:?}");
+}
+
+/// A camera that delivers a few frames and then nothing, without ending: its queue stays open,
+/// as nokhwa's AVFoundation camera's read when the camera is unplugged.
+#[derive(Default)]
+struct GoneCamera {
+  maybe_running: Option<(std::sync::mpsc::Sender<()>, std::thread::JoinHandle<()>)>,
+}
+
+impl VideoCapture for GoneCamera {
+  fn format(&self) -> CaptureFormat {
+    CaptureFormat {
+      resolution: VGA,
+      framerate: 30,
+    }
+  }
+
+  fn start(&mut self, frames: FrameSender) -> Result<(), CaptureError> {
+    let (stop, stopped) = std::sync::mpsc::channel::<()>();
+    let thread = std::thread::spawn(move || {
+      for index in 0..10 {
+        let _ = frames.send(test_pattern(VGA, index, index * 33_333).unwrap());
+        if !matches!(
+          stopped.recv_timeout(Duration::from_millis(33)),
+          Err(std::sync::mpsc::RecvTimeoutError::Timeout)
+        ) {
+          return;
+        }
+      }
+      // Gone: no frame any more, and no end either, until stopped.
+      let _ = stopped.recv();
+      drop(frames);
+    });
+    self.maybe_running = Some((stop, thread));
+    Ok(())
+  }
+
+  fn stop(&mut self) {
+    if let Some((stop, thread)) = self.maybe_running.take() {
+      drop(stop);
+      let _ = thread.join();
+    }
+  }
+
+  fn stall_limit(&self) -> Option<Duration> {
+    Some(STALL_LIMIT)
+  }
+}
+
+/// Where a [`GatedCamera`] waits until the test releases it.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Gate {
+  /// Its start (opening the camera).
+  Open,
+  /// Its stop (letting the camera go).
+  Stop,
+}
+
+/// A camera delivering a test pattern that waits at its [`Gate`] until released.
+struct GatedCamera {
+  gate: Gate,
+  capture: TestPatternCapture,
+  entered: Option<tokio::sync::oneshot::Sender<()>>,
+  released: std::sync::mpsc::Receiver<()>,
+}
+
+/// The test's side of a [`GatedCamera`].
+struct CameraGates {
+  entered: tokio::sync::oneshot::Receiver<()>,
+  release: std::sync::mpsc::Sender<()>,
+}
+
+impl GatedCamera {
+  fn new(gate: Gate) -> (Self, CameraGates) {
+    let (entered, entered_rx) = tokio::sync::oneshot::channel();
+    let (release, released) = std::sync::mpsc::channel();
+    let camera = Self {
+      gate,
+      capture: TestPatternCapture::new(CaptureFormat {
+        resolution: VGA,
+        framerate: 30,
+      }),
+      entered: Some(entered),
+      released,
+    };
+    let gates = CameraGates {
+      entered: entered_rx,
+      release,
+    };
+    (camera, gates)
+  }
+
+  fn wait_at(&mut self, gate: Gate) {
+    if gate != self.gate {
+      return;
+    }
+    if let Some(entered) = self.entered.take() {
+      let _ = entered.send(());
+      // Released, or the test is gone.
+      let _ = self.released.recv();
+    }
+  }
+}
+
+impl VideoCapture for GatedCamera {
+  fn format(&self) -> CaptureFormat {
+    self.capture.format()
+  }
+
+  fn start(&mut self, frames: FrameSender) -> Result<(), CaptureError> {
+    self.wait_at(Gate::Open);
+    self.capture.start(frames)
+  }
+
+  fn stop(&mut self) {
+    self.capture.stop();
+    self.wait_at(Gate::Stop);
+  }
+}
+
+impl CameraGates {
+  /// Once the camera waits at its gate (call once).
+  async fn entered(&mut self) {
+    // An error means the camera went without reaching its gate; the test's checks then fail.
+    let _ = (&mut self.entered).await;
+  }
+
+  fn release(&self) {
+    let _ = self.release.send(());
+  }
 }
 
 /// A camera that delivers frames but whose stop never returns (a driver stuck in its read).

@@ -1674,6 +1674,32 @@ mod tests {
       assert!(media.reported.try_recv().is_err(), "said once");
     }
 
+    /// Issue #922: a camera that stops delivering without ending (unplugged on macOS, where
+    /// nokhwa's read just waits) turns off after its stall limit and says so, like one that ends.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_camera_that_goes_silent_turns_off_and_says_so() {
+      let mut media = start_media().await;
+      let (camera, stopped) = GreyCapture::new(Keeps::Silent);
+      let answer = start_video(&media, VideoTrackKind::Camera, Box::new(camera));
+      assert_eq!(
+        tokio::time::timeout(PROMPT, answer).await.unwrap().unwrap(),
+        Ok(())
+      );
+      let reported = tokio::time::timeout(PROMPT, media.reported.recv())
+        .await
+        .unwrap()
+        .unwrap();
+      assert_eq!(
+        ActionFailure::from_wire(&reported).kind,
+        FailureKind::Call(CallFailure::CameraStopped)
+      );
+      assert!(!media.flags().0, "the camera shows as off");
+      assert!(stopped.load(Ordering::SeqCst), "and is let go");
+      media.controls.send(Control::Leave).unwrap();
+      tokio::time::timeout(PROMPT, media.task).await.unwrap().unwrap();
+      assert!(media.reported.try_recv().is_err(), "said once");
+    }
+
     /// Issue #920: a camera switch whose new camera doesn't open keeps the running camera, as the
     /// UI still shows it.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -1747,7 +1773,12 @@ mod tests {
       OneFrame,
       /// It stands still and stays open until stopped.
       Running,
+      /// It delivers nothing more but stays open, with [`SILENT_LIMIT`] as its stall limit.
+      Silent,
     }
+
+    /// The stall limit of a [`Keeps::Silent`] camera: well within [`PROMPT`].
+    const SILENT_LIMIT: Duration = Duration::from_millis(300);
 
     /// A camera that shows one grey picture.
     struct GreyCapture {
@@ -1780,7 +1811,7 @@ mod tests {
         let data = vec![128; pixels * 3 / 2];
         frames.send(teamcraft_media::video::VideoFrame::new(resolution, 0, data).unwrap());
         // Ending drops the queue: the encoder takes the queued picture, then ends the track.
-        if matches!(self.keeps, Keeps::Running) {
+        if matches!(self.keeps, Keeps::Running | Keeps::Silent) {
           self.maybe_frames = Some(frames);
         }
         Ok(())
@@ -1789,6 +1820,10 @@ mod tests {
       fn stop(&mut self) {
         self.maybe_frames = None;
         self.stopped.store(true, Ordering::SeqCst);
+      }
+
+      fn stall_limit(&self) -> Option<Duration> {
+        matches!(self.keeps, Keeps::Silent).then_some(SILENT_LIMIT)
       }
     }
 

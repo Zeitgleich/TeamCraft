@@ -43,7 +43,8 @@ pub const SCREEN_IDLE_REFRESH: Duration = Duration::from_secs(1);
 pub const BLACK_PICTURES_REPORT_AFTER: Duration = Duration::from_secs(3);
 /// How long stopping a track waits for its encoder thread, which stops the capture (cameras wait
 /// up to half a second for theirs, `camera_thread`). Bounded: a capture stuck in its driver must
-/// not stop the call (issue #683).
+/// not leave a thread waiting for good (issue #683); the call's task doesn't wait for it at all
+/// ([`VideoSender::stop_in_background`]).
 const SENDER_STOP_WAIT: Duration = Duration::from_secs(1);
 
 /// Makes the encoder for one layer; hardware where available (see [`software_encoders`]).
@@ -98,6 +99,15 @@ pub struct VideoSender {
   controls: std_mpsc::Sender<SenderControl>,
   counters: Arc<SendCounters>,
   thread: Option<WorkerThread>,
+}
+
+/// A track being stopped: its threads end on a blocking task, the call's task goes on
+/// ([`VideoSender::stop_in_background`]). Its counters stay readable, final once
+/// [`StoppingSender::is_stopped`].
+pub struct StoppingSender {
+  pub kind: VideoTrackKind,
+  counters: Arc<SendCounters>,
+  task: tokio::task::JoinHandle<()>,
 }
 
 /// Resolves once a started track encoded its first picture, or with why it never will. While
@@ -256,6 +266,7 @@ impl VideoSender {
       _ => VideoContent::Camera,
     };
     let (frames, frame_rx) = frame_queue();
+    let stall = StallWatch::new(capture.stall_limit());
     capture.start(frames)?;
     let (controls, control_rx) = std_mpsc::channel();
     let (first_picture, first_picture_rx) = oneshot::channel();
@@ -276,6 +287,7 @@ impl VideoSender {
       counters: Arc::clone(&counters),
       maybe_first_picture: Some(first_picture),
       black: BlackWatch::new(black_notice),
+      stall,
     };
     let thread = WorkerThread::spawn("video-encoder", move || {
       encoder_loop.run();
@@ -341,6 +353,7 @@ struct EncoderLoop {
   counters: Arc<SendCounters>,
   maybe_first_picture: Option<oneshot::Sender<Result<(), VideoStartError>>>,
   black: BlackWatch,
+  stall: StallWatch,
 }
 
 /// Notices a track that shows nothing but black, from the content of its captured pictures.
@@ -350,6 +363,16 @@ struct BlackWatch {
   black_in_a_row: u64,
   is_reported: bool,
   maybe_notice: Option<oneshot::Sender<BlackReport>>,
+}
+
+/// Notices a capture that stopped delivering: nothing for its [`VideoCapture::stall_limit`] since
+/// its last frame (#922). Before the first frame [`FIRST_PICTURE_TIMEOUT`] applies instead. On
+/// macOS `Instant` stands still while the computer sleeps, so a camera gets the whole limit to come
+/// back after a wake.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct StallWatch {
+  maybe_limit: Option<Duration>,
+  maybe_last_frame_at: Option<Instant>,
 }
 
 /// A change [`BlackWatch`] noticed.
@@ -411,6 +434,9 @@ impl EncoderLoop {
       if self.check_first_picture(Instant::now(), started_at) == LoopStep::Stop {
         return;
       }
+      if self.check_stall(Instant::now()) == LoopStep::Stop {
+        return;
+      }
       // A still screen delivers no frames: its black is noticed with time passing.
       if let Some(change) = self.black.poll(Instant::now()) {
         self.report_black(change);
@@ -441,6 +467,7 @@ impl EncoderLoop {
           return;
         },
       };
+      self.stall.on_frame(Instant::now());
       // A request that came while waiting (a viewer asked for a keyframe) applies to this frame.
       if self.apply_controls(&mut simulcast) == LoopStep::Stop {
         return;
@@ -578,6 +605,18 @@ impl EncoderLoop {
     LoopStep::Stop
   }
 
+  /// Ends the track when its capture stopped delivering ([`StallWatch`]), as if the capture had
+  /// ended: the call then reports the track as ended (#922).
+  fn check_stall(&mut self, now: Instant) -> LoopStep {
+    let Some(silent_for) = self.stall.stalled_for(now) else {
+      return LoopStep::Continue;
+    };
+    let source_name = self.source_name();
+    warn!(kind = ?self.kind, ?silent_for, "the {source_name} stopped delivering; the track ends");
+    self.report_start(Err(VideoStartError::CaptureEnded(source_name)));
+    LoopStep::Stop
+  }
+
   /// Counts a black frame and reports when the track turned black or recovered. A few
   /// microseconds per frame (`picture_check` samples a grid).
   fn check_content(&mut self, frame: &VideoFrame) {
@@ -707,6 +746,26 @@ impl Refresh {
   }
 }
 
+impl StallWatch {
+  fn new(maybe_limit: Option<Duration>) -> Self {
+    Self {
+      maybe_limit,
+      maybe_last_frame_at: None,
+    }
+  }
+
+  fn on_frame(&mut self, now: Instant) {
+    self.maybe_last_frame_at = Some(now);
+  }
+
+  /// How long the capture has delivered nothing, once that reached its limit.
+  fn stalled_for(&self, now: Instant) -> Option<Duration> {
+    let (limit, last_frame_at) = (self.maybe_limit?, self.maybe_last_frame_at?);
+    let silent_for = now.saturating_duration_since(last_frame_at);
+    (silent_for >= limit).then_some(silent_for)
+  }
+}
+
 impl FirstPicture {
   /// The track's later notice of showing nothing but black; once (`None` after).
   pub fn take_black_pictures(&mut self) -> Option<BlackPictures> {
@@ -765,23 +824,59 @@ impl RepeatedWarning {
 }
 
 impl VideoSender {
-  /// Stops capturing and encoding, and returns what the track did.
+  /// Stops capturing and encoding, and returns what the track did. Waits for the threads (up to
+  /// [`SENDER_STOP_WAIT`]); the call's task uses [`VideoSender::stop_in_background`].
   pub fn finish(mut self) -> SendProgress {
     self.shut_down();
     self.counters.progress()
   }
 
-  /// Stops the encoder thread and waits for it (and with it the capture), at most
-  /// [`SENDER_STOP_WAIT`]: this runs on the call's task, whose audio must go on even when a
-  /// capture hangs in its driver.
-  fn shut_down(&mut self) {
+  /// Stops capturing and encoding without waiting: the encoder thread is told to stop at once,
+  /// and waited for (with it the capture, up to [`SENDER_STOP_WAIT`]) on a blocking task. A
+  /// camera may take that long to let go, and the call's audio must not wait for it (#922).
+  /// Needs a Tokio runtime.
+  pub fn stop_in_background(mut self) -> StoppingSender {
+    self.signal_stop();
+    let kind = self.kind.clone();
+    let counters = Arc::clone(&self.counters);
+    let task = tokio::task::spawn_blocking(move || self.shut_down());
+    StoppingSender { kind, counters, task }
+  }
+
+  /// Tells the encoder thread to stop: it sees its controls closed.
+  fn signal_stop(&mut self) {
     let (closed, _) = std_mpsc::channel();
     drop(std::mem::replace(&mut self.controls, closed));
+  }
+
+  /// Stops the encoder thread and waits for it (and with it the capture), at most
+  /// [`SENDER_STOP_WAIT`]: a capture that hangs in its driver is left behind.
+  fn shut_down(&mut self) {
+    self.signal_stop();
     if let Some(thread) = self.thread.take()
       && thread.join_within(SENDER_STOP_WAIT) == Joined::Detached
     {
       warn!(kind = ?self.kind, "the video capture hangs; the track is left behind");
     }
+  }
+}
+
+impl StoppingSender {
+  /// What the track did; final once [`StoppingSender::is_stopped`].
+  pub fn progress(&self) -> SendProgress {
+    self.counters.progress()
+  }
+
+  /// The threads ended, or were left behind after [`SENDER_STOP_WAIT`].
+  pub fn is_stopped(&self) -> bool {
+    self.task.is_finished()
+  }
+
+  /// Waits until [`StoppingSender::is_stopped`] and returns what the track did.
+  pub async fn stopped(self) -> SendProgress {
+    // A panic while joining leaves the counters as they are.
+    let _ = self.task.await;
+    self.counters.progress()
   }
 }
 
@@ -1136,7 +1231,7 @@ mod tests {
       })
     }
 
-    fn start_sender(
+    pub(super) fn start_sender(
       capture: Box<dyn VideoCapture>,
       encoders: EncoderFactory,
     ) -> (
@@ -1178,6 +1273,7 @@ mod tests {
         counters: Arc::default(),
         maybe_first_picture: Some(first_picture),
         black: BlackWatch::new(oneshot::channel().0),
+        stall: StallWatch::new(None),
       };
       (encoder_loop, first_picture_rx)
     }
@@ -1267,6 +1363,116 @@ mod tests {
         .expect("a picture in time")
         .unwrap()
         .1
+    }
+  }
+
+  /// A capture that stops delivering without ending, as nokhwa's AVFoundation camera when it is
+  /// unplugged (#922), ends its track after its stall limit.
+  mod stall {
+    use super::first_picture::{fake_encoders, manual_capture, start_sender};
+    use super::*;
+
+    const LIMIT: Duration = Duration::from_millis(200);
+
+    #[test]
+    fn silence_counts_from_the_last_frame_and_only_with_a_limit() {
+      let start = Instant::now();
+      let mut watch = StallWatch::new(Some(LIMIT));
+      assert_eq!(watch.stalled_for(start + LIMIT * 10), None, "no frame yet");
+      watch.on_frame(start);
+      assert_eq!(watch.stalled_for(start + LIMIT - Duration::from_millis(1)), None);
+      assert_eq!(watch.stalled_for(start + LIMIT), Some(LIMIT));
+      watch.on_frame(start + LIMIT);
+      assert_eq!(
+        watch.stalled_for(start + LIMIT * 3 / 2),
+        None,
+        "a frame came again"
+      );
+
+      let mut unlimited = StallWatch::new(None);
+      unlimited.on_frame(start);
+      assert_eq!(unlimited.stalled_for(start + LIMIT * 100), None);
+    }
+
+    #[tokio::test]
+    async fn a_camera_that_stops_delivering_ends_its_track() {
+      let pushed = Arc::new(Mutex::new(None));
+      let (sender, first_picture, _encoded_rx) = start_sender(
+        Box::new(Stalling(SharedCapture(manual_capture(), Arc::clone(&pushed)))),
+        fake_encoders(),
+      );
+      // The capture keeps its queue open: only the silence can tell that it went away.
+      let frames = pushed.lock().unwrap().clone().unwrap();
+      assert!(frames.send(test_pattern(VGA, 0, 0).unwrap()));
+      assert_eq!(first_picture.wait().await, Ok(()));
+      let deadline = Instant::now() + LIMIT * 50;
+      while !sender.has_ended() {
+        assert!(Instant::now() < deadline, "the stalled track never ended");
+        tokio::time::sleep(Duration::from_millis(10)).await;
+      }
+      assert_eq!(sender.progress().pictures_encoded, 1);
+      drop(frames);
+    }
+
+    #[tokio::test]
+    async fn a_capture_without_a_limit_may_pause() {
+      let pushed = Arc::new(Mutex::new(None));
+      let (sender, first_picture, _encoded_rx) = start_sender(
+        Box::new(SharedCapture(manual_capture(), Arc::clone(&pushed))),
+        fake_encoders(),
+      );
+      let frames = pushed.lock().unwrap().clone().unwrap();
+      assert!(frames.send(test_pattern(VGA, 0, 0).unwrap()));
+      assert_eq!(first_picture.wait().await, Ok(()));
+      // Idle polls for longer than a limit would have been: the thread waited and went on.
+      let polls_past_limit = u64::try_from(LIMIT.as_millis() / CONTROL_POLL.as_millis()).unwrap() + 2;
+      let idle_polls = || sender.counters.idle_polls.load(Ordering::Relaxed);
+      let since = idle_polls();
+      let deadline = Instant::now() + Duration::from_secs(10);
+      while idle_polls() < since + polls_past_limit {
+        assert!(Instant::now() < deadline, "the encoder thread never idled");
+        tokio::time::sleep(Duration::from_millis(1)).await;
+      }
+      assert!(!sender.has_ended());
+    }
+
+    #[tokio::test]
+    async fn a_track_stopped_in_the_background_reports_what_it_did() {
+      let pushed = Arc::new(Mutex::new(None));
+      let (sender, first_picture, _encoded_rx) = start_sender(
+        Box::new(SharedCapture(manual_capture(), Arc::clone(&pushed))),
+        fake_encoders(),
+      );
+      let frames = pushed.lock().unwrap().clone().unwrap();
+      assert!(frames.send(test_pattern(VGA, 0, 0).unwrap()));
+      assert_eq!(first_picture.wait().await, Ok(()));
+      let stopping = sender.stop_in_background();
+      assert_eq!(stopping.kind, VideoTrackKind::Camera);
+      let progress = tokio::time::timeout(Duration::from_secs(10), stopping.stopped())
+        .await
+        .expect("the track stopped");
+      assert_eq!(progress.pictures_encoded, 1);
+    }
+
+    /// A capture with a short stall limit.
+    struct Stalling(SharedCapture);
+
+    impl VideoCapture for Stalling {
+      fn format(&self) -> CaptureFormat {
+        self.0.format()
+      }
+
+      fn start(&mut self, frames: crate::video_capture::FrameSender) -> Result<(), CaptureError> {
+        self.0.start(frames)
+      }
+
+      fn stop(&mut self) {
+        self.0.stop();
+      }
+
+      fn stall_limit(&self) -> Option<Duration> {
+        Some(LIMIT)
+      }
     }
   }
 
