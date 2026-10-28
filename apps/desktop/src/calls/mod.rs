@@ -412,7 +412,7 @@ impl CallHost {
       .await;
   }
 
-  /// Sends the own camera, as the call sends it, to `send` as JPEG images (see `self_view`);
+  /// Sends the own camera's capture (with effects) to `send` as JPEG images (see `self_view`);
   /// `send` answers whether the image was delivered.
   pub fn watch_camera(&self, channel: ChannelId, send: impl Fn(Vec<u8>) -> bool + Send + 'static) {
     self.self_view.watch(channel, send);
@@ -421,6 +421,12 @@ impl CallHost {
   /// Stops the self view, if `channel` is the one it sends through.
   pub fn unwatch_camera(&self, channel: ChannelId) {
     self.self_view.unwatch(channel);
+  }
+
+  /// The webview draws the self view in `width` x `height` device pixels: its images are made to
+  /// cover that (#937).
+  pub fn size_camera(&self, width: u32, height: u32) {
+    self.self_view.set_drawn_size(width, height);
   }
 
   /// Sends the pre-join check's microphone level (0.0 to 1.0) to `send` about ten times a second
