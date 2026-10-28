@@ -13,7 +13,7 @@ use wasm_bindgen_futures::JsFuture;
 use teamcraft_proto::BackgroundId;
 
 use crate::admin::format_bytes;
-use crate::calls::{BackgroundEffect, BackgroundImageInfo, EffectGroup};
+use crate::calls::{BackgroundEffect, BackgroundImageInfo, EffectGroup, EffectsOffer};
 use crate::components::icons::{Icon, IconName};
 use crate::i18n::use_i18n;
 use crate::reactive::SetIfAlive;
@@ -58,7 +58,9 @@ pub fn BackgroundPicker(
   let own = Memo::new(move |_| state.read(|backend| backend.background_images()));
   let error = RwSignal::new(None::<String>);
   let file_input = NodeRef::<leptos::html::Input>::new();
-  let options = Memo::new(move |_| effect_options(&own.get()));
+  // The browser offers no photos (their full pictures are only in the apps, #439).
+  let offer = untrack(|| state.read(|backend| backend.effects_offer()));
+  let options = Memo::new(move |_| effect_options(&own.get(), offer));
   let is_expanded = RwSignal::new(false);
   let is_collapsed = move || size == PickerSize::Compact && !is_expanded.get();
   // What the grid shows. Compact, it follows the chosen background so that one is never hidden;
@@ -306,11 +308,12 @@ fn group_heading_key(group: EffectGroup) -> Option<&'static str> {
   }
 }
 
-/// All options in display order: the shipped effects, then the user's own pictures.
-pub fn effect_options(own: &[BackgroundImageInfo]) -> Vec<BackgroundEffect> {
+/// All options `offer` has, in display order: the shipped effects, then the user's own pictures.
+pub fn effect_options(own: &[BackgroundImageInfo], offer: EffectsOffer) -> Vec<BackgroundEffect> {
   BackgroundEffect::ALL
     .into_iter()
     .chain(own.iter().map(|image| BackgroundEffect::Custom(image.id)))
+    .filter(|option| offer.offers(*option))
     .collect()
 }
 
@@ -406,9 +409,34 @@ mod tests {
   #[test]
   fn slugs_round_trip_for_every_option() {
     let own = [image(7), image(9)];
-    for option in effect_options(&own) {
+    for option in effect_options(&own, EffectsOffer::Full) {
       assert_eq!(effect_from_slug(&effect_slug(option)), option);
     }
+  }
+
+  /// #439: the browser has no photos; the compact picker then shows none, blur and the rest.
+  #[test]
+  fn the_browser_picker_leaves_the_photos_out() {
+    let options = effect_options(&[image(3)], EffectsOffer::InCall);
+    assert!(!options.iter().any(|option| option.group() == EffectGroup::Photos));
+    assert!(options.contains(&BackgroundEffect::BlurStrong));
+    assert!(options.contains(&BackgroundEffect::Preset(BackgroundPreset::Forest)));
+    assert_eq!(
+      options.last(),
+      Some(&BackgroundEffect::Custom("3".parse().unwrap()))
+    );
+    assert_eq!(
+      picker_items(&options).first(),
+      Some(&PickerItem::Tile(BackgroundEffect::None))
+    );
+    assert_eq!(
+      compact_options(&options, BackgroundEffect::None),
+      vec![
+        BackgroundEffect::None,
+        BackgroundEffect::BlurLight,
+        BackgroundEffect::BlurStrong
+      ]
+    );
   }
 
   #[test]
@@ -420,7 +448,7 @@ mod tests {
 
   #[test]
   fn own_pictures_come_after_the_shipped_effects() {
-    let options = effect_options(&[image(3)]);
+    let options = effect_options(&[image(3)], EffectsOffer::Full);
     assert_eq!(options.len(), BackgroundEffect::ALL.len() + 1);
     assert_eq!(options[0], BackgroundEffect::None);
     assert!(options.contains(&BackgroundEffect::Preset(BackgroundPreset::Forest)));
@@ -491,7 +519,7 @@ mod tests {
 
   #[test]
   fn the_compact_picker_shows_none_blur_and_one_row_of_photos() {
-    let all = effect_options(&[image(3)]);
+    let all = effect_options(&[image(3)], EffectsOffer::Full);
     let compact = compact_options(&all, BackgroundEffect::None);
     assert_eq!(
       compact,
@@ -509,7 +537,7 @@ mod tests {
 
   #[test]
   fn the_chosen_background_stays_in_view_whatever_it_is() {
-    let all = effect_options(&[image(3)]);
+    let all = effect_options(&[image(3)], EffectsOffer::Full);
     let own = BackgroundEffect::Custom("3".parse().unwrap());
     let forest = BackgroundEffect::Preset(BackgroundPreset::Forest);
     for current in [photo(9), forest, own, BackgroundEffect::BlurStrong, photo(0)] {
@@ -535,14 +563,14 @@ mod tests {
 
   #[test]
   fn a_choice_the_picker_does_not_list_adds_nothing() {
-    let all = effect_options(&[]);
+    let all = effect_options(&[], EffectsOffer::Full);
     let deleted = BackgroundEffect::Custom("9".parse().unwrap());
     assert_eq!(compact_options(&all, deleted).len(), 3 + COMPACT_PHOTOS);
   }
 
   #[test]
   fn headings_start_each_group_of_tiles() {
-    let all = effect_options(&[image(3)]);
+    let all = effect_options(&[image(3)], EffectsOffer::Full);
     let items = picker_items(&all);
     let headings: Vec<_> = items
       .iter()

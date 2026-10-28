@@ -49,6 +49,18 @@ class BudgetTest(unittest.TestCase):
         self.assertIn("Loaded when first used", out)
         self.assertIn("teamcraft-ui-split-admin-0123abcd.wasm", out)
 
+    def test_the_call_module_has_a_budget_of_its_own(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            dist = dist_with(tmp, app_bytes=600, service_worker_bytes=300)
+            (dist / "teamcraft-web-calls-0123abcd_bg.wasm").write_bytes(os.urandom(3000))
+            (dist / "teamcraft-web-segmentation-0123abcd_bg.wasm").write_bytes(os.urandom(5000))
+            code, out, err = run(str(dist), "--budget-bytes", "2000", "--call-module-budget-bytes", "4000")
+            self.assertEqual(code, 0, err)
+            self.assertIn("teamcraft-web-segmentation-0123abcd_bg.wasm (on demand)", out)
+            code, _, err = run(str(dist), "--budget-bytes", "2000", "--call-module-budget-bytes", "2000")
+        self.assertEqual(code, 1)
+        self.assertIn("the call module teamcraft-web-calls-0123abcd_bg.wasm is", err)
+
     def test_close_to_the_compressed_budget_only_warns(self):
         with tempfile.TemporaryDirectory() as tmp:
             dist = dist_with(tmp, app_bytes=600, service_worker_bytes=500)

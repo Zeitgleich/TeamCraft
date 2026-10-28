@@ -223,6 +223,17 @@ extern "C" {
     height: f64,
   ) -> Result<(), JsValue>;
 
+  /// `drawImage(bitmap, dx, dy, dw, dh)`.
+  #[wasm_bindgen(method, catch, js_name = drawImage)]
+  pub fn draw_bitmap(
+    this: &Canvas2d,
+    bitmap: &web_sys::ImageBitmap,
+    x: f64,
+    y: f64,
+    width: f64,
+    height: f64,
+  ) -> Result<(), JsValue>;
+
   #[wasm_bindgen(method, catch, js_name = getImageData)]
   pub fn get_image_data(
     this: &Canvas2d,
@@ -231,6 +242,35 @@ extern "C" {
     width: f64,
     height: f64,
   ) -> Result<web_sys::ImageData, JsValue>;
+}
+
+/// A tiny module with a WebAssembly SIMD instruction (`i8x16.popcnt` of a splat): browsers that
+/// validate it run SIMD, which the segmentation module of the background effects needs (#439).
+const SIMD_PROBE: [u8; 31] = [
+  0, 97, 115, 109, 1, 0, 0, 0, 1, 5, 1, 96, 0, 1, 123, 3, 2, 1, 0, 10, 10, 1, 8, 0, 65, 0, 253, 15, 253, 98,
+  11,
+];
+
+/// What the page's browser offers that the background effects need (#439): WebGPU
+/// (`navigator.gpu`), WebGL2 and WebAssembly SIMD. Only whether the APIs exist: a GPU the browser
+/// refuses shows when the effects start.
+pub fn effects_graphics() -> (bool, bool, bool) {
+  thread_local! {
+    // The APIs don't change during a page's life; the UI asks on every render of the picker.
+    static FOUND: std::cell::OnceCell<(bool, bool, bool)> = const { std::cell::OnceCell::new() };
+  }
+  FOUND.with(|found| *found.get_or_init(find_effects_graphics))
+}
+
+fn find_effects_graphics() -> (bool, bool, bool) {
+  let global = js_sys::global();
+  let has_webgpu = web_sys::window()
+    .and_then(|window| Reflect::get(&window.navigator(), &JsValue::from_str("gpu")).ok())
+    .is_some_and(|gpu| gpu.is_object());
+  let has_webgl2 = Reflect::has(&global, &JsValue::from_str("WebGL2RenderingContext")).unwrap_or(false);
+  let has_wasm_simd =
+    js_sys::WebAssembly::validate(&Uint8Array::from(&SIMD_PROBE[..]).into()).unwrap_or(false);
+  (has_webgpu, has_webgl2, has_wasm_simd)
 }
 
 /// A plain JS object with the given properties (WebIDL dictionaries).

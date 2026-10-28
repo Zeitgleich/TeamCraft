@@ -20,7 +20,10 @@ demo = []
 crate-type = ["cdylib", "rlib"]
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
-teamcraft-media = { path = "../teamcraft-media", features = ["web", "call-view"] }
+# Background effects (#439): the compositors (WebGPU, WebGL2) and the segmentation worker's page
+# side. The segmentation itself (tract and the model) is a module of its own,
+# teamcraft-web-segmentation, which only loads when the first effect starts.
+teamcraft-media = { path = "../teamcraft-media", features = ["web", "call-view", "effects"] }
 teamcraft-client-api = { path = "../teamcraft-client-api" }
 teamcraft-proto.workspace = true
 serde.workspace = true
@@ -37,5 +40,5 @@ web-sys = { version = "0.3.106", features = [
   "HtmlCanvasElement", "MediaStream", "MediaStreamTrack", "Window", "Navigator", "Document", "Element",
   "HtmlElement", "HtmlMediaElement", "HtmlVideoElement",
   "AudioContext", "AudioBuffer", "AudioBufferSourceNode", "AudioDestinationNode", "AudioNode", "BaseAudioContext",
-  "AudioScheduledSourceNode",
+  "AudioScheduledSourceNode", "Response",
 ] }

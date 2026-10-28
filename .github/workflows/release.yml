@@ -422,6 +422,8 @@ jobs:
           scripts/check-no-demo-data.py artifacts/ui-dist
           web="$RUNNER_TEMP/web"
           cp -R artifacts/ui-dist "$web"
+          # The browser's background effects download the segmentation model (#439); not in git.
+          crates/teamcraft-ui/scripts/add-segmentation-model.sh "$web"
           if [ -n "$WEB_RELEASE_KEY" ]; then
             key="$RUNNER_TEMP/web-release.pem"
             (umask 077 && printf '%s\n' "$WEB_RELEASE_KEY" > "$key")

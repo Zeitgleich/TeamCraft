@@ -179,6 +179,9 @@ pub enum CallFailure {
   /// The organization requires a background behind the camera image, which this device can't
   /// apply.
   BackgroundRequired,
+  /// The background effect couldn't start on this device (no GPU for it, or its model didn't
+  /// load); the camera sends without it.
+  EffectsUnavailable,
   /// This device isn't in the conversation's encryption group yet (the welcome hasn't come, or
   /// another device has to let it in), so it can't check who is in the call.
   EncryptionPending,
@@ -195,7 +198,7 @@ pub enum CallFailure {
 }
 
 impl CallFailure {
-  const ALL: [Self; 25] = [
+  const ALL: [Self; 26] = [
     Self::MicrophoneDenied,
     Self::MicrophoneMissing,
     Self::MicrophoneInUse,
@@ -216,6 +219,7 @@ impl CallFailure {
     Self::Unsupported,
     Self::ServerUnreachable,
     Self::BackgroundRequired,
+    Self::EffectsUnavailable,
     Self::EncryptionPending,
     Self::MoveRefused,
     Self::SpeakersUnavailable,
@@ -246,6 +250,7 @@ impl CallFailure {
       Self::Unsupported => "unsupported",
       Self::ServerUnreachable => "server_unreachable",
       Self::BackgroundRequired => "background_required",
+      Self::EffectsUnavailable => "effects_unavailable",
       Self::EncryptionPending => "encryption_pending",
       Self::MoveRefused => "move_refused",
       Self::SpeakersUnavailable => "speakers_unavailable",

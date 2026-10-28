@@ -18,6 +18,9 @@
 //! teamcraft-web-bundle --input <app.wasm> --staging <dir> --name teamcraft-ui --initializer <loader.js>
 //!                      [--wasm-opt <binary> [--wasm-opt-arg <arg>]...]
 //! ```
+//!
+//! `teamcraft-web-bundle worker …` binds and names a module that runs in a worker instead
+//! ([`worker`]: the segmentation of the background effects).
 
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
@@ -27,6 +30,8 @@ use anyhow::{Context, Result, bail};
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64;
 use sha2::{Digest, Sha256, Sha384};
+
+mod worker;
 
 /// Where the page loads everything from; the app is always served at the root.
 const PUBLIC_URL: &str = "/";
@@ -38,9 +43,17 @@ const SESSION_MODULE: &str = "session";
 
 fn main() -> Result<()> {
   tracing_subscriber::fmt().with_target(false).without_time().init();
-  let args = Args::parse(std::env::args().skip(1))?;
+  let mut raw = std::env::args().skip(1).peekable();
+  if raw.peek().map(String::as_str) == Some("worker") {
+    raw.next();
+    return worker::run(worker::WorkerArgs::parse(raw)?);
+  }
+  let args = Args::parse(raw)?;
   let input = std::fs::read(&args.input).with_context(|| format!("reading {}", args.input.display()))?;
-  let id = build_id(&input, &optimizer_settings(&args)?);
+  let id = build_id(
+    &input,
+    &optimizer_settings(args.maybe_wasm_opt.as_deref(), &args.wasm_opt_args)?,
+  );
   let work = args.staging.join(format!(".split-{id}"));
   std::fs::create_dir_all(&work)?;
   let names = Names::new(&args.name, &id);
@@ -152,8 +165,8 @@ fn build_id(input: &[u8], optimizer_settings: &str) -> String {
 }
 
 /// wasm-opt's version and flags (empty without wasm-opt).
-fn optimizer_settings(args: &Args) -> Result<String> {
-  let Some(wasm_opt) = &args.maybe_wasm_opt else {
+fn optimizer_settings(maybe_wasm_opt: Option<&Path>, wasm_opt_args: &[String]) -> Result<String> {
+  let Some(wasm_opt) = maybe_wasm_opt else {
     return Ok(String::new());
   };
   let output = std::process::Command::new(wasm_opt)
@@ -163,7 +176,7 @@ fn optimizer_settings(args: &Args) -> Result<String> {
   Ok(format!(
     "{}\n{}",
     String::from_utf8_lossy(&output.stdout).trim(),
-    args.wasm_opt_args.join(" ")
+    wasm_opt_args.join(" ")
   ))
 }
 

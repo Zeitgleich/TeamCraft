@@ -32,10 +32,25 @@
 //! once instead of the others seeing "reconnecting" until the grace period ends.
 
 mod cadence;
+#[cfg(feature = "effects")]
+mod gl_compositor;
 mod meter;
+#[cfg(feature = "effects")]
+mod picture;
 mod screen_sound;
+#[cfg(feature = "effects")]
+mod segmentation_worker;
 mod session_watch;
 mod video;
+
+#[cfg(feature = "effects")]
+pub use gl_compositor::GlCompositor;
+#[cfg(feature = "effects")]
+pub use picture::decode_picture;
+#[cfg(feature = "effects")]
+pub use segmentation_worker::{SegmentationWorker, WorkerMask};
+#[cfg(feature = "effects")]
+pub use video::CameraEffects;
 
 use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, HashMap, VecDeque};
@@ -589,15 +604,25 @@ impl WebCall {
     self.start_video(stream, video::camera_plan()).await
   }
 
-  /// [`WebCall::start_camera`] with background effects (segmentation and the WebGPU compositor);
+  /// [`WebCall::start_camera`] with background effects (the segmentation worker and a compositor);
   /// change the effect with [`WebCall::set_background_effect`].
   #[cfg(feature = "effects")]
   pub async fn start_camera_with_effects(
     &self,
     maybe_device: Option<&str>,
-    effects: crate::effects::EffectsPipeline,
+    effects: CameraEffects,
   ) -> Result<(), WebCallError> {
     let stream = video::capture_camera(maybe_device).await?;
+    self.share_camera_stream_with_effects(stream, effects).await
+  }
+
+  /// [`WebCall::share_camera_stream`] through background effects (#439).
+  #[cfg(feature = "effects")]
+  pub async fn share_camera_stream_with_effects(
+    &self,
+    stream: MediaStream,
+    effects: CameraEffects,
+  ) -> Result<(), WebCallError> {
     let plan = video::TrackPlan {
       maybe_effects: Some(effects),
       ..video::camera_plan()

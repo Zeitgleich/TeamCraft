@@ -9,7 +9,8 @@
 //   - except the parts of the app that load when first used (`lazy` in release.json, #334): those are
 //     fetched and checked against the signed hash when a page first asks for one, and in the
 //     background a little after a page (not a guest's meeting page) asked for the status, so they
-//     work offline too;
+//     work offline too; the ones only some people use (`on_demand`: the background effects'
+//     segmentation, #439) only when a page asks for them;
 //   - serves the app from that cache, never from the network;
 //   - keeps running the previous verified version if a new one does not verify, and tells the pages.
 // A build without a pinned key (development) skips all of this and says so.
@@ -35,6 +36,8 @@ const PARALLEL_DOWNLOADS = 4;
 // Where a release's cache keeps its verified file list, for the files fetched later (no file of a
 // release has this path).
 const FILES_KEY = '/.release-files';
+// And the files it fetches only when a page asks for them (`on_demand`), never in the background.
+const ON_DEMAND_KEY = '/.release-on-demand';
 // The lazily loaded files are fetched this long after a page loaded, so they don't compete with what
 // the page itself loads first.
 const WARM_DELAY_MS = 15 * 1000;
@@ -215,7 +218,9 @@ function warmLazyFiles(version) {
       await new Promise((resolve) => setTimeout(resolve, WARM_DELAY_MS));
       const cache = await caches.open(CACHE_PREFIX + version);
       const files = await (await cache.match(FILES_KEY))?.json();
+      const onDemand = new Set((await (await cache.match(ON_DEMAND_KEY))?.json()) || []);
       for (const path of Object.keys(files || {})) {
+        if (onDemand.has(path)) continue;
         if (!(await cache.match('/' + path))) await storeVerified(cache, [cache], path, files[path]);
       }
     })()
@@ -270,6 +275,7 @@ async function installVerified() {
     }
     // Kept first: an install that stops halfway resumes with it, and later fetches check against it.
     await cache.put(FILES_KEY, new Response(JSON.stringify(manifest.files)));
+    await cache.put(ON_DEMAND_KEY, new Response(JSON.stringify([...manifest.onDemand])));
     const queue = Object.entries(manifest.files).filter(([path]) => !manifest.lazy.has(path));
     const worker = async () => {
       for (let next = queue.shift(); next; next = queue.shift()) await storeVerified(cache, sources, ...next);
@@ -341,8 +347,9 @@ async function verifiedManifest() {
   if (!manifest.files['index.html']) throw new Error('the release has no index.html');
   // Which files wait until they are used is a hint outside the signature: every file is still checked
   // against its signed hash, whenever it is fetched.
-  const lazy = new Set((Array.isArray(manifest.lazy) ? manifest.lazy : []).filter((path) => path !== 'index.html'));
-  return { version: String(manifest.version), files, lazy };
+  const onDemand = new Set((Array.isArray(manifest.on_demand) ? manifest.on_demand : []).filter((path) => path !== 'index.html'));
+  const lazy = new Set([...(Array.isArray(manifest.lazy) ? manifest.lazy : []), ...onDemand].filter((path) => path !== 'index.html'));
+  return { version: String(manifest.version), files, lazy, onDemand };
 }
 
 async function sha256Hex(bytes) {

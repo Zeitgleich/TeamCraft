@@ -2,7 +2,9 @@
 # Trunk hook (post_build): builds the app's wasm, splits it into chunks that load when their part
 # of the app is first used, and writes init.js and the preload links (#334; docs/performance.md,
 # "Web bundle size"). Trunk can't split wasm, so the app is not one of its Rust assets; the service
-# worker and the call module still are. Then fills in the loading screen's texts (finish-loader.sh).
+# worker and the call module still are. Then fills in the loading screen's texts (finish-loader.sh)
+# and builds the background effects' segmentation worker (build-segmentation.sh, #439), which
+# Trunk can't build with SIMD for itself alone.
 #
 # The app is linked with relocations (`--emit-relocs`), which the split needs; crates/teamcraft-web-bundle
 # does the rest. Features for the app (the development demo): TEAMCRAFT_WEB_FEATURES, e.g. "demo".
@@ -58,5 +60,11 @@ fi
 cargo run --quiet --release --manifest-path "$root/Cargo.toml" -p teamcraft-web-bundle -- "$@"
 
 sh "$here/scripts/finish-loader.sh"
+# The background effects' segmentation worker (#439), which finish-calls.sh names.
+if [ "$profile" = "web-release" ]; then
+  WASM_OPT="$wasm_opt" sh "$here/scripts/build-segmentation.sh"
+else
+  sh "$here/scripts/build-segmentation.sh"
+fi
 # Edits index.html too, so it runs in this hook, after the bundle.
 sh "$here/scripts/finish-calls.sh"

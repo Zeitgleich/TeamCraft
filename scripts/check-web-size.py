@@ -11,18 +11,22 @@ printed too when the `brotli` module is installed. CI runs this after the releas
 (`.github/workflows/web-size.yml`) on every change to the web client.
 
 Parts of the app that load when first used (the other split chunks and the call module) are listed
-after the table; they are not part of the first visit and not of the budget.
+after the table; they are not part of the first visit and not of the budget. The call module has a
+limit of its own (`--call-module-budget-bytes`): a signed release's service worker fetches it in the
+background for every member. The background effects' segmentation (#439) is listed with them; only
+someone who turns an effect on loads it.
 
 `--budget-bytes` is the gzip -9 total. It warns within 5 % of it and fails above it. The
 uncompressed size is printed for information only: what users wait for is the transfer.
 
         scripts/check-web-size.py crates/teamcraft-ui/dist [--budget-bytes N]
-                [--baseline main.json] [--write sizes.json]
+                [--call-module-budget-bytes N] [--baseline main.json] [--write sizes.json]
 
 `--baseline` is the `--write` output of an earlier build (CI keeps main's); the delta to it is
 printed. With `GITHUB_STEP_SUMMARY` set, the table also goes to the job summary.
 """
 import argparse
+import fnmatch
 import gzip
 import json
 import os
@@ -39,6 +43,12 @@ except ImportError:  # Optional: gzip is the budget, brotli is informational.
 # plus about 10 % (docs/performance.md, "Web bundle size"). Since the split (#334) the app counts
 # only what a first visit loads; the chunks loaded when first used are listed apart.
 DEFAULT_BUDGET_BYTES = 4_700_000
+# The call module's gzip -9 size, decimal megabytes: 0.86 MB with the effects' compositors (#439),
+# plus about 15 %. The segmentation is a module of its own that only loads when an effect starts.
+DEFAULT_CALL_MODULE_BUDGET_BYTES = 1_000_000
+CALL_MODULE = "teamcraft-web-calls-*_bg.wasm"
+# Lazy files that only load on demand (marked in the list).
+ON_DEMAND_PREFIX = "teamcraft-web-segmentation-"
 # Warn when the gzip total is above this share of the budget.
 WARN_SHARE = 0.95
 # The files of a first visit, by the name trunk gives them (with a content hash).
@@ -56,6 +66,8 @@ def main(argv=None):
     parser.add_argument("dist", type=pathlib.Path, help="the trunk output directory")
     parser.add_argument("--budget-bytes", type=int, default=DEFAULT_BUDGET_BYTES,
                         help="fail above this gzip -9 total, warn close to it")
+    parser.add_argument("--call-module-budget-bytes", type=int, default=DEFAULT_CALL_MODULE_BUDGET_BYTES,
+                        help="fail when the call module is above this gzip -9 size")
     parser.add_argument("--baseline", type=pathlib.Path, help="sizes of an earlier build (JSON)")
     parser.add_argument("--write", type=pathlib.Path, help="write this build's sizes (JSON)")
     args = parser.parse_args(argv)
@@ -68,7 +80,8 @@ def main(argv=None):
         return 2
     maybe_baseline = load_baseline(args.baseline)
     report = render(sizes, maybe_baseline, args.budget_bytes)
-    report += render_lazy(measure_lazy(args.dist, session_files(args.dist)))
+    lazy = measure_lazy(args.dist, session_files(args.dist))
+    report += render_lazy(lazy)
     print(report)
     summary = os.environ.get("GITHUB_STEP_SUMMARY")
     if summary:
@@ -77,7 +90,7 @@ def main(argv=None):
     if args.write:
         args.write.parent.mkdir(parents=True, exist_ok=True)
         args.write.write_text(json.dumps(sizes, indent=2) + "\n", encoding="utf-8")
-    return check_limits(sizes, args.budget_bytes)
+    return max(check_limits(sizes, args.budget_bytes), check_call_module(lazy, args.call_module_budget_bytes))
 
 
 def measure(dist):
@@ -150,8 +163,20 @@ def render_lazy(lazy):
              "| Chunk                                            | Uncompressed | gzip -9    |",
              "|--------------------------------------------------|--------------|------------|"]
     for name, size, gzip_size in lazy:
-        lines.append(f"| {name:<48} | {mb(size):>12} | {mb(gzip_size):>10} |")
+        label = f"{name} (on demand)" if name.startswith(ON_DEMAND_PREFIX) else name
+        lines.append(f"| {label:<48} | {mb(size):>12} | {mb(gzip_size):>10} |")
     return "\n".join(lines)
+
+
+def check_call_module(lazy, budget_bytes):
+    """The exit code for the call module: 1 above its budget (a build without one passes)."""
+    pattern = re.compile(fnmatch.translate(CALL_MODULE))
+    for name, _, gzip_size in lazy:
+        if pattern.match(name) and gzip_size > budget_bytes:
+            print(f"error: the call module {name} is {gzip_size:,} bytes gzip -9, over its budget of "
+                  f"{budget_bytes:,}", file=sys.stderr)
+            return 1
+    return 0
 
 
 def check_limits(sizes, budget_bytes):

@@ -147,6 +147,7 @@ pub fn failure_message_key(failure: &ActionFailure) -> &'static str {
       CallFailure::Unsupported => "error-call-unsupported",
       CallFailure::ServerUnreachable => "error-call-server-unreachable",
       CallFailure::BackgroundRequired => "error-call-background-required",
+      CallFailure::EffectsUnavailable => "error-call-effects-unavailable",
       CallFailure::EncryptionPending => "error-call-encryption-pending",
       CallFailure::MoveRefused => "error-call-move-refused",
       CallFailure::SpeakersUnavailable => "error-call-speakers-unavailable",

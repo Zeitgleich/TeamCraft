@@ -75,6 +75,76 @@ impl RawPicture<'_> {
   }
 }
 
+/// A tightly packed RGBx picture (a canvas' `getImageData`) to I420, like [`RawPicture::to_i420`]
+/// without the other formats: the browser's background effects need only this one (#439), and
+/// leave the MJPEG decoder out of the call module that way.
+pub fn rgbx_to_i420(
+  data: &[u8],
+  width: u32,
+  height: u32,
+  timestamp_us: u64,
+) -> Result<VideoFrame, CaptureError> {
+  let resolution = even_resolution(width, height)?;
+  let (even_width, even_height) = (usize::from(resolution.width), usize::from(resolution.height));
+  let stride = width as usize * 4;
+  let needed = stride * (even_height - 1) + even_width * 4;
+  if data.len() < needed {
+    return Err(CaptureError::Device(format!(
+      "RGBx picture of {width}x{height} needs {needed} bytes, got {}",
+      data.len()
+    )));
+  }
+  // Two rows at a time, two pixels across: each 2x2 block gives four luma samples and one chroma
+  // pair. Slices of whole rows keep the bounds checks out of the inner loop (the call module is
+  // built for size, which leaves rgb32's per-pixel indexing about five times slower).
+  let mut out = vec![0; even_width * even_height * 3 / 2];
+  let (luma, chroma) = out.split_at_mut(even_width * even_height);
+  let (u_plane, v_plane) = chroma.split_at_mut(even_width * even_height / 4);
+  let chroma_width = even_width / 2;
+  let rows = luma
+    .chunks_exact_mut(even_width * 2)
+    .zip(u_plane.chunks_exact_mut(chroma_width))
+    .zip(v_plane.chunks_exact_mut(chroma_width))
+    .enumerate();
+  for (pair, ((luma_rows, u_row), v_row)) in rows {
+    let top = &data[pair * 2 * stride..][..even_width * 4];
+    let bottom = &data[(pair * 2 + 1) * stride..][..even_width * 4];
+    let (luma_top, luma_bottom) = luma_rows.split_at_mut(even_width);
+    let blocks = top
+      .as_chunks::<8>()
+      .0
+      .iter()
+      .zip(bottom.as_chunks::<8>().0)
+      .zip(
+        luma_top
+          .as_chunks_mut::<2>()
+          .0
+          .iter_mut()
+          .zip(luma_bottom.as_chunks_mut::<2>().0),
+      )
+      .zip(u_row.iter_mut().zip(v_row.iter_mut()));
+    for (((top, bottom), (luma_top, luma_bottom)), (u, v)) in blocks {
+      let rgb = |pixel: &[u8]| [i32::from(pixel[0]), i32::from(pixel[1]), i32::from(pixel[2])];
+      let pixels = [
+        rgb(&top[..4]),
+        rgb(&top[4..]),
+        rgb(&bottom[..4]),
+        rgb(&bottom[4..]),
+      ];
+      let luma_of = |[r, g, b]: [i32; 3]| (((66 * r + 129 * g + 25 * b + 128) >> 8) + 16) as u8;
+      luma_top[0] = luma_of(pixels[0]);
+      luma_top[1] = luma_of(pixels[1]);
+      luma_bottom[0] = luma_of(pixels[2]);
+      luma_bottom[1] = luma_of(pixels[3]);
+      let sum = |channel: usize| (pixels.iter().map(|pixel| pixel[channel]).sum::<i32>() + 2) / 4;
+      let (r, g, b) = (sum(0), sum(1), sum(2));
+      *u = (((-38 * r - 74 * g + 112 * b + 128) >> 8) + 128).clamp(0, 255) as u8;
+      *v = (((112 * r - 94 * g - 18 * b + 128) >> 8) + 128).clamp(0, 255) as u8;
+    }
+  }
+  Ok(VideoFrame::new(resolution, timestamp_us, out)?)
+}
+
 fn bytes_per_pixel(format: PixelFormat) -> usize {
   match format {
     PixelFormat::I420 | PixelFormat::Nv12 | PixelFormat::Mjpeg => 1,
@@ -265,6 +335,38 @@ mod tests {
     .to_i420(0)
     .unwrap();
     assert_eq!(frame.data(), &[82, 82, 82, 82, 90, 240]);
+  }
+
+  #[test]
+  fn rgbx_alone_converts_like_the_general_path() {
+    for (width, height) in [(6, 4), (7, 5), (16, 2)] {
+      let data: Vec<u8> = (0..width * height * 4)
+        .map(|value| (value * 7 % 256) as u8)
+        .collect();
+      let general = RawPicture {
+        format: PixelFormat::Rgbx,
+        width,
+        height,
+        stride: 0,
+        data: &data,
+      }
+      .to_i420(5)
+      .unwrap();
+      assert_eq!(
+        rgbx_to_i420(&data, width, height, 5).unwrap(),
+        general,
+        "{width}x{height}"
+      );
+    }
+    let data: Vec<u8> = (0..6 * 4 * 4).map(|value| (value * 7 % 256) as u8).collect();
+    assert!(matches!(
+      rgbx_to_i420(&data[..20], 6, 4, 5),
+      Err(CaptureError::Device(_))
+    ));
+    assert!(matches!(
+      rgbx_to_i420(&data, 1, 1, 5),
+      Err(CaptureError::UnsupportedFormat(_))
+    ));
   }
 
   #[test]

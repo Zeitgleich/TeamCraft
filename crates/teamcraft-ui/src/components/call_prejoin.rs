@@ -47,7 +47,7 @@ pub fn PreJoinScreen(request: CallRequest) -> impl IntoView {
   let speakers = Memo::new(move |_| {
     devices.with(|devices| InputOffer::new(devices.speakers.clone(), DevicePresence::Unknown))
   });
-  let has_effects = untrack(|| state.read(|backend| backend.has_background_effects()));
+  let has_effects = untrack(|| state.read(|backend| backend.effects_offer().has_preview()));
   let participants = Memo::new(move |_| {
     state
       .read(|backend| backend.call_participants(request.conversation))

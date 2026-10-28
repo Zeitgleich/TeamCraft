@@ -520,8 +520,10 @@ themselves and the server can't relax it.
   organization's look; owners can include them.
 - **Enforcement:** the client applies the rule when a background is chosen and when the camera turns
   on. Under `required`, a device that can't replace the background (no GPU or segmentation model) can't
-  turn the camera on, so the room behind the person is never sent. The browser and the mobile apps don't
-  send camera video yet; they get the same check when they do.
+  turn the camera on, so the room behind the person is never sent. The browser applies the rule the
+  same way (#439): it puts the organization's picture behind the person where it runs the effects
+  (Chrome, Edge and Safari with WebGPU, Firefox and browsers without WebGPU with WebGL2), and keeps
+  the camera off with a hint where it can't (no WebGL2, graphics acceleration turned off). The mobile apps don't send camera video yet; they get the same check when they do.
 - **Storage:** the pictures are stored unencrypted (every call participant sees them anyway); the policy
   lists each one with its SHA-256, and clients refuse a picture whose hash doesn't match (e2ee.md §8.1).
 - **Admin UI:** Administration → Backgrounds: upload (JPEG or PNG; re-encoded as a Full HD JPEG without

@@ -134,3 +134,9 @@ lto = true
 codegen-units = 1
 panic = "abort"
 strip = true
+
+# The browser's person segmentation (tract, only in the segmentation worker's module
+# teamcraft-web-segmentation, #439) runs every frame or two: its kernels are built for speed.
+# Chrome on the main thread: 11.5 ms instead of 19 ms a frame without SIMD, for 0.1 MB (gzip) more.
+[profile.web-release.package.tract-linalg]
+opt-level = 3

@@ -39,8 +39,8 @@ use crate::admin_live::AdminLive;
 use crate::auth::Authenticator;
 use crate::backend::{AdminBackend, CallBackend, ChatBackend, SearchBackend, SecurityBackend};
 use crate::calls::{
-  ActiveCall, BackgroundEffect, BackgroundImageInfo, CallPreview, CallRequest, CameraFallback, HuddleInfo,
-  IncomingCall, JoinMedia, MediaDevices, Participant, PreviewCamera,
+  ActiveCall, BackgroundEffect, BackgroundImageInfo, CallPreview, CallRequest, CameraFallback, EffectsOffer,
+  HuddleInfo, IncomingCall, JoinMedia, MediaDevices, Participant, PreviewCamera,
 };
 use crate::clock::now_ms;
 use crate::i18n::translate_current;
@@ -980,8 +980,11 @@ impl<C: ChatBackend> CallBackend for Hybrid<C> {
     self.calls_unavailable
   }
 
-  fn has_background_effects(&self) -> bool {
-    self.maybe_calls.as_ref().is_none_or(|calls| !calls.is_in_page())
+  fn effects_offer(&self) -> EffectsOffer {
+    self
+      .maybe_calls
+      .as_ref()
+      .map_or(EffectsOffer::Full, RemoteCalls::effects_offer)
   }
 
   fn call_join_failures(&self) -> u64 {

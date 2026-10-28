@@ -80,8 +80,10 @@ gstreamer = ["native", "dep:gstreamer", "dep:gstreamer-app", "dep:gstreamer-vide
 effects = ["dep:wgpu", "dep:bytemuck", "dep:futures-channel", "dep:pollster", "dep:zune-jpeg", "dep:zune-png", "dep:jpeg-encoder"]
 # The built-in photo backgrounds, compiled in (about 3.5 MB of JPEG): the desktop app only.
 photo-backgrounds = ["effects"]
-# Person segmentation for the effects with tract (pure-Rust ONNX inference; native and wasm).
-segmentation = ["effects", "dep:tract-onnx"]
+# Person segmentation for the effects with tract (pure-Rust ONNX inference; native and wasm), and
+# the check of a downloaded model against its pinned SHA-256. The browser's segmentation worker is
+# built with it alone, so no other crypto comes along.
+segmentation = ["effects", "dep:tract-onnx", "dep:sha2", "dep:getrandom"]
 
 [dependencies]
 teamcraft-proto.workspace = true
@@ -122,6 +124,8 @@ bytemuck = { version = "1", optional = true, features = ["derive"] }
 futures-channel = { version = "0.3.34", optional = true }
 # Segmentation model inference (MediaPipe selfie segmentation as ONNX), MIT/Apache-2.0.
 tract-onnx = { version = "0.23.9", optional = true }
+# The downloaded model's SHA-256 (as teamcraft-crypto computes hashes; MIT/Apache-2.0).
+sha2 = { version = "0.11.0", optional = true }
 # Safe libopus bindings; libopus (BSD-3-Clause) is the reference Opus implementation.
 opus = { version = "0.4.0", optional = true }
 # Cross-platform audio device I/O (ALSA/PipeWire, CoreAudio, WASAPI, AAudio).
@@ -151,6 +155,9 @@ web-sys = { version = "0.3.106", optional = true, features = [
   "WritableStream", "WritableStreamDefaultWriter", "DisplayMediaStreamConstraints",
   "Document", "Element", "EventTarget", "HtmlCanvasElement", "HtmlElement", "HtmlMediaElement",
   "HtmlVideoElement", "MediaTrackSettings", "Node", "ImageData", "ResizeObserver",
+  # Background effects (#439): the segmentation worker and the WebGL2 compositor.
+  "ErrorEvent", "ImageBitmap", "Worker", "WorkerOptions", "WorkerType", "WebGl2RenderingContext", "WebGlFramebuffer",
+  "WebGlProgram", "WebGlShader", "WebGlTexture", "WebGlUniformLocation", "WebGlVertexArrayObject",
 ] }
 futures = { version = "0.3.34", optional = true, default-features = false, features = ["std", "async-await"] }
 # Log output and error reporting of the headless teamcraft-call client.
@@ -261,9 +268,11 @@ required-features = ["web"]
 [target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
 wtransport = { version = "0.7.2", features = ["quinn", "self-signed"] }
 
-# davey pulls in rand 0.8 (getrandom 0.2), which needs its JS backend in the browser.
+# davey pulls in rand 0.8 (getrandom 0.2), which needs its JS backend in the browser; tract
+# (segmentation) rand 0.10 (getrandom 0.4).
 [target.'cfg(all(target_arch = "wasm32", target_os = "unknown"))'.dependencies]
 getrandom_02 = { package = "getrandom", version = "0.2.17", features = ["js"] }
+getrandom = { version = "0.4.3", features = ["wasm_js"], optional = true }
 
 # Runs the DAVE round trip in Node or a browser (tests/wasm_dave.rs).
 [target.'cfg(all(target_arch = "wasm32", target_os = "unknown"))'.dev-dependencies]
