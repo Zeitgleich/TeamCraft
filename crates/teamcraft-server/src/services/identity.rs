@@ -52,6 +52,10 @@ pub async fn put_identity_key(
     .as_ref()
     .ok_or_else(|| ApiError::InvalidRequest("a new identity key needs its key bag".into()))?;
   super::key_bag::check_size(state, &key_bag.encrypted_key_bag, &key_bag.wrapped_backup_keys)?;
+  // A new identity's first bag has no stored wraps to keep (e2ee.md §6.5.8).
+  if super::key_bag::passphrase_rule(state, caller) == super::key_bag::PassphraseRule::OnlyStoredOnes {
+    super::key_bag::check_passphrase_wraps(key_bag.wrapped_backup_keys.as_slice(), None)?;
+  }
 
   let outcome = state
     .database

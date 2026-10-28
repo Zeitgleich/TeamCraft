@@ -98,6 +98,10 @@ pub enum ApiError {
   /// An admin switched local accounts off: no sign-in with e-mail and password.
   #[error("sign-in with e-mail and password is turned off on this server")]
   LocalAccountsDisabled,
+  /// The signed policy lets members protect their key backup only with a recovery kit: a new or
+  /// changed recovery passphrase is refused (e2ee.md §6.5.8).
+  #[error("the workspace policy allows only a recovery kit, no new recovery passphrase")]
+  RecoveryPassphraseNotAllowed,
   /// The request arrived on a host name no brand is configured for and `unknown_host = "reject"`.
   #[error("this host name is not served here")]
   UnknownHost,
@@ -297,6 +301,7 @@ impl ApiError {
       Self::Auth(AuthError::NoTeamcraftRole | AuthError::AccountDeactivated)
       | Self::Forbidden(_)
       | Self::GuestDmNotAllowed
+      | Self::RecoveryPassphraseNotAllowed
       | Self::MfaRequired => StatusCode::FORBIDDEN,
       Self::Auth(AuthError::KeysUnavailable(_)) => StatusCode::SERVICE_UNAVAILABLE,
       Self::NotFound { .. } => StatusCode::NOT_FOUND,
@@ -341,6 +346,7 @@ impl ApiError {
       Self::MfaRequired => ErrorCode::MfaRequired,
       Self::ShareUnavailable => ErrorCode::ShareUnavailable,
       Self::LocalAccountsDisabled => ErrorCode::LocalAccountsDisabled,
+      Self::RecoveryPassphraseNotAllowed => ErrorCode::RecoveryPassphraseNotAllowed,
       Self::UnknownHost => ErrorCode::UnknownHost,
       Self::Conflict(_) => ErrorCode::Conflict,
       Self::LastOwner => ErrorCode::LastOwner,
@@ -592,6 +598,11 @@ mod tests {
         ErrorCode::CannotDeleteSelf,
       ),
       (ApiError::LastAdmin, StatusCode::CONFLICT, ErrorCode::LastAdmin),
+      (
+        ApiError::RecoveryPassphraseNotAllowed,
+        StatusCode::FORBIDDEN,
+        ErrorCode::RecoveryPassphraseNotAllowed,
+      ),
       (
         ApiError::NotSpaceMember,
         StatusCode::BAD_REQUEST,
