@@ -32,7 +32,7 @@ use anyhow::{Context, bail};
 use teamcraft_media::video::{
   CAMERA_MAX_RESOLUTION, VideoFrame, VideoResolution, camera_layers, camera_limit,
 };
-use teamcraft_media::video_capture::{CaptureFormat, VideoCapture, frame_queue};
+use teamcraft_media::video_capture::CaptureFormat;
 use teamcraft_media::video_codec::{OpenH264Decoder, SimulcastEncoder, VideoContent, VideoDecoder};
 use teamcraft_media::video_pipeline::{EncoderFactory, preferred_encoders, software_encoders};
 use teamcraft_proto::VideoLayerInfo;
@@ -128,6 +128,8 @@ struct EncodeCost {
 
 #[cfg(all(target_os = "macos", feature = "avfoundation"))]
 fn run_camera(limit: VideoResolution, encoders: &EncoderFactory, duration: Duration) -> anyhow::Result<Run> {
+  use teamcraft_media::video_capture::{VideoCapture, frame_queue};
+
   let format = CaptureFormat {
     resolution: limit,
     framerate: FRAMERATE,

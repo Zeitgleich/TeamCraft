@@ -194,8 +194,9 @@ pub(super) fn open_camera(
       Ok(capture) => {
         info!("camera through the portal (PipeWire), V4L2 if it stays silent");
         // The portal's stream can stay paused for good (#683): then the default camera directly.
-        let open_v4l2 =
-          Box::new(|| V4l2Camera::open(None, format).map(|camera| Box::new(camera) as Box<dyn VideoCapture>));
+        let open_v4l2 = Box::new(move || {
+          V4l2Camera::open(None, format).map(|camera| Box::new(camera) as Box<dyn VideoCapture>)
+        });
         let capture =
           FallbackCapture::new(Box::new(capture), "portal", open_v4l2, "V4L2", PORTAL_CAMERA_WAIT);
         // The portal decides which camera; nothing to report.
