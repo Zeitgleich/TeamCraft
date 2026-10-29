@@ -42,7 +42,8 @@ use super::{
 use crate::call_engine::OwnPublication;
 use crate::call_video::ReceivedVideoFrame;
 use crate::video::{
-  LayerSizer, VideoResolution, fit_within, screen_bitrate_bps, screen_limits, simulcast_layers,
+  CAMERA_FRAMERATE, LayerSizer, VideoResolution, camera_layers, fit_within, screen_bitrate_bps,
+  screen_limits, simulcast_layers,
 };
 use crate::web_api::{
   Canvas2d, EncodedVideoChunk, VideoDecoder, VideoEncoder, VideoFrame as WebVideoFrame, count_picture_drawn,
@@ -57,10 +58,6 @@ const H264_CODEC_LEVEL_5_1: &str = "avc1.42e033";
 const LEVEL_4_0_MAX_MACROBLOCKS: u32 = 8192;
 /// WebCodecs codec string: VP9 profile 0 (older browser clients).
 const VP9_CODEC: &str = "vp09.00.10.08";
-const CAMERA_WIDTH: u32 = 1280;
-const CAMERA_HEIGHT: u32 = 720;
-const CAMERA_FRAMERATE: u8 = 30;
-const CAMERA_BITRATE_BPS: u32 = 1_500_000;
 /// A keyframe at least this often (seconds), so a lost frame doesn't freeze the picture for long.
 const KEYFRAME_INTERVAL_SECONDS: u32 = 4;
 /// Frames waiting in an encoder above this are skipped (slow machine or encoder).
@@ -190,13 +187,22 @@ pub(super) struct Decoder {
 pub(super) struct TrackPlan {
   pub kind: VideoTrackKind,
   pub framerate: u8,
-  pub bitrate_bps: u32,
-  pub max_layers: u8,
+  pub shape: LayerShape,
   /// What is sent never exceeds this size, whatever the camera delivers (4K cameras); the
   /// encoders scale. `None`: the source size.
   pub maybe_max_resolution: Option<VideoResolution>,
   #[cfg(feature = "effects")]
   pub maybe_effects: Option<CameraEffects>,
+}
+
+/// How a track's simulcast layers are cut from its picture.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum LayerShape {
+  /// A camera's layers (`video::camera_layers`: 1080p, 720p and 360p from a 1080p camera, #967),
+  /// encoded in the latency mode that gives them their bitrate ([`camera_latency_mode`]).
+  Camera,
+  /// Up to `max_layers` layers halving the size, the top one at `bitrate_bps` (screen shares).
+  Halving { bitrate_bps: u32, max_layers: u8 },
 }
 
 impl TrackSender {
@@ -226,11 +232,30 @@ impl TrackSender {
     let limit = plan.maybe_max_resolution.unwrap_or(resolution);
     let resolution = fit_within(resolution, limit);
     let video = play_hidden(&stream).await?;
-    let infos = simulcast_layers(resolution, plan.framerate, plan.bitrate_bps, plan.max_layers);
+    let (infos, latency) = match plan.shape {
+      LayerShape::Camera => (
+        camera_layers(resolution, plan.framerate, limit),
+        camera_latency_mode(),
+      ),
+      LayerShape::Halving {
+        bitrate_bps,
+        max_layers,
+      } => (
+        simulcast_layers(resolution, plan.framerate, bitrate_bps, max_layers),
+        LatencyMode::Realtime,
+      ),
+    };
     let sizer = LayerSizer::new(infos.clone(), limit);
     let (kind, framerate, encoder_inputs) = (plan.kind.clone(), plan.framerate, inputs.clone());
     let encoders = LayerEncoders::new(infos, move |info, generation| {
-      LayerEncoder::new(info, kind.clone(), framerate, generation, &encoder_inputs)
+      LayerEncoder::new(
+        info,
+        kind.clone(),
+        framerate,
+        latency,
+        generation,
+        &encoder_inputs,
+      )
     })?;
     // "Stop sharing" in the browser's own UI (or an unplugged camera) ends the track.
     let ended_sender = inputs.clone();
@@ -581,6 +606,7 @@ impl LayerEncoder {
     info: VideoLayerInfo,
     kind: VideoTrackKind,
     framerate: u8,
+    latency: LatencyMode,
     generation: u64,
     inputs: &mpsc::UnboundedSender<Input>,
   ) -> Result<Self, WebCallError> {
@@ -635,7 +661,7 @@ impl LayerEncoder {
           ("height", JsValue::from(info.height)),
           ("bitrate", JsValue::from(info.max_bitrate_bps)),
           ("framerate", JsValue::from(framerate)),
-          ("latencyMode", JsValue::from_str("realtime")),
+          ("latencyMode", JsValue::from_str(latency.as_str())),
         ])
         .map_err(browser("VideoEncoder"))?,
       )
@@ -872,19 +898,53 @@ pub(super) fn shown_size(canvas: &HtmlCanvasElement) -> VideoResolution {
   }
 }
 
-/// The plan for a camera: three simulcast layers from 720p at 30 fps.
-pub(super) fn camera_plan() -> TrackPlan {
+/// The plan for a camera sent within `limit` (`video::camera_limit`): its layers at 30 fps, from
+/// 1080p where the camera delivers it (#967).
+pub(super) fn camera_plan(limit: VideoResolution) -> TrackPlan {
   TrackPlan {
     kind: VideoTrackKind::Camera,
     framerate: CAMERA_FRAMERATE,
-    bitrate_bps: CAMERA_BITRATE_BPS,
-    max_layers: 3,
-    maybe_max_resolution: Some(VideoResolution {
-      width: CAMERA_WIDTH as u16,
-      height: CAMERA_HEIGHT as u16,
-    }),
+    shape: LayerShape::Camera,
+    maybe_max_resolution: Some(limit),
     #[cfg(feature = "effects")]
     maybe_effects: None,
+  }
+}
+
+/// How a WebCodecs encoder weighs latency against quality (`VideoEncoderConfig.latencyMode`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum LatencyMode {
+  Realtime,
+  Quality,
+}
+
+impl LatencyMode {
+  fn as_str(self) -> &'static str {
+    match self {
+      Self::Realtime => "realtime",
+      Self::Quality => "quality",
+    }
+  }
+}
+
+/// The latency mode of a camera's encoders: `quality` on Apple devices, `realtime` elsewhere.
+/// Chrome's hardware encoder on a Mac (VideoToolbox) in `realtime` mode stops far below the
+/// bitrate on a calm camera picture, whatever the bitrate and `bitrateMode` (#967, Chrome 156, M4
+/// Max, a calm 30 fps picture: 360p 36 of 375 kbit/s, 720p 503 of 1500, 1080p 1940 of 3000, and
+/// 533 kbit/s when 720p was given 3 Mbit/s); in `quality` mode it sends 424, 1700 and 3053 kbit/s,
+/// and its pictures came out as soon (5 to 9 ms after the frame, against 6 to 11 ms). With H.264
+/// Constrained Baseline there are no B-frames to wait for. Other platforms keep `realtime`: their
+/// software encoder sends its bitrate either way, and a hardware encoder elsewhere may buffer
+/// frames outside it (untested).
+fn camera_latency_mode() -> LatencyMode {
+  let is_apple = window()
+    .ok()
+    .and_then(|window| window.navigator().user_agent().ok())
+    .is_some_and(|agent| agent.contains("Macintosh"));
+  if is_apple {
+    LatencyMode::Quality
+  } else {
+    LatencyMode::Realtime
   }
 }
 
@@ -908,8 +968,10 @@ pub(super) fn screen_plan(mode: ScreenContentMode) -> TrackPlan {
   TrackPlan {
     kind: VideoTrackKind::Screen,
     framerate,
-    bitrate_bps: screen_bitrate_bps(limit, framerate),
-    max_layers: 2,
+    shape: LayerShape::Halving {
+      bitrate_bps: screen_bitrate_bps(limit, framerate),
+      max_layers: 2,
+    },
     maybe_max_resolution: Some(limit),
     #[cfg(feature = "effects")]
     maybe_effects: None,
@@ -920,10 +982,13 @@ pub(super) fn screen_plan(mode: ScreenContentMode) -> TrackPlan {
 /// constraint is `ideal`, so no device is turned away for its size or rate (`OverconstrainedError`);
 /// if the browser still fails (the chosen device is gone, or refuses the size), it is asked once
 /// more for any camera with no constraints.
-pub(super) async fn capture_camera(maybe_device: Option<&str>) -> Result<MediaStream, WebCallError> {
+pub(super) async fn capture_camera(
+  maybe_device: Option<&str>,
+  limit: VideoResolution,
+) -> Result<MediaStream, WebCallError> {
   let video = MediaTrackConstraints::new();
-  video.set_width(&ideal(CAMERA_WIDTH)?);
-  video.set_height(&ideal(CAMERA_HEIGHT)?);
+  video.set_width(&ideal(u32::from(limit.width))?);
+  video.set_height(&ideal(u32::from(limit.height))?);
   video.set_frame_rate(&ideal(u32::from(CAMERA_FRAMERATE))?);
   if let Some(device) = maybe_device {
     let preferred = dictionary(&[("ideal", JsValue::from_str(device))]).map_err(browser("getUserMedia"))?;

@@ -26,7 +26,7 @@ use teamcraft_client_api::call_view::{CallSignal, CallView};
 use teamcraft_client_api::calls::{
   ActiveCall, BackgroundEffect, BrowserPermission, CallEndReason, CallPreview, CallRequest, CallStatusSounds,
   CameraBackground, DevicePresence, EffectsOffer, JoinMedia, MediaDevice, MediaDevices, OrgBackgrounds,
-  PreviewCamera, PushToTalk, ScreenShareSound,
+  PreviewCamera, PushToTalk, ScreenShareSound, VideoQuality,
 };
 use teamcraft_client_api::failure::{ActionFailure, CallFailure, FailureKind};
 use teamcraft_client_api::page_calls::{
@@ -48,6 +48,7 @@ use teamcraft_media::call_web::{
 };
 use teamcraft_media::effects::{BackgroundEffect as MediaEffect, needs_picture};
 use teamcraft_media::jitter::JitterBufferConfig;
+use teamcraft_media::video::{VideoResolution, camera_limit};
 use teamcraft_proto::{
   AudioCodec, CallId, DeviceId, MediaCapabilities, MediaStreamId, ScreenContentMode, VideoCodec,
   VideoTrackKind,
@@ -112,6 +113,8 @@ struct State {
   devices: MediaDevices,
   push_to_talk: PushToTalk,
   status_sounds: CallStatusSounds,
+  /// The highest quality the camera is sent at (#967).
+  camera_quality: VideoQuality,
   microphone: AudioDeviceChoice,
   speakers: AudioDeviceChoice,
   maybe_camera: Option<String>,
@@ -159,6 +162,8 @@ enum Control {
     stream: MediaStream,
     // Boxed: the effects pipeline dwarfs the other controls.
     maybe_effects: Option<Box<CameraEffects>>,
+    /// What it is sent within (`video::camera_limit`).
+    limit: VideoResolution,
     done: Done,
   },
   /// Another effect for a camera that goes through the effects.
@@ -181,6 +186,11 @@ enum Control {
     canvas: HtmlCanvasElement,
   },
   Unwatch(MediaStreamId),
+  /// The lines the viewer picked for a received track (`None`: Auto, #967).
+  VideoQuality {
+    stream_id: MediaStreamId,
+    maybe_max_lines: Option<u16>,
+  },
   StatusSounds(CallStatusSounds),
   NetworkChanged,
   VideoStats(oneshot::Sender<Option<VideoStatsReport>>),
@@ -568,6 +578,20 @@ impl Host {
         self.state.borrow_mut().status_sounds = sounds;
         self.control(Control::StatusSounds(sounds));
       },
+      CallAction::SetCameraQuality { quality } => {
+        let previous = std::mem::replace(&mut self.state.borrow_mut().camera_quality, quality);
+        if previous.max_lines() != quality.max_lines() {
+          // A running camera (or the pre-join check's) opens again at the new size.
+          if self.maybe_media.borrow().is_some() && self.state.borrow().view.is_camera_on() {
+            self.start_camera().await?;
+          }
+          self.restart_preview_camera().await?;
+        }
+      },
+      CallAction::SetVideoQuality { stream_id, quality } => self.control(Control::VideoQuality {
+        stream_id,
+        maybe_max_lines: quality.max_lines(),
+      }),
       CallAction::Decline { conversation } => {
         self.state.borrow_mut().view.decline(conversation);
         self.changed();
@@ -688,10 +712,12 @@ impl Host {
     });
     let is_through_effects = maybe_effects.is_some();
     let sent = stream.clone();
+    let limit = self.camera_limit();
     let started = self
       .ask(|done| Control::Camera {
         stream: sent,
         maybe_effects,
+        limit,
         done,
       })
       .await;
@@ -889,6 +915,11 @@ impl Host {
       .map_err(|_| "the page handed over no picture".to_owned())
   }
 
+  /// The box the camera is sent within, by the user's quality setting (#967).
+  fn camera_limit(&self) -> VideoResolution {
+    camera_limit(self.state.borrow().camera_quality.max_lines())
+  }
+
   /// Opens the chosen camera again (the browser may ask) for the call.
   async fn reopen_camera(&self) -> Result<MediaStream, ActionFailure> {
     let maybe_camera = self.state.borrow().maybe_camera.clone();
@@ -898,7 +929,7 @@ impl Host {
     if let Some(running) = &maybe_running {
       stop_tracks(running);
     }
-    call_web::capture_camera(maybe_camera.as_deref())
+    call_web::capture_camera(maybe_camera.as_deref(), self.camera_limit())
       .await
       .map_err(|error| {
         if maybe_running.is_some() {
@@ -940,7 +971,7 @@ impl Host {
   async fn start_preview_camera(&self) -> Result<(), ActionFailure> {
     self.set_preview_camera(PreviewCamera::Starting);
     let maybe_camera = self.state.borrow().maybe_camera.clone();
-    let result = call_web::capture_camera(maybe_camera.as_deref()).await;
+    let result = call_web::capture_camera(maybe_camera.as_deref(), self.camera_limit()).await;
     // Ended (or restarted) meanwhile: the screen closed, or a join took over.
     if self.state.borrow().preview_camera != PreviewCamera::Starting {
       if let Ok(stream) = &result {
@@ -1335,11 +1366,16 @@ async fn apply(call: &WebCall, control: Control) {
     Control::Camera {
       stream,
       maybe_effects,
+      limit,
       done,
     } => {
       let result = match maybe_effects {
-        Some(effects) => call.share_camera_stream_with_effects(stream, *effects).await,
-        None => call.share_camera_stream(stream).await,
+        Some(effects) => {
+          call
+            .share_camera_stream_with_effects(stream, *effects, limit)
+            .await
+        },
+        None => call.share_camera_stream(stream, limit).await,
       };
       drop(done.send(result));
     },
@@ -1356,6 +1392,10 @@ async fn apply(call: &WebCall, control: Control) {
     Control::StopScreen => call.stop_screen_share(),
     Control::Watch { stream_id, canvas } => call.watch_video(stream_id, canvas),
     Control::Unwatch(stream_id) => call.unwatch_video(stream_id),
+    Control::VideoQuality {
+      stream_id,
+      maybe_max_lines,
+    } => call.set_video_quality(stream_id, maybe_max_lines),
     Control::StatusSounds(sounds) => call.set_status_cues(status_cues(sounds)),
     Control::NetworkChanged => call.network_changed(),
     Control::VideoStats(done) => drop(done.send(call.video_stats().await)),

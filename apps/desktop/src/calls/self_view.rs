@@ -29,7 +29,7 @@ use super::video::jpeg_message;
 /// About 15 images per second: enough for a preview, a fraction of the camera's 30.
 const MIN_INTERVAL: Duration = Duration::from_millis(66);
 /// The largest image, whatever the tile: a camera that only offers 4K would otherwise cost tens of
-/// milliseconds per image. Calls capture 1280x720 (`video::CAMERA_FORMAT`), well inside.
+/// milliseconds per image. Calls capture at most 1920x1080 (`video::camera_format`, #967).
 const MAX_SIZE: VideoResolution = VideoResolution {
   width: 1920,
   height: 1080,

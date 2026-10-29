@@ -551,14 +551,19 @@ Settings → Chats).
 - Cameras on limited and changing links (#939): the ladder and its rules below, the same estimator
   on the uplink (client) and on each viewer's downlink (SFU).
 
-  | Camera layer | Desktop, browser (720p30, 1.5 Mbit/s) | Phones (2 layers, 800 kbit/s) |
-  |--------------|---------------------------------------|-------------------------------|
-  | 0            | 320×180, 94 kbit/s                    | half size, 200 kbit/s         |
-  | 1            | 640×360, 375 kbit/s                   | full size, 800 kbit/s         |
-  | 2            | 1280×720, 1.5 Mbit/s                  | –                             |
+  | Camera layer | Desktop, browser: 1080p camera | 720p camera (or capped at 720p) | Phones (2 layers, 800 kbit/s) |
+  |--------------|--------------------------------|---------------------------------|-------------------------------|
+  | 0            | 640×360, 375 kbit/s            | 320×180, 94 kbit/s              | half size, 200 kbit/s         |
+  | 1            | 1280×720, 1.5 Mbit/s           | 640×360, 375 kbit/s             | full size, 800 kbit/s         |
+  | 2            | 1920×1080, 3 Mbit/s            | 1280×720, 1.5 Mbit/s            | –                             |
 
   Bitrates are the encoders' targets; a busy camera picture comes out at about 80 % of them, and
-  every layer keeps the camera's frame rate (resolution goes before frame rate).
+  every layer keeps the camera's frame rate (resolution goes before frame rate). Desktop and
+  browser cameras send 1080p where the camera has it (`video::camera_layers`, #967), at 30 fps;
+  the user can cap what is sent at 1080p, 720p or 360p. The layers are planned for the first
+  frame the camera delivers. VideoToolbox encodes cameras at a constant bitrate (browsers where
+  WebCodecs has one): at an average bitrate it stopped spending bits on a calm picture, and a
+  720p layer sent 155 to 306 kbit/s of its 1.5 Mbit/s.
 
   *Estimator* (`teamcraft_media::bwe`): a queue building up (delay trend) cuts the estimate a
   step, to 85 % of itself; a queue that lasts 500 ms (the window the delivered rate is measured
@@ -592,7 +597,9 @@ Settings → Chats).
   kbit/s. Browsers' cameras and screen shares send a layer whole or not at all, as before.
 
   *SFU* (`layers`): per viewer, its downlink estimate less 120 kbit/s for sound is the budget;
-  the layer is the highest whose bitrate fits, at most the one the tile asks for (#927). Down at
+  the layer is the highest whose bitrate fits, at most the one the viewer asks for: the smallest
+  that covers its tile (#927; the desktop too since #967), or the quality picked in the video's
+  quality menu (#967). Down at
   once, up one layer at a time once the budget covered it with 15 % headroom for 2 s (0.5 s while
   the estimate is in its fast start: it only grows then, and the hold validates nothing; a screen
   share's viewer got the sharp layer 2 s after the estimate covered it); a paused camera is

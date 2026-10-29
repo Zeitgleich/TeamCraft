@@ -60,6 +60,7 @@ async fn a_late_viewer_of_a_still_screen_gets_its_picture() {
 
   let screen = StillScreen::default();
   let config = VideoSendConfig {
+    maybe_layer_plan: None,
     kind: VideoTrackKind::Screen,
     capture: Box::new(screen.clone()),
     layers: simulcast_layers(VGA, 30, 800_000, 1),
@@ -115,6 +116,7 @@ async fn a_viewer_that_lost_the_first_keyframe_asks_for_another() {
   wait_until_secured(&mut viewer).await;
   relay.lose_video_for(LOSS_WINDOW);
   let config = VideoSendConfig {
+    maybe_layer_plan: None,
     kind: VideoTrackKind::Screen,
     capture: Box::new(TestPatternCapture::new(CaptureFormat {
       resolution: VGA,
@@ -167,6 +169,7 @@ async fn a_capture_that_never_stops_does_not_freeze_the_call() {
   let presenter = join(sfu, certificate_hash, 1, 2).await;
   let _viewer = join(sfu, certificate_hash, 2, 1).await;
   let config = VideoSendConfig {
+    maybe_layer_plan: None,
     kind: VideoTrackKind::Camera,
     capture: Box::new(HangingCamera::default()),
     layers: simulcast_layers(VGA, 30, 150_000, 1),
@@ -193,6 +196,7 @@ async fn a_camera_that_stops_delivering_ends_its_track() {
   let mut presenter = join(sfu, certificate_hash, 1, 2).await;
   let _viewer = join(sfu, certificate_hash, 2, 1).await;
   let config = VideoSendConfig {
+    maybe_layer_plan: None,
     kind: VideoTrackKind::Camera,
     capture: Box::new(GoneCamera::default()),
     layers: simulcast_layers(VGA, 30, 150_000, 1),
@@ -236,6 +240,7 @@ async fn a_camera_that_is_slow_to_open_leaves_the_call_free() {
   let _viewer = join(sfu, certificate_hash, 2, 1).await;
   let (camera, mut gates) = GatedCamera::new(Gate::Open);
   let config = VideoSendConfig {
+    maybe_layer_plan: None,
     kind: VideoTrackKind::Camera,
     capture: Box::new(camera),
     layers: simulcast_layers(VGA, 30, 150_000, 1),
@@ -280,6 +285,7 @@ async fn a_camera_that_is_slow_to_stop_leaves_the_call_free() {
   let _viewer = join(sfu, certificate_hash, 2, 1).await;
   let (camera, mut gates) = GatedCamera::new(Gate::Stop);
   let config = VideoSendConfig {
+    maybe_layer_plan: None,
     kind: VideoTrackKind::Camera,
     capture: Box::new(camera),
     layers: simulcast_layers(VGA, 30, 150_000, 1),

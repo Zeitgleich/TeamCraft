@@ -57,7 +57,7 @@ use crate::call_resilience::{
 use crate::jitter::JitterBufferConfig;
 use crate::sfu_address::{PinnedResolver, sfu_addresses};
 use crate::system_audio::{SystemAudioCapture, SystemAudioError, SystemAudioReceiver, system_audio_queue};
-use crate::video::EncodedVideoFrame;
+use crate::video::{EncodedVideoFrame, TOP_LAYER, VideoResolution, ViewChoice};
 use crate::video_capture::CaptureError;
 use crate::video_pipeline::{
   FirstPicture, FrameSink, KeyframeNeeded, RepeatedWarning, SendProgress, StoppingSender, VideoReceiver,
@@ -226,6 +226,16 @@ enum VideoCommand {
   Unwatch(MediaStreamId),
   /// A received track's decoder failed: ask for a keyframe (rate-limited by the engine).
   RequestKeyframe(MediaStreamId),
+  /// A received track's tile is shown this large now (device pixels).
+  Shown {
+    stream_id: MediaStreamId,
+    shown: VideoResolution,
+  },
+  /// The viewer picked at most these lines for a received track (`None`: Auto, #967).
+  Quality {
+    stream_id: MediaStreamId,
+    maybe_max_lines: Option<u16>,
+  },
 }
 
 /// Where the answer to a [`VideoCommand::Start`] goes.
@@ -254,6 +264,11 @@ struct VideoState {
   maybe_commands: Option<mpsc::WeakUnboundedSender<Command>>,
   /// What others' tracks show, for counting what arrives per kind.
   remote_kinds: HashMap<MediaStreamId, VideoTrackKind>,
+  /// Others' tracks' layers, for the layer a view asks for.
+  remote_layers: HashMap<MediaStreamId, Vec<VideoLayerInfo>>,
+  /// How the app shows others' tracks: their tiles' sizes and the viewer's picks (#967). Kept
+  /// while a track is published, so a tile shown again asks for what it asked before.
+  views: HashMap<MediaStreamId, ViewChoice>,
   counts: VideoCounts,
   send_warning: RepeatedWarning,
   /// When the counters were last looked at, and what they were.
@@ -456,6 +471,22 @@ impl NativeCall {
 
   pub fn unwatch_video(&self, stream_id: MediaStreamId) {
     self.video(VideoCommand::Unwatch(stream_id));
+  }
+
+  /// A received track's tile is shown `shown` large (device pixels): while the viewer leaves the
+  /// quality to the call, it receives the smallest layer that covers the tile (#967), as in the
+  /// browser. Before the first size it receives the top layer.
+  pub fn set_video_shown(&self, stream_id: MediaStreamId, shown: VideoResolution) {
+    self.video(VideoCommand::Shown { stream_id, shown });
+  }
+
+  /// The viewer picked at most `maybe_max_lines` for a received track (`None`: Auto, by its
+  /// tile; #967). The SFU still caps it by what is sent and by the downlink.
+  pub fn set_video_quality(&self, stream_id: MediaStreamId, maybe_max_lines: Option<u16>) {
+    self.video(VideoCommand::Quality {
+      stream_id,
+      maybe_max_lines,
+    });
   }
 
   /// The app's own decoder of a subscribed track failed: its deltas are dropped until the next
@@ -1276,7 +1307,10 @@ fn handle_video(
     } => match VideoReceiver::start(sink, video.keyframe_requester(stream_id)) {
       Ok(receiver) => {
         video.receivers.insert(stream_id, receiver);
-        engine.subscribe_video(stream_id, maybe_max_layer.or(Some(u8::MAX)));
+        let max_layer = maybe_max_layer
+          .unwrap_or(TOP_LAYER)
+          .min(video.view_layer(stream_id));
+        engine.subscribe_video(stream_id, Some(max_layer));
       },
       Err(error) => warn!(%error, "cannot decode video"),
     },
@@ -1297,7 +1331,21 @@ fn handle_video(
     VideoCommand::Subscribe {
       stream_id,
       maybe_max_layer,
-    } => engine.subscribe_video(stream_id, maybe_max_layer),
+    } => {
+      let maybe_max_layer = maybe_max_layer.map(|max_layer| max_layer.min(video.view_layer(stream_id)));
+      engine.subscribe_video(stream_id, maybe_max_layer);
+    },
+    VideoCommand::Shown { stream_id, shown } => {
+      video.views.entry(stream_id).or_default().maybe_shown = Some(shown);
+      video.follow_view(engine, stream_id);
+    },
+    VideoCommand::Quality {
+      stream_id,
+      maybe_max_lines,
+    } => {
+      video.views.entry(stream_id).or_default().maybe_max_lines = maybe_max_lines;
+      video.follow_view(engine, stream_id);
+    },
     VideoCommand::Send { stream_id, frame } => {
       // Frames the app encodes itself; what becomes of each is its own business.
       let _ = engine.send_video(stream_id, &frame, Instant::now());
@@ -1425,10 +1473,17 @@ impl Sinks {
                 .video
                 .remote_kinds
                 .insert(track.stream_id, track.kind.clone());
+              self
+                .video
+                .remote_layers
+                .insert(track.stream_id, track.layers.clone());
+              self.video.follow_view(engine, track.stream_id);
             },
             CallEngineEvent::VideoUnpublished(stream_id) => {
               self.video.receivers.remove(stream_id);
               self.video.remote_kinds.remove(stream_id);
+              self.video.remote_layers.remove(stream_id);
+              self.video.views.remove(stream_id);
               // An own track the SFU dropped (rejoin without the slot) is published again.
               self.video.follow_publications(engine.device_id(), &event);
             },
@@ -1538,6 +1593,26 @@ impl VideoState {
       && let Some(request) = self.waiting.pop_front()
     {
       self.apply(engine, encoded, request);
+    }
+  }
+
+  /// The layer the app's view of a received track asks for ([`ViewChoice::layer`]); the top one
+  /// for a track it said nothing about, or whose layers are unknown.
+  fn view_layer(&self, stream_id: MediaStreamId) -> u8 {
+    let (Some(view), Some(kind), Some(layers)) = (
+      self.views.get(&stream_id),
+      self.remote_kinds.get(&stream_id),
+      self.remote_layers.get(&stream_id),
+    ) else {
+      return TOP_LAYER;
+    };
+    view.layer(kind, layers)
+  }
+
+  /// Asks for the layer a received track's view calls for now (nothing while it isn't received).
+  fn follow_view(&self, engine: &mut CallEngine, stream_id: MediaStreamId) {
+    if self.views.contains_key(&stream_id) {
+      engine.set_video_max_layer(stream_id, self.view_layer(stream_id));
     }
   }
 

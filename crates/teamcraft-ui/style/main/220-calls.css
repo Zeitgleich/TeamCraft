@@ -663,6 +663,71 @@
   color: rgb(255 255 255 / 0.66);
 }
 
+/* The quality menu's button on another person's video (#967), in the corner the name leaves
+   free. With a mouse it shows while the pointer is over the video, like a player's controls;
+   on touch it stays. */
+.tile-quality {
+  position: absolute;
+  right: 8px;
+  bottom: 8px;
+  z-index: 1;
+  display: grid;
+  place-items: center;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: rgb(0 0 0 / 0.55);
+  color: var(--on-fill);
+  cursor: pointer;
+  transition:
+    opacity var(--dur-fast) var(--ease-standard),
+    background-color 120ms ease-out;
+}
+
+.tile-quality svg {
+  width: 16px;
+  height: 16px;
+}
+
+.tile-quality:active,
+.tile-quality.active {
+  background: rgb(0 0 0 / 0.78);
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .tile-quality {
+    opacity: 0;
+  }
+
+  :is(.tile, .shared-screen):hover .tile-quality,
+  .tile-quality:focus-visible,
+  .tile-quality.active {
+    opacity: 1;
+  }
+
+  .tile-quality:hover:not(:active) {
+    background: rgb(0 0 0 / 0.7);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .tile-quality {
+    transition: none;
+  }
+}
+
+.quality-popover {
+  width: min(300px, calc(100% - 32px));
+}
+
+.quality-hint {
+  margin: 10px 2px 0;
+  font-size: var(--text-xs);
+  letter-spacing: var(--tracking-xs);
+}
+
 .silhouette::before,
 .silhouette::after {
   content: "";

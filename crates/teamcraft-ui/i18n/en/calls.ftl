@@ -83,6 +83,14 @@ tile-speaking = speaking
 tile-reconnecting = reconnecting
 video-stalled = Video paused: weak connection
 
+## Video quality (#967): how sharp another person's video comes, like a video player's menu
+video-quality = Video quality
+video-quality-for = Video quality: { $name }
+video-quality-auto = Auto
+video-quality-auto-now = Auto ({ $lines }p)
+video-quality-lines = { $lines }p
+video-quality-hint = Auto picks the sharpest picture the connection and the tile allow. A fixed choice stays below what is sent and what the connection carries.
+
 ## Stats for nerds (#938): an overlay with technical details on every video of the call
 stats-title = Stats for nerds
 stats-copy = Copy stats
@@ -212,6 +220,13 @@ calls-status-sounds-hint = A soft tone repeats while your connection is lost, an
 calls-status-sounds-all = Mine and others' connections
 calls-status-sounds-own-only = Only my connection
 calls-status-sounds-off = Off
+calls-video = Video
+calls-camera-quality = Highest camera quality sent
+calls-camera-quality-hint = Your camera is sent at up to 1080p where it supports it. Pick less to use less data.
+calls-camera-quality-auto = Auto (best)
+calls-camera-quality-1080 = 1080p
+calls-camera-quality-720 = 720p
+calls-camera-quality-360 = 360p
 calls-background = Default background
 calls-background-hint = Applied on your device before your video is sent.
 

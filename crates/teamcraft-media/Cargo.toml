@@ -247,6 +247,11 @@ required-features = ["openh264-source", "segmentation"]
 name = "portal_capture"
 required-features = ["pipewire"]
 
+# What each simulcast layer of a camera sends against its target, in real time (issue #967).
+[[example]]
+name = "camera_bitrate"
+required-features = ["openh264-source"]
+
 # Captures the camera or a display on macOS, encodes, decodes and reports what the pictures show.
 [[example]]
 name = "macos_capture"

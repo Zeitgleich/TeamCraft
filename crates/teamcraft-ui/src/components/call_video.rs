@@ -11,6 +11,7 @@ use teamcraft_proto::MediaStreamId;
 
 use crate::calls::BackgroundEffect;
 use crate::components::icons::{Icon, IconName};
+use crate::components::video_quality::VideoQualityButton;
 use crate::components::video_stats::VideoStatsOverlay;
 use crate::i18n::use_i18n;
 use crate::model::User;
@@ -278,11 +279,17 @@ pub fn LiveVideo(source: VideoSource, #[prop(into)] is_mirrored: Signal<bool>) -
     VideoSource::Remote(stream_id) => StatsTarget::Received(stream_id),
     VideoSource::OwnCamera => StatsTarget::OwnCamera,
   };
+  // Another device's video has a quality menu (#967).
+  let maybe_quality = match source {
+    VideoSource::Remote(stream_id) => Some(view! { <VideoQualityButton stream_id=stream_id /> }),
+    VideoSource::OwnCamera => None,
+  };
   view! {
     <div class="live-video" class:mirrored=move || is_mirrored.get() node_ref=host aria-hidden="true"></div>
     <Show when=move || is_stalled.get() fallback=|| ()>
       <span class="video-stalled" role="status">{move || i18n.t("video-stalled")}</span>
     </Show>
+    {maybe_quality}
     <VideoStatsOverlay target=stats_target maybe_host=host />
   }
 }

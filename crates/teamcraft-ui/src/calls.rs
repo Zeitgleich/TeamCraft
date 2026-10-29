@@ -1,12 +1,14 @@
 //! Call session state of the UI. The view models (devices, participants, effects) live in
 //! `teamcraft-client-api`; this file only adds the reactive state around them.
 
+use std::collections::HashMap;
 use std::rc::Rc;
 
 use leptos::prelude::*;
 
 pub use teamcraft_client_api::calls::*;
 use teamcraft_client_api::model::{ConversationId, UserId};
+use teamcraft_proto::MediaStreamId;
 
 /// The DM call this device is in moved into a meeting room, announced by `by` in the DM's
 /// encryption group with the people they added.
@@ -51,6 +53,13 @@ pub enum CallEvent {
   },
   StopScreenShare,
   StatusSounds(CallStatusSounds),
+  /// The highest quality the own camera is sent at (the setting, #967).
+  CameraQuality(VideoQuality),
+  /// How sharp another device's video comes (its tile's quality menu, #967).
+  VideoQuality {
+    stream_id: MediaStreamId,
+    quality: VideoQuality,
+  },
 }
 
 type CallHandler = Rc<dyn Fn(CallEvent)>;
@@ -88,6 +97,10 @@ pub struct CallState {
   pub shows_video_stats: RwSignal<bool>,
   /// The chat panel next to the call's video (#936); it stays open while the call is minimized.
   pub is_chat_open: RwSignal<bool>,
+  /// The quality picked for others' videos in this call (#967); Auto where none is listed.
+  pub video_qualities: RwSignal<HashMap<MediaStreamId, VideoQuality>>,
+  /// The video whose quality menu is open.
+  pub maybe_quality_menu: RwSignal<Option<MediaStreamId>>,
   /// The camera the backend was told about or uses on its own ([`CallState::send_camera_choice`]).
   sent_camera: StoredValue<String>,
   /// Carries the user's actions to the call backend; set once by the shell.
@@ -119,6 +132,8 @@ impl CallState {
       is_camera_menu_open: RwSignal::new(false),
       shows_video_stats: RwSignal::new(false),
       is_chat_open: RwSignal::new(false),
+      video_qualities: RwSignal::new(HashMap::new()),
+      maybe_quality_menu: RwSignal::new(None),
       sent_camera: StoredValue::new(String::new()),
       handler: StoredValue::new_local(None),
     }
@@ -211,6 +226,25 @@ impl CallState {
     }
   }
 
+  /// The quality picked for another device's video in this call; Auto unless one was picked.
+  pub fn video_quality(&self, stream_id: MediaStreamId) -> VideoQuality {
+    self
+      .video_qualities
+      .with(|qualities| qualities.get(&stream_id).copied())
+      .unwrap_or_default()
+  }
+
+  /// The user picked how sharp another device's video comes (#967); kept for this call.
+  pub fn set_video_quality(&self, stream_id: MediaStreamId, quality: VideoQuality) {
+    self.video_qualities.update(|qualities| {
+      match quality.max_lines() {
+        Some(_) => qualities.insert(stream_id, quality),
+        None => qualities.remove(&stream_id),
+      };
+    });
+    self.emit_in_call(CallEvent::VideoQuality { stream_id, quality });
+  }
+
   /// Stops ringing for an incoming call on this device.
   pub fn decline_incoming(&self) {
     if let Some(incoming) = self.incoming.get_untracked() {
@@ -278,6 +312,8 @@ impl CallState {
     self.is_sharing_screen.set(false);
     self.has_hand_raised.set(false);
     self.is_chat_open.set(false);
+    self.video_qualities.set(HashMap::new());
+    self.maybe_quality_menu.set(None);
     if was_active {
       self.emit(CallEvent::Leave);
     }
@@ -394,6 +430,55 @@ mod tests {
       call.leave();
       assert!(!covers());
       assert!(!call.is_chat_open.get_untracked());
+    });
+  }
+
+  /// #967: a quality picked for another person's video goes to the backend and holds for the
+  /// call; Auto is no entry, and leaving forgets the picks and closes the menu.
+  #[test]
+  fn a_picked_video_quality_reaches_the_backend_and_holds_for_the_call() {
+    let owner = Owner::new();
+    owner.with(|| {
+      let call = CallState::new();
+      let events = Rc::new(RefCell::new(Vec::new()));
+      let seen = events.clone();
+      call.set_handler(move |event| seen.borrow_mut().push(event));
+      call.phase.set(CallPhase::Active);
+      let stream_id = MediaStreamId(9);
+      assert_eq!(untrack(|| call.video_quality(stream_id)), VideoQuality::Auto);
+      call.set_video_quality(stream_id, VideoQuality::Lines(360));
+      assert_eq!(
+        untrack(|| call.video_quality(stream_id)),
+        VideoQuality::Lines(360)
+      );
+      call.set_video_quality(stream_id, VideoQuality::Auto);
+      assert!(
+        call
+          .video_qualities
+          .with_untracked(|qualities| qualities.is_empty())
+      );
+      assert_eq!(
+        *events.borrow(),
+        vec![
+          CallEvent::VideoQuality {
+            stream_id,
+            quality: VideoQuality::Lines(360)
+          },
+          CallEvent::VideoQuality {
+            stream_id,
+            quality: VideoQuality::Auto
+          }
+        ]
+      );
+      call.set_video_quality(stream_id, VideoQuality::Lines(720));
+      call.maybe_quality_menu.set(Some(stream_id));
+      call.leave();
+      assert!(
+        call
+          .video_qualities
+          .with_untracked(|qualities| qualities.is_empty())
+      );
+      assert_eq!(call.maybe_quality_menu.get_untracked(), None);
     });
   }
 

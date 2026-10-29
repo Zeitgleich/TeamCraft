@@ -105,7 +105,7 @@ use crate::call_video::ReceivedVideoFrame;
 use crate::datagram::SimulcastLayer;
 use crate::jitter::{JitterBuffer, JitterBufferConfig, Playout};
 use crate::rtp::AudioLevel;
-use crate::video::{EncodedVideoFrame, TOP_LAYER, VideoResolution, layer_for_view};
+use crate::video::{EncodedVideoFrame, TOP_LAYER, VideoResolution, chosen_layer};
 use crate::web_api::{
   AudioData, AudioDecoder, AudioEncoder, EncodedAudioChunk, WORKLET_SOURCE, WebTransport,
   WebTransportBidirectionalStream, datagram_writable, dictionary, has_global,
@@ -400,6 +400,11 @@ enum Command {
     canvas: HtmlCanvasElement,
   },
   UnwatchVideo(MediaStreamId),
+  /// The viewer picked at most these lines for a received track (`None`: Auto, #967).
+  SetVideoQuality {
+    stream_id: MediaStreamId,
+    maybe_max_lines: Option<u16>,
+  },
   SetStatusCues(StatusCues),
   /// Reads what the call's video does (stats for nerds, #938).
   #[cfg(feature = "call-view")]
@@ -591,17 +596,27 @@ impl WebCall {
     done_rx.await.map_err(|_| WebCallError::Ended)?
   }
 
-  /// Turns the camera on (three H.264 simulcast layers from 720p); `maybe_device` is a
-  /// `MediaDeviceInfo.deviceId`. Call it from a user gesture, like `join`.
-  pub async fn start_camera(&self, maybe_device: Option<&str>) -> Result<(), WebCallError> {
-    let stream = video::capture_camera(maybe_device).await?;
-    self.share_camera_stream(stream).await
+  /// Turns the camera on (three H.264 simulcast layers, from 1080p where the camera has it, sent
+  /// within `limit`: `video::camera_limit`); `maybe_device` is a `MediaDeviceInfo.deviceId`. Call
+  /// it from a user gesture, like `join`.
+  pub async fn start_camera(
+    &self,
+    maybe_device: Option<&str>,
+    limit: VideoResolution,
+  ) -> Result<(), WebCallError> {
+    let stream = video::capture_camera(maybe_device, limit).await?;
+    self.share_camera_stream(stream, limit).await
   }
 
-  /// Sends a camera stream the app opened itself ([`capture_camera`]), e.g. to show it as the
-  /// self view too; replaces a running camera. Stopping the camera stops the stream's tracks.
-  pub async fn share_camera_stream(&self, stream: MediaStream) -> Result<(), WebCallError> {
-    self.start_video(stream, video::camera_plan()).await
+  /// Sends a camera stream the app opened itself ([`capture_camera`]) within `limit`, e.g. to
+  /// show it as the self view too; replaces a running camera. Stopping the camera stops the
+  /// stream's tracks.
+  pub async fn share_camera_stream(
+    &self,
+    stream: MediaStream,
+    limit: VideoResolution,
+  ) -> Result<(), WebCallError> {
+    self.start_video(stream, video::camera_plan(limit)).await
   }
 
   /// [`WebCall::start_camera`] with background effects (the segmentation worker and a compositor);
@@ -611,9 +626,12 @@ impl WebCall {
     &self,
     maybe_device: Option<&str>,
     effects: CameraEffects,
+    limit: VideoResolution,
   ) -> Result<(), WebCallError> {
-    let stream = video::capture_camera(maybe_device).await?;
-    self.share_camera_stream_with_effects(stream, effects).await
+    let stream = video::capture_camera(maybe_device, limit).await?;
+    self
+      .share_camera_stream_with_effects(stream, effects, limit)
+      .await
   }
 
   /// [`WebCall::share_camera_stream`] through background effects (#439).
@@ -622,10 +640,11 @@ impl WebCall {
     &self,
     stream: MediaStream,
     effects: CameraEffects,
+    limit: VideoResolution,
   ) -> Result<(), WebCallError> {
     let plan = video::TrackPlan {
       maybe_effects: Some(effects),
-      ..video::camera_plan()
+      ..video::camera_plan(limit)
     };
     self.start_video(stream, plan).await
   }
@@ -713,6 +732,16 @@ impl WebCall {
     let _ = self.command(Command::UnwatchVideo(stream_id));
   }
 
+  /// The viewer picked at most `maybe_max_lines` for a received track (`None`: Auto, by its
+  /// tile; #967). Kept while the track is published; the SFU still caps it by what is sent and
+  /// by the downlink.
+  pub fn set_video_quality(&self, stream_id: MediaStreamId, maybe_max_lines: Option<u16>) {
+    let _ = self.command(Command::SetVideoQuality {
+      stream_id,
+      maybe_max_lines,
+    });
+  }
+
   /// What the call's video does now: every own and received track's counters and the round trip
   /// to the SFU (stats for nerds, #938). `None` once the call ended.
   #[cfg(feature = "call-view")]
@@ -764,10 +793,13 @@ impl Drop for WebCall {
   }
 }
 
-/// Asks for the camera (`getUserMedia`); `maybe_device` is a `MediaDeviceInfo.deviceId`. Call it
-/// from a user gesture.
-pub async fn capture_camera(maybe_device: Option<&str>) -> Result<MediaStream, WebCallError> {
-  video::capture_camera(maybe_device).await
+/// Asks for the camera (`getUserMedia`) at the size of `limit` (`video::camera_limit`), or what
+/// comes closest; `maybe_device` is a `MediaDeviceInfo.deviceId`. Call it from a user gesture.
+pub async fn capture_camera(
+  maybe_device: Option<&str>,
+  limit: VideoResolution,
+) -> Result<MediaStream, WebCallError> {
+  video::capture_camera(maybe_device, limit).await
 }
 
 /// Opens the browser's screen picker (`getDisplayMedia`) at once and returns its promise. Call it
@@ -922,6 +954,7 @@ async fn run_call(
     encoded_kinds: Vec::new(),
     views: HashMap::new(),
     remote_tracks: HashMap::new(),
+    qualities: HashMap::new(),
     pulses: Pulses {
       inputs: inputs.clone(),
       is_pending: Rc::new(Cell::new(false)),
@@ -1026,6 +1059,9 @@ struct CallState<'a> {
   views: HashMap<MediaStreamId, Watched>,
   /// Other devices' published tracks: their kind and layers decide which layer a tile asks for.
   remote_tracks: HashMap<MediaStreamId, VideoTrack>,
+  /// The lines the viewer picked per received track (#967); Auto where none. Kept while the
+  /// track is published, so its tile shown again asks for the same.
+  qualities: HashMap<MediaStreamId, u16>,
   pulses: Pulses,
   frame_cadence: Cadence,
   timer_cadence: Cadence,
@@ -1299,7 +1335,8 @@ impl CallState<'_> {
     let Some(track) = self.remote_tracks.get(&stream_id) else {
       return;
     };
-    let max_layer = layer_for_view(&track.kind, &track.layers, watched.shown);
+    let maybe_max_lines = self.qualities.get(&stream_id).copied();
+    let max_layer = chosen_layer(&track.kind, &track.layers, watched.shown, maybe_max_lines);
     if max_layer != watched.max_layer {
       debug!(stream_id = stream_id.0, max_layer, shown = ?watched.shown, "video tile asks for another layer");
       watched.max_layer = max_layer;
@@ -1668,8 +1705,9 @@ impl CallState<'_> {
           .inspect_err(|error| debug!(%error, "tile sizes unknown; the video keeps its first layer"))
           .ok();
         // Unknown layers (not published yet): the top, like the desktop; the SFU caps by downlink.
+        let maybe_max_lines = self.qualities.get(&stream_id).copied();
         let max_layer = self.remote_tracks.get(&stream_id).map_or(TOP_LAYER, |track| {
-          layer_for_view(&track.kind, &track.layers, shown)
+          chosen_layer(&track.kind, &track.layers, shown, maybe_max_lines)
         });
         let view = VideoView::new(stream_id, canvas, self.inputs);
         self.views.insert(
@@ -1693,6 +1731,16 @@ impl CallState<'_> {
         if self.views.remove(&stream_id).is_some() {
           engine.subscribe_video(stream_id, None);
         }
+      },
+      Command::SetVideoQuality {
+        stream_id,
+        maybe_max_lines,
+      } => {
+        match maybe_max_lines {
+          Some(lines) => self.qualities.insert(stream_id, lines),
+          None => self.qualities.remove(&stream_id),
+        };
+        self.update_layer(engine, stream_id);
       },
       Command::Leave => return Ok(Flow::Leave),
     }
@@ -1818,6 +1866,7 @@ impl CallState<'_> {
       CallEngineEvent::VideoUnpublished(stream_id) => {
         self.views.remove(stream_id);
         self.remote_tracks.remove(stream_id);
+        self.qualities.remove(stream_id);
       },
       CallEngineEvent::VideoPublished(track) if track.device_id != self.own_device => {
         self.remote_tracks.insert(track.stream_id, track.clone());

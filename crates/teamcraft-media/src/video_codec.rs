@@ -194,7 +194,7 @@ impl VideoEncoder for OpenH264Encoder {
     frame: &VideoFrame,
     is_keyframe_forced: bool,
   ) -> Result<Option<EncodedPicture>, VideoCodecError> {
-    let frame = frame.scaled(self.resolution)?;
+    let frame = frame.at_size(self.resolution)?;
     if is_keyframe_forced {
       self.encoder.force_intra_frame();
     }
@@ -511,13 +511,37 @@ impl SimulcastEncoder {
     Ok(())
   }
 
-  /// Encodes `frame` for every needed layer.
+  /// Encodes `frame` for every needed layer, lowest layer first. A layer half the size of a
+  /// larger one is shrunk from that one's picture (2x2 averages): a 1080p camera's 360p layer
+  /// from its 720p one rather than by three from 1080p, which is sharper and cheaper (#967).
   pub fn encode(&mut self, frame: &VideoFrame) -> Result<Vec<EncodedVideoFrame>, VideoCodecError> {
     let timestamp = EncodedVideoFrame::rtp_timestamp(frame.timestamp_us());
     let mut encoded = Vec::new();
-    for layer in self.layers.iter_mut().filter(|layer| layer.is_needed) {
+    // The pictures scaled so far, largest first: each needed layer, from the top down.
+    let mut scaled: Vec<VideoFrame> = Vec::new();
+    for layer in self.layers.iter_mut().rev().filter(|layer| layer.is_needed) {
+      let size = VideoResolution {
+        width: layer.info.width,
+        height: layer.info.height,
+      };
+      let source = scaled
+        .iter()
+        .find(|picture| {
+          let larger = picture.resolution();
+          larger.width == size.width * 2 && larger.height == size.height * 2
+        })
+        .unwrap_or(frame);
+      let maybe_shrunk = if source.resolution() == size {
+        None
+      } else {
+        Some(source.scaled(size)?)
+      };
       let wants_keyframe = std::mem::take(&mut layer.wants_keyframe);
-      let Some(picture) = layer.encoder.encode(frame, wants_keyframe)? else {
+      let maybe_picture = layer
+        .encoder
+        .encode(maybe_shrunk.as_ref().unwrap_or(source), wants_keyframe)?;
+      scaled.extend(maybe_shrunk);
+      let Some(picture) = maybe_picture else {
         // A dropped frame doesn't satisfy a keyframe request: the next frame asks again.
         layer.wants_keyframe = wants_keyframe;
         continue;
@@ -531,6 +555,7 @@ impl SimulcastEncoder {
         data: picture.data,
       });
     }
+    encoded.reverse();
     Ok(encoded)
   }
 }
@@ -754,6 +779,76 @@ mod tests {
       simulcast.request_keyframe(7),
       Err(VideoCodecError::UnknownLayer(7))
     ));
+  }
+
+  /// #967: a 1080p camera's 360p layer is shrunk from its 720p picture (2x2 averages), not by
+  /// three from 1080p; each encoder gets its layer's size, and a layer on its own the frame.
+  #[test]
+  fn lower_layers_are_shrunk_from_a_layer_twice_their_size() {
+    let full_hd = VideoResolution {
+      width: 1920,
+      height: 1080,
+    };
+    let layers = crate::video::camera_layers(full_hd, 30, crate::video::camera_limit(None));
+    let seen: Arc<Mutex<Vec<(u8, VideoFrame)>>> = Arc::default();
+    let mut simulcast = SimulcastEncoder::new(&layers, |info| {
+      Ok(Box::new(Seeing {
+        layer: info.layer,
+        seen: Arc::clone(&seen),
+      }) as Box<dyn VideoEncoder>)
+    })
+    .unwrap();
+    let frame = crate::video_capture::test_pattern(full_hd, 3, 0).unwrap();
+    let encoded = simulcast.encode(&frame).unwrap();
+    assert_eq!(layers_of(&encoded), vec![0, 1, 2], "lowest first, as before");
+    let first = std::mem::take(&mut *seen.lock().unwrap());
+    let input = |layer: u8| &first.iter().find(|(id, _)| *id == layer).unwrap().1;
+    let middle = frame.scaled(input(1).resolution()).unwrap();
+    assert_eq!(input(2), &frame);
+    assert_eq!(input(1), &middle);
+    assert_eq!(input(0), &middle.scaled(input(0).resolution()).unwrap());
+    assert_eq!(
+      (input(0).resolution().width, input(0).resolution().height),
+      (640, 360)
+    );
+
+    // Only the 360p layer needed: shrunk from the frame itself.
+    simulcast.set_needed_layers(&[0]);
+    simulcast.encode(&frame).unwrap();
+    let alone = std::mem::take(&mut *seen.lock().unwrap());
+    let small = VideoResolution {
+      width: 640,
+      height: 360,
+    };
+    assert_eq!(alone, vec![(0, frame.scaled(small).unwrap())]);
+  }
+
+  /// Records the frames it is given.
+  struct Seeing {
+    layer: u8,
+    seen: Arc<Mutex<Vec<(u8, VideoFrame)>>>,
+  }
+
+  impl VideoEncoder for Seeing {
+    fn codec(&self) -> VideoCodec {
+      VideoCodec::H264
+    }
+
+    fn name(&self) -> &'static str {
+      "seeing"
+    }
+
+    fn encode(
+      &mut self,
+      frame: &VideoFrame,
+      is_keyframe_forced: bool,
+    ) -> Result<Option<EncodedPicture>, VideoCodecError> {
+      self.seen.lock().unwrap().push((self.layer, frame.clone()));
+      Ok(Some(EncodedPicture {
+        is_keyframe: is_keyframe_forced,
+        data: vec![0, 0, 0, 1, 0x65],
+      }))
+    }
   }
 
   #[test]

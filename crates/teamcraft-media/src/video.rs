@@ -3,6 +3,8 @@
 //! Capture and the actual encoders/decoders come later (platform specific: WebCodecs, VideoToolbox,
 //! MediaCodec, VA-API); these types are what they plug into.
 
+use std::borrow::Cow;
+
 use teamcraft_proto::{
   MAX_SIMULCAST_LAYERS, MediaCapabilities, ScreenContentMode, VideoCodec, VideoLayerInfo, VideoTrackKind,
 };
@@ -131,6 +133,14 @@ impl VideoFrame {
       );
     }
     VideoFrame::new(target, self.timestamp_us, data)
+  }
+
+  /// This frame at `target`: itself when it has that size already (no copy), else scaled.
+  pub fn at_size(&self, target: VideoResolution) -> Result<Cow<'_, VideoFrame>, VideoError> {
+    if target == self.resolution {
+      return Ok(Cow::Borrowed(self));
+    }
+    self.scaled(target).map(Cow::Owned)
   }
 }
 
@@ -364,6 +374,81 @@ pub fn screen_layers(source: VideoResolution, framerate: u8, mode: ScreenContent
   )
 }
 
+/// The largest picture a camera is sent at (#967): 1080p where the camera delivers it.
+pub const CAMERA_MAX_RESOLUTION: VideoResolution = VideoResolution {
+  width: 1920,
+  height: 1080,
+};
+/// The frame rate cameras are sent at.
+pub const CAMERA_FRAMERATE: u8 = 30;
+/// The bitrate of a camera's 720p layer; layers above it get more by their pixel count...
+pub const CAMERA_HD_BITRATE_BPS: u32 = 1_500_000;
+/// ...up to this (1080p): more pixels need fewer bits each. At 30 fps that is about 0.05 bits
+/// per pixel, where a calm camera picture through VideoToolbox measured 46 dB PSNR at 720p (#967).
+pub const CAMERA_MAX_BITRATE_BPS: u32 = 3_000_000;
+const HD_PIXELS: u64 = 1280 * 720;
+
+/// The box a camera is sent within when the user caps it at `max_lines` lines (720 for 720p),
+/// never above [`CAMERA_MAX_RESOLUTION`]; `None` (Auto): the most there is. A box of the lines'
+/// 16:9 picture, so a portrait or 4:3 camera fits it by its height like a landscape one.
+pub fn camera_limit(maybe_max_lines: Option<u16>) -> VideoResolution {
+  let Some(lines) = maybe_max_lines else {
+    return CAMERA_MAX_RESOLUTION;
+  };
+  let lines = lines.clamp(2, CAMERA_MAX_RESOLUTION.height);
+  let width = u32::from(lines) * 16 / 9;
+  VideoResolution {
+    width: u16::try_from(width & !1).unwrap_or(CAMERA_MAX_RESOLUTION.width),
+    height: lines & !1,
+  }
+}
+
+/// The simulcast layers of a camera that delivers `source`, sent within `limit` ([`camera_limit`];
+/// a larger camera is scaled down, a smaller one sent as it is). Above 720p the layers are the
+/// whole picture, two thirds and one third (1080p, 720p, 360p): viewers of a 720p tile get the
+/// 720p layer they always got, weak links the 360p one, and only large tiles take the 1080p one.
+/// At 720p and below they halve (720p, 360p, 180p), the top one at [`CAMERA_HD_BITRATE_BPS`].
+/// Layer bitrates follow the pixel count against 720p's [`CAMERA_HD_BITRATE_BPS`], up to
+/// [`CAMERA_MAX_BITRATE_BPS`].
+pub fn camera_layers(source: VideoResolution, framerate: u8, limit: VideoResolution) -> Vec<VideoLayerInfo> {
+  let top = even(fit_within(source, limit));
+  if top.width.min(top.height) <= 720 {
+    // As before #967: the top layer gets the bitrate of 720p.
+    return simulcast_layers(top, framerate, CAMERA_HD_BITRATE_BPS, 3);
+  }
+  let third = |side: u16, thirds: u32| {
+    let scaled = u32::from(side) * thirds / 3;
+    u16::try_from(scaled & !1).unwrap_or(side).max(2)
+  };
+  [1, 2, 3]
+    .into_iter()
+    .zip(0u8..)
+    .map(|(thirds, layer)| {
+      let size = VideoResolution {
+        width: third(top.width, thirds),
+        height: third(top.height, thirds),
+      };
+      VideoLayerInfo {
+        layer,
+        width: size.width,
+        height: size.height,
+        max_framerate: framerate,
+        max_bitrate_bps: hd_scaled_bitrate(size),
+      }
+    })
+    .collect()
+}
+
+/// [`CAMERA_HD_BITRATE_BPS`] scaled by the pixel count of `size` against 720p, at most
+/// [`CAMERA_MAX_BITRATE_BPS`].
+fn hd_scaled_bitrate(size: VideoResolution) -> u32 {
+  let pixels = u64::from(size.width) * u64::from(size.height);
+  let scaled = u64::from(CAMERA_HD_BITRATE_BPS) * pixels / HD_PIXELS;
+  u32::try_from(scaled)
+    .unwrap_or(CAMERA_MAX_BITRATE_BPS)
+    .min(CAMERA_MAX_BITRATE_BPS)
+}
+
 /// Keeps a track's layers in the shape of its source (#931): a shared window that is resized or
 /// turned from landscape to portrait gets layers of its new size, within the size it started with
 /// as the limit, instead of being stretched into the old ones. A new size takes over once it held
@@ -505,6 +590,71 @@ pub fn layer_for_view(kind: &VideoTrackKind, layers: &[VideoLayerInfo], shown: V
     .into_iter()
     .find(|info| info.width >= shown.width && info.height >= shown.height)
     .map_or(TOP_LAYER, |info| info.layer)
+}
+
+/// The lines of a layer's picture as a quality menu names them (720 for "720p"): its short side,
+/// so a portrait camera's 720×1280 is 720p as well.
+pub fn layer_lines(info: &VideoLayerInfo) -> u16 {
+  info.width.min(info.height)
+}
+
+/// The layer a viewer who picked at most `max_lines` (#967: "720p" in the quality menu) asks
+/// for: the largest with at most that many lines ([`layer_lines`]), else the lowest. The SFU
+/// still caps it by what is sent and by the downlink. A track whose layers are unknown gets
+/// [`TOP_LAYER`].
+pub fn layer_for_lines(layers: &[VideoLayerInfo], max_lines: u16) -> u8 {
+  let mut by_layer: Vec<&VideoLayerInfo> = layers.iter().collect();
+  by_layer.sort_by_key(|info| info.layer);
+  let Some(lowest) = by_layer.first() else {
+    return TOP_LAYER;
+  };
+  by_layer
+    .iter()
+    .rev()
+    .find(|info| layer_lines(info) <= max_lines)
+    .map_or(lowest.layer, |info| info.layer)
+}
+
+/// The layer to ask for: by the size the picture is shown at ([`layer_for_view`]) while the
+/// viewer leaves it to the call (`None`), else at most the lines they picked
+/// ([`layer_for_lines`]).
+pub fn chosen_layer(
+  kind: &VideoTrackKind,
+  layers: &[VideoLayerInfo],
+  shown: VideoResolution,
+  maybe_max_lines: Option<u16>,
+) -> u8 {
+  match maybe_max_lines {
+    None => layer_for_view(kind, layers, shown),
+    Some(lines) => layer_for_lines(layers, lines),
+  }
+}
+
+/// What a viewer's app knows of how it shows a received track (#967): the size its tile shows it
+/// at, once told, and the lines the viewer picked, if they did.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ViewChoice {
+  pub maybe_shown: Option<VideoResolution>,
+  pub maybe_max_lines: Option<u16>,
+}
+
+impl ViewChoice {
+  /// The layer to ask for ([`chosen_layer`]); [`TOP_LAYER`] while neither the size nor a pick is
+  /// known (the SFU caps it by the downlink).
+  pub fn layer(&self, kind: &VideoTrackKind, layers: &[VideoLayerInfo]) -> u8 {
+    match (self.maybe_shown, self.maybe_max_lines) {
+      (None, None) => TOP_LAYER,
+      (maybe_shown, maybe_max_lines) => chosen_layer(
+        kind,
+        layers,
+        maybe_shown.unwrap_or(VideoResolution {
+          width: u16::MAX,
+          height: u16::MAX,
+        }),
+        maybe_max_lines,
+      ),
+    }
+  }
 }
 
 /// The best video codec a sender can use so that every receiver decodes it: encodable by the
@@ -742,6 +892,87 @@ mod tests {
       assert_eq!(limited.len(), 1);
       assert_eq!((limited[0].layer, limited[0].width), (0, 1280));
     }
+
+    fn summary(layers: &[VideoLayerInfo]) -> Vec<(u8, u16, u16, u32)> {
+      layers
+        .iter()
+        .map(|layer| (layer.layer, layer.width, layer.height, layer.max_bitrate_bps))
+        .collect()
+    }
+
+    /// #967: a 1080p camera sends 1080p on top of the 720p and 360p layers viewers had.
+    #[test]
+    fn a_1080p_camera_sends_1080p_720p_and_360p() {
+      let full_hd = VideoResolution {
+        width: 1920,
+        height: 1080,
+      };
+      let layers = camera_layers(full_hd, 30, camera_limit(None));
+      assert_eq!(
+        summary(&layers),
+        vec![
+          (0, 640, 360, 375_000),
+          (1, 1280, 720, CAMERA_HD_BITRATE_BPS),
+          (2, 1920, 1080, CAMERA_MAX_BITRATE_BPS)
+        ]
+      );
+      assert!(layers.iter().all(|layer| layer.max_framerate == 30));
+      // A 4K camera is scaled to the same layers.
+      let uhd = VideoResolution {
+        width: 3840,
+        height: 2160,
+      };
+      assert_eq!(camera_layers(uhd, 30, camera_limit(None)), layers);
+    }
+
+    #[test]
+    fn a_720p_camera_or_a_cap_at_720p_keeps_the_layers_from_before() {
+      let before = simulcast_layers(HD, 30, CAMERA_HD_BITRATE_BPS, 3);
+      assert_eq!(camera_layers(HD, 30, camera_limit(None)), before);
+      let full_hd = VideoResolution {
+        width: 1920,
+        height: 1080,
+      };
+      assert_eq!(camera_layers(full_hd, 30, camera_limit(Some(720))), before);
+      assert_eq!(
+        summary(&before),
+        vec![
+          (0, 320, 180, 93_750),
+          (1, 640, 360, 375_000),
+          (2, 1280, 720, 1_500_000)
+        ]
+      );
+    }
+
+    #[test]
+    fn a_cap_at_360p_sends_360p_and_below() {
+      let full_hd = VideoResolution {
+        width: 1920,
+        height: 1080,
+      };
+      let layers = camera_layers(full_hd, 30, camera_limit(Some(360)));
+      let sides: Vec<_> = layers.iter().map(|layer| (layer.width, layer.height)).collect();
+      assert_eq!(sides, vec![(160, 90), (320, 180), (640, 360)]);
+    }
+
+    #[test]
+    fn other_shapes_fit_the_limit_by_their_lines() {
+      let res = |width, height| VideoResolution { width, height };
+      // 4:3 at 1080 lines: 1440×1080, 960×720, 480×360.
+      let four_by_three = camera_layers(res(1440, 1080), 30, camera_limit(None));
+      let sides: Vec<_> = four_by_three
+        .iter()
+        .map(|layer| (layer.width, layer.height))
+        .collect();
+      assert_eq!(sides, vec![(480, 360), (960, 720), (1440, 1080)]);
+      assert!(four_by_three[2].max_bitrate_bps < CAMERA_MAX_BITRATE_BPS);
+      // A portrait phone camera fits by its height, as before.
+      let portrait = camera_layers(res(1080, 1920), 30, camera_limit(Some(720)));
+      let top = portrait.last().unwrap();
+      assert_eq!((top.width, top.height), (404, 720), "{portrait:?}");
+      assert_eq!(camera_limit(Some(4000)), CAMERA_MAX_RESOLUTION);
+      assert_eq!(camera_limit(Some(360)), res(640, 360));
+    }
   }
 
   mod layer_choice {
@@ -814,6 +1045,65 @@ mod tests {
         layer_for_view(&VideoTrackKind::Camera, &layers, res(1280, 720)),
         TOP_LAYER
       );
+    }
+
+    /// #967: a picked quality asks for the largest layer within its lines, whatever the tile.
+    #[test]
+    fn a_picked_quality_asks_for_the_layer_within_its_lines() {
+      let full_hd = super::camera_layers(res(1920, 1080), 30, camera_limit(None));
+      let thumbnail = res(320, 180);
+      assert_eq!(
+        chosen_layer(&VideoTrackKind::Camera, &full_hd, thumbnail, Some(1080)),
+        2
+      );
+      assert_eq!(
+        chosen_layer(&VideoTrackKind::Camera, &full_hd, thumbnail, Some(720)),
+        1
+      );
+      assert_eq!(
+        chosen_layer(&VideoTrackKind::Camera, &full_hd, res(2560, 1440), Some(360)),
+        0
+      );
+      // Auto: by the tile.
+      assert_eq!(
+        chosen_layer(&VideoTrackKind::Camera, &full_hd, thumbnail, None),
+        0
+      );
+      // A sender of 720p and less: 1080p asks for its top, 360p for its middle layer, and less
+      // than it has for its lowest.
+      let hd = camera_layers();
+      assert_eq!(layer_for_lines(&hd, 1080), 2);
+      assert_eq!(layer_for_lines(&hd, 360), 1);
+      assert_eq!(layer_for_lines(&hd, 100), 0);
+      assert_eq!(layer_for_lines(&[], 720), TOP_LAYER);
+      // A screen share may be picked lower too.
+      let screen = screen_layers(res(2560, 1440), 30, ScreenContentMode::Detail);
+      assert_eq!(
+        chosen_layer(&VideoTrackKind::Screen, &screen, thumbnail, Some(720)),
+        0
+      );
+    }
+
+    #[test]
+    fn a_view_asks_for_the_top_until_its_size_or_a_pick_is_known() {
+      let full_hd = super::camera_layers(res(1920, 1080), 30, camera_limit(None));
+      let camera = VideoTrackKind::Camera;
+      assert_eq!(ViewChoice::default().layer(&camera, &full_hd), TOP_LAYER);
+      let small = ViewChoice {
+        maybe_shown: Some(res(640, 360)),
+        maybe_max_lines: None,
+      };
+      assert_eq!(small.layer(&camera, &full_hd), 0);
+      let picked = ViewChoice {
+        maybe_max_lines: Some(1080),
+        ..small
+      };
+      assert_eq!(picked.layer(&camera, &full_hd), 2);
+      let picked_only = ViewChoice {
+        maybe_shown: None,
+        maybe_max_lines: Some(720),
+      };
+      assert_eq!(picked_only.layer(&camera, &full_hd), 1);
     }
 
     fn camera_layers() -> Vec<VideoLayerInfo> {

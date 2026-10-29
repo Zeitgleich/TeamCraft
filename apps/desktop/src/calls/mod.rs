@@ -28,7 +28,7 @@ use teamcraft_client_api::call_view::CallView;
 use teamcraft_client_api::calls::{
   ActiveCall, BackgroundEffect as UiBackgroundEffect, CallEndReason, CallPreview, CallRequest,
   CallStatusSounds, CameraFallback, DevicePresence, MediaDevice, MediaDevices, PreviewCamera, PushToTalk,
-  ScreenShareSound,
+  ScreenShareSound, VideoQuality,
 };
 use teamcraft_client_api::failure::{ActionFailure, CallFailure, FailureKind};
 use teamcraft_client_api::remote::CallSnapshot;
@@ -51,6 +51,7 @@ use teamcraft_media::camera_choice::CameraReport;
 use teamcraft_media::effects::{BackgroundImage, EffectHandle};
 use teamcraft_media::ringtone;
 use teamcraft_media::system_audio::SystemAudioCapture;
+use teamcraft_media::video::{VideoResolution, camera_limit};
 use teamcraft_media::video_capture::{CameraInfo, CaptureError};
 use teamcraft_media::video_pipeline::{BlackReport, VideoSendConfig, VideoStartError, preferred_encoders};
 use teamcraft_proto::{
@@ -145,6 +146,8 @@ struct CallState {
   push_to_talk: PushToTalk,
   /// Which call status sounds play (the user's setting).
   status_sounds: CallStatusSounds,
+  /// The highest quality the camera is sent at (the user's setting, #967).
+  camera_quality: VideoQuality,
 }
 
 /// Control of the task that owns the [`NativeCall`].
@@ -172,6 +175,16 @@ enum Control {
   Subscribe {
     stream_id: MediaStreamId,
     maybe_max_layer: Option<u8>,
+  },
+  /// A watched track's tile is shown this large (device pixels).
+  VideoShown {
+    stream_id: MediaStreamId,
+    shown: VideoResolution,
+  },
+  /// The lines the viewer picked for a watched track (`None`: Auto, #967).
+  VideoQuality {
+    stream_id: MediaStreamId,
+    maybe_max_lines: Option<u16>,
   },
   /// The webview's decoder of a watched track failed.
   RequestKeyframe(MediaStreamId),
@@ -536,6 +549,40 @@ impl CallHost {
     self.control(Control::StatusSounds(sounds)).await;
   }
 
+  /// Remembers the camera's quality setting (#967); a running camera, or the pre-join check's,
+  /// opens again at the new size.
+  pub async fn set_camera_quality(&self, quality: VideoQuality) -> Result<(), String> {
+    let previous = std::mem::replace(&mut lock(&self.state).camera_quality, quality);
+    if previous.max_lines() == quality.max_lines() {
+      return Ok(());
+    }
+    if self.is_camera_on() {
+      self.set_camera(true).await?;
+    }
+    self.restart_preview_camera().await
+  }
+
+  /// The webview shows a watched track `width` x `height` device pixels large: while the viewer
+  /// leaves the quality to the call, it receives the smallest layer that covers that (#967).
+  pub async fn size_video(&self, stream_id: MediaStreamId, width: u32, height: u32) {
+    let side = |pixels: u32| u16::try_from(pixels).unwrap_or(u16::MAX);
+    let shown = VideoResolution {
+      width: side(width),
+      height: side(height),
+    };
+    self.control(Control::VideoShown { stream_id, shown }).await;
+  }
+
+  /// The viewer picked how sharp a watched track comes (#967).
+  pub async fn set_video_quality(&self, stream_id: MediaStreamId, quality: VideoQuality) {
+    self
+      .control(Control::VideoQuality {
+        stream_id,
+        maybe_max_lines: quality.max_lines(),
+      })
+      .await;
+  }
+
   /// Remembers the microphone for the next call and switches the running one; `None` follows
   /// the system default.
   pub async fn select_microphone(&self, maybe_device: Option<String>) -> Result<(), String> {
@@ -586,9 +633,12 @@ impl CallHost {
       maybe_filter,
       maybe_handle,
     } = self.open_camera().await?;
+    let limit = self.camera_limit();
     let config = VideoSendConfig {
+      // Planned for what the camera delivers (#967): 1080p where it can, else less.
+      maybe_layer_plan: Some(Box::new(move |source| video::camera_layers(source, limit))),
       kind: VideoTrackKind::Camera,
-      layers: video::camera_layers(capture.format()),
+      layers: video::camera_layers(capture.format().resolution, limit),
       capture,
       encoders: preferred_encoders(),
       maybe_filter: Some(self.self_view.filter(maybe_filter)),
@@ -730,6 +780,7 @@ impl CallHost {
       },
     };
     let config = VideoSendConfig {
+      maybe_layer_plan: None,
       kind: VideoTrackKind::Screen,
       layers: video::screen_layers(capture.format(), mode),
       capture,
@@ -798,6 +849,11 @@ impl CallHost {
     }
   }
 
+  /// The box the camera is sent within, by the user's quality setting (#967).
+  fn camera_limit(&self) -> VideoResolution {
+    camera_limit(lock(&self.state).camera_quality.max_lines())
+  }
+
   /// Opens the chosen camera with the background effects in front of it, as the call sends it
   /// and the pre-join check shows it (blocking work on a blocking thread; the portal may ask).
   async fn open_camera(&self) -> Result<OpenedCamera, String> {
@@ -816,8 +872,9 @@ impl CallHost {
       )
     };
     let maybe_model = self.maybe_segmentation_model.clone();
+    let limit = self.camera_limit();
     let ((capture, report), maybe_effects) = tokio::task::spawn_blocking(move || {
-      let opened = video::open_camera(maybe_camera.as_deref())?;
+      let opened = video::open_camera(maybe_camera.as_deref(), limit)?;
       Ok::<_, String>((
         opened,
         video::effects_filter(background, maybe_custom.as_ref(), maybe_model.as_deref()),
@@ -1168,6 +1225,10 @@ async fn run_media(
         },
         Some(Control::StopScreenAudio) => call.stop_screen_audio(),
         Some(Control::Subscribe { stream_id, maybe_max_layer }) => call.subscribe_video(stream_id, maybe_max_layer),
+        Some(Control::VideoShown { stream_id, shown }) => call.set_video_shown(stream_id, shown),
+        Some(Control::VideoQuality { stream_id, maybe_max_lines }) => {
+          call.set_video_quality(stream_id, maybe_max_lines);
+        },
         Some(Control::RequestKeyframe(stream_id)) => call.request_keyframe(stream_id),
         // The asker may have given up waiting.
         Some(Control::VideoStats(done)) => drop(done.send(call.video_stats().await)),
@@ -1927,6 +1988,7 @@ mod tests {
       capture: Box<dyn VideoCapture>,
     ) -> oneshot::Receiver<Result<(), String>> {
       let config = VideoSendConfig {
+        maybe_layer_plan: None,
         maybe_idle_refresh: VideoSendConfig::default_idle_refresh(&kind),
         kind,
         capture,

@@ -15,6 +15,7 @@ use crate::components::call_video::{
 };
 use crate::components::count_badge::CountBadge;
 use crate::components::icons::{Icon, IconName};
+use crate::components::video_quality::VideoQualityMenu;
 use crate::components::video_stats::{VideoStatsHub, VideoStatsOverlay};
 use crate::i18n::use_i18n;
 use crate::model::{User, UserId};
@@ -194,13 +195,23 @@ pub fn CallScreen(request: CallRequest) -> impl IntoView {
     if call.is_camera_menu_open.get() {
       effects_open.set(false);
       share_open.set(false);
+      call.maybe_quality_menu.set(None);
       call.emit(CallEvent::RefreshDevices);
     }
   });
-  // The next call screen starts with the menu closed.
+  // A video's quality menu (#967) takes the place of the others.
+  Effect::new(move |_| {
+    if call.maybe_quality_menu.with(Option::is_some) {
+      effects_open.set(false);
+      share_open.set(false);
+      call.is_camera_menu_open.set(false);
+    }
+  });
+  // The next call screen starts with the menus closed.
   on_cleanup(move || {
     // Gone only while the app itself is torn down.
     let _ = call.is_camera_menu_open.try_set(false);
+    let _ = call.maybe_quality_menu.try_set(None);
   });
   let pick_camera = move |id: String| {
     call.is_camera_menu_open.set(false);
@@ -508,6 +519,7 @@ pub fn CallScreen(request: CallRequest) -> impl IntoView {
           <BackgroundPicker effect=call.effect size=PickerSize::Compact />
         </div>
       </Show>
+      {move || call.maybe_quality_menu.get().map(|stream_id| view! { <VideoQualityMenu stream_id=stream_id /> })}
       <Show when=move || call.is_camera_menu_open.get() fallback=|| ()>
         <div class="effects-popover camera-popover" role="dialog" aria-label=move || i18n.t("control-camera-choose")>
           <h2 id="camera-menu-title">{move || i18n.t("prejoin-camera")}</h2>
@@ -579,6 +591,7 @@ pub fn CallScreen(request: CallRequest) -> impl IntoView {
               // What to share comes from the system picker; the options come first.
               effects_open.set(false);
               call.is_camera_menu_open.set(false);
+              call.maybe_quality_menu.set(None);
               share_open.update(|open| *open = !*open);
             }
           }
@@ -601,6 +614,7 @@ pub fn CallScreen(request: CallRequest) -> impl IntoView {
             on_press=move || {
               share_open.set(false);
               call.is_camera_menu_open.set(false);
+              call.maybe_quality_menu.set(None);
               effects_open.update(|open| *open = !*open);
             }
           />

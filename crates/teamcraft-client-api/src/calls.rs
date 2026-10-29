@@ -684,6 +684,48 @@ impl CallStatusSounds {
   }
 }
 
+/// How sharp a video may be (#967), like a video player's quality menu: `Auto` leaves it to the
+/// call, `Lines` caps it at that many lines (the picture's short side: 720 for "720p"). The own
+/// camera's setting caps what this device sends; a choice on another device's tile asks for at
+/// most that layer of its video (still capped by what it sends and by the connection).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum VideoQuality {
+  #[default]
+  Auto,
+  Lines(u16),
+  /// A choice of a newer app: taken as `Auto`.
+  #[serde(other)]
+  Unknown,
+}
+
+impl VideoQuality {
+  /// The own camera's choices, best first.
+  pub const CAMERA_CHOICES: [VideoQuality; 4] =
+    [Self::Auto, Self::Lines(1080), Self::Lines(720), Self::Lines(360)];
+
+  /// At most how many lines; `None` for Auto.
+  pub fn max_lines(self) -> Option<u16> {
+    match self {
+      Self::Lines(lines) => Some(lines),
+      Self::Auto | Self::Unknown => None,
+    }
+  }
+
+  /// For a choice in a `<select>`: `auto` or the lines.
+  pub fn slug(self) -> String {
+    match self.max_lines() {
+      Some(lines) => lines.to_string(),
+      None => "auto".to_owned(),
+    }
+  }
+
+  /// [`VideoQuality::slug`] read back; anything else is Auto.
+  pub fn from_slug(slug: &str) -> Self {
+    slug.parse().map_or(Self::Auto, Self::Lines)
+  }
+}
+
 /// Why the last call ended other than by leaving.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "reason", rename_all = "snake_case")]
@@ -752,6 +794,25 @@ pub enum CallPhase {
 
 #[cfg(test)]
 mod tests {
+
+  mod video_quality {
+    use super::super::*;
+
+    #[test]
+    fn qualities_travel_as_auto_or_lines_and_unknown_ones_count_as_auto() {
+      let wire = |quality: VideoQuality| serde_json::to_string(&quality).unwrap();
+      assert_eq!(wire(VideoQuality::Auto), r#""auto""#);
+      assert_eq!(wire(VideoQuality::Lines(720)), r#"{"lines":720}"#);
+      let read = |json: &str| serde_json::from_str::<VideoQuality>(json).unwrap();
+      assert_eq!(read(r#"{"lines":1080}"#), VideoQuality::Lines(1080));
+      assert_eq!(read(r#""best_effort""#), VideoQuality::Unknown);
+      assert_eq!(VideoQuality::Unknown.max_lines(), None);
+      for quality in VideoQuality::CAMERA_CHOICES {
+        assert_eq!(VideoQuality::from_slug(&quality.slug()), quality);
+      }
+      assert_eq!(VideoQuality::from_slug("sharp"), VideoQuality::Auto);
+    }
+  }
 
   mod org_backgrounds {
     use super::*;

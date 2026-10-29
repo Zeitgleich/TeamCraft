@@ -48,8 +48,8 @@ struct HardwareElement {
   /// with anything else, so no picture ever came out of it (issue #683). Both encode without
   /// B-frames, which is what every receiver decodes.
   profile: &'static str,
-  /// `gst-launch` style properties for the layer's bitrate (kbit/s).
-  properties: fn(bitrate_kbps: u32) -> String,
+  /// `gst-launch` style properties for the layer's bitrate (kbit/s) and content.
+  properties: fn(bitrate_kbps: u32, content: VideoContent) -> String,
 }
 
 impl GstreamerEncoder {
@@ -74,7 +74,7 @@ impl GstreamerEncoder {
          video/x-h264,profile={} ! h264parse config-interval=-1 ! \
          video/x-h264,stream-format=byte-stream,alignment=au ! appsink name=sink sync=false",
         element.name,
-        (element.properties)(bitrate_kbps),
+        (element.properties)(bitrate_kbps, content),
         element.profile,
       );
       match Self::build(&description, element.name, layer, content) {
@@ -170,7 +170,7 @@ impl VideoEncoder for GstreamerEncoder {
     frame: &VideoFrame,
     is_keyframe_forced: bool,
   ) -> Result<Option<EncodedPicture>, VideoCodecError> {
-    let frame = frame.scaled(self.resolution)?;
+    let frame = frame.at_size(self.resolution)?;
     if is_keyframe_forced {
       let event = gstreamer_video::DownstreamForceKeyUnitEvent::builder()
         .all_headers(true)
@@ -244,7 +244,7 @@ const HARDWARE_ELEMENTS: &[HardwareElement] = &[
   HardwareElement {
     name: "vah264enc",
     profile: "constrained-baseline",
-    properties: |bitrate_kbps| {
+    properties: |bitrate_kbps, _content| {
       format!(
         "bitrate={bitrate_kbps} rate-control=cbr key-int-max={KEYFRAME_INTERVAL_FRAMES} b-frames=0 \
          ref-frames=1 cabac=false"
@@ -254,7 +254,7 @@ const HARDWARE_ELEMENTS: &[HardwareElement] = &[
   HardwareElement {
     name: "v4l2h264enc",
     profile: "constrained-baseline",
-    properties: |bitrate_kbps| {
+    properties: |bitrate_kbps, _content| {
       let bitrate_bps = u64::from(bitrate_kbps) * 1000;
       format!(
         "extra-controls=\"controls,video_bitrate={bitrate_bps},h264_i_frame_period={KEYFRAME_INTERVAL_FRAMES}\""
@@ -265,14 +265,28 @@ const HARDWARE_ELEMENTS: &[HardwareElement] = &[
 
 /// macOS: VideoToolbox. Tested on Apple silicon with GStreamer 1.28 (the release bundles the same
 /// version).
+///
+/// Cameras at a constant bitrate (#967): with only an average bitrate (`AverageBitRate`) the
+/// encoder stops spending bits on a calm picture long before it looks good. A 720p camera layer
+/// meant for 1.5 Mbit/s sent 155 to 306 kbit/s in calls, and a calm test picture 600 kbit/s at
+/// 41 dB PSNR; at a constant bitrate it sends 1.45 Mbit/s at 46 dB, and the 360p and 180p layers,
+/// which sent a tenth of theirs, their whole bitrate too (`examples/camera_bitrate.rs`). A
+/// quality floor (`quality`) instead made VideoToolbox ignore the bitrate (9 Mbit/s at 0.9).
+/// VideoToolbox has a constant bitrate on Apple silicon from macOS 13; elsewhere GStreamer caps
+/// the average with data rate limits instead. Screen shares keep the average bitrate: a still
+/// screen needs next to nothing between its changes.
 #[cfg(target_os = "macos")]
 const HARDWARE_ELEMENTS: &[HardwareElement] = &[HardwareElement {
   name: "vtenc_h264",
   profile: "baseline",
-  properties: |bitrate_kbps| {
+  properties: |bitrate_kbps, content| {
+    let rate_control = match content {
+      VideoContent::Camera => "cbr",
+      VideoContent::Screen => "abr",
+    };
     format!(
-      "bitrate={bitrate_kbps} realtime=true allow-frame-reordering=false \
-       max-keyframe-interval={KEYFRAME_INTERVAL_FRAMES}"
+      "bitrate={bitrate_kbps} rate-control={rate_control} realtime=true \
+       allow-frame-reordering=false max-keyframe-interval={KEYFRAME_INTERVAL_FRAMES}"
     )
   },
 }];
@@ -283,7 +297,7 @@ const HARDWARE_ELEMENTS: &[HardwareElement] = &[HardwareElement {
 const HARDWARE_ELEMENTS: &[HardwareElement] = &[HardwareElement {
   name: "mfh264enc",
   profile: "constrained-baseline",
-  properties: |bitrate_kbps| {
+  properties: |bitrate_kbps, _content| {
     format!(
       "bitrate={bitrate_kbps} rc-mode=cbr low-latency=true bframes=0 gop-size={KEYFRAME_INTERVAL_FRAMES}"
     )
@@ -419,6 +433,56 @@ mod tests {
       }
     }
     assert!(pictures >= 15, "only {pictures} of 20 frames came out");
+  }
+
+  /// #967: a calm camera picture uses its layer's bitrate. VideoToolbox at an average bitrate
+  /// sent a tenth of it, and the picture looked soft. Hardware only, like above.
+  #[test]
+  fn a_calm_camera_picture_uses_its_bitrate() {
+    const FRAMES: u64 = 120;
+    const SETTLED: u64 = 30;
+    let layer = simulcast_layers(HD, 30, 1_500_000, 1)[0];
+    let Some(mut encoder) = GstreamerEncoder::new(&layer, VideoContent::Camera) else {
+      assert!(
+        std::env::var_os("TEAMCRAFT_REQUIRE_HARDWARE_ENCODER").is_none(),
+        "no hardware encoder"
+      );
+      return;
+    };
+    let still = test_pattern(HD, 0, 0).unwrap();
+    let mut settled_bytes = 0;
+    for index in 0..FRAMES {
+      // The still picture with a camera's faint noise, at 30 fps.
+      let mut data = still.data().to_vec();
+      for (offset, value) in data.iter_mut().enumerate().step_by(7) {
+        let noise = (offset as u64 ^ index.wrapping_mul(2_654_435_761)) % 3;
+        *value = value.saturating_add(noise as u8);
+      }
+      let frame = VideoFrame::new(HD, index * 33_333, data).unwrap();
+      if let Some(picture) = encoder.encode(&frame, index == 0).unwrap()
+        && index >= SETTLED
+      {
+        settled_bytes += picture.data.len() as u64;
+      }
+    }
+    let seconds = (FRAMES - SETTLED) as f64 / 30.0;
+    let bitrate_bps = settled_bytes as f64 * 8.0 / seconds;
+    let share = bitrate_bps / f64::from(layer.max_bitrate_bps);
+    assert!(
+      share > 0.7,
+      "{} sent {:.0} kbit/s of {} kbit/s",
+      encoder.element,
+      bitrate_bps / 1000.0,
+      layer.max_bitrate_bps / 1000
+    );
+  }
+
+  #[cfg(target_os = "macos")]
+  #[test]
+  fn videotoolbox_sends_cameras_at_a_constant_bitrate_and_screens_on_average() {
+    let element = &HARDWARE_ELEMENTS[0];
+    assert!((element.properties)(1500, VideoContent::Camera).contains("rate-control=cbr"));
+    assert!((element.properties)(1500, VideoContent::Screen).contains("rate-control=abr"));
   }
 
   #[test]

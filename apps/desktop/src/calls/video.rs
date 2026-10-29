@@ -27,7 +27,7 @@ use teamcraft_media::effects::{
   TractSegmenter,
 };
 use teamcraft_media::system_audio::SystemAudioCapture;
-use teamcraft_media::video::{VideoResolution, fit_within, screen_limits, simulcast_layers};
+use teamcraft_media::video::{CAMERA_FRAMERATE, VideoResolution, screen_limits};
 use teamcraft_media::video_capture::{CameraInfo, CaptureError, CaptureFormat, VideoCapture};
 use teamcraft_media::video_codec::OpenH264Decoder;
 use teamcraft_media::video_jpeg::JpegTranscoder;
@@ -42,14 +42,6 @@ use super::VideoSink;
 const MODEL_VARIABLE: &str = "TEAMCRAFT_SEGMENTATION_MODEL";
 /// The bundled model, relative to the app's resources (tauri.models.conf.json).
 pub(crate) const BUNDLED_MODEL: &str = "models/selfie_segmentation_landscape.onnx";
-const CAMERA_FORMAT: CaptureFormat = CaptureFormat {
-  resolution: VideoResolution {
-    width: 1280,
-    height: 720,
-  },
-  framerate: 30,
-};
-const CAMERA_BITRATE_BPS: u32 = 1_500_000;
 /// How long the portal's camera stream may take to its first frame before V4L2 is tried: well
 /// inside the call's first-picture check (`video_pipeline::FIRST_PICTURE_TIMEOUT`, 10 s), so the
 /// V4L2 camera still has time to deliver.
@@ -185,21 +177,25 @@ pub(super) struct OpenedScreen {
 /// is no longer listed). V4L2 tries the chosen or first camera and one fallback
 /// (`camera_choice`); the report says which one opened.
 #[cfg(target_os = "linux")]
-pub(super) fn open_camera(maybe_id: Option<&str>) -> Result<(Box<dyn VideoCapture>, CameraReport), String> {
+pub(super) fn open_camera(
+  maybe_id: Option<&str>,
+  limit: VideoResolution,
+) -> Result<(Box<dyn VideoCapture>, CameraReport), String> {
   use teamcraft_media::camera_choice::{open_first, open_order};
   use teamcraft_media::capture_fallback::FallbackCapture;
   use teamcraft_media::capture_portal::PortalCapture;
   use teamcraft_media::capture_v4l2::V4l2Camera;
 
+  let format = camera_format(limit);
   let cameras = list_cameras();
   let maybe_listed = maybe_id.filter(|id| cameras.iter().any(|camera| camera.id == *id));
   if maybe_listed.is_none() {
-    match PortalCapture::camera(CAMERA_FORMAT) {
+    match PortalCapture::camera(format) {
       Ok(capture) => {
         info!("camera through the portal (PipeWire), V4L2 if it stays silent");
         // The portal's stream can stay paused for good (#683): then the default camera directly.
-        let open_v4l2 = Box::new(|| {
-          V4l2Camera::open(None, CAMERA_FORMAT).map(|camera| Box::new(camera) as Box<dyn VideoCapture>)
+        let open_v4l2 = Box::new(move || {
+          V4l2Camera::open(None, format).map(|camera| Box::new(camera) as Box<dyn VideoCapture>)
         });
         let capture =
           FallbackCapture::new(Box::new(capture), "portal", open_v4l2, "V4L2", PORTAL_CAMERA_WAIT);
@@ -215,7 +211,7 @@ pub(super) fn open_camera(maybe_id: Option<&str>) -> Result<(Box<dyn VideoCaptur
   info!(device = maybe_listed.unwrap_or("default"), "camera through V4L2");
   let order = open_order(&cameras, maybe_listed);
   let (camera, used) = open_first(&order, |camera| {
-    V4l2Camera::open(Some(camera.id.as_str()), CAMERA_FORMAT)
+    V4l2Camera::open(Some(camera.id.as_str()), format)
   })
   .map_err(|error| camera_failure_wire(&error))?;
   let report = CameraReport::default();
@@ -225,15 +221,21 @@ pub(super) fn open_camera(maybe_id: Option<&str>) -> Result<(Box<dyn VideoCaptur
 
 /// The camera opens when the capture starts (on its own thread); the report then says which one.
 #[cfg(any(target_os = "macos", target_os = "windows"))]
-pub(super) fn open_camera(maybe_id: Option<&str>) -> Result<(Box<dyn VideoCapture>, CameraReport), String> {
-  let camera = teamcraft_media::capture_nokhwa::NokhwaCamera::open(maybe_id, CAMERA_FORMAT)
+pub(super) fn open_camera(
+  maybe_id: Option<&str>,
+  limit: VideoResolution,
+) -> Result<(Box<dyn VideoCapture>, CameraReport), String> {
+  let camera = teamcraft_media::capture_nokhwa::NokhwaCamera::open(maybe_id, camera_format(limit))
     .map_err(|error| camera_failure_wire(&error))?;
   let report = camera.report();
   Ok((Box::new(camera) as Box<dyn VideoCapture>, report))
 }
 
 #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
-pub(super) fn open_camera(_maybe_id: Option<&str>) -> Result<(Box<dyn VideoCapture>, CameraReport), String> {
+pub(super) fn open_camera(
+  _maybe_id: Option<&str>,
+  _limit: VideoResolution,
+) -> Result<(Box<dyn VideoCapture>, CameraReport), String> {
   Err("cameras are not supported on this platform yet".into())
 }
 
@@ -332,15 +334,21 @@ fn open_system_audio() -> Box<dyn SystemAudioCapture> {
   Box::new(teamcraft_media::system_audio_wasapi::WasapiSystemAudio::new())
 }
 
-/// Three simulcast layers for a camera.
-pub(super) fn camera_layers(format: CaptureFormat) -> Vec<VideoLayerInfo> {
-  // The camera may capture more (4K, 60 fps); what is sent stays within the camera preset.
-  simulcast_layers(
-    fit_within(format.resolution, CAMERA_FORMAT.resolution),
-    format.framerate.min(CAMERA_FORMAT.framerate),
-    CAMERA_BITRATE_BPS,
-    3,
-  )
+/// What the camera is asked for: the size it is sent at, at most (`video::camera_limit`: 1080p
+/// unless the user picked less, #967), at 30 fps. A camera without that mode opens in the closest
+/// one (`capture_negotiate`).
+fn camera_format(limit: VideoResolution) -> CaptureFormat {
+  CaptureFormat {
+    resolution: limit,
+    framerate: CAMERA_FRAMERATE,
+  }
+}
+
+/// Three simulcast layers for a camera that delivers `source`, sent within `limit`: 1080p, 720p
+/// and 360p from a 1080p camera, 720p, 360p and 180p from a 720p one (`video::camera_layers`).
+/// The camera may capture more (4K, 60 fps); what is sent stays within the limit, at 30 fps.
+pub(super) fn camera_layers(source: VideoResolution, limit: VideoResolution) -> Vec<VideoLayerInfo> {
+  teamcraft_media::video::camera_layers(source, CAMERA_FRAMERATE, limit)
 }
 
 /// The largest picture a screen share of `mode` asks the capture for (#530).
@@ -564,7 +572,8 @@ pub(super) fn media_effect(
 }
 
 /// A picture file of the user's (JPEG or PNG) ready for the compositor: decoded and scaled to the
-/// preset size (calls send at most 720p). Blocking: decoding takes a moment.
+/// preset size (720p; the compositor scales it to a larger camera picture). Blocking: decoding
+/// takes a moment.
 pub(crate) fn decode_background(picture: &[u8]) -> Result<Arc<BackgroundImage>, String> {
   BackgroundImage::decode(picture)
     .map(|image| Arc::new(image.fit_within(PRESET_WIDTH, PRESET_HEIGHT)))
@@ -705,25 +714,41 @@ mod tests {
   }
 
   #[test]
-  fn a_4k_camera_is_sent_as_720p_within_the_bitrate_cap() {
-    let capture = CaptureFormat {
-      resolution: VideoResolution {
-        width: 3840,
-        height: 2160,
-      },
-      framerate: 60,
+  fn a_4k_camera_is_sent_as_1080p_or_as_the_user_caps_it() {
+    use teamcraft_media::video::{CAMERA_HD_BITRATE_BPS, CAMERA_MAX_BITRATE_BPS, camera_limit};
+
+    let uhd = VideoResolution {
+      width: 3840,
+      height: 2160,
     };
-    let layers = camera_layers(capture);
+    let layers = camera_layers(uhd, camera_limit(None));
     assert_eq!(layers.len(), 3);
     let top = layers.last().unwrap();
-    assert_eq!((top.width, top.height, top.max_framerate), (1280, 720, 30));
-    assert!(layers.iter().map(|layer| layer.max_bitrate_bps).sum::<u32>() <= CAMERA_BITRATE_BPS * 2);
-    assert_eq!(top.max_bitrate_bps, CAMERA_BITRATE_BPS);
+    assert_eq!((top.width, top.height, top.max_framerate), (1920, 1080, 30));
+    assert_eq!(top.max_bitrate_bps, CAMERA_MAX_BITRATE_BPS);
+    // Capped at 720p: as before #967.
+    let capped = camera_layers(uhd, camera_limit(Some(720)));
+    let top = capped.last().unwrap();
+    assert_eq!((top.width, top.height), (1280, 720));
+    assert_eq!(top.max_bitrate_bps, CAMERA_HD_BITRATE_BPS);
+    assert_eq!(
+      camera_format(camera_limit(Some(720))).resolution,
+      top_size(&capped)
+    );
+  }
+
+  fn top_size(layers: &[VideoLayerInfo]) -> VideoResolution {
+    let top = layers.last().unwrap();
+    VideoResolution {
+      width: top.width,
+      height: top.height,
+    }
   }
 
   #[test]
   fn cameras_get_three_layers_and_screens_two() {
-    assert_eq!(camera_layers(CAMERA_FORMAT).len(), 3);
+    let limit = teamcraft_media::video::camera_limit(None);
+    assert_eq!(camera_layers(camera_format(limit).resolution, limit).len(), 3);
     let screen = screen_layers(
       screen_format(ScreenContentMode::Detail),
       ScreenContentMode::Detail,

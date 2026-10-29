@@ -90,6 +90,20 @@ pub fn call_size_camera(calls: State<'_, Arc<CallHost>>, width: u32, height: u32
   calls.size_camera(width, height);
 }
 
+/// The size the webview shows a watched track in, in device pixels (the tile's size times the
+/// display's scale): while the viewer leaves the quality to the call, it receives the smallest
+/// layer that covers it (#967).
+#[tauri::command(rename_all = "snake_case")]
+pub async fn call_size_video(
+  calls: State<'_, Arc<CallHost>>,
+  stream_id: MediaStreamId,
+  width: u32,
+  height: u32,
+) -> Result<(), CommandError> {
+  calls.size_video(stream_id, width, height).await;
+  Ok(())
+}
+
 /// Sends the pre-join check's microphone level (0.0 to 1.0) through `levels`, about ten times a
 /// second while the check measures (#442).
 #[tauri::command(rename_all = "snake_case")]
@@ -301,6 +315,8 @@ pub async fn call_action(
     },
     CallAction::SetTalking { is_talking } => calls.set_talking(is_talking).await,
     CallAction::SetStatusSounds { sounds } => calls.set_status_sounds(sounds).await,
+    CallAction::SetCameraQuality { quality } => calls.set_camera_quality(quality).await?,
+    CallAction::SetVideoQuality { stream_id, quality } => calls.set_video_quality(stream_id, quality).await,
     CallAction::RefreshDevices => drop(calls.refresh_devices().await?),
     CallAction::SetPreview { preview } => {
       // The current choice under the current rule, as for the call's camera: the check shows

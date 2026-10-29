@@ -738,6 +738,17 @@ pub trait CallBackend {
   fn leave_call_everywhere(&self, _conversation: ConversationId) {}
   /// Which call status sounds play on this device, for this and later calls.
   fn set_call_status_sounds(&self, _sounds: CallStatusSounds) {}
+  /// The highest quality the own camera is sent at, for this and later calls (#967); a running
+  /// camera restarts with it.
+  fn set_camera_quality(&self, _quality: crate::calls::VideoQuality) {}
+  /// How sharp another device's track comes in the active call (#967): Auto by its tile, else at
+  /// most the lines picked.
+  fn set_video_quality(
+    &self,
+    _stream_id: teamcraft_proto::MediaStreamId,
+    _quality: crate::calls::VideoQuality,
+  ) {
+  }
   /// A [`crate::calls::MediaDevice::id`]; `None` follows the system default.
   fn select_microphone(&self, _maybe_device: Option<String>) {}
   fn select_speakers(&self, _maybe_device: Option<String>) {}

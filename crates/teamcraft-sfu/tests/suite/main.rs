@@ -5,6 +5,8 @@
 mod bandwidth_limits;
 mod camera_call;
 mod camera_start;
+#[path = "../common/mod.rs"]
+mod common;
 mod dave_call;
 mod handover;
 mod host_controls;
@@ -17,4 +19,5 @@ mod session_close;
 mod sfu_restart;
 mod video_call;
 mod video_content;
+mod video_quality;
 mod video_recovery;
