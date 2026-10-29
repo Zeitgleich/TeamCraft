@@ -424,8 +424,9 @@ impl Forwarder {
         "codec not in the publisher's encoders",
       ));
     }
+    // Four since #978; clients publish three to SFUs from before, which say no limit in `joined`.
     if layers.is_empty() || layers.len() > usize::from(MAX_SIMULCAST_LAYERS) {
-      return Err(ForwardError::InvalidPublication("needs 1 to 3 layers"));
+      return Err(ForwardError::InvalidPublication("needs 1 to 4 layers"));
     }
     if layers
       .iter()
@@ -433,7 +434,7 @@ impl Forwarder {
       .any(|(info, expected)| info.layer != expected)
     {
       return Err(ForwardError::InvalidPublication(
-        "layers must be numbered 0, 1, 2 in order",
+        "layers must be numbered from 0 in order",
       ));
     }
     let is_new_stream = !self.video_tracks.contains_key(&stream_id);
@@ -1798,6 +1799,30 @@ mod tests {
       );
     }
 
+    /// #978: up to four layers, numbered from 0; a fifth is refused.
+    #[test]
+    fn four_layers_are_taken_and_five_refused() {
+      let (mut forwarder, _) = room(2);
+      let publish = |forwarder: &mut Forwarder, stream: u32, layers: Vec<VideoLayerInfo>| {
+        forwarder.publish_video(
+          device(1),
+          StreamId(stream),
+          VideoTrackKind::Camera,
+          VideoCodec::Av1,
+          layers,
+          None,
+        )
+      };
+      let track = publish(&mut forwarder, 100, four_layers()).unwrap();
+      assert_eq!(track.layers.len(), 4);
+      let mut five = four_layers();
+      five.push(VideoLayerInfo { layer: 4, ..five[3] });
+      assert_eq!(
+        publish(&mut forwarder, 101, five),
+        Err(ForwardError::InvalidPublication("needs 1 to 4 layers"))
+      );
+    }
+
     #[test]
     fn invalid_publications_and_subscriptions() {
       let (mut forwarder, now) = video_room();
@@ -1896,12 +1921,36 @@ mod tests {
       assert_eq!(forwarder.take_uplink_feedback(device(1)), None);
     }
 
-    /// Runs a publisher sending all three layers at their bitrates and a receiver behind a link of
+    /// #978: a 1080p camera's fourth layer (180p) keeps a receiver that can't take 360p in the
+    /// picture; with the three layers from before, its lowest was 360p.
+    #[test]
+    fn a_weak_link_gets_the_fourth_layer_of_a_1080p_camera() {
+      assert_eq!(settled_layer_of(&four_layers(), 350_000), Some(0));
+      assert_eq!(settled_layer_of(&four_layers(), 900_000), Some(1));
+    }
+
+    /// Runs a publisher sending all its layers at their bitrates and a receiver behind a link of
     /// `capacity_bps` that reports feedback every 100 ms; returns the receiver's dominant layer in
     /// the last 20 of 60 s (the estimate ramps up at 8 %/s from 300 kbit/s).
     fn settled_layer(capacity_bps: u64) -> Option<u8> {
-      let (mut forwarder, start) = video_room();
-      forwarder.subscribe(device(2), VIDEO, Some(2), start).unwrap();
+      settled_layer_of(&three_layers(), capacity_bps)
+    }
+
+    /// [`settled_layer`] for a track of `layers`.
+    fn settled_layer_of(layers: &[VideoLayerInfo], capacity_bps: u64) -> Option<u8> {
+      let (mut forwarder, start) = room(3);
+      forwarder
+        .publish_video(
+          device(1),
+          VIDEO,
+          VideoTrackKind::Camera,
+          VideoCodec::Av1,
+          layers.to_vec(),
+          None,
+        )
+        .unwrap();
+      let top = layers.last().map_or(0, |info| info.layer);
+      forwarder.subscribe(device(2), VIDEO, Some(top), start).unwrap();
       let mut link = Link::new(capacity_bps);
       let mut recorder = FeedbackRecorder::new(start);
       let mut in_flight: Vec<(Instant, TransportSeq)> = Vec::new();
@@ -1913,7 +1962,7 @@ mod tests {
       while now < end {
         // 30 fps; a keyframe every second so layer switches can happen.
         let is_keyframe = frame_number.is_multiple_of(30);
-        for info in three_layers() {
+        for info in layers {
           let frame_bytes = (info.max_bitrate_bps / 8 / 30) as usize;
           for (fragment, payload) in
             fragment_frame(&vec![0; frame_bytes], frame_number, is_keyframe, 1000).unwrap()
@@ -1967,17 +2016,18 @@ mod tests {
       if layers_seen.is_empty() {
         return None;
       }
-      (0..3u8)
-        .max_by_key(|layer| layers_seen.iter().filter(|seen| *seen == layer).count() / layer_weight(*layer))
-    }
-
-    /// Datagrams per frame grow with the layer's bitrate; normalize so time spent counts, not bytes.
-    fn layer_weight(layer: u8) -> usize {
-      match layer {
-        0 => 1,
-        1 => 3,
-        _ => 10,
-      }
+      // Datagrams per frame grow with the layer's bitrate; normalized so time spent counts, not
+      // bytes.
+      let lowest_bps = layers.first().map_or(1, |info| info.max_bitrate_bps.max(1));
+      layers
+        .iter()
+        .max_by_key(|info| {
+          let weight = usize::try_from(info.max_bitrate_bps / lowest_bps)
+            .unwrap_or(1)
+            .max(1);
+          layers_seen.iter().filter(|seen| **seen == info.layer).count() / weight
+        })
+        .map(|info| info.layer)
     }
   }
 
@@ -2087,6 +2137,25 @@ mod tests {
       .into_iter()
       .map(|(receiver, _)| receiver)
       .collect()
+  }
+
+  /// A 1080p camera's layers since #978 (`video::camera_layers`).
+  fn four_layers() -> Vec<VideoLayerInfo> {
+    [
+      (0, 320, 180, 93_750),
+      (1, 640, 360, 375_000),
+      (2, 1280, 720, 1_500_000),
+      (3, 1920, 1080, 3_000_000),
+    ]
+    .into_iter()
+    .map(|(layer, width, height, max_bitrate_bps)| VideoLayerInfo {
+      layer,
+      width,
+      height,
+      max_framerate: 30,
+      max_bitrate_bps,
+    })
+    .collect()
   }
 
   fn three_layers() -> Vec<VideoLayerInfo> {

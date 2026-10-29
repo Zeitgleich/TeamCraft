@@ -1,6 +1,7 @@
 //! A camera that looks busy to an encoder, shared by the suite's camera tests: a lit background
 //! with texture, a head and a hand that move, and sensor noise in every picture, so OpenH264 uses
-//! its whole bitrate (a test pattern of flat bars needs a fraction of it).
+//! its whole bitrate (a test pattern of flat bars needs a fraction of it). 720p, or scaled to
+//! another size ([`BusyCamera::at`]).
 
 // clippy.toml only relaxes these lints inside #[test] functions; the helpers below are test code too.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
@@ -26,6 +27,7 @@ pub const CAMERA_PICTURES: usize = 30;
 /// A camera that looks busy to an encoder: a lit background with texture, a head and a hand that
 /// move, and sensor noise in every picture. The pictures are drawn once and repeat every second.
 pub struct BusyCamera {
+  resolution: VideoResolution,
   pictures: Arc<Vec<VideoFrame>>,
   /// Which picture was delivered at which timestamp.
   shown: Arc<Mutex<BTreeMap<u64, usize>>>,
@@ -35,8 +37,16 @@ pub struct BusyCamera {
 
 impl BusyCamera {
   pub fn new(start: Instant) -> Self {
-    let pictures = (0..CAMERA_PICTURES).map(draw_camera_picture).collect();
+    Self::at(start, HD)
+  }
+
+  /// The same camera delivering `resolution` (its 720p pictures scaled once, before it starts).
+  pub fn at(start: Instant, resolution: VideoResolution) -> Self {
+    let pictures = (0..CAMERA_PICTURES)
+      .map(|index| draw_camera_picture(index).scaled(resolution).unwrap())
+      .collect();
     Self {
+      resolution,
       pictures: Arc::new(pictures),
       shown: Arc::default(),
       start,
@@ -58,7 +68,7 @@ impl BusyCamera {
 impl VideoCapture for BusyCamera {
   fn format(&self) -> CaptureFormat {
     CaptureFormat {
-      resolution: HD,
+      resolution: self.resolution,
       framerate: FRAMERATE,
     }
   }

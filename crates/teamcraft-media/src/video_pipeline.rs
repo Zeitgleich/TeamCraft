@@ -15,7 +15,9 @@ use tracing::{debug, info, warn};
 
 use crate::call_video::ReceivedVideoFrame;
 use crate::picture_check::{PictureContent, picture_content};
-use crate::video::{EncodedVideoFrame, LayerSizer, VideoFrame, VideoResolution, fit_within};
+use crate::video::{
+  EncodedVideoFrame, LayerSizer, VideoFrame, VideoResolution, fit_within, within_layer_limit,
+};
 use crate::video_capture::{CaptureError, FrameReceiver, VideoCapture, frame_queue};
 use crate::video_codec::{
   FallbackEncoder, OpenH264Decoder, OpenH264Encoder, SimulcastEncoder, VideoCodecError, VideoContent,
@@ -276,6 +278,19 @@ impl VideoSendConfig {
   /// [`SCREEN_IDLE_REFRESH`], cameras none.
   pub fn default_idle_refresh(kind: &VideoTrackKind) -> Option<Duration> {
     (*kind == VideoTrackKind::Screen).then_some(SCREEN_IDLE_REFRESH)
+  }
+
+  /// The same track with at most `max_layers` layers, the top ones (#978,
+  /// [`crate::video::within_layer_limit`]), also where they are planned from the first frame:
+  /// what the SFU takes ([`crate::call_engine::CallEngine::simulcast_layer_limit`]).
+  pub fn within_layer_limit(mut self, max_layers: u8) -> Self {
+    self.layers = within_layer_limit(&self.layers, max_layers);
+    if let Some(plan) = self.maybe_layer_plan.take() {
+      self.maybe_layer_plan = Some(Box::new(move |source| {
+        within_layer_limit(&plan(source), max_layers)
+      }));
+    }
+    self
   }
 }
 
@@ -1347,6 +1362,42 @@ mod tests {
       .unwrap()
       .unwrap();
     assert_eq!(first.timestamp, EncodedVideoFrame::rtp_timestamp(0));
+  }
+
+  /// #978: a 1080p camera sent to an SFU that takes three layers is planned with its top three,
+  /// 1080p, 720p and 360p, also when the layers are planned from the first frame.
+  #[tokio::test]
+  async fn a_layer_limit_keeps_the_top_layers_of_the_plan() {
+    let limit = crate::video::camera_limit(None);
+    let (encoded, _encoded_rx) = mpsc::unbounded_channel();
+    let capture = Delivering {
+      format: CaptureFormat {
+        resolution: limit,
+        framerate: 30,
+      },
+      delivers: limit,
+      maybe_frames: None,
+    };
+    let config = VideoSendConfig {
+      kind: VideoTrackKind::Camera,
+      capture: Box::new(capture),
+      layers: crate::video::camera_layers(limit, 30, limit),
+      maybe_layer_plan: Some(Box::new(move |source| {
+        crate::video::camera_layers(source, 30, limit)
+      })),
+      encoders: first_picture::fake_encoders(),
+      maybe_filter: None,
+      maybe_idle_refresh: None,
+    }
+    .within_layer_limit(3);
+    assert_eq!(config.layers.len(), 3);
+    let (sender, _first_picture) = VideoSender::start(config, encoded).unwrap();
+    let sides: Vec<(u8, u16)> = sender
+      .layers
+      .iter()
+      .map(|info| (info.layer, info.height))
+      .collect();
+    assert_eq!(sides, vec![(0, 360), (1, 720), (2, 1080)]);
   }
 
   /// Delivers one frame of `delivers` as soon as it starts, whatever it was asked for.

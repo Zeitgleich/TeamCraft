@@ -1435,7 +1435,7 @@ fn native_config(
       // page does (#565).
       video_encoders: vec![VideoCodec::H264],
       video_decoders: video::decodable_codecs(page_decoders),
-      max_simulcast_layers: 3,
+      max_simulcast_layers: teamcraft_proto::MAX_SIMULCAST_LAYERS,
       max_frame_fragments: teamcraft_proto::MAX_VIDEO_FRAME_FRAGMENTS,
     },
     bwe: BweConfig::default(),

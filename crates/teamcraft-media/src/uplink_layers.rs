@@ -551,6 +551,26 @@ mod tests {
     assert!(!uplink.allows(CAMERA, 1));
   }
 
+  /// #978: a 1080p camera's 180p layer keeps a weak uplink in the picture; with the three layers
+  /// of before (360p the lowest, at half its bitrate 190 kbit/s) 200 kbit/s sent no video at all.
+  #[test]
+  fn a_weak_uplink_sends_a_1080p_cameras_180p_layer() {
+    let four = full_hd_layers();
+    let tracks = [adapting_camera(&four)];
+    let mut uplink = UplinkLayers::new(300_000);
+    uplink.on_estimate(6_000_000, &tracks, false, &policy(), now());
+    assert!(uplink.allows(CAMERA, 3));
+    uplink.on_estimate(200_000, &tracks, false, &policy(), now());
+    assert!(uplink.allows(CAMERA, 0));
+    assert!(!uplink.allows(CAMERA, 1));
+    let three = within_three(&four);
+    let tracks = [adapting_camera(&three)];
+    let mut before = UplinkLayers::new(300_000);
+    before.on_estimate(6_000_000, &tracks, false, &policy(), now());
+    before.on_estimate(200_000, &tracks, false, &policy(), now());
+    assert!(!before.allows(CAMERA, 0));
+  }
+
   #[test]
   fn layers_come_back_with_a_margin() {
     let layers = camera_layers();
@@ -856,6 +876,21 @@ mod tests {
 
   fn camera_layers() -> Vec<VideoLayerInfo> {
     vec![layer(0, 150_000), layer(1, 500_000), layer(2, 1_500_000)]
+  }
+
+  /// A 1080p camera's layers (`video::camera_layers`, #978): 180p to 1080p.
+  fn full_hd_layers() -> Vec<VideoLayerInfo> {
+    vec![
+      layer(0, 93_750),
+      layer(1, 375_000),
+      layer(2, 1_500_000),
+      layer(3, 3_000_000),
+    ]
+  }
+
+  /// `layers` as an SFU that takes three gets them.
+  fn within_three(layers: &[VideoLayerInfo]) -> Vec<VideoLayerInfo> {
+    crate::video::within_layer_limit(layers, 3)
   }
 
   fn layer(layer: u8, max_bitrate_bps: u32) -> VideoLayerInfo {

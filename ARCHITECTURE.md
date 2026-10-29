@@ -343,7 +343,13 @@ The same approach Fluxer announced for its new voice system (see https://fluxer.
 
 - Forwards encrypted frames, never decodes.
 - **Audio:** forward the 3–5 loudest speakers based on the audio-level header extension; in large calls nobody receives dozens of audio streams.
-- **Video:** simulcast (3 layers) from each sender; the SFU picks the layer per receiver from its bandwidth estimate and viewport size ("last-N" for gallery view).
+- **Video:** simulcast (up to 4 layers) from each sender; the SFU picks the layer per receiver from its bandwidth estimate and viewport size ("last-N" for gallery view).
+- **Layer limit (#978):** the SFU says in `joined` how many layers per track it takes
+  (`maybe_max_simulcast_layers`, 4). SFUs from before say nothing and take 3: a client then plans
+  its tracks within 3 (a 1080p camera sends 1080p, 720p and 360p, as before), and a publication
+  planned before the SFU's answer goes out without its top layers, whose encoders pause. Clients
+  from before read no limit, publish at most 3 layers and receive 4-layer tracks like any other
+  (layers are chosen by size).
 - **Keyframes:** the SFU asks the publisher for one when a receiver switches layers, (re)subscribes,
   or sends `request_keyframe` because it can't decode until the next one (a lost fragment, a frame
   that didn't decrypt, a failed decoder). Requests are rate-limited per receiver and track (1 s) and
@@ -566,14 +572,17 @@ Settings → Chats).
 
   | Camera layer | Desktop, browser: 1080p camera | 720p camera (or capped at 720p) | Phones (2 layers, 800 kbit/s) |
   |--------------|--------------------------------|---------------------------------|-------------------------------|
-  | 0            | 640×360, 375 kbit/s            | 320×180, 94 kbit/s              | half size, 200 kbit/s         |
-  | 1            | 1280×720, 1.5 Mbit/s           | 640×360, 375 kbit/s             | full size, 800 kbit/s         |
-  | 2            | 1920×1080, 3 Mbit/s            | 1280×720, 1.5 Mbit/s            | –                             |
+  | 0            | 320×180, 94 kbit/s             | 320×180, 94 kbit/s              | half size, 200 kbit/s         |
+  | 1            | 640×360, 375 kbit/s            | 640×360, 375 kbit/s             | full size, 800 kbit/s         |
+  | 2            | 1280×720, 1.5 Mbit/s           | 1280×720, 1.5 Mbit/s            | –                             |
+  | 3            | 1920×1080, 3 Mbit/s            | –                               | –                             |
 
   Bitrates are the encoders' targets; a busy camera picture comes out at about 80 % of them, and
   every layer keeps the camera's frame rate (resolution goes before frame rate). Desktop and
   browser cameras send 1080p where the camera has it (`video::camera_layers`, #967), at 30 fps;
-  the user can cap what is sent at 1080p, 720p or 360p. The layers are planned for the first
+  the user can cap what is sent at 1080p, 720p or 360p. A 1080p camera's fourth layer, 180p
+  (#978), keeps a viewer whose link can't carry 360p in the picture: with three layers (360p the
+  lowest) such a viewer got only the SFU's resume probes, about 15 frames every 5 s. The layers are planned for the first
   frame the camera delivers. VideoToolbox encodes cameras at a constant bitrate (browsers where
   WebCodecs has one): at an average bitrate it stopped spending bits on a calm picture, and a
   720p layer sent 155 to 306 kbit/s of its 1.5 Mbit/s. Screen layers keep the average bitrate (a

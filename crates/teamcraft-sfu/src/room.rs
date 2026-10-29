@@ -24,9 +24,9 @@ use std::{
 use teamcraft_media::{datagram::StreamId, dave::DaveEpoch};
 use teamcraft_proto::{
   Base64Bytes, CallClientMessage, CallEvent, CallId, CallParticipant, CallRosterEntry, ConversationId,
-  DeviceId, ErrorBody, ErrorCode, MediaCapabilities, MediaStreamId, SFU_GOING_AWAY_CLOSE_CODE, SfuCallRoster,
-  SfuControlAction, TransportFeedback, UnixMillis, UserId, VideoCodec, VideoLayerInfo, VideoPublicationId,
-  VideoTrackKind,
+  DeviceId, ErrorBody, ErrorCode, MAX_SIMULCAST_LAYERS, MediaCapabilities, MediaStreamId,
+  SFU_GOING_AWAY_CLOSE_CODE, SfuCallRoster, SfuControlAction, TransportFeedback, UnixMillis, UserId,
+  VideoCodec, VideoLayerInfo, VideoPublicationId, VideoTrackKind,
 };
 use thiserror::Error;
 use tokio::sync::mpsc::{Sender, error::TrySendError};
@@ -985,6 +985,7 @@ impl RoomState {
         video_tracks: self.forwarder.video_tracks(),
         screen_audio_tracks: self.forwarder.screen_audio_tracks(),
         maybe_reconnect_grace_ms: Some(u64::try_from(reconnect_grace.as_millis()).unwrap_or(u64::MAX)),
+        maybe_max_simulcast_layers: Some(MAX_SIMULCAST_LAYERS),
       },
     );
     for (device_id, other) in &self.participants {

@@ -468,30 +468,36 @@ pub fn camera_limit(maybe_max_lines: Option<u16>) -> VideoResolution {
   }
 }
 
+/// The shares of a camera's picture above 720p its layers are sent at, lowest first, in sixths:
+/// 180p, 360p, 720p and 1080p of a 1080p camera (#967, #978).
+const CAMERA_LAYER_SIXTHS: [u32; 4] = [1, 2, 4, 6];
+
 /// The simulcast layers of a camera that delivers `source`, sent within `limit` ([`camera_limit`];
 /// a larger camera is scaled down, a smaller one sent as it is). Above 720p the layers are the
-/// whole picture, two thirds and one third (1080p, 720p, 360p): viewers of a 720p tile get the
-/// 720p layer they always got, weak links the 360p one, and only large tiles take the 1080p one.
-/// At 720p and below they halve (720p, 360p, 180p), the top one at [`CAMERA_HD_BITRATE_BPS`].
-/// Layer bitrates follow the pixel count against 720p's [`CAMERA_HD_BITRATE_BPS`], up to
-/// [`CAMERA_MAX_BITRATE_BPS`].
+/// whole picture, two thirds, one third and one sixth (1080p, 720p, 360p, 180p): viewers of a 720p
+/// tile get the 720p layer they always got, only large tiles take the 1080p one, and a link that
+/// can't carry 360p still gets 180p (#978) rather than a paused picture. At 720p and below they
+/// halve (720p, 360p, 180p), the top one at [`CAMERA_HD_BITRATE_BPS`]. Layer bitrates follow the
+/// pixel count against 720p's [`CAMERA_HD_BITRATE_BPS`], up to [`CAMERA_MAX_BITRATE_BPS`].
+///
+/// Four layers need an SFU that takes them; [`within_layer_limit`] fits a plan to an older one.
 pub fn camera_layers(source: VideoResolution, framerate: u8, limit: VideoResolution) -> Vec<VideoLayerInfo> {
   let top = even(fit_within(source, limit));
   if top.width.min(top.height) <= 720 {
     // As before #967: the top layer gets the bitrate of 720p.
     return simulcast_layers(top, framerate, CAMERA_HD_BITRATE_BPS, 3);
   }
-  let third = |side: u16, thirds: u32| {
-    let scaled = u32::from(side) * thirds / 3;
+  let sixths = |side: u16, sixths: u32| {
+    let scaled = u32::from(side) * sixths / 6;
     u16::try_from(scaled & !1).unwrap_or(side).max(2)
   };
-  [1, 2, 3]
+  CAMERA_LAYER_SIXTHS
     .into_iter()
     .zip(0u8..)
-    .map(|(thirds, layer)| {
+    .map(|(share, layer)| {
       let size = VideoResolution {
-        width: third(top.width, thirds),
-        height: third(top.height, thirds),
+        width: sixths(top.width, share),
+        height: sixths(top.height, share),
       };
       VideoLayerInfo {
         layer,
@@ -501,6 +507,20 @@ pub fn camera_layers(source: VideoResolution, framerate: u8, limit: VideoResolut
         max_bitrate_bps: hd_scaled_bitrate(size),
       }
     })
+    .collect()
+}
+
+/// The top `max_layers` of `layers` (lowest first, numbered from 0), numbered from 0 again: how a
+/// track planned with more layers than the SFU takes is sent (#978). A 1080p camera sends 1080p,
+/// 720p and 360p to an SFU that takes three (one from before #978), as it did before; its 180p
+/// layer is left out. Plans with fewer layers stay as they are.
+pub fn within_layer_limit(layers: &[VideoLayerInfo], max_layers: u8) -> Vec<VideoLayerInfo> {
+  let skipped = layers.len().saturating_sub(usize::from(max_layers.max(1)));
+  layers
+    .iter()
+    .skip(skipped)
+    .zip(0u8..)
+    .map(|(info, layer)| VideoLayerInfo { layer, ..*info })
     .collect()
 }
 
@@ -1105,9 +1125,10 @@ mod tests {
         .collect()
     }
 
-    /// #967: a 1080p camera sends 1080p on top of the 720p and 360p layers viewers had.
+    /// #967: a 1080p camera sends 1080p on top of the 720p and 360p layers viewers had; #978:
+    /// and 180p below them for links that can't carry 360p.
     #[test]
-    fn a_1080p_camera_sends_1080p_720p_and_360p() {
+    fn a_1080p_camera_sends_1080p_720p_360p_and_180p() {
       let full_hd = VideoResolution {
         width: 1920,
         height: 1080,
@@ -1116,9 +1137,10 @@ mod tests {
       assert_eq!(
         summary(&layers),
         vec![
-          (0, 640, 360, 375_000),
-          (1, 1280, 720, CAMERA_HD_BITRATE_BPS),
-          (2, 1920, 1080, CAMERA_MAX_BITRATE_BPS)
+          (0, 320, 180, 93_750),
+          (1, 640, 360, 375_000),
+          (2, 1280, 720, CAMERA_HD_BITRATE_BPS),
+          (3, 1920, 1080, CAMERA_MAX_BITRATE_BPS)
         ]
       );
       assert!(layers.iter().all(|layer| layer.max_framerate == 30));
@@ -1128,6 +1150,35 @@ mod tests {
         height: 2160,
       };
       assert_eq!(camera_layers(uhd, 30, camera_limit(None)), layers);
+    }
+
+    /// #978: an SFU that takes three layers gets a 1080p camera's 1080p, 720p and 360p, as
+    /// before; fewer layers than the limit stay as they are.
+    #[test]
+    fn a_plan_within_three_layers_keeps_the_top_ones() {
+      let full_hd = VideoResolution {
+        width: 1920,
+        height: 1080,
+      };
+      let four = camera_layers(full_hd, 30, camera_limit(None));
+      assert_eq!(
+        summary(&within_layer_limit(&four, 3)),
+        vec![
+          (0, 640, 360, 375_000),
+          (1, 1280, 720, CAMERA_HD_BITRATE_BPS),
+          (2, 1920, 1080, CAMERA_MAX_BITRATE_BPS)
+        ]
+      );
+      assert_eq!(within_layer_limit(&four, 4), four);
+      assert_eq!(within_layer_limit(&four, MAX_SIMULCAST_LAYERS), four);
+      let hd = camera_layers(HD, 30, camera_limit(None));
+      assert_eq!(within_layer_limit(&hd, 3), hd);
+      // At least the top layer, whatever the limit says.
+      assert_eq!(
+        summary(&within_layer_limit(&four, 0)),
+        vec![(0, 1920, 1080, CAMERA_MAX_BITRATE_BPS)]
+      );
+      assert!(within_layer_limit(&[], 3).is_empty());
     }
 
     #[test]
@@ -1163,14 +1214,14 @@ mod tests {
     #[test]
     fn other_shapes_fit_the_limit_by_their_lines() {
       let res = |width, height| VideoResolution { width, height };
-      // 4:3 at 1080 lines: 1440×1080, 960×720, 480×360.
+      // 4:3 at 1080 lines: 1440×1080, 960×720, 480×360, 240×180.
       let four_by_three = camera_layers(res(1440, 1080), 30, camera_limit(None));
       let sides: Vec<_> = four_by_three
         .iter()
         .map(|layer| (layer.width, layer.height))
         .collect();
-      assert_eq!(sides, vec![(480, 360), (960, 720), (1440, 1080)]);
-      assert!(four_by_three[2].max_bitrate_bps < CAMERA_MAX_BITRATE_BPS);
+      assert_eq!(sides, vec![(240, 180), (480, 360), (960, 720), (1440, 1080)]);
+      assert!(four_by_three[3].max_bitrate_bps < CAMERA_MAX_BITRATE_BPS);
       // A portrait phone camera fits by its height, as before.
       let portrait = camera_layers(res(1080, 1920), 30, camera_limit(Some(720)));
       let top = portrait.last().unwrap();
@@ -1252,28 +1303,41 @@ mod tests {
       );
     }
 
-    /// #967: a picked quality asks for the largest layer within its lines, whatever the tile.
+    /// #967: a picked quality asks for the largest layer within its lines, whatever the tile;
+    /// #978: a 1080p camera's 180p can be picked too.
     #[test]
     fn a_picked_quality_asks_for_the_layer_within_its_lines() {
       let full_hd = super::camera_layers(res(1920, 1080), 30, camera_limit(None));
       let thumbnail = res(320, 180);
       assert_eq!(
         chosen_layer(&VideoTrackKind::Camera, &full_hd, thumbnail, Some(1080)),
-        2
+        3
       );
       assert_eq!(
         chosen_layer(&VideoTrackKind::Camera, &full_hd, thumbnail, Some(720)),
-        1
+        2
       );
       assert_eq!(
         chosen_layer(&VideoTrackKind::Camera, &full_hd, res(2560, 1440), Some(360)),
+        1
+      );
+      assert_eq!(
+        chosen_layer(&VideoTrackKind::Camera, &full_hd, res(2560, 1440), Some(180)),
         0
       );
-      // Auto: by the tile.
+      // Auto: by the tile; a thumbnail is covered by the 180p layer, a grid tile by 360p.
       assert_eq!(
         chosen_layer(&VideoTrackKind::Camera, &full_hd, thumbnail, None),
         0
       );
+      assert_eq!(
+        chosen_layer(&VideoTrackKind::Camera, &full_hd, res(640, 360), None),
+        1
+      );
+      // From an SFU that takes three layers: the lines still find their layer.
+      let three = within_layer_limit(&full_hd, 3);
+      assert_eq!(layer_for_lines(&three, 1080), 2);
+      assert_eq!(layer_for_lines(&three, 180), 0);
       // A sender of 720p and less: 1080p asks for its top, 360p for its middle layer, and less
       // than it has for its lowest.
       let hd = camera_layers();
@@ -1303,17 +1367,18 @@ mod tests {
         maybe_shown: Some(res(640, 360)),
         maybe_max_lines: None,
       };
-      assert_eq!(small.layer(&camera, &full_hd), 0);
+      // 640×360 is covered by the 360p layer, above the 180p one (#978).
+      assert_eq!(small.layer(&camera, &full_hd), 1);
       let picked = ViewChoice {
         maybe_max_lines: Some(1080),
         ..small
       };
-      assert_eq!(picked.layer(&camera, &full_hd), 2);
+      assert_eq!(picked.layer(&camera, &full_hd), 3);
       let picked_only = ViewChoice {
         maybe_shown: None,
         maybe_max_lines: Some(720),
       };
-      assert_eq!(picked_only.layer(&camera, &full_hd), 1);
+      assert_eq!(picked_only.layer(&camera, &full_hd), 2);
     }
 
     fn camera_layers() -> Vec<VideoLayerInfo> {
