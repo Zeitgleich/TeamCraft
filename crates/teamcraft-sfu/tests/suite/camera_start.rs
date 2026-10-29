@@ -191,6 +191,7 @@ fn count_detailed(decoded: &Mutex<Vec<VideoFrame>>) -> usize {
 
 fn camera_config(camera: WarmingCamera) -> VideoSendConfig {
   VideoSendConfig {
+    maybe_layer_plan: None,
     kind: VideoTrackKind::Camera,
     capture: Box::new(camera),
     layers: simulcast_layers(HD, FRAMERATE, 1_500_000, 3),

@@ -49,6 +49,11 @@ const SENDER_STOP_WAIT: Duration = Duration::from_secs(1);
 /// How often the encoder thread notes which encoders work, for the call's stats (#938): an
 /// encoder falls back to software rarely, and the stats are read once a second.
 const ENCODER_NAMES_INTERVAL: Duration = Duration::from_secs(1);
+/// How long [`VideoSender::start`] waits for the first frame of a track whose layers are planned
+/// from it ([`VideoSendConfig::maybe_layer_plan`]). Most cameras deliver within a second; one that
+/// takes longer gets the layers planned for the size asked for, and the start check
+/// ([`FIRST_PICTURE_TIMEOUT`]) still applies after it.
+pub const FIRST_FRAME_WAIT: Duration = Duration::from_secs(3);
 
 /// Makes the encoder for one layer; hardware where available (see [`software_encoders`]).
 pub type EncoderFactory =
@@ -56,6 +61,9 @@ pub type EncoderFactory =
 
 /// Turns frames before encoding, e.g. background effects. Runs on the encoder thread.
 pub type FrameFilter = Box<dyn FnMut(VideoFrame) -> VideoFrame + Send>;
+
+/// Plans a track's layers for the size its source delivers ([`VideoSendConfig::maybe_layer_plan`]).
+pub type LayerPlanner = Box<dyn FnOnce(VideoResolution) -> Vec<VideoLayerInfo> + Send>;
 
 /// Gets decoded frames of a watched track, on the decoder thread.
 pub type FrameSink = Box<dyn FnMut(VideoFrame) + Send>;
@@ -206,6 +214,11 @@ pub struct VideoSendConfig {
   pub capture: Box<dyn VideoCapture>,
   /// Simulcast layers, lowest first (one for screen shares).
   pub layers: Vec<VideoLayerInfo>,
+  /// Plans the layers anew for the size of the first frame, which [`VideoSender::start`] waits
+  /// for (at most [`FIRST_FRAME_WAIT`]); `layers` stay when none came by then. A camera asked for
+  /// 1080p may deliver less, and its layers are then published as they are sent (#967): viewers
+  /// pick by them, and the uplink gives each its bitrate.
+  pub maybe_layer_plan: Option<LayerPlanner>,
   pub encoders: EncoderFactory,
   pub maybe_filter: Option<FrameFilter>,
   /// Encodes the last picture again after this long without a new frame. Screen captures only
@@ -278,6 +291,7 @@ impl VideoSender {
       kind,
       mut capture,
       layers,
+      maybe_layer_plan,
       encoders,
       maybe_filter,
       maybe_idle_refresh,
@@ -289,6 +303,14 @@ impl VideoSender {
     let (frames, frame_rx) = frame_queue();
     let stall = StallWatch::new(capture.stall_limit());
     capture.start(frames)?;
+    let (layers, maybe_first_frame) = match maybe_layer_plan {
+      Some(plan) => match frame_rx.recv_timeout(FIRST_FRAME_WAIT) {
+        Ok(frame) => (plan(frame.resolution()), Some(frame)),
+        // No frame yet (the start check follows), or the capture ended (the loop finds out).
+        Err(_) => (layers, None),
+      },
+      None => (layers, None),
+    };
     let (controls, control_rx) = std_mpsc::channel();
     let (first_picture, first_picture_rx) = oneshot::channel();
     let (black_notice, black_rx) = oneshot::channel();
@@ -307,6 +329,7 @@ impl VideoSender {
         maybe_idle_interval: maybe_idle_refresh,
       },
       frame_rx,
+      maybe_pending_frame: maybe_first_frame,
       control_rx,
       encoded,
       counters: Arc::clone(&counters),
@@ -388,6 +411,8 @@ struct EncoderLoop {
   maybe_filter: Option<FrameFilter>,
   refresh: Refresh,
   frame_rx: FrameReceiver,
+  /// A frame taken from the capture before the loop ran (the one the layers were planned for).
+  maybe_pending_frame: Option<VideoFrame>,
   control_rx: std_mpsc::Receiver<SenderControl>,
   encoded: mpsc::UnboundedSender<(VideoTrackKind, EncodedVideoFrame)>,
   counters: Arc<SendCounters>,
@@ -492,7 +517,11 @@ impl EncoderLoop {
         }
         continue;
       }
-      let frame = match self.frame_rx.recv_timeout(CONTROL_POLL) {
+      let received = match self.maybe_pending_frame.take() {
+        Some(frame) => Ok(frame),
+        None => self.frame_rx.recv_timeout(CONTROL_POLL),
+      };
+      let frame = match received {
         Ok(frame) => frame,
         Err(RecvTimeoutError::Timeout) => {
           #[cfg(test)]
@@ -1154,6 +1183,7 @@ mod tests {
     let (encoded, mut encoded_rx) = mpsc::unbounded_channel();
     let pushed = Arc::new(Mutex::new(None));
     let config = VideoSendConfig {
+      maybe_layer_plan: None,
       kind: VideoTrackKind::Camera,
       capture: Box::new(SharedCapture(capture, Arc::clone(&pushed))),
       layers: simulcast_layers(VGA, 30, 800_000, 2),
@@ -1216,6 +1246,7 @@ mod tests {
     let (encoded, mut encoded_rx) = mpsc::unbounded_channel();
     let pushed = Arc::new(Mutex::new(None));
     let config = VideoSendConfig {
+      maybe_layer_plan: None,
       kind: VideoTrackKind::Screen,
       capture: Box::new(SharedCapture(capture, Arc::clone(&pushed))),
       // Planned for a landscape picture...
@@ -1259,6 +1290,7 @@ mod tests {
   fn a_sender_whose_capture_or_encoder_ends_reports_it() {
     let (encoded, _encoded_rx) = mpsc::unbounded_channel();
     let config = VideoSendConfig {
+      maybe_layer_plan: None,
       kind: VideoTrackKind::Screen,
       capture: Box::new(ManualCapture::new(CaptureFormat {
         resolution: VGA,
@@ -1276,6 +1308,68 @@ mod tests {
       std::thread::sleep(Duration::from_millis(10));
     }
     assert!(sender.has_ended());
+  }
+
+  /// #967: a camera asked for 1080p that delivers 720p publishes the layers of 720p, and the
+  /// frame they were planned for is encoded like every other.
+  #[tokio::test]
+  async fn layers_are_planned_for_the_first_frame_the_camera_delivers() {
+    let hd = VideoResolution {
+      width: 1280,
+      height: 720,
+    };
+    let limit = crate::video::camera_limit(None);
+    let (encoded, mut encoded_rx) = mpsc::unbounded_channel();
+    let capture = Delivering {
+      format: CaptureFormat {
+        resolution: limit,
+        framerate: 30,
+      },
+      delivers: hd,
+      maybe_frames: None,
+    };
+    let config = VideoSendConfig {
+      kind: VideoTrackKind::Camera,
+      capture: Box::new(capture),
+      layers: crate::video::camera_layers(limit, 30, limit),
+      maybe_layer_plan: Some(Box::new(move |source| {
+        crate::video::camera_layers(source, 30, limit)
+      })),
+      encoders: first_picture::fake_encoders(),
+      maybe_filter: None,
+      maybe_idle_refresh: None,
+    };
+    let (sender, _first_picture) = VideoSender::start(config, encoded).unwrap();
+    assert_eq!(sender.layers, crate::video::camera_layers(hd, 30, limit));
+    assert_eq!(sender.layers.last().map(|top| top.height), Some(720));
+    let (_, first) = tokio::time::timeout(Duration::from_secs(5), encoded_rx.recv())
+      .await
+      .unwrap()
+      .unwrap();
+    assert_eq!(first.timestamp, EncodedVideoFrame::rtp_timestamp(0));
+  }
+
+  /// Delivers one frame of `delivers` as soon as it starts, whatever it was asked for.
+  struct Delivering {
+    format: CaptureFormat,
+    delivers: VideoResolution,
+    maybe_frames: Option<crate::video_capture::FrameSender>,
+  }
+
+  impl VideoCapture for Delivering {
+    fn format(&self) -> CaptureFormat {
+      self.format
+    }
+
+    fn start(&mut self, frames: crate::video_capture::FrameSender) -> Result<(), CaptureError> {
+      assert!(frames.send(test_pattern(self.delivers, 0, 0)?));
+      self.maybe_frames = Some(frames);
+      Ok(())
+    }
+
+    fn stop(&mut self) {
+      self.maybe_frames = None;
+    }
   }
 
   mod first_picture {
@@ -1554,6 +1648,7 @@ mod tests {
     ) {
       let (encoded, encoded_rx) = mpsc::unbounded_channel();
       let config = VideoSendConfig {
+        maybe_layer_plan: None,
         kind: VideoTrackKind::Camera,
         capture,
         layers: simulcast_layers(VGA, 30, 800_000, 1),
@@ -1583,6 +1678,7 @@ mod tests {
           maybe_idle_interval: None,
         },
         frame_rx,
+        maybe_pending_frame: None,
         control_rx,
         encoded,
         counters: Arc::default(),
@@ -1660,6 +1756,7 @@ mod tests {
       let pushed = Arc::new(Mutex::new(None));
       let (encoded, encoded_rx) = mpsc::unbounded_channel();
       let config = VideoSendConfig {
+        maybe_layer_plan: None,
         kind: VideoTrackKind::Screen,
         capture: Box::new(SharedCapture(manual_capture(), Arc::clone(&pushed))),
         layers: simulcast_layers(VGA, 30, 800_000, 1),
@@ -1854,6 +1951,7 @@ mod tests {
       let pushed = Arc::new(Mutex::new(None));
       let (encoded, _encoded_rx) = mpsc::unbounded_channel();
       let config = VideoSendConfig {
+        maybe_layer_plan: None,
         kind: VideoTrackKind::Screen,
         capture: Box::new(SharedCapture(manual_capture(), Arc::clone(&pushed))),
         layers: simulcast_layers(VGA, 30, 800_000, 1),
@@ -1880,6 +1978,7 @@ mod tests {
       let pushed = Arc::new(Mutex::new(None));
       let (encoded, _encoded_rx) = mpsc::unbounded_channel();
       let config = VideoSendConfig {
+        maybe_layer_plan: None,
         kind: VideoTrackKind::Camera,
         capture: Box::new(SharedCapture(manual_capture(), Arc::clone(&pushed))),
         layers: simulcast_layers(VGA, 30, 800_000, 1),

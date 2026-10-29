@@ -18,7 +18,7 @@ use crate::calls::{
   ActiveCall, BackgroundEffect, BackgroundImageInfo, CallEndReason, CallHistoryItem, CallMoveOffer,
   CallPreview, CallRequest, CallStatusSounds, CameraFallback, IncomingCall, JoinMedia, MediaDevices,
   OrgBackgroundRule, OrgBackgrounds, PreviewCamera, PushToTalk, RemoteVideoTrack, RunningCall,
-  ScreenContentMode,
+  ScreenContentMode, VideoQuality,
 };
 use crate::live::LiveSnapshot;
 use crate::model::{
@@ -143,6 +143,17 @@ pub enum CallAction {
   /// Which call status sounds play (a device setting; also before any call).
   SetStatusSounds {
     sounds: CallStatusSounds,
+  },
+  /// The highest quality the own camera is sent at (#967; a device setting, also before any
+  /// call). A running camera restarts with it.
+  SetCameraQuality {
+    quality: VideoQuality,
+  },
+  /// How sharp another device's track comes to this device (#967): Auto by the size its tile
+  /// shows it at, else at most the lines picked. Kept while the track is published.
+  SetVideoQuality {
+    stream_id: teamcraft_proto::MediaStreamId,
+    quality: VideoQuality,
   },
   /// Lists the cameras, microphones and speakers again (the pre-join screen opened).
   RefreshDevices,

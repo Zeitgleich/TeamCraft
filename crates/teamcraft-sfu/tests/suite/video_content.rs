@@ -66,6 +66,7 @@ async fn check_content_arrives(
   let mut viewer = join(port, certificate_hash, 2, 1).await;
   let captured = Arc::clone(&capture.captured);
   let config = VideoSendConfig {
+    maybe_layer_plan: None,
     kind: kind.clone(),
     maybe_idle_refresh: VideoSendConfig::default_idle_refresh(&kind),
     capture: Box::new(capture),

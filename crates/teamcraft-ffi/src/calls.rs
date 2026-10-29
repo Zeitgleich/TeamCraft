@@ -664,6 +664,7 @@ async fn start_camera(
   camera: CameraSlot,
 ) -> Result<(), TeamCraftError> {
   let config = VideoSendConfig {
+    maybe_layer_plan: None,
     kind: VideoTrackKind::Camera,
     capture: Box::new(AppCamera::new(format, camera)),
     layers: simulcast_layers(

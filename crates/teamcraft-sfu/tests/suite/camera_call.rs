@@ -165,6 +165,7 @@ async fn camera_reaches_the_viewer(start: Start) {
 /// An HD test pattern in three simulcast layers.
 fn camera_config() -> VideoSendConfig {
   VideoSendConfig {
+    maybe_layer_plan: None,
     kind: VideoTrackKind::Camera,
     capture: Box::new(TestPatternCapture::new(CaptureFormat {
       resolution: HD,

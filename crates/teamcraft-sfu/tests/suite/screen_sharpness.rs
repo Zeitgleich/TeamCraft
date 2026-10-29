@@ -196,6 +196,7 @@ async fn run(scenario: Scenario, duration: Duration) -> Timeline {
   let encoded: Arc<Mutex<Vec<Encoded>>> = Arc::default();
   let (limit, framerate) = screen_limits(ScreenContentMode::Detail);
   let config = VideoSendConfig {
+    maybe_layer_plan: None,
     kind: VideoTrackKind::Screen,
     layers: screen_layers(limit, framerate, ScreenContentMode::Detail),
     capture: Box::new(screen),

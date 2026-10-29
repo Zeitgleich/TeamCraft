@@ -3,6 +3,7 @@
 //! here is empty.
 
 mod bandwidth_limits;
+mod busy_camera;
 mod camera_call;
 mod camera_start;
 mod dave_call;
@@ -17,4 +18,5 @@ mod session_close;
 mod sfu_restart;
 mod video_call;
 mod video_content;
+mod video_quality;
 mod video_recovery;

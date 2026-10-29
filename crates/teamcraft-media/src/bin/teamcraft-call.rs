@@ -104,6 +104,7 @@ fn test_pattern_camera() -> VideoSendConfig {
     framerate: 30,
   };
   VideoSendConfig {
+    maybe_layer_plan: None,
     kind: VideoTrackKind::Camera,
     capture: Box::new(TestPatternCapture::new(format)),
     layers: simulcast_layers(format.resolution, format.framerate, 1_500_000, 3),

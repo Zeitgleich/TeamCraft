@@ -215,7 +215,11 @@ async fn pump(
       },
       future::Either::Left(Some(Control::StopScreenShare)) => call.stop_screen_share(),
       future::Either::Left(Some(Control::StartCamera(done))) => {
-        let result = call.start_camera(None).await.map_err(|error| error.to_string());
+        let limit = teamcraft_media::video::camera_limit(None);
+        let result = call
+          .start_camera(None, limit)
+          .await
+          .map_err(|error| error.to_string());
         let _ = done.send(result);
       },
       future::Either::Left(Some(Control::StopCamera)) => call.stop_camera(),
