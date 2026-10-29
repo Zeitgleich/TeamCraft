@@ -774,6 +774,7 @@ fn security_of(client: &Client<Api, Store>) -> Result<SecuritySnapshot, String> 
     maybe_owners: client.owner_roster_status(),
     maybe_presence_policy: teamcraft_core::workspace::presence_policy(client.store()),
     maybe_screen_share_policy: teamcraft_core::workspace::screen_share_policy(client.store()),
+    maybe_notetaker: teamcraft_core::notetaker::notetaker_policy(client.store()),
     maybe_backup: teamcraft_core::ui_snapshot::key_backup_state(client.store()).unwrap_or_else(|error| {
       // The settings then show the backup as unknown; the rest of the snapshot still counts.
       tracing::warn!(%error, "the key backup state is unreadable");

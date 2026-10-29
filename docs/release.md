@@ -214,28 +214,29 @@ Dependabot's pull requests are left out. Edit the template when a known limitati
 
 ## What a release contains
 
-| File                                                            | Built by                                         |
-|-----------------------------------------------------------------|--------------------------------------------------|
-| `ghcr.io/zeitgleich/teamcraft-server:X.Y.Z` (+ `X.Y`, `latest`) | `image` jobs (amd64 + arm64, native runners)     |
-| `ghcr.io/zeitgleich/teamcraft-sfu:X.Y.Z` (+ `X.Y`, `latest`)    | `image` jobs                                     |
-| `ghcr.io/zeitgleich/teamcraft-bridge:X.Y.Z` (+ `X.Y`, `latest`) | `image` jobs                                     |
-| `images.txt`                                                    | image references with their digests              |
-| `teamcraft-{server,sfu,bridge}-X.Y.Z.{spdx,cdx}.json`           | SBOMs of the images (syft; SPDX, CycloneDX)      |
-| `teamcraft-source-X.Y.Z.{spdx,cdx}.json`                        | SBOMs of the source tree (Cargo, Gradle)         |
-| `TeamCraft_X.Y.Z_*.deb`, `.rpm`, `.AppImage`                    | `desktop-release.yml`, x86_64 and aarch64        |
-| `teamcraft-desktop-<arch>.flatpak`                              | `desktop-release.yml`                            |
-| `TeamCraft_X.Y.Z_{aarch64,x64}.dmg`                             | `desktop-release.yml`, Apple silicon and Intel   |
-| `TeamCraft_X.Y.Z_{x64,arm64}-setup.exe`, `.msi`                 | `desktop-release.yml`, unsigned                  |
-| `TeamCraft_X.Y.Z_{aarch64,x64}.app.tar.gz`                      | `desktop-release.yml`, the macOS update archives |
-| `*.sig` next to the AppImages, installers and `.app.tar.gz`     | updater signatures (with the updater key only)   |
-| `latest.json`                                                   | updater manifest (`scripts/updater-manifest.py`) |
-| `teamcraft-web-X.Y.Z.tar.gz`                                    | the web client (`[web] static_dir`)              |
-| `teamcraft-android-X.Y.Z-{full,libre}-release.apk`              | `android` job, signed with the upload key        |
-| `teamcraft-android-X.Y.Z-{full,libre}-release-unsigned.apk`     | instead, when no upload key is configured        |
-| `teamcraft-android-X.Y.Z-{full,libre}-debug-signed.apk`         | `android` job; throwaway debug key, testing only |
-| `teamcraft-android-X.Y.Z-full-release.aab`                      | `android` job; the bundle for Google Play        |
-| `teamcraft-android-X.Y.Z-full-release-unsigned.aab`             | instead, when no upload key is configured        |
-| `SHA256SUMS`                                                    | over every file above (Android lines added last) |
+| File                                                               | Built by                                         |
+|--------------------------------------------------------------------|--------------------------------------------------|
+| `ghcr.io/zeitgleich/teamcraft-server:X.Y.Z` (+ `X.Y`, `latest`)    | `image` jobs (amd64 + arm64, native runners)     |
+| `ghcr.io/zeitgleich/teamcraft-sfu:X.Y.Z` (+ `X.Y`, `latest`)       | `image` jobs                                     |
+| `ghcr.io/zeitgleich/teamcraft-bridge:X.Y.Z` (+ `X.Y`, `latest`)    | `image` jobs                                     |
+| `ghcr.io/zeitgleich/teamcraft-notetaker:X.Y.Z` (+ `X.Y`, `latest`) | `image` jobs                                     |
+| `images.txt`                                                       | image references with their digests              |
+| `teamcraft-{server,sfu,bridge,notetaker}-X.Y.Z.{spdx,cdx}.json`    | SBOMs of the images (syft; SPDX, CycloneDX)      |
+| `teamcraft-source-X.Y.Z.{spdx,cdx}.json`                           | SBOMs of the source tree (Cargo, Gradle)         |
+| `TeamCraft_X.Y.Z_*.deb`, `.rpm`, `.AppImage`                       | `desktop-release.yml`, x86_64 and aarch64        |
+| `teamcraft-desktop-<arch>.flatpak`                                 | `desktop-release.yml`                            |
+| `TeamCraft_X.Y.Z_{aarch64,x64}.dmg`                                | `desktop-release.yml`, Apple silicon and Intel   |
+| `TeamCraft_X.Y.Z_{x64,arm64}-setup.exe`, `.msi`                    | `desktop-release.yml`, unsigned                  |
+| `TeamCraft_X.Y.Z_{aarch64,x64}.app.tar.gz`                         | `desktop-release.yml`, the macOS update archives |
+| `*.sig` next to the AppImages, installers and `.app.tar.gz`        | updater signatures (with the updater key only)   |
+| `latest.json`                                                      | updater manifest (`scripts/updater-manifest.py`) |
+| `teamcraft-web-X.Y.Z.tar.gz`                                       | the web client (`[web] static_dir`)              |
+| `teamcraft-android-X.Y.Z-{full,libre}-release.apk`                 | `android` job, signed with the upload key        |
+| `teamcraft-android-X.Y.Z-{full,libre}-release-unsigned.apk`        | instead, when no upload key is configured        |
+| `teamcraft-android-X.Y.Z-{full,libre}-debug-signed.apk`            | `android` job; throwaway debug key, testing only |
+| `teamcraft-android-X.Y.Z-full-release.aab`                         | `android` job; the bundle for Google Play        |
+| `teamcraft-android-X.Y.Z-full-release-unsigned.aab`                | instead, when no upload key is configured        |
+| `SHA256SUMS`                                                       | over every file above (Android lines added last) |
 
 ## Integrity: checksums, attestations, signatures
 

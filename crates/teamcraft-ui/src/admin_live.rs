@@ -75,6 +75,9 @@ pub struct AdminData {
   instance: Option<AdminInstanceResponse>,
   brands: Option<AdminBrandsResponse>,
   mail: Option<AdminMailSettingsResponse>,
+  /// Loaded when the console shows the notetaker page.
+  notetaker: Option<teamcraft_proto::AdminNotetakerResponse>,
+  has_asked_notetaker: bool,
   calendar: Option<AdminCalendarSettingsResponse>,
   runtime: Option<RuntimeSettingsResponse>,
   last_test: Option<(SettingsTestKind, SettingsTestResponse)>,
@@ -272,6 +275,33 @@ impl AdminLive {
 
   pub fn mail_settings(&self) -> Option<AdminMailSettingsResponse> {
     self.data.borrow().mail.clone()
+  }
+
+  /// Whether the notetaker's key is stored; loaded once the console shows its page.
+  pub fn notetaker_settings(&self) -> Option<teamcraft_proto::AdminNotetakerResponse> {
+    let maybe_settings = self.data.borrow().notetaker.clone();
+    // Once per console session: a refusal (no `manage_workspace`) must not ask again on every render.
+    let is_first_ask = !std::mem::replace(&mut self.data.borrow_mut().has_asked_notetaker, true);
+    if maybe_settings.is_none() && is_first_ask {
+      self.load(
+        "notetaker".to_owned(),
+        "/api/v1/admin/notetaker".to_owned(),
+        Loaded::Notetaker,
+      );
+    }
+    maybe_settings
+  }
+
+  pub fn set_notetaker_key(&self, key: teamcraft_proto::SecretUpdate) {
+    let request = teamcraft_proto::PutNotetakerKeyRequest { key };
+    if let Ok(body) = serde_json::to_string(&request) {
+      self.send_stored(
+        ApiMethod::Put,
+        "/api/v1/admin/notetaker/key".to_owned(),
+        Some(body),
+        Stored::Notetaker,
+      );
+    }
   }
 
   pub fn save_mail_settings(&self, request: UpdateMailSettingsRequest) {
@@ -866,6 +896,10 @@ impl AdminLive {
           let members = list.members.into_iter().map(|member| member.user.id).collect();
           Box::new(move |data: &mut AdminData| drop(data.members.insert(channel, members))) as Store
         }),
+      Loaded::Notetaker => self
+        .fetch::<teamcraft_proto::AdminNotetakerResponse>(&path, &mut errors)
+        .await
+        .map(|settings| Box::new(move |data: &mut AdminData| data.notetaker = Some(settings)) as Store),
     };
     {
       let mut data = self.data.borrow_mut();
@@ -1089,6 +1123,7 @@ pub enum Stored {
   Mail,
   Calendar,
   Runtime,
+  Notetaker,
 }
 
 /// What on-demand data a load is for.
@@ -1096,6 +1131,7 @@ pub enum Loaded {
   Scheme(Option<SpaceId>),
   Moderation(ConversationId),
   Members(ConversationId),
+  Notetaker,
 }
 
 /// Stores a loaded value in the cache.
@@ -1114,6 +1150,7 @@ impl Stored {
       Self::Mail => data.mail = Some(serde_json::from_str(body)?),
       Self::Calendar => data.calendar = Some(serde_json::from_str(body)?),
       Self::Runtime => data.runtime = Some(serde_json::from_str(body)?),
+      Self::Notetaker => data.notetaker = Some(serde_json::from_str(body)?),
     }
     Ok(())
   }

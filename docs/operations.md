@@ -55,14 +55,15 @@ repository's end-to-end harness against it (`tests/e2e/tests/suite/deployed.rs`,
 
 ## Pieces and what holds state
 
-| Piece              | State                                                                     | Needs backup |
-|--------------------|---------------------------------------------------------------------------|--------------|
-| `teamcraft-server` | none of its own (calls roster and rate limits are in memory)              | config only  |
-| PostgreSQL         | accounts, structure, **ciphertext** of messages and MLS queues, audit log | yes          |
-| S3 bucket          | encrypted attachments and search index segments                           | yes          |
-| `teamcraft-sfu`    | none (rooms live while a call lasts)                                      | config only  |
-| `teamcraft-bridge` | SQLCipher database with the bot's keys and its channels' content keys     | yes          |
-| Identity provider  | users, roles, sessions                                                    | its own      |
+| Piece                 | State                                                                                                            | Needs backup |
+|-----------------------|------------------------------------------------------------------------------------------------------------------|--------------|
+| `teamcraft-server`    | none of its own (calls roster and rate limits are in memory)                                                     | config only  |
+| PostgreSQL            | accounts, structure, **ciphertext** of messages and MLS queues, audit log                                        | yes          |
+| S3 bucket             | encrypted attachments and search index segments                                                                  | yes          |
+| `teamcraft-sfu`       | none (rooms live while a call lasts)                                                                             | config only  |
+| `teamcraft-bridge`    | SQLCipher database with the bot's keys and its channels' content keys                                            | yes          |
+| `teamcraft-notetaker` | SQLCipher database with the bot's keys, its conversations' content keys and the transcripts of calls in progress | yes          |
+| Identity provider     | users, roles, sessions                                                                                           | its own      |
 
 The server only holds ciphertext. A stolen database or bucket gives an attacker metadata (who is in
 which conversation, when messages were sent) but no message content or attachment keys. Clients
@@ -74,8 +75,9 @@ exists; clients can still read what they have stored locally.
 
 - `GET /healthz` is liveness, `GET /readyz` also checks the database and answers 503 once a shutdown
   has begun. The images ship
-  `teamcraft-server healthcheck [--ready]`, `teamcraft-sfu healthcheck` and `teamcraft-bridge
-  healthcheck` for container health checks (no curl in the images).
+  `teamcraft-server healthcheck [--ready]`, `teamcraft-sfu healthcheck`, `teamcraft-bridge
+  healthcheck` and `teamcraft-notetaker healthcheck` (its liveness file, the notetaker listens on
+  no port) for container health checks (no curl in the images).
 - **Dependencies** (`[dependencies]`, issue #743). Each backend (database, object storage, identity
   provider, push gateway, SFU control) has a circuit breaker: after `failure_threshold` (3) failures
   in a row it counts as down, requests that need it are answered at once with **503, `Retry-After`
@@ -233,8 +235,9 @@ take space unseen. `dev/garage-cors.py` sets both rules on the dev bucket.
 2. Server and SFU with the same configuration and **the same secrets** (see below), including the
    settings key (`[secrets]`; without it the mail and calendar passwords set in the console must be
    entered again), identity provider reachable.
-3. Bridges: restore their database file (it holds the bot's keys) or re-enroll them with their
-   passphrase (the bot's backup key is on the server, so a lost bridge database is recoverable).
+3. Bridges and the notetaker: restore their database file (it holds the bot's keys) or re-enroll
+   them with their passphrase (the bot's backup key is on the server, so a lost database is
+   recoverable; a lost notetaker database also loses the transcript of a call in progress).
 4. Clients reconnect and run a full sync; devices whose rows were lost re-register.
 
 ## Owners
@@ -272,9 +275,9 @@ make someone an owner.
   rate limits and the call roster live in the server's memory, and there is no bus between instances
   yet: events published on one instance never reach clients connected to another. Upgrade by
   replacing the instance (a short interruption), not by rolling several.
-- Order: database backup, new `teamcraft-server`, then `teamcraft-sfu`, then bridges. The SFU
-  verifies join tokens the server signs; the token format is versioned with the server. An old
-  server binary refuses to start against a database migrated by a newer one.
+- Order: database backup, new `teamcraft-server`, then `teamcraft-sfu`, then bridges and the
+  notetaker. The SFU verifies join tokens the server signs; the token format is versioned with the
+  server. An old server binary refuses to start against a database migrated by a newer one.
 - On SIGTERM the server drains: `/readyz` answers 503, every gateway and device-linking socket is
   closed with code 1012 ("service restart"), and the process waits up to `[gateway]
   drain_timeout_secs` (default 10) for the sockets to close before it exits. Give the container a

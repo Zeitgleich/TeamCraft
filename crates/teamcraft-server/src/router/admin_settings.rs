@@ -24,5 +24,7 @@ pub(super) fn routes() -> OpenApiRouter<AppState> {
       handlers::admin_reset_mail_settings_handler
     ))
     .routes(routes!(handlers::admin_send_test_mail_handler))
+    .routes(routes!(handlers::admin_get_notetaker_handler))
+    .routes(routes!(handlers::admin_put_notetaker_key_handler))
     .routes(routes!(handlers::admin_reset_settings_handler))
 }

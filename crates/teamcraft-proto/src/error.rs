@@ -55,6 +55,8 @@ wire_enum! {
     /// The signed workspace policy lets members protect their key backup only with a recovery kit:
     /// a new or changed recovery passphrase is refused (e2ee.md §6.5.8).
     RecoveryPassphraseNotAllowed => "recovery_passphrase_not_allowed",
+    /// No OpenRouter API key is stored for the notetaker (admin.md §3.7).
+    NotetakerKeyNotFound => "notetaker_key_not_found",
     UserGroupNotFound => "user_group_not_found",
     MfaRequired => "mfa_required",
     Conflict => "conflict",
@@ -279,6 +281,7 @@ mod tests {
       ErrorCode::AdminJoinRequestTooSoon,
       ErrorCode::ShareUnavailable,
       ErrorCode::RecoveryPassphraseNotAllowed,
+      ErrorCode::NotetakerKeyNotFound,
       ErrorCode::UnknownHost,
       ErrorCode::BrandAssetNotFound,
       ErrorCode::UserGroupNotFound,

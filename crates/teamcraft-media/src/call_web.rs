@@ -2287,7 +2287,7 @@ impl WebAudio {
         set_sink(&self.context, choice).await;
         Some(open_playback(&self.context)?)
       },
-      AudioSink::Discard => None,
+      AudioSink::Discard | AudioSink::Frames => None,
     };
     if let Some(old) = std::mem::replace(&mut self.maybe_capture, maybe_capture) {
       old.close();

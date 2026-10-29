@@ -55,6 +55,20 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     Ok(id)
   }
 
+  /// Encrypts and uploads a small file held in memory, then posts `body` with it (headless clients:
+  /// the notetaker's transcript). Larger files go through [`Self::start_direct_upload`].
+  pub async fn send_text_with_file(
+    &mut self,
+    conversation: ConversationId,
+    body: &str,
+    file: OutgoingFile,
+  ) -> Result<ClientMessageId, CoreError> {
+    let attachment = self.upload_encrypted(conversation, file).await?;
+    let id = self.queue_text_with_files(conversation, body, Vec::new(), vec![attachment])?;
+    self.flush_outbox().await?;
+    Ok(id)
+  }
+
   /// Downloads and decrypts the file of a message, checking the blob's hash first.
   pub async fn fetch_file(
     &mut self,

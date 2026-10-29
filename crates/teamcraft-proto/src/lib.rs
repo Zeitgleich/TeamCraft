@@ -13,6 +13,7 @@ mod gateway;
 mod id;
 mod integration;
 pub mod live;
+mod notetaker;
 mod permission;
 mod rendezvous;
 mod role;
@@ -44,6 +45,11 @@ pub use integration::{
   MAX_SOURCE_ALERT_LEVELS, MAX_SOURCE_FILES_PER_MESSAGE, MAX_SOURCE_NAME_CHARS,
   MAX_SOURCE_RATE_LIMIT_PER_MINUTE, SourceChange, SourceId, SourceKind, SourceOptions, SourceTokenHash,
   SourceTokenHashError,
+};
+pub use notetaker::{
+  DEFAULT_SUMMARY_MODEL, DEFAULT_SUMMARY_PROMPT, DEFAULT_TRANSCRIPTION_MODEL, LANGUAGE_AUTO, MAX_MODEL_CHARS,
+  MAX_PROMPT_CHARS, NotetakerInviters, NotetakerPolicy, NotetakerPolicyError, NotetakerRequest,
+  NotetakerScope,
 };
 pub use permission::{
   ALL_KNOWN as ALL_PERMISSIONS, ChannelContext, ChannelModeration, ChannelRole, Permission, PermissionScheme,

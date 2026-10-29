@@ -10,6 +10,7 @@ use crate::components::admin_channels::ChannelsSection;
 use crate::components::admin_instance::InstanceSection;
 use crate::components::admin_integrations::IntegrationsSection;
 use crate::components::admin_mail::MailSection;
+use crate::components::admin_notetaker::NotetakerSection;
 use crate::components::admin_people::PeopleSection;
 use crate::components::admin_permissions::PermissionsSection;
 use crate::components::admin_retention::RetentionSection;
@@ -78,6 +79,7 @@ pub fn AdminConsole(section: AdminSection) -> impl IntoView {
           {nav_item(AdminSection::Updates, IconName::Download)}
           {nav_item(AdminSection::Instance, IconName::Monitor)}
           {nav_item(AdminSection::Integrations, IconName::Terminal)}
+          {nav_item(AdminSection::Notetaker, IconName::Compose)}
           {nav_item(AdminSection::Audit, IconName::List)}
         </ul>
       </nav>
@@ -109,6 +111,7 @@ pub fn AdminConsole(section: AdminSection) -> impl IntoView {
           AdminSection::Retention => view! { <RetentionSection /> }.into_any(),
           AdminSection::Updates => view! { <UpdatesPolicySection /> }.into_any(),
           AdminSection::Integrations => view! { <IntegrationsSection /> }.into_any(),
+          AdminSection::Notetaker => view! { <NotetakerSection /> }.into_any(),
           AdminSection::Audit => view! { <AuditSection /> }.into_any(),
         }}
       </div>

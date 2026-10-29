@@ -43,7 +43,8 @@ use teamcraft_proto::{
   Base64Bytes, GatewayInfoResponse, GatewayRevokeRequest, PushGatewayResponse, WebPushKeyResponse,
 };
 use teamcraft_proto::{
-  CallJoinTokenResponse, ChangeWebPushSubscriptionRequest, CreateCallJoinTokenRequest, MoveCallRequest,
+  CallJoinTokenResponse, CallStateResponse, ChangeWebPushSubscriptionRequest, CreateCallJoinTokenRequest,
+  ErrorCode, MoveCallRequest,
 };
 use teamcraft_proto::{
   CategoryId, CategoryResponse, CreateCategoryRequest, CreateInviteRequest, CreateSpaceRequest,
@@ -661,6 +662,14 @@ impl<T: AccessTokenSource> ServerApi for HttpServerApi<T> {
         request,
       )
       .await
+  }
+
+  async fn running_call(&self, conversation: ConversationId) -> Result<Option<CallStateResponse>, ApiError> {
+    match self.get(&format!("/conversations/{conversation}/call")).await {
+      Ok(call) => Ok(Some(call)),
+      Err(error) if error.error_code() == Some(&ErrorCode::CallNotFound) => Ok(None),
+      Err(error) => Err(error),
+    }
   }
 
   async fn create_instant_meeting(

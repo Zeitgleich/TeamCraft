@@ -10996,6 +10996,35 @@ dependencies = [
 ]
 
 [[package]]
+name = "teamcraft-notetaker"
+version = "1.0.11"
+dependencies = [
+ "anyhow",
+ "axum",
+ "base64 0.23.1",
+ "figment",
+ "fluent-bundle",
+ "rand_core 0.6.4",
+ "reqwest",
+ "secrecy",
+ "serde",
+ "serde_json",
+ "teamcraft-core",
+ "teamcraft-crypto",
+ "teamcraft-media",
+ "teamcraft-ops",
+ "teamcraft-proto",
+ "teamcraft-sfu",
+ "thiserror 2.0.21",
+ "time",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+ "unic-langid",
+ "wtransport",
+]
+
+[[package]]
 name = "teamcraft-ops"
 version = "1.0.11"
 dependencies = [

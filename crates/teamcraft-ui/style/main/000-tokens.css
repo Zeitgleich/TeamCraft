@@ -143,6 +143,9 @@
   --call-muted: #9aa6ba;
   --call-danger: #d64533;
   --call-danger-hover: #a93226;
+  /* Notices that a call is not end-to-end encrypted towards someone (the notetaker, e2ee.md §8.2). */
+  --call-notice-bg: #3a2614;
+  --call-notice-text: #ffc58f;
   --lightbox-bg: #0b0d12;
   --lightbox-tip-text: #111111;
   --call-surface-solid: #141a26;

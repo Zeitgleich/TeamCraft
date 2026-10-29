@@ -2062,6 +2062,120 @@ Old owner clients that re-sign the policy (after a roster change) without knowin
 drop the section, which means `free` until an up-to-date owner client signs again; update owner devices
 before using organization backgrounds.
 
+### 8.2 Notetaker: a participant that sends call audio out (issue #975)
+
+The notetaker is an AI participant that transcribes a call and posts a summary into the call's
+conversation. It **ends end-to-end encryption for the calls it is in, by design**: it can only hear a
+call as a member with DAVE keys of its own, and what it hears leaves for a transcription service. The
+product decision is to offer it anyway, off by default, and to make every consequence visible. This
+section says what it is, what leaves, and what protects participants.
+
+**What it is and where it runs.** `teamcraft-notetaker` is a headless client like the bridge (§13): a
+bot account (`POST /api/v1/admin/bots`) with a device of its own, identity key, MLS leaves and
+encrypted local store (`teamcraft-core`), and the native call driver (`teamcraft-media`) for calls. It
+is a separate process, not part of the server or the SFU, and runs on a host the organization trusts
+(next to the bridge, or on a machine of its own). It can run on the server's host, but whoever
+controls that host can then read the audio and transcripts the notetaker handles, which is what the
+rest of this document keeps the server from. In a call it is an ordinary participant: its device must
+be in the conversation's MLS group, its call key binding is verified like everybody's (§8), it gets
+the media keys through the normal welcome, and it is in everybody's participant list.
+
+**What leaves, and where to.** The notetaker decrypts each participant's audio frames (the SFU sends
+one stream per speaker, so the speaker of every word is known without guessing), decodes them, cuts
+each speaker's speech into pieces of at most 30 seconds at pauses, and sends every piece as a 16 kHz
+mono WAV over TLS to OpenRouter's transcription endpoint (`POST /api/v1/audio/transcriptions`), which
+passes it to the model's provider. At the end the transcript (speaker names, times, text) goes to a
+chat model on OpenRouter (`POST /api/v1/chat/completions`) for the summary. Nothing else of the call
+leaves: no video, no screen share, no chat. The SFU forwards the three loudest speakers
+(ARCHITECTURE.md §6.3), so that is also what the notetaker hears.
+
+- **Audio is not kept.** A piece stays in the notetaker's memory until it is transcribed or given up
+  after its retries; it is never written to disk. The transcript so far is kept in the encrypted
+  local store, so a restart of the notetaker doesn't lose it, and deleted once the result is posted.
+- **Provider data policy.** With `zero_data_retention` (default on) every request carries
+  OpenRouter's provider preferences `zdr: true` and `data_collection: "deny"`, so only endpoints that
+  keep no data and don't train on it serve it. What OpenRouter and the provider do with the data is
+  in the end a contract (admin.md §3.7, data processing).
+
+**Policy (signed).** Everything that decides whether audio leaves and where it goes is a group of the
+owner-signed workspace policy (`notetaker`, admin.md §2.3), so a compromised server can neither turn
+the notetaker on, nor point it at another model, prompt or account. Clients and the notetaker read it
+from the verified policy only.
+
+| Field                 | Default                                 | Meaning                                                                        |
+|-----------------------|-----------------------------------------|--------------------------------------------------------------------------------|
+| `is_enabled`          | `false`                                 | The notetaker may be asked into calls                                          |
+| `bot`                 | none                                    | User ID of the notetaker's bot account; clients show this account as notetaker |
+| `inviters`            | `members`                               | Who may ask it in: `members` (not guests) or `admins` (of the verified roster) |
+| `can_anyone_stop`     | `true`                                  | Anyone in the conversation, guests included, can send it away                  |
+| `transcription_model` | `mistralai/voxtral-mini-transcribe-3-0` | OpenRouter model of the transcription                                          |
+| `summary_model`       | `mistralai/mistral-large-2512`          | OpenRouter model of the summary                                                |
+| `language`            | `auto`                                  | Language of the transcript and the summary (`auto`, or an ISO 639-1 code)      |
+| `prompt`              | built in                                | Instructions for the summary                                                   |
+| `zero_data_retention` | `true`                                  | Only zero-data-retention endpoints that don't train on the data                |
+| `api_key_sha256`      | none                                    | SHA-256 (hex) of the OpenRouter API key the owner entered                      |
+
+Old owner clients that re-sign the policy without knowing `notetaker` drop the group, which turns the
+notetaker off: the failure is the safe one.
+
+**The API key.** An admin enters the OpenRouter key in the console. The server stores it encrypted
+with its settings key (admin.md §6.2), never sends it to member clients, and hands it only to the bot
+account the policy names, over that account's authenticated connection
+(`GET /api/v1/notetaker/credentials`). The owner's client puts the key's SHA-256 into the signed
+policy, and the notetaker uses a key only if it matches: a compromised server can't swap in the key of
+an account of its own, whose request logs it could read. It can withhold the key, which only stops the
+notetaker. The notetaker's configuration may hold the key instead (`openrouter.api_key`); then it
+never reaches the server, and its hash in the policy must match all the same.
+
+**Asking it in.** The notetaker never decides on its own to listen. A request is an encrypted control
+message in the conversation (`MessageContent::Notetaker`, hidden from the timeline like the bridge's
+source announcements, §13.1):
+
+| Request             | Sent when                                               | The notetaker                                                                      |
+|---------------------|---------------------------------------------------------|------------------------------------------------------------------------------------|
+| `join` `this_call`  | "Add notetaker" in a running call                       | joins the conversation's call running now, or one starting within 10 minutes       |
+| `join` `every_call` | a meeting is scheduled with "Notetaker joins the calls" | joins every call of the meeting chat until a `stop`                                |
+| `stop`              | "Remove notetaker" in the call                          | leaves the call, transcribes what it heard, posts it; ends a standing `every_call` |
+
+It takes a `join` only from a sender the verified policy allows (`inviters`; the server's account kind
+can only take rights away, as for sources), and a `stop` from the member who asked it in, anybody
+allowed to ask it in, an admin of the verified roster or, with `can_anyone_stop`, any member of the
+conversation. A meeting host's "Remove" (meetings.md, host controls) stops it as well. It also leaves a
+call where nobody else has been for a minute, and after `max_call_minutes` (default 240).
+
+Members only accept DAVE keys of devices that were in the conversation's group when they prepared
+their join (§8, step 4). So the notetaker must be a member of the conversation **before** the call:
+invited with the meeting, or added to a channel like an integration bot. The button in the call then
+only sends the `join`, and is offered only where the notetaker is a member. (Adding a device to a
+running call's trusted roster is a follow-up; it would also let a new channel member join a running
+call whose participants prepared before the member was added.)
+
+**Everybody sees it.**
+
+- It is a participant: its tile reads "Notetaker – transcribing", and it counts in the participant
+  list, on every client, including clients without this feature, which show the bot account under the
+  name the admin gave it.
+- While it is in the call, the call screen shows a banner that says where the audio goes and who may
+  remove it, to everyone who joins later as well, and the pre-join screen shows it when the running
+  call has it. The header's encryption badge changes from "End-to-end encrypted" to "Notetaker in the
+  call – audio goes to OpenRouter". Clients derive both from the participant list and the verified
+  policy, never from what the notetaker or the server says about itself: the server can't hide them
+  while the notetaker is in the call, and can't make an ordinary participant look like it.
+- When it joins it posts a message into the conversation: that it transcribes, that the audio goes to
+  OpenRouter and to which model, and how to remove it. Clients that don't know the feature yet (the
+  mobile apps) see that message and the participant.
+- The notices bind compliant clients only: anybody in a call can record it by other means (#216).
+
+**The result.** One message in the call's conversation, encrypted for its members like any other: the
+summary (short summary, decisions, action items with owners, open questions) as text and the
+transcript as a Markdown attachment (§4.5). Everyone in the conversation can read it, which for a
+meeting chat is the people of the meeting; retention applies as to any message. Long transcripts are
+summarized in parts first, then the parts together.
+
+**What else the notetaker sees.** It is a member device, so it receives the messages of the
+conversations it is in, from its join on, and keeps them in its encrypted local store like any client.
+Add it to meeting chats and to the channels where it is used, not everywhere.
+
 ## 9. Local storage
 
 - Local database: SQLite with SQLCipher; key in the OS keystore (desktop).

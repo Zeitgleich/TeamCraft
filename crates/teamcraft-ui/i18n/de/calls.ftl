@@ -92,6 +92,7 @@ tile-muted = stummgeschaltet
 tile-hand = Hand gehoben
 tile-speaking = spricht
 tile-reconnecting = Verbindung wird wiederhergestellt
+tile-notetaker = Notetaker – transkribiert
 video-stalled = Video pausiert: schwache Verbindung
 
 ## Videoqualität (#967): wie scharf das Video einer anderen Person ankommt, wie im Menü eines Videoplayers
@@ -301,3 +302,12 @@ calls-echo-hint = Verhindert, dass andere sich über deine Lautsprecher selbst h
 
 # Dateien-Ansicht und Einrichtungs-Checkliste (Issue #301)
 calls-loading = Anrufe werden geladen
+
+## Notetaker (e2ee.md §8.2)
+call-notetaker-add = Notetaker hinzufügen
+call-notetaker-remove = Notetaker entfernen
+call-notetaker-joining = Der Notetaker wird hinzugefügt. Solange er im Anruf ist, wird der Ton für das Transkript an OpenRouter gesendet.
+call-notetaker-banner = Der Notetaker erstellt ein Transkript dieses Anrufs. Dazu wird das Gesprochene an OpenRouter ({ $model }) gesendet und ist damit nicht Ende-zu-Ende-verschlüsselt. Zusammenfassung und Transkript erscheinen danach im Chat.
+call-notetaker-badge = Notetaker im Anruf – Ton geht an OpenRouter
+call-notetaker-badge-detail = Solange der Notetaker im Anruf ist, erreicht ihn alles Gesagte und wird für das Transkript an OpenRouter und den Anbieter des Modells gesendet. Video und geteilte Bildschirme nutzt er nicht.
+prejoin-notetaker = Der Notetaker ist in diesem Anruf: Was du sagst, wird für ein Transkript an OpenRouter gesendet.

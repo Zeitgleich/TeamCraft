@@ -73,6 +73,31 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     Ok(self.api.create_call_join_token(conversation, &request).await?)
   }
 
+  /// The call running in the conversation, `None` if none runs. Never starts one (headless
+  /// participants such as the notetaker only join calls people started).
+  pub async fn running_call(
+    &self,
+    conversation: ConversationId,
+  ) -> Result<Option<teamcraft_proto::CallStateResponse>, CoreError> {
+    Ok(self.api.running_call(conversation).await?)
+  }
+
+  /// The users of the conversation's encryption group with the names this device knows them by
+  /// (the notetaker's transcript); a user without a known name gets `None`.
+  pub fn group_member_names(
+    &mut self,
+    conversation: ConversationId,
+  ) -> Result<Vec<(UserId, Option<String>)>, CoreError> {
+    let users = self.group_users(conversation)?;
+    let mut names = Vec::with_capacity(users.len());
+    for user in users {
+      let maybe_summary: Option<teamcraft_proto::UserSummary> =
+        records::get_json(&self.store, Table::Users, &user.to_string())?;
+      names.push((user, maybe_summary.map(|summary| summary.display_name)));
+    }
+    Ok(names)
+  }
+
   /// A join token, the signer and the verified devices for joining the conversation's call.
   pub async fn prepare_call(&mut self, conversation: ConversationId) -> Result<CallPreparation, CoreError> {
     self.ensure_call_group(conversation).await?;

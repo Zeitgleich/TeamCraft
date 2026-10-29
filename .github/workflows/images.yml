@@ -1,0 +1,83 @@
+name: Images
+
+# Builds the service images whose Containerfile a pull request changes, so a broken one shows
+# before a release tries to publish it (release.yml builds and pushes them, amd64 and arm64). Here:
+# amd64 only, nothing pushed, the release caches read but not written. The notetaker's image is also
+# started once, to see that its binary finds every shared library it links (libasound, libcrypto).
+# Like ci.yml, pull requests need the `ci` label.
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, labeled]
+    paths:
+      - "containers/teamcraft-*.Containerfile"
+      - ".github/workflows/images.yml"
+  # By hand: every image.
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  changed:
+    name: Changed images
+    if: github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'ci')
+    runs-on: ubuntu-latest
+    outputs:
+      images: ${{ steps.list.outputs.images }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+      - id: list
+        env:
+          EVENT: ${{ github.event_name }}
+          BASE: ${{ github.event.pull_request.base.sha }}
+        run: |
+          if [ "$EVENT" = "pull_request" ] && ! git diff --quiet "$BASE" HEAD -- .github/workflows/images.yml; then
+            files="$(ls containers/teamcraft-*.Containerfile)"
+          elif [ "$EVENT" = "pull_request" ]; then
+            files="$(git diff --name-only "$BASE" HEAD -- 'containers/teamcraft-*.Containerfile')"
+          else
+            files="$(ls containers/teamcraft-*.Containerfile)"
+          fi
+          images="$(printf '%s\n' "$files" | sed -n 's|^containers/\(.*\)\.Containerfile$|\1|p' | jq -R . | jq -cs .)"
+          echo "images=${images}" >> "$GITHUB_OUTPUT"
+          echo "Images to build: ${images}"
+
+  image:
+    name: Image ${{ matrix.image }} (amd64)
+    needs: changed
+    if: needs.changed.outputs.images != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        image: ${{ fromJSON(needs.changed.outputs.images) }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+      - uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          file: containers/${{ matrix.image }}.Containerfile
+          platforms: linux/amd64
+          tags: ${{ matrix.image }}:check
+          load: true
+          push: false
+          cache-from: type=gha,scope=${{ matrix.image }}-amd64
+      # Without a configuration the health check fails, but only after the binary started: a missing
+      # shared library would stop it before (exit 127, "error while loading shared libraries").
+      - name: The notetaker's binary starts
+        if: matrix.image == 'teamcraft-notetaker'
+        run: |
+          set +e
+          output="$(docker run --rm -e TEAMCRAFT_NOTETAKER_SERVER__URL=https://chat.example.com \
+            teamcraft-notetaker:check healthcheck 2>&1)"
+          status=$?
+          set -e
+          echo "$output"
+          [ "$status" -eq 1 ] && grep -q 'liveness file' <<< "$output"

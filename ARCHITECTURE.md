@@ -116,6 +116,7 @@ Binaries:
 
 - **`teamcraft-server`** – REST API, real-time gateway (WebSocket), auth, permissions, MLS delivery service, CalCraft/SMTP integration. Starts as a single process (no Redis/NATS); stateless enough to run several instances behind a load balancer later.
 - **`teamcraft-bridge`** – optional, runs next to log/webhook sources: encrypts their output into integration channels.
+- **`teamcraft-notetaker`** – optional AI notetaker, runs on a host the organization trusts: a call participant (bot account and device) that people ask into a call; it sends the call's audio to OpenRouter for transcription and posts a summary. Off by default, owner-signed policy, visible to everyone in the call (e2ee.md §8.2).
 - **`teamcraft-pbx`** – optional telephony module: AI hotline on any SIP trunk (`rsipstack`), pluggable voice agent providers (first: ElevenLabs), queues, handover to agents in the app. No Asterisk.
 - **`teamcraft-sfu`** – selective forwarding unit for calls. Separate so it can run on a box with good network and be restarted without dropping chat. Registers with the server using a registration token.
 - **`teamcraft-push-gateway`** – its own repository ([Zeitgleich/teamcraft-push-gateway](https://github.com/Zeitgleich/teamcraft-push-gateway)): holds the APNs and FCM credentials of the published store apps and forwards the sealed wake-ups of any server to them, so self-hosted servers work with the store apps. Run by the app's publisher on a separate host; sees device tokens and ciphertext only ([docs/push-gateway.md](docs/push-gateway.md)).
@@ -721,24 +722,25 @@ Monorepo. Deployment configuration lives in a separate private `teamcraft-deploy
 Crates that exist today: `proto`, `crypto`, `media`, `core`, `server`, `sfu`. The others are added
 when their milestone starts.
 
-| Path                      | Kind   | WASM | Purpose                                                                                                                                       |
-|---------------------------|--------|------|-----------------------------------------------------------------------------------------------------------------------------------------------|
-| `crates/teamcraft-proto`  | lib    | yes  | API, gateway and SFU signaling types (serde)                                                                                                  |
-| `crates/teamcraft-crypto` | lib    | yes  | MLS (openmls), identity/device keys, content keys, key bag, rendezvous, attachment crypto                                                     |
-| `crates/teamcraft-media`  | lib    | yes  | RTP packetization, jitter buffer, DAVE (davey), simulcast layer logic                                                                         |
-| `crates/teamcraft-db`     | lib    | no   | Postgres access (sqlx, compile-time checked queries), migrations                                                                              |
-| `crates/teamcraft-ops`    | lib    | no   | Helpers of the server binaries: container health probe (`healthcheck` subcommand), graceful shutdown signal                                   |
-| `crates/teamcraft-core`   | lib    | yes  | Client state, sync, local store (SQLCipher), search (tantivy + shared encrypted segments), notification rules                                 |
-| `crates/teamcraft-ffi`    | lib    | no   | UniFFI bindings of `teamcraft-core` for Swift and Kotlin                                                                                      |
-| `crates/teamcraft-server` | bin    | no   | REST API, gateway, auth, permissions, presence, MLS delivery, push, CalCraft/SMTP                                                             |
-| `crates/teamcraft-sfu`    | bin    | no   | WebTransport SFU                                                                                                                              |
-| `crates/teamcraft-vault`  | bin    | no   | Optional trusted vault node: compliance archive, file text extraction                                                                         |
-| `crates/teamcraft-bridge` | bin    | no   | Integration bridge: local webhooks/log ingestion → E2EE messages, builds index segments                                                       |
-| `crates/teamcraft-pbx`    | bin    | no   | Telephony + AI hotline: provider-agnostic SIP trunks, voice agent adapters, queues, DAVE participant ([docs/telephony.md](docs/telephony.md)) |
-| `crates/teamcraft-ui`     | lib    | yes  | Leptos UI (desktop + web)                                                                                                                     |
-| `apps/desktop`            | Tauri  | no   | macOS + Linux shell, native audio                                                                                                             |
-| `apps/ios`                | Xcode  | no   | App + Notification Service Extension                                                                                                          |
-| `apps/android`            | Gradle | no   | App                                                                                                                                           |
+| Path                         | Kind   | WASM | Purpose                                                                                                                                       |
+|------------------------------|--------|------|-----------------------------------------------------------------------------------------------------------------------------------------------|
+| `crates/teamcraft-proto`     | lib    | yes  | API, gateway and SFU signaling types (serde)                                                                                                  |
+| `crates/teamcraft-crypto`    | lib    | yes  | MLS (openmls), identity/device keys, content keys, key bag, rendezvous, attachment crypto                                                     |
+| `crates/teamcraft-media`     | lib    | yes  | RTP packetization, jitter buffer, DAVE (davey), simulcast layer logic                                                                         |
+| `crates/teamcraft-db`        | lib    | no   | Postgres access (sqlx, compile-time checked queries), migrations                                                                              |
+| `crates/teamcraft-ops`       | lib    | no   | Helpers of the server binaries: container health probe (`healthcheck` subcommand), graceful shutdown signal                                   |
+| `crates/teamcraft-core`      | lib    | yes  | Client state, sync, local store (SQLCipher), search (tantivy + shared encrypted segments), notification rules                                 |
+| `crates/teamcraft-ffi`       | lib    | no   | UniFFI bindings of `teamcraft-core` for Swift and Kotlin                                                                                      |
+| `crates/teamcraft-server`    | bin    | no   | REST API, gateway, auth, permissions, presence, MLS delivery, push, CalCraft/SMTP                                                             |
+| `crates/teamcraft-sfu`       | bin    | no   | WebTransport SFU                                                                                                                              |
+| `crates/teamcraft-vault`     | bin    | no   | Optional trusted vault node: compliance archive, file text extraction                                                                         |
+| `crates/teamcraft-bridge`    | bin    | no   | Integration bridge: local webhooks/log ingestion → E2EE messages, builds index segments                                                       |
+| `crates/teamcraft-notetaker` | bin    | no   | AI notetaker: a call participant that transcribes through OpenRouter and posts a summary ([docs/e2ee.md](docs/e2ee.md) §8.2)                  |
+| `crates/teamcraft-pbx`       | bin    | no   | Telephony + AI hotline: provider-agnostic SIP trunks, voice agent adapters, queues, DAVE participant ([docs/telephony.md](docs/telephony.md)) |
+| `crates/teamcraft-ui`        | lib    | yes  | Leptos UI (desktop + web)                                                                                                                     |
+| `apps/desktop`               | Tauri  | no   | macOS + Linux shell, native audio                                                                                                             |
+| `apps/ios`                   | Xcode  | no   | App + Notification Service Extension                                                                                                          |
+| `apps/android`               | Gradle | no   | App                                                                                                                                           |
 
 ## 9. Milestones
 

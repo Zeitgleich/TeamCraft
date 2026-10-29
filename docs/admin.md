@@ -553,6 +553,85 @@ size unless its sharer picks 4K, so the default changes nothing for people who d
 - **Admin UI:** Administration → Security → Screen sharing → "Allow 4K screen sharing"; saving is a
   policy change, which needs an owner (`sign_workspace`).
 
+### 3.7 Notetaker (AI transcript and summary of calls)
+
+The notetaker is a participant people can ask into a call; afterwards it posts a summary and the
+transcript into the call's conversation. **It sends the call's audio out of the end-to-end
+encryption** to OpenRouter and the model's provider (e2ee.md §8.2), so it is off by default and every
+participant sees when it is there. Read the data processing notes below before turning it on.
+
+**Setting it up**
+
+1. Create a bot account for it (Administration → Integrations, or `POST /api/v1/admin/bots`) with a
+   name people recognize, such as "Notetaker".
+2. Run `teamcraft-notetaker` with the bot's token on a host you trust, next to the bridge or on its
+   own (`crates/teamcraft-notetaker/teamcraft-notetaker.example.toml`). Each release publishes the
+   image `ghcr.io/zeitgleich/teamcraft-notetaker:X.Y.Z` (multi-arch, signed, like the server's;
+   `containers/README.md`), and the deployment playbook
+   ([teamcraft-deploy](https://github.com/Zeitgleich/teamcraft-deploy)) runs it with its optional
+   role `teamcraft_notetaker` (`teamcraft_notetaker_enabled`, off by default). It needs to reach the
+   server, the SFU (QUIC/UDP) and `https://openrouter.ai`, and listens on no port. On its first start
+   it enrolls a device, like the bridge; keep its database volume (`/var/lib/teamcraft-notetaker`).
+   Whoever controls that host can hear the calls the notetaker is in.
+3. Administration → Notetaker (owners sign, like every policy page): turn it on, pick the bot account,
+   choose who may add it, the models, the language and the summary instructions, and enter the
+   OpenRouter API key.
+4. Add the bot to the channels where it may be used (Channel settings → Integrations), or let people
+   tick "Notetaker joins the calls" when they schedule a meeting. It can only join calls of
+   conversations it is a member of, and must be in before the call starts (e2ee.md §8.2).
+
+**Settings** (signed policy group `notetaker`, except the key)
+
+| Setting                  | Default                                 | What                                                                                        |
+|--------------------------|-----------------------------------------|---------------------------------------------------------------------------------------------|
+| Notetaker on             | off                                     | Whether people can ask it into calls                                                        |
+| Notetaker account        | none                                    | The bot account clients treat as the notetaker                                              |
+| Who may add it           | members                                 | Members (not guests), or admins only                                                        |
+| Anyone may remove it     | on                                      | Off: only whoever added it, people who may add it, and admins                               |
+| Transcription model      | `mistralai/voxtral-mini-transcribe-3-0` | Any OpenRouter speech-to-text model; German and English among its languages                 |
+| Summary model            | `mistralai/mistral-large-2512`          | Any OpenRouter chat model                                                                   |
+| Language                 | automatic                               | Language of transcript and summary; `auto` detects it per piece                             |
+| Summary instructions     | built in                                | The prompt: summary, decisions, action items with owners, open questions                    |
+| Zero data retention only | on                                      | Requests may only go to endpoints that keep no data and don't train on it                   |
+| OpenRouter API key       | none                                    | Write-only; stored encrypted with the settings key (§6.2), its SHA-256 goes into the policy |
+
+The key is never shown again and never sent to member clients; only the bot account the policy names
+can fetch it, and the notetaker refuses a key whose hash isn't the signed one. A server without a
+settings key (`[secrets]`) can't store it: then put the key into the notetaker's own configuration
+(`openrouter.api_key`) and enter it in the console all the same, which signs only its hash.
+
+**In a call.** "Add notetaker" in the call's menu asks it in (where it is a member of the conversation
+and the user may add it). While it is in the call, everybody sees a banner and a changed encryption
+badge, its tile says "Notetaker – transcribing", and it posts a message saying where the audio goes.
+"Remove notetaker" (for whoever added it, admins and, by default, anybody) or a meeting host's "Remove"
+stops it: it leaves, transcribes what it heard and posts the result. It leaves on its own a minute
+after the last person left, and after 4 hours (`limits.max_call_minutes`).
+
+**Costs.** OpenRouter bills the transcription per second of speech and the summary per token. With the
+defaults, about $0.21 per hour of speech (Voxtral Mini Transcribe 3, $0.0035 per minute) plus about
+$0.01 for the summary of an hour (Mistral Large, $0.50 per million input tokens): roughly **$0.22 per
+meeting hour**. Overlapping speakers count once each; silence is not sent. The notetaker logs what
+each call cost (`usage.cost` of every request) and the total when it posts.
+
+**Data processing (GDPR).** The organization is the controller of the call audio and the transcript.
+OpenRouter (a company in the USA) and the provider that runs the model are processors:
+
+- Conclude a data processing agreement with OpenRouter and check the providers its routing may use
+  for your models (with zero data retention on, only endpoints that store nothing); for transfers
+  outside the EU you need a transfer mechanism (EU-US Data Privacy Framework or standard contractual
+  clauses). The default models are Mistral's, a provider in the EU, but OpenRouter itself sits in the
+  middle; whether it processes in the EU depends on your OpenRouter plan.
+- Tell people before they join (privacy notice, Art. 13 GDPR) and have a legal basis. In some
+  countries transcribing non-public spoken words needs everybody's consent (in Germany § 201 StGB);
+  the notices in the app inform, they don't replace consent. In companies with a works council, a
+  tool that processes employees' speech is usually subject to co-determination (in Germany § 87 (1)
+  no. 6 BetrVG).
+- Retention: no audio is kept anywhere in TeamCraft (e2ee.md §8.2). The summary and transcript are
+  messages and follow the conversation's retention. The notetaker's own database keeps the messages
+  of its conversations like any device; delete the volume when you stop using it.
+- Access requests and erasure: transcripts are messages in the conversation; the providers keep
+  nothing with zero data retention on.
+
 ## 4. Audit log
 
 Every admin action, recovery, device change and role change is logged with actor, target and time.

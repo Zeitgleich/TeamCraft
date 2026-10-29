@@ -845,10 +845,25 @@ pub fn ScheduleMeetingDialog(
       .with_untracked(|all| all.iter().find(|meeting| meeting.id == id).cloned())
   });
   let is_edit = maybe_before.is_some();
+  // The notetaker can be asked into the meeting's calls (e2ee.md §8.2) when the verified policy
+  // has it on and lets this user ask it in.
+  let maybe_notetaker = untrack(|| {
+    state.read(|backend| {
+      let policy = backend.notetaker_policy()?;
+      let me = backend.me();
+      let may_ask = crate::notetaker::may_ask_in(
+        &policy,
+        !me.is_guest && !me.is_bot,
+        backend.can_manage_integration_sources(),
+      );
+      policy.active_bot().filter(|_| may_ask)
+    })
+  });
   let form = RwSignal::new(match &maybe_before {
-    Some(before) => ScheduleForm::from_meeting(before, me),
+    Some(before) => ScheduleForm::from_meeting(before, me).with_notetaker(maybe_notetaker),
     None => ScheduleForm::new(format_local_datetime_input(suggested_start(now))),
   });
+  let had_notetaker = form.get_untracked().maybe_notetaker.is_some();
   let mut durations = DURATIONS.to_vec();
   if !durations.contains(&form.get_untracked().duration_minutes) {
     durations.push(form.get_untracked().duration_minutes);
@@ -890,8 +905,19 @@ pub fn ScheduleMeetingDialog(
         Ok(request) => {
           maybe_error.set(None);
           is_saving.set(true);
+          let conversation = before.conversation_id;
+          let has_notetaker = form.get_untracked().maybe_notetaker.is_some();
+          if had_notetaker && !has_notetaker {
+            // Sent while the notetaker is still in the chat's group, before the edit takes it out.
+            state.write(|backend| {
+              backend.request_notetaker(conversation, teamcraft_proto::NotetakerRequest::Stop)
+            });
+          }
           spawn_local(async move {
             save_edit(state, hub, me, before, request).await;
+            if has_notetaker && !had_notetaker {
+              state.try_write(|backend| backend.request_notetaker(conversation, every_call()));
+            }
             is_saving.set_if_alive(false);
           });
         },
@@ -903,6 +929,7 @@ pub fn ScheduleMeetingDialog(
       Ok(request) => {
         maybe_error.set(None);
         is_saving.set(true);
+        let has_notetaker = form.get_untracked().maybe_notetaker.is_some();
         spawn_local(async move {
           let client = hub.client();
           if let Some(meeting) = hub.run(me, now_ms(), client.create(&request)).await {
@@ -911,6 +938,10 @@ pub fn ScheduleMeetingDialog(
             let invitees = crate::meetings::invited_users(&request);
             // Gone only with the app; then the chat stays without encryption (nobody else founds it).
             state.try_write(|backend| backend.set_up_meeting_chat(meeting.conversation_id, invitees));
+            // Queued behind the chat's setup, so it goes into the group the notetaker is in.
+            if has_notetaker {
+              state.try_write(|backend| backend.request_notetaker(meeting.conversation_id, every_call()));
+            }
             show_created(state, hub, meeting);
           }
           is_saving.set_if_alive(false);
@@ -1126,6 +1157,20 @@ pub fn ScheduleMeetingDialog(
             <span>{move || i18n.t("schedule-lobby")}</span>
           </label>
           <p class="muted-text small">{move || i18n.t("schedule-lobby-hint")}</p>
+          {maybe_notetaker.map(|bot| view! {
+            <label class="checkbox">
+              <input
+                type="checkbox"
+                prop:checked=move || form.get().maybe_notetaker.is_some()
+                on:change=move |ev| {
+                  let is_ticked = event_target_checked(&ev);
+                  form.update(|form| form.maybe_notetaker = is_ticked.then_some(bot));
+                }
+              />
+              <span>{move || i18n.t("schedule-notetaker")}</span>
+            </label>
+            <p class="muted-text small">{move || i18n.t("schedule-notetaker-hint")}</p>
+          })}
           {move || {
             maybe_error.get().map(|error| {
               let detail = match &error {
@@ -1152,6 +1197,13 @@ pub fn ScheduleMeetingDialog(
 /// line with the new invitee list (security-relevant: added users get access to later messages,
 /// removed ones are taken out with a key-rotating commit; e2ee.md §4.6, "Meeting chats"). The list
 /// comes from this request, never from the server's member list.
+/// The notetaker's standing request for a meeting's calls (e2ee.md §8.2).
+fn every_call() -> teamcraft_proto::NotetakerRequest {
+  teamcraft_proto::NotetakerRequest::Join {
+    scope: teamcraft_proto::NotetakerScope::EveryCall,
+  }
+}
+
 async fn save_edit(
   state: AppState,
   hub: MeetingsHub,

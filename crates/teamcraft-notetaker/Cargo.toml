@@ -1,0 +1,55 @@
+[package]
+name = "teamcraft-notetaker"
+description = "Headless TeamCraft participant that transcribes calls through OpenRouter and posts a summary"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[lib]
+name = "teamcraft_notetaker"
+path = "src/lib.rs"
+
+[[bin]]
+name = "teamcraft-notetaker"
+path = "src/main.rs"
+
+[dependencies]
+teamcraft-core = { path = "../teamcraft-core" }
+teamcraft-crypto = { path = "../teamcraft-crypto" }
+# The native call driver (WebTransport, DAVE, Opus): the notetaker is an ordinary call participant.
+teamcraft-media = { path = "../teamcraft-media", features = ["native"] }
+teamcraft-ops.workspace = true
+teamcraft-proto.workspace = true
+anyhow.workspace = true
+base64.workspace = true
+figment.workspace = true
+# The posted texts in German and English, from Fluent files like the app's (already in the tree
+# through teamcraft-ui).
+fluent-bundle = "0.16"
+unic-langid = "0.9"
+# OpenRouter's API and the notetaker's credentials at the server (already in the tree through the core).
+reqwest.workspace = true
+secrecy.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+# The meeting's date in the summary prompt and the transcript's header.
+time = { workspace = true, features = ["formatting", "macros"] }
+tokio = { workspace = true, features = ["rt-multi-thread", "sync", "time", "macros", "signal"] }
+tracing.workspace = true
+tracing-subscriber.workspace = true
+
+[dev-dependencies]
+# A local stand-in for OpenRouter in the client's tests (no real API calls, no key).
+axum = { workspace = true, features = ["tokio", "http1", "json"] }
+figment = { workspace = true, features = ["test"] }
+# A session against a real SFU in the same process, with device-bound DAVE keys.
+teamcraft-sfu = { path = "../teamcraft-sfu" }
+rand_core.workspace = true
+wtransport = { version = "0.7.2", features = ["quinn", "self-signed"] }

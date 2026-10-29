@@ -256,6 +256,8 @@ pub fn PreJoinScreen(request: CallRequest) -> impl IntoView {
             }
           }}
         </p>
+        // Before joining: the running call's audio goes to the notetaker (e2ee.md §8.2).
+        <crate::components::call_notetaker::NotetakerPreJoinNotice conversation=request.conversation />
         <div class="field">
           <label for=CAMERA_FIELD_ID>{move || i18n.t("prejoin-camera")}</label>
           <DeviceSelect id=CAMERA_FIELD_ID kind=InputKind::Camera offer=camera selected=call.camera_id on_pick=Callback::new(pick_camera) />

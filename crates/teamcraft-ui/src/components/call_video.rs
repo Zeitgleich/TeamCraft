@@ -44,6 +44,9 @@ pub fn VideoTile(
   /// The real video of the tile, where the page shows call video.
   #[prop(into, default = Signal::stored(None))]
   video: Signal<Option<VideoSource>>,
+  /// What the participant is besides a person in the call ("Notetaker – transcribing").
+  #[prop(default = None)]
+  maybe_role: Option<String>,
 ) -> impl IntoView {
   let i18n = use_i18n();
   let name = if is_self {
@@ -57,6 +60,7 @@ pub fn VideoTile(
   let id = user.id;
   // Their profile picture, like everywhere else (`Avatar`); the initials until it loaded or without.
   let picture = move || crate::profiles::use_profiles().and_then(|hub| hub.avatar_url(id));
+  let aria_role = maybe_role.clone();
 
   view! {
     <div
@@ -66,8 +70,13 @@ pub fn VideoTile(
       class:tile-large=is_large
       style:--hue=hue.to_string()
       role="group"
-      aria-label=move || {
+      aria-label={
+        let maybe_role = aria_role;
+        move || {
         let mut parts = vec![if is_self { i18n.t("tile-you") } else { display.clone() }];
+        if let Some(role) = &maybe_role {
+          parts.push(role.clone());
+        }
         if is_muted.get() {
           parts.push(i18n.t("tile-muted"));
         }
@@ -81,6 +90,7 @@ pub fn VideoTile(
           parts.push(i18n.t("tile-reconnecting"));
         }
         parts.join(", ")
+        }
       }
     >
       <div class=move || format!("video-surface effect-{}", if is_self { effect.get().slug() } else { "none" })>
@@ -114,6 +124,7 @@ pub fn VideoTile(
       <div class="tile-label">
         {(!is_self).then(|| view! { <span class="tile-name" translate="no">{name.clone()}</span> })}
         {is_self.then(|| view! { <span class="tile-name">{move || i18n.t("tile-you")}</span> })}
+        {maybe_role.map(|role| view! { <span class="tile-role">{role}</span> })}
         <Show when=move || is_muted.get() fallback=|| ()>
           <Icon name=IconName::MicOff class="tile-badge" />
         </Show>

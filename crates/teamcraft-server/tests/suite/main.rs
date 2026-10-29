@@ -44,6 +44,7 @@ mod meeting_mail;
 mod meetings;
 mod messages;
 mod mls;
+mod notetaker;
 mod notification_settings;
 mod oidc;
 mod org_backgrounds;
