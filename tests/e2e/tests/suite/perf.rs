@@ -834,6 +834,11 @@ async fn come_back(page: &Page, needle: &str) -> bool {
       has_signed_in = true;
     } else if !has_signed_in && text.contains("Sign in") && !text.contains("Activity") {
       click_text(page, "Sign in").await;
+    } else if text.contains("Activity") {
+      // The app opens on Chats (#558); the seeded channels are in the first space.
+      let _ = page
+        .evaluate("document.querySelector('.space-btn[aria-label^=\"Space 00\"]')?.click()")
+        .await;
     }
     assert!(
       Instant::now() < deadline,
@@ -978,6 +983,9 @@ async fn scroll_back(page: &Page) -> (f64, f64, f64) {
       last = now;
       if (steps < 120) {
         pick();
+        // A person scrolls with the wheel (or a finger, or keys): only that leaves the bottom
+        // (#665). The synthetic event says so; the step itself is set directly.
+        list.dispatchEvent(new WheelEvent('wheel', { deltaY: -600, bubbles: true }));
         list.scrollTop = Math.max(0, list.scrollTop - 600);
         steps += 1;
         setTimeout(check, 0);
