@@ -1,4 +1,4 @@
-//! The notetaker's API key (e2ee.md §8.2, admin.md §3.6): admins store it write-only, and only the
+//! The notetaker's API key (e2ee.md §8.2, admin.md §3.7): admins store it write-only, and only the
 //! bot account the signed policy names fetches it. Everything else about the notetaker is signed
 //! policy ([`crate::NotetakerPolicy`]) or encrypted control messages.
 

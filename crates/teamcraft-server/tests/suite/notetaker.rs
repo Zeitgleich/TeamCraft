@@ -1,4 +1,4 @@
-//! The notetaker's API key and policy checks (e2ee.md §8.2, admin.md §3.6): admins store the key
+//! The notetaker's API key and policy checks (e2ee.md §8.2, admin.md §3.7): admins store the key
 //! write-only, only the bot account of the enabled signed policy gets it, and owners can't publish
 //! a malformed notetaker group.
 #![cfg(feature = "integration")]

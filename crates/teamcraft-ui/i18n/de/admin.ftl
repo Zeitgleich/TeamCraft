@@ -746,7 +746,7 @@ admin-integrations-reveal-done = Ich habe es gespeichert
 admin-integrations-next-steps = Danach: den Bot zu den Kanälen hinzufügen, die er bedient (Kanaleinstellungen, Integrationen), und die Bridge einmal starten, damit sie ihr Gerät einrichtet.
 admin-integrations-copy = Kopieren
 
-## Notetaker (admin.md §3.6)
+## Notetaker (admin.md §3.7)
 admin-nav-notetaker = Notetaker
 admin-notetaker-title = Notetaker
 admin-notetaker-subtitle = Ein KI-Teilnehmer, den man in einen Anruf holen kann: Er transkribiert den Anruf und schreibt Zusammenfassung und Transkript in die Unterhaltung des Anrufs.

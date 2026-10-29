@@ -1,4 +1,4 @@
-//! The notetaker's OpenRouter API key (e2ee.md §8.2, admin.md §3.6). Admins store it write-only;
+//! The notetaker's OpenRouter API key (e2ee.md §8.2, admin.md §3.7). Admins store it write-only;
 //! it is sealed with the settings key before it reaches the database and handed only to the bot
 //! account the signed policy names. Everything else about the notetaker is owner-signed policy or
 //! encrypted between members: the server can't turn it on, and the notetaker checks the key it

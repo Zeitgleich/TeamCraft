@@ -1,5 +1,5 @@
 # teamcraft-notetaker: an AI participant that transcribes calls through OpenRouter and posts a
-# summary (docs/e2ee.md §8.2, docs/admin.md §3.6). Every option with its default.
+# summary (docs/e2ee.md §8.2, docs/admin.md §3.7). Every option with its default.
 #
 # Each key can also be set in the environment: TEAMCRAFT_NOTETAKER_<SECTION>__<KEY>, e.g.
 # TEAMCRAFT_NOTETAKER_SERVER__BOT_TOKEN. The file itself: --config <path> or

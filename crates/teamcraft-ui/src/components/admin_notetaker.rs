@@ -1,4 +1,4 @@
-//! The notetaker page of the console (admin.md §3.6, e2ee.md §8.2): the signed `notetaker` group of
+//! The notetaker page of the console (admin.md §3.7, e2ee.md §8.2): the signed `notetaker` group of
 //! the workspace policy, and the OpenRouter key, which goes to the server write-only while only its
 //! SHA-256 is signed.
 

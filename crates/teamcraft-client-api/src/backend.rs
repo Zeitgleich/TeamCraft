@@ -953,7 +953,7 @@ pub trait AdminBackend {
   fn last_settings_test(&self) -> Option<(SettingsTestKind, SettingsTestResponse)> {
     None
   }
-  /// Whether the notetaker's OpenRouter key is stored (admin.md §3.6); `None` until loaded.
+  /// Whether the notetaker's OpenRouter key is stored (admin.md §3.7); `None` until loaded.
   fn notetaker_settings(&self) -> Option<teamcraft_proto::AdminNotetakerResponse> {
     None
   }

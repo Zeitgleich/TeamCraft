@@ -2095,7 +2095,7 @@ leaves: no video, no screen share, no chat. The SFU forwards the three loudest s
 - **Provider data policy.** With `zero_data_retention` (default on) every request carries
   OpenRouter's provider preferences `zdr: true` and `data_collection: "deny"`, so only endpoints that
   keep no data and don't train on it serve it. What OpenRouter and the provider do with the data is
-  in the end a contract (admin.md §3.6, data processing).
+  in the end a contract (admin.md §3.7, data processing).
 
 **Policy (signed).** Everything that decides whether audio leaves and where it goes is a group of the
 owner-signed workspace policy (`notetaker`, admin.md §2.3), so a compromised server can neither turn

@@ -1,4 +1,4 @@
-//! The notetaker (e2ee.md §8.2, admin.md §3.6): an AI participant that transcribes a call and posts
+//! The notetaker (e2ee.md §8.2, admin.md §3.7): an AI participant that transcribes a call and posts
 //! a summary into the call's conversation. It sends the call's audio out of the end-to-end
 //! encryption, so everything that decides whether and where audio goes is owner-signed policy
 //! ([`NotetakerPolicy`]), and the notetaker joins a call only when a member asks it in with an

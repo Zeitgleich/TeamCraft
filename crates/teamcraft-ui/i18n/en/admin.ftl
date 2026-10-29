@@ -746,7 +746,7 @@ admin-integrations-reveal-done = I have saved it
 admin-integrations-next-steps = Next: add the bot to the channels it serves (channel settings, Integrations), then start the bridge once so it enrolls its device.
 admin-integrations-copy = Copy
 
-## Notetaker (admin.md §3.6)
+## Notetaker (admin.md §3.7)
 admin-nav-notetaker = Notetaker
 admin-notetaker-title = Notetaker
 admin-notetaker-subtitle = An AI participant people can ask into a call: it transcribes the call and posts a summary and the transcript into the call's conversation.

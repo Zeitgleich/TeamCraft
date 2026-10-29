@@ -1,4 +1,4 @@
-//! The TeamCraft notetaker (e2ee.md §8.2, admin.md §3.6): a headless participant that people ask
+//! The TeamCraft notetaker (e2ee.md §8.2, admin.md §3.7): a headless participant that people ask
 //! into a call, which transcribes it through OpenRouter and posts a summary and the transcript into
 //! the call's conversation.
 //!
