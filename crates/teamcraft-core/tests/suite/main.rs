@@ -35,6 +35,7 @@ mod meeting_chats;
 mod member_devices;
 mod member_removal;
 mod messages;
+mod notetaker;
 mod mls_recovery;
 mod mls_storage;
 mod offline_actions;
