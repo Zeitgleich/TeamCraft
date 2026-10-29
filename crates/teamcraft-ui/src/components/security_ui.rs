@@ -2,7 +2,6 @@
 
 use leptos::prelude::*;
 use leptos::task::spawn_local;
-use qrcode::{Color, QrCode};
 use teamcraft_client_api::failure::{ActionFailure, FailureKind};
 
 use crate::components::icons::{Icon, IconName};
@@ -344,27 +343,11 @@ fn DemoLinkDialog() -> impl IntoView {
 /// A QR code drawn as one SVG path. Light modules on a white quiet zone keep it scannable in dark mode.
 #[component]
 pub(crate) fn QrImage(data: String) -> impl IntoView {
-  const QUIET_ZONE: usize = 3;
   let i18n = use_i18n();
-  let Ok(code) = QrCode::new(data.as_bytes()) else {
+  let Some(crate::qr::QrPath { size, path }) = crate::qr::svg_path(&data) else {
     tracing::warn!("could not encode the link QR code");
     return ().into_any();
   };
-  let width = code.width();
-  let size = width + 2 * QUIET_ZONE;
-  let path: String = code
-    .to_colors()
-    .into_iter()
-    .enumerate()
-    .filter(|(_, color)| *color == Color::Dark)
-    .map(|(index, _)| {
-      format!(
-        "M{} {}h1v1h-1z",
-        index % width + QUIET_ZONE,
-        index / width + QUIET_ZONE
-      )
-    })
-    .collect();
   view! {
     <svg
       class="qr"

@@ -1,8 +1,8 @@
 //! Settings > Devices and Settings > Security & privacy. Devices: this device first, the others
 //! with platform and last seen, what this device verified of each and how it gets pushes;
 //! renaming, a test push, signing out (confirmed first) and linking a new one. Security: the state
-//! of encryption and of the key backup in plain words with the next step, the recovery passphrase,
-//! verifying people, the user's own key one level down, and what others can see.
+//! of encryption and of the key backup in plain words with the next step, the recovery kit (or a
+//! legacy passphrase), verifying people, the user's own key one level down, and what others can see.
 
 use leptos::prelude::*;
 use teamcraft_client_api::admin::{DeviceInfo, DevicePushStatus, DeviceVerification};
@@ -14,11 +14,12 @@ use crate::auth::tauri;
 use crate::clock::{format_relative, now_ms};
 use crate::components::icons::{Icon, IconName};
 use crate::components::pending_button::PendingButton;
+use crate::components::recovery_kit_setup::RecoveryKitSetup;
 use crate::components::settings_rows::{
   ListFilter, MAX_LIST_ENTRIES, SelectRow, SettingRow, SettingsCard, SwitchRow, matches_filter, row_id,
   slug_options,
 };
-use crate::feedback::{ActionFailure, FailureKind, PendingAction};
+use crate::feedback::{ActionFailure, PendingAction};
 use crate::i18n::{I18n, use_i18n};
 use crate::model::{DeviceId, TimestampMs, UserId};
 use crate::reactive::SetIfAlive;
@@ -499,24 +500,101 @@ pub fn SecuritySection() -> impl IntoView {
   }
 }
 
-/// The key backup in plain words with the next step (issue #410), and the recovery passphrase:
-/// setting or replacing it wraps the backup with the new one (e2ee.md §6.2).
+/// The key backup in plain words with the next step (issue #410), and how it is protected: the
+/// recovery kit (e2ee.md §6.5) or, for accounts from before it, a passphrase (§6.2). A new kit
+/// replaces the passphrase or the previous kit.
 #[component]
 fn RecoveryCard() -> impl IntoView {
   let state = use_app_state();
   let i18n = use_i18n();
   let backup = Memo::new(move |_| state.read(|backend| backend.key_backup()));
-  let needs_recovery = Memo::new(move |_| {
-    backup.with(|maybe| {
-      maybe
-        .as_ref()
-        .is_some_and(|state| !state.has(RecoveryMethod::Passphrase))
-    })
+  let has =
+    move |method: RecoveryMethod| backup.with(|maybe| maybe.as_ref().is_some_and(|state| state.has(method)));
+  let has_kit = Memo::new(move |_| has(RecoveryMethod::RecoveryKey));
+  let has_passphrase = Memo::new(move |_| has(RecoveryMethod::Passphrase));
+  let is_passphrase_allowed =
+    Memo::new(move |_| backup.with(|maybe| maybe.as_ref().is_none_or(|state| state.is_passphrase_allowed)));
+  let editing = RwSignal::new(Editing::Nothing);
+  let maybe_done = RwSignal::new(None::<&'static str>);
+  let saving = PendingAction::new();
+  let account = state.me().display_name;
+  let save_kit = Callback::new(move |recovery_key: String| {
+    saving.spawn(async move {
+      crate::remote_backend::set_recovery_key(&recovery_key)
+        .await
+        .map_err(|error| ActionFailure::from_wire(&error))?;
+      editing.set_if_alive(Editing::Nothing);
+      maybe_done.set_if_alive(Some("security-kit-done"));
+      Ok(())
+    });
   });
-  let is_open = RwSignal::new(false);
+  let kit_hint = Signal::derive(move || match maybe_done.get() {
+    Some(key) => i18n.t(key),
+    None => i18n.t("security-kit-hint"),
+  });
+
+  view! {
+    <SettingsCard heading="security-backup-title">
+      {move || backup.get().map(|state| backup_status(&state, i18n))}
+      <SettingRow label="security-kit-row" live_hint=kit_hint>
+        <Show when=move || editing.get() == Editing::Nothing fallback=|| ()>
+          <button
+            type="button"
+            class="btn btn-small"
+            class:btn-primary=move || !has_kit.get()
+            on:click=move |_| {
+              maybe_done.set(None);
+              editing.set(Editing::Kit);
+            }
+          >
+            {move || {
+              if has_kit.get() {
+                i18n.t("security-kit-new")
+              } else if has_passphrase.get() {
+                i18n.t("security-kit-replace")
+              } else {
+                i18n.t("security-kit-create")
+              }
+            }}
+          </button>
+        </Show>
+      </SettingRow>
+      <Show when=move || editing.get() == Editing::Kit fallback=|| ()>
+        <div class="set-subform">
+          <RecoveryKitSetup
+            account=account.clone()
+            finish_label=Signal::derive(move || i18n.t("security-kit-save"))
+            is_busy=Signal::derive(move || saving.is_pending())
+            on_confirmed=save_kit
+            maybe_on_cancel=Callback::new(move |()| editing.set(Editing::Nothing))
+          />
+        </div>
+      </Show>
+      // A passphrase is only kept up for accounts that have one and may (e2ee.md §6.5.8).
+      <Show
+        when=move || has_passphrase.get() && !has_kit.get() && is_passphrase_allowed.get()
+        fallback=|| ()
+      >
+        <PassphraseRow editing=editing maybe_done=maybe_done />
+      </Show>
+    </SettingsCard>
+  }
+}
+
+/// Which form of the recovery card is open.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Editing {
+  Nothing,
+  Kit,
+  Passphrase,
+}
+
+/// Changing a legacy recovery passphrase (e2ee.md §6.2): the new one replaces the old wrap.
+#[component]
+fn PassphraseRow(editing: RwSignal<Editing>, maybe_done: RwSignal<Option<&'static str>>) -> impl IntoView {
+  let i18n = use_i18n();
   let passphrase = RwSignal::new(String::new());
   let confirm = RwSignal::new(String::new());
-  let is_done = RwSignal::new(false);
   let saving = PendingAction::new();
   let is_long_enough = move || passphrase.get().chars().count() >= MIN_PASSPHRASE_CHARS;
   let do_match = move || passphrase.get() == confirm.get();
@@ -530,85 +608,81 @@ fn RecoveryCard() -> impl IntoView {
     saving.spawn(async move {
       crate::remote_backend::change_passphrase(&new_passphrase)
         .await
-        .map_err(|error| ActionFailure::new(FailureKind::Other, error))?;
+        .map_err(|error| ActionFailure::from_wire(&error))?;
       passphrase.set_if_alive(String::new());
       confirm.set_if_alive(String::new());
-      is_open.set_if_alive(false);
-      is_done.set_if_alive(true);
+      editing.set_if_alive(Editing::Nothing);
+      maybe_done.set_if_alive(Some("recovery-done"));
       Ok(())
     });
   };
   view! {
-    <SettingsCard heading="security-backup-title">
-      {move || backup.get().map(|state| backup_status(&state, i18n))}
-      <SettingRow
-        label="security-recovery-row"
-        live_hint=Signal::derive(move || if is_done.get() { i18n.t("recovery-done") } else { i18n.t("recovery-hint") })
-      >
-        <Show when=move || !is_open.get() fallback=|| ()>
-          <button
-            type="button"
-            class="btn btn-small"
-            class:btn-primary=move || needs_recovery.get()
-            on:click=move |_| { is_done.set(false); is_open.set(true); }
-          >
-            {move || if needs_recovery.get() { i18n.t("security-backup-set-up") } else { i18n.t("recovery-save") }}
-          </button>
-        </Show>
-      </SettingRow>
-      <Show when=move || is_open.get() fallback=|| ()>
-        <form class="set-subform" on:submit=save>
-          <label class="set-row-label" for="recovery-new">{move || i18n.t("recovery-new")}</label>
-          <input
-            id="recovery-new"
-            class="input"
-            type="password"
-            autocomplete="new-password"
-            data-autofocus
-            prop:value=move || passphrase.get()
-            on:input=move |ev| passphrase.set(event_target_value(&ev))
-          />
-          <label class="set-row-label" for="recovery-confirm">{move || i18n.t("enroll-confirm")}</label>
-          <input
-            id="recovery-confirm"
-            class="input"
-            type="password"
-            autocomplete="new-password"
-            prop:value=move || confirm.get()
-            on:input=move |ev| confirm.set(event_target_value(&ev))
-          />
-          <p class="set-row-hint">{move || i18n.t_with("enroll-new-hint", &[("count", &MIN_PASSPHRASE_CHARS.to_string())])}</p>
-          <Show when=move || is_long_enough() && !confirm.get().is_empty() && !do_match() fallback=|| ()>
-            <p class="field-error" role="alert">{move || i18n.t("security-passphrase-mismatch")}</p>
-          </Show>
-          <div class="set-confirm-actions">
-            <button type="button" class="btn btn-small" on:click=move |_| is_open.set(false)>{move || i18n.t("cancel")}</button>
-            <button
-              type="submit"
-              class="btn btn-small btn-primary"
-              prop:disabled=move || saving.is_pending() || !can_save()
-              aria-busy=move || saving.is_pending().then_some("true")
-            >
-              <Show when=move || saving.is_pending() fallback=|| ()>
-                <span class="spinner" role="status" aria-label=move || i18n.t("action-running")></span>
-              </Show>
-              {move || i18n.t("recovery-save")}
-            </button>
-          </div>
-        </form>
+    <SettingRow label="security-recovery-row" hint="recovery-hint">
+      <Show when=move || editing.get() == Editing::Nothing fallback=|| ()>
+        <button
+          type="button"
+          class="btn btn-small"
+          on:click=move |_| {
+            maybe_done.set(None);
+            editing.set(Editing::Passphrase);
+          }
+        >
+          {move || i18n.t("recovery-save")}
+        </button>
       </Show>
-    </SettingsCard>
+    </SettingRow>
+    <Show when=move || editing.get() == Editing::Passphrase fallback=|| ()>
+      <form class="set-subform" on:submit=save>
+        <label class="set-row-label" for="recovery-new">{move || i18n.t("recovery-new")}</label>
+        <input
+          id="recovery-new"
+          class="input"
+          type="password"
+          autocomplete="new-password"
+          data-autofocus
+          prop:value=move || passphrase.get()
+          on:input=move |ev| passphrase.set(event_target_value(&ev))
+        />
+        <label class="set-row-label" for="recovery-confirm">{move || i18n.t("recovery-confirm")}</label>
+        <input
+          id="recovery-confirm"
+          class="input"
+          type="password"
+          autocomplete="new-password"
+          prop:value=move || confirm.get()
+          on:input=move |ev| confirm.set(event_target_value(&ev))
+        />
+        <p class="set-row-hint">{move || i18n.t_with("recovery-length-hint", &[("count", &MIN_PASSPHRASE_CHARS.to_string())])}</p>
+        <Show when=move || is_long_enough() && !confirm.get().is_empty() && !do_match() fallback=|| ()>
+          <p class="field-error" role="alert">{move || i18n.t("security-passphrase-mismatch")}</p>
+        </Show>
+        <div class="set-confirm-actions">
+          <button type="button" class="btn btn-small" on:click=move |_| editing.set(Editing::Nothing)>{move || i18n.t("cancel")}</button>
+          <button
+            type="submit"
+            class="btn btn-small btn-primary"
+            prop:disabled=move || saving.is_pending() || !can_save()
+            aria-busy=move || saving.is_pending().then_some("true")
+          >
+            <Show when=move || saving.is_pending() fallback=|| ()>
+              <span class="spinner" role="status" aria-label=move || i18n.t("action-running")></span>
+            </Show>
+            {move || i18n.t("recovery-save")}
+          </button>
+        </div>
+      </form>
+    </Show>
   }
 }
 
 /// The key backup in plain words: whether it is on the server and how it can be restored, with
-/// when the passphrase was last set. No crypto terms on this level.
+/// when the kit was made or the passphrase last set. No crypto terms on this level.
 fn backup_status(state: &KeyBackupState, i18n: I18n) -> impl IntoView + use<> {
-  let has_passphrase = state.has(RecoveryMethod::Passphrase);
-  let is_ok = state.is_stored && has_passphrase;
+  let is_protected = state.has(RecoveryMethod::RecoveryKey) || state.has(RecoveryMethod::Passphrase);
+  let is_ok = state.is_stored && is_protected;
   let title = if !state.is_stored {
     i18n.t("security-backup-missing")
-  } else if has_passphrase {
+  } else if is_protected {
     i18n.t("security-backup-ok")
   } else {
     i18n.t("security-backup-no-recovery")
@@ -629,16 +703,30 @@ fn backup_status(state: &KeyBackupState, i18n: I18n) -> impl IntoView + use<> {
 
 /// The sentences under the backup's state: how it is protected and what is still to do.
 fn backup_detail(state: &KeyBackupState, i18n: I18n, now: TimestampMs) -> String {
+  let locale = i18n.locale().tag();
   let mut parts = Vec::new();
   if !state.is_stored {
     parts.push(i18n.t("security-backup-missing-hint"));
+  } else if state.has(RecoveryMethod::RecoveryKey) {
+    parts.push(match state.maybe_recovery_key_set_at {
+      Some(at) => i18n.t_with(
+        "security-backup-kit-set",
+        &[("when", &format_relative(at, now, locale))],
+      ),
+      None => i18n.t("security-backup-kit"),
+    });
   } else if state.has(RecoveryMethod::Passphrase) {
     parts.push(match state.maybe_passphrase_set_at {
       Some(at) => i18n.t_with(
         "security-backup-passphrase-set",
-        &[("when", &format_relative(at, now, i18n.locale().tag()))],
+        &[("when", &format_relative(at, now, locale))],
       ),
       None => i18n.t("security-backup-passphrase"),
+    });
+    parts.push(if state.is_passphrase_allowed {
+      i18n.t("security-backup-replace-hint")
+    } else {
+      i18n.t("security-backup-passphrase-off")
     });
   } else {
     parts.push(i18n.t("security-backup-no-recovery-hint"));

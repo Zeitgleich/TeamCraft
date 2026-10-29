@@ -42,7 +42,7 @@ pub struct ContactVerification {
 
 /// The key backup as this device knows it (e2ee.md §6), for Settings > Security & privacy (issue
 /// #410). Facts only; the settings put them into words and a next step.
-#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct KeyBackupState {
   /// The encrypted key bag is on the server, so a new device can restore keys and account data.
   pub is_stored: bool,
@@ -60,6 +60,30 @@ pub struct KeyBackupState {
     skip_serializing_if = "Option::is_none"
   )]
   pub maybe_passphrase_set_at: Option<TimestampMs>,
+  /// When the current recovery kit was made (e2ee.md §6.5); `None` without one.
+  #[serde(
+    rename = "recovery_key_set_at",
+    default,
+    skip_serializing_if = "Option::is_none"
+  )]
+  pub maybe_recovery_key_set_at: Option<TimestampMs>,
+  /// Whether the verified workspace policy lets the user set or change a passphrase (e2ee.md
+  /// §6.5.8); otherwise only a recovery kit is offered.
+  #[serde(default = "allowed")]
+  pub is_passphrase_allowed: bool,
+}
+
+impl Default for KeyBackupState {
+  fn default() -> Self {
+    Self {
+      is_stored: false,
+      has_pending_upload: false,
+      recovery: Vec::new(),
+      maybe_passphrase_set_at: None,
+      maybe_recovery_key_set_at: None,
+      is_passphrase_allowed: true,
+    }
+  }
 }
 
 impl KeyBackupState {
@@ -68,11 +92,19 @@ impl KeyBackupState {
   }
 }
 
+/// An older shell sends no policy: it allowed passphrases.
+fn allowed() -> bool {
+  true
+}
+
 /// A way the backup key is wrapped for recovery (e2ee.md §6.1–6.3).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RecoveryMethod {
+  /// A legacy recovery passphrase (e2ee.md §6.2).
   Passphrase,
+  /// The recovery key of a recovery kit (e2ee.md §6.5).
+  RecoveryKey,
   Passkey,
   /// The organization's admins can restore it together (§6.3).
   Organization,

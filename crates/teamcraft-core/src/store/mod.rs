@@ -41,9 +41,9 @@ pub use browser::{
   IndexedDbRecords, IndexedDbStore, browser_database_key, browser_database_key_without_upgrade,
   own_sound_delete, own_sound_get, own_sound_put, vault_delete, vault_get, vault_put,
 };
-#[cfg(not(any(target_arch = "wasm32", target_os = "android", target_os = "ios")))]
-pub use key_source::KeyringKeySource;
 pub use key_source::{DatabaseKeySource, KeySourceError, StaticKeySource};
+#[cfg(not(any(target_arch = "wasm32", target_os = "android", target_os = "ios")))]
+pub use key_source::{KeptBackupKey, KeyringKeySource};
 #[cfg(not(target_arch = "wasm32"))]
 pub use key_source::{KeystoreThreadError, run_outside_runtime};
 #[cfg(not(target_arch = "wasm32"))]

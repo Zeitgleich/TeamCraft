@@ -323,7 +323,7 @@ async fn sign_in_and_unlock(page: &Page, user: &str) {
   wait_for_text(page, "Sign in").await;
   click_text(page, "Sign in").await;
   sign_in_at_keycloak(page, user).await;
-  wait_for_element(page, "#enroll-passphrase")
+  wait_for_element(page, "#enroll-secret")
     .await
     .click()
     .await

@@ -23,6 +23,15 @@ pub struct KeyringKeySource {
   account: String,
 }
 
+/// The account's backup key kept in the OS keychain (desktop, e2ee.md §6.5.6), so this computer
+/// can set the account up again without the recovery kit when its local data is lost. Same
+/// keychains as [`KeyringKeySource`]; without one nothing is kept and the kit is the way back.
+#[cfg(not(any(target_arch = "wasm32", target_os = "android", target_os = "ios")))]
+pub struct KeptBackupKey {
+  service: String,
+  account: String,
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum KeySourceError {
   #[error("OS keystore unavailable: {0}")]
@@ -124,6 +133,79 @@ impl KeyringKeySource {
 }
 
 #[cfg(not(any(target_arch = "wasm32", target_os = "android", target_os = "ios")))]
+impl KeptBackupKey {
+  /// `account` scopes the entry like the database key's (server and user).
+  pub fn new(service: impl Into<String>, account: impl Into<String>) -> Self {
+    Self {
+      service: service.into(),
+      account: account.into(),
+    }
+  }
+
+  /// The kept key, `None` when the keychain holds none for the account. Blocks on the keychain.
+  pub fn load(&self) -> Result<Option<SymmetricKey>, KeySourceError> {
+    self.run(|entry| match entry.get_secret() {
+      Ok(bytes) => {
+        let bytes = zeroize::Zeroizing::new(bytes);
+        SymmetricKey::from_slice(&bytes)
+          .map(Some)
+          .ok_or(KeySourceError::InvalidKey(bytes.len()))
+      },
+      Err(keyring::Error::NoEntry) => Ok(None),
+      Err(error) => Err(KeySourceError::Keystore(error.to_string())),
+    })
+  }
+
+  /// Keeps `key`; an entry that already holds it is left alone, so a start writes nothing.
+  pub fn keep(&self, key: &SymmetricKey) -> Result<(), KeySourceError> {
+    let is_kept = match self.load() {
+      Ok(Some(kept)) => kept.is_same_key(key),
+      // An unreadable entry is replaced.
+      Ok(None) | Err(KeySourceError::InvalidKey(_)) => false,
+      Err(error) => return Err(error),
+    };
+    if is_kept {
+      return Ok(());
+    }
+    self.run(|entry| {
+      entry
+        .set_secret(key.expose_secret())
+        .map_err(|error| KeySourceError::Keystore(error.to_string()))
+    })
+  }
+
+  /// Removes the entry; one that is not there counts as removed.
+  pub fn forget(&self) -> Result<(), KeySourceError> {
+    self.run(|entry| match entry.delete_credential() {
+      Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
+      Err(error) => Err(KeySourceError::Keystore(error.to_string())),
+    })
+  }
+
+  /// Runs one keychain call outside any async runtime (see [`run_outside_runtime`]).
+  fn run<T: Send>(
+    &self,
+    action: impl FnOnce(&keyring::Entry) -> Result<T, KeySourceError> + Send,
+  ) -> Result<T, KeySourceError> {
+    run_outside_runtime(|| {
+      let entry = keyring::Entry::new(&self.service, &self.account)
+        .map_err(|error| KeySourceError::Keystore(error.to_string()))?;
+      action(&entry)
+    })
+    .map_err(|error| KeySourceError::Keystore(error.to_string()))?
+  }
+}
+
+#[cfg(not(any(target_arch = "wasm32", target_os = "android", target_os = "ios")))]
+impl std::fmt::Debug for KeptBackupKey {
+  fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    f.debug_struct("KeptBackupKey")
+      .field("service", &self.service)
+      .finish_non_exhaustive()
+  }
+}
+
+#[cfg(not(any(target_arch = "wasm32", target_os = "android", target_os = "ios")))]
 impl std::fmt::Debug for KeyringKeySource {
   fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
     f.debug_struct("KeyringKeySource")
@@ -188,6 +270,32 @@ mod tests {
         let second = source.database_key();
         delete_test_entry(&account);
         assert_eq!(first.expose_secret(), second.unwrap().expose_secret());
+      },
+      Err(KeySourceError::Keystore(error)) => {
+        assert!(!error.contains("panicked"), "{error}");
+      },
+      Err(error) => panic!("{error}"),
+    }
+  }
+
+  /// The backup key round trip through the real keychain; without one (CI containers) the keychain
+  /// error is accepted, as above.
+  #[cfg(not(any(target_os = "android", target_os = "ios")))]
+  #[tokio::test]
+  async fn a_kept_backup_key_comes_back_and_goes() {
+    let account = format!("backup-key-test-{}", std::process::id());
+    let kept = KeptBackupKey::new(TEST_SERVICE, &account);
+    let key = SymmetricKey::generate(&mut rand_core::OsRng);
+    match kept.keep(&key) {
+      Ok(()) => {
+        let loaded = kept.load();
+        // Keeping the same key again writes nothing and fails nothing.
+        let again = kept.keep(&key);
+        kept.forget().unwrap();
+        assert_eq!(loaded.unwrap().unwrap().expose_secret(), key.expose_secret());
+        again.unwrap();
+        assert!(kept.load().unwrap().is_none());
+        kept.forget().unwrap();
       },
       Err(KeySourceError::Keystore(error)) => {
         assert!(!error.contains("panicked"), "{error}");

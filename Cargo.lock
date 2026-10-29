@@ -11099,6 +11099,7 @@ dependencies = [
  "leptos",
  "oauth2",
  "qrcode",
+ "rand_core 0.6.4",
  "secrecy",
  "serde",
  "serde_json",
@@ -11115,6 +11116,7 @@ dependencies = [
  "wasm-bindgen",
  "wasm-bindgen-futures",
  "web-sys",
+ "zeroize",
 ]
 
 [[package]]

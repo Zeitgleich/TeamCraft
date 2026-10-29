@@ -176,7 +176,7 @@ signature (freshness above).
 - **Keep an owner's app in use.** An owner's client signs the roster again by itself when half of
   the 30 days have passed. The console warns a week before the window runs out (a client setting,
   `workspace_expiry_warning`) and once it has: then an owner only needs to open TeamCraft.
-- **All owners lost** (every owner left, or lost all devices and the recovery passphrase): nobody can
+- **All owners lost** (every owner left, or lost all devices and the recovery kit): nobody can
   sign a roster or policy again, and a new genesis is refused by every client that pinned the root of
   trust (`RootChanged`). Admins keep their authority until the freshness window runs out; after that
   the workspace can't be administered. A recovery path is still open (issue #188); until it exists,
@@ -666,7 +666,8 @@ Groups that are stored and reset as a whole:
 
 **Signed or not.** Settings that member clients must be able to verify against a compromised server
 are part of the owner-signed workspace policy (§2.3) and are edited there: `admin_self_join`, org
-recovery, history and retention defaults, session rules, directory privacy, presence, threads, guest
+recovery, whether members may still set a recovery passphrase instead of a recovery kit
+(`recovery.is_passphrase_allowed`, e2ee.md §6.5.8), history and retention defaults, session rules, directory privacy, presence, threads, guest
 rules (allowed e-mail domains, default expiry, whom guests may start a DM with), the shortest
 password, push content, call backgrounds, desktop updates and the recommended number of owners.
 Everything in this section is enforced

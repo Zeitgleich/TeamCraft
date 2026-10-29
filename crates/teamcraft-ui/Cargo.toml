@@ -48,8 +48,12 @@ web-sys = { version = "0.3", features = [
 # Fluent: the i18n format mandated by the project rules (English source + translations).
 fluent-bundle = "0.16"
 unic-langid = "0.9"
-# Real QR codes for device linking (pure Rust, no image support needed).
+# Real QR codes for device linking and the recovery kit (pure Rust, no image support needed).
 qrcode = { version = "0.14", default-features = false }
+# The recovery kit (e2ee.md §6.5): its key comes from the OS RNG (WebCrypto in the browser), its
+# text forms are cleared after use. Both already in the tree through teamcraft-crypto.
+rand_core = { version = "0.6.4", features = ["getrandom"] }
+zeroize = "1.9.1"
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true

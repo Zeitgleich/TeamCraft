@@ -12,6 +12,7 @@ use teamcraft_client_api::sign_in_page::SignInPage;
 use teamcraft_proto::{GetMeResponse, SignInMethod};
 use wasm_bindgen::JsCast;
 
+use crate::areas::{self, Place, lazy_area};
 use crate::auth::SignInLook;
 use crate::auth::tauri::{self, ServerCheck, ServerProblem};
 use crate::auth::{self, AppConfig};
@@ -23,6 +24,7 @@ use crate::components::brand_logo::{BrandImage, BrandLogo};
 use crate::components::bundle_banner::BundleBanner;
 use crate::components::icons::{Icon, IconName};
 use crate::components::pending_button::PendingButton;
+use crate::components::recovery_kit_setup::{KitFilePicker, RecoveryKitSetup};
 use crate::components::security_ui::QrImage;
 use crate::components::tab_elsewhere::TabGate;
 use crate::feedback::{PendingAction, failure_message};
@@ -31,14 +33,16 @@ use crate::i18n::{I18n, use_i18n};
 use crate::meetings::{MeetingsClient, MeetingsHub};
 use crate::notify_sync::NotificationSync;
 use crate::reactive::{SetIfAlive, use_interval};
+use crate::recovery_kit::KitFile;
 use crate::remote_backend::{self, RemoteChat};
 use crate::remote_calls::RemoteCalls;
 use crate::server_backend::{LoadError, RestChat};
 use crate::session::{LocalSignInProblem, LoginProblem, SessionControl, SessionState};
 use crate::settings::Settings;
 use crate::sign_in_page::{SignInBlock, SignInPageState, blocks};
-use teamcraft_client_api::remote::{CoreStatus, LinkStatus};
+use teamcraft_client_api::remote::{CoreStatus, EnrollSecret, LinkStatus};
 use teamcraft_client_api::sign_in_look::LookTheme;
+use teamcraft_crypto::recovery_key::{RecoveryKey, RecoveryKeyError};
 
 /// Shows the right screen for the sign-in state and the chat shell once the user is in.
 #[component]
@@ -78,8 +82,11 @@ pub fn SessionGate(settings: Settings) -> impl IntoView {
       SessionState::SignedOut(problem) => view! { <LoginScreen problem=problem control=control /> }.into_any(),
       SessionState::SigningIn => view! { <SigningInScreen control=control /> }.into_any(),
       SessionState::OpeningCore => view! { <OpeningCoreScreen control=control /> }.into_any(),
-      SessionState::NeedsEnrollment { me, has_existing_identity, was_data_lost } => {
-        view! { <EnrollScreen name=me.display_name has_existing_identity=has_existing_identity was_data_lost=was_data_lost control=control /> }.into_any()
+      SessionState::NeedsEnrollment { me, has_existing_identity, was_data_lost, can_restore_on_device } => {
+        let name = me.display_name;
+        lazy_area(Place::Screen, move || {
+          areas::enroll_screen(name.clone(), has_existing_identity, was_data_lost, can_restore_on_device, control)
+        })
       },
       SessionState::NeedsDeviceSetup(me) => view! { <WelcomeScreen name=me.display_name control=control /> }.into_any(),
       // A browser tab shows the app only while it is the account's active tab (#744).
@@ -1261,50 +1268,25 @@ fn DataGate(me: GetMeResponse, settings: Settings, control: SessionControl) -> i
   }
 }
 
-/// First run on this device (desktop): create the encryption keys, or recover them when the account
-/// already has some. The passphrase wraps the key backup (e2ee.md §6.2).
+/// First run on this device. A new account saves its recovery kit, then creates its keys
+/// (e2ee.md §6.5.4); an account that has keys unlocks them with the kit (or a legacy passphrase),
+/// with the key this computer kept in its keychain, or by linking from another device (§6.5.5).
 #[component]
-fn EnrollScreen(
+pub(crate) fn EnrollScreen(
   name: String,
   has_existing_identity: bool,
   was_data_lost: bool,
+  can_restore_on_device: bool,
   control: SessionControl,
 ) -> impl IntoView {
   let i18n = use_i18n();
   let is_linking = RwSignal::new(false);
-  let name = StoredValue::new(name);
-  let passphrase = RwSignal::new(String::new());
-  let confirm = RwSignal::new(String::new());
   let device_name = RwSignal::new(default_device_name(i18n));
-  let is_revealed = RwSignal::new(false);
-  let input_type = move || if is_revealed.get() { "text" } else { "password" };
-  let mismatch =
-    move || !has_existing_identity && !confirm.get().is_empty() && confirm.get() != passphrase.get();
-  let too_short = move || {
-    !has_existing_identity
-      && !passphrase.get().is_empty()
-      && passphrase.get().chars().count() < MIN_PASSPHRASE_CHARS
-  };
-  let can_submit = move || {
-    !control.is_enrolling.get()
-      && !passphrase.get().is_empty()
-      && (has_existing_identity
-        || (passphrase.get().chars().count() >= MIN_PASSPHRASE_CHARS && confirm.get() == passphrase.get()))
-  };
-  let submit = move |ev: web_sys::SubmitEvent| {
-    ev.prevent_default();
-    if can_submit() {
-      control.enroll(
-        passphrase.get_untracked(),
-        device_name.get_untracked().trim().to_owned(),
-      );
-    }
-  };
+  let name = StoredValue::new(name);
 
-  let device_name_for_link = device_name;
   view! {
     <Show when=move || is_linking.get() fallback=|| ()>
-      <LinkScreen device_name=device_name_for_link.get_untracked() control=control on_back=Callback::new(move |()| is_linking.set(false)) />
+      <LinkScreen device_name=device_name.get_untracked() control=control on_back=Callback::new(move |()| is_linking.set(false)) />
     </Show>
     <Show when=move || !is_linking.get() fallback=|| ()>
     <AuthFrame>
@@ -1315,114 +1297,218 @@ fn EnrollScreen(
           <p>{move || i18n.t("enroll-data-lost")}</p>
         </div>
       })}
-      <p class="muted-text">
-        {move || if has_existing_identity { i18n.t("enroll-recover-subtitle") } else { i18n.t("enroll-new-subtitle") }}
-      </p>
-      <form class="auth-form" on:submit=submit>
-        <div class="field">
-          <label for="enroll-passphrase">
-            {move || if has_existing_identity { i18n.t("enroll-passphrase-recover") } else { i18n.t("enroll-passphrase-new") }}
-          </label>
-          <div class="input-with-action">
+      {if has_existing_identity {
+        view! {
+          <RecoverForm
+            device_name=device_name
+            can_restore_on_device=can_restore_on_device
+            control=control
+            on_link=Callback::new(move |()| is_linking.set(true))
+          />
+        }
+        .into_any()
+      } else {
+        view! { <NewAccountForm name=name.get_value() device_name=device_name control=control /> }.into_any()
+      }}
+    </AuthFrame>
+    </Show>
+  }
+}
+
+/// A new account: the recovery kit first, then the keys it protects. No passphrase to invent.
+#[component]
+fn NewAccountForm(name: String, device_name: RwSignal<String>, control: SessionControl) -> impl IntoView {
+  let i18n = use_i18n();
+  let on_confirmed = Callback::new(move |recovery_key: String| {
+    control.enroll(
+      EnrollSecret::RecoveryKey { recovery_key },
+      device_name.get_untracked().trim().to_owned(),
+    );
+  });
+  view! {
+    <p class="muted-text">{move || i18n.t("enroll-new-subtitle")}</p>
+    <div class="field">
+      <label for="enroll-device">{move || i18n.t("enroll-device-name")}</label>
+      <input
+        id="enroll-device"
+        class="input"
+        name="device"
+        autocomplete="off"
+        prop:value=move || device_name.get()
+        on:input=move |ev| device_name.set(event_target_value(&ev))
+      />
+    </div>
+    <RecoveryKitSetup
+      account=name
+      finish_label=Signal::derive(move || {
+        if control.is_enrolling.get() { i18n.t("enroll-working") } else { i18n.t("enroll-create") }
+      })
+      is_busy=Signal::derive(move || control.is_enrolling.get())
+      on_confirmed=on_confirmed
+    />
+    <EnrollError message_key="enroll-failed" control=control />
+    <div class="auth-actions">
+      <button type="button" class="btn" on:click=move |_| control.sign_out()>{move || i18n.t("menu-log-out")}</button>
+    </div>
+  }
+}
+
+/// An account with keys: the recovery kit's file or key, a legacy passphrase, this computer's
+/// keychain, or another device.
+#[component]
+fn RecoverForm(
+  device_name: RwSignal<String>,
+  can_restore_on_device: bool,
+  control: SessionControl,
+  on_link: Callback<()>,
+) -> impl IntoView {
+  let i18n = use_i18n();
+  let secret = RwSignal::new(String::new());
+  let is_revealed = RwSignal::new(false);
+  let maybe_file_note = RwSignal::new(None::<FileNote>);
+  let input_type = move || if is_revealed.get() { "text" } else { "password" };
+  // A key with a typo still goes to the core as a passphrase (it may be one); the hint says why
+  // it may not open anything.
+  let looks_like_typo =
+    move || secret.with(|text| matches!(RecoveryKey::parse(text), Err(RecoveryKeyError::ChecksumMismatch)));
+  let can_submit = move || !control.is_enrolling.get() && secret.with(|text| !text.trim().is_empty());
+  let submit = move |ev: web_sys::SubmitEvent| {
+    ev.prevent_default();
+    if can_submit() {
+      control.enroll(
+        enroll_secret(secret.get_untracked()),
+        device_name.get_untracked().trim().to_owned(),
+      );
+    }
+  };
+  let on_file = Callback::new(move |read: KitFile| {
+    let note = match read {
+      KitFile::Key(key) => {
+        secret.set_if_alive(key.to_display().to_string());
+        FileNote::Read
+      },
+      KitFile::NoKey => FileNote::NoKey,
+    };
+    maybe_file_note.set_if_alive(Some(note));
+  });
+  let restore_here = move |_| {
+    control.enroll(
+      EnrollSecret::KeptOnDevice,
+      device_name.get_untracked().trim().to_owned(),
+    );
+  };
+
+  view! {
+    <p class="muted-text">{move || i18n.t("enroll-recover-subtitle")}</p>
+    {can_restore_on_device.then(|| view! {
+      <div class="kit-device-restore">
+        <p class="muted-text small">{move || i18n.t("enroll-restore-device-hint")}</p>
+        <button type="button" class="btn btn-primary" prop:disabled=move || control.is_enrolling.get() on:click=restore_here>
+          {move || i18n.t("enroll-restore-device")}
+        </button>
+      </div>
+    })}
+    <form class="auth-form" on:submit=submit>
+      <div class="field">
+        <label for="enroll-secret">{move || i18n.t("enroll-secret-label")}</label>
+        <div class="input-with-action">
           <input
-            id="enroll-passphrase"
+            id="enroll-secret"
             class="input"
             type=input_type
-            name="passphrase"
-            autocomplete=if has_existing_identity { "current-password" } else { "new-password" }
+            name="recovery-key"
+            autocomplete="current-password"
+            autocapitalize="off"
+            spellcheck="false"
             data-autofocus
-            aria-describedby="enroll-passphrase-hint"
-            prop:value=move || passphrase.get()
-            on:input=move |ev| passphrase.set(event_target_value(&ev))
+            aria-describedby="enroll-secret-hint"
+            prop:value=move || secret.get()
+            on:input=move |ev| {
+              maybe_file_note.set(None);
+              secret.set(event_target_value(&ev));
+            }
           />
           <button
             type="button"
             class="btn btn-small"
             aria-pressed=move || is_revealed.get().to_string()
-            aria-controls="enroll-passphrase enroll-confirm"
+            aria-controls="enroll-secret"
             on:click=move |_| is_revealed.update(|value| *value = !*value)
           >
             {move || if is_revealed.get() { i18n.t("passphrase-hide") } else { i18n.t("passphrase-show") }}
           </button>
-          </div>
-          <p id="enroll-passphrase-hint" class="muted-text small" class:warn-text=too_short>
-            {move || {
-              if has_existing_identity {
-                i18n.t("enroll-recover-hint")
-              } else {
-                i18n.t_with("enroll-new-hint", &[("count", &MIN_PASSPHRASE_CHARS.to_string())])
-              }
-            }}
-          </p>
         </div>
-        <Show when=move || !has_existing_identity fallback=|| ()>
-          <div class="field">
-            <label for="enroll-confirm">{move || i18n.t("enroll-confirm")}</label>
-            <input
-              id="enroll-confirm"
-              class="input"
-              type=input_type
-              name="passphrase-confirm"
-              autocomplete="new-password"
-              aria-invalid=move || mismatch().to_string()
-              prop:value=move || confirm.get()
-              on:input=move |ev| confirm.set(event_target_value(&ev))
-            />
-            <Show when=mismatch fallback=|| ()>
-              <p class="field-error" role="alert">{move || i18n.t("enroll-mismatch")}</p>
-            </Show>
-          </div>
-        </Show>
-        <div class="field">
-          <label for="enroll-device">{move || i18n.t("enroll-device-name")}</label>
-          <input
-            id="enroll-device"
-            class="input"
-            name="device"
-            autocomplete="off"
-            prop:value=move || device_name.get()
-            on:input=move |ev| device_name.set(event_target_value(&ev))
-          />
+        <p id="enroll-secret-hint" class="muted-text small" class:warn-text=looks_like_typo>
+          {move || if looks_like_typo() { i18n.t("enroll-key-typo") } else { i18n.t("enroll-secret-hint") }}
+        </p>
+        <div class="kit-actions">
+          <KitFilePicker label=Signal::derive(move || i18n.t("kit-open")) on_read=on_file />
         </div>
-        <Show when=move || !has_existing_identity fallback=|| ()>
-          <p class="auth-alert" role="note">
-            <Icon name=IconName::Alert />
-            <span>{move || i18n.t("enroll-warning")}</span>
-          </p>
-        </Show>
-        {move || {
-          control
-            .enroll_error
-            .get()
-            .map(|message| {
-              view! {
-                <p class="field-error" role="alert">
-                  {move || if has_existing_identity { i18n.t("enroll-recover-failed") } else { i18n.t("enroll-failed") }}
-                  <span class="small mono" translate="no">{message}</span>
-                </p>
-              }
-            })
-        }}
-        <div class="auth-actions">
-          <button type="submit" class="btn btn-primary" disabled=move || !can_submit()>
-            {move || {
-              if control.is_enrolling.get() {
-                i18n.t("enroll-working")
-              } else if has_existing_identity {
-                i18n.t("enroll-recover")
-              } else {
-                i18n.t("enroll-create")
-              }
-            }}
-          </button>
-          <Show when=move || has_existing_identity fallback=|| ()>
-            <button type="button" class="btn" on:click=move |_| is_linking.set(true)>{move || i18n.t("enroll-link")}</button>
-          </Show>
-          <button type="button" class="btn" on:click=move |_| control.sign_out()>{move || i18n.t("menu-log-out")}</button>
-        </div>
-      </form>
-    </AuthFrame>
-    </Show>
+        {move || maybe_file_note.get().map(|note| match note {
+          FileNote::Read => view! { <p class="ok-text small" role="status">{move || i18n.t("enroll-kit-read")}</p> }.into_any(),
+          FileNote::NoKey => view! { <p class="field-error" role="alert">{move || i18n.t("kit-file-no-key")}</p> }.into_any(),
+        })}
+      </div>
+      <div class="field">
+        <label for="enroll-device">{move || i18n.t("enroll-device-name")}</label>
+        <input
+          id="enroll-device"
+          class="input"
+          name="device"
+          autocomplete="off"
+          prop:value=move || device_name.get()
+          on:input=move |ev| device_name.set(event_target_value(&ev))
+        />
+      </div>
+      <EnrollError message_key="enroll-recover-failed" control=control />
+      <div class="auth-actions">
+        <button type="submit" class="btn btn-primary" disabled=move || !can_submit()>
+          {move || if control.is_enrolling.get() { i18n.t("enroll-working") } else { i18n.t("enroll-recover") }}
+        </button>
+        <button type="button" class="btn" on:click=move |_| on_link.run(())>{move || i18n.t("enroll-link")}</button>
+        <button type="button" class="btn" on:click=move |_| control.sign_out()>{move || i18n.t("menu-log-out")}</button>
+      </div>
+    </form>
+  }
+}
+
+/// What the recover form says about a picked file.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum FileNote {
+  Read,
+  NoKey,
+}
+
+/// The core's answer to the last setup attempt, under `message_key` with the details.
+#[component]
+fn EnrollError(message_key: &'static str, control: SessionControl) -> impl IntoView {
+  let i18n = use_i18n();
+  move || {
+    control.enroll_error.get().map(|message| {
+      let failure = ActionFailure::from_wire(&message);
+      let text = match failure.kind {
+        FailureKind::Other => i18n.t(message_key),
+        _ => failure_message(i18n, &failure),
+      };
+      view! {
+        <p class="field-error" role="alert">
+          {text}
+          " "
+          <span class="small mono" translate="no">{failure.detail}</span>
+        </p>
+      }
+    })
+  }
+}
+
+/// What the recover field holds, as the core takes it: a recovery key when it reads as one (valid
+/// checksum), anything else as a legacy passphrase (e2ee.md §6.5.5).
+fn enroll_secret(text: String) -> EnrollSecret {
+  match RecoveryKey::parse(&text) {
+    Ok(key) => EnrollSecret::RecoveryKey {
+      recovery_key: key.to_display().to_string(),
+    },
+    Err(_) => EnrollSecret::Passphrase { passphrase: text },
   }
 }
 
@@ -1546,10 +1632,6 @@ enum AskState {
   Asked,
   Failed,
 }
-
-/// Short passphrases are cheap to guess offline; the minimum is a UI rule, the cost of the key
-/// derivation (Argon2id) does the rest.
-const MIN_PASSPHRASE_CHARS: usize = 12;
 
 /// "Desktop (Linux x86_64)" in the desktop app, "Browser (Linux x86_64)" in a browser: the name
 /// the user sees later in the device list, so it should say what this device is.

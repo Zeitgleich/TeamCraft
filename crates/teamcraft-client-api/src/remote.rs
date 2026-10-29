@@ -370,12 +370,17 @@ pub enum CoreStatus {
   NotStarted,
   /// First run on this device: keys have to be created or recovered.
   NeedsEnrollment {
-    /// The account already has keys on the server, so the recovery passphrase unlocks them.
+    /// The account already has keys on the server, so the recovery kit (or a legacy passphrase)
+    /// unlocks them.
     has_existing_identity: bool,
     /// This device was set up before, but its local data is gone (the browser deleted it): the user
     /// is told why setup is asked for again.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     was_data_lost: bool,
+    /// The desktop app kept this account's backup key in the OS keychain (e2ee.md §6.5.6), so the
+    /// account can be restored on this computer without the recovery kit.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    can_restore_on_device: bool,
   },
   Ready {
     /// Fingerprint of the account's identity key.
@@ -455,14 +460,36 @@ pub enum StoreHealth {
 /// First-run setup of this device (e2ee.md §3, §6).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EnrollRequest {
-  /// Wraps the key backup; recovers an existing identity when the account has one.
-  pub passphrase: String,
+  /// Wraps the key backup of a new account; recovers an existing identity when the account has one.
+  pub secret: EnrollSecret,
   /// Shown in the user's device list.
   pub device_name: String,
-  /// The device of a meeting guest (browser only): an ephemeral identity with no backup; the
-  /// passphrase is ignored.
-  #[serde(default)]
-  pub is_guest: bool,
+}
+
+/// What sets this device up (e2ee.md §6.5). `Debug` never shows a key or passphrase.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum EnrollSecret {
+  /// The recovery key of a recovery kit: the new kit's at first sign-in, the saved one when
+  /// recovering.
+  RecoveryKey { recovery_key: String },
+  /// A legacy recovery passphrase (recovering an account that still has one).
+  Passphrase { passphrase: String },
+  /// Desktop: the backup key this computer kept in its OS keychain (e2ee.md §6.5.6).
+  KeptOnDevice,
+  /// The device of a meeting guest (browser only): an ephemeral identity with no backup.
+  Guest,
+}
+
+impl std::fmt::Debug for EnrollSecret {
+  fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    f.write_str(match self {
+      Self::RecoveryKey { .. } => "RecoveryKey([redacted])",
+      Self::Passphrase { .. } => "Passphrase([redacted])",
+      Self::KeptOnDevice => "KeptOnDevice",
+      Self::Guest => "Guest",
+    })
+  }
 }
 
 /// Something the user did that changes data.
@@ -569,6 +596,11 @@ pub enum ChatAction {
   /// Wraps the key backup with a new recovery passphrase (the old one stops working for recovery).
   ChangePassphrase {
     passphrase: String,
+  },
+  /// Wraps the key backup with the recovery key of a new recovery kit the user saved; the previous
+  /// kit and a legacy passphrase stop working for recovery (e2ee.md §6.5.7).
+  SetRecoveryKey {
+    recovery_key: String,
   },
   /// This device became idle (no input for a while) or active again; the server shows idle devices
   /// as away (docs/gateway.md).
@@ -1933,14 +1965,24 @@ mod tests {
         has_pending_upload: false,
         recovery: vec![crate::security::RecoveryMethod::Passphrase],
         maybe_passphrase_set_at: Some(1_000),
+        ..crate::security::KeyBackupState::default()
       }),
       ..SecuritySnapshot::default()
     };
     let json = serde_json::to_value(&snapshot).expect("serialize");
     assert_eq!(
       json["backup"],
-      serde_json::json!({"is_stored": true, "has_pending_upload": false, "recovery": ["passphrase"], "passphrase_set_at": 1000})
+      serde_json::json!({"is_stored": true, "has_pending_upload": false, "recovery": ["passphrase"], "passphrase_set_at": 1000, "is_passphrase_allowed": true})
     );
+    let older: crate::security::KeyBackupState =
+      serde_json::from_str(r#"{"is_stored":true,"recovery":["passphrase"]}"#).expect("parse");
+    assert!(older.is_passphrase_allowed);
+    assert_eq!(older.maybe_recovery_key_set_at, None);
+    let kit: crate::security::KeyBackupState =
+      serde_json::from_str(r#"{"is_stored":true,"recovery":["recovery_key"],"recovery_key_set_at":5}"#)
+        .expect("parse");
+    assert!(kit.has(crate::security::RecoveryMethod::RecoveryKey));
+    assert_eq!(kit.maybe_recovery_key_set_at, Some(5));
     let newer: crate::security::KeyBackupState =
       serde_json::from_str(r#"{"is_stored":true,"recovery":["passphrase","hardware_key"]}"#).expect("parse");
     assert_eq!(
@@ -1949,6 +1991,41 @@ mod tests {
         crate::security::RecoveryMethod::Passphrase,
         crate::security::RecoveryMethod::Unknown
       ]
+    );
+  }
+
+  #[test]
+  fn enroll_secrets_are_tagged_and_never_debug_printed() {
+    let request = EnrollRequest {
+      secret: EnrollSecret::RecoveryKey {
+        recovery_key: "AAAA-BBBB".into(),
+      },
+      device_name: "Laptop".into(),
+    };
+    let json = serde_json::to_string(&request).expect("serialize");
+    assert_eq!(
+      json,
+      r#"{"secret":{"kind":"recovery_key","recovery_key":"AAAA-BBBB"},"device_name":"Laptop"}"#
+    );
+    assert_eq!(
+      serde_json::from_str::<EnrollRequest>(&json).expect("parse"),
+      request
+    );
+    assert!(!format!("{request:?}").contains("AAAA"));
+    let passphrase = EnrollSecret::Passphrase {
+      passphrase: "hunter2 hunter2".into(),
+    };
+    assert!(!format!("{passphrase:?}").contains("hunter2"));
+    assert_eq!(
+      serde_json::to_string(&EnrollSecret::KeptOnDevice).expect("serialize"),
+      r#"{"kind":"kept_on_device"}"#
+    );
+    assert_eq!(
+      serde_json::to_string(&ChatAction::SetRecoveryKey {
+        recovery_key: "K".into()
+      })
+      .expect("serialize"),
+      r#"{"action":"set_recovery_key","recovery_key":"K"}"#
     );
   }
 
@@ -1988,20 +2065,22 @@ mod tests {
     let status = CoreStatus::NeedsEnrollment {
       has_existing_identity: true,
       was_data_lost: false,
+      can_restore_on_device: false,
     };
     assert_eq!(
       serde_json::to_string(&status).expect("serialize"),
       r#"{"state":"needs_enrollment","has_existing_identity":true}"#
     );
     let lost: CoreStatus = serde_json::from_str(
-      r#"{"state":"needs_enrollment","has_existing_identity":true,"was_data_lost":true}"#,
+      r#"{"state":"needs_enrollment","has_existing_identity":true,"was_data_lost":true,"can_restore_on_device":true}"#,
     )
     .expect("parse");
     assert_eq!(
       lost,
       CoreStatus::NeedsEnrollment {
         has_existing_identity: true,
-        was_data_lost: true
+        was_data_lost: true,
+        can_restore_on_device: true,
       }
     );
     assert_eq!(

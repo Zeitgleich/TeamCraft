@@ -143,6 +143,18 @@ pub fn SecuritySection() -> impl IntoView {
       </fieldset>
 
       <fieldset class="policy-group" prop:disabled=move || policy.is_locked()>
+        <legend>{move || i18n.t("policy-backup")}</legend>
+        <p class="muted-text small">{move || i18n.t("policy-backup-hint")}</p>
+        <CheckRow
+          name="recovery_passphrase_allowed"
+          label=Signal::derive(move || i18n.t("policy-backup-passphrase"))
+          hint=Signal::derive(move || i18n.t("policy-backup-passphrase-hint"))
+          checked=Signal::derive(move || draft.get().recovery.is_passphrase_allowed)
+          on_change=move |value| policy.edit(|p| p.recovery.is_passphrase_allowed = value)
+        />
+      </fieldset>
+
+      <fieldset class="policy-group" prop:disabled=move || policy.is_locked()>
         <legend>{move || i18n.t("policy-recovery")}</legend>
         <p class="muted-text small">{move || i18n.t("policy-recovery-hint")}</p>
         <CheckRow

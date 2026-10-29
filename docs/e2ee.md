@@ -1437,7 +1437,9 @@ The backup key is stored *wrapped* in up to three ways:
 ### 6.1 Wrapped by devices
 
 Each device holds the backup key in the OS keystore (iOS/macOS Keychain, Android Keystore, Linux
-Secret Service). This is the everyday path; nobody types anything.
+Secret Service). This is the everyday path; nobody types anything. The desktop app keeps it in the
+keychain next to the database key, so the device can be set up again without the recovery kit
+when its local data is lost (§6.5.6).
 
 ### 6.2 Wrapped by a passkey (primary recovery, like WhatsApp since 2025)
 
@@ -1445,8 +1447,10 @@ Secret Service). This is the everyday path; nobody types anything.
 - The passkey syncs through iCloud Keychain, Google Password Manager, 1Password, etc., so losing a phone
   does not lose the passkey.
 - Recovery = log in + unlock with Face ID / fingerprint. No password to remember.
-- Fallback for platforms without PRF support: a recovery passphrase, stretched with Argon2id
-  (128 MiB, ~1 s), with rate limiting on the server.
+- Fallback for platforms without PRF support: a generated **recovery kit** (§6.5) since issue #738.
+  Before that, users invented a recovery passphrase, stretched with Argon2id (128 MiB, ~1 s), with
+  rate limiting on the server; existing passphrases keep working (legacy, §6.5.7), and the
+  workspace policy decides whether new ones may be set (§6.5.8).
 - A passphrase that wraps the backup key has at least 8 bytes (apps may ask for more). Only an
   enrollment with a passphrase creates a new identity: a linked or recovering device that the server
   tells "this account has no identity" stops, instead of creating one the server could unwrap.
@@ -1571,12 +1575,237 @@ restored together with them on a new device.
   a change, a recovery) records its clock's time; merging keeps the later one. Settings > Security
   shows it next to the backup's state, which each device reads from what it already knows: whether a
   key bag is stored, uploads still pending, and which wraps exist (passphrase, passkey,
-  organization). The server learns nothing new.
+  organization). The server learns nothing new. When the recovery kit was last made is kept the
+  same way (`recovery_key_set_at`, §6.5).
 - **The activity feed has no read mark of its own** (issue #534): an entry is read when the read
   position of its target (conversation or thread) is at or after it, and those positions sync
   through the server like any other. The older `activity_read` field is still merged (the later one
   wins) so old devices keep working, but nothing reads it any more. The feed itself is computed
   from decrypted messages on each device (notifications.md).
+
+### 6.5 Recovery kit (issue #738, design for review)
+
+Inventing and remembering a recovery passphrase is unfriendly, and the passphrases people invent
+are weak or get lost. Like Apple's recovery key or Passbolt's recovery kit, the client instead
+**generates** a high-entropy recovery key and hands it to the user as a file to keep (print it, put
+it in a password manager or a safe). Nobody has to invent or remember anything; a further device
+is linked from an existing one (§5) and never needs the kit.
+
+Nothing here is a new primitive: random bytes, SHA-256, HKDF-SHA256 and the XChaCha20-Poly1305
+wrap of §6 (`teamcraft-crypto::recovery_key`, `teamcraft-crypto::backup`).
+
+#### 6.5.1 Key format
+
+```text
+secret    = 16 random bytes from the OS RNG                         (128 bit)
+checksum  = SHA-256(labeled("TeamCraft-v1 recovery key checksum", 0x01 ‖ secret))[0..4]
+key bytes = secret ‖ checksum                                        (20 bytes = 160 bit)
+shown     = Crockford Base32(key bytes): 32 characters, 8 groups of 4 joined with "-"
+            e.g. 7K2Q-M9XD-4TRB-0HZE-VWAP-36NC-JF8G-1SYK (made up)
+machine   = "tcrecovery1:" ‖ the 32 characters (QR code and kit file)
+```
+
+- **128 bits** of entropy: a search of the whole space is out of reach, so the key needs no
+  stretching (§6.5.2). The issue asked for at least 128 bits; more would only make the key longer
+  to type.
+- **Crockford Base32** (alphabet `0123456789ABCDEFGHJKMNPQRSTVWXYZ`, most significant bit first, no
+  padding): no `I`, `L`, `O`, `U`, so nothing looks alike in print. Reading is forgiving: case is
+  ignored, spaces and hyphens are dropped, `O` reads as `0` and `I`/`L` as `1`. Any other character,
+  or anything but 32 characters, is refused.
+- **Checksum.** 32 bits that are a function of the secret, so a typo is caught locally (with
+  probability 1 − 2⁻³²) and the app says "a character is wrong" instead of "the key doesn't open
+  your backup" after a server round trip. The format version (`0x01`) is inside the hash, so a
+  future version's keys never pass as version 1. The checksum adds no information to the full key;
+  for someone holding *part* of a key it filters guesses of the missing characters offline (the
+  wrap on the server still has to confirm a guess), which only matters for leaks of most of a key.
+- **Versioning.** The machine form names the version (`tcrecovery1`, like `tclink2:` of §5); the
+  shown form is recognized by its length and checksum. A future format gets a new version digit, a
+  new checksum input and, if it needs one, a new KDF identifier (§6.5.2).
+- The secret lives in a zeroizing type with a redacted `Debug` (`RecoveryKey`); its text forms are
+  zeroizing strings.
+
+#### 6.5.2 Wrapping the backup key
+
+A new wrap method next to §6.1–6.3, `WrapMethod::RecoveryKey = 5`, in the existing envelope
+(`WrappedBackupKey` version 1):
+
+```text
+salt       = 16 random bytes, new for every wrap
+KEK        = HKDF-SHA256(salt = salt, IKM = secret, info = "TeamCraft-v1 recovery key backup key wrap")   32 bytes
+parameters = TLS { kdf: u8 = 1 (HKDF-SHA256), salt: [u8; 16] }
+wrap       = XChaCha20-Poly1305(KEK, random 24-byte nonce, backup key,
+                                AAD = labeled("TeamCraft-v1 backup key wrap", TLS { 1, user ID, method 5, parameters }))
+```
+
+- **HKDF, no Argon2id.** Stretching makes guessing a low-entropy passphrase expensive; a uniformly
+  random 128-bit key can't be guessed, so a key derivation that only separates domains is enough.
+  It also keeps recovery instant on phones and in the browser.
+- The **salt** makes the KEK differ per wrap, so even two wraps made with the same key share no
+  KEK. The user binding, the method and the parameters are authenticated in the AAD, as for every
+  wrap: a wrap moved to another user or relabelled as another method fails to open.
+- **KDF identifier.** An unknown `kdf` value is refused (`UnsupportedKdf`); a later key format or
+  KDF gets a new identifier and old wraps keep opening.
+- The wrap list next to the key bag holds at most one recovery-key wrap. Making a new kit replaces
+  it, so the old kit stops opening the backup (as far as the server serves the new list, see
+  §6.5.9).
+- The list's own encoding (a count byte, then each wrap as a 32-bit length and its bytes) moves
+  from `teamcraft-core` into `teamcraft-crypto::backup`, unchanged on the wire, so the server can
+  read which methods a list holds (§6.5.8).
+
+#### 6.5.3 The kit file
+
+A single self-contained **HTML** file (no scripts, no external resources, one printed A4 page),
+built in the client and saved through the browser's or the webview's download. It is never sent
+to the server: on the web it is a `Blob` in the page, on the desktop it goes from the webview to the
+downloads folder. It contains:
+
+- what it is ("TeamCraft recovery kit"), the account (name, e-mail) and the server address it
+  belongs to, and the day it was made, so a user with several accounts picks the right one;
+- the key in large monospace groups, and the same key as a QR code (inline SVG of the machine
+  form) for phones;
+- instructions: keep it offline or in a password manager, don't send it by e-mail or chat; it is
+  only asked for when setting up a device without another one at hand; TeamCraft (or IT) never
+  asks for it otherwise; if it is lost or seen by others, make a new kit in Settings > Security &
+  privacy (the old one stops working).
+
+PDF was considered: a PDF writer in the web bundle costs size for no gain the browser's own
+"Print / Save as PDF" of the HTML doesn't already give. The app reads the key back from the file
+(§6.5.5) by looking for the machine form, so the file stays plain HTML a person can read.
+
+The file name carries the server's host name, never the key (`teamcraft-recovery-kit-<host>.html`).
+
+#### 6.5.4 First sign-in
+
+1. The client generates the key (`RecoveryKey::generate`, in the UI's WebAssembly: the browser
+   build and the desktop webview alike) and shows it with **Download recovery kit**.
+2. The user must show they kept it before continuing: type one group of the key, chosen at random
+   (the key itself is hidden at that step), or open the saved file. This is about not clicking
+   through, not a security boundary.
+3. Only then the device enrolls (§3.2) with `EnrollmentSecret::RecoveryKey`: the fresh backup key is
+   wrapped with the recovery key (and later the org key, §6.3), and the identity and its first key
+   bag go to the server in one request as before. If the enrollment is interrupted after that
+   request, the account has an identity, and the next start recovers it with the kit the user
+   just confirmed.
+4. The device records when the kit was made in the account data (`recovery_key_set_at`, merged
+   like `recovery_passphrase_set_at`, §6.4).
+
+The browser and the desktop no longer offer inventing a passphrase at first sign-in. The phone apps
+keep doing so until they get the kit (follow-up), and the bridge's bot keeps its configured
+passphrase (docs/bridge.md).
+
+#### 6.5.5 Recovery (all devices lost)
+
+The setup screen of an account that has keys offers, besides linking (§5):
+
+- **Open recovery kit…**: the client reads the chosen file locally and finds the machine form in it;
+- a field **Recovery key or passphrase**: text that reads as a recovery key (32 characters, valid
+  checksum) is used as one, anything else as a legacy passphrase. A passphrase can't be mistaken
+  for a key: it would have to be exactly 32 Crockford characters with a matching 32-bit checksum.
+- the desktop app, if its keychain still holds this account's backup key: **Restore on this
+  computer** (§6.5.6).
+
+The core tries the recovery-key wraps of the server's list with the key, then opens the key bag
+as for every recovery (identity check, sequence binding, §6). For apps that only have a
+passphrase field (the phone apps until they get the kit), the core treats a "passphrase" that
+opens no passphrase wrap but reads as a recovery key as that key, so typing the key works there
+too. Scanning the kit's QR code is a phone feature and comes with the phone apps (follow-up);
+desktop and web have no camera scanner and take the file or the typed key.
+
+#### 6.5.6 The OS keychain (desktop)
+
+The desktop app keeps the account's **backup key** in the OS keychain through the maintained
+`keyring` crate, which it already uses for the database key: macOS Keychain, Windows Credential
+Manager, Linux Secret Service (GNOME Keyring, KWallet). This is §6.1's "wrapped by devices": the
+keychain is the wrap, nothing is uploaded.
+
+- Entry: service `de.zeitgleich.teamcraft.backup-key`, account `<server URL>|<user ID>`, the same
+  scope as the database key; the value is the 32-byte backup key.
+- Written when the device is set up (enrolled, linked, recovered) and on every start when it is
+  missing or differs (a backup key switched by an org recovery, §6.3.1); written through
+  `run_outside_runtime` like the database key (§9).
+- Used when this computer must set up the same account again (the local database was lost, or set
+  aside as unreadable, §9.5): the core opens the server's key bag with it as with a recovery key
+  and checks the identity. A key that no longer opens the bag (the account's backup key changed)
+  fails the restore, and the user takes the kit instead.
+- **Fallback.** Without a usable keychain (Linux without a Secret Service, a denied or locked
+  keychain) nothing is kept and the failure is logged; setting the device up again needs the kit or
+  another device. (The database key itself has no fallback yet: the app doesn't open its store
+  without a keychain. "Ask once and keep the store key wrapped by the kit" is a follow-up.)
+- Not on the web: the browser has no OS keychain (§9.1); the kit is the only way back there.
+- Phones keep their database key in the iOS Keychain / Android Keystore already (§9.2); keeping the
+  backup key there and the kit screens are part of the phone follow-up.
+
+What it costs: the entry is as strong as the OS account's keychain. Software running as the user
+that may read the keychain gets the backup key without the database file (today it needs both the
+database key from the keychain and the file). Windows may roam Credential Manager entries with a
+domain profile; there the entry reaches other computers of the profile, which is the "known
+platform" convenience of the issue, but also what a domain administrator can read. The server's
+key bag is still needed to read anything.
+
+#### 6.5.7 Existing users (migration)
+
+- A passphrase wrap keeps working for recovery, Argon2id unchanged, for as long as it exists.
+- Settings > Security & privacy offers **Replace passphrase with a recovery kit**: the same kit
+  steps as at first sign-in, then one key bag upload with the new wrap list: the new recovery-key
+  wrap in, the passphrase wrap and any earlier recovery-key wrap out, the other factors (org,
+  passkey) kept. The backup key and the key bag's contents don't change, so the user's other
+  devices carry on without noticing (they adopt the new list with the next bag, §6).
+- **Make a new recovery kit** (kit lost or seen by others) does the same with a fresh key.
+- Changing the passphrase stays possible where the policy allows it (§6.5.8), for users who still
+  have one; users with a kit aren't offered a passphrase.
+- **Older apps** decode the wrap list strictly and don't know method 5: an app older than this
+  change can't change the passphrase of, or recover with a passphrase into, an account whose list
+  holds a recovery-key wrap. The web client is always current, desktop apps update themselves, and
+  phone apps of the same release decode the new method; they just don't offer the kit yet.
+
+#### 6.5.8 Admin policy
+
+A new group in the owner-signed workspace policy (admin.md §2.3, §6.3):
+`recovery.is_passphrase_allowed`, default `true`, so a workspace that never set it keeps today's
+behaviour. With `false`, for members (guests' bags are wrapped with a random secret nobody keeps,
+bots' passphrase comes from the bridge's configuration; both are exempt):
+
+- **Clients** (from the policy they verified): Settings offers no passphrase, only the kit, and a
+  member who still has only a passphrase sees "Replace with a recovery kit" as the next step. The
+  core refuses to set a passphrase (`PassphraseNotAllowed`). Existing passphrase wraps keep opening:
+  switching the policy never locks anyone out.
+- **Server** (sanity check, as for the rest of the policy): it refuses (403
+  `recovery_passphrase_not_allowed`) a member's `PUT /me/identity-key` whose first key bag holds a
+  passphrase wrap, and a `PUT /me/key-bag` whose list holds a passphrase wrap that is not
+  byte-identical to one in the stored list. Devices that upload a bag with the user's unchanged
+  passphrase wrap keep working; only new or changed passphrases are refused. The server reads the
+  method byte of each list entry and nothing else; a list it can't split under this policy is
+  refused as malformed. This stops older apps and today's phone apps, which only know passphrases,
+  from setting new ones; the clients' own check rests on the signed policy.
+- Until the phone apps have the kit, a member whose only device is a phone can't set up a new
+  account with passphrases switched off (linking and recovering with a typed key work). The admin
+  console says so next to the switch.
+
+#### 6.5.9 Threat model notes
+
+- **The key never leaves the client unwrapped.** It is made in the client, saved to a local file,
+  and on the desktop crosses only the webview–core IPC of the app itself. The server stores the
+  wrap list and the encrypted key bag as before; it never sees the key, the KEK or the backup key.
+- **Offline attacks by the server** on a recovery-key wrap need 2¹²⁸ guesses; this is what a
+  passphrase wrap can't promise (a weak passphrase falls to Argon2id guessing). It is also why the
+  policy can switch passphrases off.
+- **The kit is the backup's key.** Whoever has the file and the encrypted key bag (the server, or
+  someone who can sign in as the user) can read the user's history. Hence the instructions in the
+  kit and the confirmation step. The identity provider's sign-in still stands between a stolen kit
+  and the key bag for anyone but the server.
+- **Replacing a factor doesn't rotate the backup key.** The server could have kept an older wrap
+  list. After *Replace passphrase with a recovery kit* such a server can still attack the old
+  passphrase wrap offline (Argon2id-stretched), and after *Make a new recovery kit* whoever holds the
+  old kit and an old wrap can still unwrap the backup key. Rotating the backup key would stop that,
+  but the user's other devices would then have to link again (§6.3.1 does this after an org
+  recovery). Offering "new backup key, link your devices again" for a kit that was seen by others is
+  a follow-up.
+- **Phishing.** The app asks for the key only on the setup screen of a device that has no keys,
+  and the kit says so. It is never typed into a page of the server's choosing other than the web
+  client itself, whose integrity is §9.3's.
+- **Keychain** trade-offs: §6.5.6.
+- **Out of scope:** additionally wrapping the backup key with a passkey (WebAuthn PRF, §6.2) for
+  recovery without the file; tracked as a follow-up of issue #738.
 
 ## 7. Push notifications (Threema model, extended)
 

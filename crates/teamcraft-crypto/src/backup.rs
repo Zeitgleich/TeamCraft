@@ -2,8 +2,10 @@
 //!
 //! The key bag is encrypted with a random backup key. The backup key itself is stored on the server
 //! only in wrapped form, once per [`WrapMethod`]: by the device keystore (§6.1), by a passkey PRF
-//! output (§6.2), by a recovery passphrase stretched with Argon2id (§6.2 fallback) and, later, by
-//! the organization recovery key (§6.3). Every wrapper implements [`BackupKeyWrapper`].
+//! output (§6.2), by the recovery key of a recovery kit (§6.5), by a legacy recovery passphrase
+//! stretched with Argon2id (§6.2 fallback) and by the organization recovery key (§6.3). Every
+//! wrapper implements [`BackupKeyWrapper`]. The wraps are stored as one list next to the key bag
+//! ([`encode_wrapped_key_list`]).
 
 use argon2::{Algorithm, Argon2, Params, Version};
 use hkdf::Hkdf;
@@ -15,10 +17,16 @@ use zeroize::Zeroizing;
 use crate::aead::{self, NONCE_LEN};
 use crate::domain;
 use crate::ids::UserId;
+use crate::recovery_key::RecoveryKey;
 use crate::secret::{SYMMETRIC_KEY_LEN, SecretBytes, SymmetricKey};
 
 const WRAPPED_BACKUP_KEY_VERSION: u8 = 1;
 const PASSPHRASE_SALT_LEN: usize = 16;
+const RECOVERY_KEY_SALT_LEN: usize = 16;
+/// `kdf` of a recovery-key wrap: HKDF-SHA256 (e2ee.md §6.5.2).
+const RECOVERY_KEY_KDF_HKDF_SHA256: u8 = 1;
+/// Most wraps one list holds (its count is one byte).
+pub const MAX_WRAPPED_KEYS: usize = u8::MAX as usize;
 
 /// Upper bounds for Argon2id parameters read from a wrapped key. The server supplies the wrapped
 /// key, so these stop it from making a client allocate or compute without limit.
@@ -36,9 +44,8 @@ pub struct BackupKey(SymmetricKey);
 
 /// Wraps and unwraps the backup key with one recovery factor.
 ///
-/// Implementations: [`PassphraseWrapper`], [`SymmetricKeyWrapper`] (device keystore, passkey PRF).
-/// The organization recovery wrapper (§6.3, public-key encryption to a threshold-shared key) is
-/// a later implementation of this trait.
+/// Implementations: [`PassphraseWrapper`], [`RecoveryKeyWrapper`], [`SymmetricKeyWrapper`] (device
+/// keystore, passkey PRF) and the organization recovery wrapper (`org_recovery`).
 pub trait BackupKeyWrapper {
   fn method(&self) -> WrapMethod;
 
@@ -61,6 +68,8 @@ pub enum WrapMethod {
   PasskeyPrf = 2,
   Passphrase = 3,
   OrgRecovery = 4,
+  /// The recovery key of a recovery kit (e2ee.md §6.5).
+  RecoveryKey = 5,
 }
 
 /// A backup key encrypted under one recovery factor, as stored on the server.
@@ -88,6 +97,12 @@ pub struct Argon2Settings {
   pub parallelism: u32,
 }
 
+/// Wraps with the 128-bit recovery key of a recovery kit (e2ee.md §6.5.2). The key is uniformly
+/// random, so HKDF derives the key-encryption key; there is nothing to stretch.
+pub struct RecoveryKeyWrapper {
+  recovery_key: RecoveryKey,
+}
+
 /// Wraps with a 256-bit key-encryption key that comes from outside: the OS keystore (§6.1) or a
 /// passkey PRF output (§6.2).
 pub struct SymmetricKeyWrapper {
@@ -100,6 +115,21 @@ pub struct SymmetricKeyWrapper {
 struct PassphraseParameters {
   settings: Argon2Settings,
   salt: [u8; PASSPHRASE_SALT_LEN],
+}
+
+/// Public parameters of a recovery-key wrap. `kdf` is a plain byte, so an unknown one is reported as
+/// such instead of as a decoding error.
+#[derive(TlsSerialize, TlsDeserializeBytes, TlsSize)]
+struct RecoveryKeyParameters {
+  kdf: u8,
+  salt: [u8; RECOVERY_KEY_SALT_LEN],
+}
+
+/// One entry of a wrap list, undecoded: what a reader needs that only looks at the method (the
+/// server enforcing the workspace policy, e2ee.md §6.5.8).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RawWrappedKey<'a> {
+  bytes: &'a [u8],
 }
 
 /// Associated data binding a wrapped key to its user, method and parameters.
@@ -128,6 +158,12 @@ pub enum BackupError {
   PassphraseTooShort,
   #[error("passkey PRF output must be at least 32 bytes")]
   PrfOutputTooShort,
+  #[error("unsupported recovery key derivation {0}")]
+  UnsupportedKdf(u8),
+  #[error("malformed list of wrapped backup keys")]
+  MalformedList,
+  #[error("a list holds at most {MAX_WRAPPED_KEYS} wrapped backup keys")]
+  TooManyWraps,
   #[error("encryption failed")]
   EncryptionFailed,
   #[error("this wrapper can only wrap; unwrapping needs the recovered org key")]
@@ -304,6 +340,69 @@ impl Default for Argon2Settings {
   }
 }
 
+impl RecoveryKeyWrapper {
+  pub fn new(recovery_key: &RecoveryKey) -> Self {
+    Self {
+      recovery_key: recovery_key.duplicate(),
+    }
+  }
+
+  fn derive_key(&self, salt: &[u8; RECOVERY_KEY_SALT_LEN]) -> Result<SymmetricKey, BackupError> {
+    let hkdf = Hkdf::<Sha256>::new(Some(salt), self.recovery_key.expose_secret());
+    let mut output = Zeroizing::new([0u8; SYMMETRIC_KEY_LEN]);
+    hkdf
+      .expand(domain::RECOVERY_KEY_WRAP_KDF.as_bytes(), output.as_mut())
+      .map_err(|_| BackupError::KeyDerivation)?;
+    Ok(SymmetricKey::from_bytes(*output))
+  }
+}
+
+impl BackupKeyWrapper for RecoveryKeyWrapper {
+  fn method(&self) -> WrapMethod {
+    WrapMethod::RecoveryKey
+  }
+
+  fn wrap_key(
+    &self,
+    user_id: UserId,
+    backup_key: &BackupKey,
+    rng: &mut dyn CryptoRngCore,
+  ) -> Result<WrappedBackupKey, BackupError> {
+    let mut salt = [0u8; RECOVERY_KEY_SALT_LEN];
+    rng.fill_bytes(&mut salt);
+    let key_encryption_key = self.derive_key(&salt)?;
+    let parameters = RecoveryKeyParameters {
+      kdf: RECOVERY_KEY_KDF_HKDF_SHA256,
+      salt,
+    }
+    .tls_serialize_detached()?;
+    seal_backup_key(
+      user_id,
+      WrapMethod::RecoveryKey,
+      parameters,
+      &key_encryption_key,
+      backup_key,
+      rng,
+    )
+  }
+
+  fn unwrap_key(&self, user_id: UserId, wrapped: &WrappedBackupKey) -> Result<BackupKey, BackupError> {
+    ensure_method(WrapMethod::RecoveryKey, wrapped)?;
+    let parameters = RecoveryKeyParameters::tls_deserialize_exact_bytes(&wrapped.parameters)?;
+    if parameters.kdf != RECOVERY_KEY_KDF_HKDF_SHA256 {
+      return Err(BackupError::UnsupportedKdf(parameters.kdf));
+    }
+    let key_encryption_key = self.derive_key(&parameters.salt)?;
+    open_backup_key(user_id, &key_encryption_key, wrapped)
+  }
+}
+
+impl std::fmt::Debug for RecoveryKeyWrapper {
+  fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    f.debug_struct("RecoveryKeyWrapper").finish_non_exhaustive()
+  }
+}
+
 impl SymmetricKeyWrapper {
   /// Uses a key held in the OS keystore (Keychain, Android Keystore, Secret Service).
   pub fn device_keystore(key: SymmetricKey) -> Self {
@@ -428,6 +527,58 @@ pub(crate) fn wrap_aad(
   ))
 }
 
+/// Encodes the wraps stored next to the key bag (e2ee.md §6): a count byte, then every wrap as a
+/// big-endian `u32` length and its bytes. The key bag's AAD binds these exact bytes.
+pub fn encode_wrapped_key_list(wrapped: &[WrappedBackupKey]) -> Result<Vec<u8>, BackupError> {
+  let count = u8::try_from(wrapped.len()).map_err(|_| BackupError::TooManyWraps)?;
+  let mut out = vec![count];
+  for key in wrapped {
+    let bytes = key.to_bytes()?;
+    let length = u32::try_from(bytes.len()).map_err(|_| BackupError::MalformedList)?;
+    out.extend_from_slice(&length.to_be_bytes());
+    out.extend_from_slice(&bytes);
+  }
+  Ok(out)
+}
+
+/// Decodes a list written by [`encode_wrapped_key_list`]; every wrap must decode.
+pub fn decode_wrapped_key_list(bytes: &[u8]) -> Result<Vec<WrappedBackupKey>, BackupError> {
+  split_wrapped_key_list(bytes)?
+    .into_iter()
+    .map(|raw| WrappedBackupKey::from_bytes(raw.bytes))
+    .collect()
+}
+
+/// The entries of a list without decoding them, so a reader that only needs the methods also
+/// accepts wraps of methods it doesn't know.
+pub fn split_wrapped_key_list(bytes: &[u8]) -> Result<Vec<RawWrappedKey<'_>>, BackupError> {
+  let (&count, mut rest) = bytes.split_first().ok_or(BackupError::MalformedList)?;
+  let mut entries = Vec::with_capacity(usize::from(count));
+  for _ in 0..count {
+    let (length, tail) = rest.split_first_chunk::<4>().ok_or(BackupError::MalformedList)?;
+    let length = usize::try_from(u32::from_be_bytes(*length)).map_err(|_| BackupError::MalformedList)?;
+    let entry = tail.get(..length).ok_or(BackupError::MalformedList)?;
+    entries.push(RawWrappedKey { bytes: entry });
+    rest = &tail[length..];
+  }
+  if !rest.is_empty() {
+    return Err(BackupError::MalformedList);
+  }
+  Ok(entries)
+}
+
+impl<'a> RawWrappedKey<'a> {
+  /// Whether the entry is a wrap of `method` (its version and method bytes say so).
+  pub fn is_method(&self, method: WrapMethod) -> bool {
+    matches!(self.bytes, [_version, byte, ..] if *byte == method as u8)
+  }
+
+  /// The entry's bytes as stored.
+  pub fn as_bytes(&self) -> &'a [u8] {
+    self.bytes
+  }
+}
+
 #[cfg(test)]
 mod tests {
   use rand_core::OsRng;
@@ -477,6 +628,90 @@ mod tests {
       .unwrap()
       .unwrap_key(ALICE, &wrapped)
       .unwrap();
+  }
+
+  #[test]
+  fn recovery_key_round_trip_through_bytes() {
+    let backup_key = BackupKey::generate(&mut OsRng);
+    let recovery_key = RecoveryKey::generate(&mut OsRng);
+    let wrapped = RecoveryKeyWrapper::new(&recovery_key)
+      .wrap_key(ALICE, &backup_key, &mut OsRng)
+      .unwrap();
+    let decoded = WrappedBackupKey::from_bytes(&wrapped.to_bytes().unwrap()).unwrap();
+    assert_eq!(decoded.method(), WrapMethod::RecoveryKey);
+
+    // The key as the user types it back from the kit opens the wrap.
+    let typed = RecoveryKey::parse(&recovery_key.to_display()).unwrap();
+    let unwrapped = RecoveryKeyWrapper::new(&typed)
+      .unwrap_key(ALICE, &decoded)
+      .unwrap();
+    assert!(bool::from(unwrapped.key().ct_eq(backup_key.key())));
+  }
+
+  #[test]
+  fn every_recovery_key_wrap_has_its_own_salt() {
+    let backup_key = BackupKey::generate(&mut OsRng);
+    let wrapper = RecoveryKeyWrapper::new(&RecoveryKey::generate(&mut OsRng));
+    let first = wrapper.wrap_key(ALICE, &backup_key, &mut OsRng).unwrap();
+    let second = wrapper.wrap_key(ALICE, &backup_key, &mut OsRng).unwrap();
+    assert_ne!(first.parameters, second.parameters);
+    assert_eq!(first.parameters[0], RECOVERY_KEY_KDF_HKDF_SHA256);
+  }
+
+  mod wrap_list {
+    use super::*;
+
+    #[test]
+    fn round_trips_and_keeps_the_order() {
+      let backup_key = BackupKey::generate(&mut OsRng);
+      let wraps = vec![
+        passphrase_wrapper("correct horse battery staple")
+          .wrap_key(ALICE, &backup_key, &mut OsRng)
+          .unwrap(),
+        RecoveryKeyWrapper::new(&RecoveryKey::generate(&mut OsRng))
+          .wrap_key(ALICE, &backup_key, &mut OsRng)
+          .unwrap(),
+      ];
+      let bytes = encode_wrapped_key_list(&wraps).unwrap();
+      assert_eq!(decode_wrapped_key_list(&bytes).unwrap(), wraps);
+      let raw = split_wrapped_key_list(&bytes).unwrap();
+      assert!(raw[0].is_method(WrapMethod::Passphrase));
+      assert!(raw[1].is_method(WrapMethod::RecoveryKey));
+      assert!(!raw[1].is_method(WrapMethod::Passphrase));
+      assert_eq!(raw[1].as_bytes(), wraps[1].to_bytes().unwrap());
+      assert_eq!(encode_wrapped_key_list(&[]).unwrap(), [0]);
+    }
+
+    #[test]
+    fn splitting_accepts_methods_it_does_not_know() {
+      // A wrap of a future method 9: the split reads it, decoding refuses it.
+      let entry = [WRAPPED_BACKUP_KEY_VERSION, 9, 0xAA, 0xBB];
+      let mut bytes = vec![1];
+      bytes.extend_from_slice(&(entry.len() as u32).to_be_bytes());
+      bytes.extend_from_slice(&entry);
+      let raw = split_wrapped_key_list(&bytes).unwrap();
+      assert_eq!(raw.len(), 1);
+      assert!(!raw[0].is_method(WrapMethod::Passphrase));
+      assert!(decode_wrapped_key_list(&bytes).is_err());
+    }
+
+    #[test]
+    fn malformed_lists_are_refused() {
+      for bytes in [
+        &[][..],
+        &[1][..],
+        &[1, 0, 0, 0, 5, 1, 2][..],
+        &[0, 7][..],
+        &[1, 0xff, 0xff, 0xff, 0xff][..],
+      ] {
+        assert!(
+          matches!(split_wrapped_key_list(bytes), Err(BackupError::MalformedList)),
+          "{bytes:?}"
+        );
+      }
+      let short_entry = [1, 0, 0, 0, 1, 3];
+      assert!(!split_wrapped_key_list(&short_entry).unwrap()[0].is_method(WrapMethod::Passphrase));
+    }
   }
 
   #[test]
@@ -603,6 +838,60 @@ mod tests {
           .wrap_key(ALICE, &backup_key, &mut OsRng)
           .is_ok()
       );
+    }
+
+    #[test]
+    fn rejects_another_recovery_key_and_another_method() {
+      let backup_key = BackupKey::generate(&mut OsRng);
+      let wrapped = RecoveryKeyWrapper::new(&RecoveryKey::generate(&mut OsRng))
+        .wrap_key(ALICE, &backup_key, &mut OsRng)
+        .unwrap();
+      let other = RecoveryKeyWrapper::new(&RecoveryKey::generate(&mut OsRng));
+      assert!(matches!(
+        other.unwrap_key(ALICE, &wrapped),
+        Err(BackupError::UnwrapFailed)
+      ));
+      assert!(matches!(
+        passphrase_wrapper("x").unwrap_key(ALICE, &wrapped),
+        Err(BackupError::WrongMethod {
+          expected: WrapMethod::Passphrase,
+          actual: WrapMethod::RecoveryKey
+        })
+      ));
+    }
+
+    #[test]
+    fn rejects_tampered_recovery_key_parameters() {
+      let backup_key = BackupKey::generate(&mut OsRng);
+      let recovery_key = RecoveryKey::generate(&mut OsRng);
+      let wrapper = RecoveryKeyWrapper::new(&recovery_key);
+      let wrapped = wrapper.wrap_key(ALICE, &backup_key, &mut OsRng).unwrap();
+
+      let mut salt_changed = wrapped.clone();
+      let last = salt_changed.parameters.len() - 1;
+      salt_changed.parameters[last] ^= 1;
+      assert!(matches!(
+        wrapper.unwrap_key(ALICE, &salt_changed),
+        Err(BackupError::UnwrapFailed)
+      ));
+      assert!(matches!(
+        wrapper.unwrap_key(UserId::new(2), &wrapped),
+        Err(BackupError::UnwrapFailed)
+      ));
+
+      // A KDF this version doesn't know is named as such.
+      let mut future_kdf = wrapped.clone();
+      future_kdf.parameters[0] = 2;
+      assert!(matches!(
+        wrapper.unwrap_key(ALICE, &future_kdf),
+        Err(BackupError::UnsupportedKdf(2))
+      ));
+      let mut truncated = wrapped;
+      truncated.parameters.pop();
+      assert!(matches!(
+        wrapper.unwrap_key(ALICE, &truncated),
+        Err(BackupError::Encoding(_))
+      ));
     }
 
     #[test]

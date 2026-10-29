@@ -32,7 +32,7 @@ Several brands on one server (`docs/branding.md`) are `teamcraft_brands` in the 
 the host names to Caddy and the Keycloak client.
 
 Then point the desktop app at `https://chat.example.com` and sign in. The first device of every user
-creates their keys; set up the recovery passphrase when asked.
+creates their keys; save the recovery kit when asked (e2ee.md §6.5).
 
 ### Running the images yourself
 
@@ -66,7 +66,7 @@ repository's end-to-end harness against it (`tests/e2e/tests/suite/deployed.rs`,
 
 The server only holds ciphertext. A stolen database or bucket gives an attacker metadata (who is in
 which conversation, when messages were sent) but no message content or attachment keys. Clients
-hold the keys; see `docs/e2ee.md` for what is recoverable and how (backup key, passphrase, device
+hold the keys; see `docs/e2ee.md` for what is recoverable and how (backup key, recovery kit, device
 linking, organization recovery). **Losing the database loses everybody's history** unless a backup
 exists; clients can still read what they have stored locally.
 
@@ -244,7 +244,7 @@ admin roster and policy with their devices (admin.md §2.3). The server can't do
 there is no operator override: an operator with full access to the server and database still can't
 make someone an owner.
 
-- Make sure there are **at least two owners** with a set-up device and recovery passphrase. Give the
+- Make sure there are **at least two owners** with a set-up device and recovery kit. Give the
   second person the owner role in the identity provider before the first owner signs the first
   policy: the first roster takes every owner and admin the server lists then. The console
   (Administration → Security → Owners) warns when the signed roster has fewer owners than
@@ -257,7 +257,7 @@ make someone an owner.
 - An owner's app re-signs the roster every 15 days while it is in use. If no owner opens TeamCraft
   for 30 days, member clients stop accepting the admins until an owner does; the console warns a
   week ahead.
-- **If every owner is lost** (left, or lost all devices and the recovery passphrase), the workspace
+- **If every owner is lost** (left, or lost all devices and the recovery kit), the workspace
   can't be administered any more: chat keeps working, admin actions don't. Restoring a backup does
   not help, and a new first owner is refused by every client. A recovery procedure is not
   available yet (issue #188); until then the only way out is a new workspace (fresh database, new

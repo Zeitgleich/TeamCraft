@@ -529,6 +529,7 @@ pub fn key_backup_state(store: &impl LocalStore) -> Result<Option<KeyBackupState
   for wrapped in decode_wrapped_keys(blob.as_slice())? {
     let maybe_method = match wrapped.method() {
       WrapMethod::Passphrase => Some(RecoveryMethod::Passphrase),
+      WrapMethod::RecoveryKey => Some(RecoveryMethod::RecoveryKey),
       WrapMethod::PasskeyPrf => Some(RecoveryMethod::Passkey),
       WrapMethod::OrgRecovery => Some(RecoveryMethod::Organization),
       // The device's own wrap restores nothing on another device.
@@ -540,13 +541,19 @@ pub fn key_backup_state(store: &impl LocalStore) -> Result<Option<KeyBackupState
       recovery.push(method);
     }
   }
-  let maybe_passphrase_set_at = stored_account_data(store)?
+  let account_data = stored_account_data(store)?;
+  let maybe_passphrase_set_at = account_data
     .maybe_recovery_passphrase_set_at
     .filter(|_| recovery.contains(&RecoveryMethod::Passphrase));
+  let maybe_recovery_key_set_at = account_data
+    .maybe_recovery_key_set_at
+    .filter(|_| recovery.contains(&RecoveryMethod::RecoveryKey));
   Ok(Some(KeyBackupState {
     is_stored: sync.key_bag_version > 0,
     has_pending_upload: sync.is_key_bag_dirty,
     recovery,
     maybe_passphrase_set_at,
+    maybe_recovery_key_set_at,
+    is_passphrase_allowed: crate::workspace::is_passphrase_allowed(store),
   }))
 }

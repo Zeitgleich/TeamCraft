@@ -454,6 +454,24 @@ impl Default for ClientUpdatePolicy {
   }
 }
 
+/// How members may protect their key backup (e2ee.md §6.5.8). Clients apply what the owners signed;
+/// the server refuses new passphrases for members as a sanity check.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct RecoveryPolicy {
+  /// Whether members may still set or change a recovery passphrase instead of a recovery kit.
+  /// Existing passphrases keep opening the backup either way.
+  pub is_passphrase_allowed: bool,
+}
+
+impl Default for RecoveryPolicy {
+  fn default() -> Self {
+    // Today's behaviour for workspaces whose policy predates the setting.
+    Self {
+      is_passphrase_allowed: true,
+    }
+  }
+}
+
 /// Default for [`OwnerPolicy::recommended_minimum`].
 pub const DEFAULT_RECOMMENDED_OWNERS: u8 = 2;
 
@@ -503,6 +521,8 @@ pub struct WorkspacePolicy {
   pub client_updates: ClientUpdatePolicy,
   #[serde(default)]
   pub owners: OwnerPolicy,
+  #[serde(default)]
+  pub recovery: RecoveryPolicy,
 }
 
 /// The JSON document a policy entry's `payload` must contain (and the owner signs).
@@ -545,6 +565,7 @@ impl Default for WorkspacePolicy {
       call_backgrounds: CallBackgroundPolicy::default(),
       client_updates: ClientUpdatePolicy::default(),
       owners: OwnerPolicy::default(),
+      recovery: RecoveryPolicy::default(),
     }
   }
 }
@@ -608,6 +629,17 @@ mod tests {
     assert_eq!(policy.compliance_archive.mode, ComplianceArchiveMode::Off);
     assert!(json.contains(r#""admin_self_join":"visible""#));
     assert!(policy.org_recovery.is_enabled_for_members && !policy.org_recovery.is_enabled_for_guests);
+    assert!(json.contains(r#""recovery":{"is_passphrase_allowed":true}"#));
+  }
+
+  #[test]
+  fn policies_without_the_recovery_group_allow_passphrases() {
+    let mut json = serde_json::to_value(WorkspacePolicy::default()).unwrap();
+    json.as_object_mut().unwrap().remove("recovery");
+    let older: WorkspacePolicy = serde_json::from_value(json).unwrap();
+    assert!(older.recovery.is_passphrase_allowed);
+    let strict: RecoveryPolicy = serde_json::from_str(r#"{"is_passphrase_allowed":false}"#).unwrap();
+    assert!(!strict.is_passphrase_allowed);
   }
 
   mod guest_dm_start {

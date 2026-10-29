@@ -32,8 +32,8 @@ use teamcraft_client_api::calls::{BackgroundEffect, OrgBackgrounds};
 use teamcraft_client_api::model::{Message, ThreadId};
 use teamcraft_client_api::remote::{
   AttachmentPriority, ChatAction, ChatAnswer, ChatQuery, ChatSnapshot, ContactKeys, CoreConnection,
-  CoreStatus, EnrollRequest, LinkRequestView, LinkStatus, MessageWindow, SecuritySnapshot, StoreHealth,
-  StoreProblem,
+  CoreStatus, EnrollRequest, EnrollSecret, LinkRequestView, LinkStatus, MessageWindow, SecuritySnapshot,
+  StoreHealth, StoreProblem,
 };
 use teamcraft_client_api::snapshot_changes::{SnapshotChanges, SnapshotCursor};
 use teamcraft_core::api::{AccessTokenSource, ApiError, HttpServerApi, ServerApi};
@@ -56,7 +56,7 @@ use teamcraft_core::ui_snapshot::SnapshotCache;
 use teamcraft_core::upkeep::{self, Upkeep, UploadMode};
 use teamcraft_core::{
   CallPreparation, Client, ClientSettings, CoreError, EnrollmentOptions, EnrollmentSecret, LinkOffer,
-  PendingEnrollment, UnreadableStore, platform,
+  PendingEnrollment, UnreadableStore, parse_recovery_key, platform,
 };
 use teamcraft_crypto::backup::Argon2Settings;
 use teamcraft_crypto::identity::IdentityPublicKey;
@@ -1370,9 +1370,11 @@ impl Core {
           return Ok(self.adopt(client));
         }
         self.drop_abandoned_setup().await;
+        // The browser has no OS keychain (e2ee.md §6.5.6): the recovery kit is the way back.
         Ok(CoreStatus::NeedsEnrollment {
           has_existing_identity: self.has_existing_identity().await?,
           was_data_lost: load_string(&self.store_ready_key()).is_some(),
+          can_restore_on_device: false,
         })
       },
     }
@@ -1447,6 +1449,7 @@ impl Core {
         self.status = CoreStatus::NeedsEnrollment {
           has_existing_identity,
           was_data_lost,
+          can_restore_on_device: false,
         };
       }
     }
@@ -1729,12 +1732,17 @@ impl Core {
     if self.client.is_some() {
       return Ok(());
     }
-    if request.is_guest {
-      return self.enroll_guest(request.device_name).await;
-    }
+    let secret = match request.secret {
+      EnrollSecret::Guest => return self.enroll_guest(request.device_name).await,
+      EnrollSecret::RecoveryKey { recovery_key } => {
+        EnrollmentSecret::recovery_key(&recovery_key).map_err(describe_failure)?
+      },
+      EnrollSecret::Passphrase { passphrase } => EnrollmentSecret::passphrase(passphrase),
+      EnrollSecret::KeptOnDevice => return Err("the browser keeps no key for the account".to_owned()),
+    };
     let options = EnrollmentOptions {
       device_name: request.device_name,
-      secret: EnrollmentSecret::Passphrase(SecretBytes::new(request.passphrase.into_bytes())),
+      secret,
       argon2: Argon2Settings::default(),
       maybe_attestation: None,
     };
@@ -1799,7 +1807,7 @@ impl Core {
         options,
       )
       .await
-      .map_err(describe)?;
+      .map_err(describe_failure)?;
     tracing::info!("device enrolled");
     self.status = self.adopt(client);
     Ok(())
@@ -2101,6 +2109,13 @@ impl Core {
           .await
           .map_err(describe_failure);
       },
+      ChatAction::SetRecoveryKey { recovery_key } => {
+        let recovery_key = parse_recovery_key(recovery_key).map_err(describe_failure)?;
+        return client
+          .set_recovery_key(&recovery_key)
+          .await
+          .map_err(describe_failure);
+      },
       ChatAction::SetActivity { is_idle } => {
         self.send_activity(*is_idle).await;
         return Ok(());
@@ -2191,6 +2206,7 @@ impl Core {
       | ChatAction::OpenGroupDm { .. }
       | ChatAction::AddMember { .. }
       | ChatAction::ChangePassphrase { .. }
+      | ChatAction::SetRecoveryKey { .. }
       | ChatAction::SetActivity { .. }
       | ChatAction::SetAttention { .. }
       | ChatAction::AcceptKeyChange { .. }

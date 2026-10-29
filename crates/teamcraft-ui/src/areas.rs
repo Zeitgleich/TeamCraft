@@ -46,7 +46,7 @@ use crate::components::huddle_bar::HuddleBarContent;
 use crate::components::lightbox::Lightbox;
 use crate::components::link_request_prompt::{LinkRequestCards, Step as LinkStep};
 use crate::components::log_view::IntegrationFeed;
-use crate::components::login::SessionGate;
+use crate::components::login::{EnrollScreen, SessionGate};
 use crate::components::meetings_view::{MeetingCreatedDialog, MeetingsView, ScheduleMeetingDialog};
 use crate::components::members_panel::MembersPanel;
 use crate::components::message_actions::{EditHistoryDialog, ForwardDialog, PinsPanel, SavedView};
@@ -70,6 +70,7 @@ use crate::i18n::use_i18n;
 use crate::lightbox::MediaKey;
 use crate::model::{ConversationId, MessageId, SpaceId, UserId};
 use crate::reactive::SetIfAlive;
+use crate::session::SessionControl;
 use crate::settings::Settings;
 use crate::state::AppState;
 use crate::tab_handover::TabState;
@@ -124,6 +125,23 @@ macro_rules! areas {
 areas! {
   /// Sign-in and the signed-in app: everything but the guest pages.
   session(settings: Settings) => session: view! { <SessionGate settings=settings /> };
+  /// Setting up this device: saving the recovery kit at first sign-in, or unlocking the keys
+  /// (e2ee.md §6.5). A device sees it once, so it loads when needed.
+  enroll_screen(
+    name: String,
+    has_existing_identity: bool,
+    was_data_lost: bool,
+    can_restore_on_device: bool,
+    control: SessionControl
+  ) => setup: view! {
+    <EnrollScreen
+      name=name
+      has_existing_identity=has_existing_identity
+      was_data_lost=was_data_lost
+      can_restore_on_device=can_restore_on_device
+      control=control
+    />
+  };
   /// The administration console: the largest part of the app, for admins only.
   admin_console(section: AdminSection) => admin: view! { <AdminConsole section=section /> };
   settings(_unit: ()) => settings: view! { <SettingsModal /> };
