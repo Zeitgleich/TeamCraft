@@ -10,6 +10,7 @@ use crate::calls::{
 };
 use crate::components::call_audio_menu::AudioMenu;
 use crate::components::call_chat::{CallChat, CallChatPanel, CallChatToast};
+use crate::components::call_notetaker::{NotetakerBanner, ask_notetaker_in, use_notetaker_in_call};
 use crate::components::call_prejoin::call_heading;
 use crate::components::call_video::{
   BackgroundPicker, LiveVideo, PickerSize, VideoSource, VideoTile, can_share_screen, can_show_video,
@@ -55,6 +56,14 @@ pub fn CallScreen(request: CallRequest) -> impl IntoView {
         .collect::<Vec<_>>()
     })
   });
+  // The notetaker (e2ee.md §8.2): its account comes from the verified policy, its presence from
+  // who is in the call; the badge, the banner and its tile say so to everybody.
+  let others =
+    Memo::new(move |_| remote.with(|tiles| tiles.iter().map(|tile| tile.user.id).collect::<Vec<_>>()));
+  let notetaker = use_notetaker_in_call(request.conversation, others);
+  let is_notetaker_asked = RwSignal::new(false);
+  let is_notetaker_present =
+    Memo::new(move |_| notetaker.get().is_some_and(|notetaker| notetaker.is_present));
   let remote_sharer = Memo::new(move |_| {
     remote
       .get()
@@ -284,10 +293,14 @@ pub fn CallScreen(request: CallRequest) -> impl IntoView {
         .find(|tile| tile.user.id == id)
         .map(|tile| tile.user.clone())
     });
+    let maybe_role = notetaker
+      .with_untracked(|notetaker| notetaker.as_ref().is_some_and(|notetaker| notetaker.bot == id))
+      .then(|| i18n.t("tile-notetaker"));
     maybe_user.map(|user| {
       view! {
         <VideoTile
           user=user
+          maybe_role=maybe_role
           is_large=is_large
           is_muted=participant_flag(id, |participant| participant.is_muted, false)
           is_camera_on=participant_flag(id, |participant| participant.is_camera_on, true)
@@ -461,14 +474,24 @@ pub fn CallScreen(request: CallRequest) -> impl IntoView {
             <span>{move || i18n.t_count("call-participants", participant_count())}</span>
           </span>
         </div>
-        <span class="e2ee-pill" title=move || i18n.t("call-encrypted-detail")>
-          <Icon name=IconName::Shield />
-          <span>{move || i18n.t("call-encrypted")}</span>
-          {move || {
-            let code = if is_real { privacy_code.get() } else { Some("48 20 17".to_owned()) };
-            code.map(|code| view! { <span class="mono" translate="no">{i18n.t_with("call-verification-code", &[("code", &code)])}</span> })
-          }}
-        </span>
+        <Show
+          when=move || is_notetaker_present.get()
+          fallback=move || view! {
+            <span class="e2ee-pill" title=move || i18n.t("call-encrypted-detail")>
+              <Icon name=IconName::Shield />
+              <span>{move || i18n.t("call-encrypted")}</span>
+              {move || {
+                let code = if is_real { privacy_code.get() } else { Some("48 20 17".to_owned()) };
+                code.map(|code| view! { <span class="mono" translate="no">{i18n.t_with("call-verification-code", &[("code", &code)])}</span> })
+              }}
+            </span>
+          }
+        >
+          <span class="e2ee-pill is-notetaker" title=move || i18n.t("call-notetaker-badge-detail")>
+            <Icon name=IconName::Alert />
+            <span>{move || i18n.t("call-notetaker-badge")}</span>
+          </span>
+        </Show>
         <Show when=move || is_connecting.get() fallback=|| ()>
           <span class="muted-text" role="status">{move || i18n.t("call-connecting")}</span>
         </Show>
@@ -492,6 +515,7 @@ pub fn CallScreen(request: CallRequest) -> impl IntoView {
         })
       }}
       <crate::components::add_to_call::CallMoveBanner />
+      <NotetakerBanner conversation=request.conversation notetaker=notetaker is_asked=is_notetaker_asked />
       <div class="call-body">
         <div class="call-stage-wrap">{stage}</div>
         <Show when=move || chat.is_open.get() fallback=|| ()>
@@ -700,6 +724,17 @@ pub fn CallScreen(request: CallRequest) -> impl IntoView {
             icon=IconName::UserPlus
             label=Signal::derive(move || i18n.t("call-add-people"))
             on_press=move || state.overlay.set(Overlay::AddToCall(request.conversation))
+          />
+        </Show>
+        // The notetaker joins only where it is a member already (e2ee.md §8.2).
+        <Show
+          when=move || notetaker.get().is_some_and(|notetaker| notetaker.can_invite) && !is_notetaker_asked.get()
+          fallback=|| ()
+        >
+          <ControlButton
+            icon=IconName::Compose
+            label=Signal::derive(move || i18n.t("call-notetaker-add"))
+            on_press=move || ask_notetaker_in(request.conversation, is_notetaker_asked)
           />
         </Show>
         // A phone's control bar keeps to what a call needs.

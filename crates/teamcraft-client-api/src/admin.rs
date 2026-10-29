@@ -688,11 +688,13 @@ pub enum AdminSection {
   Instance,
   /// Bots for the integration bridge (docs/bridge.md).
   Integrations,
+  /// The AI notetaker of calls (e2ee.md §8.2): signed policy and the API key.
+  Notetaker,
   Audit,
 }
 
 impl AdminSection {
-  pub const ALL: [AdminSection; 16] = [
+  pub const ALL: [AdminSection; 17] = [
     Self::Channels,
     Self::Users,
     Self::Permissions,
@@ -708,6 +710,7 @@ impl AdminSection {
     Self::Updates,
     Self::Instance,
     Self::Integrations,
+    Self::Notetaker,
     Self::Audit,
   ];
 
@@ -728,6 +731,7 @@ impl AdminSection {
       Self::Updates => "updates",
       Self::Instance => "instance",
       Self::Integrations => "integrations",
+      Self::Notetaker => "notetaker",
       Self::Audit => "audit",
     }
   }

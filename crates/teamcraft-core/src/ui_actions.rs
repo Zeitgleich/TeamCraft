@@ -359,6 +359,16 @@ impl<S: LocalStore> CoreChatBackend<S> {
     self.control(conversation, MessageContent::IntegrationSource { change });
   }
 
+  /// A request to the notetaker (e2ee.md §8.2), taken into this device's ledger at once and sent
+  /// encrypted like any control message.
+  pub(crate) fn ui_request_notetaker(
+    &self,
+    conversation: ConversationId,
+    request: teamcraft_proto::NotetakerRequest,
+  ) {
+    self.control(conversation, MessageContent::Notetaker { request });
+  }
+
   pub(crate) fn ui_revoke_integration_source(&self, conversation: ConversationId, source: SourceId) {
     let change = SourceChange::Revoked { source };
     self.control(conversation, MessageContent::IntegrationSource { change });

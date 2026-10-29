@@ -66,6 +66,7 @@ pub mod message_sounds;
 pub mod mock;
 pub mod motion;
 pub mod navigation;
+pub mod notetaker;
 pub mod notification_pictures;
 pub mod notifier;
 pub mod notify_sync;

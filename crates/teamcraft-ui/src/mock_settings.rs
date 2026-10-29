@@ -25,6 +25,7 @@ pub(super) struct SettingsMock {
   pub(super) calendar: AdminCalendarSettingsResponse,
   pub(super) runtime: RuntimeSettingsResponse,
   pub(super) last_test: Option<(SettingsTestKind, SettingsTestResponse)>,
+  pub(super) notetaker: teamcraft_proto::AdminNotetakerResponse,
 }
 
 impl SettingsMock {
@@ -87,6 +88,11 @@ impl SettingsMock {
       },
       runtime: default_runtime(),
       last_test: None,
+      notetaker: teamcraft_proto::AdminNotetakerResponse {
+        is_key_stored: false,
+        can_store_secrets: true,
+        maybe_key_updated_at: None,
+      },
     };
     mock.sync_hostnames();
     mock

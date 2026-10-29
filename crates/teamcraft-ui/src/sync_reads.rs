@@ -152,6 +152,7 @@ mod tests {
       maybe_owners: None,
       maybe_presence_policy: None,
       maybe_screen_share_policy: None,
+      maybe_notetaker: None,
       maybe_backup: None,
     }
   }

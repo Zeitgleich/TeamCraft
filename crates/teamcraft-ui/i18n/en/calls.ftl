@@ -92,6 +92,7 @@ tile-muted = muted
 tile-hand = hand raised
 tile-speaking = speaking
 tile-reconnecting = reconnecting
+tile-notetaker = Notetaker – transcribing
 video-stalled = Video paused: weak connection
 
 ## Video quality (#967): how sharp another person's video comes, like a video player's menu
@@ -301,3 +302,12 @@ calls-echo-hint = Stops others from hearing themselves through your speakers.
 
 # Files view and setup checklist (issue #301)
 calls-loading = Loading calls
+
+## Notetaker (e2ee.md §8.2)
+call-notetaker-add = Add notetaker
+call-notetaker-remove = Remove notetaker
+call-notetaker-joining = The notetaker joins in a moment. While it is in the call, the audio goes to OpenRouter for transcription.
+call-notetaker-banner = The notetaker is transcribing this call. What is said goes to it and on to OpenRouter ({ $model }); towards them the call is not end-to-end encrypted. A summary and the transcript are posted in the chat afterwards.
+call-notetaker-badge = Notetaker in the call – audio goes to OpenRouter
+call-notetaker-badge-detail = While the notetaker is in the call, everything said reaches it and goes on to OpenRouter and the model's provider for transcription. The rest of the call stays end-to-end encrypted.
+prejoin-notetaker = The notetaker is in this call: what you say goes to OpenRouter for transcription.

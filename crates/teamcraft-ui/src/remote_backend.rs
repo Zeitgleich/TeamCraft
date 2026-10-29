@@ -1255,6 +1255,17 @@ impl ChatBackend for RemoteChat {
     self.act(ChatAction::RevokeIntegrationSource { conversation, source });
   }
 
+  fn notetaker_policy(&self) -> Option<teamcraft_proto::NotetakerPolicy> {
+    self.mirror.borrow().snapshot.security.maybe_notetaker.clone()
+  }
+
+  fn request_notetaker(&self, conversation: ConversationId, request: teamcraft_proto::NotetakerRequest) {
+    self.act(ChatAction::RequestNotetaker {
+      conversation,
+      request,
+    });
+  }
+
   fn channel_roles(&self, conversation: ConversationId) -> Vec<teamcraft_client_api::model::ChannelMember> {
     match self.ask(ChatQuery::ChannelRoles { conversation }) {
       Some(ChatAnswer::ChannelRoles { members }) => members,

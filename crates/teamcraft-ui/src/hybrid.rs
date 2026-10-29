@@ -706,6 +706,14 @@ impl<C: ChatBackend + 'static> ChatBackend for Hybrid<C> {
     self.chat.revoke_integration_source(conversation, source);
   }
 
+  fn notetaker_policy(&self) -> Option<teamcraft_proto::NotetakerPolicy> {
+    self.chat.notetaker_policy()
+  }
+
+  fn request_notetaker(&self, conversation: ConversationId, request: teamcraft_proto::NotetakerRequest) {
+    self.chat.request_notetaker(conversation, request);
+  }
+
   fn channel_roles(&self, conversation: ConversationId) -> Vec<teamcraft_client_api::model::ChannelMember> {
     self.chat.channel_roles(conversation)
   }
@@ -1511,6 +1519,19 @@ impl<C: ChatBackend> AdminBackend for Hybrid<C> {
 
   fn mail_settings(&self) -> Option<AdminMailSettingsResponse> {
     self.maybe_admin.as_ref().and_then(|admin| admin.mail_settings())
+  }
+
+  fn notetaker_settings(&self) -> Option<teamcraft_proto::AdminNotetakerResponse> {
+    self
+      .maybe_admin
+      .as_ref()
+      .and_then(|admin| admin.notetaker_settings())
+  }
+
+  fn set_notetaker_key(&self, key: teamcraft_proto::SecretUpdate) {
+    if let Some(admin) = &self.maybe_admin {
+      admin.set_notetaker_key(key);
+    }
   }
 
   fn save_mail_settings(&self, request: UpdateMailSettingsRequest) {

@@ -563,6 +563,14 @@ pub trait ChatBackend {
   }
   /// Revokes a source for good: its token stops working once the bridge reads the revocation.
   fn revoke_integration_source(&self, _conversation: ConversationId, _source: teamcraft_proto::SourceId) {}
+  /// The notetaker group of the verified workspace policy (e2ee.md §8.2); `None` before a policy
+  /// was verified. The call screen shows the notetaker from this, never from the server's word.
+  fn notetaker_policy(&self) -> Option<teamcraft_proto::NotetakerPolicy> {
+    None
+  }
+  /// Asks the notetaker into the conversation's call or sends it away: an encrypted, hidden
+  /// control message the notetaker reads (and decides on from the verified policy).
+  fn request_notetaker(&self, _conversation: ConversationId, _request: teamcraft_proto::NotetakerRequest) {}
   /// The channel's members with their roles; empty until the member list is loaded.
   fn channel_roles(&self, _conversation: ConversationId) -> Vec<crate::model::ChannelMember> {
     Vec::new()
@@ -945,6 +953,12 @@ pub trait AdminBackend {
   fn last_settings_test(&self) -> Option<(SettingsTestKind, SettingsTestResponse)> {
     None
   }
+  /// Whether the notetaker's OpenRouter key is stored (admin.md §3.6); `None` until loaded.
+  fn notetaker_settings(&self) -> Option<teamcraft_proto::AdminNotetakerResponse> {
+    None
+  }
+  /// Stores, replaces or removes the notetaker's key at the server (write-only).
+  fn set_notetaker_key(&self, _key: teamcraft_proto::SecretUpdate) {}
   fn runtime_settings(&self) -> Option<RuntimeSettingsResponse> {
     None
   }

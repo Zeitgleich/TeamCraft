@@ -636,6 +636,9 @@ pub struct ScheduleForm {
   /// Total number of occurrences; `None` repeats until cancelled.
   pub maybe_count: Option<u32>,
   pub has_lobby: bool,
+  /// The notetaker's account when "Notetaker joins the calls" is ticked (e2ee.md §8.2): invited like
+  /// a member, so it is in the chat's group before any call.
+  pub maybe_notetaker: Option<UserId>,
   /// Made when the dialog opens and kept for every submit of it, so a retry after a lost answer
   /// (or a second click) schedules the meeting only once.
   pub maybe_idempotency_key: Option<IdempotencyKey>,
@@ -654,6 +657,7 @@ impl ScheduleForm {
       interval: 1,
       maybe_count: None,
       has_lobby: true,
+      maybe_notetaker: None,
       maybe_idempotency_key: Some(IdempotencyKey::random()),
     }
   }
@@ -679,6 +683,18 @@ impl ScheduleForm {
       }
     }
     form
+  }
+
+  /// The notetaker `maybe_bot` attends: it is the "Notetaker joins the calls" box, not a member in
+  /// the people list.
+  pub fn with_notetaker(mut self, maybe_bot: Option<UserId>) -> Self {
+    if let Some(bot) = maybe_bot
+      && self.members.contains(&bot)
+    {
+      self.members.retain(|member| *member != bot);
+      self.maybe_notetaker = Some(bot);
+    }
+    self
   }
 
   /// The change to save: the time only when it moved (a meeting already under way can still get a
@@ -734,6 +750,9 @@ impl ScheduleForm {
       .iter()
       .map(|user_id| MeetingInvitee::User { user_id: *user_id })
       .collect();
+    if let Some(bot) = self.maybe_notetaker.filter(|bot| !self.members.contains(bot)) {
+      invitees.push(MeetingInvitee::User { user_id: bot });
+    }
     for external in &self.externals {
       let email = external.email.trim();
       if !is_plausible_email(email) {
@@ -1269,6 +1288,37 @@ mod tests {
       maybe_email,
       maybe_name: None,
       rsvp: RsvpStatus::NeedsAction,
+    }
+  }
+
+  mod notetaker {
+    use teamcraft_proto::Id;
+
+    use super::*;
+
+    #[test]
+    fn a_ticked_notetaker_is_invited_like_a_member() {
+      let mut form = filled_form();
+      let bot = UserId::from_snowflake(teamcraft_proto::Snowflake::new(99).unwrap());
+      assert!(form.to_request(NOW).unwrap().invitees.is_empty());
+      form.maybe_notetaker = Some(bot);
+      let invitees = form.to_request(NOW).unwrap().invitees;
+      assert_eq!(invitees, [MeetingInvitee::User { user_id: bot }]);
+    }
+
+    #[test]
+    fn an_attending_notetaker_is_the_box_not_a_member() {
+      let bot = UserId::from_snowflake(teamcraft_proto::Snowflake::new(99).unwrap());
+      let alice = UserId::from_snowflake(teamcraft_proto::Snowflake::new(5).unwrap());
+      let mut form = filled_form();
+      form.members = vec![alice, bot];
+      let form = form.with_notetaker(Some(bot));
+      assert_eq!(
+        (form.members.as_slice(), form.maybe_notetaker),
+        (&[alice][..], Some(bot))
+      );
+      let request = form.to_request(NOW).unwrap();
+      assert_eq!(request.invitees.len(), 2);
     }
   }
 

@@ -319,7 +319,7 @@ mod tests {
 
     #[test]
     fn malformed_fields_are_refused() {
-      let cases: [(fn(&mut NotetakerPolicy), NotetakerPolicyError); 6] = [
+      let cases: [(Change, NotetakerPolicyError); 6] = [
         (
           |p| p.transcription_model = "whisper".into(),
           NotetakerPolicyError::InvalidModel {
@@ -382,6 +382,9 @@ mod tests {
       assert_eq!(off.active_bot(), None);
     }
   }
+
+  /// An edit of a valid policy.
+  type Change = fn(&mut NotetakerPolicy);
 
   fn enabled() -> NotetakerPolicy {
     NotetakerPolicy {

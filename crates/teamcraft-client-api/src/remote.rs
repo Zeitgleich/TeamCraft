@@ -272,6 +272,10 @@ pub struct SecuritySnapshot {
     skip_serializing_if = "Option::is_none"
   )]
   pub maybe_screen_share_policy: Option<teamcraft_proto::ScreenSharePolicy>,
+  /// The notetaker group of the verified policy (e2ee.md §8.2); `None` before a policy was
+  /// verified (or from an older shell), which shows no notetaker controls.
+  #[serde(rename = "notetaker", default, skip_serializing_if = "Option::is_none")]
+  pub maybe_notetaker: Option<teamcraft_proto::NotetakerPolicy>,
   /// The key backup as this device knows it (issue #410); `None` from an older shell.
   #[serde(rename = "backup", default, skip_serializing_if = "Option::is_none")]
   pub maybe_backup: Option<crate::security::KeyBackupState>,
@@ -894,6 +898,10 @@ pub enum ChatAction {
     conversation: ConversationId,
     source: teamcraft_proto::SourceId,
   },
+  RequestNotetaker {
+    conversation: ConversationId,
+    request: teamcraft_proto::NotetakerRequest,
+  },
   AddMemberWithHistory {
     conversation: ConversationId,
     user: UserId,
@@ -1203,6 +1211,10 @@ impl ChatAction {
       Self::RevokeIntegrationSource { conversation, source } => {
         backend.revoke_integration_source(conversation, source)
       },
+      Self::RequestNotetaker {
+        conversation,
+        request,
+      } => backend.request_notetaker(conversation, request),
       Self::InviteToSpace { invite } => backend.invite_to_space(invite),
       Self::AddSpaceMembers {
         space,

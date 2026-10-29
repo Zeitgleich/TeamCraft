@@ -1320,3 +1320,46 @@
   outline-color: var(--on-fill);
 }
 
+
+/* The notetaker (e2ee.md §8.2): the badge, the banner and its tile's label say that the call's
+   audio leaves the end-to-end encryption while it is there. */
+.e2ee-pill.is-notetaker {
+  background: var(--call-notice-bg);
+  color: var(--call-notice-text);
+}
+
+.call-notetaker-banner {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 12px;
+  margin: 8px 20px 0;
+  padding: 8px 12px;
+  border-radius: var(--radius);
+  background: var(--call-notice-bg);
+  color: var(--call-notice-text);
+  font-size: var(--text-sm);
+}
+
+.call-notetaker-banner p {
+  flex: 1;
+  min-width: 12rem;
+  margin: 0;
+}
+
+.call-notetaker-banner .btn {
+  margin-left: auto;
+}
+
+.prejoin-notetaker {
+  margin: 8px 0 0;
+}
+
+.tile-role {
+  padding: 0 6px;
+  border-radius: var(--radius-pill);
+  background: var(--call-notice-bg);
+  color: var(--call-notice-text);
+  font-size: var(--text-xs);
+  white-space: nowrap;
+}

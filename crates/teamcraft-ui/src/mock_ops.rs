@@ -415,6 +415,27 @@ impl AdminBackend for MockBackend {
     Some(self.ops.borrow().settings.mail.clone())
   }
 
+  fn notetaker_settings(&self) -> Option<teamcraft_proto::AdminNotetakerResponse> {
+    Some(self.ops.borrow().settings.notetaker.clone())
+  }
+
+  fn set_notetaker_key(&self, key: teamcraft_proto::SecretUpdate) {
+    let mut ops = self.ops.borrow_mut();
+    let now = self.now;
+    let notetaker = &mut ops.settings.notetaker;
+    match key {
+      teamcraft_proto::SecretUpdate::Keep => {},
+      teamcraft_proto::SecretUpdate::Clear => {
+        notetaker.is_key_stored = false;
+        notetaker.maybe_key_updated_at = None;
+      },
+      teamcraft_proto::SecretUpdate::Set(_) => {
+        notetaker.is_key_stored = true;
+        notetaker.maybe_key_updated_at = Some(teamcraft_proto::UnixMillis(now));
+      },
+    }
+  }
+
   fn save_mail_settings(&self, request: UpdateMailSettingsRequest) {
     let mut ops = self.ops.borrow_mut();
     ops.settings.save_mail(request);

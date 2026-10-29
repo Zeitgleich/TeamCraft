@@ -1924,6 +1924,14 @@ impl<S: LocalStore> ChatBackend for CoreChatBackend<S> {
     self.ui_revoke_integration_source(conversation, source);
   }
 
+  fn notetaker_policy(&self) -> Option<teamcraft_proto::NotetakerPolicy> {
+    crate::notetaker::notetaker_policy(&self.store)
+  }
+
+  fn request_notetaker(&self, conversation: ConversationId, request: teamcraft_proto::NotetakerRequest) {
+    self.ui_request_notetaker(conversation, request);
+  }
+
   fn channel_roles(&self, conversation: ConversationId) -> Vec<teamcraft_client_api::model::ChannelMember> {
     let stored: Option<teamcraft_proto::ListConversationMembersResponse> = self.read(records::get_json(
       &self.store,
