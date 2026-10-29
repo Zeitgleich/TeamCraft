@@ -427,12 +427,68 @@ not measured (the Mac ran on AC power, and `powermetrics` needs root); CPU time 
 - Viewers: AV1 is decoded in hardware where it is announced on Apple silicon (M3 and later) and
   by dav1d in Chrome and Firefox (not measured here).
 
-Seen on the way, not changed here: VideoToolbox at an average bitrate (`rate-control=abr`, what
-screen shares use since #530) sent the *lower* layers of the scrolling synthetic page far above
-their targets (the 720p layer 9 Mbit/s for 1.7, a 4K share's 1080p layer 20 Mbit/s for 3.7),
-while the top layer stayed far below its own. `data-rate-limits` didn't change it. The synthetic
-1 px text is harsher than real text after scaling, but a viewer on a weak link may get much more
-than its layer's bitrate: a follow-up.
+Seen on the way: VideoToolbox sent the *lower* layers of the scrolling page far above their
+targets. Fixed in #979 (next section).
+
+### Screen layers at their bitrate (issue #979)
+
+VideoToolbox at an average bitrate (`rate-control=abr`, what screen shares use since #530, so a
+still screen sends next to nothing) encodes at the `quality` GStreamer always sets
+(`kVTCompressionPropertyKey_Quality`, 0.5 by default) and ignores the bitrate: with the 720p
+layer's bitrate set to 100 kbit/s instead of 1.7 Mbit/s it still sent 9.1 Mbit/s of scrolled text,
+and `data-rate-limits` (`kVTCompressionPropertyKey_DataRateLimits`, set and accepted) changed
+nothing either. The top layer of a share stays below its target because the scrolling page moves
+by whole pixels in it; a half-size layer gets half-pixel motion that the encoder can't follow by
+moving blocks, and at a fixed quality it pays for that in bits. A constant bitrate
+(`rate-control=cbr`) holds the target but spends it on every change: 5.8 of 6.6 Mbit/s for a
+line being typed on a 1440p screen, against 22 kbit/s at the average bitrate. A `quality` changed
+on a running encoder is taken by GStreamer but not by VideoToolbox.
+
+So `video_gstreamer::QualityGovernor` measures each VideoToolbox screen layer's pictures (the last
+eight, without keyframes and the 200 ms of pictures after one, which VideoToolbox makes several
+times larger) and rebuilds the layer's encoder at a lower `quality` while it sends more than its
+bitrate, in a step sized by how far over (ln(share) / 4), and at a higher one once it sends less
+than half (aimed at 60 %, at most once a second; straight back to 0.5 below 5 %, as a screen
+that stands still sends). Each change costs a keyframe: 2 to 4 changes per scroll here. Cameras (constant
+bitrate) and the other platforms' encoders (VA-API, Media Foundation: constant bitrate) are not
+touched.
+
+`screen_bench`, M4 Max, macOS 26.6, GStreamer 1.28.8, 10 s per row, every frame encoded; target and
+sent in kbit/s, luma PSNR of the layer's own pictures (the synthetic 1 px text, harsher than real
+text after scaling):
+
+| Profile, scene        | Layer      | Target | Before: sent (PSNR) | After: sent (PSNR) | Keyframes after |
+|-----------------------|------------|-------:|--------------------:|-------------------:|----------------:|
+| detail, scroll        | 720p       |   1659 |      9096 (31.3 dB) |     1352 (19.2 dB) |               6 |
+|                       | 1440p      |   6636 |       281 (40.8 dB) |      281 (40.8 dB) |               1 |
+| detail 4K, scroll     | 540p       |    933 |     10616 (18.7 dB) |      502 (14.6 dB) |               3 |
+|                       | 1080p      |   3732 |     20457 (32.4 dB) |     2698 (20.9 dB) |               4 |
+|                       | 4K         |  14930 |       382 (43.8 dB) |      382 (43.8 dB) |               1 |
+| motion, scroll        | 540p60     |   1866 |     23231 (29.9 dB) |     1261 (16.6 dB) |               5 |
+|                       | 1080p60    |   7465 |      1099 (36.5 dB) |     1100 (36.5 dB) |               2 |
+| motion 4K, scroll     | 720p60     |   3318 |     18300 (31.3 dB) |     2554 (19.2 dB) |               6 |
+|                       | 1440p60    |  13271 |      1038 (40.7 dB) |     1038 (40.7 dB) |               2 |
+
+Still screens (a line being typed) send the same before and after, every layer at its old quality
+(detail: 31 and 70 kbit/s at 31.1 and 36.4 dB; 4K: 119, 41 and 216 kbit/s); with
+`--frames changes` (only changed pictures, plus one a second, as a share sends) 11 and 22 kbit/s,
+and the scrolling rows as above. The scrolled lower layers lose their sharpness (as with a
+constant bitrate: 20.7 dB for the 720p layer at 1515 kbit/s) and get it back with the first
+pictures after the scroll stops (on a still screen the next picture once a second, then a sharp
+keyframe with the one after). Encoding costs a little more while a layer is held (detail scroll: 0.85 ms
+CPU per frame against 0.6), and a rebuilt encoder answers each frame before the next (3.4 ms wall
+per frame against 0.4: the first encoder of a layer, whose first picture takes longer than the
+50 ms wait, then hands each picture out with the next frame).
+
+Through the real SFU (`screen_layer_bitrate` in the SFU suite, release build with
+`--features teamcraft-media/gstreamer`; the viewer picks each layer and measures 4 s of it):
+
+| Share | Layer | Target | Before            | After            | OpenH264 (debug build) |
+|-------|-------|-------:|------------------:|-----------------:|-----------------------:|
+| 1440p | 720p  |   1658 | 22613 (1363 %)    | 1235 (74 %)      | –                      |
+|       | 1440p |   6635 | 537 (8 %)         | 575 (9 %)        | –                      |
+| 720p  | 360p  |    500 | 6428 (1286 %)     | 314 (63 %)       | 480–585 (8 frames)     |
+|       | 720p  |   2000 | 269 (13 %)        | 259 (13 %)       | 334–351                |
 
 ## Clients
 

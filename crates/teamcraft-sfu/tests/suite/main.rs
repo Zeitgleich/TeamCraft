@@ -14,6 +14,7 @@ mod multi_device;
 mod native_client;
 mod reconnect;
 mod reporting;
+mod screen_layer_bitrate;
 mod screen_sharpness;
 mod session_close;
 mod sfu_restart;
