@@ -21,8 +21,12 @@ pub struct Liveness {
 
 #[derive(Debug, Error)]
 pub enum HealthError {
-  #[error("the liveness file {path} can't be read: {source}")]
-  Unreadable { path: String, source: std::io::Error },
+  #[error("the liveness file {path} can't be read")]
+  Unreadable {
+    path: String,
+    #[source]
+    source: std::io::Error,
+  },
   #[error("the liveness file holds no time")]
   Malformed,
   #[error("the worker last ran {age_secs} s ago")]
