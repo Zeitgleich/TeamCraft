@@ -14,7 +14,8 @@ use crate::auth::tauri;
 use crate::backend::Backend;
 use crate::calls::CallPhase;
 use crate::calls::{
-  BackgroundEffect, CallEvent, CallRequest, CallStatusSounds, CameraFallback, VideoQuality,
+  AudioDeviceChange, AudioKind, AudioOffer, BackgroundEffect, CallEvent, CallRequest, CallStatusSounds,
+  CameraFallback, MediaDevices, VideoQuality, audio_device_change,
 };
 use crate::clock::now_ms;
 use crate::components::announcement_banner::AnnouncementBanner;
@@ -55,7 +56,7 @@ use crate::prefs::{CallPrefs, Zoom};
 use crate::reactive::{OwnerLiveness, use_interval};
 use crate::sections::badge_count;
 use crate::settings::{Settings, Theme};
-use crate::state::{AppState, MainView, Overlay, RailEntry, SidePanel, ToastTone};
+use crate::state::{AppState, MainView, Overlay, RailEntry, SidePanel, ToastAction, ToastTone};
 use crate::toast_motion::{Swipe, use_flip_stack};
 use crate::toast_timer::Hold;
 use crate::viewport::{CompactDepth, CompactPane, PaneStep};
@@ -1010,6 +1011,87 @@ fn track_banner_height(banners: NodeRef<leptos::html::Div>) {
   });
 }
 
+/// What microphones or speakers plugged in or out mean for the running call (#986), and what the
+/// user hears about it.
+fn react_to_audio_devices(state: AppState, previous: &MediaDevices, current: &MediaDevices) {
+  let i18n = use_i18n();
+  let call = state.call;
+  let mut appeared = Vec::new();
+  let mut moved = Vec::new();
+  for kind in AudioKind::ALL {
+    // A browser that can't route sound plays on the system's output whatever is listed.
+    if kind == AudioKind::Speakers && !crate::components::call_video::can_choose_speakers() {
+      continue;
+    }
+    let chosen = call.audio_id(kind).get_untracked();
+    match audio_device_change(kind.of(previous), kind.of(current), &chosen) {
+      Some(AudioDeviceChange::DefaultMoved(device)) => moved.push((kind, device.label)),
+      Some(AudioDeviceChange::Gone { gone, maybe_default }) => {
+        // For this call only: the remembered choice comes back with the device (offered then).
+        call.choose_audio(kind, String::new());
+        let text = match maybe_default {
+          Some(default) => i18n.t_with(
+            "call-audio-gone",
+            &[("gone", gone.label.as_str()), ("used", default.label.as_str())],
+          ),
+          None => i18n.t_with("call-audio-gone-none", &[("gone", gone.label.as_str())]),
+        };
+        state.show_toast(text);
+      },
+      Some(AudioDeviceChange::Appeared(device)) => appeared.push((kind, device)),
+      None => {},
+    }
+  }
+  // Either choice opens the microphone and the speakers again (both backends switch them
+  // together), so a headset that became the default for both is one switch and one note.
+  if let Some((kind, _)) = moved.first() {
+    call.reopen_audio(*kind);
+  }
+  match moved.as_slice() {
+    [(_, microphone), (_, speakers)] if microphone == speakers => {
+      state.show_brief_toast(i18n.t_with("call-audio-default-moved", &[("device", microphone.as_str())]))
+    },
+    _ => {
+      for (kind, label) in &moved {
+        let key = audio_key(
+          *kind,
+          "call-microphone-default-moved",
+          "call-speakers-default-moved",
+        );
+        state.show_brief_toast(i18n.t_with(key, &[("device", label.as_str())]));
+      }
+    },
+  }
+  // A headset comes as a microphone and speakers of one name: one offer for both. Two devices of
+  // different names at once are rare; the microphone is offered then.
+  let Some((_, first)) = appeared.first() else {
+    return;
+  };
+  let label = first.label.clone();
+  let id_of = |wanted: AudioKind| {
+    appeared
+      .iter()
+      .find(|(kind, device)| *kind == wanted && device.label == label)
+      .map(|(_, device)| device.id.clone())
+  };
+  call.maybe_audio_offer.set(Some(AudioOffer {
+    maybe_microphone: id_of(AudioKind::Microphone),
+    maybe_speakers: id_of(AudioKind::Speakers),
+    label: label.clone(),
+  }));
+  state.show_toast_with_action(
+    i18n.t_with("call-audio-offer", &[("device", label.as_str())]),
+    ToastAction::UseAudioDevice,
+  );
+}
+
+fn audio_key(kind: AudioKind, microphone: &'static str, speakers: &'static str) -> &'static str {
+  match kind {
+    AudioKind::Microphone => microphone,
+    AudioKind::Speakers => speakers,
+  }
+}
+
 /// The user's call actions go to the call backend (the desktop shell or the page's call module), and
 /// calls that ring there show the dialog.
 pub(crate) fn connect_calls(state: AppState) {
@@ -1035,8 +1117,9 @@ pub(crate) fn connect_calls(state: AppState) {
       CallEvent::Muted(is_muted) => backend.set_call_muted(is_muted),
       CallEvent::Deafened(is_deafened) => backend.set_call_deafened(is_deafened),
       CallEvent::MoveHere => backend.move_call_here(),
-      CallEvent::Microphone(device) => backend.select_microphone(Some(device)),
-      CallEvent::Speakers(device) => backend.select_speakers(Some(device)),
+      // An empty id is the system default.
+      CallEvent::Microphone(device) => backend.select_microphone(Some(device).filter(|id| !id.is_empty())),
+      CallEvent::Speakers(device) => backend.select_speakers(Some(device).filter(|id| !id.is_empty())),
       CallEvent::TestSpeakers(device) => backend.test_speakers(Some(device)),
       CallEvent::RefreshDevices => backend.refresh_media_devices(),
       CallEvent::Preview(preview) => backend.set_call_preview(preview),
@@ -1089,6 +1172,24 @@ pub(crate) fn connect_calls(state: AppState) {
   Effect::new(move |_| {
     call.camera_id.track();
     call.send_camera_choice();
+  });
+  // The microphone and speakers likewise (#986): the remembered ones at start, then every change
+  // (a pick in the call or before it, the settings), once each; a running call switches at once.
+  Effect::new(move |_| {
+    call.microphone_id.track();
+    call.speaker_id.track();
+    call.send_audio_choices();
+  });
+  // Microphones and speakers plugged in or out during a call (#986): a call on the system
+  // default follows it, the device in use unplugged gives way to the default, and a new one is
+  // offered. The desktop lists them every few seconds during a call, browsers on `devicechange`.
+  Effect::new(move |previous: Option<MediaDevices>| {
+    let devices = state.read(|backend| backend.media_devices());
+    let is_in_call = call.phase.get() == CallPhase::Active;
+    if is_in_call && let Some(previous) = &previous {
+      untrack(|| react_to_audio_devices(state, previous, &devices));
+    }
+    devices
   });
   // Another camera stood in for the chosen one (declined on the iPhone, in use): the user learns
   // which one is used, and the pickers show it.

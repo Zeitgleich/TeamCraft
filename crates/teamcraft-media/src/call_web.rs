@@ -92,7 +92,7 @@ use crate::audio_frame::{
   EncodedAudioFrame, FRAME_SAMPLES_PER_CHANNEL, SAMPLE_RATE_HZ, planned_loss_percent,
 };
 use crate::audio_io::{AudioDeviceChoice, AudioDeviceId, AudioDeviceInfo, AudioSink, AudioSource, sine_tone};
-use crate::audio_level::{DEFAULT_VOICE_THRESHOLD_DBOV, measure_audio_level};
+use crate::audio_level::{CallMeter, DEFAULT_VOICE_THRESHOLD_DBOV, SharedLevel, measure_audio_level};
 use crate::call_auth::CallKeyAuthenticator;
 use crate::call_cues::{CallCue, CuePlayer, StatusCues};
 use crate::call_engine::{
@@ -153,6 +153,8 @@ pub struct WebCall {
   inputs: mpsc::UnboundedSender<Input>,
   events: mpsc::UnboundedReceiver<CallEngineEvent>,
   finished: oneshot::Receiver<Result<CallStats, WebCallError>>,
+  /// The microphone's newest meter reading (#986).
+  microphone_level: SharedLevel,
 }
 
 /// How to reach the SFU and what to send and play.
@@ -555,9 +557,11 @@ impl WebCall {
     let (event_tx, events) = mpsc::unbounded();
     let (finished_tx, finished) = oneshot::channel();
     let task_inputs = inputs.clone();
+    let microphone_level = SharedLevel::default();
+    let meter = CallMeter::new(microphone_level.clone());
     spawn_local(async move {
       let channels = (task_inputs, input_rx, event_tx);
-      let result = run_call(config, transport, sessions, audio, channels).await;
+      let result = run_call(config, transport, sessions, audio, channels, meter).await;
       // The app may have dropped the call without waiting for the result.
       let _ = finished_tx.send(result);
     });
@@ -565,7 +569,14 @@ impl WebCall {
       inputs,
       events,
       finished,
+      microphone_level,
     })
+  }
+
+  /// The microphone's level (0.0 to 1.0) as the call captures it, also while muted, about ten
+  /// readings a second; silence while no microphone delivers. For the call's device menu (#986).
+  pub fn microphone_level(&self) -> SharedLevel {
+    self.microphone_level.clone()
   }
 
   pub fn set_muted(&self, is_muted: bool) {
@@ -826,8 +837,32 @@ pub async fn picked_screen(request: Promise) -> Result<MediaStream, WebCallError
 }
 
 /// Asks for the microphone (`getUserMedia`) with the browser's echo cancellation, noise
-/// suppression and gain control, as the call sends it.
+/// suppression and gain control, as the call sends it. A chosen microphone that is gone
+/// (unplugged since it was picked) gives way to the default (#986).
 async fn capture_microphone(choice: &AudioDeviceChoice) -> Result<MediaStream, WebCallError> {
+  match open_microphone(choice).await {
+    Err(error) if is_gone_device(choice, &error) => {
+      warn!(%error, "the chosen microphone is gone; using the default");
+      open_microphone(&AudioDeviceChoice::Default).await
+    },
+    other => other,
+  }
+}
+
+/// Whether opening `choice` failed because the device isn't there (any more): a stored or picked
+/// id the browser no longer lists. The default failing that way means there is no microphone.
+fn is_gone_device(choice: &AudioDeviceChoice, error: &WebCallError) -> bool {
+  matches!(choice, AudioDeviceChoice::Device(_))
+    && matches!(
+      error,
+      WebCallError::MediaAccess {
+        reason: MediaAccessReason::NotFound,
+        ..
+      }
+    )
+}
+
+async fn open_microphone(choice: &AudioDeviceChoice) -> Result<MediaStream, WebCallError> {
   let track_constraints = MediaTrackConstraints::new();
   track_constraints.set_echo_cancellation(&JsValue::TRUE);
   track_constraints.set_noise_suppression(&JsValue::TRUE);
@@ -916,6 +951,7 @@ async fn run_call(
   sessions: OpenSessions,
   mut audio: WebAudio,
   (inputs, mut input_rx, events): CallChannels,
+  meter: CallMeter,
 ) -> Result<CallStats, WebCallError> {
   let mut engine = CallEngine::new(config.engine.clone(), Instant::now());
   if let Some(roster) = &config.maybe_trusted_roster {
@@ -951,6 +987,7 @@ async fn run_call(
     encoder: OpusEncoder::new(&inputs, OpusProfile::Voice)?,
     maybe_screen_sound: None,
     remotes: BTreeMap::new(),
+    meter,
     source: config.source.clone(),
     tone_position: 0,
     is_muted: config.is_muted_at_start,
@@ -1053,6 +1090,8 @@ struct CallState<'a> {
   /// The running screen share's sound, while it is sent.
   maybe_screen_sound: Option<ScreenSound>,
   remotes: BTreeMap<RemoteStream, RemoteAudio>,
+  /// Measures the microphone for the call's device menu (#986).
+  meter: CallMeter,
   source: AudioSource,
   tone_position: u64,
   is_muted: bool,
@@ -1146,6 +1185,7 @@ impl CallState<'_> {
         origin: AudioOrigin::Microphone,
         samples,
       } => {
+        self.meter.push(&samples, Instant::now());
         if !self.is_muted {
           self.encoder.push(&samples)?;
         }
@@ -1295,6 +1335,7 @@ impl CallState<'_> {
   async fn on_pulse(&mut self, engine: &mut CallEngine, audio: &WebAudio) -> Result<Flow, WebCallError> {
     self.pulses.taken();
     let now = Instant::now();
+    self.meter.tick(now);
     for _ in 0..self.frame_cadence.due(now) {
       self.on_frame_tick(audio)?;
       if self.is_ending_lost && !self.cues.is_playing(CallCue::ConnectionLost) {
@@ -1684,9 +1725,13 @@ impl CallState<'_> {
       },
       Command::SwitchAudio { source, sink, done } => {
         // Inputs queue up while the browser opens the new devices (or asks for permission).
+        // The mute stays: it lives in the call, not in the capture.
         let result = audio.switch(&source, &sink, self.inputs).await;
         match &result {
-          Ok(()) => self.source = source,
+          Ok(()) => {
+            self.source = source;
+            self.meter.restart();
+          },
           Err(error) => warn!(%error, "switching audio devices failed"),
         }
         // The caller may have given up waiting.
@@ -3070,6 +3115,30 @@ mod tests {
           );
         }
       }
+    }
+
+    /// #986: a microphone unplugged since it was picked gives way to the default; a refusal or
+    /// a missing default does not.
+    #[test]
+    fn only_a_chosen_microphone_that_is_gone_gives_way_to_the_default() {
+      let refused = |reason| WebCallError::MediaAccess {
+        input: MediaInput::Microphone,
+        reason,
+        message: String::new(),
+      };
+      let chosen = AudioDeviceChoice::Device(AudioDeviceId::new("usb-headset"));
+      assert!(is_gone_device(&chosen, &refused(MediaAccessReason::NotFound)));
+      for reason in [
+        MediaAccessReason::Denied,
+        MediaAccessReason::InUse,
+        MediaAccessReason::Other,
+      ] {
+        assert!(!is_gone_device(&chosen, &refused(reason)), "{reason:?}");
+      }
+      assert!(!is_gone_device(
+        &AudioDeviceChoice::Default,
+        &refused(MediaAccessReason::NotFound)
+      ));
     }
 
     #[test]

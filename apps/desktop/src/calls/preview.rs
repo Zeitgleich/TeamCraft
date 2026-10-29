@@ -170,7 +170,7 @@ impl LevelWatch {
     }
   }
 
-  fn publish(&self, level: f32) {
+  pub(super) fn publish(&self, level: f32) {
     let mut maybe_watcher = self.lock();
     if maybe_watcher
       .as_ref()

@@ -8,6 +8,7 @@ use crate::calls::{
   CallEvent, CallKind, CallLayout, CallRequest, MediaDevice, Participant, ScreenContentMode,
   ScreenShareResolution, ScreenShareSound, selected_camera_is_rear,
 };
+use crate::components::call_audio_menu::AudioMenu;
 use crate::components::call_chat::{CallChat, CallChatPanel, CallChatToast};
 use crate::components::call_prejoin::call_heading;
 use crate::components::call_video::{
@@ -207,6 +208,7 @@ pub fn CallScreen(request: CallRequest) -> impl IntoView {
       effects_open.set(false);
       share_open.set(false);
       call.maybe_quality_menu.set(None);
+      call.is_audio_menu_open.set(false);
       call.emit(CallEvent::RefreshDevices);
     }
   });
@@ -216,6 +218,16 @@ pub fn CallScreen(request: CallRequest) -> impl IntoView {
       effects_open.set(false);
       share_open.set(false);
       call.is_camera_menu_open.set(false);
+      call.is_audio_menu_open.set(false);
+    }
+  });
+  // So does the microphone and speaker menu (#986), which lists the devices itself.
+  Effect::new(move |_| {
+    if call.is_audio_menu_open.get() {
+      effects_open.set(false);
+      share_open.set(false);
+      call.is_camera_menu_open.set(false);
+      call.maybe_quality_menu.set(None);
     }
   });
   // The next call screen starts with the menus closed.
@@ -223,6 +235,7 @@ pub fn CallScreen(request: CallRequest) -> impl IntoView {
     // Gone only while the app itself is torn down.
     let _ = call.is_camera_menu_open.try_set(false);
     let _ = call.maybe_quality_menu.try_set(None);
+    let _ = call.is_audio_menu_open.try_set(false);
   });
   let pick_camera = move |id: String| {
     call.is_camera_menu_open.set(false);
@@ -550,6 +563,9 @@ pub fn CallScreen(request: CallRequest) -> impl IntoView {
         </div>
       </Show>
       {move || call.maybe_quality_menu.get().map(|stream_id| view! { <VideoQualityMenu stream_id=stream_id /> })}
+      <Show when=move || call.is_audio_menu_open.get() fallback=|| ()>
+        <AudioMenu />
+      </Show>
       <Show when=move || call.is_camera_menu_open.get() fallback=|| ()>
         <div class="effects-popover camera-popover" role="dialog" aria-label=move || i18n.t("control-camera-choose")>
           <h2 id="camera-menu-title">{move || i18n.t("prejoin-camera")}</h2>
@@ -570,12 +586,26 @@ pub fn CallScreen(request: CallRequest) -> impl IntoView {
         </div>
       </Show>
       <footer class="call-controls" role="toolbar" aria-label=move || i18n.t("call-controls-label")>
-        <ControlButton
-          is_off=Signal::derive(move || !call.is_mic_on.get())
-          icon=Signal::derive(move || if call.is_mic_on.get() { IconName::Mic } else { IconName::MicOff })
-          label=Signal::derive(move || if call.is_mic_on.get() { i18n.t("control-mic-mute") } else { i18n.t("control-mic-unmute") })
-          on_press=move || call.set_muted(call.is_mic_on.get_untracked())
-        />
+        // The microphone with its menu of microphones and speakers (#986).
+        <div class="control-split">
+          <ControlButton
+            is_off=Signal::derive(move || !call.is_mic_on.get())
+            icon=Signal::derive(move || if call.is_mic_on.get() { IconName::Mic } else { IconName::MicOff })
+            label=Signal::derive(move || if call.is_mic_on.get() { i18n.t("control-mic-mute") } else { i18n.t("control-mic-unmute") })
+            on_press=move || call.set_muted(call.is_mic_on.get_untracked())
+          />
+          <button
+            class="control-btn control-menu-btn"
+            class:active=move || call.is_audio_menu_open.get()
+            aria-label=move || i18n.t("control-audio-choose")
+            title=move || i18n.t("control-audio-choose")
+            aria-haspopup="dialog"
+            aria-expanded=move || call.is_audio_menu_open.get().to_string()
+            on:click=move |_| call.is_audio_menu_open.update(|open| *open = !*open)
+          >
+            <Icon name=IconName::ChevronDown class="is-flipped" />
+          </button>
+        </div>
         <Show when=move || is_real fallback=|| ()>
           <ControlButton
             is_off=Signal::derive(move || call.is_deafened.get())
@@ -622,6 +652,7 @@ pub fn CallScreen(request: CallRequest) -> impl IntoView {
               effects_open.set(false);
               call.is_camera_menu_open.set(false);
               call.maybe_quality_menu.set(None);
+              call.is_audio_menu_open.set(false);
               share_open.update(|open| *open = !*open);
             }
           }
@@ -645,6 +676,7 @@ pub fn CallScreen(request: CallRequest) -> impl IntoView {
               share_open.set(false);
               call.is_camera_menu_open.set(false);
               call.maybe_quality_menu.set(None);
+              call.is_audio_menu_open.set(false);
               effects_open.update(|open| *open = !*open);
             }
           />

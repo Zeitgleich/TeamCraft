@@ -42,8 +42,9 @@ use wtransport::tls::Sha256Digest;
 use wtransport::{ClientConfig, Connection, Endpoint, RecvStream, SendStream};
 
 use crate::audio_codec::{FRAME_SAMPLES_PER_CHANNEL, OpusEncoderConfig};
-use crate::audio_device::{AudioDeviceError, AudioInput, AudioOutput, PlaybackBuffer};
-use crate::audio_io::{AudioSink, AudioSource, sine_tone};
+use crate::audio_device::{AudioDeviceError, AudioInput, AudioOutput, PlaybackBuffer, open_or_default};
+use crate::audio_io::{AudioDeviceChoice, AudioSink, AudioSource, sine_tone};
+use crate::audio_level::{CallMeter, SharedLevel};
 use crate::audio_pipeline::{AudioPipelineError, CapturePipeline, PlaybackMixer};
 use crate::call_auth::{CallKeyAuthenticator, DeviceCallKeyAuthenticator};
 use crate::call_cues::{CallCue, CuePlayer, StatusCues};
@@ -88,6 +89,8 @@ pub struct NativeCall {
   task: JoinHandle<Result<CallStats, NativeCallError>>,
   /// The id of the next video publication: every one of the call goes through this handle.
   next_publication: AtomicU32,
+  /// The microphone's newest meter reading (#986).
+  microphone_level: SharedLevel,
 }
 
 /// How to reach the SFU and what to send and play.
@@ -368,18 +371,27 @@ impl NativeCall {
     let link = Link::open(&config.sfu_url, &hashes, &config.resilience).await?;
     let (commands, command_rx) = mpsc::unbounded_channel();
     let (event_tx, events) = mpsc::unbounded_channel();
+    let microphone_level = SharedLevel::default();
     let task = tokio::spawn(run_call(
       config,
       link,
       (commands.downgrade(), command_rx),
       event_tx,
+      CallMeter::new(microphone_level.clone()),
     ));
     Ok(Self {
       commands,
       events,
       task,
       next_publication: AtomicU32::new(0),
+      microphone_level,
     })
+  }
+
+  /// The microphone's level (0.0 to 1.0) as the call captures it, also while muted, about ten
+  /// readings a second; silence while no microphone delivers. For the call's device menu (#986).
+  pub fn microphone_level(&self) -> SharedLevel {
+    self.microphone_level.clone()
   }
 
   pub fn set_muted(&self, is_muted: bool) {
@@ -615,6 +627,7 @@ async fn run_call(
     mpsc::UnboundedReceiver<Command>,
   ),
   events: mpsc::UnboundedSender<CallEngineEvent>,
+  mut meter: CallMeter,
 ) -> Result<CallStats, NativeCallError> {
   let start = Instant::now();
   let mut engine = CallEngine::new(config.engine.clone(), start);
@@ -641,7 +654,8 @@ async fn run_call(
     capture.set_muted(true);
   }
   let mut source = config.source.clone();
-  let mut devices = AudioDevices::open(&source, &config.sink)?;
+  // A remembered device unplugged since gives way to the default: the call still starts (#986).
+  let mut devices = AudioDevices::open(&source, &config.sink, GoneDevice::UseDefault)?;
   let mut sinks = Sinks {
     events,
     mixer,
@@ -686,6 +700,7 @@ async fn run_call(
       },
       maybe_samples = recv_capture(&mut devices.maybe_capture) => {
         if let Some(samples) = maybe_samples {
+          meter.push(&samples, Instant::now());
           for frame in capture.push(&samples)? {
             engine.send_audio(&frame, Instant::now());
             sinks.stats.frames_sent += 1;
@@ -720,6 +735,7 @@ async fn run_call(
       },
       _ = timer_tick.tick() => {
         let now = Instant::now();
+        meter.tick(now);
         engine.on_timer(now);
         if connection.is_out_of_time(now) {
           break Err(NativeCallError::ConnectionLost);
@@ -763,9 +779,12 @@ async fn run_call(
           },
           Some(Command::SwitchAudio { source: new_source, sink, done }) => {
             // Open the new devices before closing the old ones, so a failure changes nothing.
-            let result = AudioDevices::open(&new_source, &sink).map(|new_devices| {
+            // The mute stays: it lives in the engine and the capture pipeline, not the device.
+            // A device picked just as it went away fails, and the call keeps the old one.
+            let result = AudioDevices::open(&new_source, &sink, GoneDevice::Fail).map(|new_devices| {
               std::mem::replace(&mut devices, new_devices).close();
               source = new_source;
+              meter.restart();
             });
             if let Err(error) = &result {
               warn!(%error, "switching audio devices failed");
@@ -1886,9 +1905,18 @@ impl VideoCounts {
   }
 }
 
+/// What opening a chosen audio device that is gone does.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum GoneDevice {
+  /// Opens the system default instead (a call starting with a stale remembered choice).
+  UseDefault,
+  /// Fails with [`AudioDeviceError::DeviceGone`] (a switch: the running devices stay).
+  Fail,
+}
+
 impl AudioDevices {
   /// Starts the audio thread with the devices the source and sink need.
-  fn open(source: &AudioSource, sink: &AudioSink) -> Result<Self, AudioDeviceError> {
+  fn open(source: &AudioSource, sink: &AudioSink, gone: GoneDevice) -> Result<Self, AudioDeviceError> {
     let (capture_tx, capture_rx) = mpsc::unbounded_channel();
     let maybe_output_choice = match sink {
       AudioSink::Speakers(choice) => Some(choice.clone()),
@@ -1907,15 +1935,26 @@ impl AudioDevices {
     let (ready_tx, ready_rx) = std_mpsc::channel::<Result<(), AudioDeviceError>>();
     let thread = std::thread::spawn(move || {
       let opened = (|| -> Result<(Option<AudioInput>, Option<AudioOutput>), AudioDeviceError> {
-        let maybe_input = match &maybe_input_choice {
-          Some(choice) => Some(AudioInput::open(choice, move |samples| {
+        let open_input = |choice: &AudioDeviceChoice| {
+          let capture_tx = capture_tx.clone();
+          AudioInput::open(choice, move |samples| {
             // The call task may be gone; the device thread stops right after.
             let _ = capture_tx.send(samples.to_vec());
-          })?),
-          None => None,
+          })
+        };
+        let maybe_input = match (&maybe_input_choice, gone) {
+          (Some(choice), GoneDevice::UseDefault) => Some(open_or_default(choice, open_input)?),
+          (Some(choice), GoneDevice::Fail) => Some(open_input(choice)?),
+          (None, _) => None,
         };
         let maybe_output = match (&maybe_output_choice, playback_for_thread) {
-          (Some(choice), Some(buffer)) => Some(AudioOutput::open(choice, buffer)?),
+          (Some(choice), Some(buffer)) => {
+            let open_output = |choice: &AudioDeviceChoice| AudioOutput::open(choice, Arc::clone(&buffer));
+            Some(match gone {
+              GoneDevice::UseDefault => open_or_default(choice, open_output)?,
+              GoneDevice::Fail => open_output(choice)?,
+            })
+          },
           _ => None,
         };
         Ok((maybe_input, maybe_output))

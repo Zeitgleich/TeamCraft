@@ -35,6 +35,7 @@ use teamcraft_client_api::page_calls::{
 use teamcraft_client_api::remote::{CallAction, CallActionAnswer, CallSnapshot};
 use teamcraft_client_api::video_stats::VideoStatsReport;
 use teamcraft_media::audio_io::{AudioDeviceChoice, AudioDeviceId, AudioDeviceInfo, AudioSink, AudioSource};
+use teamcraft_media::audio_level::SharedLevel;
 use teamcraft_media::bwe::BweConfig;
 use teamcraft_media::call_auth::{CallKeyAuthenticator, CallKeyError};
 use teamcraft_media::call_engine::{CallEngineConfig, CallEngineEvent};
@@ -143,6 +144,8 @@ struct State {
 struct Media {
   controls: mpsc::UnboundedSender<Control>,
   finished: oneshot::Receiver<()>,
+  /// The call's microphone level, for the device menu (#986).
+  microphone_level: SharedLevel,
 }
 
 type Done = oneshot::Sender<Result<(), WebCallError>>;
@@ -385,18 +388,26 @@ pub fn camera_view() -> Option<HtmlVideoElement> {
   Some(video)
 }
 
-/// The microphone's level in the pre-join check, from 0 (silence, or no check) to 1.
+/// The microphone's level, from 0 (silence, or nothing measured) to 1: the pre-join check's, or
+/// the running call's for its device menu (#986).
 #[wasm_bindgen]
 pub fn preview_level() -> f32 {
-  host()
-    .ok()
-    .and_then(|host| {
+  let Ok(host) = host() else {
+    return 0.0;
+  };
+  let maybe_check = host
+    .state
+    .borrow()
+    .maybe_preview_meter
+    .as_ref()
+    .map(MicrophoneMeter::level);
+  maybe_check
+    .or_else(|| {
       host
-        .state
+        .maybe_media
         .borrow()
-        .maybe_preview_meter
         .as_ref()
-        .map(MicrophoneMeter::level)
+        .map(|media| media.microphone_level.get())
     })
     .unwrap_or(0.0)
 }
@@ -506,7 +517,11 @@ impl Host {
     }
     let (controls, control_rx) = mpsc::unbounded();
     let (finished_tx, finished) = oneshot::channel();
-    *self.maybe_media.borrow_mut() = Some(Media { controls, finished });
+    *self.maybe_media.borrow_mut() = Some(Media {
+      controls,
+      finished,
+      microphone_level: call.microphone_level(),
+    });
     let host = Rc::downgrade(self);
     spawn_local(async move {
       run_media(call, control_rx, host, own_device).await;

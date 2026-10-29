@@ -84,6 +84,25 @@ pub fn list_output_devices() -> Result<Vec<AudioDeviceInfo>, AudioDeviceError> {
   })
 }
 
+/// Opens the chosen device with `open`; a chosen device that is gone (unplugged since it was
+/// picked, or stored on another computer) gives way to the system default, so a call doesn't
+/// fail to start over a stale choice (#986).
+pub fn open_or_default<T>(
+  choice: &AudioDeviceChoice,
+  mut open: impl FnMut(&AudioDeviceChoice) -> Result<T, AudioDeviceError>,
+) -> Result<T, AudioDeviceError> {
+  match open(choice) {
+    Err(AudioDeviceError::DeviceGone(direction)) => {
+      warn!(
+        direction,
+        "the chosen audio device is gone; using the system default"
+      );
+      open(&AudioDeviceChoice::Default)
+    },
+    other => other,
+  }
+}
+
 impl AudioInput {
   /// Opens a microphone at its own rate; `on_samples` gets mono 48 kHz samples on the audio thread.
   pub fn open(
@@ -456,6 +475,40 @@ mod tests {
         "pulled {pulled}"
       );
       assert!(out.iter().skip(1).all(|sample| (sample - 0.25).abs() < 1e-6));
+    }
+
+    #[test]
+    fn a_gone_device_gives_way_to_the_default() {
+      let chosen = AudioDeviceChoice::Device(AudioDeviceId::new("usb-headset"));
+      let mut tried = Vec::new();
+      let opened = open_or_default(&chosen, |choice| {
+        tried.push(choice.clone());
+        match choice {
+          AudioDeviceChoice::Device(_) => Err(AudioDeviceError::DeviceGone("input")),
+          AudioDeviceChoice::Default => Ok("default"),
+        }
+      });
+      assert_eq!(opened.unwrap(), "default");
+      assert_eq!(tried, vec![chosen, AudioDeviceChoice::Default]);
+    }
+
+    #[test]
+    fn other_failures_and_the_default_are_not_retried() {
+      let chosen = AudioDeviceChoice::Device(AudioDeviceId::new("busy"));
+      let mut attempts = 0;
+      let result: Result<(), _> = open_or_default(&chosen, |_| {
+        attempts += 1;
+        Err(AudioDeviceError::UnsupportedFormat("input"))
+      });
+      assert!(matches!(result, Err(AudioDeviceError::UnsupportedFormat(_))));
+      assert_eq!(attempts, 1);
+      let mut attempts = 0;
+      let result: Result<(), _> = open_or_default(&AudioDeviceChoice::Default, |_| {
+        attempts += 1;
+        Err(AudioDeviceError::NoDevice("output"))
+      });
+      assert!(matches!(result, Err(AudioDeviceError::NoDevice(_))));
+      assert_eq!(attempts, 1);
     }
 
     #[test]

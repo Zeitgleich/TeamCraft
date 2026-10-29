@@ -142,6 +142,42 @@ async fn audio_switches_mid_call_and_a_missing_device_keeps_the_old_one() {
   assert!(stats.frames_sent > 10, "{stats:?}");
 }
 
+/// #986: switching the microphone mid-call keeps it muted; it sends once unmuted.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_audio_switch_mid_call_keeps_the_microphone_muted() {
+  let (port, certificate_hash) = start_sfu().await;
+  let engine = CallEngineConfig {
+    user_id: id_of(9),
+    device_id: id_of(9),
+    capabilities: MediaCapabilities::default(),
+    bwe: BweConfig::default(),
+  };
+  let sfu_url = format!("https://[::1]:{port}{CALL_PATH}");
+  let mut config = NativeCallConfig::new(sfu_url, "dev:12:9:9".into(), engine);
+  config.maybe_certificate_hash = Some(certificate_hash);
+  config.is_muted_at_start = true;
+  let call = NativeCall::join(config).await.unwrap();
+
+  let tone = AudioSource::Tone {
+    frequency_hz: 440.0,
+    amplitude: 0.3,
+  };
+  call.set_audio(tone, AudioSink::Discard).await.unwrap();
+  tokio::time::sleep(Duration::from_millis(1000)).await;
+  // A tone isn't measured: the meter is the microphone's.
+  assert_eq!(call.microphone_level().get(), 0.0);
+  call.set_muted(false);
+  tokio::time::sleep(Duration::from_millis(500)).await;
+
+  let stats = call.leave().await.unwrap();
+  // Muted, the tone sent nothing; unmuted for half a second, about 25 frames (75 had the switch
+  // unmuted it).
+  assert!(
+    (10..=45).contains(&stats.frames_sent),
+    "the switch unmuted the call or nothing was sent after the unmute: {stats:?}"
+  );
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn screen_share_reaches_a_subscriber_through_the_sfu() {
   let (port, certificate_hash) = start_sfu().await;

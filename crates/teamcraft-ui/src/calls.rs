@@ -36,7 +36,9 @@ pub enum CallEvent {
   Deafened(bool),
   /// Takes the call over from the account's other devices, which leave it.
   MoveHere,
+  /// The microphone to use from now on, also mid-call (an empty id: the system default).
   Microphone(String),
+  /// The speakers to use from now on, also mid-call (an empty id: the system default).
   Speakers(String),
   /// Plays the test sound on these speakers (an empty id: the default).
   TestSpeakers(String),
@@ -65,6 +67,178 @@ pub enum CallEvent {
 }
 
 type CallHandler = Rc<dyn Fn(CallEvent)>;
+
+/// A kind of audio device the call uses.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AudioKind {
+  Microphone,
+  Speakers,
+}
+
+/// A microphone or speakers plugged in during a call, which the user may switch to (#986). A
+/// headset is one offer for both.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AudioOffer {
+  pub label: String,
+  pub maybe_microphone: Option<String>,
+  pub maybe_speakers: Option<String>,
+}
+
+/// What a new listing of the microphones or speakers means for the running call (#986).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum AudioDeviceChange {
+  /// The user follows the system default, and the system made another device the default: the
+  /// call opens it.
+  DefaultMoved(MediaDevice),
+  /// A device came that the call doesn't use: the user may switch to it.
+  Appeared(MediaDevice),
+  /// The chosen device went away: the call falls back to the system default (`None`: there is
+  /// none left).
+  Gone {
+    gone: MediaDevice,
+    maybe_default: Option<MediaDevice>,
+  },
+}
+
+/// One entry of the call's microphone or speaker menu (#986).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AudioMenuEntry {
+  /// What choosing it sends (an empty id: the system default).
+  pub id: String,
+  /// The device's name; for the system default the name of the device it is now.
+  pub label: String,
+  /// The entry follows the system default (ours, or a browser's own "default" device).
+  pub is_system_default: bool,
+  /// The call uses it.
+  pub is_checked: bool,
+}
+
+/// Ids browsers give stand-ins for other devices: Chrome's "default" and Windows'
+/// "communications" device. They are no device of their own to offer.
+const DEVICE_ALIASES: [&str; 2] = ["default", "communications"];
+/// Chrome's own entry for the system default.
+const BROWSER_DEFAULT_ID: &str = "default";
+
+impl AudioKind {
+  pub const ALL: [Self; 2] = [Self::Microphone, Self::Speakers];
+
+  /// This kind's devices in a listing.
+  pub fn of(self, devices: &MediaDevices) -> &[MediaDevice] {
+    match self {
+      Self::Microphone => &devices.microphones,
+      Self::Speakers => &devices.speakers,
+    }
+  }
+
+  fn event(self, id: String) -> CallEvent {
+    match self {
+      Self::Microphone => CallEvent::Microphone(id),
+      Self::Speakers => CallEvent::Speakers(id),
+    }
+  }
+}
+
+/// Whether a chosen id follows the system default: nothing chosen, or a browser's "default".
+pub fn follows_system_default(chosen: &str) -> bool {
+  chosen.is_empty() || chosen == BROWSER_DEFAULT_ID
+}
+
+/// What changed between two listings of one kind of audio device, for a call that uses `chosen`
+/// (#986). The first listing (`previous` empty: browsers name devices only with permission) and
+/// an unchanged one mean nothing.
+pub fn audio_device_change(
+  previous: &[MediaDevice],
+  current: &[MediaDevice],
+  chosen: &str,
+) -> Option<AudioDeviceChange> {
+  if previous.is_empty() || previous == current {
+    return None;
+  }
+  let is_listed = |list: &[MediaDevice], id: &str| list.iter().any(|device| device.id == id);
+  // A choice that wasn't listed before is one the backend already replaced with the default.
+  let follows_default = follows_system_default(chosen) || !is_listed(previous, chosen);
+  if !follows_default && !is_listed(current, chosen) {
+    let gone = previous.iter().find(|device| device.id == chosen)?.clone();
+    return Some(AudioDeviceChange::Gone {
+      gone,
+      maybe_default: current
+        .first()
+        .map(|default| real_device(current, default).clone()),
+    });
+  }
+  // The system default is listed first (on the desktop and in browsers); Chrome's own "default"
+  // entry keeps its id and changes its name.
+  if follows_default
+    && let Some(default) = current.first()
+    && previous.first() != Some(default)
+  {
+    return Some(AudioDeviceChange::DefaultMoved(
+      real_device(current, default).clone(),
+    ));
+  }
+  current
+    .iter()
+    .find(|device| {
+      !DEVICE_ALIASES.contains(&device.id.as_str()) && device.id != chosen && !is_listed(previous, &device.id)
+    })
+    .map(|device| AudioDeviceChange::Appeared(device.clone()))
+}
+
+/// The device a browser's stand-in ("Default - Jabra Evolve") is: the one whose name ends its
+/// name, in whatever language the browser words the rest. Any other device is itself.
+fn real_device<'a>(devices: &'a [MediaDevice], device: &'a MediaDevice) -> &'a MediaDevice {
+  if !DEVICE_ALIASES.contains(&device.id.as_str()) {
+    return device;
+  }
+  devices
+    .iter()
+    .filter(|candidate| {
+      !DEVICE_ALIASES.contains(&candidate.id.as_str())
+        && !candidate.label.is_empty()
+        && device.label.ends_with(&candidate.label)
+    })
+    .max_by_key(|candidate| candidate.label.len())
+    .unwrap_or(device)
+}
+
+/// The entries of the call's microphone or speaker menu (#986): the system default first (a
+/// browser's own "default" device, or ours where the list has none), then every device, the one
+/// in use checked. A choice that isn't listed (unplugged, from another computer) is the default,
+/// which is what the call uses then.
+pub fn audio_menu_entries(devices: &[MediaDevice], chosen: &str) -> Vec<AudioMenuEntry> {
+  let has_browser_default = devices.iter().any(|device| device.id == BROWSER_DEFAULT_ID);
+  let checked_id = if !follows_system_default(chosen) && devices.iter().any(|device| device.id == chosen) {
+    chosen
+  } else if has_browser_default {
+    BROWSER_DEFAULT_ID
+  } else {
+    ""
+  };
+  let ours = (!has_browser_default).then(|| AudioMenuEntry {
+    id: String::new(),
+    label: devices
+      .first()
+      .map(|device| device.label.clone())
+      .unwrap_or_default(),
+    is_system_default: true,
+    is_checked: checked_id.is_empty(),
+  });
+  ours
+    .into_iter()
+    .chain(
+      devices
+        .iter()
+        // Windows' communications device is the default of another kind of sound.
+        .filter(|device| device.id != "communications")
+        .map(|device| AudioMenuEntry {
+          id: device.id.clone(),
+          label: device.label.clone(),
+          is_system_default: device.id == BROWSER_DEFAULT_ID,
+          is_checked: device.id == checked_id,
+        }),
+    )
+    .collect()
+}
 
 /// Session state of the user's own call. Device choices survive between calls.
 #[derive(Clone, Copy)]
@@ -97,6 +271,10 @@ pub struct CallState {
   /// Asks for the camera choice: the call screen's camera menu, or the pre-join screen's camera
   /// field (the "Choose camera" of a camera error, #819).
   pub is_camera_menu_open: RwSignal<bool>,
+  /// The call screen's menu of microphones and speakers (#986).
+  pub is_audio_menu_open: RwSignal<bool>,
+  /// A microphone or speakers plugged in during the call, offered on a toast (#986).
+  pub maybe_audio_offer: RwSignal<Option<AudioOffer>>,
   /// "Stats for nerds" (#938) over every video of the call.
   pub shows_video_stats: RwSignal<bool>,
   /// The chat panel next to the call's video (#936); it stays open while the call is minimized.
@@ -107,6 +285,10 @@ pub struct CallState {
   pub maybe_quality_menu: RwSignal<Option<MediaStreamId>>,
   /// The camera the backend was told about or uses on its own ([`CallState::send_camera_choice`]).
   sent_camera: StoredValue<String>,
+  /// The microphone and speakers the backend was told about ([`CallState::send_audio_choices`]);
+  /// it starts on the system default.
+  sent_microphone: StoredValue<String>,
+  sent_speakers: StoredValue<String>,
   /// Carries the user's actions to the call backend; set once by the shell.
   handler: StoredValue<Option<CallHandler>, LocalStorage>,
 }
@@ -135,11 +317,15 @@ impl CallState {
       is_deafened: RwSignal::new(false),
       move_offer: RwSignal::new(None),
       is_camera_menu_open: RwSignal::new(false),
+      is_audio_menu_open: RwSignal::new(false),
+      maybe_audio_offer: RwSignal::new(None),
       shows_video_stats: RwSignal::new(false),
       is_chat_open: RwSignal::new(false),
       video_qualities: RwSignal::new(HashMap::new()),
       maybe_quality_menu: RwSignal::new(None),
       sent_camera: StoredValue::new(String::new()),
+      sent_microphone: StoredValue::new(String::new()),
+      sent_speakers: StoredValue::new(String::new()),
       handler: StoredValue::new_local(None),
     }
   }
@@ -210,6 +396,52 @@ impl CallState {
     }
     self.sent_camera.set_value(id.clone());
     self.emit(CallEvent::CameraDevice(id));
+  }
+
+  /// The chosen microphone or speakers (an empty id: the system default).
+  pub fn audio_id(&self, kind: AudioKind) -> RwSignal<String> {
+    match kind {
+      AudioKind::Microphone => self.microphone_id,
+      AudioKind::Speakers => self.speaker_id,
+    }
+  }
+
+  fn sent_audio(&self, kind: AudioKind) -> StoredValue<String> {
+    match kind {
+      AudioKind::Microphone => self.sent_microphone,
+      AudioKind::Speakers => self.sent_speakers,
+    }
+  }
+
+  /// The user picked this microphone or speakers (an empty id: the system default): a running
+  /// call switches at once, muted or not (#986), and the pre-join check measures it. Remembering
+  /// it is the caller's part (the preferences).
+  pub fn choose_audio(&self, kind: AudioKind, id: String) {
+    self.audio_id(kind).set(id);
+    self.send_audio_choices();
+  }
+
+  /// Tells the backend the chosen microphone and speakers unless it knows them already, so a
+  /// choice reaches it once: the remembered one at start, a pick, a change in the settings.
+  pub fn send_audio_choices(&self) {
+    for kind in AudioKind::ALL {
+      let (Some(id), sent) = (self.audio_id(kind).try_get_untracked(), self.sent_audio(kind)) else {
+        return;
+      };
+      if sent.try_with_value(|sent| *sent == id) != Some(false) {
+        continue;
+      }
+      sent.set_value(id.clone());
+      self.emit(kind.event(id));
+    }
+  }
+
+  /// The system made another device its default while the call follows it: the call opens the
+  /// default again, which is that device now.
+  pub fn reopen_audio(&self, kind: AudioKind) {
+    if let Some(id) = self.audio_id(kind).try_get_untracked() {
+      self.emit(kind.event(id));
+    }
   }
 
   fn emit_in_call(&self, event: CallEvent) {
@@ -320,6 +552,8 @@ impl CallState {
     self.is_chat_open.set(false);
     self.video_qualities.set(HashMap::new());
     self.maybe_quality_menu.set(None);
+    self.is_audio_menu_open.set(false);
+    self.maybe_audio_offer.set(None);
     if was_active {
       self.emit(CallEvent::Leave);
     }
@@ -564,6 +798,217 @@ mod tests {
       call.send_camera_choice();
       assert!(events.borrow().is_empty());
     });
+  }
+
+  /// #986: a microphone or speakers choice reaches the backend once (an empty one is the system
+  /// default, which the backend starts on), and a default that moved is opened again.
+  #[test]
+  fn an_audio_choice_reaches_the_backend_once() {
+    let owner = Owner::new();
+    owner.with(|| {
+      let call = CallState::new();
+      let events = Rc::new(RefCell::new(Vec::new()));
+      let seen = events.clone();
+      call.set_handler(move |event| seen.borrow_mut().push(event));
+
+      // Nothing remembered: the backend is on the default already.
+      call.send_audio_choices();
+      assert!(events.borrow().is_empty());
+
+      // The remembered microphone at start, then a pick in the call's menu: each once.
+      call.microphone_id.set("usb".into());
+      call.send_audio_choices();
+      call.send_audio_choices();
+      call.choose_audio(AudioKind::Speakers, "headset".into());
+      assert_eq!(
+        *events.borrow(),
+        vec![
+          CallEvent::Microphone("usb".into()),
+          CallEvent::Speakers("headset".into())
+        ]
+      );
+
+      // Back to the system default is a choice too.
+      events.borrow_mut().clear();
+      call.choose_audio(AudioKind::Microphone, String::new());
+      assert_eq!(*events.borrow(), vec![CallEvent::Microphone(String::new())]);
+
+      // The default moved: opened again although the choice is the same.
+      events.borrow_mut().clear();
+      call.reopen_audio(AudioKind::Microphone);
+      assert_eq!(*events.borrow(), vec![CallEvent::Microphone(String::new())]);
+    });
+  }
+
+  /// #986: a switch mid-call keeps the microphone muted: choosing a device sends no unmute.
+  #[test]
+  fn switching_the_microphone_keeps_it_muted() {
+    let owner = Owner::new();
+    owner.with(|| {
+      let call = CallState::new();
+      let events = Rc::new(RefCell::new(Vec::new()));
+      let seen = events.clone();
+      call.set_handler(move |event| seen.borrow_mut().push(event));
+      call.phase.set(CallPhase::Active);
+      call.set_muted(true);
+      call.choose_audio(AudioKind::Microphone, "headset".into());
+      assert!(!call.is_mic_on.get_untracked());
+      assert_eq!(
+        *events.borrow(),
+        vec![CallEvent::Muted(true), CallEvent::Microphone("headset".into())]
+      );
+    });
+  }
+
+  mod audio_devices {
+    use super::*;
+
+    #[test]
+    fn nothing_changes_on_the_first_or_an_unchanged_listing() {
+      let listed = [camera("mic", "Built-in")];
+      assert_eq!(audio_device_change(&[], &listed, ""), None);
+      assert_eq!(audio_device_change(&listed, &listed, "mic"), None);
+    }
+
+    #[test]
+    fn a_plugged_in_headset_is_offered_to_a_call_on_a_chosen_device() {
+      let before = [camera("built-in", "MacBook Microphone")];
+      let after = [
+        camera("built-in", "MacBook Microphone"),
+        camera("jabra", "Jabra Evolve"),
+      ];
+      assert_eq!(
+        audio_device_change(&before, &after, "built-in"),
+        Some(AudioDeviceChange::Appeared(camera("jabra", "Jabra Evolve")))
+      );
+    }
+
+    #[test]
+    fn a_call_on_the_system_default_follows_it() {
+      // The desktop lists the default first; macOS made the headset the default.
+      let before = [camera("built-in", "MacBook Microphone")];
+      let after = [
+        camera("jabra", "Jabra Evolve"),
+        camera("built-in", "MacBook Microphone"),
+      ];
+      assert_eq!(
+        audio_device_change(&before, &after, ""),
+        Some(AudioDeviceChange::DefaultMoved(camera("jabra", "Jabra Evolve")))
+      );
+      // Chrome keeps its "default" entry and renames it.
+      let before = [
+        camera("default", "Default - MacBook Microphone"),
+        camera("built-in", "MacBook Microphone"),
+      ];
+      let after = [
+        camera("default", "Default - Jabra Evolve"),
+        camera("built-in", "MacBook Microphone"),
+        camera("jabra", "Jabra Evolve"),
+      ];
+      // The device is named as itself, not as Chrome's stand-in.
+      for chosen in ["", "default"] {
+        assert_eq!(
+          audio_device_change(&before, &after, chosen),
+          Some(AudioDeviceChange::DefaultMoved(camera("jabra", "Jabra Evolve"))),
+          "{chosen:?}"
+        );
+      }
+      // The default stayed: the new device is offered instead.
+      let after = [
+        camera("default", "Default - MacBook Microphone"),
+        camera("built-in", "MacBook Microphone"),
+        camera("jabra", "Jabra Evolve"),
+      ];
+      assert_eq!(
+        audio_device_change(&before, &after, ""),
+        Some(AudioDeviceChange::Appeared(camera("jabra", "Jabra Evolve")))
+      );
+    }
+
+    #[test]
+    fn the_device_in_use_unplugged_gives_way_to_the_default() {
+      let before = [
+        camera("built-in", "MacBook Microphone"),
+        camera("jabra", "Jabra Evolve"),
+      ];
+      let after = [camera("built-in", "MacBook Microphone")];
+      assert_eq!(
+        audio_device_change(&before, &after, "jabra"),
+        Some(AudioDeviceChange::Gone {
+          gone: camera("jabra", "Jabra Evolve"),
+          maybe_default: Some(camera("built-in", "MacBook Microphone")),
+        })
+      );
+      // The last one gone: no default left.
+      assert_eq!(
+        audio_device_change(&after, &[], "built-in"),
+        Some(AudioDeviceChange::Gone {
+          gone: camera("built-in", "MacBook Microphone"),
+          maybe_default: None,
+        })
+      );
+      // Another device unplugged changes nothing for the call.
+      assert_eq!(audio_device_change(&before, &after, "built-in"), None);
+    }
+
+    #[test]
+    fn a_choice_that_was_not_listed_counts_as_the_default() {
+      // Remembered from another computer: the backend opened the default instead.
+      let before = [camera("built-in", "MacBook Microphone")];
+      let after = [
+        camera("jabra", "Jabra Evolve"),
+        camera("built-in", "MacBook Microphone"),
+      ];
+      assert_eq!(
+        audio_device_change(&before, &after, "elsewhere"),
+        Some(AudioDeviceChange::DefaultMoved(camera("jabra", "Jabra Evolve")))
+      );
+    }
+
+    #[test]
+    fn the_menu_starts_with_the_system_default_and_checks_the_device_in_use() {
+      let devices = [
+        camera("built-in", "MacBook Microphone"),
+        camera("jabra", "Jabra Evolve"),
+      ];
+      let checked = |entries: Vec<AudioMenuEntry>| {
+        entries
+          .into_iter()
+          .filter(|entry| entry.is_checked)
+          .map(|entry| entry.id)
+          .collect::<Vec<_>>()
+      };
+      let entries = audio_menu_entries(&devices, "");
+      assert_eq!(entries.len(), 3);
+      assert!(entries[0].is_system_default && entries[0].id.is_empty());
+      assert_eq!(entries[0].label, "MacBook Microphone");
+      assert_eq!(checked(entries), vec![String::new()]);
+      assert_eq!(
+        checked(audio_menu_entries(&devices, "jabra")),
+        vec!["jabra".to_owned()]
+      );
+      // Unplugged: the call is on the default.
+      assert_eq!(checked(audio_menu_entries(&devices, "gone")), vec![String::new()]);
+      // Chrome's own default entry stands for the system default; nothing is added.
+      let browser = [
+        camera("default", "Default - MacBook Microphone"),
+        camera("communications", "Communications - MacBook Microphone"),
+        camera("built-in", "MacBook Microphone"),
+      ];
+      let entries = audio_menu_entries(&browser, "");
+      assert_eq!(
+        entries.iter().map(|entry| entry.id.as_str()).collect::<Vec<_>>(),
+        vec!["default", "built-in"]
+      );
+      assert!(entries[0].is_system_default);
+      assert_eq!(checked(entries), vec!["default".to_owned()]);
+      assert_eq!(
+        checked(audio_menu_entries(&browser, "built-in")),
+        vec!["built-in".to_owned()]
+      );
+      // No device at all: only the default.
+      assert_eq!(audio_menu_entries(&[], "").len(), 1);
+    }
   }
 
   fn camera(id: &str, label: &str) -> MediaDevice {

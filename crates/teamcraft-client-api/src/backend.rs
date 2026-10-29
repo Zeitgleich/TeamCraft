@@ -789,11 +789,15 @@ pub trait CallBackend {
   fn call_preview_camera(&self) -> PreviewCamera {
     PreviewCamera::Off
   }
-  /// The microphone's level in the pre-join check, from 0.0 (silence) to 1.0 (full scale); the
-  /// meter reads it a few times a second.
+  /// The microphone's level in the pre-join check, or in the running call while
+  /// [`CallBackend::watch_call_level`] is on, from 0.0 (silence) to 1.0 (full scale); the meter
+  /// reads it a few times a second.
   fn call_preview_level(&self) -> f32 {
     0.0
   }
+  /// The call's device menu shows its meter (#986): the running call's microphone level comes
+  /// through [`CallBackend::call_preview_level`] until it is turned off again.
+  fn watch_call_level(&self, _is_watching: bool) {}
 }
 
 /// Administration without content access: every read returns metadata only.

@@ -366,6 +366,17 @@ impl RemoteCalls {
     self.act(CallAction::SetPreview { preview });
   }
 
+  /// The call's device menu shows the microphone's level (#986): the shell sends the running
+  /// call's readings while it is on. The page's call module measures its call anyway.
+  pub fn watch_call_level(&self, is_watching: bool) {
+    #[cfg(target_arch = "wasm32")]
+    if let CallLink::Shell = self.link {
+      self.shell_level.follow(is_watching);
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    let _ = is_watching;
+  }
+
   pub fn preview_camera(&self) -> PreviewCamera {
     self.snapshot.borrow().preview_camera
   }
@@ -374,7 +385,8 @@ impl RemoteCalls {
     self.snapshot.borrow().maybe_camera_fallback.clone()
   }
 
-  /// The pre-join check's microphone level: the shell's newest reading, or the page's meter.
+  /// The microphone level of the pre-join check or of the call's device menu: the shell's newest
+  /// reading, or the page's meter.
   pub fn preview_level(&self) -> f32 {
     match &self.link {
       #[cfg(target_arch = "wasm32")]

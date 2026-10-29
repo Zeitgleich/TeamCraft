@@ -1,10 +1,17 @@
 //! Audio level of a PCM frame for the RFC 6464 header extension, and the microphone meter of the
-//! pre-join check (#442).
+//! pre-join check (#442) and of the call's device menu (#986).
 //!
 //! The level is the frame's RMS in -dBov (0 = full-scale square wave, 127 = silence). The voice
 //! activity flag uses a plain level threshold; a real voice activity detector (Opus' or the audio
 //! processing module's) can replace it later without changing the wire format.
 
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU32, Ordering};
+use std::time::Duration;
+
+use web_time::Instant;
+
+use crate::audio_frame::SAMPLE_RATE_HZ;
 use crate::rtp::AudioLevel;
 
 /// Frames louder than this (in -dBov, lower is louder) count as voice by default.
@@ -21,6 +28,25 @@ pub struct MeterWindow {
   window_samples: usize,
   sum_of_squares: f64,
   count: usize,
+}
+
+/// How many samples one reading of a call's meter averages: ten readings a second.
+const CALL_METER_WINDOW: usize = (SAMPLE_RATE_HZ / 10) as usize;
+/// A reading older than this is from a microphone that stopped delivering (unplugged, or the
+/// call switching to another one): the meter shows silence instead.
+const STALE_READING: Duration = Duration::from_millis(500);
+
+/// The newest meter reading of a running call's microphone (0.0 to 1.0), for the call's device
+/// menu (#986). The call's task writes it, the app reads it from anywhere.
+#[derive(Clone, Debug, Default)]
+pub struct SharedLevel(Arc<AtomicU32>);
+
+/// Measures what a call captures from its microphone into a [`SharedLevel`].
+#[derive(Debug)]
+pub struct CallMeter {
+  window: MeterWindow,
+  maybe_last_reading: Option<Instant>,
+  shared: SharedLevel,
 }
 
 /// Measures one frame of 16-bit PCM (any channel layout, interleaved samples are fine).
@@ -65,6 +91,54 @@ impl MeterWindow {
       }
     }
     maybe_reading
+  }
+}
+
+impl SharedLevel {
+  /// The newest reading; 0.0 before the first one.
+  pub fn get(&self) -> f32 {
+    f32::from_bits(self.0.load(Ordering::Relaxed))
+  }
+
+  fn set(&self, level: f32) {
+    self.0.store(level.to_bits(), Ordering::Relaxed);
+  }
+}
+
+impl CallMeter {
+  pub fn new(shared: SharedLevel) -> Self {
+    Self {
+      window: MeterWindow::new(CALL_METER_WINDOW),
+      maybe_last_reading: None,
+      shared,
+    }
+  }
+
+  /// Adds captured microphone samples; a full window becomes the newest reading.
+  pub fn push(&mut self, samples: &[f32], now: Instant) {
+    if let Some(level) = self.window.push(samples) {
+      self.shared.set(level);
+      self.maybe_last_reading = Some(now);
+    }
+  }
+
+  /// Called now and then: a microphone that stopped delivering reads as silence, not as its last
+  /// level.
+  pub fn tick(&mut self, now: Instant) {
+    if self
+      .maybe_last_reading
+      .is_some_and(|last| now.saturating_duration_since(last) > STALE_READING)
+    {
+      self.maybe_last_reading = None;
+      self.shared.set(0.0);
+    }
+  }
+
+  /// Another microphone took over: its readings start afresh, from silence.
+  pub fn restart(&mut self) {
+    self.window = MeterWindow::new(CALL_METER_WINDOW);
+    self.maybe_last_reading = None;
+    self.shared.set(0.0);
   }
 }
 
@@ -167,6 +241,52 @@ mod tests {
       assert!((reading - meter_level(&float_sine(0.1))).abs() < 0.01);
       // The next window starts empty: silence reads as silence.
       assert_eq!(window.push(&[0.0; 1920]), Some(0.0));
+    }
+
+    #[test]
+    fn a_call_meter_shares_its_newest_reading() {
+      let shared = SharedLevel::default();
+      let mut meter = CallMeter::new(shared.clone());
+      let start = Instant::now();
+      assert_eq!(shared.get(), 0.0);
+      // Five 20 ms frames make one reading (a tenth of a second).
+      for _ in 0..4 {
+        meter.push(&float_sine(0.1), start);
+      }
+      assert_eq!(shared.get(), 0.0);
+      meter.push(&float_sine(0.1), start);
+      assert!((shared.get() - meter_level(&float_sine(0.1))).abs() < 0.01);
+    }
+
+    #[test]
+    fn a_call_meter_falls_silent_when_the_microphone_stops_or_changes() {
+      let shared = SharedLevel::default();
+      let mut meter = CallMeter::new(shared.clone());
+      let start = Instant::now();
+      for _ in 0..5 {
+        meter.push(&float_sine(0.1), start);
+      }
+      let level = shared.get();
+      assert!(level > 0.0);
+      // Still fresh: the reading stays.
+      meter.tick(start + Duration::from_millis(400));
+      assert_eq!(shared.get(), level);
+      // Nothing came for longer than a reading lives: silence.
+      meter.tick(start + Duration::from_millis(600));
+      assert_eq!(shared.get(), 0.0);
+      // A switch to another microphone starts from silence, and half a window of the old one
+      // doesn't count towards the new one's first reading.
+      for _ in 0..8 {
+        meter.push(&float_sine(0.5), start);
+      }
+      assert!(shared.get() > 0.0);
+      meter.restart();
+      assert_eq!(shared.get(), 0.0);
+      // Two silent frames would complete the old window (three loud ones) into a loud reading.
+      for _ in 0..2 {
+        meter.push(&[0.0; 960], start);
+      }
+      assert_eq!(shared.get(), 0.0);
     }
   }
 
