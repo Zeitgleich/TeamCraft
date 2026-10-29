@@ -659,6 +659,7 @@ async fn run_call(
   let mut sinks = Sinks {
     events,
     mixer,
+    is_forwarding_audio: config.sink.is_frames(),
     stats: CallStats::default(),
     video: VideoState {
       maybe_commands: Some(own_commands),
@@ -785,6 +786,7 @@ async fn run_call(
               std::mem::replace(&mut devices, new_devices).close();
               source = new_source;
               meter.restart();
+              sinks.is_forwarding_audio = sink.is_frames();
             });
             if let Err(error) = &result {
               warn!(%error, "switching audio devices failed");
@@ -1388,6 +1390,8 @@ async fn started_video(
 struct Sinks {
   events: mpsc::UnboundedSender<CallEngineEvent>,
   mixer: PlaybackMixer,
+  /// [`AudioSink::Frames`]: received audio frames go to the app as events, not into the mixer.
+  is_forwarding_audio: bool,
   stats: CallStats,
   video: VideoState,
   /// Status sounds, mixed into the playback (never sent).
@@ -1464,7 +1468,17 @@ impl Sinks {
           opus,
         }) => {
           self.stats.frames_received += 1;
-          self.mixer.push(sender, origin, sequence_number, opus)?;
+          if self.is_forwarding_audio {
+            // The app went away when the receiver is gone; the call ends with it.
+            let _ = self.events.send(CallEngineEvent::AudioFrame {
+              sender,
+              origin,
+              sequence_number,
+              opus,
+            });
+          } else {
+            self.mixer.push(sender, origin, sequence_number, opus)?;
+          }
         },
         EngineOutput::Event(CallEngineEvent::VideoFrame(frame)) => {
           self.video.count_received(frame.stream_id);
@@ -1922,7 +1936,7 @@ impl AudioDevices {
     let (capture_tx, capture_rx) = mpsc::unbounded_channel();
     let maybe_output_choice = match sink {
       AudioSink::Speakers(choice) => Some(choice.clone()),
-      AudioSink::Discard => None,
+      AudioSink::Discard | AudioSink::Frames => None,
     };
     let maybe_input_choice = match source {
       AudioSource::Microphone(choice) => Some(choice.clone()),

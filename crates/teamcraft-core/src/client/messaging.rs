@@ -619,6 +619,17 @@ fn apply_control_with(
       maybe_server_id,
     );
   }
+  if let MessageContent::Notetaker { request } = content {
+    // Decrypted in the conversation's group, so `sender` is a member of it; whether the request
+    // counts is decided from the verified policy and roster (notetaker.rs).
+    let record = crate::notetaker::NotetakerRequestRecord {
+      by: sender,
+      request: request.clone(),
+      at_ms,
+      maybe_server_id,
+    };
+    return crate::notetaker::apply_request(store, conversation, record);
+  }
   if let MessageContent::Event {
     event: crate::store::ConversationEvent::CallMoved {
       meeting,

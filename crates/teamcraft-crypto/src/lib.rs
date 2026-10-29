@@ -28,6 +28,7 @@ pub mod recovery_key;
 pub mod rendezvous;
 pub mod secret;
 pub mod server_secret;
+pub mod service_key;
 pub mod share_link;
 pub mod source_token;
 pub mod workspace;

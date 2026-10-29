@@ -279,6 +279,11 @@ pub enum MessageContent {
   /// A change to the channel's integration-bridge sources (docs/bridge.md, "Sources"); applied
   /// to the conversation's [`SourceLedger`](crate::integration_sources::SourceLedger).
   IntegrationSource { change: teamcraft_proto::SourceChange },
+  /// A request to the workspace's notetaker (e2ee.md §8.2): join the conversation's call, or leave it;
+  /// applied to the conversation's [`NotetakerLedger`](crate::notetaker::NotetakerLedger).
+  Notetaker {
+    request: teamcraft_proto::NotetakerRequest,
+  },
   #[serde(other)]
   Unknown,
 }
@@ -886,6 +891,7 @@ impl StoredMessage {
           | MessageContent::Bookmarks { .. }
           | MessageContent::IndexSegment { .. }
           | MessageContent::IntegrationSource { .. }
+          | MessageContent::Notetaker { .. }
           | MessageContent::Event {
             event: ConversationEvent::CallMoved { .. }
           }

@@ -43,7 +43,9 @@ use teamcraft_proto::{
   CreateOrgBackgroundUploadRequest, CreateOrgBackgroundUploadResponse, OrgBackgroundDownloadResponse,
   OrgBackgroundId,
 };
-use teamcraft_proto::{CallId, CallJoinTokenResponse, CreateCallJoinTokenRequest, MoveCallRequest};
+use teamcraft_proto::{
+  CallId, CallJoinTokenResponse, CallStateResponse, CreateCallJoinTokenRequest, MoveCallRequest,
+};
 use teamcraft_proto::{
   CategoryId, CategoryResponse, CreateCategoryRequest, CreateInviteRequest, CreateSpaceRequest,
   InviteResponse, ListCategoriesResponse, UpdateCategoryRequest, UpdateConversationRequest,
@@ -2643,6 +2645,20 @@ impl ServerApi for FakeServerApi {
         expires_at: UnixMillis(0),
         sfu_certificate_sha256: Vec::new(),
       })
+    })
+  }
+
+  /// A call some member's join token started; the fake keeps no participants.
+  async fn running_call(&self, conversation: ConversationId) -> Result<Option<CallStateResponse>, ApiError> {
+    self.with(|state, me| {
+      Ok(state.calls.get(&conversation).map(|call_id| CallStateResponse {
+        call_id: *call_id,
+        conversation_id: conversation,
+        started_by: me,
+        started_at: UnixMillis(0),
+        is_ringing: false,
+        participants: Vec::new(),
+      }))
     })
   }
 

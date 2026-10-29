@@ -8,7 +8,9 @@ use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
 use crate::wire_enum::wire_enum;
-use crate::{Base64Bytes, DeviceId, HistoryPolicy, OrgBackgroundId, ScreenShareResolution, UnixMillis};
+use crate::{
+  Base64Bytes, DeviceId, HistoryPolicy, NotetakerPolicy, OrgBackgroundId, ScreenShareResolution, UnixMillis,
+};
 
 wire_enum! {
   /// Which log an entry belongs to.
@@ -544,6 +546,9 @@ pub struct WorkspacePolicy {
   pub recovery: RecoveryPolicy,
   #[serde(default)]
   pub screen_share: ScreenSharePolicy,
+  /// The AI notetaker of calls (e2ee.md §8.2); off when absent.
+  #[serde(default)]
+  pub notetaker: NotetakerPolicy,
 }
 
 /// The JSON document a policy entry's `payload` must contain (and the owner signs).
@@ -588,6 +593,7 @@ impl Default for WorkspacePolicy {
       owners: OwnerPolicy::default(),
       recovery: RecoveryPolicy::default(),
       screen_share: ScreenSharePolicy::default(),
+      notetaker: NotetakerPolicy::default(),
     }
   }
 }
@@ -662,6 +668,16 @@ mod tests {
     assert!(older.recovery.is_passphrase_allowed);
     let strict: RecoveryPolicy = serde_json::from_str(r#"{"is_passphrase_allowed":false}"#).unwrap();
     assert!(!strict.is_passphrase_allowed);
+  }
+
+  #[test]
+  fn policies_without_the_notetaker_group_have_it_off() {
+    let mut json = serde_json::to_value(WorkspacePolicy::default()).unwrap();
+    assert_eq!(json["notetaker"]["is_enabled"], serde_json::json!(false));
+    json.as_object_mut().unwrap().remove("notetaker");
+    let older: WorkspacePolicy = serde_json::from_value(json).unwrap();
+    assert!(!older.notetaker.is_enabled);
+    assert_eq!(older.notetaker.active_bot(), None);
   }
 
   mod guest_dm_start {

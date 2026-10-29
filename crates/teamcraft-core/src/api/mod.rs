@@ -59,7 +59,9 @@ use teamcraft_proto::{
   CreateOrgBackgroundUploadRequest, CreateOrgBackgroundUploadResponse, OrgBackgroundDownloadResponse,
   OrgBackgroundId,
 };
-use teamcraft_proto::{CallJoinTokenResponse, CreateCallJoinTokenRequest, MoveCallRequest};
+use teamcraft_proto::{
+  CallJoinTokenResponse, CallStateResponse, CreateCallJoinTokenRequest, MoveCallRequest,
+};
 use teamcraft_proto::{
   CategoryId, CategoryResponse, CreateCategoryRequest, CreateInviteRequest, CreateSpaceRequest, InviteId,
   InviteResponse, ListCategoriesResponse, ListInvitesResponse, SpaceResponse, UpdateCategoryRequest,
@@ -353,6 +355,13 @@ pub trait ServerApi {
     conversation: ConversationId,
     request: &CreateCallJoinTokenRequest,
   ) -> impl Future<Output = Result<CallJoinTokenResponse, ApiError>>;
+
+  /// The call running in the conversation (`GET /conversations/{id}/call`), `None` if none runs.
+  /// Unlike a join token it never starts one.
+  fn running_call(
+    &self,
+    conversation: ConversationId,
+  ) -> impl Future<Output = Result<Option<CallStateResponse>, ApiError>>;
 
   /// "Meet now" (`POST /meetings/instant`); `invitees` become members of its chat.
   fn create_instant_meeting(

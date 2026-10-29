@@ -862,6 +862,7 @@ impl<S: LocalStore> CoreChatBackend<S> {
       | MessageContent::Deleted
       | MessageContent::IndexSegment { .. }
       | MessageContent::IntegrationSource { .. }
+      | MessageContent::Notetaker { .. }
       | MessageContent::Unknown => String::new(),
     };
     let (kind, author) = match &stored.content {
