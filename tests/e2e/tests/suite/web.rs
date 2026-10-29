@@ -465,7 +465,19 @@ impl Rig {
 pub(crate) async fn wait_until_set_up(alice: &mut Peer, carol: &mut Peer, page: &Page) {
   let deadline = Instant::now() + Duration::from_secs(120);
   let mut round = 0_u32;
-  while body_text(page).await.contains("isn't fully set up") {
+  // The notice shows once the conversation has loaded (its messages are there), so only its
+  // absence for a while after that counts.
+  let mut maybe_clear_since: Option<Instant> = None;
+  loop {
+    let text = body_text(page).await;
+    if text.contains("hello from carol") && !text.contains("isn't fully set up") {
+      let since = *maybe_clear_since.get_or_insert_with(Instant::now);
+      if since.elapsed() >= Duration::from_secs(3) {
+        return;
+      }
+    } else {
+      maybe_clear_since = None;
+    }
     assert!(
       Instant::now() < deadline,
       "the browser was never added to the conversation"
