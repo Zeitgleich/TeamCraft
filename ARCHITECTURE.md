@@ -641,9 +641,11 @@ Settings → Chats).
   (50 ms of the new total, at least four of 1000 bytes) on a stream it never assigns; receivers
   report their arrival like any datagram's and drop them (every client does, also those from
   before). The bottleneck spaces them out at its rate, so their arrival times show what the link
-  carries. A burst that gets through raises the estimate there (at most twice what it was sent
-  for) and the step follows after 0.5 s; one that falls short limits the estimate to what got
-  through (never below what keeps the current layers), and the next one waits 2 s, then 4 s.
+  carries. A burst that gets through lets the step follow 0.5 s after the estimate covers it, and
+  after the fast start raises the estimate there (at most twice what it was sent for; during it,
+  jumping ahead switched a screen share's viewer to the sharp layer before the presenter's own
+  uplink carried it); one that falls short limits the estimate to what got through (never below
+  what keeps the current layers), and the next one waits 2 s, then 4 s.
   Bursts also go out before the estimate covers a step, so a link that got better is found
   within seconds instead of after the estimate's slow growth after congestion. Their queue and
   loss don't count as congestion. Receivers that send no feedback switch up as before. After

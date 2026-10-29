@@ -688,7 +688,15 @@ impl Forwarder {
       .on_feedback(feedback, now, participant.feedback_epoch);
     participant.has_feedback = true;
     match participant.probe.on_feedback(&self.config.probe, feedback, now) {
-      Some(ProbeOutcome::Carried { measured_bps }) => participant.downlink.raise_to(measured_bps),
+      // During the fast start the estimate triples every second on its own; jumping ahead of it
+      // switched a screen share's viewer to the sharp layer before the presenter's uplink
+      // estimate (in its own fast start) carried that layer, and the presenter stopped it again
+      // (screen_sharpness on CI). After congestion the estimate grows slowly: there the probe
+      // lifts it.
+      Some(ProbeOutcome::Carried { measured_bps }) if !participant.downlink.is_in_fast_start() => {
+        participant.downlink.raise_to(measured_bps);
+      },
+      Some(ProbeOutcome::Carried { .. }) => {},
       Some(ProbeOutcome::FellShort {
         measured_bps,
         floor_bps,

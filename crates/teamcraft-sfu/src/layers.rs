@@ -170,13 +170,26 @@ impl LayerAllocator {
     let budget = f64::from(estimate_bps.saturating_sub(config.audio_reserve_bps));
     let ideal = ideal_allocation(budget, demands, 1.0);
     let with_headroom = ideal_allocation(budget, demands, config.upswitch_headroom);
-    let shown_with_headroom = match proof {
-      UpgradeProof::NotRequired => with_headroom.clone(),
-      UpgradeProof::Shown { bps } => {
-        let shown_budget = f64::from(bps.min(estimate_bps).saturating_sub(config.audio_reserve_bps));
-        ideal_allocation(shown_budget, demands, config.upswitch_headroom)
-      },
+    let shown_bps = match proof {
+      UpgradeProof::NotRequired => estimate_bps,
+      UpgradeProof::Shown { bps } => bps,
     };
+    // What a probe showed the link carries, regardless of the estimate (whether to probe again)
+    // and within it (whether to switch up).
+    let shown_alone = ideal_allocation(
+      f64::from(shown_bps.saturating_sub(config.audio_reserve_bps)),
+      demands,
+      config.upswitch_headroom,
+    );
+    let shown_with_headroom = ideal_allocation(
+      f64::from(
+        shown_bps
+          .min(estimate_bps)
+          .saturating_sub(config.audio_reserve_bps),
+      ),
+      demands,
+      config.upswitch_headroom,
+    );
 
     let mut result = HashMap::new();
     for demand in demands {
@@ -285,7 +298,7 @@ impl LayerAllocator {
           .filter_map(|demand| {
             let layer = result.get(&demand.stream_id).copied().flatten();
             let step = next_layer(demand, layer)?;
-            let shown = shown_with_headroom.get(&demand.stream_id).copied().flatten();
+            let shown = shown_alone.get(&demand.stream_id).copied().flatten();
             (layer_rank(shown) < i16::from(step)).then_some((demand.stream_id, step))
           })
           .collect();
@@ -781,6 +794,23 @@ mod tests {
       let top = allocator.allocate_with_proof(&config(), 3_000_000, more, &demands, at(3.2));
       assert_eq!(top.layers[&StreamId(1)], Some(2));
       assert_eq!(top.maybe_probe, None, "at the top: nothing to probe");
+    }
+
+    /// A probe that showed the step stands until it expires, also while the estimate doesn't
+    /// cover the step yet (its fast start): no burst after burst meanwhile.
+    #[test]
+    fn a_shown_step_is_not_probed_again() {
+      let layers = three_layers();
+      let mut allocator = LayerAllocator::new();
+      let demands = [demand(1, 0, 2, &layers)];
+      let shown = UpgradeProof::Shown { bps: 700_000 };
+      let allocation = allocator.allocate_with_proof(&config(), 400_000, shown, &demands, Instant::now());
+      assert_eq!(
+        allocation.layers[&StreamId(1)],
+        Some(0),
+        "the estimate doesn't cover it"
+      );
+      assert_eq!(allocation.maybe_probe, None);
     }
   }
 
