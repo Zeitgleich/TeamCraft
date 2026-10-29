@@ -96,7 +96,28 @@ jobs:
               break
             fi
           done <<< "$runs"
-          echo "::error::CI of main is not green for ${CODE_SHA}: ${verdict:-no run found}. Fix or re-run CI (gh workflow run ci.yml --ref main), then run this workflow again."
+          # PRs merged by the auto-merge workflow (GITHUB_TOKEN) start no push run on main, so the
+          # newest code change may have no CI run at all: start one and wait for it.
+          if [ -z "$verdict" ]; then
+            echo "::notice::no CI run on main covers ${CODE_SHA}; starting one"
+            head="$(git rev-parse HEAD)"
+            gh workflow run ci.yml --ref main
+            run_id=""
+            for _ in $(seq 1 30); do
+              sleep 10
+              run_id="$(gh run list --workflow ci.yml --branch main --event workflow_dispatch --limit 10 \
+                --json databaseId,headSha --jq ".[] | select(.headSha == \"$head\") | .databaseId" | head -n 1)"
+              [ -n "$run_id" ] && break
+            done
+            [ -n "$run_id" ] || { echo "::error::the CI run on main didn't start"; exit 1; }
+            echo "waiting for CI run $run_id"
+            if gh run watch "$run_id" --exit-status --interval 60 > /dev/null; then
+              echo "CI green: run $run_id ($head)"
+              exit 0
+            fi
+            verdict="$(gh run view "$run_id" --json status,conclusion --jq '.status + "/" + .conclusion') ($head)"
+          fi
+          echo "::error::CI of main is not green for ${CODE_SHA}: ${verdict}. Fix or re-run CI (gh workflow run ci.yml --ref main), then run this workflow again."
           exit 1
       - name: Version
         if: steps.changes.outputs.release == 'true'
