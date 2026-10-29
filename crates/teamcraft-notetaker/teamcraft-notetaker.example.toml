@@ -1,0 +1,75 @@
+# teamcraft-notetaker: an AI participant that transcribes calls through OpenRouter and posts a
+# summary (docs/e2ee.md §8.2, docs/admin.md §3.6). Every option with its default.
+#
+# Each key can also be set in the environment: TEAMCRAFT_NOTETAKER_<SECTION>__<KEY>, e.g.
+# TEAMCRAFT_NOTETAKER_SERVER__BOT_TOKEN. The file itself: --config <path> or
+# TEAMCRAFT_NOTETAKER_CONFIG.
+#
+# Whether the notetaker may join calls at all, which models it uses, the language and the summary
+# instructions are not set here: they are the owner-signed workspace policy (Administration ->
+# Notetaker), so the server can't change them.
+
+[server]
+# The TeamCraft server.
+url = "https://chat.example.com"
+# Token of the notetaker's bot account (Administration -> Integrations, or POST /api/v1/admin/bots).
+# Prefer the environment or a file.
+# bot_token = "tcb_..."
+# bot_token_file = "/run/secrets/notetaker_bot_token"
+
+[store]
+# The encrypted local database: the bot's keys, its conversations and the transcripts of calls in
+# progress. Keep it on a volume of its own.
+path = "/var/lib/teamcraft-notetaker/notetaker.db"
+# 32 random bytes as base64 (openssl rand -base64 32). Prefer the environment or a file.
+# key = "..."
+# key_file = "/run/secrets/notetaker_store_key"
+
+[identity]
+device_name = "teamcraft-notetaker"
+# Recovery passphrase of the bot's key backup; needed on the first run (and if the database is
+# lost). Keep it somewhere safe.
+# passphrase = "..."
+# passphrase_file = "/run/secrets/notetaker_passphrase"
+# argon2_memory_kib = 131072
+# argon2_iterations = 3
+
+[openrouter]
+base_url = "https://openrouter.ai/api/v1"
+# The API key, if it should not be stored on the server (then enter it in the console all the same,
+# which signs only its SHA-256). Without it the key comes from the server.
+# api_key = "sk-or-..."
+# api_key_file = "/run/secrets/openrouter_api_key"
+# One request's longest time.
+request_timeout_secs = 120
+# Retries of rate limits (429), timeouts, server errors and lost connections; the wait doubles from
+# retry_base_delay_ms, or follows Retry-After.
+max_retries = 4
+retry_base_delay_ms = 1000
+# Requests at the same time, all calls together.
+max_concurrent_requests = 4
+# Sent as X-Title (OpenRouter's app attribution); "" sends none.
+app_title = "TeamCraft notetaker"
+
+[limits]
+# The notetaker leaves a call after this long and posts what it has.
+max_call_minutes = 240
+# It leaves a call where nobody else has been for this long.
+alone_timeout_secs = 60
+# It gives up joining a call whose keys it hasn't got after this long.
+join_timeout_secs = 60
+# Longest piece of one speaker's speech per transcription request; pieces end earlier at pauses.
+max_piece_secs = 30
+# A pause this long ends a piece.
+pause_ms = 700
+# Pieces with less speech than this are not sent (coughs, clicks).
+min_speech_ms = 500
+# Frames quieter than this count as silence.
+voice_threshold_dbfs = -50.0
+# The transcript goes to the summary model in parts of at most this many characters.
+summary_chunk_chars = 48000
+# Most tokens of one summary answer.
+max_summary_tokens = 2000
+# At shutdown, calls in progress get this long to transcribe and post; the rest is posted at the
+# next start.
+shutdown_drain_secs = 60
