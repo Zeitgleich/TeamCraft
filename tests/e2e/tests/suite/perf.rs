@@ -38,7 +38,7 @@ use teamcraft_e2e::scenario::space_with;
 use teamcraft_e2e::{Peer, Stack};
 use teamcraft_proto::{ConversationId, HistoryPolicy, SpaceId, UserId};
 
-use crate::web::{TEST_CSP, click_text, wait_for_element, wait_for_text};
+use crate::web::{TEST_CSP, click_text, type_until_kept, wait_for_element, wait_for_text};
 
 /// Not the browser tests' 8082, so both can run at once (the dev realm registers both).
 const PORT: u16 = 8083;
@@ -323,14 +323,8 @@ async fn sign_in_and_unlock(page: &Page, user: &str) {
   wait_for_text(page, "Sign in").await;
   click_text(page, "Sign in").await;
   sign_in_at_keycloak(page, user).await;
-  wait_for_element(page, "#enroll-secret")
-    .await
-    .click()
-    .await
-    .unwrap()
-    .type_str(PASSPHRASE)
-    .await
-    .unwrap();
+  // The setup screen may render again while the core settles and lose what was typed (#444).
+  type_until_kept(page, "#enroll-secret", PASSPHRASE).await;
   click_text(page, "Unlock").await;
   wait_for_text(page, "Activity").await;
 }

@@ -27,10 +27,22 @@ async fn a_linked_device_shares_the_identity_and_joins_the_channels() {
   let laptop_api = HttpServerApi::new(stack.base_url.clone(), carol.tokens.clone());
   let offer = LinkOffer::generate();
   let code = offer.to_code();
-  let (laptop_side, phone_side) = tokio::join!(
-    NewDeviceLink::connect(&laptop_api, &offer),
-    carol.client.start_link_approval(&code)
-  );
+  // The laptop waits in the relay first; a phone that comes before it finds nobody there and fails
+  // at once (#645), as when the code is scanned after the laptop gave up. A person scans a code
+  // that is already shown, so the phone comes a moment later (and tries again if it was too early).
+  let approve = async {
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+      match carol.client.start_link_approval(&code).await {
+        Err(teamcraft_core::CoreError::LinkPeerGone) if Instant::now() < deadline => {
+          tokio::time::sleep(Duration::from_millis(500)).await;
+        },
+        outcome => return outcome,
+      }
+    }
+  };
+  let (laptop_side, phone_side) = tokio::join!(NewDeviceLink::connect(&laptop_api, &offer), approve);
   let (laptop_side, phone_side) = (laptop_side.unwrap(), phone_side.unwrap());
   assert_eq!(laptop_side.short_code(), phone_side.short_code());
   // The phone reports success only once the laptop confirmed the transfer: both run at once.

@@ -8,6 +8,7 @@ use serde_json::json;
 use teamcraft_e2e::peer::settle;
 use teamcraft_e2e::scenario::{channel_with, space_with};
 use teamcraft_e2e::{Peer, Stack};
+use teamcraft_proto::GuestDmStart;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_guest_sees_only_the_conversations_he_was_added_to() {
@@ -86,21 +87,30 @@ async fn a_guest_sees_only_the_conversations_he_was_added_to() {
   let admin = stack.get(&dave.tokens, "/admin/users").await;
   assert_eq!(admin.status, StatusCode::FORBIDDEN, "{admin:?}");
 
-  // He can DM somebody he shares a conversation with (carol) but not a stranger (bob).
+  // By default a guest starts no conversation on his own (#887), neither with a stranger (bob) nor
+  // with somebody he shares a channel with (carol); carol can always write to him.
   let bob_id = stack.user_id(&stack.tokens("bob")).await;
   let stranger = stack.post(&dave.tokens, "/dms", json!({"user_id": bob_id})).await;
   assert!(
     !stranger.status.is_success(),
     "a guest opened a DM with a stranger: {stranger:?}"
   );
-  let colleague = dave.client.open_dm(carol.user_id()).await;
-  assert!(colleague.is_ok(), "{colleague:?}");
+  let colleague = stack
+    .post(
+      &dave.tokens,
+      "/dms",
+      json!({"user_id": carol.user_id().to_string()}),
+    )
+    .await;
+  assert_eq!(colleague.status, StatusCode::FORBIDDEN, "{colleague:?}");
+  let from_member = carol.client.open_dm(dave.user_id()).await;
+  assert!(from_member.is_ok(), "{from_member:?}");
 
   stack.stop().await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_guest_only_meets_people_from_conversations_he_shares_with_every_participant() {
+async fn a_guest_starts_conversations_only_with_people_he_shares_one_with() {
   let Some(stack) = Stack::start().await else { return };
   let mut alice = Peer::enroll(&stack, "alice").await;
   let mut carol = Peer::enroll(&stack, "carol").await;
@@ -118,14 +128,13 @@ async fn a_guest_only_meets_people_from_conversations_he_shares_with_every_parti
   let user = |peer: &Peer| peer.user_id().to_string();
   let (alice_id, carol_id, erin_id, dave_id) = (user(&alice), user(&carol), user(&erin), user(&dave));
 
-  // One to one: only along a shared conversation, in both directions.
-  let to_guest = stack
-    .post(&erin.tokens, "/dms", json!({"user_id": dave_id}))
+  // The workspace lets guests start conversations with people they share one with (#887; the
+  // default is that they start none).
+  alice
+    .set_policy(|policy| policy.guests.set_dm_start(Some(GuestDmStart::Shared)))
     .await;
-  assert!(
-    !to_guest.status.is_success(),
-    "a member DMed a guest they share nothing with: {to_guest:?}"
-  );
+
+  // One to one: only along a shared conversation.
   let from_guest = stack
     .post(&dave.tokens, "/dms", json!({"user_id": erin_id}))
     .await;
@@ -134,22 +143,11 @@ async fn a_guest_only_meets_people_from_conversations_he_shares_with_every_parti
     "a guest DMed a stranger: {from_guest:?}"
   );
   stack
-    .post(&carol.tokens, "/dms", json!({"user_id": dave_id}))
+    .post(&dave.tokens, "/dms", json!({"user_id": carol_id}))
     .await
     .expect(StatusCode::CREATED);
 
-  // Group DMs: the guest must know *everybody* in it, not only whoever opens it.
-  let with_stranger = stack
-    .post(
-      &carol.tokens,
-      "/group-dms",
-      json!({"user_ids": [dave_id, erin_id]}),
-    )
-    .await;
-  assert!(
-    !with_stranger.status.is_success(),
-    "Carol put her guest and Erin, who don't know each other, in one group: {with_stranger:?}"
-  );
+  // Group DMs: the guest must know *everybody* in it, not only one of them.
   let by_guest = stack
     .post(
       &dave.tokens,
@@ -160,9 +158,9 @@ async fn a_guest_only_meets_people_from_conversations_he_shares_with_every_parti
   assert!(!by_guest.status.is_success(), "{by_guest:?}");
   stack
     .post(
-      &carol.tokens,
+      &dave.tokens,
       "/group-dms",
-      json!({"user_ids": [dave_id, alice_id]}),
+      json!({"user_ids": [carol_id, alice_id]}),
     )
     .await
     .expect(StatusCode::CREATED);
@@ -170,7 +168,13 @@ async fn a_guest_only_meets_people_from_conversations_he_shares_with_every_parti
   // Once Dave and Erin share a channel, the DM is fine.
   channel_with(&mut alice, space, "joint", &mut [&mut erin, &mut dave]).await;
   stack
-    .post(&erin.tokens, "/dms", json!({"user_id": dave_id}))
+    .post(&dave.tokens, "/dms", json!({"user_id": erin_id}))
+    .await
+    .expect(StatusCode::CREATED);
+
+  // Members can always write to a guest, also without a shared conversation (Bob shares none).
+  stack
+    .post(&stack.tokens("bob"), "/dms", json!({"user_id": dave_id}))
     .await
     .expect(StatusCode::CREATED);
 
