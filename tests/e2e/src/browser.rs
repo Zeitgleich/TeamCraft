@@ -58,6 +58,7 @@ impl BrowserSession {
     let (browser, mut handler) = Browser::launch(config).await.expect("launching the browser");
     let handler = tokio::spawn(async move { while handler.next().await.is_some() {} });
     let page = browser.new_page("about:blank").await.expect("opening a page");
+    let_workers_start(&page).await;
     Some(Self {
       browser,
       page,
@@ -93,6 +94,7 @@ impl BrowserSession {
   /// Opens another tab of the same browser (same profile and origin storage) at `url`.
   pub async fn new_page(&self, url: &str) -> Page {
     let page = self.browser.new_page(url).await.expect("opening a page");
+    let_workers_start(&page).await;
     prefer_mouse(&page).await;
     page
   }
@@ -185,6 +187,24 @@ fn find_chrome() -> Option<PathBuf> {
       .map(|dir| dir.join(name))
       .find(|candidate| candidate.is_file())
   })
+}
+
+/// chromiumoxide attaches to every target a page starts and pauses it until it is told to run
+/// (`waitForDebuggerOnStart`); the page's service worker then stays in "starting" for good, and
+/// `navigator.serviceWorker.ready` never settles (#460). The page's own auto-attach is set again
+/// without the pause.
+async fn let_workers_start(page: &Page) {
+  use chromiumoxide::cdp::browser_protocol::target::SetAutoAttachParams;
+  let params = SetAutoAttachParams::builder()
+    .auto_attach(true)
+    .wait_for_debugger_on_start(false)
+    .flatten(true)
+    .build()
+    .expect("auto-attach parameters");
+  page
+    .execute(params)
+    .await
+    .expect("letting the page's workers start");
 }
 
 /// A headless browser has no mouse and, on a machine with a touch screen, reports a coarse primary
