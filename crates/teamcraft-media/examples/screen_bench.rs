@@ -205,7 +205,7 @@ impl Page {
             line[width / 8 + column] = INK;
           }
         }
-        if index / 15 % 2 == 0 && width / 8 + typed * glyph + 2 < width {
+        if (index / 15).is_multiple_of(2) && width / 8 + typed * glyph + 2 < width {
           line[width / 8 + typed * glyph + 1] = INK;
         }
       }
