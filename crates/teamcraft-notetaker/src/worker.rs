@@ -33,7 +33,7 @@ use tokio::task::JoinSet;
 use tracing::{debug, info, warn};
 
 use crate::capture::CaptureSettings;
-use crate::keys::{Credentials, KeyError};
+use crate::keys::Credentials;
 use crate::openrouter::{OpenRouterClient, OpenRouterError, Usage};
 use crate::report::{ReportInput, compose, joined_notice};
 use crate::session::{
@@ -50,8 +50,10 @@ const TICK: Duration = Duration::from_millis(500);
 const HEARTBEAT: Duration = Duration::from_secs(20);
 const RECONNECT_BACKOFF_MIN: Duration = Duration::from_secs(1);
 const RECONNECT_BACKOFF_MAX: Duration = Duration::from_secs(30);
-/// While a request waits and no call is known, the server is asked this often.
+/// While a `this_call` request waits and no call is known, the server is asked this often.
 const CALL_CHECK_INTERVAL: Duration = Duration::from_secs(15);
+/// The same for a standing `every_call` request: the gateway announces calls; this is a backstop.
+const STANDING_CHECK_INTERVAL: Duration = Duration::from_secs(300);
 /// A conversation whose call could not be joined is tried again after this long.
 const START_RETRY: Duration = Duration::from_secs(30);
 /// Store keys: a call in progress or not posted yet, and what was served last, per conversation.
@@ -314,7 +316,11 @@ impl<A: ServerApi, S: LocalStore> Worker<A, S> {
       let Some(join) = maybe_join else {
         continue;
       };
-      let Some(call_id) = self.known_call(conversation).await else {
+      let interval = match join.scope {
+        NotetakerScope::EveryCall => STANDING_CHECK_INTERVAL,
+        _ => CALL_CHECK_INTERVAL,
+      };
+      let Some(call_id) = self.known_call(conversation, interval).await else {
         continue;
       };
       if join.scope == NotetakerScope::EveryCall && served.maybe_last_call == Some(call_id) {
@@ -327,7 +333,7 @@ impl<A: ServerApi, S: LocalStore> Worker<A, S> {
   }
 
   /// The conversation's running call: as the gateway said, else from the server now and then.
-  async fn known_call(&mut self, conversation: ConversationId) -> Option<CallId> {
+  async fn known_call(&mut self, conversation: ConversationId, interval: Duration) -> Option<CallId> {
     if let Some(call_id) = self.running_calls.get(&conversation) {
       return Some(*call_id);
     }
@@ -335,7 +341,7 @@ impl<A: ServerApi, S: LocalStore> Worker<A, S> {
     if self.next_check.get(&conversation).is_some_and(|next| now < *next) {
       return None;
     }
-    self.next_check.insert(conversation, now + CALL_CHECK_INTERVAL);
+    self.next_check.insert(conversation, now + interval);
     match self.client.running_call(conversation).await {
       Ok(Some(call)) => {
         self.running_calls.insert(conversation, call.call_id);
@@ -394,12 +400,6 @@ impl<A: ServerApi, S: LocalStore> Worker<A, S> {
       self.running_calls.remove(&conversation);
       return;
     }
-    let mut served = self.served(conversation);
-    served.maybe_last_call = Some(call_id);
-    if join.scope == NotetakerScope::ThisCall {
-      served.maybe_this_call_at_ms = Some(join.at_ms);
-    }
-    self.save(&served_key(conversation), &served);
     let now_ms = unix_ms();
     let record = maybe_resumed.unwrap_or_else(|| SessionRecord {
       conversation,
@@ -411,7 +411,6 @@ impl<A: ServerApi, S: LocalStore> Worker<A, S> {
       transcript: Transcript::default(),
       maybe_report: None,
     });
-    self.save(&session_key(conversation), &record);
     let prior_elapsed = Duration::from_millis(u64::try_from(now_ms - record.started_at_ms).unwrap_or(0));
     let params = SessionParams {
       conversation,
@@ -430,10 +429,25 @@ impl<A: ServerApi, S: LocalStore> Worker<A, S> {
       devices: preparation.devices,
       tickets: self.tickets.for_conversation(conversation),
     };
+    let config = match crate::session::native_config(&params, access) {
+      Ok(config) => config,
+      Err(error) => {
+        warn!(%error, conversation_id = %conversation, "the call's keys can't be bound to this device");
+        self.delay_start(conversation);
+        return;
+      },
+    };
+    let mut served = self.served(conversation);
+    served.maybe_last_call = Some(call_id);
+    if join.scope == NotetakerScope::ThisCall {
+      served.maybe_this_call_at_ms = Some(join.at_ms);
+    }
+    self.save(&served_key(conversation), &served);
+    self.save(&session_key(conversation), &record);
     info!(conversation_id = %conversation, call_id = %call_id, requested_by = %join.by, "joining a call");
     let handle = crate::session::start(
       params,
-      access,
+      config,
       openrouter,
       Arc::clone(&self.limiter),
       self.session_sender.clone(),
@@ -505,14 +519,18 @@ impl<A: ServerApi, S: LocalStore> Worker<A, S> {
     }
     self.save(&session_key(conversation), &record);
     let names = self.names(conversation);
-    let maybe_openrouter = self.credentials.client(&record.policy).await.ok();
+    let openrouter = self
+      .credentials
+      .client(&record.policy)
+      .await
+      .map_err(|error| error.to_string());
     let minutes = outcome.elapsed.as_secs().div_ceil(60);
     let reason = outcome.reason.clone();
     let settings = self.settings.summary;
     self.reports.spawn(write_report(
       record,
       names,
-      maybe_openrouter,
+      openrouter,
       minutes,
       reason,
       outcome.usage,
@@ -687,8 +705,9 @@ impl<A: ServerApi, S: LocalStore> Worker<A, S> {
           self.gateway = Some(connection);
           self.backoff = RECONNECT_BACKOFF_MIN;
           self.last_heartbeat = now;
-          // Calls may have ended while the connection was away.
+          // Calls may have ended or begun while the connection was away: ask again.
           self.running_calls.clear();
+          self.next_check.clear();
         },
         Err(error) => {
           warn!(%error, retry_in = ?self.backoff, "gateway connection failed");
@@ -795,7 +814,7 @@ impl<A: ServerApi, S: LocalStore> Worker<A, S> {
 async fn write_report(
   record: SessionRecord,
   known_names: HashMap<UserId, String>,
-  maybe_openrouter: Option<Arc<OpenRouterClient>>,
+  openrouter: Result<Arc<OpenRouterClient>, String>,
   minutes: u64,
   reason: StopReason,
   mut usage: Usage,
@@ -816,10 +835,10 @@ async fn write_report(
     .collect();
   let lines = record.transcript.lines(&names);
   let mut is_key_refused = false;
-  let summary = match (&maybe_openrouter, record.transcript.is_empty()) {
+  let summary = match (&openrouter, record.transcript.is_empty()) {
     (_, true) => Err(String::new()),
-    (None, false) => Err(KeyError::NotStored.to_string()),
-    (Some(client), false) => {
+    (Err(reason), false) => Err(reason.clone()),
+    (Ok(client), false) => {
       let input = SummaryInput {
         date: &date,
         participants: &participants,

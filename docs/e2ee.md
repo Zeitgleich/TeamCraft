@@ -2131,11 +2131,11 @@ never reaches the server, and its hash in the policy must match all the same.
 message in the conversation (`MessageContent::Notetaker`, hidden from the timeline like the bridge's
 source announcements, §13.1):
 
-| Request             | Sent when                                     | The notetaker                                                                       |
-|---------------------|-----------------------------------------------|-------------------------------------------------------------------------------------|
-| `join` `this_call`  | "Add notetaker" in a running call             | joins the conversation's call running now, or one starting within 10 minutes        |
-| `join` `every_call` | a meeting is scheduled with "Notetaker joins" | joins every call of the meeting chat until a `stop`                                 |
-| `stop`              | "Remove notetaker" in the call                | leaves the call, transcribes what it heard, posts it; ends a standing `every_call`  |
+| Request             | Sent when                                               | The notetaker                                                                      |
+|---------------------|---------------------------------------------------------|------------------------------------------------------------------------------------|
+| `join` `this_call`  | "Add notetaker" in a running call                       | joins the conversation's call running now, or one starting within 10 minutes       |
+| `join` `every_call` | a meeting is scheduled with "Notetaker joins the calls" | joins every call of the meeting chat until a `stop`                                |
+| `stop`              | "Remove notetaker" in the call                          | leaves the call, transcribes what it heard, posts it; ends a standing `every_call` |
 
 It takes a `join` only from a sender the verified policy allows (`inviters`; the server's account kind
 can only take rights away, as for sources), and a `stop` from the member who asked it in, anybody

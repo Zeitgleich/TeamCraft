@@ -161,10 +161,10 @@ impl SessionHandle {
   }
 }
 
-/// Joins the call and runs the session in a task of its own.
+/// Joins the call (`config`, from [`native_config`]) and runs the session in a task of its own.
 pub fn start(
   params: SessionParams,
-  access: CallAccess,
+  config: NativeCallConfig,
   client: Arc<OpenRouterClient>,
   limiter: Arc<Semaphore>,
   events: SessionEvents,
@@ -172,7 +172,7 @@ pub fn start(
   let (stop, stop_rx) = watch::channel(None);
   let (conversation, call_id) = (params.conversation, params.call_id);
   tokio::spawn(async move {
-    let outcome = run(params, access, client, limiter, events.clone(), stop_rx).await;
+    let outcome = run(params, config, client, limiter, events.clone(), stop_rx).await;
     // A worker that is gone posts nothing anyway; the transcript is in its store.
     let _ = events.send((conversation, SessionEvent::Ended(Box::new(outcome))));
   });
@@ -185,17 +185,13 @@ pub fn start(
 
 async fn run(
   params: SessionParams,
-  access: CallAccess,
+  config: NativeCallConfig,
   client: Arc<OpenRouterClient>,
   limiter: Arc<Semaphore>,
   events: SessionEvents,
   mut stop: watch::Receiver<Option<StopReason>>,
 ) -> SessionOutcome {
   let mut running = Running::new(params, client, limiter, events);
-  let config = match native_config(&running.params, access) {
-    Ok(config) => config,
-    Err(reason) => return running.finish(StopReason::ConnectionLost(reason)).await,
-  };
   let mut call = match NativeCall::join(config).await {
     Ok(call) => call,
     Err(error) => {
@@ -442,7 +438,7 @@ impl Running {
 
 /// The native call: muted, audio frames to the session, only the conversation's verified devices
 /// trusted (e2ee.md §8).
-fn native_config(params: &SessionParams, access: CallAccess) -> Result<NativeCallConfig, String> {
+pub fn native_config(params: &SessionParams, access: CallAccess) -> Result<NativeCallConfig, String> {
   let engine = CallEngineConfig {
     user_id: params.user_id,
     device_id: params.device_id,
@@ -471,5 +467,210 @@ impl CallBindingSigner for CoreSigner {
     not_after: u64,
   ) -> Result<SignedCallKeyBinding, CallBindingError> {
     self.0.sign_call_key_binding(call_id, dave_public_key, not_after)
+  }
+}
+
+#[cfg(test)]
+mod tests {
+  use std::collections::HashMap;
+  use std::net::{Ipv6Addr, SocketAddr};
+
+  use base64::Engine;
+  use base64::engine::general_purpose::STANDARD;
+  use rand_core::OsRng;
+  use teamcraft_crypto::identity::{DeviceKeyPair, IdentityKeyPair};
+  use teamcraft_crypto::ids::{DeviceId as CryptoDeviceId, UserId as CryptoUserId};
+  use teamcraft_media::call_auth::CallKeyAuthenticator;
+  use teamcraft_sfu::auth::DevTokenVerifier;
+  use teamcraft_sfu::config::SfuConfig;
+  use teamcraft_sfu::server::{CALL_PATH, Sfu};
+  use wtransport::Identity;
+
+  use super::*;
+  use crate::test_support::{FakeOpenRouter, Reply};
+
+  const CALL: u64 = 31;
+  const SPEAKER: u64 = 1;
+  const NOTETAKER: u64 = 2;
+  const SPEECH: Duration = Duration::from_secs(3);
+  const DEADLINE: Duration = Duration::from_secs(30);
+
+  /// A speaker's test tone goes through a real SFU and DAVE to the notetaker's session, is cut into
+  /// a piece, sent to the (fake) transcription endpoint as a 16 kHz WAV, and comes back as the
+  /// speaker's segment when the session is asked to leave.
+  #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+  async fn a_speaker_is_transcribed_through_the_sfu() {
+    let openrouter = FakeOpenRouter::start(vec![Reply::json(
+      200,
+      r#"{"text":"Hello from the tone.","usage":{"seconds":3.0,"cost":0.0002}}"#,
+    )])
+    .await;
+    let (port, certificate_hash) = start_sfu().await;
+    let mut authenticators = authenticators();
+    let speaker = NativeCall::join(call_config(
+      port,
+      certificate_hash,
+      SPEAKER,
+      authenticators.remove(&SPEAKER).unwrap(),
+    ))
+    .await
+    .unwrap();
+    let mut config = call_config(
+      port,
+      certificate_hash,
+      NOTETAKER,
+      authenticators.remove(&NOTETAKER).unwrap(),
+    );
+    config.source = AudioSource::Silence;
+    config.sink = AudioSink::Frames;
+    config.is_muted_at_start = true;
+    let (events_tx, mut events) = mpsc::unbounded_channel();
+    let handle = start(
+      params(),
+      config,
+      Arc::new(openrouter.client(0)),
+      Arc::new(Semaphore::new(2)),
+      events_tx,
+    );
+
+    let deadline = tokio::time::Instant::now() + DEADLINE;
+    let mut maybe_secured_at = None;
+    let outcome = loop {
+      let wait = tokio::time::timeout_at(deadline, events.recv()).await;
+      let (conversation, event) = wait.expect("the session took too long").unwrap();
+      assert_eq!(conversation, id(7));
+      match event {
+        SessionEvent::Secured => {
+          maybe_secured_at = Some(tokio::time::Instant::now());
+          let stop = handle.stop.clone();
+          tokio::spawn(async move {
+            tokio::time::sleep(SPEECH).await;
+            stop.send_replace(Some(StopReason::Requested));
+          });
+        },
+        SessionEvent::Ended(outcome) => break *outcome,
+        SessionEvent::Segment(_) | SessionEvent::PieceFailed => {},
+      }
+    };
+    speaker.leave().await.unwrap();
+
+    assert!(maybe_secured_at.is_some() && outcome.was_secured);
+    assert_eq!(outcome.reason, StopReason::Requested);
+    let segments = outcome.transcript.segments();
+    assert_eq!(segments.len(), 1, "{segments:?}");
+    assert_eq!(segments[0].user, id(SPEAKER as i64));
+    assert_eq!(segments[0].text, "Hello from the tone.");
+    assert!(
+      segments[0].end_ms - segments[0].start_ms > 1_500,
+      "{:?}",
+      segments[0]
+    );
+    assert_eq!(outcome.usage.requests, 1);
+    let request = openrouter.requests().remove(0);
+    assert_eq!(request.body["model"], "mistralai/voxtral-mini-transcribe-3-0");
+    let wav = STANDARD
+      .decode(request.body["input_audio"]["data"].as_str().unwrap())
+      .unwrap();
+    assert_eq!(&wav[0..4], b"RIFF");
+    assert_eq!(u32::from_le_bytes(wav[24..28].try_into().unwrap()), 16_000);
+  }
+
+  fn params() -> SessionParams {
+    SessionParams {
+      conversation: id(7),
+      call_id: id(CALL as i64),
+      user_id: id(NOTETAKER as i64),
+      device_id: id(NOTETAKER as i64),
+      policy: NotetakerPolicy::default(),
+      capture: CaptureSettings {
+        max_piece: Duration::from_secs(30),
+        pause: Duration::from_millis(700),
+        min_speech: Duration::from_millis(500),
+        voice_threshold_dbfs: -50.0,
+      },
+      limits: SessionLimits {
+        max_call: Duration::from_secs(600),
+        alone: Duration::from_secs(60),
+        join: Duration::from_secs(20),
+      },
+      prior: Transcript::default(),
+      prior_elapsed: Duration::ZERO,
+    }
+  }
+
+  fn call_config(
+    port: u16,
+    certificate_hash: [u8; 32],
+    device: u64,
+    authenticator: Arc<dyn CallKeyAuthenticator>,
+  ) -> NativeCallConfig {
+    let engine = CallEngineConfig {
+      user_id: id(device as i64),
+      device_id: id(device as i64),
+      capabilities: MediaCapabilities::default(),
+      bwe: BweConfig::default(),
+    };
+    let sfu_url = format!(
+      "https://{}{CALL_PATH}",
+      SocketAddr::new(Ipv6Addr::LOCALHOST.into(), port)
+    );
+    let mut config = NativeCallConfig::new(sfu_url, format!("dev:{CALL}:{device}:{device}"), engine);
+    config.maybe_certificate_hash = Some(certificate_hash);
+    config.source = AudioSource::Tone {
+      frequency_hz: 220.0,
+      amplitude: 0.3,
+    };
+    config.sink = AudioSink::Discard;
+    let other = if device == SPEAKER { NOTETAKER } else { SPEAKER };
+    config.maybe_trusted_roster = Some(vec![id(other as i64)]);
+    config.maybe_authenticator = Some(authenticator);
+    config
+  }
+
+  /// Device-bound DAVE keys of both devices, each verifying the other's certificate.
+  fn authenticators() -> HashMap<u64, Arc<dyn CallKeyAuthenticator>> {
+    let mut key_pairs = Vec::new();
+    let mut verified = HashMap::new();
+    for device in [SPEAKER, NOTETAKER] {
+      let identity = IdentityKeyPair::generate(&mut OsRng);
+      let user = CryptoUserId::new(device);
+      let key_pair = DeviceKeyPair::generate(user, CryptoDeviceId::new(device), &mut OsRng);
+      let certificate = identity.certify_device(user, &key_pair.public_keys()).unwrap();
+      verified.insert(
+        id::<DeviceId>(device as i64),
+        certificate.verify(&identity.public_key()).unwrap(),
+      );
+      key_pairs.push((device, key_pair));
+    }
+    key_pairs
+      .into_iter()
+      .map(|(device, key_pair)| {
+        let authenticator: Arc<dyn CallKeyAuthenticator> = Arc::new(DeviceCallKeyAuthenticator::new(
+          Arc::new(key_pair),
+          verified.clone(),
+        ));
+        (device, authenticator)
+      })
+      .collect()
+  }
+
+  async fn start_sfu() -> (u16, [u8; 32]) {
+    let config = SfuConfig {
+      bind_addr: SocketAddr::from((Ipv6Addr::UNSPECIFIED, 0)),
+      ..SfuConfig::default()
+    };
+    let identity = Identity::self_signed(["localhost", "127.0.0.1", "::1"]).unwrap();
+    let sfu = Sfu::bind(config, identity, Arc::new(DevTokenVerifier)).unwrap();
+    let port = sfu.local_addr().unwrap().port();
+    let certificate_hash = *sfu.certificate_hash().as_ref();
+    tokio::spawn(sfu.run());
+    (port, certificate_hash)
+  }
+
+  fn id<T: std::str::FromStr>(raw: i64) -> T
+  where
+    T::Err: std::fmt::Debug,
+  {
+    raw.to_string().parse().unwrap()
   }
 }

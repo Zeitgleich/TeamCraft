@@ -11004,6 +11004,7 @@ dependencies = [
  "base64 0.23.1",
  "figment",
  "fluent-bundle",
+ "rand_core 0.6.4",
  "reqwest",
  "secrecy",
  "serde",
@@ -11013,12 +11014,14 @@ dependencies = [
  "teamcraft-media",
  "teamcraft-ops",
  "teamcraft-proto",
+ "teamcraft-sfu",
  "thiserror 2.0.21",
  "time",
  "tokio",
  "tracing",
  "tracing-subscriber",
  "unic-langid",
+ "wtransport",
 ]
 
 [[package]]

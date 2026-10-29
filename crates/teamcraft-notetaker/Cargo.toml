@@ -49,3 +49,7 @@ tracing-subscriber.workspace = true
 # A local stand-in for OpenRouter in the client's tests (no real API calls, no key).
 axum = { workspace = true, features = ["tokio", "http1", "json"] }
 figment = { workspace = true, features = ["test"] }
+# A session against a real SFU in the same process, with device-bound DAVE keys.
+teamcraft-sfu = { path = "../teamcraft-sfu" }
+rand_core.workspace = true
+wtransport = { version = "0.7.2", features = ["quinn", "self-signed"] }

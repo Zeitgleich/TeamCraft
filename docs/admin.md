@@ -572,8 +572,8 @@ participant sees when it is there. Read the data processing notes below before t
    choose who may ask it in, the models, the language and the summary instructions, and enter the
    OpenRouter API key.
 4. Add the bot to the channels where it may be used (Channel settings → Integrations), or let people
-   tick "Notetaker joins" when they schedule a meeting. It can only join calls of conversations it is a
-   member of, and must be in before the call starts (e2ee.md §8.2).
+   tick "Notetaker joins the calls" when they schedule a meeting. It can only join calls of
+   conversations it is a member of, and must be in before the call starts (e2ee.md §8.2).
 
 **Settings** (signed policy group `notetaker`, except the key)
 
@@ -588,7 +588,7 @@ participant sees when it is there. Read the data processing notes below before t
 | Language                 | automatic                               | Language of transcript and summary; `auto` detects it per piece                             |
 | Summary instructions     | built in                                | The prompt: summary, decisions, action items with owners, open questions                    |
 | Zero data retention only | on                                      | Requests may only go to endpoints that keep no data and don't train on it                   |
-| OpenRouter API key       | none                                    | Write-only; stored encrypted with the settings key (§6.2), its SHA-256 goes into the policy  |
+| OpenRouter API key       | none                                    | Write-only; stored encrypted with the settings key (§6.2), its SHA-256 goes into the policy |
 
 The key is never shown again and never sent to member clients; only the bot account the policy names
 can fetch it, and the notetaker refuses a key whose hash isn't the signed one. A server without a
