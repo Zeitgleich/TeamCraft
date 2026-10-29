@@ -46,6 +46,17 @@
   grid-row: 1;
 }
 
+/* A phone on its side is only about 400px high: a few banners at once (an unanswered notification
+   prompt, the owner's roster reminder) would push a conversation's composer off the screen. The
+   banners keep a quarter of the height and scroll within it. */
+@media (max-height: 500px) {
+  :root[data-layout="compact"] .app > .app-banners {
+    max-height: 25dvh;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+  }
+}
+
 :root[data-layout="compact"] .app > .top-bar {
   grid-row: 2;
   height: var(--topbar-h);
