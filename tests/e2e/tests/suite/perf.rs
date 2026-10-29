@@ -296,7 +296,7 @@ impl Rig {
       .with_env("TEAMCRAFT_DATABASE__MAX_CONNECTIONS", "16");
     let turn = lease_web_port(PORT).await;
     let stack = builder.start().await?;
-    let browser = BrowserSession::launch().await?;
+    let browser = BrowserSession::launch_for_measurements().await?;
     let alice = Peer::enroll(&stack, "alice").await;
     let bob = Peer::enroll(&stack, "bob").await;
     // Carol's keys exist before the browser signs in (it unlocks them); her first device then

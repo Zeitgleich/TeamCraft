@@ -9,6 +9,10 @@ use chromiumoxide::browser::{Browser, BrowserConfig};
 use chromiumoxide::page::{Page, ScreenshotParams};
 use futures_util::{FutureExt, StreamExt};
 
+/// How long a command to the browser (a page script, a click) may take. A script that waits for
+/// something that never comes fails the test after this, not after the job's timeout.
+const REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
+
 /// A browser process with one page; closed on drop of the handler task.
 pub struct BrowserSession {
   browser: Browser,
@@ -26,6 +30,16 @@ impl BrowserSession {
 
   /// [`Self::launch`] with more command line switches (fake camera and microphone for calls).
   pub async fn launch_with(extra_args: &[&str]) -> Option<Self> {
+    Self::launch_with_timeout(extra_args, REQUEST_TIMEOUT).await
+  }
+
+  /// [`Self::launch`] for page scripts that wait for the app much longer than
+  /// [`REQUEST_TIMEOUT`] (perf.rs).
+  pub async fn launch_for_measurements() -> Option<Self> {
+    Self::launch_with_timeout(&[], std::time::Duration::from_secs(300)).await
+  }
+
+  async fn launch_with_timeout(extra_args: &[&str], request_timeout: std::time::Duration) -> Option<Self> {
     let is_required = std::env::var("E2E_REQUIRED").is_ok_and(|value| value == "1");
     let Some(executable) = find_chrome() else {
       assert!(
@@ -51,8 +65,7 @@ impl BrowserSession {
       .arg("lang=en-US")
       .arg("accept-lang=en-US")
       .window_size(1360, 840)
-      // Page scripts that wait for the app (perf.rs) may take longer than the 30 s default.
-      .request_timeout(std::time::Duration::from_secs(300))
+      .request_timeout(request_timeout)
       .build()
       .expect("browser config");
     let (browser, mut handler) = Browser::launch(config).await.expect("launching the browser");
