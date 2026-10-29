@@ -7,9 +7,10 @@
 //! even over budget; then tracks are upgraded one layer at a time in priority order up to the layer the receiver asked
 //! for. Downgrades apply at once (a screen share's after `screen_downswitch_hold`); an upgrade only
 //! when the budget covers the new layer with `upswitch_headroom` for `upswitch_hold`, so a noisy
-//! estimate doesn't make layers flap. A paused track resumes its lowest layer every
-//! `resume_probe_interval` as a probe: without traffic there is no feedback, and the estimate
-//! would never recover.
+//! estimate doesn't make layers flap. A paused track resumes its lowest layer as a probe, first
+//! `resume_probe_interval` after the pause and then less and less often while the probes don't
+//! keep it (up to `max_resume_probe_interval`): without traffic there is no feedback, and the
+//! estimate would never recover.
 
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
@@ -26,8 +27,15 @@ pub struct LayerAllocationConfig {
   pub upswitch_headroom: f64,
   /// ... continuously for this long.
   pub upswitch_hold: Duration,
-  /// A track paused for lack of bandwidth is tried again at its lowest layer this often.
+  /// A track paused for lack of bandwidth is tried again at its lowest layer this long after the
+  /// pause. A link that just lost a burst (a limit setting in, cross traffic) often carries the
+  /// lowest layer again within a second or two, while the estimate, cut to what got through of the
+  /// burst, needs far longer to grow back: at a steady 5 s, a viewer behind a limited downlink saw
+  /// no picture for 5.3 s on a CI runner.
   pub resume_probe_interval: Duration,
+  /// Every probe that doesn't keep the track doubles the wait before the next one, up to this: a
+  /// link that really can't carry the lowest layer isn't probed every few seconds.
+  pub max_resume_probe_interval: Duration,
   /// Whether screen shares may be paused for lack of bandwidth like cameras.
   pub can_pause_screen_shares: bool,
   /// How long the budget has to stay below a screen share's layer before it drops. A still
@@ -66,6 +74,8 @@ pub struct LayerAllocator {
   /// Resume probes in progress: the lowest layer is kept until then, whatever the estimate says,
   /// so its feedback can lift the estimate.
   probing_until: HashMap<StreamId, Instant>,
+  /// The wait before the next resume probe, after probes that didn't keep the track.
+  resume_wait: HashMap<StreamId, Duration>,
 }
 
 impl Default for LayerAllocationConfig {
@@ -74,7 +84,8 @@ impl Default for LayerAllocationConfig {
       audio_reserve_bps: 3 * 40_000,
       upswitch_headroom: 1.15,
       upswitch_hold: Duration::from_secs(2),
-      resume_probe_interval: Duration::from_secs(5),
+      resume_probe_interval: Duration::from_secs(2),
+      max_resume_probe_interval: Duration::from_secs(8),
       can_pause_screen_shares: false,
       screen_downswitch_hold: Duration::from_secs(3),
     }
@@ -144,6 +155,9 @@ impl LayerAllocator {
     self
       .downgrade_pending_since
       .retain(|stream_id, _| result.contains_key(stream_id));
+    self
+      .resume_wait
+      .retain(|stream_id, _| result.contains_key(stream_id));
     result
   }
 
@@ -185,6 +199,7 @@ impl LayerAllocator {
     if chosen.is_some() {
       self.paused_since.remove(&demand.stream_id);
       self.probing_until.remove(&demand.stream_id);
+      self.resume_wait.remove(&demand.stream_id);
       return chosen;
     }
     if self
@@ -194,9 +209,21 @@ impl LayerAllocator {
     {
       return lowest;
     }
-    self.probing_until.remove(&demand.stream_id);
+    if self.probing_until.remove(&demand.stream_id).is_some() {
+      // The probe ended without the estimate covering the layer: wait longer for the next.
+      let wait = self
+        .resume_wait
+        .entry(demand.stream_id)
+        .or_insert(config.resume_probe_interval);
+      *wait = (*wait * 2).min(config.max_resume_probe_interval);
+    }
+    let wait = self
+      .resume_wait
+      .get(&demand.stream_id)
+      .copied()
+      .unwrap_or(config.resume_probe_interval);
     let since = *self.paused_since.entry(demand.stream_id).or_insert(now);
-    if now.saturating_duration_since(since) < config.resume_probe_interval {
+    if now.saturating_duration_since(since) < wait {
       return None;
     }
     self.paused_since.remove(&demand.stream_id);
@@ -465,14 +492,55 @@ mod tests {
         allocator.allocate(&config(), 200_000, &demands, start)[&StreamId(1)],
         None
       );
-      let before = start + Duration::from_secs(4);
+      let before = start + Duration::from_millis(1_900);
       assert_eq!(
         allocator.allocate(&config(), 200_000, &demands, before)[&StreamId(1)],
         None
       );
-      let after = start + Duration::from_secs(5);
+      let after = start + Duration::from_secs(2);
       assert_eq!(
         allocator.allocate(&config(), 200_000, &demands, after)[&StreamId(1)],
+        Some(0)
+      );
+    }
+
+    /// Probes that don't keep the track come less and less often (2, 4, 8, 8 s apart); once the
+    /// track runs again, the next pause is probed soon again.
+    #[test]
+    fn resume_probes_back_off_while_they_fail() {
+      let layers = three_layers();
+      let mut allocator = LayerAllocator::new();
+      let start = Instant::now();
+      let demands = [demand(1, 0, 2, &layers)];
+      let mut probes_at = Vec::new();
+      let mut was_sent = false;
+      for tick in 0..=400 {
+        let at = start + Duration::from_millis(100 * tick);
+        let is_sent = allocator.allocate(&config(), 200_000, &demands, at)[&StreamId(1)].is_some();
+        if is_sent && !was_sent {
+          probes_at.push(tick / 10);
+        }
+        was_sent = is_sent;
+      }
+      // Paused at 0; probes of 2 s at 2, then 2 + 2 + 4, 8 + 2 + 8, 18 + 2 + 8, 28 + 2 + 8.
+      assert_eq!(probes_at, vec![2, 8, 18, 28, 38]);
+
+      // The estimate covers the layer (an upgrade from paused waits for the hold): the next pause
+      // is probed after 2 s again.
+      let covered = start + Duration::from_secs(41);
+      allocator.allocate(&config(), 400_000, &demands, covered);
+      let resumed = covered + Duration::from_secs(2);
+      assert_eq!(
+        allocator.allocate(&config(), 400_000, &demands, resumed)[&StreamId(1)],
+        Some(0)
+      );
+      let paused = resumed + Duration::from_millis(100);
+      assert_eq!(
+        allocator.allocate(&config(), 200_000, &demands, paused)[&StreamId(1)],
+        None
+      );
+      assert_eq!(
+        allocator.allocate(&config(), 200_000, &demands, paused + Duration::from_secs(2))[&StreamId(1)],
         Some(0)
       );
     }
