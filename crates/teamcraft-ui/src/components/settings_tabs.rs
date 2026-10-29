@@ -4,7 +4,7 @@
 //! `settings_keyboard`).
 
 use leptos::prelude::*;
-use teamcraft_client_api::calls::CallStatusSounds;
+use teamcraft_client_api::calls::{CallStatusSounds, VideoQuality};
 use teamcraft_client_api::window_chrome::{TitleBar, TrayIconStyle, WindowPlatform};
 use teamcraft_proto::BrandLinks;
 
@@ -598,6 +598,20 @@ pub fn AudioVideoSection() -> impl IntoView {
         hint="settings-mirror-hint"
         value=Signal::derive(move || calls.get().mirror_self_view)
         on_change=Callback::new(move |value: bool| prefs.update(|all| all.calls.mirror_self_view = value))
+      />
+    </SettingsCard>
+    <SettingsCard heading="calls-video">
+      <SelectRow
+        label="calls-camera-quality"
+        hint="calls-camera-quality-hint"
+        options=VideoQuality::CAMERA_CHOICES
+          .into_iter()
+          .map(|quality| (quality.slug(), format!("calls-camera-quality-{}", quality.slug())))
+          .collect()
+        value=Signal::derive(move || calls.get().camera_quality.slug())
+        on_change=Callback::new(move |slug: String| {
+          prefs.update(|all| all.calls.camera_quality = VideoQuality::from_slug(&slug))
+        })
       />
     </SettingsCard>
     <SettingsCard heading="calls-audio">

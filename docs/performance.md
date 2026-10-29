@@ -236,6 +236,64 @@ effects pipeline would first upload the full 4K picture (12 MB per frame) and on
 effect is on. Bilinear shrinking by 3 (4K → 720p) samples one source pixel of nine and can
 alias fine patterns; an area filter would look better at about the same cost, if it shows.
 
+### What each camera layer sends (issue #967)
+
+In calls a Mac's 720p camera layer, meant for 1.5 Mbit/s, sent 155 to 306 kbit/s through
+VideoToolbox, and the picture looked soft. From
+`crates/teamcraft-media/examples/camera_bitrate.rs`: frames encoded as they come, at 30 fps in
+real time, as the call's encoder thread does; a calm synthetic camera picture (a room and a
+person who barely moves, a denoised camera's faint noise); the first second left out; luma PSNR
+of a sample of each layer decoded with OpenH264 against what its encoder was given. Apple M4 Max,
+macOS 26.6, GStreamer 1.28; runs vary by about 0.5 dB.
+
+```sh
+cargo run --release -p teamcraft-media --example camera_bitrate \
+  --features gstreamer,openh264-source -- calm --seconds 10 [--max 720] [--encoder software]
+```
+
+A 720p camera (and before #967 every camera, a 1080p one shrunk to 720p):
+
+| Layer | Target     | VideoToolbox, average bitrate (before) | VideoToolbox, constant bitrate (after) | OpenH264            |
+|-------|------------|----------------------------------------|----------------------------------------|---------------------|
+| 180p  | 94 kbit/s  | 15 kbit/s (16 %), 38.4 dB              | 97 kbit/s (103 %), 45.2 dB             | 19 kbit/s, 45.5 dB  |
+| 360p  | 375 kbit/s | 29 kbit/s (8 %), 40.2 dB               | 377 kbit/s (101 %), 46.3 dB            | 73 kbit/s, 47.2 dB  |
+| 720p  | 1.5 Mbit/s | 602 kbit/s (40 %), 41.2 dB             | 1504 kbit/s (100 %), 45.4 dB           | 424 kbit/s, 44.9 dB |
+
+A 1080p camera since #967 (the average bitrate measured with these layers before the change):
+
+| Layer | Target     | VideoToolbox, average bitrate | VideoToolbox, constant bitrate | OpenH264             |
+|-------|------------|-------------------------------|--------------------------------|----------------------|
+| 360p  | 375 kbit/s | 42 kbit/s (11 %), 39.7 dB     | 381 kbit/s (102 %), 46.0 dB    | 71 kbit/s, 47.2 dB   |
+| 720p  | 1.5 Mbit/s | 440 kbit/s (29 %), 42.0 dB    | 1504 kbit/s (100 %), 45.5 dB   | 420 kbit/s, 44.9 dB  |
+| 1080p | 3 Mbit/s   | 1348 kbit/s (45 %), 41.6 dB   | 3038 kbit/s (101 %), 43.9 dB   | 1146 kbit/s, 46.2 dB |
+
+Encoding a frame (shrinking it to the layers and encoding all three) took 2.0 ms of CPU with
+VideoToolbox for both cameras (2.9 and 4.5 ms wall time), 2.6 and 4.9 ms with OpenH264.
+
+- VideoToolbox at an average bitrate (`AverageBitRate`) stops spending bits on a calm picture
+  long before it looks good: the 720p layer at 41 dB where its bitrate buys 45. A camera with
+  less noise than this picture (a Mac's in daylight) undershoots further, as in the calls. At a
+  constant bitrate (`rate-control=cbr`; `kVTCompressionPropertyKey_ConstantBitRate`, Apple
+  silicon from macOS 13, which GStreamer emulates with data rate limits elsewhere) every layer
+  sends its target, 4 to 7 dB sharper. A quality floor (`quality`) instead made VideoToolbox
+  ignore the bitrate: 0.9 sent 9.3 Mbit/s for the 1.5 Mbit/s layer.
+- OpenH264 stops below its target on a calm picture too, but only once the picture is as sharp as
+  the bitrate would make it (45 dB and more): its rate control bottoms out at its lowest
+  quantizer, not at a soft picture. On the busy camera of the SFU's tests it uses its whole
+  bitrate.
+- Through a real SFU (`video_quality` in its test suite: a busy 720p camera, the viewer picks
+  720p) the 720p layer arrived at 143 kbit/s with VideoToolbox at an average bitrate and at
+  1496 kbit/s at a constant one (OpenH264: 1365 kbit/s with the rest of the suite running).
+- The browser has the same problem in Chrome's hardware encoder on a Mac. A page encoding a calm
+  30 fps picture with WebCodecs (H.264 Constrained Baseline, Chrome 156, same Mac): in
+  `latencyMode: "realtime"` 36 of 375 kbit/s at 360p, 503 of 1500 at 720p and 1940 of 3000 at
+  1080p, and still 533 kbit/s when 720p was given 3 Mbit/s; `bitrateMode: "constant"` changed
+  nothing. In `"quality"` mode 424, 1700 and 3053 kbit/s, with the pictures out 5 to 9 ms after
+  the frame (6 to 11 ms in `"realtime"`). Chrome's software encoder sent about 1.1 Mbit/s at 720p
+  in either mode. Camera encoders in browsers on Apple devices use `"quality"` now
+  (`call_web/video.rs`, `camera_latency_mode`); Safari, Firefox and other platforms' hardware
+  encoders are not measured.
+
 ## Clients
 
 How fast and how lean the apps are for the person using them; the budgets they must stay within are

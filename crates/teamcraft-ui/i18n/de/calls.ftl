@@ -83,6 +83,14 @@ tile-speaking = spricht
 tile-reconnecting = Verbindung wird wiederhergestellt
 video-stalled = Video pausiert: schwache Verbindung
 
+## Videoqualität (#967): wie scharf das Video einer anderen Person ankommt, wie im Menü eines Videoplayers
+video-quality = Videoqualität
+video-quality-for = Videoqualität: { $name }
+video-quality-auto = Automatisch
+video-quality-auto-now = Automatisch ({ $lines }p)
+video-quality-lines = { $lines }p
+video-quality-hint = Automatisch wählt das schärfste Bild, das die Verbindung und die Kachel zulassen. Eine feste Wahl bleibt unter dem, was gesendet wird und was die Verbindung trägt.
+
 ## Statistiken für Nerds (#938): technische Angaben über jedem Video des Anrufs
 stats-title = Statistiken für Nerds
 stats-copy = Statistiken kopieren
@@ -212,6 +220,13 @@ calls-status-sounds-hint = Ein leiser Ton wiederholt sich, solange deine Verbind
 calls-status-sounds-all = Meine und die Verbindungen anderer
 calls-status-sounds-own-only = Nur meine Verbindung
 calls-status-sounds-off = Aus
+calls-video = Video
+calls-camera-quality = Höchste gesendete Kameraqualität
+calls-camera-quality-hint = Deine Kamera wird mit bis zu 1080p gesendet, wo sie das kann. Wähle weniger, um Daten zu sparen.
+calls-camera-quality-auto = Automatisch (beste)
+calls-camera-quality-1080 = 1080p
+calls-camera-quality-720 = 720p
+calls-camera-quality-360 = 360p
 calls-background = Standardhintergrund
 calls-background-hint = Wird auf deinem Gerät angewendet, bevor dein Video gesendet wird.
 

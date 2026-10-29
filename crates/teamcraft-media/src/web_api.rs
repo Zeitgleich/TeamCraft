@@ -143,10 +143,6 @@ extern "C" {
   #[wasm_bindgen(method, catch)]
   pub fn close(this: &VideoEncoder) -> Result<(), JsValue>;
 
-  /// Resolves to `{ supported, config }`.
-  #[wasm_bindgen(static_method_of = VideoEncoder, js_name = isConfigSupported, catch)]
-  pub fn is_config_supported(config: &Object) -> Result<Promise, JsValue>;
-
   /// <https://www.w3.org/TR/webcodecs/#videodecoder-interface>
   pub type VideoDecoder;
 

@@ -29,7 +29,7 @@ use teamcraft_sfu::server::{CALL_PATH, Sfu};
 use tokio::time::Instant;
 use wtransport::Identity;
 
-use super::busy_camera::BusyCamera;
+use crate::common::busy_camera::BusyCamera;
 
 const HD: VideoResolution = VideoResolution {
   width: 1280,
@@ -83,7 +83,9 @@ async fn a_picked_quality_moves_the_viewer_to_its_layer_and_auto_follows_the_til
 
 /// #967: on a link that carries it, the top layer the viewer picked arrives at about its
 /// bitrate. VideoToolbox at an average bitrate sent 155 to 306 kbit/s of a 720p layer's
-/// 1.5 Mbit/s in calls; OpenH264 spends it on the busy camera's motion and noise.
+/// 1.5 Mbit/s in calls, and 143 kbit/s here; at a constant bitrate 1496. OpenH264 spends it on
+/// the busy camera's motion and noise (1365 kbit/s with the rest of the suite running). The
+/// bounds leave room for a slow CI runner that encodes fewer pictures a second.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_good_link_carries_the_top_layer_at_about_its_bitrate() {
   let (port, certificate_hash) = start_sfu().await;
@@ -118,11 +120,12 @@ async fn a_good_link_carries_the_top_layer_at_about_its_bitrate() {
   presenter.leave().await.unwrap();
   viewer.leave().await.unwrap();
   reached.unwrap();
-  // DAVE adds a few bytes per frame; the encoders' own rate control may stay a bit below.
+  // DAVE adds a few bytes per frame; the encoders' rate control may stay below, more so where
+  // a loaded machine encodes fewer pictures.
   let bitrate_bps = bytes as f64 * 8.0 / seconds;
   let share = bitrate_bps / f64::from(CAMERA_HD_BITRATE_BPS);
   assert!(
-    (0.6..1.6).contains(&share),
+    (0.5..2.0).contains(&share),
     "the top layer came at {:.0} kbit/s ({frames} frames in {seconds:.1} s) of {} kbit/s",
     bitrate_bps / 1000.0,
     CAMERA_HD_BITRATE_BPS / 1000

@@ -13,7 +13,9 @@ use crate::attention::{AttentionReporter, AttentionSignals, LockReading, is_atte
 use crate::auth::tauri;
 use crate::backend::Backend;
 use crate::calls::CallPhase;
-use crate::calls::{BackgroundEffect, CallEvent, CallRequest, CallStatusSounds, CameraFallback};
+use crate::calls::{
+  BackgroundEffect, CallEvent, CallRequest, CallStatusSounds, CameraFallback, VideoQuality,
+};
 use crate::clock::now_ms;
 use crate::components::announcement_banner::AnnouncementBanner;
 use crate::components::bottom_nav::BottomNav;
@@ -1044,6 +1046,8 @@ pub(crate) fn connect_calls(state: AppState) {
       CallEvent::StartScreenShare { has_sound, mode } => backend.start_screen_share(has_sound, mode),
       CallEvent::StopScreenShare => backend.stop_screen_share(),
       CallEvent::StatusSounds(sounds) => backend.set_call_status_sounds(sounds),
+      CallEvent::CameraQuality(quality) => backend.set_camera_quality(quality),
+      CallEvent::VideoQuality { stream_id, quality } => backend.set_video_quality(stream_id, quality),
     });
   });
   // The status sounds setting reaches the call backend at start and on every change (not on
@@ -1054,6 +1058,14 @@ pub(crate) fn connect_calls(state: AppState) {
       call.emit(CallEvent::StatusSounds(sounds));
     }
     sounds
+  });
+  // The camera's quality setting likewise (#967): at start and on every change.
+  Effect::new(move |previous: Option<VideoQuality>| {
+    let quality = state.settings.prefs.with(|prefs| prefs.calls.camera_quality);
+    if previous != Some(quality) {
+      call.emit(CallEvent::CameraQuality(quality));
+    }
+    quality
   });
   // The effect picker writes the signal; the media layer applies it to the camera image.
   Effect::new(move |previous: Option<BackgroundEffect>| {

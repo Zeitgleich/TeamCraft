@@ -3,9 +3,10 @@
 //! here is empty.
 
 mod bandwidth_limits;
-mod busy_camera;
 mod camera_call;
 mod camera_start;
+#[path = "../common/mod.rs"]
+mod common;
 mod dave_call;
 mod handover;
 mod host_controls;

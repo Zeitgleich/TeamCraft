@@ -199,7 +199,7 @@ pub(super) struct TrackPlan {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum LayerShape {
   /// A camera's layers (`video::camera_layers`: 1080p, 720p and 360p from a 1080p camera, #967),
-  /// encoded at a constant bitrate where the browser can.
+  /// encoded in the latency mode that gives them their bitrate ([`camera_latency_mode`]).
   Camera,
   /// Up to `max_layers` layers halving the size, the top one at `bitrate_bps` (screen shares).
   Halving { bitrate_bps: u32, max_layers: u8 },
@@ -232,18 +232,17 @@ impl TrackSender {
     let limit = plan.maybe_max_resolution.unwrap_or(resolution);
     let resolution = fit_within(resolution, limit);
     let video = play_hidden(&stream).await?;
-    let (infos, bitrate_mode) = match plan.shape {
-      LayerShape::Camera => {
-        let infos = camera_layers(resolution, plan.framerate, limit);
-        let mode = constant_bitrate_if_supported(&infos, plan.framerate).await;
-        (infos, mode)
-      },
+    let (infos, latency) = match plan.shape {
+      LayerShape::Camera => (
+        camera_layers(resolution, plan.framerate, limit),
+        camera_latency_mode(),
+      ),
       LayerShape::Halving {
         bitrate_bps,
         max_layers,
       } => (
         simulcast_layers(resolution, plan.framerate, bitrate_bps, max_layers),
-        BitrateMode::Variable,
+        LatencyMode::Realtime,
       ),
     };
     let sizer = LayerSizer::new(infos.clone(), limit);
@@ -253,7 +252,7 @@ impl TrackSender {
         info,
         kind.clone(),
         framerate,
-        bitrate_mode,
+        latency,
         generation,
         &encoder_inputs,
       )
@@ -607,7 +606,7 @@ impl LayerEncoder {
     info: VideoLayerInfo,
     kind: VideoTrackKind,
     framerate: u8,
-    bitrate_mode: BitrateMode,
+    latency: LatencyMode,
     generation: u64,
     inputs: &mpsc::UnboundedSender<Input>,
   ) -> Result<Self, WebCallError> {
@@ -661,9 +660,8 @@ impl LayerEncoder {
           ("width", JsValue::from(info.width)),
           ("height", JsValue::from(info.height)),
           ("bitrate", JsValue::from(info.max_bitrate_bps)),
-          ("bitrateMode", JsValue::from_str(bitrate_mode.as_str())),
           ("framerate", JsValue::from(framerate)),
-          ("latencyMode", JsValue::from_str("realtime")),
+          ("latencyMode", JsValue::from_str(latency.as_str())),
         ])
         .map_err(browser("VideoEncoder"))?,
       )
@@ -913,57 +911,40 @@ pub(super) fn camera_plan(limit: VideoResolution) -> TrackPlan {
   }
 }
 
-/// How a WebCodecs encoder spends its bitrate (`VideoEncoderConfig.bitrateMode`).
+/// How a WebCodecs encoder weighs latency against quality (`VideoEncoderConfig.latencyMode`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum BitrateMode {
-  Constant,
-  Variable,
+pub(super) enum LatencyMode {
+  Realtime,
+  Quality,
 }
 
-impl BitrateMode {
+impl LatencyMode {
   fn as_str(self) -> &'static str {
     match self {
-      Self::Constant => "constant",
-      Self::Variable => "variable",
+      Self::Realtime => "realtime",
+      Self::Quality => "quality",
     }
   }
 }
 
-/// A camera's encoders at a constant bitrate where the browser has one for the top layer: at a
-/// variable bitrate, hardware encoders (VideoToolbox on a Mac) stop spending bits on a calm
-/// picture long before it looks good (#967). Browsers without it, or that can't tell, encode at a
-/// variable bitrate as before.
-async fn constant_bitrate_if_supported(infos: &[VideoLayerInfo], framerate: u8) -> BitrateMode {
-  let Some(top) = infos.last() else {
-    return BitrateMode::Variable;
-  };
-  let Ok(config) = dictionary(&[
-    (
-      "codec",
-      JsValue::from_str(h264_encoder_codec(top.width, top.height)),
-    ),
-    ("width", JsValue::from(top.width)),
-    ("height", JsValue::from(top.height)),
-    ("bitrate", JsValue::from(top.max_bitrate_bps)),
-    ("bitrateMode", JsValue::from_str(BitrateMode::Constant.as_str())),
-    ("framerate", JsValue::from(framerate)),
-    ("latencyMode", JsValue::from_str("realtime")),
-  ]) else {
-    return BitrateMode::Variable;
-  };
-  let Ok(promise) = VideoEncoder::is_config_supported(&config) else {
-    return BitrateMode::Variable;
-  };
-  let is_supported = JsFuture::from(promise)
-    .await
+/// The latency mode of a camera's encoders: `quality` on Apple devices, `realtime` elsewhere.
+/// Chrome's hardware encoder on a Mac (VideoToolbox) in `realtime` mode stops far below the
+/// bitrate on a calm camera picture, whatever the bitrate and `bitrateMode` (#967, Chrome 156, M4
+/// Max, a calm 30 fps picture: 360p 36 of 375 kbit/s, 720p 503 of 1500, 1080p 1940 of 3000, and
+/// 533 kbit/s when 720p was given 3 Mbit/s); in `quality` mode it sends 424, 1700 and 3053 kbit/s,
+/// and its pictures came out as soon (5 to 9 ms after the frame, against 6 to 11 ms). With H.264
+/// Constrained Baseline there are no B-frames to wait for. Other platforms keep `realtime`: their
+/// software encoder sends its bitrate either way, and a hardware encoder elsewhere may buffer
+/// frames outside it (untested).
+fn camera_latency_mode() -> LatencyMode {
+  let is_apple = window()
     .ok()
-    .and_then(|support| js_sys::Reflect::get(&support, &JsValue::from_str("supported")).ok())
-    .is_some_and(|supported| supported.is_truthy());
-  if is_supported {
-    BitrateMode::Constant
+    .and_then(|window| window.navigator().user_agent().ok())
+    .is_some_and(|agent| agent.contains("Macintosh"));
+  if is_apple {
+    LatencyMode::Quality
   } else {
-    debug!("no constant bitrate for the camera; encoding at a variable bitrate");
-    BitrateMode::Variable
+    LatencyMode::Realtime
   }
 }
 

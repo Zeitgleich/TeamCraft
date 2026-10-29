@@ -387,6 +387,8 @@ pub struct CallPrefs {
   pub screen_mode: teamcraft_client_api::calls::ScreenContentMode,
   /// Tones while the connection is lost and when it is back.
   pub status_sounds: teamcraft_client_api::calls::CallStatusSounds,
+  /// The highest quality the camera is sent at (#967).
+  pub camera_quality: teamcraft_client_api::calls::VideoQuality,
 }
 
 impl Default for CallPrefs {
@@ -405,6 +407,7 @@ impl Default for CallPrefs {
       share_sound: false,
       screen_mode: teamcraft_client_api::calls::ScreenContentMode::Detail,
       status_sounds: teamcraft_client_api::calls::CallStatusSounds::All,
+      camera_quality: teamcraft_client_api::calls::VideoQuality::Auto,
     }
   }
 }

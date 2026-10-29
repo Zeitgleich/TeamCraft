@@ -18,6 +18,12 @@
 //! largest offset of a pixel, default 1: a camera that denoises, like a Mac's in daylight) and
 //! `--size` its size (default 1920x1080). The layers are the call's (`video::camera_layers`);
 //! `--max` caps them like the user's setting does (1080, 720 or 360 lines).
+//!
+//! The report is logged as a table, a row per layer. The PSNR column decodes a sample of each
+//! layer's pictures with OpenH264 and compares them with what the layer's encoder was given. The
+//! encoding's cost is the process's CPU time (all threads: GStreamer's and VideoToolbox's too)
+//! and the wall time while the simulcast encoder works on a frame, after the warm-up. The
+//! numbers of #967 are in docs/performance.md ("What each camera layer sends").
 
 use std::collections::{BTreeMap, VecDeque};
 use std::time::{Duration, Instant};
@@ -86,12 +92,12 @@ fn main() -> anyhow::Result<()> {
     framerate: FRAMERATE,
   };
   let duration = Duration::from_secs(seconds);
-  let (layers, tallies, elapsed, names) = match source.as_str() {
+  let run = match source.as_str() {
     "camera" => run_camera(limit, &encoders, duration)?,
     "calm" => run_calm(format, limit, &encoders, duration, noise)?,
     other => bail!("unknown source {other}; use camera or calm"),
   };
-  report(&layers, &tallies, elapsed, &names);
+  report(&run);
   Ok(())
 }
 
@@ -103,7 +109,22 @@ fn parse_size(value: &str) -> anyhow::Result<VideoResolution> {
   })
 }
 
-type Run = (Vec<VideoLayerInfo>, BTreeMap<u8, LayerTally>, Duration, String);
+/// What a run gives: the layers, what each sent, how long it ran, the encoders and their cost.
+struct Run {
+  layers: Vec<VideoLayerInfo>,
+  tallies: BTreeMap<u8, LayerTally>,
+  elapsed: Duration,
+  encoder_names: String,
+  cost: EncodeCost,
+}
+
+/// What encoding the frames after the warm-up took.
+#[derive(Debug, Default)]
+struct EncodeCost {
+  frames: u32,
+  cpu: Duration,
+  wall: Duration,
+}
 
 #[cfg(all(target_os = "macos", feature = "avfoundation"))]
 fn run_camera(limit: VideoResolution, encoders: &EncoderFactory, duration: Duration) -> anyhow::Result<Run> {
@@ -169,6 +190,7 @@ struct Encoding {
   decoders: BTreeMap<u8, OpenH264Decoder>,
   recent: VecDeque<VideoFrame>,
   started: Instant,
+  cost: EncodeCost,
 }
 
 impl Encoding {
@@ -194,6 +216,7 @@ impl Encoding {
       decoders,
       recent: VecDeque::new(),
       started: Instant::now(),
+      cost: EncodeCost::default(),
     })
   }
 
@@ -203,16 +226,25 @@ impl Encoding {
       self.recent.pop_front();
     }
     self.recent.push_back(frame.clone());
-    for picture in self.simulcast.encode(frame)? {
+    let (cpu_before, wall_before) = (cpu_time(), Instant::now());
+    let pictures = self.simulcast.encode(frame)?;
+    if is_steady {
+      self.cost.frames += 1;
+      self.cost.cpu += cpu_time().saturating_sub(cpu_before);
+      self.cost.wall += wall_before.elapsed();
+    }
+    for picture in pictures {
       let tally = self.tallies.entry(picture.layer.value()).or_default();
       let maybe_decoded = match self.decoders.get_mut(&picture.layer.value()) {
         Some(decoder) => decoder.decode(&picture.data, frame.timestamp_us())?,
         None => None,
       };
-      if let Some(decoded) = maybe_decoded.filter(|_| is_steady && tally.pictures % PSNR_EVERY == 0) {
+      if let Some(decoded) = maybe_decoded.filter(|_| is_steady && tally.pictures.is_multiple_of(PSNR_EVERY))
+      {
         let mut best = 0.0f64;
         for source in &self.recent {
-          best = best.max(luma_psnr(&source.scaled(decoded.resolution())?, &decoded));
+          let reference = layer_input(source, &self.layers, decoded.resolution())?;
+          best = best.max(luma_psnr(&reference, &decoded));
         }
         tally.psnr_sum += best;
         tally.psnr_samples += 1;
@@ -233,16 +265,33 @@ impl Encoding {
   }
 
   fn finish(self) -> Run {
-    let elapsed = self.started.elapsed();
-    let names = self.simulcast.encoder_names();
-    (self.layers, self.tallies, elapsed, names)
+    Run {
+      elapsed: self.started.elapsed(),
+      encoder_names: self.simulcast.encoder_names(),
+      layers: self.layers,
+      tallies: self.tallies,
+      cost: self.cost,
+    }
   }
 }
 
-fn report(layers: &[VideoLayerInfo], tallies: &BTreeMap<u8, LayerTally>, elapsed: Duration, names: &str) {
+fn report(run: &Run) {
+  let Run {
+    layers,
+    tallies,
+    elapsed,
+    encoder_names,
+    cost,
+  } = run;
   let steady_seconds = elapsed.saturating_sub(WARM_UP).as_secs_f64().max(0.001);
-  println!("encoder: {names}, {:.1} s", elapsed.as_secs_f64());
-  println!(
+  let per_frame = |total: Duration| total.as_secs_f64() * 1000.0 / f64::from(cost.frames.max(1));
+  info!(
+    "encoder: {encoder_names}, {:.1} s; encoding {:.1} ms CPU, {:.1} ms wall per frame",
+    elapsed.as_secs_f64(),
+    per_frame(cost.cpu),
+    per_frame(cost.wall)
+  );
+  info!(
     "{:<6} {:>10} {:>10} {:>10} {:>7} {:>6} {:>10} {:>11} {:>8}",
     "layer", "size", "target", "sent", "share", "fps", "keyframes", "avg P bytes", "PSNR"
   );
@@ -260,7 +309,7 @@ fn report(layers: &[VideoLayerInfo], tallies: &BTreeMap<u8, LayerTally>, elapsed
       || "-".to_owned(),
       |tally| format!("{:.1} dB", tally.psnr_sum / tally.psnr_samples as f64),
     );
-    println!(
+    info!(
       "{:<6} {:>10} {:>6.0} kb/s {:>6.0} kb/s {:>6.0}% {:>6.1} {:>10} {:>11.0} {:>8}",
       layer.layer,
       format!("{}x{}", layer.width, layer.height),
@@ -273,6 +322,46 @@ fn report(layers: &[VideoLayerInfo], tallies: &BTreeMap<u8, LayerTally>, elapsed
       psnr,
     );
   }
+}
+
+/// What the simulcast encoder gives the layer of `size`: `source` shrunk to it, by way of the
+/// layer twice its size where there is one (`SimulcastEncoder::encode`). The PSNR compares with
+/// that, not with another way of shrinking.
+fn layer_input(
+  source: &VideoFrame,
+  layers: &[VideoLayerInfo],
+  size: VideoResolution,
+) -> anyhow::Result<VideoFrame> {
+  let is_double = |layer: &&VideoLayerInfo| layer.width == size.width * 2 && layer.height == size.height * 2;
+  let shrunk = match layers.iter().find(is_double) {
+    Some(double) => {
+      let double = VideoResolution {
+        width: double.width,
+        height: double.height,
+      };
+      layer_input(source, layers, double)?.scaled(size)?
+    },
+    None => source.scaled(size)?,
+  };
+  Ok(shrunk)
+}
+
+/// The process's CPU time so far, over all threads.
+#[cfg(unix)]
+fn cpu_time() -> Duration {
+  use nix::sys::resource::{UsageWho, getrusage};
+  getrusage(UsageWho::RUSAGE_SELF).map_or(Duration::ZERO, |usage| {
+    let to_duration = |time: nix::sys::time::TimeVal| {
+      Duration::new(time.tv_sec().max(0) as u64, (time.tv_usec().max(0) * 1000) as u32)
+    };
+    to_duration(usage.user_time()) + to_duration(usage.system_time())
+  })
+}
+
+/// Not measured outside Unix: the CPU time stays 0.
+#[cfg(not(unix))]
+fn cpu_time() -> Duration {
+  Duration::ZERO
 }
 
 fn luma_psnr(source: &VideoFrame, decoded: &VideoFrame) -> f64 {

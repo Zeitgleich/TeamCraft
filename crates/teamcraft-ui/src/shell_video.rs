@@ -168,6 +168,7 @@ mod view {
   use std::cell::{Cell, RefCell};
   use std::collections::HashMap;
   use std::rc::{Rc, Weak};
+  use std::time::Duration;
 
   use js_sys::{Array, Reflect, Uint8Array};
   use leptos::task::spawn_local;
@@ -193,6 +194,9 @@ mod view {
   /// Decoder errors in a row (without a frame decoded between them) before a track falls back to
   /// JPEG images; a single error only rebuilds the decoder.
   const MAX_DECODER_ERRORS: u32 = 3;
+  /// How often a watched track's shown size is looked at (#967): the shell receives the smallest
+  /// layer that covers it while the viewer leaves the quality to the call.
+  const SHOWN_SIZE_INTERVAL: Duration = Duration::from_secs(1);
   /// WebCodecs codec strings, as the browser's call module uses them (`call_web/video.rs`).
   const H264_CODEC: &str = "avc1.42e028";
   const VP9_CODEC: &str = "vp09.00.10.08";
@@ -259,8 +263,11 @@ mod view {
     images_in_flight: Cell<u32>,
     image_sequence: Cell<u64>,
     last_drawn_image: Cell<u64>,
-    /// The size in device pixels the shell was last told the self view is drawn in.
+    /// The size in device pixels the shell was last told the view is drawn (self view) or shown
+    /// (another device's track) in.
     maybe_told_size: Cell<Option<(u32, u32)>>,
+    /// When the shown size of another device's track was last looked at.
+    maybe_size_looked_at: Cell<Option<Duration>>,
   }
 
   struct FrameChannel {
@@ -301,6 +308,7 @@ mod view {
         image_sequence: Cell::new(0),
         last_drawn_image: Cell::new(0),
         maybe_told_size: Cell::new(None),
+        maybe_size_looked_at: Cell::new(None),
       });
       let starting = Rc::clone(&view);
       spawn_local(async move {
@@ -417,6 +425,43 @@ mod view {
         FrameCodec::Jpeg => self.draw_image(payload),
         FrameCodec::H264 | FrameCodec::Vp9 => self.decode(header, &payload),
       }
+      self.tell_shown_size();
+    }
+
+    /// Tells the shell how large another device's track is shown, in device pixels, when that
+    /// changed (looked at once a second while frames come): while the viewer leaves the quality
+    /// to the call, it receives the smallest layer that covers the tile (#967), as in the browser.
+    fn tell_shown_size(&self) {
+      let VideoSource::Remote(stream_id) = self.source else {
+        return;
+      };
+      let now = crate::motion::now();
+      let is_due = self
+        .maybe_size_looked_at
+        .get()
+        .is_none_or(|at| now.saturating_sub(at) >= SHOWN_SIZE_INTERVAL);
+      if !is_due {
+        return;
+      }
+      self.maybe_size_looked_at.set(Some(now));
+      let maybe_size = web_sys::window().and_then(|window| {
+        let rect = self.canvas.get_bounding_client_rect();
+        drawn_size(rect.width(), rect.height(), window.device_pixel_ratio())
+      });
+      // Not in the page (lingering after its tile went): nothing to tell.
+      let Some(size) = maybe_size else {
+        return;
+      };
+      if self.maybe_told_size.replace(Some(size)) == Some(size) {
+        return;
+      }
+      spawn_local(async move {
+        let args = json!({ "stream_id": stream_id, "width": size.0, "height": size.1 });
+        if let Err(error) = call::<()>("call_size_video", &args).await {
+          // The track keeps the layer it has.
+          tracing::debug!(%error, "video size not told");
+        }
+      });
     }
 
     fn draw_image(self: &Rc<Self>, jpeg: Uint8Array) {

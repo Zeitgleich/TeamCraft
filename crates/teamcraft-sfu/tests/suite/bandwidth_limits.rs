@@ -49,7 +49,7 @@ use tokio::net::UdpSocket;
 use tokio::sync::mpsc;
 use wtransport::Identity;
 
-use super::busy_camera::{BusyCamera, FRAMERATE, HD};
+use crate::common::busy_camera::{BusyCamera, FRAMERATE, HD};
 
 /// The desktop's camera of a 720p camera: three layers from 1.5 Mbit/s (apps/desktop's
 /// `camera_layers`), at the busy camera's size and rate.

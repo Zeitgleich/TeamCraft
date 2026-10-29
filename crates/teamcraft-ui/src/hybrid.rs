@@ -12,7 +12,7 @@ use leptos::prelude::{Get, GetUntracked, RwSignal, Set};
 use std::rc::Rc;
 use teamcraft_client_api::calls::{
   CallMoveOffer, CallStatusSounds, CallsUnavailableReason, OrgBackgroundRule, RemoteVideoTrack,
-  ScreenContentMode,
+  ScreenContentMode, VideoQuality,
 };
 use teamcraft_proto::OrgBackgroundId;
 
@@ -1139,6 +1139,18 @@ impl<C: ChatBackend> CallBackend for Hybrid<C> {
   fn set_call_status_sounds(&self, sounds: CallStatusSounds) {
     if let Some(calls) = &self.maybe_calls {
       calls.act(CallAction::SetStatusSounds { sounds });
+    }
+  }
+
+  fn set_camera_quality(&self, quality: VideoQuality) {
+    if let Some(calls) = &self.maybe_calls {
+      calls.act(CallAction::SetCameraQuality { quality });
+    }
+  }
+
+  fn set_video_quality(&self, stream_id: teamcraft_proto::MediaStreamId, quality: VideoQuality) {
+    if let Some(calls) = &self.maybe_calls {
+      calls.act(CallAction::SetVideoQuality { stream_id, quality });
     }
   }
 
