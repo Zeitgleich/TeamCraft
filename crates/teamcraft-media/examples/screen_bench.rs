@@ -5,14 +5,17 @@
 //! ```sh
 //! cargo run --release -p teamcraft-media --features gstreamer,openh264-source \
 //!   --example screen_bench -- [--profile detail|motion|detail-4k|motion-4k] \
-//!   [--source 3840x2160] [--scene still|scroll] [--seconds 10] [--encoder preferred|software]
+//!   [--source 3840x2160] [--scene still|scroll] [--seconds 10] [--encoder preferred|software] \
+//!   [--frames every|changes]
 //! ```
 //!
 //! `--source` is the display's size in pixels (default 3840x2160, a 4K display); the profile
 //! shrinks it to its limits. `--scene still` is a page of text where one line is typed (a
-//! character every few frames, a blinking cursor), `scroll` the page scrolling steadily. Every
-//! frame is encoded, at the profile's frame rate: the worst case, since a share of a still screen
-//! sends only what changes. `--encoder preferred` (the default) encodes as the call does
+//! character every few frames, a blinking cursor), `scroll` the page scrolling steadily. With
+//! `--frames every` (the default) every frame is encoded, at the profile's frame rate: the worst
+//! case. `--frames changes` encodes only frames that differ from the last one, plus the last one
+//! again after a second without change, as a share does (the capture delivers changes only, and
+//! the encoder thread refreshes a still screen, `video_pipeline::SCREEN_IDLE_REFRESH`). `--encoder preferred` (the default) encodes as the call does
 //! (VideoToolbox, VA-API), `software` with OpenH264.
 //!
 //! The report gives the encoding's cost per frame (the process's CPU time over all threads, the
@@ -26,7 +29,9 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, bail};
 use teamcraft_media::video::{ScreenProfile, VideoFrame, VideoResolution};
 use teamcraft_media::video_codec::{OpenH264Decoder, SimulcastEncoder, VideoContent, VideoDecoder};
-use teamcraft_media::video_pipeline::{EncoderFactory, preferred_encoders, software_encoders};
+use teamcraft_media::video_pipeline::{
+  EncoderFactory, SCREEN_IDLE_REFRESH, preferred_encoders, software_encoders,
+};
 use teamcraft_proto::{ScreenContentMode, ScreenShareResolution, VideoLayerInfo};
 use tracing::info;
 
@@ -52,6 +57,7 @@ fn main() -> anyhow::Result<()> {
   let mut is_scrolling = false;
   let mut seconds = 10u64;
   let mut encoder = "preferred".to_owned();
+  let mut is_changes_only = false;
   while let Some(argument) = arguments.next() {
     match (argument.as_str(), arguments.next()) {
       ("--profile", Some(value)) => profile = parse_profile(&value)?,
@@ -59,6 +65,7 @@ fn main() -> anyhow::Result<()> {
       ("--scene", Some(value)) => is_scrolling = parse_scene(&value)?,
       ("--seconds", Some(value)) => seconds = value.parse().context("--seconds takes a number")?,
       ("--encoder", Some(value)) => encoder = value,
+      ("--frames", Some(value)) => is_changes_only = parse_frames(&value)?,
       (other, _) => bail!("unknown argument {other}"),
     }
   }
@@ -80,14 +87,24 @@ fn main() -> anyhow::Result<()> {
   let interval = Duration::from_secs(1) / u32::from(framerate);
   let duration = Duration::from_secs(seconds);
   let mut index = 0u64;
+  let mut maybe_last: Option<(VideoFrame, Instant)> = None;
   while encoding.started.elapsed() < duration {
     let due = encoding.started + interval * u32::try_from(index)?;
     if let Some(wait) = due.checked_duration_since(Instant::now()) {
       std::thread::sleep(wait);
     }
-    let timestamp_us = u64::try_from(encoding.started.elapsed().as_micros())?;
-    encoding.encode(&page.frame(index, is_scrolling, timestamp_us)?)?;
+    // When the frame was due, as a capture stamps it, also when the encoding runs late.
+    let timestamp_us = u64::try_from((interval * u32::try_from(index)?).as_micros())?;
+    let frame = page.frame(index, is_scrolling, timestamp_us)?;
     index += 1;
+    let is_unchanged = maybe_last.as_ref().is_some_and(|(last, encoded_at)| {
+      last.data() == frame.data() && encoded_at.elapsed() < SCREEN_IDLE_REFRESH
+    });
+    if is_changes_only && is_unchanged {
+      continue;
+    }
+    encoding.encode(&frame)?;
+    maybe_last = Some((frame, Instant::now()));
   }
   report(&encoding, framerate);
   Ok(())
@@ -109,6 +126,14 @@ fn parse_scene(value: &str) -> anyhow::Result<bool> {
     "still" => Ok(false),
     "scroll" => Ok(true),
     other => bail!("unknown scene {other}; use still or scroll"),
+  }
+}
+
+fn parse_frames(value: &str) -> anyhow::Result<bool> {
+  match value {
+    "every" => Ok(false),
+    "changes" => Ok(true),
+    other => bail!("unknown frames {other}; use every or changes"),
   }
 }
 

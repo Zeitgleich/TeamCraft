@@ -576,7 +576,11 @@ Settings → Chats).
   the user can cap what is sent at 1080p, 720p or 360p. The layers are planned for the first
   frame the camera delivers. VideoToolbox encodes cameras at a constant bitrate (browsers where
   WebCodecs has one): at an average bitrate it stopped spending bits on a calm picture, and a
-  720p layer sent 155 to 306 kbit/s of its 1.5 Mbit/s.
+  720p layer sent 155 to 306 kbit/s of its 1.5 Mbit/s. Screen layers keep the average bitrate (a
+  still screen sends next to nothing), but VideoToolbox then encodes at a fixed quality and
+  ignores the bitrate: a governor (`video_gstreamer::QualityGovernor`, #979) rebuilds a screen
+  layer's encoder at a lower quality while it sends more than its bitrate (scrolled text) and at
+  the full one again when the screen calms.
 
   *Estimator* (`teamcraft_media::bwe`): a queue building up (delay trend) cuts the estimate a
   step, to 85 % of itself; a queue that lasts 500 ms (the window the delivered rate is measured

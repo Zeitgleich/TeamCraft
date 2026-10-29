@@ -12,6 +12,8 @@
 //!
 //! [`FallbackEncoder`]: crate::video_codec::FallbackEncoder
 
+use std::collections::VecDeque;
+
 use gstreamer as gst;
 use gstreamer::prelude::*;
 use gstreamer_app::{AppSink, AppSrc};
@@ -38,6 +40,17 @@ pub struct GstreamerEncoder {
   slice_height: usize,
   element: &'static str,
   has_delivered: bool,
+  /// What holds a screen layer at its bitrate, for elements that need it
+  /// ([`HardwareElement::is_screen_quality_governed`]).
+  maybe_governed: Option<Governed>,
+}
+
+/// A screen layer whose quality a [`QualityGovernor`] sets: the encoder is rebuilt at each new
+/// quality (VideoToolbox keeps the quality its session started with).
+struct Governed {
+  hardware: &'static HardwareElement,
+  layer: VideoLayerInfo,
+  governor: QualityGovernor,
 }
 
 /// The platform's hardware encoder element and its settings.
@@ -50,6 +63,9 @@ struct HardwareElement {
   profile: &'static str,
   /// `gst-launch` style properties for the layer's bitrate (kbit/s) and content.
   properties: fn(bitrate_kbps: u32, content: VideoContent) -> String,
+  /// Whether screen layers get a [`QualityGovernor`] for the element's `quality`: its own rate
+  /// control lets them send far more than their bitrate.
+  is_screen_quality_governed: bool,
 }
 
 impl GstreamerEncoder {
@@ -63,27 +79,66 @@ impl GstreamerEncoder {
       info!(%error, "GStreamer is not available; encoding in software");
       return None;
     }
-    let bitrate_kbps = (layer.max_bitrate_bps / 1000).max(1);
     for element in HARDWARE_ELEMENTS {
       if gst::ElementFactory::find(element.name).is_none() {
         debug!(element = element.name, "hardware encoder element not installed");
         continue;
       }
-      let description = format!(
-        "appsrc name=source is-live=true format=time ! {} {} ! \
-         video/x-h264,profile={} ! h264parse config-interval=-1 ! \
-         video/x-h264,stream-format=byte-stream,alignment=au ! appsink name=sink sync=false",
-        element.name,
-        (element.properties)(bitrate_kbps, content),
-        element.profile,
-      );
+      let is_governed = element.is_screen_quality_governed && content == VideoContent::Screen;
+      let maybe_quality = is_governed.then_some(SCREEN_QUALITY);
+      let description = pipeline_description(element, layer, content, maybe_quality);
       match Self::build(&description, element.name, layer, content) {
-        Ok(encoder) => return Some(encoder),
+        Ok(mut encoder) => {
+          encoder.maybe_governed = is_governed.then(|| Governed {
+            hardware: element,
+            layer: *layer,
+            governor: QualityGovernor::new(layer.max_bitrate_bps),
+          });
+          return Some(encoder);
+        },
         Err(error) => info!(%error, element = element.name, "hardware encoder unusable"),
       }
     }
     info!("no usable hardware H.264 encoder; encoding in software");
     None
+  }
+
+  /// Notes the picture of `frame` for the [`QualityGovernor`], if the layer has one, and rebuilds
+  /// the encoder at the quality it asks for: the next picture is a keyframe. Where that fails the
+  /// layer keeps its encoder and quality, ungoverned.
+  fn govern(&mut self, frame: &VideoFrame, bytes: usize, is_keyframe: bool) {
+    let Some(governed) = &mut self.maybe_governed else {
+      return;
+    };
+    let Some(quality) = governed
+      .governor
+      .note_picture(frame.timestamp_us(), bytes, is_keyframe)
+    else {
+      return;
+    };
+    let layer = governed.layer;
+    let description = pipeline_description(governed.hardware, &layer, VideoContent::Screen, Some(quality));
+    match Self::build(&description, self.element, &layer, VideoContent::Screen) {
+      Ok(rebuilt) => {
+        debug!(
+          element = self.element,
+          width = layer.width,
+          quality,
+          "screen layer at a new quality for its bitrate"
+        );
+        // The old pipeline stops on a thread of its own (`Drop`).
+        let mut old = std::mem::replace(self, rebuilt);
+        self.has_delivered = true;
+        self.maybe_governed = old.maybe_governed.take();
+        if let Some(governed) = &mut self.maybe_governed {
+          governed.governor.set_quality(quality);
+        }
+      },
+      Err(error) => {
+        warn!(%error, element = self.element, "screen layer keeps its quality");
+        self.maybe_governed = None;
+      },
+    }
   }
 
   fn build(
@@ -137,6 +192,7 @@ impl GstreamerEncoder {
       slice_height,
       element,
       has_delivered: false,
+      maybe_governed: None,
     })
   }
 
@@ -207,11 +263,13 @@ impl VideoEncoder for GstreamerEncoder {
       .buffer()
       .ok_or_else(|| VideoCodecError::Codec("sample without buffer".into()))?;
     let is_keyframe = !buffer.flags().contains(gst::BufferFlags::DELTA_UNIT);
-    let map = buffer.map_readable().map_err(gstreamer_error)?;
-    Ok(Some(EncodedPicture {
-      is_keyframe,
-      data: map.as_slice().to_vec(),
-    }))
+    let data = buffer
+      .map_readable()
+      .map_err(gstreamer_error)?
+      .as_slice()
+      .to_vec();
+    self.govern(&frame, data.len(), is_keyframe);
+    Ok(Some(EncodedPicture { is_keyframe, data }))
   }
 }
 
@@ -250,6 +308,7 @@ const HARDWARE_ELEMENTS: &[HardwareElement] = &[
          ref-frames=1 cabac=false"
       )
     },
+    is_screen_quality_governed: false,
   },
   HardwareElement {
     name: "v4l2h264enc",
@@ -260,6 +319,7 @@ const HARDWARE_ELEMENTS: &[HardwareElement] = &[
         "extra-controls=\"controls,video_bitrate={bitrate_bps},h264_i_frame_period={KEYFRAME_INTERVAL_FRAMES}\""
       )
     },
+    is_screen_quality_governed: false,
   },
 ];
 
@@ -273,8 +333,15 @@ const HARDWARE_ELEMENTS: &[HardwareElement] = &[
 /// which sent a tenth of theirs, their whole bitrate too (`examples/camera_bitrate.rs`). A
 /// quality floor (`quality`) instead made VideoToolbox ignore the bitrate (9 Mbit/s at 0.9).
 /// VideoToolbox has a constant bitrate on Apple silicon from macOS 13; elsewhere GStreamer caps
-/// the average with data rate limits instead. Screen shares keep the average bitrate: a still
-/// screen needs next to nothing between its changes.
+/// the average with data rate limits instead.
+///
+/// Screen shares keep the average bitrate: a still screen needs next to nothing between its
+/// changes, where a constant bitrate spends the whole bitrate on every change (5.8 of 6.6 Mbit/s
+/// for a line being typed on a 1440p screen, against 22 kbit/s). But at an average bitrate
+/// VideoToolbox encodes at the `quality` GStreamer always sets (0.5 by default) and ignores the
+/// bitrate and the data rate limits (#979): scrolling text sent 9 Mbit/s in a 720p layer meant for
+/// 1.7, and as much with the bitrate set to 100 kbit/s. So a [`QualityGovernor`] picks a screen
+/// layer's quality for its bitrate.
 #[cfg(target_os = "macos")]
 const HARDWARE_ELEMENTS: &[HardwareElement] = &[HardwareElement {
   name: "vtenc_h264",
@@ -289,6 +356,7 @@ const HARDWARE_ELEMENTS: &[HardwareElement] = &[HardwareElement {
        allow-frame-reordering=false max-keyframe-interval={KEYFRAME_INTERVAL_FRAMES}"
     )
   },
+  is_screen_quality_governed: true,
 }];
 
 // Media Foundation's H.264 encoder MFT (NVIDIA, AMD and Intel hardware, else Microsoft's software
@@ -302,10 +370,158 @@ const HARDWARE_ELEMENTS: &[HardwareElement] = &[HardwareElement {
       "bitrate={bitrate_kbps} rc-mode=cbr low-latency=true bframes=0 gop-size={KEYFRAME_INTERVAL_FRAMES}"
     )
   },
+  is_screen_quality_governed: false,
 }];
 
 #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
 const HARDWARE_ELEMENTS: &[HardwareElement] = &[];
+
+/// The `gst-launch` description of a pipeline encoding `layer` with `element`, at `maybe_quality`
+/// (the element's `quality`) where given.
+fn pipeline_description(
+  element: &HardwareElement,
+  layer: &VideoLayerInfo,
+  content: VideoContent,
+  maybe_quality: Option<f64>,
+) -> String {
+  let bitrate_kbps = (layer.max_bitrate_bps / 1000).max(1);
+  // GStreamer reads the number the same in every locale.
+  let quality = maybe_quality.map_or(String::new(), |quality| format!(" quality={quality:.3}"));
+  format!(
+    "appsrc name=source is-live=true format=time ! {} {}{quality} ! \
+     video/x-h264,profile={} ! h264parse config-interval=-1 ! \
+     video/x-h264,stream-format=byte-stream,alignment=au ! appsink name=sink sync=false",
+    element.name,
+    (element.properties)(bitrate_kbps, content),
+    element.profile,
+  )
+}
+
+/// A screen layer's highest quality: GStreamer's default, what screen shares had before #979
+/// (the text of a still 1440p screen at about 36 dB PSNR for a few dozen kbit/s).
+const SCREEN_QUALITY: f64 = 0.5;
+/// How many of the last pictures a layer's bitrate is measured over: scrolled text gives some
+/// pictures several times the size of the others.
+const MEASURED_PICTURES: usize = 8;
+/// Pictures measured at a quality before it changes again, unless they span a second: a scroll
+/// that starts is noticed within about a tenth of a second, a screen that stands still by its
+/// next picture.
+const MIN_MEASURED_PICTURES: usize = 4;
+/// How long a quality holds before it may rise again: each change costs a keyframe, and a layer
+/// that just went down shouldn't come straight back up while the screen still scrolls.
+const MIN_RISE_INTERVAL_US: u64 = 1_000_000;
+/// A picture counts over the time since the one before, within these bounds. A still screen's
+/// picture comes once a second (`video_pipeline::SCREEN_IDLE_REFRESH`): after that long the
+/// pictures before don't tell what comes, and the measuring starts afresh.
+const MIN_PICTURE_INTERVAL_US: u64 = 1_000;
+const STILL_INTERVAL_US: u64 = 1_000_000;
+/// How much the bitrate grows per unit of quality (natural log): about 4 above a quality of 0.25
+/// and 12 below it, with scrolling text (`examples/screen_bench.rs`). A layer over its bitrate
+/// steps down by the flatter slope (a step into the steeper part goes too far, and the step up
+/// catches it); a layer below steps up by the steeper one, so it doesn't overshoot again.
+const FALL_SLOPE: f64 = 4.0;
+const RISE_SLOPE: f64 = 12.0;
+/// A layer below this share of its bitrate gets a higher quality, aimed at [`AIM_SHARE`]. Between
+/// it and the whole bitrate the quality stays.
+const LOW_SHARE: f64 = 0.5;
+const AIM_SHARE: f64 = 0.6;
+/// A layer below this share of its bitrate goes straight back to [`SCREEN_QUALITY`]: its screen
+/// stands still (scrolled text at the lowest quality still needs more than a tenth).
+const CALM_SHARE: f64 = 0.05;
+/// Smaller changes than this aren't made.
+const MIN_QUALITY_STEP: f64 = 0.02;
+/// How long after a keyframe the pictures aren't measured: VideoToolbox makes the next few
+/// several times the size they settle at (scrolled text at 0.11: 132, 41, 30 and 86 kbit, then
+/// about 10), and taken for the content they sent the quality down again after every change.
+const KEYFRAME_SETTLE_US: u64 = 200_000;
+
+/// Holds a screen layer at most at its bitrate where the encoder doesn't (#979): VideoToolbox at
+/// an average bitrate encodes at its quality whatever that costs. From the pictures' sizes over
+/// the last few frames it lowers the quality while the layer sends more than its bitrate (in steps
+/// sized by how far over it is), and raises it again, up to [`SCREEN_QUALITY`], once the layer
+/// sends less than half of it: a still or typed-on screen keeps its quality, scrolling text in a
+/// lower layer is held at its bitrate within a few frames, and its text sharpens again a second
+/// after it stops. Keyframes aren't measured, nor the pictures of [`KEYFRAME_SETTLE_US`] after
+/// one: they come on request or with a new quality, not from the content.
+#[derive(Debug)]
+struct QualityGovernor {
+  target_bps: f64,
+  quality: f64,
+  maybe_last_us: Option<u64>,
+  maybe_changed_us: Option<u64>,
+  /// Bits and time (µs) of the last pictures at the current quality.
+  measured: VecDeque<(f64, u64)>,
+  maybe_keyframe_us: Option<u64>,
+}
+
+impl QualityGovernor {
+  fn new(target_bps: u32) -> Self {
+    Self {
+      target_bps: f64::from(target_bps.max(1)),
+      quality: SCREEN_QUALITY,
+      maybe_last_us: None,
+      maybe_changed_us: None,
+      measured: VecDeque::with_capacity(MEASURED_PICTURES),
+      maybe_keyframe_us: None,
+    }
+  }
+
+  /// Notes a picture of `bytes` from the frame of `timestamp_us`; the quality the frames from now
+  /// on need, when it is another ([`Self::set_quality`] once the encoder has it).
+  fn note_picture(&mut self, timestamp_us: u64, bytes: usize, is_keyframe: bool) -> Option<f64> {
+    let maybe_interval_us = self.maybe_last_us.map(|last_us| {
+      timestamp_us
+        .saturating_sub(last_us)
+        .clamp(MIN_PICTURE_INTERVAL_US, STILL_INTERVAL_US)
+    });
+    self.maybe_last_us = Some(timestamp_us);
+    if is_keyframe {
+      self.maybe_keyframe_us = Some(timestamp_us);
+    }
+    let interval_us = maybe_interval_us?;
+    let is_settling = self
+      .maybe_keyframe_us
+      .is_some_and(|keyframe_us| timestamp_us.saturating_sub(keyframe_us) < KEYFRAME_SETTLE_US);
+    if is_settling {
+      return None;
+    }
+    if interval_us == STILL_INTERVAL_US {
+      self.measured.clear();
+    } else if self.measured.len() == MEASURED_PICTURES {
+      self.measured.pop_front();
+    }
+    self.measured.push_back((bytes as f64 * 8.0, interval_us));
+    let measured_us: u64 = self.measured.iter().map(|(_, us)| us).sum();
+    if self.measured.len() < MIN_MEASURED_PICTURES && measured_us < STILL_INTERVAL_US {
+      return None;
+    }
+    let bits: f64 = self.measured.iter().map(|(bits, _)| bits).sum();
+    let share = bits / (measured_us as f64 / 1e6) / self.target_bps;
+    let may_rise = self
+      .maybe_changed_us
+      .is_none_or(|changed_us| timestamp_us.saturating_sub(changed_us) >= MIN_RISE_INTERVAL_US);
+    let quality = if share > 1.0 {
+      self.quality - share.ln() / FALL_SLOPE
+    } else if share < CALM_SHARE && may_rise {
+      SCREEN_QUALITY
+    } else if share < LOW_SHARE && may_rise {
+      self.quality + (AIM_SHARE / share).ln() / RISE_SLOPE
+    } else {
+      self.quality
+    }
+    .clamp(0.0, SCREEN_QUALITY);
+    let is_change = (quality - self.quality).abs() >= MIN_QUALITY_STEP
+      || (quality == SCREEN_QUALITY && quality > self.quality);
+    is_change.then_some(quality)
+  }
+
+  /// The encoder encodes at `quality` from now on: it is measured afresh.
+  fn set_quality(&mut self, quality: f64) {
+    self.quality = quality;
+    self.maybe_changed_us = self.maybe_last_us;
+    self.measured.clear();
+  }
+}
 
 /// Row length and luma plane height (in rows) of NV12 buffers described by `info`, as
 /// [`nv12_bytes`] lays them out: the chroma plane follows the luma plane with the same stride.
@@ -334,9 +550,10 @@ fn gstreamer_error(error: impl std::fmt::Debug) -> VideoCodecError {
 mod tests {
   use super::*;
   use crate::picture_check::{PictureContent, picture_content};
-  use crate::video::simulcast_layers;
+  use crate::video::{screen_layers, simulcast_layers};
   use crate::video_capture::test_pattern;
   use crate::video_codec::{OpenH264Decoder, VideoDecoder};
+  use teamcraft_proto::{ScreenContentMode, ScreenShareResolution};
 
   const HD: VideoResolution = VideoResolution {
     width: 1280,
@@ -483,6 +700,262 @@ mod tests {
     let element = &HARDWARE_ELEMENTS[0];
     assert!((element.properties)(1500, VideoContent::Camera).contains("rate-control=cbr"));
     assert!((element.properties)(1500, VideoContent::Screen).contains("rate-control=abr"));
+    assert!(element.is_screen_quality_governed);
+  }
+
+  /// #979: scrolled text in the 720p layer of a 1440p share (1.7 Mbit/s). VideoToolbox sent
+  /// 9 Mbit/s of it at its fixed quality; held by the [`QualityGovernor`] it stays within the
+  /// bitrate, and once the text stands still it gets its quality back. Hardware only, like above.
+  #[test]
+  fn scrolled_text_stays_within_its_screen_layers_bitrate() {
+    const SCROLLED: u64 = 120;
+    const SETTLED: u64 = 45;
+    /// Then the text stands still: the encoder thread encodes its picture again once a second.
+    const STILL: u64 = 3;
+    let screen = VideoResolution {
+      width: 2560,
+      height: 1440,
+    };
+    let layer = screen_layers(
+      screen,
+      30,
+      ScreenContentMode::Detail,
+      &ScreenShareResolution::Standard,
+    )[0];
+    let Some(mut encoder) = GstreamerEncoder::new(&layer, VideoContent::Screen) else {
+      assert!(
+        std::env::var_os("TEAMCRAFT_REQUIRE_HARDWARE_ENCODER").is_none(),
+        "no hardware encoder"
+      );
+      return;
+    };
+    let (width, height) = (usize::from(layer.width), usize::from(layer.height));
+    let page = TextPage::new(width * 2, height * 2 + usize::try_from(SCROLLED).unwrap() + 2);
+    let mut settled_bytes = 0;
+    for index in 0..SCROLLED + STILL {
+      // A pixel of the page per frame: half a pixel of the layer, as a screen shrunk to it.
+      let offset = usize::try_from(index.min(SCROLLED)).unwrap();
+      let timestamp_us = if index < SCROLLED {
+        index * 33_333
+      } else {
+        SCROLLED * 33_333 + (index - SCROLLED + 1) * 1_000_000
+      };
+      let frame = page.shrunk(layer, offset, timestamp_us);
+      let maybe_picture = encoder.encode(&frame, index == 0).unwrap();
+      if let Some(picture) = maybe_picture
+        && (SETTLED..SCROLLED).contains(&index)
+      {
+        settled_bytes += picture.data.len() as u64;
+      }
+    }
+    let seconds = (SCROLLED - SETTLED) as f64 / 30.0;
+    let share = settled_bytes as f64 * 8.0 / seconds / f64::from(layer.max_bitrate_bps);
+    assert!(
+      (0.25..1.2).contains(&share),
+      "scrolled text sent {:.0} % of the layer's {} kbit/s",
+      share * 100.0,
+      layer.max_bitrate_bps / 1000
+    );
+    if let Some(governed) = &encoder.maybe_governed {
+      let quality = governed.governor.quality;
+      assert_eq!(quality, SCREEN_QUALITY, "still text gets its quality back");
+    }
+  }
+
+  /// Text on a page twice a layer's size, shrunk to the layer (2x2 averages) as a screen is.
+  struct TextPage {
+    width: usize,
+    luma: Vec<u8>,
+  }
+
+  impl TextPage {
+    fn new(width: usize, height: usize) -> Self {
+      const LINE: usize = 26;
+      let mut luma = vec![235u8; width * height];
+      let mut random = 0x2545_f491_4f6c_dd1du64;
+      for top in (0..height.saturating_sub(LINE)).step_by(LINE) {
+        for left in (40..width.saturating_sub(52)).step_by(12) {
+          random ^= random << 13;
+          random ^= random >> 7;
+          random ^= random << 17;
+          if random.is_multiple_of(7) {
+            continue;
+          }
+          // A glyph of 2x2 blocks (a pixel of the layer each), 5 wide and 8 high.
+          for row in 0..16 {
+            for column in 0..10 {
+              if (random >> (row / 2 * 5 + column / 2)) & 1 == 1 {
+                luma[(top + 5 + row) * width + left + column] = 40;
+              }
+            }
+          }
+        }
+      }
+      Self { width, luma }
+    }
+
+    /// The layer's picture of the page scrolled by `offset` rows of the page.
+    fn shrunk(&self, layer: VideoLayerInfo, offset: usize, timestamp_us: u64) -> VideoFrame {
+      let (width, height) = (usize::from(layer.width), usize::from(layer.height));
+      let mut data = Vec::with_capacity(width * height * 3 / 2);
+      for y in 0..height {
+        let top = (2 * y + offset) * self.width;
+        for x in 0..width {
+          let at = top + 2 * x;
+          let sum = u16::from(self.luma[at])
+            + u16::from(self.luma[at + 1])
+            + u16::from(self.luma[at + self.width])
+            + u16::from(self.luma[at + self.width + 1]);
+          data.push(u8::try_from(sum / 4).unwrap());
+        }
+      }
+      data.resize(width * height * 3 / 2, 128);
+      let resolution = VideoResolution {
+        width: layer.width,
+        height: layer.height,
+      };
+      VideoFrame::new(resolution, timestamp_us, data).unwrap()
+    }
+  }
+
+  /// Bits of a picture of scrolled text in a 720p layer at `quality`, as VideoToolbox sends it at
+  /// 30 fps: 9 Mbit/s at 0.5, 3.4 at 0.25, 0.3 at 0 (`examples/screen_bench.rs`).
+  fn scrolled_text_bits(quality: f64) -> f64 {
+    let bitrate_bps = if quality >= 0.25 {
+      3.4e6 * (3.9 * (quality - 0.25)).exp()
+    } else {
+      0.29e6 * (9.8 * quality).exp()
+    };
+    bitrate_bps / 30.0
+  }
+
+  /// What a governed encoder sends: `bits_at` gives a picture's bits at a quality; a new quality
+  /// rebuilds the encoder, which starts with a keyframe followed by a larger picture. Gives the
+  /// bits of the pictures from `measure_from` on and the number of changes.
+  fn govern(
+    governor: &mut QualityGovernor,
+    timestamps_us: impl Iterator<Item = u64>,
+    bits_at: impl Fn(f64) -> f64,
+    measure_from: u64,
+  ) -> (f64, u32) {
+    let (mut bits, mut changes) = (0.0, 0);
+    let mut since_rebuild = None;
+    for timestamp_us in timestamps_us {
+      let is_keyframe = since_rebuild == Some(0);
+      let picture_bits = match since_rebuild {
+        Some(0) => 400_000.0,
+        Some(1) => 3.0 * bits_at(governor.quality),
+        _ => bits_at(governor.quality),
+      };
+      since_rebuild = since_rebuild.map(|pictures| pictures + 1);
+      if timestamp_us >= measure_from {
+        bits += picture_bits;
+      }
+      let bytes = (picture_bits / 8.0) as usize;
+      if let Some(quality) = governor.note_picture(timestamp_us, bytes, is_keyframe) {
+        governor.set_quality(quality);
+        changes += 1;
+        since_rebuild = Some(0);
+      }
+    }
+    (bits, changes)
+  }
+
+  /// #979: scrolled text five times over a layer's bitrate is held within it in a few changes
+  /// (each costs a keyframe), and the quality comes back a second after the text stops.
+  #[test]
+  fn the_governor_holds_scrolled_text_at_its_bitrate_and_lets_still_text_sharpen() {
+    const TARGET_BPS: u32 = 1_659_000;
+    let mut governor = QualityGovernor::new(TARGET_BPS);
+    assert_eq!(governor.quality, SCREEN_QUALITY);
+    // Five seconds of scrolling at 30 fps; the last three measured.
+    let frames = (0..150u64).map(|index| index * 33_333);
+    let (bits, changes) = govern(&mut governor, frames, scrolled_text_bits, 2_000_000);
+    let share = bits / 3.0 / f64::from(TARGET_BPS);
+    assert!(
+      (LOW_SHARE * 0.8..1.0).contains(&share),
+      "{:.0} % of the bitrate at quality {:.3}",
+      share * 100.0,
+      governor.quality
+    );
+    assert!(changes <= 4, "{changes} changes");
+    assert!(governor.quality < 0.25, "quality {}", governor.quality);
+    // The text stops: a picture a second of next to nothing.
+    let still = (1..=2u64).map(|second| 5_000_000 + second * 1_000_000);
+    govern(&mut governor, still, |_| 2_000.0, 0);
+    assert_eq!(governor.quality, SCREEN_QUALITY);
+  }
+
+  /// A still screen and one being typed on stay at the full quality: they need a fraction of
+  /// their bitrate, and requested keyframes (with the larger picture after them) don't count.
+  #[test]
+  fn the_governor_keeps_a_still_or_typed_on_screen_at_its_quality() {
+    let mut governor = QualityGovernor::new(1_659_000);
+    // A character typed every 110 ms, the cursor blinking; a keyframe every other second.
+    let mut timestamp_us = 0;
+    for index in 0..100u64 {
+      let is_keyframe = index % 18 == 0;
+      let bytes = match index % 18 {
+        0 => 120_000,
+        1 => 20_000,
+        _ => 1_500,
+      };
+      assert_eq!(governor.note_picture(timestamp_us, bytes, is_keyframe), None);
+      timestamp_us += 110_000;
+    }
+    // Then nothing changes: the picture again once a second.
+    for _ in 0..5 {
+      timestamp_us += 1_000_000;
+      assert_eq!(governor.note_picture(timestamp_us, 300, false), None);
+    }
+    assert_eq!(governor.quality, SCREEN_QUALITY);
+  }
+
+  /// A layer over its bitrate goes down at once; one that just went down doesn't come straight
+  /// back up, even far below its bitrate.
+  #[test]
+  fn the_governor_falls_at_once_and_rises_after_a_second() {
+    let mut governor = QualityGovernor::new(1_000_000);
+    let mut changes = Vec::new();
+    for index in 0..5u64 {
+      // 2 Mbit/s at 30 fps.
+      if let Some(quality) = governor.note_picture(index * 33_333, 8_333, false) {
+        governor.set_quality(quality);
+        changes.push((index, quality));
+      }
+    }
+    assert_eq!(changes.len(), 1, "{changes:?}");
+    let (index, quality) = changes[0];
+    assert_eq!(index, 4, "decided on four measured pictures");
+    assert!((quality - (SCREEN_QUALITY - 2f64.ln() / FALL_SLOPE)).abs() < 1e-3);
+    // Now far below: the quality holds for a second after the change.
+    let mut timestamp_us = 4 * 33_333;
+    let mut maybe_rise = None;
+    while maybe_rise.is_none() {
+      timestamp_us += 33_333;
+      maybe_rise = governor.note_picture(timestamp_us, 100, false);
+      assert!(timestamp_us < 3_000_000, "never rose");
+    }
+    assert!(timestamp_us >= 4 * 33_333 + MIN_RISE_INTERVAL_US);
+    assert_eq!(maybe_rise, Some(SCREEN_QUALITY));
+  }
+
+  #[test]
+  fn a_governed_pipeline_names_its_quality_in_every_locale() {
+    let element = HardwareElement {
+      name: "vtenc_h264",
+      profile: "baseline",
+      properties: |bitrate_kbps, _content| format!("bitrate={bitrate_kbps}"),
+      is_screen_quality_governed: true,
+    };
+    let layer = simulcast_layers(HD, 30, 1_659_000, 1)[0];
+    let governed = pipeline_description(&element, &layer, VideoContent::Screen, Some(0.125));
+    assert!(
+      governed.contains("vtenc_h264 bitrate=1659 quality=0.125 !"),
+      "{governed}"
+    );
+    let plain = pipeline_description(&element, &layer, VideoContent::Camera, None);
+    assert!(!plain.contains("quality"), "{plain}");
   }
 
   #[test]
