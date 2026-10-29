@@ -1264,6 +1264,46 @@
   }
 }
 
+/* The microphone button with the arrow of its device menu (#986), one control in the bar. */
+.control-split {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
+
+.control-btn.control-menu-btn {
+  width: 28px;
+  border-radius: 14px;
+}
+
+.control-menu-btn .icon {
+  width: 16px;
+  height: 16px;
+}
+
+/* The microphone and speaker menu (#986): two short lists, the level between them. */
+.audio-popover {
+  max-height: calc(100% - 100px);
+  overflow-y: auto;
+}
+
+.audio-popover h2 + .camera-options {
+  margin-bottom: 4px;
+}
+
+.audio-popover .camera-options + h2,
+.audio-meter + h2 {
+  margin-top: 14px;
+}
+
+.audio-meter {
+  margin: 6px 10px 0;
+}
+
+.audio-test {
+  margin-top: 10px;
+}
+
 .system-effects-hint {
   display: flex;
   align-items: center;

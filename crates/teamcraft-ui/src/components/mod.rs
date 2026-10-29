@@ -32,6 +32,7 @@ pub mod bookmarks;
 pub mod bottom_nav;
 pub mod brand_logo;
 pub mod bundle_banner;
+pub mod call_audio_menu;
 pub mod call_chat;
 pub mod call_prejoin;
 pub mod call_screen;

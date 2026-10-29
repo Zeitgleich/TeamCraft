@@ -57,6 +57,8 @@ pub enum ToastAction {
   ChooseCamera,
   /// Opens macOS's Screen Recording settings for a share the system refused (#940).
   OpenScreenSettings,
+  /// Switches the call to the microphone or speakers plugged in during it (#986).
+  UseAudioDevice,
 }
 
 impl ToastAction {
@@ -65,6 +67,7 @@ impl ToastAction {
     match self {
       Self::ChooseCamera => "control-camera-choose",
       Self::OpenScreenSettings => "call-screen-settings-open",
+      Self::UseAudioDevice => "call-audio-use",
     }
   }
 
@@ -837,6 +840,12 @@ impl AppState {
     self.backend.with_value(|backend| read(backend.as_ref()))
   }
 
+  /// Like [`AppState::read`] without tracking, for cleanups: `None` once the backend is gone
+  /// (the app torn down).
+  pub fn try_read<R>(&self, read: impl FnOnce(&dyn Backend) -> R) -> Option<R> {
+    self.backend.try_with_value(|backend| read(backend.as_ref()))
+  }
+
   /// Applies a mutation and notifies every reader.
   pub fn write<R>(&self, write: impl FnOnce(&dyn Backend) -> R) -> R {
     let result = self.backend.with_value(|backend| write(backend.as_ref()));
@@ -1073,6 +1082,37 @@ impl AppState {
     self.push_toast(text, None);
   }
 
+  /// Shows a toast with a button for the next step until the user closes it; a newer toast with
+  /// the same action replaces it (the action carries out the newest offer).
+  pub fn show_toast_with_action(&self, text: String, action: ToastAction) {
+    let id = self.next_toast.get_value();
+    self.next_toast.set_value(id + 1);
+    self.toasts.update(|list| {
+      list.retain(|shown| shown.maybe_action != Some(action));
+      push_capped(
+        list,
+        Toast {
+          id,
+          text,
+          maybe_undo: None,
+          maybe_action: Some(action),
+          tone: ToastTone::Info,
+        },
+      );
+    });
+  }
+
+  /// The user picked a microphone or speakers (an empty id: the system default), in the call or
+  /// before it: a running call switches at once (#986), and the choice is remembered like the
+  /// setting.
+  pub fn choose_audio_device(&self, kind: crate::calls::AudioKind, id: String) {
+    self.call.choose_audio(kind, id.clone());
+    self.settings.prefs.update(|prefs| match kind {
+      crate::calls::AudioKind::Microphone => prefs.calls.microphone_id = id,
+      crate::calls::AudioKind::Speakers => prefs.calls.speaker_id = id,
+    });
+  }
+
   /// Shows a failed action until the user closes it. Called from outside the reactive tree (the
   /// core answered), so it does nothing once the shell is gone. A repeat of any error still shown
   /// adds no second toast; background failures are rate-limited before they get here (#344).
@@ -1105,6 +1145,21 @@ impl AppState {
     match action {
       ToastAction::ChooseCamera => self.call.is_camera_menu_open.set(true),
       ToastAction::OpenScreenSettings => crate::external_links::open_screen_recording_settings(),
+      ToastAction::UseAudioDevice => {
+        let Some(offer) = self.call.maybe_audio_offer.get_untracked() else {
+          return;
+        };
+        self.call.maybe_audio_offer.set(None);
+        let picks = [
+          (crate::calls::AudioKind::Microphone, offer.maybe_microphone),
+          (crate::calls::AudioKind::Speakers, offer.maybe_speakers),
+        ];
+        for (kind, maybe_id) in picks {
+          if let Some(id) = maybe_id {
+            self.choose_audio_device(kind, id);
+          }
+        }
+      },
     }
   }
 

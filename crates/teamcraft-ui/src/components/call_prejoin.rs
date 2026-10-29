@@ -5,7 +5,7 @@ use leptos::ev;
 use leptos::prelude::*;
 
 use crate::calls::{
-  CallEvent, CallKind, CallPreview, CallRequest, DevicePresence, MediaDevice, PreviewCamera,
+  AudioKind, CallEvent, CallKind, CallPreview, CallRequest, DevicePresence, MediaDevice, PreviewCamera,
   selected_camera_is_rear,
 };
 use crate::components::avatar::{Avatar, AvatarSize};
@@ -19,11 +19,11 @@ use crate::model::User;
 use crate::reactive::{is_document_visible, use_interval_while, use_page_visible};
 use crate::state::use_app_state;
 
-const METER_BARS: usize = 14;
+pub(crate) const METER_BARS: usize = 14;
 /// How often the meter reads the level: about eight times a second, smooth enough for speech.
-const METER_TICK_MS: u64 = 120;
+pub(crate) const METER_TICK_MS: u64 = 120;
 /// How long the speaker button says "playing": the test sound (1.4 s) and a little start-up.
-const SPEAKER_TEST_MS: u64 = 1800;
+pub(crate) const SPEAKER_TEST_MS: u64 = 1800;
 /// The camera field, which "Choose camera" on a camera error focuses.
 const CAMERA_FIELD_ID: &str = "prejoin-camera";
 
@@ -71,19 +71,11 @@ pub fn PreJoinScreen(request: CallRequest) -> impl IntoView {
   ];
   on_cleanup(move || refresh_on_return.into_iter().for_each(|handle| handle.remove()));
 
-  // Show the first device of each kind when nothing was chosen before: the one the system uses.
+  // Show the first camera when nothing was chosen before: the one the system uses. The
+  // microphone and speakers stay unchosen, the system default, which their fields show as the
+  // first device (listed first); a call on it follows the system's choice (#986).
   Effect::new(move |_| {
     let devices = devices.get();
-    for (signal, list) in [
-      (call.microphone_id, &devices.microphones),
-      (call.speaker_id, &devices.speakers),
-    ] {
-      if signal.get_untracked().is_empty()
-        && let Some(first) = list.first()
-      {
-        signal.set(first.id.clone());
-      }
-    }
     // The desktop lists the camera it opens by default first (#819); telling it again would only
     // restart the check's camera.
     if call.camera_id.get_untracked().is_empty()
@@ -270,7 +262,7 @@ pub fn PreJoinScreen(request: CallRequest) -> impl IntoView {
         </div>
         <div class="field">
           <label for="prejoin-mic">{move || i18n.t("prejoin-microphone")}</label>
-          <DeviceSelect id="prejoin-mic" kind=InputKind::Microphone offer=microphone selected=call.microphone_id on_pick=Callback::new(move |id: String| call.emit(CallEvent::Microphone(id))) />
+          <DeviceSelect id="prejoin-mic" kind=InputKind::Microphone offer=microphone selected=call.microphone_id on_pick=Callback::new(move |id: String| state.choose_audio_device(AudioKind::Microphone, id)) />
           <Show when=move || microphone.with(InputOffer::is_usable) fallback=|| ()>
           <div
             class="meter"
@@ -296,7 +288,7 @@ pub fn PreJoinScreen(request: CallRequest) -> impl IntoView {
           }}
           <div class="field-row">
             {can_choose_speakers().then(|| view! {
-              <DeviceSelect id="prejoin-speaker" kind=InputKind::Speakers offer=speakers selected=call.speaker_id on_pick=Callback::new(move |id: String| call.emit(CallEvent::Speakers(id))) />
+              <DeviceSelect id="prejoin-speaker" kind=InputKind::Speakers offer=speakers selected=call.speaker_id on_pick=Callback::new(move |id: String| state.choose_audio_device(AudioKind::Speakers, id)) />
             })}
             <button type="button" class="btn" on:click=test_speaker disabled=move || is_testing_speaker.get()>
               <Icon name=IconName::Volume />
@@ -366,7 +358,7 @@ fn camera_status_key(is_camera_on: bool, maybe_check: Option<PreviewCamera>) -> 
 }
 
 /// How many of the meter's bars a level (0.0 to 1.0) lights.
-fn meter_bars(level: f32) -> usize {
+pub(crate) fn meter_bars(level: f32) -> usize {
   // Invariant: clamped to 0..=METER_BARS before the cast.
   (level * METER_BARS as f32).round().clamp(0.0, METER_BARS as f32) as usize
 }

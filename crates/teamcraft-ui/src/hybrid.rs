@@ -1179,6 +1179,12 @@ impl<C: ChatBackend> CallBackend for Hybrid<C> {
   fn call_preview_level(&self) -> f32 {
     self.maybe_calls.as_ref().map_or(0.0, RemoteCalls::preview_level)
   }
+
+  fn watch_call_level(&self, is_watching: bool) {
+    if let Some(calls) = &self.maybe_calls {
+      calls.watch_call_level(is_watching);
+    }
+  }
 }
 
 impl<C: ChatBackend> AdminBackend for Hybrid<C> {

@@ -23,6 +23,7 @@ pub(crate) mod video;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, PoisonError};
+use std::time::Duration;
 
 use teamcraft_client_api::call_view::CallView;
 use teamcraft_client_api::calls::{
@@ -72,6 +73,11 @@ pub use teamcraft_client_api::remote::CALL_CHANGED_EVENT;
 /// Development SFUs use self-signed certificates; this variable pins one by its SHA-256 hash (hex,
 /// colons allowed). Production SFUs have certificates the system trusts.
 const CERT_HASH_VARIABLE: &str = "TEAMCRAFT_SFU_CERT_HASH";
+/// How often a running call lists the microphones and speakers again (#986): the desktop has no
+/// event for a headset plugged in or out, and the UI reacts to the lists.
+const AUDIO_DEVICE_POLL: Duration = Duration::from_secs(2);
+/// How often the call's microphone level goes to the device menu's meter, while it watches.
+const CALL_LEVEL_INTERVAL: Duration = Duration::from_millis(100);
 
 /// The call state of the signed-in user, shared by the Tauri commands and the media task.
 pub struct CallHost {
@@ -362,6 +368,7 @@ impl CallHost {
         notify: Arc::clone(&self.notify),
         report_failure: Arc::clone(&self.report_failure),
         video_sinks: Arc::clone(&self.video_sinks),
+        levels: self.levels.clone(),
       },
     ));
     *media = Some(MediaCall { controls, task });
@@ -1145,6 +1152,8 @@ struct MediaShared {
   notify: Arc<dyn Fn() + Send + Sync>,
   report_failure: FailureReporter,
   video_sinks: VideoSinks,
+  /// Where the call's microphone level goes while the device menu watches it (#986).
+  levels: LevelWatch,
 }
 
 async fn run_media(
@@ -1162,8 +1171,13 @@ async fn run_media(
   } = &shared;
   let (failed, mut failed_rx) = mpsc::unbounded_channel::<VideoStartFailure>();
   let (black, mut black_rx) = mpsc::unbounded_channel::<VideoBlack>();
+  let device_watch = tokio::spawn(watch_audio_devices(Arc::clone(state), Arc::clone(notify)));
+  let microphone_level = call.microphone_level();
+  let mut level_tick = tokio::time::interval(CALL_LEVEL_INTERVAL);
+  level_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
   loop {
     tokio::select! {
+      _ = level_tick.tick() => shared.levels.publish(microphone_level.get()),
       maybe_control = controls.recv() => match maybe_control {
         Some(Control::Mute(is_muted)) => call.set_muted(is_muted),
         Some(Control::Deafen(is_deafened)) => call.set_deafened(is_deafened),
@@ -1285,6 +1299,8 @@ async fn run_media(
     },
     Err(error) => tracing::warn!(%error, "call ended with an error"),
   }
+  device_watch.abort();
+  shared.levels.publish(0.0);
   lock(state).view.end_active();
   lock(&shared.video_sinks).clear();
   notify();
@@ -1448,6 +1464,58 @@ fn certificate_hash_from_env() -> Result<Option<[u8; 32]>, String> {
     .ok_or_else(|| format!("{CERT_HASH_VARIABLE} needs 32 bytes as hex"))
 }
 
+/// Lists the microphones and speakers every [`AUDIO_DEVICE_POLL`] while the call runs; a change
+/// reaches the UI, which reacts to it (#986): a headset plugged in is offered or followed as the
+/// system default, the device in use unplugged gives way to the default.
+async fn watch_audio_devices(state: Arc<Mutex<CallState>>, notify: Arc<dyn Fn() + Send + Sync>) {
+  let mut tick = tokio::time::interval(AUDIO_DEVICE_POLL);
+  tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+  // The first tick is immediate: the lists of the join are fresh enough.
+  tick.tick().await;
+  loop {
+    tick.tick().await;
+    let listed = tokio::task::spawn_blocking(|| {
+      Ok::<_, AudioDeviceError>((list_input_devices()?, list_output_devices()?))
+    })
+    .await;
+    let (inputs, outputs) = match listed {
+      Ok(Ok(lists)) => lists,
+      Ok(Err(error)) => {
+        tracing::debug!(%error, "could not list the audio devices");
+        continue;
+      },
+      // The runtime is shutting down.
+      Err(_) => return,
+    };
+    let is_changed = update_audio_devices(
+      &mut lock(&state).devices,
+      inputs.iter().map(media_device).collect(),
+      outputs.iter().map(media_device).collect(),
+    );
+    if is_changed {
+      notify();
+    }
+  }
+}
+
+/// Puts newly listed microphones and speakers into `devices`, keeping the cameras; whether
+/// anything changed.
+fn update_audio_devices(
+  devices: &mut MediaDevices,
+  microphones: Vec<MediaDevice>,
+  speakers: Vec<MediaDevice>,
+) -> bool {
+  if devices.microphones == microphones && devices.speakers == speakers {
+    return false;
+  }
+  let camera_presence = devices.camera_presence;
+  *devices = MediaDevices {
+    camera_presence,
+    ..MediaDevices::listed(std::mem::take(&mut devices.cameras), microphones, speakers)
+  };
+  true
+}
+
 fn media_device(info: &AudioDeviceInfo) -> MediaDevice {
   MediaDevice {
     id: info.id.to_string(),
@@ -1498,6 +1566,38 @@ mod tests {
   use teamcraft_proto::{CallId, Id, Snowflake, UserId};
 
   use super::*;
+
+  #[test]
+  fn a_listing_that_changed_replaces_the_audio_devices_and_keeps_the_cameras() {
+    let device = |id: &str| MediaDevice {
+      id: id.into(),
+      label: format!("{id} label"),
+    };
+    let mut devices = MediaDevices::listed(vec![device("cam")], vec![device("mic")], vec![device("spk")]);
+    // A sandbox's unknown camera presence stays as it was.
+    devices.camera_presence = DevicePresence::Unknown;
+    assert!(!update_audio_devices(
+      &mut devices,
+      vec![device("mic")],
+      vec![device("spk")]
+    ));
+    assert!(update_audio_devices(
+      &mut devices,
+      vec![device("headset"), device("mic")],
+      vec![device("headset"), device("spk")]
+    ));
+    assert_eq!(devices.cameras, vec![device("cam")]);
+    assert_eq!(devices.camera_presence, DevicePresence::Unknown);
+    assert_eq!(devices.microphones[0].id, "headset");
+    assert_eq!(devices.speakers[0].id, "headset");
+    // The last microphone unplugged: there is none.
+    assert!(update_audio_devices(
+      &mut devices,
+      Vec::new(),
+      vec![device("spk")]
+    ));
+    assert_eq!(devices.microphone_presence, DevicePresence::Missing);
+  }
 
   #[test]
   fn gateway_ring_reaches_the_snapshot_until_declined() {
@@ -1979,6 +2079,7 @@ mod tests {
           let _ = sink.send(failure);
         }),
         video_sinks: Arc::default(),
+        levels: LevelWatch::default(),
       };
       let task = tokio::spawn(run_media(call, control_rx, shared));
       Media {
