@@ -48,7 +48,7 @@ services:
       - ./dev/keycloak/teamcraft-dev-realm.json:/opt/keycloak/data/import/teamcraft-dev-realm.json:ro
 
   garage:
-    image: dxflrs/garage:v2.4.1
+    image: dxflrs/garage:v2.5.0
     command: ["/garage", "server"]
     ports:
       - "127.0.0.1:3900:3900"
