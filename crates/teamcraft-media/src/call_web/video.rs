@@ -332,8 +332,16 @@ impl TrackSender {
     publication: VideoPublicationId,
     inputs: &mpsc::UnboundedSender<Input>,
   ) -> Result<(), WebCallError> {
-    self.encoding.codec = codec;
-    self.encoders.reopen(self.encoding.opener(inputs))?;
+    let previous = std::mem::replace(&mut self.encoding.codec, codec);
+    if let Err(error) = self.encoders.reopen(self.encoding.opener(inputs)) {
+      // Back to the codec the track is published in; a layer whose encoder doesn't open again is
+      // restarted with the next picture, as after a failure.
+      self.encoding.codec = previous;
+      if let Err(restore) = self.encoders.reopen(self.encoding.opener(inputs)) {
+        debug!(%restore, "a video encoder didn't open again in the track's codec");
+      }
+      return Err(error);
+    }
     self.publication.own = OwnPublication::new(publication);
     self.frames_since_keyframe = 0;
     Ok(())
@@ -1787,6 +1795,31 @@ mod tests {
       );
       // A late failure report of a replaced encoder is stale.
       encoders.on_failed(1, 1).unwrap();
+      assert_eq!(bench.borrow().opened.len(), 4);
+    }
+
+    /// A share published anew in another codec (#565): every layer gets an encoder from the new
+    /// opener, starting with a keyframe; the old ones' late failure reports are stale.
+    #[test]
+    fn reopened_encoders_come_from_the_new_opener_and_start_with_keyframes() {
+      let (bench, mut encoders) = encoders(2);
+      encoders.encode(&(), false).unwrap();
+      let reopened = Rc::clone(&bench);
+      encoders
+        .reopen(move |info, generation| {
+          // The new codec's encoders, told apart by a generation far above the old ones'.
+          reopened.borrow_mut().open(info.layer, generation + 100)?;
+          Ok(FakeEncoder {
+            layer: info.layer,
+            generation: generation + 100,
+            bench: Rc::clone(&reopened),
+          })
+        })
+        .unwrap();
+      assert_eq!(bench.borrow().opened[2..], [(0, 102), (1, 103)]);
+      encoders.encode(&(), false).unwrap();
+      assert_eq!(bench.borrow().coded[2..], [(0, 102, true), (1, 103, true)]);
+      encoders.on_failed(0, 0).unwrap();
       assert_eq!(bench.borrow().opened.len(), 4);
     }
 

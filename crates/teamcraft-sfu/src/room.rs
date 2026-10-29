@@ -1132,17 +1132,18 @@ impl RoomState {
     }
   }
 
-  /// Tells each connected participant the video codecs the others decode (#565) when they
-  /// changed since it was last told, and `maybe_fresh` (a device that just joined or rejoined) in
-  /// any case. A reconnecting device hears them when it is back.
+  /// Tells each connected participant that encodes video the video codecs the others decode
+  /// (#565) when they changed since it was last told, and `maybe_fresh` (a device that just
+  /// joined or rejoined) in any case. A reconnecting device hears them when it is back; one that
+  /// sends no video (audio only) never does.
   fn announce_decodable_codecs(&mut self, maybe_fresh: Option<DeviceId>) {
     let devices: Vec<DeviceId> = self.participants.keys().copied().collect();
     for device_id in devices {
-      if self.handle_of(device_id).is_none() {
+      let maybe_codecs = self.forwarder.decodable_video_codecs(device_id);
+      let Some(codecs) = maybe_codecs.filter(|_| self.handle_of(device_id).is_some()) else {
         self.decodable_announced.remove(&device_id);
         continue;
-      }
-      let codecs = self.forwarder.decodable_video_codecs(device_id);
+      };
       if maybe_fresh != Some(device_id) && self.decodable_announced.get(&device_id) == Some(&codecs) {
         continue;
       }
@@ -1466,12 +1467,14 @@ mod tests {
       assert_eq!(announced(&drain(&mut bob_rx)), vec![vec![VideoCodec::H264]]);
       assert_eq!(announced(&drain(&mut carol_rx)), vec![both.to_vec()]);
 
-      // Audio-only devices (no decoders: older clients, dial-ins) don't hold anyone back.
-      let (_dave_rx, _, _) = join_capable(&rooms, 4, 40, MediaCapabilities::default());
+      // Audio-only devices (no decoders: older clients, dial-ins) don't hold anyone back, and
+      // hear nothing of it (they publish no video).
+      let (mut dave_rx, _, _) = join_capable(&rooms, 4, 40, MediaCapabilities::default());
       assert!(
         announced(&drain(&mut alice_rx)).is_empty(),
         "nothing changed for alice"
       );
+      assert!(announced(&drain(&mut dave_rx)).is_empty());
 
       assert!(rooms.leave(&room, id(30), carol_session));
       assert_eq!(announced(&drain(&mut alice_rx)), vec![both.to_vec()]);

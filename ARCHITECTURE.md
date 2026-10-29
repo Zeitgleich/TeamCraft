@@ -361,14 +361,27 @@ The same approach Fluxer announced for its new voice system (see https://fluxer.
   sends every layer its new uplink carries until then. A viewer's tile whose video got no new
   picture for 3 s says so ("Video paused: weak connection").
 - **Screen share:** separate session/stream, so a heavy share cannot degrade the call.
-- **Screen share quality** (`teamcraft_media::video::screen_layers`): two content modes, chosen per
+- **Screen share quality** (`teamcraft_media::video::ScreenProfile`): two content modes, chosen per
   share (remembered): *detail* (default) keeps text sharp, up to 1440p at 30 fps; *motion* keeps
   smooth video, up to 1080p at 60 fps. The top layer's bitrate follows the pixel rate (about 0.06
   bit per pixel, 2 to 8 Mbit/s: 1080p30 about 4, 1440p30 about 6.6); a second layer at half size and
   a quarter of the bitrate serves weak viewers, and the uplink budget drops the big layer first.
   A smaller source is never enlarged. Hardware encoders and the screen-content tuning of the encoders
-  apply as for cameras. Not yet: 4K, AV1/VP9 screen-content tools, battery and CPU budgets per
-  mode (to be measured, docs/performance.md).
+  apply as for cameras. **4K** (#565) is a choice per share where the workspace policy allows it
+  (`screen_share.max_resolution`, docs/admin.md §3.6): detail up to 4K at 30 fps, motion up to
+  1440p at 60 fps, the top layer at up to 16 Mbit/s, and above 1440p a third, quarter-size layer.
+  The bandwidth estimator grows past its 10 Mbit/s ceiling only up to what the sender (uplink) or
+  the SFU (a viewer's downlink) declares it needs, at most 25 Mbit/s. Budgets: docs/performance.md.
+- **Video codecs** (#565): every client announces what it encodes and decodes with `join`
+  (`MediaCapabilities`); the SFU tells each device that encodes video which codecs all the others
+  that receive video decode (`decodable_video_codecs`, again whenever that changes), and refuses a
+  subscription to a codec the receiver doesn't decode. A detail share goes out in AV1 with its
+  screen content tools (WebCodecs `contentHint: "text"`) where the sender encodes AV1 and everyone
+  else decodes it; a device that joins without AV1 makes the sender publish the share anew in
+  H.264, and the last one leaving lets it return to AV1. Cameras and motion shares stay H.264.
+  Today browsers with an AV1 WebCodecs encoder (Chrome, Edge, Firefox) send AV1; browsers and
+  desktops decode it where their WebCodecs does (the desktop's page tells its shell); the desktop's
+  own encoders and the phone apps are H.264 only, and older clients and SFUs H.264 too.
 - **Screen share sound** (opt-in): the computer's playback without the call itself, as a second
   Opus stream per device (music mode, 64 kbit/s). The SFU forwards it to everyone regardless of
   the speaker selection. It is encrypted with the device's DAVE audio key, like the microphone.
@@ -383,7 +396,7 @@ The same approach Fluxer announced for its new voice system (see https://fluxer.
 - **Video effects** (background blur, background images, light correction) run on the sending device
   before encoding – the SFU only ever sees encrypted frames. Pipeline per platform: [PLAN.md](PLAN.md) §8.
 - Bandwidth estimation: transport-wide feedback over the signaling stream + QUIC congestion signals.
-- Codecs: Opus (audio, 48 kHz, DTX, in-band FEC planned for the measured uplink loss, §6.5); video AV1 or VP9 where hardware supports it, H.264 as fallback.
+- Codecs: Opus (audio, 48 kHz, DTX, in-band FEC planned for the measured uplink loss, §6.5); video H.264 everywhere, AV1 for detail screen shares where sender and every viewer support it (negotiated, see "Video codecs" above).
 - The server tells the SFU directly who may join which call (roster + short-lived join tokens); clients never decide that.
 
 ### 6.4 Meetings with CalCraft

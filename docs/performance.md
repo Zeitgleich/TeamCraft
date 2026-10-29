@@ -294,6 +294,146 @@ VideoToolbox for both cameras (2.9 and 4.5 ms wall time), 2.6 and 4.9 ms with Op
   (`call_web/video.rs`, `camera_latency_mode`); Safari, Firefox and other platforms' hardware
   encoders are not measured.
 
+### Screen share: profiles and codecs (issue #565)
+
+A share is sent per its profile (`video::ScreenProfile`): detail up to 1440p30, motion up to
+1080p60, and with the 4K option detail up to 4K30 and motion up to 1440p60 (top layer up to 16
+Mbit/s instead of 8). A detail share goes out in AV1 with WebCodecs' screen content tools where
+the sender's browser encodes AV1 and every viewer decodes it (ARCHITECTURE.md §6.3, "Video
+codecs"); H.264 otherwise. All numbers: Apple M4 Max (10 performance + 4 efficiency cores),
+macOS 26.6, on AC power, other work on the machine.
+
+**Which codec, in the browser.** `dev/screen-codec-bench/` draws an editor-like screen (code in
+real fonts, a file list, a tab strip; text at 1.25× at 1440p and 2× at 4K, as a HiDPI display
+draws it) into a canvas, encodes it with WebCodecs, decodes it again and compares every tenth
+picture's luma plane with the source's (BT.709). "Still": the page with one line being typed and
+a blinking cursor; "scroll": the page scrolling 6 px per frame at 1× (a fast, steady scroll).
+150 frames at 30 fps (60 for motion), the first second left out, `latencyMode: "realtime"`, as
+the call configures its screen encoders. Chrome 156, headless.
+
+```sh
+cd dev/screen-codec-bench && python3 make_runs.py
+python3 server.py chrome q1440.json q1440.jsonl && python3 table.py q1440.jsonl
+```
+
+1440p at 30 fps, scrolling text (what is sent, luma PSNR):
+
+| Target     | H.264, hardware      | H.264, software      | AV1, `contentHint: "text"` | AV1, no hint         |
+|------------|----------------------|----------------------|----------------------------|----------------------|
+| 1 Mbit/s   | 918 kbit/s, 37.1 dB  | 778 kbit/s, 34.8 dB  | 1015 kbit/s, 47.8 dB       | 954 kbit/s, 40.3 dB  |
+| 2 Mbit/s   | 1914 kbit/s, 43.4 dB | 1928 kbit/s, 43.2 dB | 1990 kbit/s, 50.4 dB       | 1890 kbit/s, 45.4 dB |
+| 4 Mbit/s   | 3905 kbit/s, 50.8 dB | 3855 kbit/s, 49.2 dB | 3489 kbit/s, 53.0 dB       | 3615 kbit/s, 50.4 dB |
+| 6.6 Mbit/s | 5982 kbit/s, 55.1 dB | 6338 kbit/s, 51.3 dB | 4576 kbit/s, 53.9 dB       | 5496 kbit/s, 53.0 dB |
+
+1440p at 30 fps, a still page with a line being typed:
+
+| Target     | H.264, hardware      | H.264, software     | AV1, `contentHint: "text"` | AV1, no hint        |
+|------------|----------------------|---------------------|----------------------------|---------------------|
+| 1 Mbit/s   | 1110 kbit/s, 44.9 dB | 421 kbit/s, 45.8 dB | 314 kbit/s, 51.1 dB        | 532 kbit/s, 47.6 dB |
+| 2 Mbit/s   | 673 kbit/s, 51.8 dB  | 110 kbit/s, 45.3 dB | 249 kbit/s, 51.7 dB        | 397 kbit/s, 50.2 dB |
+| 4 Mbit/s   | 527 kbit/s, 53.6 dB  | 46 kbit/s, 47.7 dB  | 152 kbit/s, 51.9 dB        | 334 kbit/s, 50.8 dB |
+| 6.6 Mbit/s | 237 kbit/s, 53.9 dB  | 46 kbit/s, 45.0 dB  | 102 kbit/s, 52.0 dB        | 210 kbit/s, 51.2 dB |
+
+4K at 30 fps (text at 2×) and 1080p at 60 fps (motion):
+
+| Picture, scene  | Target    | H.264, hardware      | H.264, software      | AV1 (`"text"`; `"motion"` at 60 fps) |
+|-----------------|-----------|----------------------|----------------------|--------------------------------------|
+| 4K30, scroll    | 4 Mbit/s  | 2283 kbit/s, 51.6 dB | 3452 kbit/s, 49.8 dB | 1241 kbit/s, 53.4 dB                 |
+| 4K30, scroll    | 15 Mbit/s | 2007 kbit/s, 55.7 dB | 2392 kbit/s, 50.1 dB | 1011 kbit/s, 54.4 dB                 |
+| 4K30, still     | 4 Mbit/s  | 1209 kbit/s, 51.7 dB | 219 kbit/s, 47.5 dB  | 430 kbit/s, 52.8 dB                  |
+| 4K30, still     | 15 Mbit/s | 585 kbit/s, 55.4 dB  | 76 kbit/s, 47.5 dB   | 139 kbit/s, 53.5 dB                  |
+| 1080p60, scroll | 4 Mbit/s  | 2061 kbit/s, 54.2 dB | 2652 kbit/s, 50.8 dB | 2899 kbit/s, 51.7 dB                 |
+| 1080p60, scroll | 8 Mbit/s  | 1842 kbit/s, 54.5 dB | 2406 kbit/s, 50.2 dB | 2738 kbit/s, 52.6 dB                 |
+
+- **AV1 with its screen content tools keeps text sharp at a fraction of the bitrate.** Scrolling
+  at 1440p, AV1 at 1 Mbit/s (47.8 dB) is as sharp as H.264 at about 3 Mbit/s, and at 2 Mbit/s
+  (50.4 dB) as H.264 at 4: 10.7 and 7.0 dB more than Chrome's hardware H.264 at the same bitrate.
+  That is what a viewer on a weak link gets, and what the half-size layer has. At the full
+  1440p bitrate both are sharp (53.9 and 55.1 dB), AV1 with a third less. A still page costs AV1
+  100 to 300 kbit/s against H.264's 240 to 1100.
+- **The hint matters:** without `contentHint: "text"` (libaom without its screen content mode)
+  AV1 is 5 to 7 dB less sharp at 1 to 2 Mbit/s. Chrome 156 and Firefox 159 accept the hint.
+- **Motion stays H.264:** at 1080p60 the hardware H.264 encoder was sharper (54.2 against 51.7 dB)
+  with less bitrate, at a fraction of the CPU (below). Motion shares and cameras keep H.264.
+- **4K text is cheap to send:** text drawn at 2× compresses well; the 4K top layer sent 1 to 2.4
+  Mbit/s of its 15 at 51 to 55 dB. The cap matters for pictures, video and fast changes.
+- **VP9 is not used:** Chrome's VP9 (libvpx) took the canvas' full-range RGB but tagged its
+  decoded pictures with limited range and the BT.709 transfer, so a canvas drew them with a
+  constant shift (33 dB at any bitrate; the Y plane 22 dB off the source). It also cost 1.5 to 2×
+  AV1's CPU. VP9 would have been the codec for viewers without AV1 decoding (Safari on Macs before
+  M3); they get H.264.
+- **Who encodes and decodes AV1:** Chrome 156 and Firefox 159 here encode AV1 and VP9 in software
+  only and decode both in hardware (`isConfigSupported`). VideoToolbox on this Mac has no AV1 or
+  VP9 encoder (H.264, HEVC, ProRes, JPEG only) and decodes AV1 in hardware (Apple silicon from
+  M3), VP9 not; Safari and the desktop's WebKit view decode AV1 where the hardware does. The
+  desktop's own encoders stay H.264 (VideoToolbox, VA-API, OpenH264): a software AV1 encoder in
+  the desktop (GStreamer's `svtav1enc` with its screen content mode, `av1enc`, `rav1enc`) is a
+  follow-up.
+
+**CPU in the browser** (same page, the encoder's CPU time per frame: the browser's processes
+while encoding, as fast as it goes and without decoding, minus the page drawing the same frames
+without encoding; one encoder at the top layer's size; a share adds its half-size layer, about a
+quarter more):
+
+| Picture, scene  | H.264, hardware | H.264, software | AV1, `"text"`  |
+|-----------------|-----------------|-----------------|----------------|
+| 1080p30, still  | 5.0 ms (15 %)   | 5.0 ms (15 %)   | 4.1 ms (12 %)  |
+| 1080p30, scroll | 1.9 ms (6 %)    | 7.2 ms (22 %)   | 8.1 ms (24 %)  |
+| 1440p30, still  | 3.6 ms (11 %)   | 7.6 ms (23 %)   | 7.5 ms (22 %)  |
+| 1440p30, scroll | 3.7 ms (11 %)   | 13.1 ms (39 %)  | 15.4 ms (46 %) |
+| 4K30, still     | 8.1 ms (24 %)   | 22.0 ms (66 %)  | 15.9 ms (48 %) |
+| 4K30, scroll    | 7.6 ms (23 %)   | 27.0 ms (81 %)  | 32.9 ms (99 %) |
+| 1080p60, scroll | 2.0 ms (12 %)   | 6.9 ms (41 %)   | 8.6 ms (52 %)  |
+| 1440p60, scroll | 3.6 ms (21 %)   | 13.2 ms (79 %)  | 15.4 ms (92 %) |
+
+The percentage is of one core at the picture's frame rate. libaom spreads the work over several
+threads, so a 4K share in AV1 takes about one core in all, spread over several.
+
+**The desktop's encoders** (`crates/teamcraft-media/examples/screen_bench.rs`: every layer of the
+profile, encoded in real time as the call's encoder thread does, from a synthetic page of
+pixel-font text on a 3840x2160 display, 10 s per row; CPU is the process's over all threads,
+VideoToolbox's included; capture and its BGRA conversion are not part of it):
+
+```sh
+cargo run --release -p teamcraft-media --features gstreamer,openh264-source --example screen_bench -- \
+  --profile detail-4k --scene scroll [--encoder software]
+```
+
+| Profile (top layer) | Scene  | VideoToolbox, CPU per frame | OpenH264, CPU per frame (frame rate reached) |
+|---------------------|--------|-----------------------------|----------------------------------------------|
+| detail (1440p30)    | still  | 0.6 ms (2 %)                | 19.2 ms (58 %)                               |
+| detail (1440p30)    | scroll | 0.7 ms (2 %)                | 19.9 ms (60 %)                               |
+| motion (1080p60)    | still  | 0.3 ms (2 %)                | 10.7 ms (64 %)                               |
+| motion (1080p60)    | scroll | 0.3 ms (1 %)                | 10.5 ms (63 %)                               |
+| 4K detail (4K30)    | still  | 1.4 ms (4 %)                | 46.6 ms (140 %; 18 fps)                      |
+| 4K detail (4K30)    | scroll | 1.4 ms (4 %)                | 93.3 ms (280 %; 10 fps)                      |
+| 4K motion (1440p60) | still  | 0.4 ms (2 %)                | 19.2 ms (115 %; 45 fps)                      |
+| 4K motion (1440p60) | scroll | 0.4 ms (2 %)                | 18.9 ms (113 %; 46 fps)                      |
+
+The GPU's utilization (`ioreg`, "Device Utilization %") stayed at 0 to 9 % during the
+VideoToolbox runs, as without them: the encoder is a media engine of its own. Battery drain was
+not measured (the Mac ran on AC power, and `powermetrics` needs root); CPU time is the stand-in.
+
+**Budgets** that follow from these numbers:
+
+- Desktop with a hardware encoder: encoding a share costs at most about 2 % of a core at the
+  standard sizes and 4 % at 4K. Without one (OpenH264), 60 % of a core at the standard sizes,
+  and a 4K share doesn't keep its frame rate (10 to 18 fps on 1.4 to 2.8 cores): 4K needs a
+  hardware encoder.
+- Browser: a detail share in AV1 costs about half a core at 1440p30 (both layers) and one core at
+  4K30, against a tenth and a quarter with the hardware H.264 encoder. The call's encoders skip a
+  frame while two wait (`MAX_ENCODE_QUEUE`), so a slower machine sends a detail share at a lower
+  frame rate, as detail mode intends.
+- Viewers: AV1 is decoded in hardware where it is announced on Apple silicon (M3 and later) and
+  by dav1d in Chrome and Firefox (not measured here).
+
+Seen on the way, not changed here: VideoToolbox at an average bitrate (`rate-control=abr`, what
+screen shares use since #530) sent the *lower* layers of the scrolling synthetic page far above
+their targets (the 720p layer 9 Mbit/s for 1.7, a 4K share's 1080p layer 20 Mbit/s for 3.7),
+while the top layer stayed far below its own. `data-rate-limits` didn't change it. The synthetic
+1 px text is harsher than real text after scaling, but a viewer on a weak link may get much more
+than its layer's bitrate: a follow-up.
+
 ## Clients
 
 How fast and how lean the apps are for the person using them; the budgets they must stay within are

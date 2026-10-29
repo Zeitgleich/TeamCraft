@@ -313,8 +313,13 @@ impl Forwarder {
 
   /// The video codecs every other participant that decodes video decodes, best first (#565):
   /// what `device_id` can publish so that everyone may watch it. Participants without video
-  /// decoders (audio only) don't count; with nobody else, every codec there is.
-  pub fn decodable_video_codecs(&self, device_id: DeviceId) -> Vec<VideoCodec> {
+  /// decoders (audio only) don't count; with nobody else, every codec there is. `None` for a
+  /// participant that encodes no video (it publishes nothing), or one that isn't there.
+  pub fn decodable_video_codecs(&self, device_id: DeviceId) -> Option<Vec<VideoCodec>> {
+    let publisher = self.participants.get(&device_id)?;
+    if publisher.capabilities.video_encoders.is_empty() {
+      return None;
+    }
     let mut codecs = KNOWN_VIDEO_CODECS.to_vec();
     for (other, participant) in &self.participants {
       let decoders = &participant.capabilities.video_decoders;
@@ -322,7 +327,7 @@ impl Forwarder {
         codecs.retain(|codec| decoders.contains(codec));
       }
     }
-    codecs
+    Some(codecs)
   }
 
   /// Removes a participant with its tracks and subscriptions.

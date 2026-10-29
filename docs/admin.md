@@ -537,6 +537,22 @@ themselves and the server can't relax it.
   more and the row. Uploads announced but never completed are swept the same way. The same applies to
   people's own backgrounds.
 
+### 3.6 Screen sharing
+
+How sharp screen shares may be is part of the signed workspace policy (`screen_share`, §2.3):
+`max_resolution` is `uhd` (default) or `standard`. With `uhd`, people can tick "Share in 4K" in the
+share options: the share is sent at up to 4K at 30 fps (1440p at 60 fps for motion) and up to 16
+Mbit/s per share and viewer, instead of up to 1440p and 8 Mbit/s. With `standard`, the option isn't
+offered and a share asked for in 4K is sent at the standard size. Each share starts at the standard
+size unless its sharer picks 4K, so the default changes nothing for people who don't.
+
+- **Enforcement:** member clients apply it (they read the verified policy); the SFU doesn't check
+  picture sizes, so it is a bandwidth setting, not a security boundary. Clients from before the
+  setting (#565) offer no 4K. An owner client from before it that signs the policy again drops the
+  setting, which means `uhd` until an up-to-date owner client signs again.
+- **Admin UI:** Administration → Security → Screen sharing → "Allow 4K screen sharing"; saving is a
+  policy change, which needs an owner (`sign_workspace`).
+
 ## 4. Audit log
 
 Every admin action, recovery, device change and role change is logged with actor, target and time.
@@ -669,7 +685,8 @@ are part of the owner-signed workspace policy (§2.3) and are edited there: `adm
 recovery, whether members may still set a recovery passphrase instead of a recovery kit
 (`recovery.is_passphrase_allowed`, e2ee.md §6.5.8), history and retention defaults, session rules, directory privacy, presence, threads, guest
 rules (allowed e-mail domains, default expiry, whom guests may start a DM with), the shortest
-password, push content, call backgrounds, desktop updates and the recommended number of owners.
+password, push content, call backgrounds, 4K screen sharing, desktop updates and the recommended
+number of owners.
 Everything in this section is enforced
 by the server alone (the server sends the mail, checks the sizes, applies invites): a compromised
 server could ignore these settings whether they were signed or not, so a signature would protect

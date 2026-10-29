@@ -722,6 +722,78 @@ impl ViewChoice {
   }
 }
 
+/// An AV1 temporal unit's first byte when it is a temporal delimiter OBU (type 2, with a size).
+const AV1_TEMPORAL_DELIMITER: [u8; 2] = [0x12, 0x00];
+const AV1_OBU_HAS_SIZE: u8 = 0b0000_0010;
+const AV1_OBU_HAS_EXTENSION: u8 = 0b0000_0100;
+const AV1_OBU_TYPE_SHIFT: u8 = 3;
+const AV1_OBU_TYPE_MASK: u8 = 0b0111_1000;
+const AV1_OBU_TEMPORAL_DELIMITER: u8 = 2;
+
+/// A decrypted AV1 frame as decoders take it (#565). DAVE sends a temporal unit as AV1's RTP
+/// format carries it: without its temporal delimiter, and the last OBU without its size field.
+/// WebCodecs (and the hardware decoders behind it) take a temporal unit in the low overhead
+/// format, as encoders give it: a temporal delimiter first and every OBU with its size. A frame
+/// that doesn't parse is returned as it is (the decoder's error asks for a keyframe).
+pub fn av1_temporal_unit(frame: &[u8]) -> Vec<u8> {
+  let mut unit = Vec::with_capacity(frame.len() + AV1_TEMPORAL_DELIMITER.len() + 8);
+  let starts_with_delimiter = frame
+    .first()
+    .is_some_and(|header| (header & AV1_OBU_TYPE_MASK) >> AV1_OBU_TYPE_SHIFT == AV1_OBU_TEMPORAL_DELIMITER);
+  if !starts_with_delimiter {
+    unit.extend_from_slice(&AV1_TEMPORAL_DELIMITER);
+  }
+  let mut rest = frame;
+  while let Some((&header, after_header)) = rest.split_first() {
+    let extension_bytes = usize::from(header & AV1_OBU_HAS_EXTENSION != 0);
+    let Some((extension, after_extension)) = after_header.split_at_checked(extension_bytes) else {
+      return frame.to_vec();
+    };
+    let (payload, next) = if header & AV1_OBU_HAS_SIZE != 0 {
+      let Some((size, size_bytes)) = read_leb128(after_extension) else {
+        return frame.to_vec();
+      };
+      match after_extension[size_bytes..].split_at_checked(size) {
+        Some(split) => split,
+        None => return frame.to_vec(),
+      }
+    } else {
+      (after_extension, &after_extension[after_extension.len()..])
+    };
+    unit.push(header | AV1_OBU_HAS_SIZE);
+    unit.extend_from_slice(extension);
+    write_leb128(payload.len(), &mut unit);
+    unit.extend_from_slice(payload);
+    rest = next;
+  }
+  unit
+}
+
+/// An unsigned LEB128 number (at most 8 bytes, as AV1 allows) and the bytes it took.
+fn read_leb128(bytes: &[u8]) -> Option<(usize, usize)> {
+  let mut value = 0u64;
+  for (index, byte) in bytes.iter().take(8).enumerate() {
+    value |= u64::from(byte & 0x7f) << (index * 7);
+    if byte & 0x80 == 0 {
+      return Some((usize::try_from(value).ok()?, index + 1));
+    }
+  }
+  None
+}
+
+fn write_leb128(mut value: usize, out: &mut Vec<u8>) {
+  loop {
+    // The low seven bits; the cast keeps exactly them.
+    let byte = (value & 0x7f) as u8;
+    value >>= 7;
+    if value == 0 {
+      out.push(byte);
+      return;
+    }
+    out.push(byte | 0x80);
+  }
+}
+
 /// The best video codec a sender can use so that every receiver decodes it: encodable by the
 /// sender, decodable by all `receivers`, preferring AV1, then VP9, then H.264.
 pub fn choose_video_codec(
@@ -859,6 +931,28 @@ mod tests {
     width: 1280,
     height: 720,
   };
+
+  /// What DAVE (and AV1's RTP format) leave of a temporal unit becomes one again (#565).
+  #[test]
+  fn av1_temporal_units_get_their_delimiter_and_sizes_back() {
+    // A temporal delimiter, a sequence header (3 bytes) and a frame OBU of 200 bytes (two-byte
+    // size), as an encoder gives them.
+    let mut original = vec![0x12, 0x00, 0x0a, 0x03, 1, 2, 3, 0x32, 0xc8, 0x01];
+    original.extend(std::iter::repeat_n(7u8, 200));
+    // As DAVE sends it: no delimiter, the last OBU without its size.
+    let mut sent = vec![0x0a, 0x03, 1, 2, 3, 0x30];
+    sent.extend(std::iter::repeat_n(7u8, 200));
+    assert_eq!(av1_temporal_unit(&sent), original);
+    // A complete unit stays as it is; so does one that doesn't parse.
+    assert_eq!(av1_temporal_unit(&original), original);
+    let truncated = [0x0a, 0x09, 1, 2];
+    assert_eq!(av1_temporal_unit(&truncated), truncated);
+    // An OBU with an extension byte keeps it.
+    assert_eq!(
+      av1_temporal_unit(&[0x34, 0x28, 9, 9]),
+      vec![0x12, 0x00, 0x36, 0x28, 0x02, 9, 9]
+    );
+  }
 
   mod frames {
     use super::*;

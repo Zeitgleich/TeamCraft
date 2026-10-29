@@ -1755,6 +1755,8 @@ impl CallEngine {
       }
     }
     let data = match decrypted {
+      // DAVE sends AV1 without its temporal delimiters and last OBU sizes (#565).
+      Ok(data) if codec == VideoCodec::Av1 => crate::video::av1_temporal_unit(&data),
       Ok(data) => data,
       Err(error) => {
         self.ask_for_keyframe(stream, now);

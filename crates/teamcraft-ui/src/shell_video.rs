@@ -217,9 +217,16 @@ mod view {
 
   /// The video codecs this page decodes with WebCodecs, for the shell to announce to a call
   /// (#565): H.264 (the shell turns it into images where the page can't), and AV1 where WebCodecs
-  /// decodes it (Apple silicon from M3 in WKWebView, WebView2; the shell has no images for it).
+  /// decodes it and H.264 too (Apple silicon from M3 in WKWebView, WebView2; the shell has no
+  /// images of AV1).
   pub async fn decodable_codecs() -> Vec<VideoCodec> {
     let mut codecs = vec![VideoCodec::H264];
+    // A page that can't decode H.264 asks the shell for images of every track it shows, and the
+    // shell has none of AV1.
+    if !can_decode_h264().await {
+      return codecs;
+    }
+    // async-ok: a thread-local Cell, not a signal.
     let can_decode_av1 = match CAN_DECODE_AV1.get() {
       Some(is_known) => is_known,
       None => {
