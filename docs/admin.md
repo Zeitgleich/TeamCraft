@@ -565,9 +565,14 @@ participant sees when it is there. Read the data processing notes below before t
 1. Create a bot account for it (Administration → Integrations, or `POST /api/v1/admin/bots`) with a
    name people recognize, such as "Notetaker".
 2. Run `teamcraft-notetaker` with the bot's token on a host you trust, next to the bridge or on its
-   own (`crates/teamcraft-notetaker/teamcraft-notetaker.example.toml`). It needs to reach the server,
-   the SFU (QUIC/UDP) and `https://openrouter.ai`. On its first start it enrolls a device, like the
-   bridge; keep its database volume.
+   own (`crates/teamcraft-notetaker/teamcraft-notetaker.example.toml`). Each release publishes the
+   image `ghcr.io/zeitgleich/teamcraft-notetaker:X.Y.Z` (multi-arch, signed, like the server's;
+   `containers/README.md`), and the deployment playbook
+   ([teamcraft-deploy](https://github.com/Zeitgleich/teamcraft-deploy)) runs it with its optional
+   role `teamcraft_notetaker` (`teamcraft_notetaker_enabled`, off by default). It needs to reach the
+   server, the SFU (QUIC/UDP) and `https://openrouter.ai`, and listens on no port. On its first start
+   it enrolls a device, like the bridge; keep its database volume (`/var/lib/teamcraft-notetaker`).
+   Whoever controls that host can hear the calls the notetaker is in.
 3. Administration → Notetaker (owners sign, like every policy page): turn it on, pick the bot account,
    choose who may ask it in, the models, the language and the summary instructions, and enter the
    OpenRouter API key.

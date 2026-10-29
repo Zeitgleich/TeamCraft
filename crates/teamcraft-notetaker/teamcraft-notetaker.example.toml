@@ -73,3 +73,10 @@ max_summary_tokens = 2000
 # At shutdown, calls in progress get this long to transcribe and post; the rest is posted at the
 # next start.
 shutdown_drain_secs = 60
+
+[health]
+# The liveness file `teamcraft-notetaker healthcheck` reads (the container HEALTHCHECK); the worker
+# rewrites it every 10 seconds. Default: notetaker.alive next to store.path.
+# file = "/var/lib/teamcraft-notetaker/notetaker.alive"
+# The check fails when the file is older than this.
+max_age_secs = 120

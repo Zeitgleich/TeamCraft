@@ -1,16 +1,21 @@
 //! Entry point: configuration, logging, then the notetaker until a signal.
+//! `teamcraft-notetaker healthcheck` checks the liveness file for the container `HEALTHCHECK`.
 
 use std::io::Write;
 use std::path::PathBuf;
 use std::process::ExitCode;
+use std::time::{Duration, SystemTime};
 
 use teamcraft_notetaker::app::{open_client, run};
 use teamcraft_notetaker::config::{CONFIG_PATH_ENV, NotetakerConfig};
+use teamcraft_notetaker::health;
 use teamcraft_ops::shutdown_signal;
 use tracing_subscriber::EnvFilter;
 
 fn main() -> ExitCode {
-  match serve() {
+  let is_healthcheck = std::env::args().nth(1).as_deref() == Some("healthcheck");
+  let result = if is_healthcheck { healthcheck() } else { serve() };
+  match result {
     Ok(()) => ExitCode::SUCCESS,
     Err(error) => {
       // Logging may not be initialised yet, so report on stderr directly.
@@ -18,6 +23,17 @@ fn main() -> ExitCode {
       ExitCode::FAILURE
     },
   }
+}
+
+/// Healthy while the worker keeps rewriting its liveness file.
+fn healthcheck() -> anyhow::Result<()> {
+  let config = NotetakerConfig::load(config_path().as_deref())?;
+  health::check(
+    &config.health_file(),
+    Duration::from_secs(config.health.max_age_secs),
+    SystemTime::now(),
+  )?;
+  Ok(())
 }
 
 #[tokio::main]

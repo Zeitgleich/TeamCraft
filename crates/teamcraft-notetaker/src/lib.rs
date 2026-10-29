@@ -13,11 +13,13 @@
 //! - [`keys`]: the API key, checked against the hash the owners signed.
 //! - [`transcript`], [`summary`], [`report`], [`texts`]: what gets posted.
 //! - [`session`]: one call; [`worker`]: the client, the requests, the sessions, posting.
+//! - [`health`]: the liveness file of the container health check.
 //! - [`app`]: wiring for the binary.
 
 pub mod app;
 pub mod capture;
 pub mod config;
+pub mod health;
 pub mod keys;
 pub mod openrouter;
 pub mod report;

@@ -97,6 +97,8 @@ pub struct Worker<A: ServerApi, S: LocalStore> {
   session_events: mpsc::UnboundedReceiver<(ConversationId, SessionEvent)>,
   reports: JoinSet<FinishedReport>,
   has_resumed: bool,
+  /// The container health check's file, rewritten while the loop runs.
+  maybe_liveness: Option<crate::health::Liveness>,
 }
 
 struct ActiveSession {
@@ -184,7 +186,14 @@ impl<A: ServerApi, S: LocalStore> Worker<A, S> {
       session_events,
       reports: JoinSet::new(),
       has_resumed: false,
+      maybe_liveness: None,
     }
+  }
+
+  /// Rewrites `liveness` on every tick (the container health check reads it).
+  pub fn with_liveness(mut self, liveness: crate::health::Liveness) -> Self {
+    self.maybe_liveness = Some(liveness);
+    self
   }
 
   /// Runs until `stop` resolves, then lets the calls in progress finish and post (for at most the
@@ -213,6 +222,9 @@ impl<A: ServerApi, S: LocalStore> Worker<A, S> {
 
   async fn on_tick(&mut self) {
     let now = Instant::now();
+    if let Some(liveness) = &mut self.maybe_liveness {
+      liveness.touch(now);
+    }
     self.keep_gateway(now).await;
     if self.gateway.is_none() {
       return;

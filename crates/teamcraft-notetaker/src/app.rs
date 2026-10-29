@@ -18,6 +18,7 @@ use teamcraft_proto::{ConversationId, CreateCallJoinTokenRequest, DeviceId};
 use tracing::info;
 
 use crate::config::NotetakerConfig;
+use crate::health::Liveness;
 use crate::keys::{ClientSettings as OpenRouterSettings, ConfiguredKey, Credentials, KeySource, ServerKey};
 use crate::session::SessionLimits;
 use crate::summary::SummarySettings;
@@ -112,7 +113,8 @@ pub async fn run(
     credentials,
     tickets,
     config.openrouter.max_concurrent_requests,
-  );
+  )
+  .with_liveness(Liveness::new(config.health_file()));
   info!("notetaker running");
   worker.run_until(stop).await;
   Ok(())

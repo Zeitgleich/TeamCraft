@@ -34,6 +34,8 @@ pub struct NotetakerConfig {
   pub openrouter: OpenRouterSection,
   #[serde(default)]
   pub limits: LimitsSection,
+  #[serde(default)]
+  pub health: HealthSection,
 }
 
 /// The TeamCraft server and the bot account the notetaker acts as.
@@ -125,6 +127,18 @@ pub struct LimitsSection {
   pub shutdown_drain_secs: u64,
 }
 
+/// The liveness file the container health check reads (`teamcraft-notetaker healthcheck`): the
+/// worker touches it every few seconds while its loop runs.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct HealthSection {
+  /// Default: `notetaker.alive` next to `store.path`.
+  #[serde(rename = "file")]
+  pub maybe_file: Option<PathBuf>,
+  /// The check fails when the file is older than this.
+  pub max_age_secs: u64,
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum ConfigError {
   #[error("invalid configuration: {0}")]
@@ -188,6 +202,9 @@ impl NotetakerConfig {
     if limits.summary_chunk_chars < 4_000 {
       return invalid("limits.summary_chunk_chars must be at least 4000");
     }
+    if self.health.max_age_secs < 30 {
+      return invalid("health.max_age_secs must be at least 30 (the file is rewritten every 10 s)");
+    }
     Ok(())
   }
 
@@ -238,6 +255,18 @@ impl NotetakerConfig {
     }
   }
 
+  /// Where the liveness file is: `health.file`, or `notetaker.alive` next to the database.
+  pub fn health_file(&self) -> PathBuf {
+    self.health.maybe_file.clone().unwrap_or_else(|| {
+      self
+        .store
+        .path
+        .parent()
+        .unwrap_or_else(|| Path::new(""))
+        .join("notetaker.alive")
+    })
+  }
+
   pub fn retry_settings(&self) -> RetrySettings {
     RetrySettings {
       max_retries: self.openrouter.max_retries,
@@ -280,6 +309,15 @@ impl Default for OpenRouterSection {
       retry_base_delay_ms: 1_000,
       max_concurrent_requests: 4,
       app_title: "TeamCraft notetaker".to_owned(),
+    }
+  }
+}
+
+impl Default for HealthSection {
+  fn default() -> Self {
+    Self {
+      maybe_file: None,
+      max_age_secs: 120,
     }
   }
 }
