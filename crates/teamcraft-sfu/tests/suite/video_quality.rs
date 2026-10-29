@@ -120,14 +120,21 @@ async fn a_good_link_carries_the_top_layer_at_about_its_bitrate() {
   presenter.leave().await.unwrap();
   viewer.leave().await.unwrap();
   reached.unwrap();
-  // DAVE adds a few bytes per frame; the encoders' rate control may stay below, more so where
-  // a loaded machine encodes fewer pictures.
+  // DAVE adds a few bytes per frame. The encoders' rate control gives each picture its share of
+  // the bitrate at the camera's 30 fps, so a loaded runner that encodes fewer pictures sends less
+  // (OpenH264 on CI: 560 kbit/s at 11 fps): the bitrate is judged per picture, at 30 fps.
+  assert!(
+    frames >= 15,
+    "only {frames} frames of the top layer in {seconds:.1} s"
+  );
   let bitrate_bps = bytes as f64 * 8.0 / seconds;
-  let share = bitrate_bps / f64::from(CAMERA_HD_BITRATE_BPS);
+  let per_picture_bps = bytes as f64 * 8.0 / frames as f64 * 30.0;
+  let share = per_picture_bps / f64::from(CAMERA_HD_BITRATE_BPS);
   assert!(
     (0.5..2.0).contains(&share),
-    "the top layer came at {:.0} kbit/s ({frames} frames in {seconds:.1} s) of {} kbit/s",
+    "the top layer came at {:.0} kbit/s ({:.0} kbit/s at 30 fps; {frames} frames in {seconds:.1} s) of {} kbit/s",
     bitrate_bps / 1000.0,
+    per_picture_bps / 1000.0,
     CAMERA_HD_BITRATE_BPS / 1000
   );
 }
