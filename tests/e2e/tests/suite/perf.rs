@@ -38,7 +38,7 @@ use teamcraft_e2e::scenario::space_with;
 use teamcraft_e2e::{Peer, Stack};
 use teamcraft_proto::{ConversationId, HistoryPolicy, SpaceId, UserId};
 
-use crate::web::{TEST_CSP, click_text, wait_for_element, wait_for_text};
+use crate::web::{TEST_CSP, click_text, type_until_kept, wait_for_element, wait_for_text};
 
 /// Not the browser tests' 8082, so both can run at once (the dev realm registers both).
 const PORT: u16 = 8083;
@@ -296,7 +296,7 @@ impl Rig {
       .with_env("TEAMCRAFT_DATABASE__MAX_CONNECTIONS", "16");
     let turn = lease_web_port(PORT).await;
     let stack = builder.start().await?;
-    let browser = BrowserSession::launch().await?;
+    let browser = BrowserSession::launch_for_measurements().await?;
     let alice = Peer::enroll(&stack, "alice").await;
     let bob = Peer::enroll(&stack, "bob").await;
     // Carol's keys exist before the browser signs in (it unlocks them); her first device then
@@ -323,14 +323,8 @@ async fn sign_in_and_unlock(page: &Page, user: &str) {
   wait_for_text(page, "Sign in").await;
   click_text(page, "Sign in").await;
   sign_in_at_keycloak(page, user).await;
-  wait_for_element(page, "#enroll-secret")
-    .await
-    .click()
-    .await
-    .unwrap()
-    .type_str(PASSPHRASE)
-    .await
-    .unwrap();
+  // The setup screen may render again while the core settles and lose what was typed (#444).
+  type_until_kept(page, "#enroll-secret", PASSPHRASE).await;
   click_text(page, "Unlock").await;
   wait_for_text(page, "Activity").await;
 }
@@ -840,6 +834,11 @@ async fn come_back(page: &Page, needle: &str) -> bool {
       has_signed_in = true;
     } else if !has_signed_in && text.contains("Sign in") && !text.contains("Activity") {
       click_text(page, "Sign in").await;
+    } else if text.contains("Activity") {
+      // The app opens on Chats (#558); the seeded channels are in the first space.
+      let _ = page
+        .evaluate("document.querySelector('.space-btn[aria-label^=\"Space 00\"]')?.click()")
+        .await;
     }
     assert!(
       Instant::now() < deadline,
@@ -984,6 +983,9 @@ async fn scroll_back(page: &Page) -> (f64, f64, f64) {
       last = now;
       if (steps < 120) {
         pick();
+        // A person scrolls with the wheel (or a finger, or keys): only that leaves the bottom
+        // (#665). The synthetic event says so; the step itself is set directly.
+        list.dispatchEvent(new WheelEvent('wheel', { deltaY: -600, bubbles: true }));
         list.scrollTop = Math.max(0, list.scrollTop - 600);
         steps += 1;
         setTimeout(check, 0);

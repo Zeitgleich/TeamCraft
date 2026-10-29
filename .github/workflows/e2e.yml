@@ -28,7 +28,9 @@ jobs:
           libasound2-dev libclang-dev cmake pkg-config libssl-dev
       - name: Run the suite
         # Starts the dev stack, builds server, SFU, bridge and the web client, runs the tests.
-        # The runner's Google Chrome drives the browser tests.
+        # The runner's Google Chrome drives the browser tests. Ends before the job does, so the
+        # screenshots and process logs below are still uploaded when it runs out of time.
+        timeout-minutes: 52
         run: scripts/e2e.sh
       - name: Failure screenshots and process logs
         # The logs of the server, SFU and bridge of failed tests stay in the temp directory.

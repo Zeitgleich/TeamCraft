@@ -279,11 +279,11 @@ async fn a_message_written_in_the_web_client_reaches_a_second_client() {
   rig.finish().await;
 }
 
-/// e2ee.md §9.4: two tabs of the same account share one core. Messages sent alternately from both
-/// tabs each reach Carol exactly once and decrypt (one MLS state, one outbox), and when the owning tab
-/// closes, the other one takes the store over and keeps working.
+/// #744 (e2ee.md §9.4): one tab at a time runs the app, with the one core and store of the account.
+/// A second tab asks before it takes over, the first one steps down and can take it back. Messages
+/// sent from either tab reach Carol exactly once, in order, and decrypt.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn two_tabs_share_one_core_and_the_second_takes_over() {
+async fn a_second_tab_takes_over_and_the_first_takes_it_back() {
   let Some(mut rig) = Rig::start().await else { return };
   let channel = rig.channel;
   let first = rig.browser.page.clone();
@@ -297,64 +297,42 @@ async fn two_tabs_share_one_core_and_the_second_takes_over() {
   rig
     .deliver_until(|texts| texts.iter().any(|text| text == "hello from carol"))
     .await;
+  send_in_channel(&first, "tab one: 1").await;
+  rig
+    .deliver_until(|texts| texts.iter().any(|text| text == "tab one: 1"))
+    .await;
 
+  // The second tab asks first; taking over makes the first one inactive.
   let second = rig
     .browser
     .new_page(&format!("{WEB_ORIGIN}/?backend=server"))
     .await;
+  wait_for_text(&second, "TeamCraft is already open in another tab").await;
+  click_text(&second, "Use here").await;
+  wait_for_text(&first, "TeamCraft was opened in another tab").await;
   sign_in_again(&second).await;
   wait_for_text(&second, "browser-channel").await;
-  let follows = second
-    .evaluate("navigator.locks.query().then(state => state.held.length + ':' + state.pending.length)")
-    .await
-    .unwrap()
-    .into_value::<String>()
-    .unwrap();
-  assert_eq!(
-    follows, "1:1",
-    "one tab holds the store lock, the other waits for it"
-  );
+  send_in_channel(&second, "tab two: 1").await;
+  rig
+    .deliver_until(|texts| texts.iter().any(|text| text == "tab two: 1"))
+    .await;
 
-  let sent = ["tab one: 1", "tab two: 1", "tab one: 2", "tab two: 2"];
-  for (index, text) in sent.iter().enumerate() {
-    let page = if index % 2 == 0 { &first } else { &second };
-    send_in_channel(page, text).await;
-    rig
-      .deliver_until(|texts| texts.iter().any(|seen| seen == text))
-      .await;
-  }
-  // Every message arrived once, in order, and Carol could decrypt each of them.
+  // And back to the first tab.
+  first.bring_to_front().await.unwrap();
+  click_text(&first, "Use here").await;
+  wait_for_text(&second, "TeamCraft was opened in another tab").await;
+  send_in_channel(&first, "tab one: 2").await;
+  rig
+    .deliver_until(|texts| texts.iter().any(|text| text == "tab one: 2"))
+    .await;
+
   let texts = rig.carol.texts(channel);
   let seen: Vec<&str> = texts
     .iter()
     .map(String::as_str)
     .filter(|text| text.starts_with("tab "))
     .collect();
-  assert_eq!(seen, sent);
-  assert_eq!(
-    seen,
-    sent
-      .iter()
-      .map(|text| (*text).to_owned())
-      .collect::<Vec<_>>()
-      .iter()
-      .collect::<Vec<_>>()
-  );
-
-  // The owner goes away: the follower opens the store and sends on its own.
-  first.close().await.unwrap();
-  send_in_channel(&second, "tab two after the first closed").await;
-  rig
-    .deliver_until(|texts| texts.iter().any(|text| text == "tab two after the first closed"))
-    .await;
-  let texts = rig.carol.texts(channel);
-  assert_eq!(
-    texts
-      .iter()
-      .filter(|text| *text == "tab two after the first closed")
-      .count(),
-    1
-  );
+  assert_eq!(seen, ["tab one: 1", "tab two: 1", "tab one: 2"]);
   rig.finish().await;
 }
 
@@ -482,6 +460,41 @@ impl Rig {
   }
 }
 
+/// Pumps Alice's other device (and Carol's) until it added the browser to the open conversation's
+/// group, so the page no longer says the device isn't set up for it.
+pub(crate) async fn wait_until_set_up(alice: &mut Peer, carol: &mut Peer, page: &Page) {
+  let deadline = Instant::now() + Duration::from_secs(120);
+  let mut round = 0_u32;
+  // The notice shows once the conversation has loaded (its messages are there), so only its
+  // absence for a while after that counts.
+  let mut maybe_clear_since: Option<Instant> = None;
+  loop {
+    let text = body_text(page).await;
+    if text.contains("hello from carol") && !text.contains("isn't fully set up") {
+      let since = *maybe_clear_since.get_or_insert_with(Instant::now);
+      if since.elapsed() >= Duration::from_secs(3) {
+        return;
+      }
+    } else {
+      maybe_clear_since = None;
+    }
+    assert!(
+      Instant::now() < deadline,
+      "the browser was never added to the conversation"
+    );
+    if round.is_multiple_of(50) {
+      alice.heartbeat().await;
+      carol.heartbeat().await;
+    }
+    round += 1;
+    alice.pump_reconnecting().await;
+    alice.client.apply_pending_changes().await.unwrap();
+    carol.pump_reconnecting().await;
+    carol.client.apply_pending_changes().await.unwrap();
+    tokio::time::sleep(Duration::from_millis(200)).await;
+  }
+}
+
 /// Signs in through Keycloak's login page and unlocks the account's keys on this new browser.
 pub(crate) async fn sign_in_as_alice(page: &Page) {
   teamcraft_e2e::browser::prefer_mouse(page).await;
@@ -573,17 +586,41 @@ async fn send_in_channel(page: &Page, text: &str) {
   page.bring_to_front().await.unwrap();
   click_text(page, "browser-channel").await;
   let composer = wait_for_element(page, "[data-composer]").await;
-  composer
-    .click()
-    .await
-    .unwrap()
-    .type_str(text)
-    .await
-    .unwrap()
-    .press_key("Enter")
-    .await
-    .unwrap();
+  // Banners come and go above the conversation while the app settles (the release check, storage
+  // warnings) and move the composer: a click at where it was lands elsewhere. Focus it directly,
+  // and type again if the text did not reach it.
+  let deadline = Instant::now() + WAIT;
+  loop {
+    focus_composer(page).await;
+    composer.type_str(text).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    if composer_text(page).await.contains(text) {
+      break;
+    }
+    assert!(Instant::now() < deadline, "the composer never showed {text:?}");
+  }
+  composer.press_key("Enter").await.unwrap();
   wait_for_text(page, text).await;
+}
+
+/// Puts the keyboard focus into the channel's composer.
+async fn focus_composer(page: &Page) {
+  let deadline = Instant::now() + WAIT;
+  loop {
+    let is_focused = page
+      .evaluate(
+        "(() => { const el = document.querySelector('[data-composer]'); if (!el) return false; el.focus(); return document.activeElement === el; })()",
+      )
+      .await
+      .ok()
+      .and_then(|result| result.into_value::<bool>().ok())
+      .unwrap_or(false);
+    if is_focused {
+      return;
+    }
+    assert!(Instant::now() < deadline, "the composer never took the focus");
+    tokio::time::sleep(Duration::from_millis(200)).await;
+  }
 }
 
 async fn wait_for_text_gone(page: &Page, needle: &str) {
@@ -695,16 +732,27 @@ pub(crate) async fn wait_for_text(page: &Page, needle: &str) {
   }
 }
 
-/// Clicks the first button, link or list entry whose text contains `text`.
+/// Clicks the first button, link or list entry whose text contains `text`, once there is one: menus
+/// and dialogs of the split bundle show after their chunk loaded.
 pub(crate) async fn click_text(page: &Page, text: &str) {
   let script = format!(
-    "(() => {{ const el = [...document.querySelectorAll('button, a, li, [role=button], [role=link], [role=treeitem], [role=option]')].find(e => e.innerText.includes({text:?})); if (!el) return false; el.click(); return true; }})()"
+    "(() => {{ const el = [...document.querySelectorAll('button, a, li, [role=button], [role=link], [role=treeitem], [role=option], [role=menuitem]')].find(e => e.innerText.includes({text:?})); if (!el) return false; el.click(); return true; }})()"
   );
-  let clicked = page
-    .evaluate(script)
-    .await
-    .unwrap()
-    .into_value::<bool>()
-    .unwrap_or(false);
-  assert!(clicked, "no button or link with the text {text:?}");
+  let deadline = Instant::now() + WAIT;
+  loop {
+    let clicked = page
+      .evaluate(script.as_str())
+      .await
+      .ok()
+      .and_then(|result| result.into_value::<bool>().ok())
+      .unwrap_or(false);
+    if clicked {
+      return;
+    }
+    assert!(
+      Instant::now() < deadline,
+      "no button or link with the text {text:?} within {WAIT:?}"
+    );
+    tokio::time::sleep(Duration::from_millis(200)).await;
+  }
 }

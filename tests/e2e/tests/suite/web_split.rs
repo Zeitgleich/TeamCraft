@@ -22,6 +22,7 @@ async fn the_settings_load_their_own_chunk() {
   rig
     .browser
     .screenshot_on_failure("web-split-settings", |page| async move {
+      record_every_resource(&page).await;
       sign_in_as_alice(&page).await;
       wait_for_text(&page, "browser-channel").await;
       assert!(
@@ -60,9 +61,12 @@ async fn a_signed_release_fetches_and_checks_a_chunk_when_it_is_used() {
       sign_in_as_alice(&page).await;
       wait_for_text(&page, "browser-channel").await;
       wait_for_verified_worker(&page).await;
+      // The chunks this visit loaded are in the cache now, but not the settings' (until the
+      // worker fetches the rest in the background, a while after the page loaded).
+      let cached = cached_chunks(&page).await;
       assert!(
-        cached_chunks(&page).await.is_empty(),
-        "the worker installed chunks the first visit doesn't need"
+        !cached.iter().any(|chunk| chunk.contains("-split-settings-")),
+        "the worker installed the settings chunk before they were used: {cached:?}"
       );
       page.goto(format!("{WEB_ORIGIN}/settings")).await.unwrap();
       wait_for_text(&page, SETTINGS_TEXT).await;
@@ -148,6 +152,15 @@ async fn cached_chunks(page: &Page) -> Vec<String> {
     return found;
   })()"#;
   page.evaluate(script).await.unwrap().into_value().unwrap()
+}
+
+/// The browser keeps 250 resource timings per page by default, and the app alone loads more chunks
+/// than that: the later ones, the settings among them, would never be listed.
+async fn record_every_resource(page: &Page) {
+  page
+    .evaluate_on_new_document("performance.setResourceTimingBufferSize(100000)")
+    .await
+    .unwrap();
 }
 
 /// The wasm chunks the page fetched.
