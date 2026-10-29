@@ -36,6 +36,7 @@ pub mod meetings;
 pub mod members;
 pub mod messages;
 pub mod mls;
+pub mod notetaker;
 pub mod notifications;
 pub mod oidc;
 pub mod org_backgrounds;

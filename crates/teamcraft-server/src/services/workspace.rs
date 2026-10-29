@@ -65,6 +65,7 @@ pub async fn append(
   let maybe_document = if kind == WorkspaceLogKind::Policy {
     let document = check_policy_payload(request.payload.as_slice(), request.expected_version + 1)?;
     check_org_backgrounds_exist(state, &document.policy.call_backgrounds).await?;
+    check_notetaker_bot(state, &document.policy.notetaker).await?;
     Some(document)
   } else {
     None
@@ -320,6 +321,10 @@ fn check_policy_payload(payload: &[u8], expected_new_version: u64) -> Result<Pol
     ));
   }
   check_guest_and_password_policy(policy)?;
+  policy
+    .notetaker
+    .check()
+    .map_err(|error| ApiError::InvalidRequest(format!("notetaker: {error}")))?;
   if !(1..=MAX_RECOMMENDED_OWNERS).contains(&policy.owners.recommended_minimum) {
     return Err(ApiError::InvalidRequest(format!(
       "owners.recommended_minimum must be between 1 and {MAX_RECOMMENDED_OWNERS}"
@@ -428,6 +433,24 @@ async fn check_org_backgrounds_exist(
         image.id
       )));
     }
+  }
+  Ok(())
+}
+
+/// An enabled notetaker names an active bot account (e2ee.md §8.2). Clients trust only the
+/// signature; this keeps owners from publishing a notetaker that can't fetch its key.
+async fn check_notetaker_bot(
+  state: &AppState,
+  notetaker: &teamcraft_proto::NotetakerPolicy,
+) -> Result<(), ApiError> {
+  let Some(bot) = notetaker.active_bot() else {
+    return Ok(());
+  };
+  let maybe_user = state.database.get_user(bot).await?;
+  if !maybe_user.is_some_and(|user| user.kind == teamcraft_proto::UserKind::Bot && !user.is_deactivated) {
+    return Err(ApiError::InvalidRequest(
+      "notetaker: the account is not an active bot account".into(),
+    ));
   }
   Ok(())
 }
