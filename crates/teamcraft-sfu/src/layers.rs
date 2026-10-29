@@ -11,6 +11,11 @@
 //! `resume_probe_interval` after the pause and then less and less often while the probes don't
 //! keep it (up to `max_resume_probe_interval`): without traffic there is no feedback, and the
 //! estimate would never recover.
+//!
+//! An upgrade can also wait for proof that the link carries it ([`UpgradeProof`]): the estimate
+//! grows while the link isn't full, and switching to the next layer to find out stalled the
+//! picture of a viewer whose link couldn't carry it (#994). The allocation then asks for a probe
+//! of the rate the upgrade needs ([`Allocation::maybe_probe`]) and switches once one showed it.
 
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
@@ -27,6 +32,9 @@ pub struct LayerAllocationConfig {
   pub upswitch_headroom: f64,
   /// ... continuously for this long.
   pub upswitch_hold: Duration,
+  /// ... or this long when a probe showed the link carries the new total ([`UpgradeProof`]): the
+  /// hold rides out a noisy estimate, a probe measured the link.
+  pub shown_upswitch_hold: Duration,
   /// A track paused for lack of bandwidth is tried again at its lowest layer this long after the
   /// pause. A link that just lost a burst (a limit setting in, cross traffic) often carries the
   /// lowest layer again within a second or two, while the estimate, cut to what got through of the
@@ -36,6 +44,12 @@ pub struct LayerAllocationConfig {
   /// Every probe that doesn't keep the track doubles the wait before the next one, up to this: a
   /// link that really can't carry the lowest layer isn't probed every few seconds.
   pub max_resume_probe_interval: Duration,
+  /// How long the budget has to stay below a track's lowest layer before it is paused (it drops
+  /// to its lowest layer at once). A link that carries the lowest layer with little to spare
+  /// (180p on 250 kbit/s) saw its estimate cut below it by the delay of a keyframe, and the
+  /// picture stood still for seconds until the track resumed (#994); the estimate is back above
+  /// within a second or so.
+  pub pause_hold: Duration,
   /// Whether screen shares may be paused for lack of bandwidth like cameras.
   pub can_pause_screen_shares: bool,
   /// How long the budget has to stay below a screen share's layer before it drops. A still
@@ -63,6 +77,35 @@ pub struct TrackDemand<'a> {
   pub downswitch_hold: Duration,
 }
 
+/// What an upgrade needs besides an estimate that covers it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UpgradeProof {
+  /// Nothing (a receiver that sends no feedback can't be probed).
+  NotRequired,
+  /// A probe has to have shown that the link carries the new total; it showed this much lately
+  /// (0: nothing).
+  Shown { bps: u32 },
+}
+
+/// The layers of one receiver and the probe they wait for.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Allocation {
+  /// The layer to forward per track (`None` = paused).
+  pub layers: HashMap<StreamId, Option<u8>>,
+  /// An upgrade is due but not shown yet ([`UpgradeProof::Shown`]): the probe it waits for.
+  pub maybe_probe: Option<ProbeRequest>,
+}
+
+/// A probe an upgrade waits for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ProbeRequest {
+  /// The rate the link has to carry for the upgrade (audio reserve and headroom included).
+  pub target_bps: u32,
+  /// The rate that keeps the current layers with headroom: a probe that falls short limits the
+  /// estimate no lower, it is no reason to give up what gets through.
+  pub floor_bps: u32,
+}
+
 /// Remembers the current allocation of one receiver for hysteresis.
 #[derive(Debug, Default)]
 pub struct LayerAllocator {
@@ -70,6 +113,8 @@ pub struct LayerAllocator {
   upgrade_pending_since: HashMap<StreamId, Instant>,
   /// Since when the budget is below the layer of a track with a [`TrackDemand::downswitch_hold`].
   downgrade_pending_since: HashMap<StreamId, Instant>,
+  /// Since when the budget is below the lowest layer of a track that is still sent.
+  pause_pending_since: HashMap<StreamId, Instant>,
   paused_since: HashMap<StreamId, Instant>,
   /// Resume probes in progress: the lowest layer is kept until then, whatever the estimate says,
   /// so its feedback can lift the estimate.
@@ -84,8 +129,10 @@ impl Default for LayerAllocationConfig {
       audio_reserve_bps: 3 * 40_000,
       upswitch_headroom: 1.15,
       upswitch_hold: Duration::from_secs(2),
+      shown_upswitch_hold: Duration::from_millis(500),
       resume_probe_interval: Duration::from_secs(2),
       max_resume_probe_interval: Duration::from_secs(8),
+      pause_hold: Duration::from_secs(2),
       can_pause_screen_shares: false,
       screen_downswitch_hold: Duration::from_secs(3),
     }
@@ -97,7 +144,8 @@ impl LayerAllocator {
     Self::default()
   }
 
-  /// The layer to forward per track (`None` = paused), given the receiver's current estimate.
+  /// The layer to forward per track (`None` = paused), given the receiver's current estimate,
+  /// without proof for upgrades.
   pub fn allocate(
     &mut self,
     config: &LayerAllocationConfig,
@@ -105,9 +153,30 @@ impl LayerAllocator {
     demands: &[TrackDemand<'_>],
     now: Instant,
   ) -> HashMap<StreamId, Option<u8>> {
+    self
+      .allocate_with_proof(config, estimate_bps, UpgradeProof::NotRequired, demands, now)
+      .layers
+  }
+
+  /// The layers per track, given the receiver's current estimate and what upgrades need besides.
+  pub fn allocate_with_proof(
+    &mut self,
+    config: &LayerAllocationConfig,
+    estimate_bps: u32,
+    proof: UpgradeProof,
+    demands: &[TrackDemand<'_>],
+    now: Instant,
+  ) -> Allocation {
     let budget = f64::from(estimate_bps.saturating_sub(config.audio_reserve_bps));
     let ideal = ideal_allocation(budget, demands, 1.0);
     let with_headroom = ideal_allocation(budget, demands, config.upswitch_headroom);
+    let shown_with_headroom = match proof {
+      UpgradeProof::NotRequired => with_headroom.clone(),
+      UpgradeProof::Shown { bps } => {
+        let shown_budget = f64::from(bps.min(estimate_bps).saturating_sub(config.audio_reserve_bps));
+        ideal_allocation(shown_budget, demands, config.upswitch_headroom)
+      },
+    };
 
     let mut result = HashMap::new();
     for demand in demands {
@@ -119,24 +188,67 @@ impl LayerAllocator {
         // The budget covers the current layer (again).
         self.downgrade_pending_since.remove(&stream_id);
       }
+      if wanted.is_some() {
+        self.pause_pending_since.remove(&stream_id);
+      }
       let chosen = if current.is_none() && !self.current.contains_key(&stream_id) {
         // New subscription: start where the budget allows.
         wanted
       } else if layer_rank(wanted) <= layer_rank(current) {
         // Same or lower: apply immediately, unless the track holds its layer through a dip.
         self.upgrade_pending_since.remove(&stream_id);
-        self.downgrade_after_hold(demand, current, wanted, now)
-      } else if layer_rank(affordable_with_headroom) > layer_rank(current) {
-        let since = *self.upgrade_pending_since.entry(stream_id).or_insert(now);
-        if now.saturating_duration_since(since) >= config.upswitch_hold {
-          self.upgrade_pending_since.remove(&stream_id);
-          // Step up one layer at a time; a paused track resumes at its lowest layer.
-          match current {
-            Some(layer) => Some(layer + 1).min(affordable_with_headroom),
-            None => demand.layers.first().map(|info| info.layer),
+        let lowest = demand
+          .layers
+          .first()
+          .map(|info| info.layer)
+          .filter(|layer| *layer <= demand.max_layer);
+        // A resume probe that ends has had its time.
+        let is_probing = self.probing_until.contains_key(&stream_id);
+        if wanted.is_none()
+          && current.is_some()
+          && lowest.is_some()
+          && !is_probing
+          && !config.pause_hold.is_zero()
+        {
+          // Down to the lowest layer at once (after a screen share's hold); paused only once
+          // the budget stays below that.
+          let since = *self.pause_pending_since.entry(stream_id).or_insert(now);
+          if now.saturating_duration_since(since) >= config.pause_hold {
+            self.pause_pending_since.remove(&stream_id);
+            self.downgrade_after_hold(demand, current, None, now)
+          } else {
+            self.downgrade_after_hold(demand, current, lowest.min(current), now)
           }
         } else {
+          self.downgrade_after_hold(demand, current, wanted, now)
+        }
+      } else if layer_rank(affordable_with_headroom) > layer_rank(current) {
+        let since = *self.upgrade_pending_since.entry(stream_id).or_insert(now);
+        // Step up one layer at a time; a paused track resumes at its lowest layer.
+        let step = match current {
+          Some(layer) => Some(layer + 1).min(affordable_with_headroom),
+          None => demand.layers.first().map(|info| info.layer),
+        };
+        let is_shown = match proof {
+          UpgradeProof::NotRequired => false,
+          UpgradeProof::Shown { .. } => {
+            layer_rank(shown_with_headroom.get(&stream_id).copied().flatten()) >= layer_rank(step)
+          },
+        };
+        let hold = if is_shown {
+          config.shown_upswitch_hold.min(config.upswitch_hold)
+        } else {
+          config.upswitch_hold
+        };
+        if now.saturating_duration_since(since) < hold {
           current
+        } else if !is_shown && proof != UpgradeProof::NotRequired {
+          // Due, but the link hasn't shown it carries the step: the hold stays over, so the
+          // step follows as soon as a probe shows it.
+          current
+        } else {
+          self.upgrade_pending_since.remove(&stream_id);
+          step
         }
       } else {
         self.upgrade_pending_since.remove(&stream_id);
@@ -158,7 +270,32 @@ impl LayerAllocator {
     self
       .resume_wait
       .retain(|stream_id, _| result.contains_key(stream_id));
-    result
+    self
+      .pause_pending_since
+      .retain(|stream_id, _| result.contains_key(stream_id));
+    let maybe_probe = match proof {
+      UpgradeProof::NotRequired => None,
+      UpgradeProof::Shown { .. } => {
+        // Every track below the layer it asked for has a next step; those the link hasn't shown
+        // it carries are worth a probe, whether the estimate covers them yet or not: a link that
+        // got better is found by the probe, not by an estimate that grows slowly after
+        // congestion.
+        let unshown: Vec<(StreamId, u8)> = demands
+          .iter()
+          .filter_map(|demand| {
+            let layer = result.get(&demand.stream_id).copied().flatten();
+            let step = next_layer(demand, layer)?;
+            let shown = shown_with_headroom.get(&demand.stream_id).copied().flatten();
+            (layer_rank(shown) < i16::from(step)).then_some((demand.stream_id, step))
+          })
+          .collect();
+        probe_request(config, demands, &result, &unshown)
+      },
+    };
+    Allocation {
+      layers: result,
+      maybe_probe,
+    }
   }
 
   /// `wanted` (at most `current`) once the budget has been below `current` for the track's
@@ -256,6 +393,51 @@ pub fn full_demand_bps(config: &LayerAllocationConfig, demands: &[TrackDemand<'_
   const PROBE_MARGIN: f64 = 1.1;
   // Saturating float-to-int conversion is intended.
   ((f64::from(config.audio_reserve_bps) + video * config.upswitch_headroom) * PROBE_MARGIN) as u32
+}
+
+/// The layer above `maybe_layer` (the lowest for a paused track) that `demand` has and asked for.
+fn next_layer(demand: &TrackDemand<'_>, maybe_layer: Option<u8>) -> Option<u8> {
+  demand
+    .layers
+    .iter()
+    .map(|info| info.layer)
+    .find(|layer| i16::from(*layer) > layer_rank(maybe_layer) && *layer <= demand.max_layer)
+}
+
+/// The cheapest of the `unshown` steps (track, layer) as a probe, or `None` without any.
+fn probe_request(
+  config: &LayerAllocationConfig,
+  demands: &[TrackDemand<'_>],
+  layers: &HashMap<StreamId, Option<u8>>,
+  unshown: &[(StreamId, u8)],
+) -> Option<ProbeRequest> {
+  let bitrate = |demand: &TrackDemand<'_>, maybe_layer: Option<u8>| -> f64 {
+    maybe_layer
+      .and_then(|layer| demand.layers.iter().find(|info| info.layer == layer))
+      .map_or(0.0, |info| f64::from(info.max_bitrate_bps))
+  };
+  let total_with = |maybe_step: Option<(StreamId, u8)>| -> f64 {
+    let video: f64 = demands
+      .iter()
+      .map(|demand| {
+        let layer = match maybe_step {
+          Some((stream_id, step)) if stream_id == demand.stream_id => Some(step),
+          _ => layers.get(&demand.stream_id).copied().flatten(),
+        };
+        bitrate(demand, layer)
+      })
+      .sum();
+    f64::from(config.audio_reserve_bps) + video * config.upswitch_headroom
+  };
+  let target = unshown
+    .iter()
+    .map(|step| total_with(Some(*step)))
+    .min_by(f64::total_cmp)?;
+  // Saturating float-to-int conversions are intended.
+  Some(ProbeRequest {
+    target_bps: target.ceil() as u32,
+    floor_bps: total_with(None) as u32,
+  })
 }
 
 /// Greedy allocation that fits `budget` with every layer's bitrate scaled by `headroom`.
@@ -534,7 +716,13 @@ mod tests {
         allocator.allocate(&config(), 400_000, &demands, resumed)[&StreamId(1)],
         Some(0)
       );
-      let paused = resumed + Duration::from_millis(100);
+      let below = resumed + Duration::from_millis(100);
+      assert_eq!(
+        allocator.allocate(&config(), 200_000, &demands, below)[&StreamId(1)],
+        Some(0),
+        "the pause hold"
+      );
+      let paused = below + Duration::from_secs(2);
       assert_eq!(
         allocator.allocate(&config(), 200_000, &demands, paused)[&StreamId(1)],
         None
@@ -543,6 +731,85 @@ mod tests {
         allocator.allocate(&config(), 200_000, &demands, paused + Duration::from_secs(2))[&StreamId(1)],
         Some(0)
       );
+    }
+  }
+
+  mod proof {
+    use super::*;
+
+    /// #994: an upgrade the estimate covers waits until a probe showed the link carries it; the
+    /// allocation asks for that probe, and for one of the next step even before the estimate
+    /// covers it.
+    #[test]
+    fn an_upgrade_waits_for_a_probe_that_shows_the_link_carries_it() {
+      let layers = three_layers();
+      let mut allocator = LayerAllocator::new();
+      let start = Instant::now();
+      let demands = [demand(1, 0, 2, &layers)];
+      let at = |seconds: f64| start + Duration::from_secs_f64(seconds);
+      let nothing_shown = UpgradeProof::Shown { bps: 0 };
+      let first = allocator.allocate_with_proof(&config(), 400_000, nothing_shown, &demands, at(0.0));
+      assert_eq!(first.layers[&StreamId(1)], Some(0));
+      // 120k audio + 1.15 x 500k for layer 1; 120k + 1.15 x 150k keep layer 0.
+      let request = ProbeRequest {
+        target_bps: 695_000,
+        floor_bps: 292_500,
+      };
+      assert_eq!(
+        first.maybe_probe,
+        Some(request),
+        "a probe before the estimate covers it"
+      );
+      let due = allocator.allocate_with_proof(&config(), 3_000_000, nothing_shown, &demands, at(0.1));
+      assert_eq!(due.layers[&StreamId(1)], Some(0));
+      let held = allocator.allocate_with_proof(&config(), 3_000_000, nothing_shown, &demands, at(2.5));
+      assert_eq!(held.layers[&StreamId(1)], Some(0), "past the hold, but not shown");
+      assert_eq!(held.maybe_probe, Some(request));
+      let shown = UpgradeProof::Shown { bps: 700_000 };
+      let up = allocator.allocate_with_proof(&config(), 3_000_000, shown, &demands, at(2.6));
+      assert_eq!(up.layers[&StreamId(1)], Some(1), "shown: up at once");
+      // The next step, 120k + 1.15 x 1.5M, isn't shown by 700k.
+      assert_eq!(up.maybe_probe.map(|probe| probe.target_bps), Some(1_845_000));
+      // Shown, the next step needs only the short hold.
+      let more = UpgradeProof::Shown { bps: 2_000_000 };
+      assert_eq!(
+        allocator
+          .allocate_with_proof(&config(), 3_000_000, more, &demands, at(2.7))
+          .layers[&StreamId(1)],
+        Some(1)
+      );
+      let top = allocator.allocate_with_proof(&config(), 3_000_000, more, &demands, at(3.2));
+      assert_eq!(top.layers[&StreamId(1)], Some(2));
+      assert_eq!(top.maybe_probe, None, "at the top: nothing to probe");
+    }
+  }
+
+  mod pausing {
+    use super::*;
+
+    /// #994: a dip of the estimate below the lowest layer doesn't pause the track at once; one
+    /// that lasts does. A higher layer drops to the lowest at once.
+    #[test]
+    fn a_track_is_paused_only_when_the_budget_stays_below_its_lowest_layer() {
+      let layers = three_layers();
+      let mut allocator = LayerAllocator::new();
+      let start = Instant::now();
+      let demands = [demand(1, 0, 2, &layers)];
+      let layer_at = |allocator: &mut LayerAllocator, millis: u64, estimate: u32| {
+        allocator.allocate(
+          &config(),
+          estimate,
+          &demands,
+          start + Duration::from_millis(millis),
+        )[&StreamId(1)]
+      };
+      assert_eq!(layer_at(&mut allocator, 0, 1_000_000), Some(1));
+      assert_eq!(layer_at(&mut allocator, 100, 200_000), Some(0));
+      assert_eq!(layer_at(&mut allocator, 1_500, 200_000), Some(0));
+      assert_eq!(layer_at(&mut allocator, 1_600, 300_000), Some(0), "back above");
+      assert_eq!(layer_at(&mut allocator, 1_700, 200_000), Some(0));
+      assert_eq!(layer_at(&mut allocator, 3_600, 200_000), Some(0));
+      assert_eq!(layer_at(&mut allocator, 3_700, 200_000), None);
     }
   }
 
