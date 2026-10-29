@@ -192,9 +192,12 @@ mod tests {
     let mut policy = NotetakerPolicy::default();
     let notice = joined_notice(&texts, &policy);
     assert!(notice.contains("OpenRouter (mistralai/voxtral-mini-transcribe-3-0)"));
-    assert!(notice.contains("Anyone in the call"));
+    assert!(notice.contains("Anyone in the call can remove it with \"Remove notetaker\""));
     policy.can_anyone_stop = false;
-    assert!(joined_notice(&texts, &policy).contains("Whoever asked it in and admins"));
+    assert!(
+      joined_notice(&texts, &policy)
+        .contains("Whoever added it and admins can remove it with \"Remove notetaker\"")
+    );
   }
 
   #[test]
@@ -249,7 +252,7 @@ mod tests {
     assert!(
       report
         .body
-        .contains("Der Notetaker ist früher gegangen (er wurde entfernt)")
+        .contains("Der Notetaker hat den Anruf vorzeitig verlassen (er wurde entfernt)")
     );
     assert!(report.body.contains("(OpenRouter refused the API key)"));
     assert!(report.body.contains("2 Redeabschnitte"));

@@ -2,8 +2,8 @@
 # What the notetaker posts into a call's conversation (e2ee.md §8.2).
 
 ## When it joins a call
-joined-anyone-may-stop = The notetaker is in this call and transcribes it. The audio goes to OpenRouter ({ $model }) for transcription and is not kept; the summary and the transcript will be posted here. Anyone in the call can send it away with "Remove notetaker".
-joined-some-may-stop = The notetaker is in this call and transcribes it. The audio goes to OpenRouter ({ $model }) for transcription and is not kept; the summary and the transcript will be posted here. Whoever asked it in and admins can send it away with "Remove notetaker".
+joined-anyone-may-stop = The notetaker has joined the call and is making a transcript of the conversation. For this, the audio is sent to OpenRouter ({ $model }) and not kept; the summary and the transcript will be posted here afterwards. Anyone in the call can remove it with "Remove notetaker".
+joined-some-may-stop = The notetaker has joined the call and is making a transcript of the conversation. For this, the audio is sent to OpenRouter ({ $model }) and not kept; the summary and the transcript will be posted here afterwards. Whoever added it and admins can remove it with "Remove notetaker".
 
 ## The result
 result-heading = Notes of the call on { $date }
@@ -15,7 +15,7 @@ result-gaps = { $count ->
 }
 result-no-speech = The notetaker heard no speech in this call, so there is nothing to summarize.
 result-summary-failed = The summary could not be written ({ $reason }). The transcript is attached.
-result-partial = The notetaker left early ({ $reason }); these notes cover the call up to then.
+result-partial = The notetaker left the call early ({ $reason }); these notes cover the call up to then.
 join-failed = The notetaker could not join this call: the apps in the call did not take its keys. It has to be a member of this conversation before the call starts; whoever was in the call before it was added needs to join again.
 
 ## Why it left early
@@ -28,6 +28,6 @@ reason-shutdown = it was restarted
 
 ## The transcript file
 transcript-title = Transcript of the call on { $date }
-transcript-note = Transcribed automatically by { $model }; it may contain mistakes. Speakers are named by their device in the call.
+transcript-note = Transcribed automatically by { $model }; it may contain mistakes.
 transcript-file-name = transcript-{ $date }.md
 participant-fallback = Participant { $number }

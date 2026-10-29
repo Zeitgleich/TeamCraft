@@ -306,8 +306,8 @@ calls-loading = Loading calls
 ## Notetaker (e2ee.md §8.2)
 call-notetaker-add = Add notetaker
 call-notetaker-remove = Remove notetaker
-call-notetaker-joining = The notetaker joins in a moment. While it is in the call, the audio goes to OpenRouter for transcription.
-call-notetaker-banner = The notetaker is transcribing this call. What is said goes to it and on to OpenRouter ({ $model }); towards them the call is not end-to-end encrypted. A summary and the transcript are posted in the chat afterwards.
+call-notetaker-joining = The notetaker is being added. While it is in the call, the audio is sent to OpenRouter for the transcript.
+call-notetaker-banner = The notetaker is making a transcript of this call. For this, what is said is sent to OpenRouter ({ $model }), so it is not end-to-end encrypted. The summary and the transcript will be posted in the chat afterwards.
 call-notetaker-badge = Notetaker in the call – audio goes to OpenRouter
-call-notetaker-badge-detail = While the notetaker is in the call, everything said reaches it and goes on to OpenRouter and the model's provider for transcription. The rest of the call stays end-to-end encrypted.
-prejoin-notetaker = The notetaker is in this call: what you say goes to OpenRouter for transcription.
+call-notetaker-badge-detail = While the notetaker is in the call, everything said reaches it and is sent on to OpenRouter and the model's provider for the transcript. It doesn't use video or shared screens.
+prejoin-notetaker = The notetaker is in this call: what you say is sent to OpenRouter for a transcript.

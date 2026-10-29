@@ -92,7 +92,7 @@ tile-muted = stummgeschaltet
 tile-hand = Hand gehoben
 tile-speaking = spricht
 tile-reconnecting = Verbindung wird wiederhergestellt
-tile-notetaker = Notetaker – schreibt mit
+tile-notetaker = Notetaker – transkribiert
 video-stalled = Video pausiert: schwache Verbindung
 
 ## Videoqualität (#967): wie scharf das Video einer anderen Person ankommt, wie im Menü eines Videoplayers
@@ -304,10 +304,10 @@ calls-echo-hint = Verhindert, dass andere sich über deine Lautsprecher selbst h
 calls-loading = Anrufe werden geladen
 
 ## Notetaker (e2ee.md §8.2)
-call-notetaker-add = Notetaker hinzuholen
+call-notetaker-add = Notetaker hinzufügen
 call-notetaker-remove = Notetaker entfernen
-call-notetaker-joining = Der Notetaker kommt gleich dazu. Solange er im Anruf ist, geht der Ton zur Transkription an OpenRouter.
-call-notetaker-banner = Der Notetaker schreibt diesen Anruf mit. Was gesagt wird, geht an ihn und weiter an OpenRouter ({ $model }); ihnen gegenüber ist der Anruf nicht Ende-zu-Ende-verschlüsselt. Zusammenfassung und Transkript erscheinen danach im Chat.
+call-notetaker-joining = Der Notetaker wird hinzugefügt. Solange er im Anruf ist, wird der Ton für das Transkript an OpenRouter gesendet.
+call-notetaker-banner = Der Notetaker erstellt ein Transkript dieses Anrufs. Dazu wird das Gesprochene an OpenRouter ({ $model }) gesendet und ist damit nicht Ende-zu-Ende-verschlüsselt. Zusammenfassung und Transkript erscheinen danach im Chat.
 call-notetaker-badge = Notetaker im Anruf – Ton geht an OpenRouter
-call-notetaker-badge-detail = Solange der Notetaker im Anruf ist, erreicht ihn alles Gesagte und geht zur Transkription weiter an OpenRouter und den Anbieter des Modells. Der Rest des Anrufs bleibt Ende-zu-Ende-verschlüsselt.
-prejoin-notetaker = Der Notetaker ist in diesem Anruf: Was du sagst, geht zur Transkription an OpenRouter.
+call-notetaker-badge-detail = Solange der Notetaker im Anruf ist, erreicht ihn alles Gesagte und wird für das Transkript an OpenRouter und den Anbieter des Modells gesendet. Video und geteilte Bildschirme nutzt er nicht.
+prejoin-notetaker = Der Notetaker ist in diesem Anruf: Was du sagst, wird für ein Transkript an OpenRouter gesendet.

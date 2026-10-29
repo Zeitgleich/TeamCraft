@@ -574,7 +574,7 @@ participant sees when it is there. Read the data processing notes below before t
    it enrolls a device, like the bridge; keep its database volume (`/var/lib/teamcraft-notetaker`).
    Whoever controls that host can hear the calls the notetaker is in.
 3. Administration → Notetaker (owners sign, like every policy page): turn it on, pick the bot account,
-   choose who may ask it in, the models, the language and the summary instructions, and enter the
+   choose who may add it, the models, the language and the summary instructions, and enter the
    OpenRouter API key.
 4. Add the bot to the channels where it may be used (Channel settings → Integrations), or let people
    tick "Notetaker joins the calls" when they schedule a meeting. It can only join calls of
@@ -586,8 +586,8 @@ participant sees when it is there. Read the data processing notes below before t
 |--------------------------|-----------------------------------------|---------------------------------------------------------------------------------------------|
 | Notetaker on             | off                                     | Whether people can ask it into calls                                                        |
 | Notetaker account        | none                                    | The bot account clients treat as the notetaker                                              |
-| Who may ask it in        | members                                 | Members (not guests), or admins only                                                        |
-| Anyone may send it away  | on                                      | Off: only who asked it in, who may ask it in, and admins                                    |
+| Who may add it           | members                                 | Members (not guests), or admins only                                                        |
+| Anyone may remove it     | on                                      | Off: only whoever added it, people who may add it, and admins                               |
 | Transcription model      | `mistralai/voxtral-mini-transcribe-3-0` | Any OpenRouter speech-to-text model; German and English among its languages                 |
 | Summary model            | `mistralai/mistral-large-2512`          | Any OpenRouter chat model                                                                   |
 | Language                 | automatic                               | Language of transcript and summary; `auto` detects it per piece                             |
@@ -601,9 +601,9 @@ settings key (`[secrets]`) can't store it: then put the key into the notetaker's
 (`openrouter.api_key`) and enter it in the console all the same, which signs only its hash.
 
 **In a call.** "Add notetaker" in the call's menu asks it in (where it is a member of the conversation
-and the user may ask it in). While it is in the call, everybody sees a banner and a changed encryption
+and the user may add it). While it is in the call, everybody sees a banner and a changed encryption
 badge, its tile says "Notetaker – transcribing", and it posts a message saying where the audio goes.
-"Remove notetaker" (for who asked it in, admins and, by default, anybody) or a meeting host's "Remove"
+"Remove notetaker" (for whoever added it, admins and, by default, anybody) or a meeting host's "Remove"
 stops it: it leaves, transcribes what it heard and posts the result. It leaves on its own a minute
 after the last person left, and after 4 hours (`limits.max_call_minutes`).
 
