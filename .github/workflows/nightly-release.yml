@@ -84,7 +84,7 @@ jobs:
         env:
           CODE_SHA: ${{ steps.changes.outputs.code_sha }}
         run: |
-          runs="$(gh run list --workflow ci.yml --branch main --event push --limit 50 \
+          runs="$(gh run list --workflow ci.yml --branch main --limit 50 \
             --json headSha,status,conclusion --jq '.[] | [.headSha, .status, .conclusion] | @tsv')"
           verdict=""
           while IFS=$'\t' read -r sha status conclusion; do
