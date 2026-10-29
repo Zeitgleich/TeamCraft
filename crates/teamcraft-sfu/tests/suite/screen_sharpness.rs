@@ -33,7 +33,8 @@ use teamcraft_media::video_capture::{CaptureError, CaptureFormat, FrameSender, V
 use teamcraft_media::video_codec::{EncodedPicture, VideoCodecError, VideoEncoder};
 use teamcraft_media::video_pipeline::{EncoderFactory, VideoSendConfig, preferred_encoders};
 use teamcraft_proto::{
-  AudioCodec, DeviceId, MediaCapabilities, ScreenContentMode, VideoCodec, VideoTrackKind,
+  AudioCodec, DeviceId, MediaCapabilities, ScreenContentMode, ScreenShareResolution, VideoCodec,
+  VideoTrackKind,
 };
 use teamcraft_sfu::auth::DevTokenVerifier;
 use teamcraft_sfu::config::SfuConfig;
@@ -194,11 +195,16 @@ async fn run(scenario: Scenario, duration: Duration) -> Timeline {
   let shown = Arc::clone(&screen.shown);
   let start = Instant::now();
   let encoded: Arc<Mutex<Vec<Encoded>>> = Arc::default();
-  let (limit, framerate) = screen_limits(ScreenContentMode::Detail);
+  let (limit, framerate) = screen_limits(ScreenContentMode::Detail, &ScreenShareResolution::Standard);
   let config = VideoSendConfig {
     maybe_layer_plan: None,
     kind: VideoTrackKind::Screen,
-    layers: screen_layers(limit, framerate, ScreenContentMode::Detail),
+    layers: screen_layers(
+      limit,
+      framerate,
+      ScreenContentMode::Detail,
+      &ScreenShareResolution::Standard,
+    ),
     capture: Box::new(screen),
     encoders: counting(preferred_encoders(), start, Arc::clone(&encoded)),
     maybe_filter: None,
@@ -426,7 +432,7 @@ impl TextScreen {
 impl VideoCapture for TextScreen {
   /// As ScreenCaptureKit's capture: the largest picture asked for, not the display's size.
   fn format(&self) -> CaptureFormat {
-    let (resolution, framerate) = screen_limits(ScreenContentMode::Detail);
+    let (resolution, framerate) = screen_limits(ScreenContentMode::Detail, &ScreenShareResolution::Standard);
     CaptureFormat {
       resolution,
       framerate,

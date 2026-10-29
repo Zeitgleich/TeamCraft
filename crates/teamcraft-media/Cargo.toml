@@ -252,6 +252,11 @@ required-features = ["pipewire"]
 name = "camera_bitrate"
 required-features = ["openh264-source"]
 
+# What a screen share costs and sends per profile (standard or 4K, detail or motion; issue #565).
+[[example]]
+name = "screen_bench"
+required-features = ["openh264-source"]
+
 # Captures the camera or a display on macOS, encodes, decodes and reports what the pictures show.
 [[example]]
 name = "macos_capture"

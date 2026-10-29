@@ -36,6 +36,23 @@ wire_enum! {
   }
 }
 
+/// Every video codec this version knows, best first: what a publisher may pick from when no other
+/// device receives video ([`crate::CallEvent::DecodableVideoCodecs`]).
+pub const KNOWN_VIDEO_CODECS: [VideoCodec; 3] = [VideoCodec::Av1, VideoCodec::Vp9, VideoCodec::H264];
+
+wire_enum! {
+  /// The largest picture a screen share is sent at (#565). `Standard` is what every share had
+  /// before: up to 1440p at 30 fps for detail, 1080p at 60 fps for motion, at most 8 Mbit/s. `Uhd`
+  /// raises it to 4K at 30 fps (1440p at 60 fps for motion) and 16 Mbit/s: a choice per share, and
+  /// only where the workspace allows it (`ScreenSharePolicy`).
+  #[derive(Default)]
+  pub enum ScreenShareResolution {
+    #[default]
+    Standard => "standard",
+    Uhd => "uhd",
+  }
+}
+
 wire_enum! {
   /// What a video track shows.
   pub enum VideoTrackKind {
@@ -131,9 +148,34 @@ impl VideoCodec {
   }
 }
 
+impl ScreenShareResolution {
+  /// What a share asked for at `self` is sent at under a workspace's `limit`: the smaller of the
+  /// two. A value this version doesn't know counts as [`ScreenShareResolution::Standard`] on
+  /// either side.
+  pub fn within(&self, limit: &ScreenShareResolution) -> ScreenShareResolution {
+    match (self, limit) {
+      (Self::Uhd, Self::Uhd) => Self::Uhd,
+      _ => Self::Standard,
+    }
+  }
+}
+
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  #[test]
+  fn screen_share_resolution_stays_within_the_limit() {
+    use ScreenShareResolution::{Standard, Uhd};
+    assert_eq!(Uhd.within(&Uhd), Uhd);
+    assert_eq!(Uhd.within(&Standard), Standard);
+    assert_eq!(Standard.within(&Uhd), Standard);
+    let newer = ScreenShareResolution::Unknown("8k".into());
+    assert_eq!(newer.within(&Uhd), Standard);
+    assert_eq!(Uhd.within(&newer), Standard);
+    assert_eq!(serde_json::to_string(&Uhd).unwrap(), r#""uhd""#);
+    assert_eq!(ScreenShareResolution::default(), Standard);
+  }
 
   #[test]
   fn capabilities_wire_format_and_default() {

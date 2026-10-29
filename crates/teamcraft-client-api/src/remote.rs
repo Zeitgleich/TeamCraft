@@ -18,7 +18,7 @@ use crate::calls::{
   ActiveCall, BackgroundEffect, BackgroundImageInfo, CallEndReason, CallHistoryItem, CallMoveOffer,
   CallPreview, CallRequest, CallStatusSounds, CameraFallback, IncomingCall, JoinMedia, MediaDevices,
   OrgBackgroundRule, OrgBackgrounds, PreviewCamera, PushToTalk, RemoteVideoTrack, RunningCall,
-  ScreenContentMode, VideoQuality,
+  ScreenContentMode, ScreenShareResolution, VideoQuality,
 };
 use crate::live::LiveSnapshot;
 use crate::model::{
@@ -84,6 +84,11 @@ pub enum CallAction {
     /// [`CallAction::SetCamera`] after the join.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     is_camera_on: bool,
+    /// The video codecs the page decodes (#565), for the desktop shell, whose page shows the
+    /// call's video: it announces them to the call. Empty (older UIs, the browser's own call
+    /// module, which asks its browser itself): H.264 only.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    video_decoders: Vec<teamcraft_proto::VideoCodec>,
   },
   Leave,
   Decline {
@@ -136,6 +141,10 @@ pub enum CallAction {
     /// What the share keeps under pressure (older UIs send none: detail).
     #[serde(default)]
     content_mode: ScreenContentMode,
+    /// How large the share may be (#565; older UIs send none: standard). The UI asks for 4K only
+    /// where the workspace allows it.
+    #[serde(default)]
+    resolution: ScreenShareResolution,
   },
   StopScreenShare,
   /// Opens the system's video effects panel (macOS: Portrait, background, Studio Light).
@@ -185,6 +194,7 @@ impl CallAction {
       request,
       is_muted: media.is_muted,
       is_camera_on: media.is_camera_on,
+      video_decoders: Vec::new(),
     }
   }
 }
@@ -254,6 +264,14 @@ pub struct SecuritySnapshot {
   /// older shell) allows them, as the server's default does. The server enforces it either way.
   #[serde(rename = "presence_policy", default, skip_serializing_if = "Option::is_none")]
   pub maybe_presence_policy: Option<teamcraft_proto::PresencePolicy>,
+  /// How large screen shares may be under the verified policy (#565); `None` (not known yet, or
+  /// an older shell): the default, 4K offered.
+  #[serde(
+    rename = "screen_share_policy",
+    default,
+    skip_serializing_if = "Option::is_none"
+  )]
+  pub maybe_screen_share_policy: Option<teamcraft_proto::ScreenSharePolicy>,
   /// The key backup as this device knows it (issue #410); `None` from an older shell.
   #[serde(rename = "backup", default, skip_serializing_if = "Option::is_none")]
   pub maybe_backup: Option<crate::security::KeyBackupState>,
@@ -1856,6 +1874,7 @@ mod tests {
         request,
         is_muted: false,
         is_camera_on: true,
+        video_decoders: Vec::new(),
       }
     );
   }
@@ -1931,6 +1950,7 @@ mod tests {
       CallAction::StartScreenShare {
         has_sound: true,
         content_mode: ScreenContentMode::Motion,
+        resolution: ScreenShareResolution::Uhd,
       },
       CallAction::OpenSystemVideoEffects,
     ] {
@@ -2066,9 +2086,28 @@ mod tests {
       older,
       CallAction::StartScreenShare {
         has_sound: false,
-        content_mode: ScreenContentMode::Detail
+        content_mode: ScreenContentMode::Detail,
+        resolution: ScreenShareResolution::Standard,
       }
     );
+  }
+
+  /// The desktop page tells its shell what it decodes (#565); older UIs say nothing: H.264 only.
+  #[test]
+  fn join_carries_the_pages_decoders_only_when_there_are_any() {
+    let request = CallRequest {
+      conversation: "5".parse().expect("id"),
+      kind: crate::calls::CallKind::Direct,
+    };
+    let mut join = CallAction::join(request, JoinMedia::default());
+    let plain = serde_json::to_string(&join).expect("serialize");
+    assert!(!plain.contains("video_decoders"), "{plain}");
+    if let CallAction::Join { video_decoders, .. } = &mut join {
+      video_decoders.push(teamcraft_proto::VideoCodec::Av1);
+    }
+    let json = serde_json::to_string(&join).expect("serialize");
+    assert!(json.ends_with(r#""video_decoders":["av1"]}"#), "{json}");
+    assert_eq!(serde_json::from_str::<CallAction>(&json).expect("parse"), join);
   }
 
   #[test]

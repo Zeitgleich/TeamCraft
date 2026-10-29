@@ -26,7 +26,7 @@ use teamcraft_media::video_capture::{CaptureFormat, VideoCapture, frame_queue};
 use teamcraft_media::video_codec::{OpenH264Decoder, SimulcastEncoder, VideoContent, VideoDecoder};
 use teamcraft_media::video_jpeg::encode_jpeg;
 use teamcraft_media::video_pipeline::preferred_encoders;
-use teamcraft_proto::ScreenContentMode;
+use teamcraft_proto::{ScreenContentMode, ScreenShareResolution};
 use tracing::{info, warn};
 
 const CAMERA: CaptureFormat = CaptureFormat {
@@ -163,7 +163,12 @@ fn encode_and_decode(frames: &[VideoFrame], content: VideoContent) -> anyhow::Re
   };
   let layers = match content {
     VideoContent::Camera => simulcast_layers(first.resolution(), 30, 1_500_000, 3),
-    VideoContent::Screen => screen_layers(first.resolution(), 30, ScreenContentMode::Detail),
+    VideoContent::Screen => screen_layers(
+      first.resolution(),
+      30,
+      ScreenContentMode::Detail,
+      &ScreenShareResolution::Standard,
+    ),
   };
   let top_layer = layers.iter().map(|layer| layer.layer).max().unwrap_or(0);
   let encoders = preferred_encoders();

@@ -6,7 +6,7 @@ use teamcraft_proto::VideoTrackKind;
 
 use crate::calls::{
   CallEvent, CallKind, CallLayout, CallRequest, MediaDevice, Participant, ScreenContentMode,
-  ScreenShareSound, selected_camera_is_rear,
+  ScreenShareResolution, ScreenShareSound, selected_camera_is_rear,
 };
 use crate::components::call_chat::{CallChat, CallChatPanel, CallChatToast};
 use crate::components::call_prejoin::call_heading;
@@ -169,6 +169,17 @@ pub fn CallScreen(request: CallRequest) -> impl IntoView {
       .prefs
       .update(|prefs| prefs.calls.screen_mode = mode);
   };
+  let set_screen_resolution = move |resolution: ScreenShareResolution| {
+    call.screen_resolution.set(resolution.clone());
+    state
+      .settings
+      .prefs
+      .update(|prefs| prefs.calls.screen_resolution = resolution);
+  };
+  // The 4K choice is offered where the workspace allows it (#565).
+  let can_share_uhd = Memo::new(move |_| {
+    state.read(|backend| backend.screen_share_policy().max_resolution == ScreenShareResolution::Uhd)
+  });
   let set_share_sound = move |has_sound: bool| {
     call.share_sound.set(has_sound);
     state
@@ -502,6 +513,25 @@ pub fn CallScreen(request: CallRequest) -> impl IntoView {
               <small class="muted-text">{move || i18n.t("share-motion-hint")}</small>
             </span>
           </label>
+          <Show when=move || can_share_uhd.get() fallback=|| ()>
+            <label class="checkbox">
+              <input
+                type="checkbox"
+                prop:checked=move || call.screen_resolution.get() == ScreenShareResolution::Uhd
+                on:change=move |ev| {
+                  set_screen_resolution(if event_target_checked(&ev) {
+                    ScreenShareResolution::Uhd
+                  } else {
+                    ScreenShareResolution::Standard
+                  })
+                }
+              />
+              <span>
+                {move || i18n.t("share-uhd")}
+                <small class="muted-text">{move || i18n.t("share-uhd-hint")}</small>
+              </span>
+            </label>
+          </Show>
           <button
             class="btn btn-primary"
             on:click=move |_| {

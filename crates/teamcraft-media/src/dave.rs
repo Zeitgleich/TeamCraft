@@ -478,6 +478,33 @@ mod tests {
       );
     }
 
+    /// An AV1 temporal unit as WebCodecs' encoder gives it comes out of DAVE without its
+    /// temporal delimiter and the last OBU's size, and whole again after `av1_temporal_unit`
+    /// (#565).
+    #[test]
+    fn av1_frames_come_back_whole() {
+      let gateway = DaveExternalSender::new().unwrap();
+      let mut alice = joined_participant(&gateway, ALICE);
+      let mut bob = joined_participant(&gateway, BOB);
+      add_members(
+        &gateway,
+        &mut alice,
+        &mut [],
+        &mut [(BOB, &mut bob)],
+        &[ALICE, BOB],
+      );
+      // A temporal delimiter, a sequence header and a frame OBU of 300 bytes.
+      let mut unit = vec![0x12, 0x00, 0x0a, 0x04, 0, 1, 2, 3, 0x32, 0xac, 0x02];
+      unit.extend((0..300u32).map(|value| (value % 251) as u8));
+      let encrypted = alice
+        .encrypt_frame(MediaKind::Video, FrameCodec::Av1, &unit)
+        .unwrap()
+        .into_owned();
+      let decrypted = bob.decrypt_frame(ALICE, MediaKind::Video, &encrypted).unwrap();
+      assert_ne!(decrypted, unit, "DAVE sends the unit as AV1's RTP format does");
+      assert_eq!(crate::video::av1_temporal_unit(&decrypted), unit);
+    }
+
     #[test]
     fn third_participant_joins_existing_group() {
       let gateway = DaveExternalSender::new().unwrap();

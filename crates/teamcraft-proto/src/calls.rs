@@ -248,6 +248,14 @@ pub enum CallEvent {
     stream_id: MediaStreamId,
     layers: Vec<u8>,
   },
+  /// The video codecs every other device in the call that receives video decodes, best first
+  /// (#565); every known codec while no other device does. Sent after `joined` and whenever it
+  /// changes (a device joins, leaves or rejoins with other capabilities). A publisher picks its
+  /// screen share's codec from these and publishes the share anew when its codec drops out of
+  /// them. Older SFUs send none: only H.264 is safe then.
+  DecodableVideoCodecs {
+    codecs: Vec<VideoCodec>,
+  },
   /// Arrival times of the datagrams this client sent (uplink estimation, done by the client).
   TransportFeedback {
     feedback: TransportFeedback,
@@ -571,6 +579,22 @@ mod tests {
     let json = serde_json::to_string(&request).unwrap();
     assert_eq!(json, r#"{"type":"request_keyframe","stream_id":12}"#);
     assert_eq!(serde_json::from_str::<CallClientMessage>(&json).unwrap(), request);
+  }
+
+  /// Older clients read the event as `Unknown` and keep their codec (H.264).
+  #[test]
+  fn decodable_codecs_wire_format() {
+    let event = CallEvent::DecodableVideoCodecs {
+      codecs: vec![VideoCodec::Av1, VideoCodec::H264],
+    };
+    let json = serde_json::to_string(&event).unwrap();
+    assert_eq!(
+      json,
+      r#"{"type":"decodable_video_codecs","codecs":["av1","h264"]}"#
+    );
+    assert_eq!(serde_json::from_str::<CallEvent>(&json).unwrap(), event);
+    let unknown: CallEvent = serde_json::from_str(r#"{"type":"some_later_event","codecs":[]}"#).unwrap();
+    assert_eq!(unknown, CallEvent::Unknown);
   }
 
   #[test]

@@ -6,7 +6,8 @@
 use std::borrow::Cow;
 
 use teamcraft_proto::{
-  MAX_SIMULCAST_LAYERS, MediaCapabilities, ScreenContentMode, VideoCodec, VideoLayerInfo, VideoTrackKind,
+  MAX_SIMULCAST_LAYERS, MediaCapabilities, ScreenContentMode, ScreenShareResolution, VideoCodec,
+  VideoLayerInfo, VideoTrackKind,
 };
 use thiserror::Error;
 use web_time::{Duration, Instant};
@@ -322,56 +323,120 @@ pub fn simulcast_layers(
     .collect()
 }
 
-/// The largest screen share picture of each content mode (#530): detail up to 1440p at 30 fps,
-/// motion up to 1080p at 60 fps.
-pub fn screen_limits(mode: ScreenContentMode) -> (VideoResolution, u8) {
-  match mode {
-    ScreenContentMode::Motion => (
-      VideoResolution {
-        width: 1920,
-        height: 1080,
-      },
-      60,
-    ),
-    ScreenContentMode::Detail | ScreenContentMode::Unknown => (
-      VideoResolution {
-        width: 2560,
-        height: 1440,
-      },
-      30,
-    ),
+/// The largest screen share picture of each content mode (#530) and share size (#565): detail
+/// up to 1440p at 30 fps, motion up to 1080p at 60 fps; with [`ScreenShareResolution::Uhd`] detail
+/// up to 4K at 30 fps and motion up to 1440p at 60 fps.
+pub fn screen_limits(mode: ScreenContentMode, size: &ScreenShareResolution) -> (VideoResolution, u8) {
+  let is_uhd = *size == ScreenShareResolution::Uhd;
+  match (mode, is_uhd) {
+    (ScreenContentMode::Motion, false) => (FULL_HD, 60),
+    (ScreenContentMode::Motion, true) => (QHD, 60),
+    (ScreenContentMode::Detail | ScreenContentMode::Unknown, false) => (QHD, 30),
+    (ScreenContentMode::Detail | ScreenContentMode::Unknown, true) => (UHD, 30),
   }
 }
+
+const FULL_HD: VideoResolution = VideoResolution {
+  width: 1920,
+  height: 1080,
+};
+const QHD: VideoResolution = VideoResolution {
+  width: 2560,
+  height: 1440,
+};
+const UHD: VideoResolution = VideoResolution {
+  width: 3840,
+  height: 2160,
+};
 
 /// Bits per pixel of a screen share's top layer: enough for text to stay sharp in H.264.
 const SCREEN_BITS_PER_PIXEL: f64 = 0.06;
 const SCREEN_MIN_BITRATE_BPS: u32 = 2_000_000;
+/// The most a standard share's top layer sends (1440p at 30 fps needs about 6.6 Mbit/s).
 const SCREEN_MAX_BITRATE_BPS: u32 = 8_000_000;
+/// The most a 4K share's top layer sends (#565): 4K at 30 fps needs about 15 Mbit/s.
+const SCREEN_UHD_MAX_BITRATE_BPS: u32 = 16_000_000;
+
+/// The most the top layer of a share of `size` sends.
+pub fn screen_max_bitrate_bps(size: &ScreenShareResolution) -> u32 {
+  match size {
+    ScreenShareResolution::Uhd => SCREEN_UHD_MAX_BITRATE_BPS,
+    ScreenShareResolution::Standard | ScreenShareResolution::Unknown(_) => SCREEN_MAX_BITRATE_BPS,
+  }
+}
 
 /// The top layer's bitrate for a screen share of `resolution` at `framerate`: it follows the
-/// pixels per second, between 2 and 8 Mbit/s (1080p30 about 4, 1440p30 about 6.6).
-pub fn screen_bitrate_bps(resolution: VideoResolution, framerate: u8) -> u32 {
+/// pixels per second, from 2 Mbit/s up to the share size's cap (1080p30 about 4, 1440p30 about
+/// 6.6, both at most 8; 4K30 about 15 of at most 16).
+pub fn screen_bitrate_bps(resolution: VideoResolution, framerate: u8, size: &ScreenShareResolution) -> u32 {
   let pixels_per_second = f64::from(resolution.width) * f64::from(resolution.height) * f64::from(framerate);
   // Clamped to the u32 range above, so the cast cannot truncate.
   (pixels_per_second * SCREEN_BITS_PER_PIXEL).clamp(
     f64::from(SCREEN_MIN_BITRATE_BPS),
-    f64::from(SCREEN_MAX_BITRATE_BPS),
+    f64::from(screen_max_bitrate_bps(size)),
   ) as u32
 }
 
-/// Layers of a screen share captured at `source`: the picture within the mode's limits, plus a
-/// half-size layer at a quarter of the bitrate for viewers on weak links (the uplink budget drops
-/// the big layer first, so a slow link or viewer doesn't lower the quality for the others).
-pub fn screen_layers(source: VideoResolution, framerate: u8, mode: ScreenContentMode) -> Vec<VideoLayerInfo> {
-  let (limit, max_framerate) = screen_limits(mode);
+/// Layers of a screen share captured at `source`: the picture within the mode's and size's limits,
+/// plus a half-size layer at a quarter of the bitrate for viewers on weak links (the uplink budget
+/// drops the big layer first, so a slow link or viewer doesn't lower the quality for the others).
+/// A picture above 1440p (a 4K share) gets a quarter-size layer too: from 4K the half-size one is
+/// 1080p at about 4 Mbit/s, and a weak link needs a step below it.
+pub fn screen_layers(
+  source: VideoResolution,
+  framerate: u8,
+  mode: ScreenContentMode,
+  size: &ScreenShareResolution,
+) -> Vec<VideoLayerInfo> {
+  let (limit, max_framerate) = screen_limits(mode, size);
   let resolution = fit_within(source, limit);
   let framerate = framerate.clamp(1, max_framerate);
+  let layers = if u32::from(resolution.width) * u32::from(resolution.height) > QHD_PIXELS {
+    3
+  } else {
+    2
+  };
   simulcast_layers(
     resolution,
     framerate,
-    screen_bitrate_bps(resolution, framerate),
-    2,
+    screen_bitrate_bps(resolution, framerate, size),
+    layers,
   )
+}
+
+const QHD_PIXELS: u32 = 2560 * 1440;
+
+/// How a screen share is sent (#530, #565): what it keeps under pressure and how large it may be.
+/// The default is a standard-size detail share.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ScreenProfile {
+  pub mode: ScreenContentMode,
+  pub size: ScreenShareResolution,
+}
+
+impl ScreenProfile {
+  /// The largest picture and frame rate ([`screen_limits`]).
+  pub fn limits(&self) -> (VideoResolution, u8) {
+    screen_limits(self.mode, &self.size)
+  }
+
+  /// The layers of a share captured at `source` ([`screen_layers`]).
+  pub fn layers(&self, source: VideoResolution, framerate: u8) -> Vec<VideoLayerInfo> {
+    screen_layers(source, framerate, self.mode, &self.size)
+  }
+
+  /// The codecs a share may go out in where the sender encodes them and every viewer decodes
+  /// them, best first (#565). A detail share takes AV1 first: with its screen content tools
+  /// (WebCodecs `contentHint: "text"`) text came out 7 to 11 dB sharper than H.264 at 1 to 2
+  /// Mbit/s, and a still screen needed a fraction of H.264's bitrate (docs/performance.md). A
+  /// motion share stays H.264: there AV1 was no sharper than the hardware H.264 encoder and cost
+  /// several times its CPU. H.264, which every device decodes, comes last.
+  pub fn codecs(&self) -> Vec<VideoCodec> {
+    match self.mode {
+      ScreenContentMode::Motion => vec![VideoCodec::H264],
+      ScreenContentMode::Detail | ScreenContentMode::Unknown => vec![VideoCodec::Av1, VideoCodec::H264],
+    }
+  }
 }
 
 /// The largest picture a camera is sent at (#967): 1080p where the camera delivers it.
@@ -657,6 +722,78 @@ impl ViewChoice {
   }
 }
 
+/// An AV1 temporal unit's first byte when it is a temporal delimiter OBU (type 2, with a size).
+const AV1_TEMPORAL_DELIMITER: [u8; 2] = [0x12, 0x00];
+const AV1_OBU_HAS_SIZE: u8 = 0b0000_0010;
+const AV1_OBU_HAS_EXTENSION: u8 = 0b0000_0100;
+const AV1_OBU_TYPE_SHIFT: u8 = 3;
+const AV1_OBU_TYPE_MASK: u8 = 0b0111_1000;
+const AV1_OBU_TEMPORAL_DELIMITER: u8 = 2;
+
+/// A decrypted AV1 frame as decoders take it (#565). DAVE sends a temporal unit as AV1's RTP
+/// format carries it: without its temporal delimiter, and the last OBU without its size field.
+/// WebCodecs (and the hardware decoders behind it) take a temporal unit in the low overhead
+/// format, as encoders give it: a temporal delimiter first and every OBU with its size. A frame
+/// that doesn't parse is returned as it is (the decoder's error asks for a keyframe).
+pub fn av1_temporal_unit(frame: &[u8]) -> Vec<u8> {
+  let mut unit = Vec::with_capacity(frame.len() + AV1_TEMPORAL_DELIMITER.len() + 8);
+  let starts_with_delimiter = frame
+    .first()
+    .is_some_and(|header| (header & AV1_OBU_TYPE_MASK) >> AV1_OBU_TYPE_SHIFT == AV1_OBU_TEMPORAL_DELIMITER);
+  if !starts_with_delimiter {
+    unit.extend_from_slice(&AV1_TEMPORAL_DELIMITER);
+  }
+  let mut rest = frame;
+  while let Some((&header, after_header)) = rest.split_first() {
+    let extension_bytes = usize::from(header & AV1_OBU_HAS_EXTENSION != 0);
+    let Some((extension, after_extension)) = after_header.split_at_checked(extension_bytes) else {
+      return frame.to_vec();
+    };
+    let (payload, next) = if header & AV1_OBU_HAS_SIZE != 0 {
+      let Some((size, size_bytes)) = read_leb128(after_extension) else {
+        return frame.to_vec();
+      };
+      match after_extension[size_bytes..].split_at_checked(size) {
+        Some(split) => split,
+        None => return frame.to_vec(),
+      }
+    } else {
+      (after_extension, &after_extension[after_extension.len()..])
+    };
+    unit.push(header | AV1_OBU_HAS_SIZE);
+    unit.extend_from_slice(extension);
+    write_leb128(payload.len(), &mut unit);
+    unit.extend_from_slice(payload);
+    rest = next;
+  }
+  unit
+}
+
+/// An unsigned LEB128 number (at most 8 bytes, as AV1 allows) and the bytes it took.
+fn read_leb128(bytes: &[u8]) -> Option<(usize, usize)> {
+  let mut value = 0u64;
+  for (index, byte) in bytes.iter().take(8).enumerate() {
+    value |= u64::from(byte & 0x7f) << (index * 7);
+    if byte & 0x80 == 0 {
+      return Some((usize::try_from(value).ok()?, index + 1));
+    }
+  }
+  None
+}
+
+fn write_leb128(mut value: usize, out: &mut Vec<u8>) {
+  loop {
+    // The low seven bits; the cast keeps exactly them.
+    let byte = (value & 0x7f) as u8;
+    value >>= 7;
+    if value == 0 {
+      out.push(byte);
+      return;
+    }
+    out.push(byte | 0x80);
+  }
+}
+
 /// The best video codec a sender can use so that every receiver decodes it: encodable by the
 /// sender, decodable by all `receivers`, preferring AV1, then VP9, then H.264.
 pub fn choose_video_codec(
@@ -717,30 +854,76 @@ mod tests {
   #[test]
   fn screen_bitrate_follows_the_pixel_rate_within_bounds() {
     let res = |width, height| VideoResolution { width, height };
-    let mbps = |resolution, framerate| screen_bitrate_bps(resolution, framerate) as f64 / 1e6;
+    let standard = ScreenShareResolution::Standard;
+    let uhd = ScreenShareResolution::Uhd;
+    let mbps = |resolution, framerate| screen_bitrate_bps(resolution, framerate, &standard) as f64 / 1e6;
     assert!((3.5..4.0).contains(&mbps(res(1920, 1080), 30)));
     assert!((6.0..7.0).contains(&mbps(res(2560, 1440), 30)));
     assert!((7.0..=8.0).contains(&mbps(res(1920, 1080), 60)));
-    assert_eq!(screen_bitrate_bps(res(2560, 1440), 60), 8_000_000);
-    assert_eq!(screen_bitrate_bps(res(640, 360), 15), 2_000_000);
+    assert_eq!(screen_bitrate_bps(res(2560, 1440), 60, &standard), 8_000_000);
+    assert_eq!(screen_bitrate_bps(res(640, 360), 15, &standard), 2_000_000);
+    // A 4K share may send more (#565), and a standard-size picture the same either way.
+    let uhd_mbps = screen_bitrate_bps(res(3840, 2160), 30, &uhd) as f64 / 1e6;
+    assert!((14.5..15.5).contains(&uhd_mbps), "{uhd_mbps}");
+    assert_eq!(screen_bitrate_bps(res(3840, 2160), 30, &standard), 8_000_000);
+    assert_eq!(screen_bitrate_bps(res(2560, 1440), 60, &uhd), 13_271_040);
+    assert_eq!(
+      screen_bitrate_bps(res(1920, 1080), 30, &uhd),
+      screen_bitrate_bps(res(1920, 1080), 30, &standard)
+    );
+    assert_eq!(screen_bitrate_bps(res(7680, 4320), 60, &uhd), 16_000_000);
   }
 
   #[test]
   fn screen_layers_keep_text_sharp_or_motion_smooth() {
     let res = |width, height| VideoResolution { width, height };
-    let detail = screen_layers(res(3840, 2160), 60, ScreenContentMode::Detail);
+    let standard = ScreenShareResolution::Standard;
+    let detail = screen_layers(res(3840, 2160), 60, ScreenContentMode::Detail, &standard);
     let top = detail.last().unwrap();
     assert_eq!((top.width, top.height, top.max_framerate), (2560, 1440, 30));
     assert_eq!(detail.len(), 2);
     assert_eq!((detail[0].width, detail[0].height), (1280, 720));
-    let motion = screen_layers(res(2560, 1440), 60, ScreenContentMode::Motion);
+    let motion = screen_layers(res(2560, 1440), 60, ScreenContentMode::Motion, &standard);
     let top = motion.last().unwrap();
     assert_eq!((top.width, top.height, top.max_framerate), (1920, 1080, 60));
     // A small window is not enlarged.
-    let small = screen_layers(res(800, 600), 30, ScreenContentMode::Detail);
+    let small = screen_layers(res(800, 600), 30, ScreenContentMode::Detail, &standard);
     assert_eq!(
       (small.last().unwrap().width, small.last().unwrap().height),
       (800, 600)
+    );
+  }
+
+  /// A 4K share (#565) keeps a 4K screen's pixels, with two lower layers to step down to.
+  #[test]
+  fn uhd_screen_layers_keep_4k_and_step_down_in_three_layers() {
+    let res = |width, height| VideoResolution { width, height };
+    let uhd = ScreenShareResolution::Uhd;
+    let detail = screen_layers(res(3840, 2160), 60, ScreenContentMode::Detail, &uhd);
+    let sizes: Vec<(u16, u16, u8)> = detail
+      .iter()
+      .map(|layer| (layer.width, layer.height, layer.max_framerate))
+      .collect();
+    assert_eq!(sizes, vec![(960, 540, 30), (1920, 1080, 30), (3840, 2160, 30)]);
+    assert!(detail[2].max_bitrate_bps > SCREEN_MAX_BITRATE_BPS);
+    assert_eq!(detail[1].max_bitrate_bps, detail[2].max_bitrate_bps / 4);
+    // A 5K screen is shrunk to 4K; motion keeps 60 fps at 1440p.
+    let five_k = screen_layers(res(5120, 2880), 30, ScreenContentMode::Detail, &uhd);
+    assert_eq!((five_k[2].width, five_k[2].height), (3840, 2160));
+    let motion = screen_layers(res(3840, 2160), 60, ScreenContentMode::Motion, &uhd);
+    let top = motion.last().unwrap();
+    assert_eq!((top.width, top.height, top.max_framerate), (2560, 1440, 60));
+    assert_eq!(motion.len(), 2);
+    // A 1440p screen shared in 4K is sent as before: the size option never enlarges.
+    let qhd = screen_layers(res(2560, 1440), 30, ScreenContentMode::Detail, &uhd);
+    assert_eq!(
+      qhd,
+      screen_layers(
+        res(2560, 1440),
+        30,
+        ScreenContentMode::Detail,
+        &ScreenShareResolution::Standard
+      )
     );
   }
 
@@ -748,6 +931,28 @@ mod tests {
     width: 1280,
     height: 720,
   };
+
+  /// What DAVE (and AV1's RTP format) leave of a temporal unit becomes one again (#565).
+  #[test]
+  fn av1_temporal_units_get_their_delimiter_and_sizes_back() {
+    // A temporal delimiter, a sequence header (3 bytes) and a frame OBU of 200 bytes (two-byte
+    // size), as an encoder gives them.
+    let mut original = vec![0x12, 0x00, 0x0a, 0x03, 1, 2, 3, 0x32, 0xc8, 0x01];
+    original.extend(std::iter::repeat_n(7u8, 200));
+    // As DAVE sends it: no delimiter, the last OBU without its size.
+    let mut sent = vec![0x0a, 0x03, 1, 2, 3, 0x30];
+    sent.extend(std::iter::repeat_n(7u8, 200));
+    assert_eq!(av1_temporal_unit(&sent), original);
+    // A complete unit stays as it is; so does one that doesn't parse.
+    assert_eq!(av1_temporal_unit(&original), original);
+    let truncated = [0x0a, 0x09, 1, 2];
+    assert_eq!(av1_temporal_unit(&truncated), truncated);
+    // An OBU with an extension byte keeps it.
+    assert_eq!(
+      av1_temporal_unit(&[0x34, 0x28, 9, 9]),
+      vec![0x12, 0x00, 0x36, 0x28, 0x02, 9, 9]
+    );
+  }
 
   mod frames {
     use super::*;
@@ -1077,7 +1282,12 @@ mod tests {
       assert_eq!(layer_for_lines(&hd, 100), 0);
       assert_eq!(layer_for_lines(&[], 720), TOP_LAYER);
       // A screen share may be picked lower too.
-      let screen = screen_layers(res(2560, 1440), 30, ScreenContentMode::Detail);
+      let screen = screen_layers(
+        res(2560, 1440),
+        30,
+        ScreenContentMode::Detail,
+        &ScreenShareResolution::Standard,
+      );
       assert_eq!(
         chosen_layer(&VideoTrackKind::Screen, &screen, thumbnail, Some(720)),
         0
@@ -1121,7 +1331,12 @@ mod tests {
 
     #[test]
     fn resized_layers_keep_the_aspect_ratio_their_shares_and_caps() {
-      let configured = screen_layers(res(2560, 1440), 30, ScreenContentMode::Detail);
+      let configured = screen_layers(
+        res(2560, 1440),
+        30,
+        ScreenContentMode::Detail,
+        &ScreenShareResolution::Standard,
+      );
       let portrait = resized_layers(&configured, res(810, 1440));
       let summary: Vec<_> = portrait
         .iter()
@@ -1199,7 +1414,12 @@ mod tests {
 
     fn screen_sizer() -> (LayerSizer, Instant) {
       let limit = res(2560, 1440);
-      let configured = screen_layers(limit, 30, ScreenContentMode::Detail);
+      let configured = screen_layers(
+        limit,
+        30,
+        ScreenContentMode::Detail,
+        &ScreenShareResolution::Standard,
+      );
       (LayerSizer::new(configured, limit), Instant::now())
     }
 

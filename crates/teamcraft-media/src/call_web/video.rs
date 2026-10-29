@@ -41,10 +41,7 @@ use super::{
 };
 use crate::call_engine::OwnPublication;
 use crate::call_video::ReceivedVideoFrame;
-use crate::video::{
-  CAMERA_FRAMERATE, LayerSizer, VideoResolution, camera_layers, fit_within, screen_bitrate_bps,
-  screen_limits, simulcast_layers,
-};
+use crate::video::{CAMERA_FRAMERATE, LayerSizer, ScreenProfile, VideoResolution, camera_layers, fit_within};
 use crate::web_api::{
   Canvas2d, EncodedVideoChunk, VideoDecoder, VideoEncoder, VideoFrame as WebVideoFrame, count_picture_drawn,
 };
@@ -58,6 +55,14 @@ const H264_CODEC_LEVEL_5_1: &str = "avc1.42e033";
 const LEVEL_4_0_MAX_MACROBLOCKS: u32 = 8192;
 /// WebCodecs codec string: VP9 profile 0 (older browser clients).
 const VP9_CODEC: &str = "vp09.00.10.08";
+/// WebCodecs codec string: AV1 Main profile, level 5.0, 8 bit (#565): up to 4K at 30 fps and
+/// 1440p at 60 fps, every picture a screen share sends. Decoders take it for any smaller picture.
+const AV1_CODEC: &str = "av01.0.12M.08";
+/// AV1 level 5.1, for a picture or rate above level 5.0's (not sent today; a larger source).
+const AV1_CODEC_LEVEL_5_1: &str = "av01.0.13M.08";
+/// Level 5.0's largest picture and its samples per second (AV1 spec, annex A.3).
+const AV1_LEVEL_5_0_MAX_PICTURE: u32 = 8_912_896;
+const AV1_LEVEL_5_0_MAX_RATE: u64 = 267_386_880;
 /// A keyframe at least this often (seconds), so a lost frame doesn't freeze the picture for long.
 const KEYFRAME_INTERVAL_SECONDS: u32 = 4;
 /// Frames waiting in an encoder above this are skipped (slow machine or encoder).
@@ -74,6 +79,10 @@ pub(super) struct TrackSender {
   stream: MediaStream,
   video: HtmlVideoElement,
   encoders: LayerEncoders<LayerEncoder>,
+  /// What the encoders are built with, to build them anew in another codec (#565).
+  encoding: Encoding,
+  /// The codecs the track may go out in, best first (`ScreenProfile::codecs`; cameras H.264).
+  codecs: Vec<VideoCodec>,
   /// Follows the source's size with the layers' (a shared window resized).
   sizer: LayerSizer,
   framerate: u8,
@@ -183,11 +192,25 @@ pub(super) struct Decoder {
   _error: Closure<dyn FnMut(JsValue)>,
 }
 
+/// How a track's encoders are configured, whatever the layer.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Encoding {
+  kind: VideoTrackKind,
+  codec: VideoCodec,
+  framerate: u8,
+  latency: LatencyMode,
+  /// `VideoEncoderConfig.contentHint` (#565): `"text"` turns on AV1's screen content tools.
+  maybe_content_hint: Option<&'static str>,
+}
+
 /// What [`TrackSender::start`] needs besides the stream.
 pub(super) struct TrackPlan {
   pub kind: VideoTrackKind,
   pub framerate: u8,
   pub shape: LayerShape,
+  /// The codecs the track may go out in, best first; the call picks the first every viewer
+  /// decodes ([`crate::call_engine::CallEngine::video_codec_for`]).
+  pub codecs: Vec<VideoCodec>,
   /// What is sent never exceeds this size, whatever the camera delivers (4K cameras); the
   /// encoders scale. `None`: the source size.
   pub maybe_max_resolution: Option<VideoResolution>,
@@ -196,20 +219,23 @@ pub(super) struct TrackPlan {
 }
 
 /// How a track's simulcast layers are cut from its picture.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum LayerShape {
   /// A camera's layers (`video::camera_layers`: 1080p, 720p and 360p from a 1080p camera, #967),
   /// encoded in the latency mode that gives them their bitrate ([`camera_latency_mode`]).
   Camera,
-  /// Up to `max_layers` layers halving the size, the top one at `bitrate_bps` (screen shares).
-  Halving { bitrate_bps: u32, max_layers: u8 },
+  /// A screen share's layers (`video::screen_layers`: the picture and a half-size one, a
+  /// quarter-size one too above 1440p), as on the desktop.
+  Screen(ScreenProfile),
 }
 
 impl TrackSender {
   /// Starts encoding the stream's video track as `plan.kind`, to be published under `publication`.
+  /// Its encoders encode `codec`, one of `plan.codecs`.
   pub async fn start(
     stream: MediaStream,
     plan: TrackPlan,
+    codec: VideoCodec,
     publication: VideoPublicationId,
     inputs: &mpsc::UnboundedSender<Input>,
   ) -> Result<Self, WebCallError> {
@@ -232,31 +258,27 @@ impl TrackSender {
     let limit = plan.maybe_max_resolution.unwrap_or(resolution);
     let resolution = fit_within(resolution, limit);
     let video = play_hidden(&stream).await?;
-    let (infos, latency) = match plan.shape {
+    let (infos, latency, maybe_content_hint) = match &plan.shape {
       LayerShape::Camera => (
         camera_layers(resolution, plan.framerate, limit),
         camera_latency_mode(),
+        None,
       ),
-      LayerShape::Halving {
-        bitrate_bps,
-        max_layers,
-      } => (
-        simulcast_layers(resolution, plan.framerate, bitrate_bps, max_layers),
+      LayerShape::Screen(profile) => (
+        profile.layers(resolution, plan.framerate),
         LatencyMode::Realtime,
+        Some(content_hint(profile)),
       ),
     };
     let sizer = LayerSizer::new(infos.clone(), limit);
-    let (kind, framerate, encoder_inputs) = (plan.kind.clone(), plan.framerate, inputs.clone());
-    let encoders = LayerEncoders::new(infos, move |info, generation| {
-      LayerEncoder::new(
-        info,
-        kind.clone(),
-        framerate,
-        latency,
-        generation,
-        &encoder_inputs,
-      )
-    })?;
+    let encoding = Encoding {
+      kind: plan.kind.clone(),
+      codec,
+      framerate: plan.framerate,
+      latency,
+      maybe_content_hint,
+    };
+    let encoders = LayerEncoders::new(infos, encoding.opener(inputs))?;
     // "Stop sharing" in the browser's own UI (or an unplugged camera) ends the track.
     let ended_sender = inputs.clone();
     let ended_kind = plan.kind.clone();
@@ -272,6 +294,8 @@ impl TrackSender {
       stream,
       video,
       encoders,
+      encoding,
+      codecs: plan.codecs,
       sizer,
       framerate: plan.framerate,
       frames_since_keyframe: 0,
@@ -287,6 +311,40 @@ impl TrackSender {
 
   pub fn layers(&self) -> Vec<VideoLayerInfo> {
     self.encoders.infos()
+  }
+
+  /// The codec its encoders encode.
+  pub fn codec(&self) -> &VideoCodec {
+    &self.encoding.codec
+  }
+
+  /// The codecs the track may go out in, best first.
+  pub fn codecs(&self) -> &[VideoCodec] {
+    &self.codecs
+  }
+
+  /// Encodes in `codec` from the next picture on, under the new publication `publication` (#565:
+  /// a viewer joined that can't decode the codec, or the last one that couldn't left). Every
+  /// layer starts with a keyframe; the old stream is the caller's to withdraw.
+  pub fn switch_codec(
+    &mut self,
+    codec: VideoCodec,
+    publication: VideoPublicationId,
+    inputs: &mpsc::UnboundedSender<Input>,
+  ) -> Result<(), WebCallError> {
+    let previous = std::mem::replace(&mut self.encoding.codec, codec);
+    if let Err(error) = self.encoders.reopen(self.encoding.opener(inputs)) {
+      // Back to the codec the track is published in; a layer whose encoder doesn't open again is
+      // restarted with the next picture, as after a failure.
+      self.encoding.codec = previous;
+      if let Err(restore) = self.encoders.reopen(self.encoding.opener(inputs)) {
+        debug!(%restore, "a video encoder didn't open again in the track's codec");
+      }
+      return Err(error);
+    }
+    self.publication.own = OwnPublication::new(publication);
+    self.frames_since_keyframe = 0;
+    Ok(())
   }
 
   /// The size the camera or screen delivers now; `None` before it plays.
@@ -497,6 +555,24 @@ impl<E: FrameEncoder> LayerEncoders<E> {
     Ok(())
   }
 
+  /// Every layer gets a new encoder from `open` (another codec, #565), at its size, which starts
+  /// with a keyframe; `open` replaces the encoders from then on. Fails when one doesn't open.
+  pub fn reopen(
+    &mut self,
+    open: impl FnMut(VideoLayerInfo, u64) -> Result<E, WebCallError> + 'static,
+  ) -> Result<(), WebCallError> {
+    self.open = Box::new(open);
+    for layer in &mut self.layers {
+      let generation = self.next_generation;
+      self.next_generation += 1;
+      layer.encoder = (self.open)(layer.info, generation)?;
+      layer.generation = generation;
+      layer.wants_keyframe = true;
+      layer.restarts_in_a_row = 0;
+    }
+    Ok(())
+  }
+
   /// The same layers at a new size (`infos`; the source changed size): every layer gets a new
   /// encoder that starts with a keyframe. One that fails to open is replaced as after a failure.
   pub fn resize(&mut self, infos: &[VideoLayerInfo]) -> Result<(), EncoderGaveUp> {
@@ -601,17 +677,61 @@ impl Drop for SizeWatch {
   }
 }
 
+impl Encoding {
+  /// Opens a layer's encoder with these settings.
+  fn opener(
+    &self,
+    inputs: &mpsc::UnboundedSender<Input>,
+  ) -> impl FnMut(VideoLayerInfo, u64) -> Result<LayerEncoder, WebCallError> + 'static {
+    let (encoding, inputs) = (self.clone(), inputs.clone());
+    move |info, generation| LayerEncoder::new(info, &encoding, generation, &inputs)
+  }
+
+  /// `VideoEncoderConfig` of a layer of `info`'s size.
+  fn config(&self, info: &VideoLayerInfo) -> Result<js_sys::Object, JsValue> {
+    let mut entries = vec![
+      ("width", JsValue::from(info.width)),
+      ("height", JsValue::from(info.height)),
+      ("bitrate", JsValue::from(info.max_bitrate_bps)),
+      ("framerate", JsValue::from(self.framerate)),
+      ("latencyMode", JsValue::from_str(self.latency.as_str())),
+    ];
+    match self.codec {
+      VideoCodec::Av1 => {
+        entries.push((
+          "codec",
+          JsValue::from_str(av1_encoder_codec(info.width, info.height, self.framerate)),
+        ));
+        if let Some(hint) = self.maybe_content_hint {
+          entries.push(("contentHint", JsValue::from_str(hint)));
+        }
+      },
+      // H.264 as before #565, also for codecs nobody picks (`CallEngine::video_codec_for`).
+      _ => {
+        entries.push((
+          "codec",
+          JsValue::from_str(h264_encoder_codec(info.width, info.height)),
+        ));
+        entries.push((
+          "avc",
+          dictionary(&[("format", JsValue::from_str("annexb"))])?.into(),
+        ));
+      },
+    }
+    dictionary(&entries)
+  }
+}
+
 impl LayerEncoder {
   fn new(
     info: VideoLayerInfo,
-    kind: VideoTrackKind,
-    framerate: u8,
-    latency: LatencyMode,
+    encoding: &Encoding,
     generation: u64,
     inputs: &mpsc::UnboundedSender<Input>,
   ) -> Result<Self, WebCallError> {
     let sender = inputs.clone();
     let layer = info.layer;
+    let kind = encoding.kind.clone();
     let output_kind = kind.clone();
     let output = Closure::<dyn FnMut(EncodedVideoChunk)>::new(move |chunk: EncodedVideoChunk| {
       let bytes = Uint8Array::new_with_length(chunk.byte_length());
@@ -648,23 +768,8 @@ impl LayerEncoder {
       .map_err(browser("VideoEncoder"))?,
     )
     .map_err(browser("VideoEncoder"))?;
-    let avc = dictionary(&[("format", JsValue::from_str("annexb"))]).map_err(browser("VideoEncoder"))?;
     encoder
-      .configure(
-        &dictionary(&[
-          (
-            "codec",
-            JsValue::from_str(h264_encoder_codec(info.width, info.height)),
-          ),
-          ("avc", avc.into()),
-          ("width", JsValue::from(info.width)),
-          ("height", JsValue::from(info.height)),
-          ("bitrate", JsValue::from(info.max_bitrate_bps)),
-          ("framerate", JsValue::from(framerate)),
-          ("latencyMode", JsValue::from_str(latency.as_str())),
-        ])
-        .map_err(browser("VideoEncoder"))?,
-      )
+      .configure(&encoding.config(&info).map_err(browser("VideoEncoder"))?)
       .map_err(browser("VideoEncoder"))?;
     Ok(Self {
       encoder,
@@ -794,7 +899,8 @@ impl Decoder {
     let codec_string = match codec {
       VideoCodec::H264 => H264_CODEC,
       VideoCodec::Vp9 => VP9_CODEC,
-      _ => return Err(WebCallError::Unsupported("this video codec")),
+      VideoCodec::Av1 => AV1_CODEC,
+      VideoCodec::Unknown(_) => return Err(WebCallError::Unsupported("this video codec")),
     };
     let context: Canvas2d = canvas
       .get_context("2d")
@@ -838,7 +944,8 @@ impl Decoder {
       .map_err(browser("VideoDecoder"))?,
     )
     .map_err(browser("VideoDecoder"))?;
-    // H.264 in Annex B carries its parameter sets in band: no `description` needed.
+    // H.264 in Annex B carries its parameter sets in band, AV1 its sequence header in every
+    // keyframe: no `description` needed.
     decoder
       .configure(&dictionary(&[("codec", JsValue::from_str(codec_string))]).map_err(browser("VideoDecoder"))?)
       .map_err(browser("VideoDecoder"))?;
@@ -905,6 +1012,7 @@ pub(super) fn camera_plan(limit: VideoResolution) -> TrackPlan {
     kind: VideoTrackKind::Camera,
     framerate: CAMERA_FRAMERATE,
     shape: LayerShape::Camera,
+    codecs: vec![VideoCodec::H264],
     maybe_max_resolution: Some(limit),
     #[cfg(feature = "effects")]
     maybe_effects: None,
@@ -948,8 +1056,6 @@ fn camera_latency_mode() -> LatencyMode {
   }
 }
 
-/// The plan for a screen share: the mode's largest picture and rate (1440p30 for detail, 1080p60
-/// for motion) plus a half-size layer for weak links; a smaller source is sent as it is.
 /// The codec string an H.264 encoder of `width`×`height` is configured with: level 4.0 up to
 /// 1080p, level 5.1 above. Chrome refuses to encode a picture larger than the level allows
 /// ("exceeds the maximum coded area"), so a 1440p screen share's top layer failed, and the
@@ -963,15 +1069,92 @@ fn h264_encoder_codec(width: u16, height: u16) -> &'static str {
   }
 }
 
-pub(super) fn screen_plan(mode: ScreenContentMode) -> TrackPlan {
-  let (limit, framerate) = screen_limits(mode);
+/// The video codecs a browser encodes and decodes (#565).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CodecSupport {
+  pub encoders: Vec<VideoCodec>,
+  pub decoders: Vec<VideoCodec>,
+}
+
+/// What this browser encodes and decodes: H.264 always (every client sends and takes it), AV1
+/// where WebCodecs says it encodes a standard screen share's top layer (1440p at 30 fps, in real
+/// time) and decodes it. A browser that doesn't answer gets H.264 only.
+pub(super) async fn codec_support() -> CodecSupport {
+  let mut support = CodecSupport {
+    encoders: vec![VideoCodec::H264],
+    decoders: vec![VideoCodec::H264],
+  };
+  let probe = Encoding {
+    kind: VideoTrackKind::Screen,
+    codec: VideoCodec::Av1,
+    framerate: 30,
+    latency: LatencyMode::Realtime,
+    maybe_content_hint: Some("text"),
+  };
+  let layer = VideoLayerInfo {
+    layer: 0,
+    width: 2560,
+    height: 1440,
+    max_framerate: 30,
+    max_bitrate_bps: 6_000_000,
+  };
+  if let Ok(config) = probe.config(&layer)
+    && is_supported(VideoEncoder::is_config_supported(&config)).await
+  {
+    support.encoders.insert(0, VideoCodec::Av1);
+  }
+  if let Ok(config) = dictionary(&[("codec", JsValue::from_str(AV1_CODEC))])
+    && is_supported(VideoDecoder::is_config_supported(&config)).await
+  {
+    support.decoders.insert(0, VideoCodec::Av1);
+  }
+  support
+}
+
+/// Whether an `isConfigSupported` answer says yes; a throw (no WebCodecs) or a rejection says no.
+async fn is_supported(answer: Result<Promise, JsValue>) -> bool {
+  let Ok(promise) = answer else {
+    return false;
+  };
+  JsFuture::from(promise)
+    .await
+    .ok()
+    .and_then(|support| js_sys::Reflect::get(&support, &JsValue::from_str("supported")).ok())
+    .and_then(|is_supported| is_supported.as_bool())
+    .unwrap_or(false)
+}
+
+/// The codec string an AV1 encoder of `width`×`height` at `framerate` is configured with: level
+/// 5.0 up to 4K at 30 fps, 5.1 above.
+fn av1_encoder_codec(width: u16, height: u16, framerate: u8) -> &'static str {
+  let picture = u32::from(width) * u32::from(height);
+  let rate = u64::from(picture) * u64::from(framerate);
+  if picture <= AV1_LEVEL_5_0_MAX_PICTURE && rate <= AV1_LEVEL_5_0_MAX_RATE {
+    AV1_CODEC
+  } else {
+    AV1_CODEC_LEVEL_5_1
+  }
+}
+
+/// `VideoEncoderConfig.contentHint` of a screen share's encoders (#565): `"text"` for detail
+/// (AV1's palette and intra block copy: libaom's screen content mode in Chrome), `"motion"`.
+fn content_hint(profile: &ScreenProfile) -> &'static str {
+  match profile.mode {
+    ScreenContentMode::Motion => "motion",
+    ScreenContentMode::Detail | ScreenContentMode::Unknown => "text",
+  }
+}
+
+/// The plan for a screen share: the profile's largest picture and rate (1440p30 for detail,
+/// 1080p60 for motion; 4K30 and 1440p60 for a 4K share) plus smaller layers for weak links; a
+/// smaller source is sent as it is.
+pub(super) fn screen_plan(profile: &ScreenProfile) -> TrackPlan {
+  let (limit, framerate) = profile.limits();
   TrackPlan {
     kind: VideoTrackKind::Screen,
     framerate,
-    shape: LayerShape::Halving {
-      bitrate_bps: screen_bitrate_bps(limit, framerate),
-      max_layers: 2,
-    },
+    shape: LayerShape::Screen(profile.clone()),
+    codecs: profile.codecs(),
     maybe_max_resolution: Some(limit),
     #[cfg(feature = "effects")]
     maybe_effects: None,
@@ -1027,32 +1210,32 @@ async fn request_camera(constraints: &MediaStreamConstraints) -> Result<MediaStr
 /// Asks the user what to share (`getDisplayMedia`), with its sound if `has_sound`. Needs a recent
 /// user gesture.
 pub(super) async fn capture_screen(
-  mode: ScreenContentMode,
+  profile: &ScreenProfile,
   has_sound: bool,
 ) -> Result<MediaStream, WebCallError> {
-  picked_screen(request_screen(mode, has_sound)?).await
+  picked_screen(request_screen(profile, has_sound)?).await
 }
 
 /// Opens the screen picker now (synchronously, so a click's user activation still counts) and
 /// returns `getDisplayMedia`'s promise. With `has_sound` the picker also offers the tab's or the
 /// system's sound ([`super::screen_sound`]); a browser that throws at the sound request at once is
 /// asked again, still in the click, for the picture alone.
-pub(super) fn request_screen(mode: ScreenContentMode, has_sound: bool) -> Result<Promise, WebCallError> {
+pub(super) fn request_screen(profile: &ScreenProfile, has_sound: bool) -> Result<Promise, WebCallError> {
   let maybe_sound = super::screen_sound::sound_request(has_sound);
-  match display_media(mode, maybe_sound) {
+  match display_media(profile, maybe_sound) {
     Err(error) if maybe_sound.is_some() => {
       warn!(%error, "the browser refused to capture the screen's sound; sharing the picture alone");
-      display_media(mode, None)
+      display_media(profile, None)
     },
     result => result,
   }
 }
 
 fn display_media(
-  mode: ScreenContentMode,
+  profile: &ScreenProfile,
   maybe_sound: Option<super::screen_sound::SoundRequest>,
 ) -> Result<Promise, WebCallError> {
-  let (limit, framerate) = screen_limits(mode);
+  let (limit, framerate) = profile.limits();
   let video = dictionary(&[
     ("frameRate", maximum(u32::from(framerate))?),
     ("width", maximum(u32::from(limit.width))?),
@@ -1612,6 +1795,31 @@ mod tests {
       );
       // A late failure report of a replaced encoder is stale.
       encoders.on_failed(1, 1).unwrap();
+      assert_eq!(bench.borrow().opened.len(), 4);
+    }
+
+    /// A share published anew in another codec (#565): every layer gets an encoder from the new
+    /// opener, starting with a keyframe; the old ones' late failure reports are stale.
+    #[test]
+    fn reopened_encoders_come_from_the_new_opener_and_start_with_keyframes() {
+      let (bench, mut encoders) = encoders(2);
+      encoders.encode(&(), false).unwrap();
+      let reopened = Rc::clone(&bench);
+      encoders
+        .reopen(move |info, generation| {
+          // The new codec's encoders, told apart by a generation far above the old ones'.
+          reopened.borrow_mut().open(info.layer, generation + 100)?;
+          Ok(FakeEncoder {
+            layer: info.layer,
+            generation: generation + 100,
+            bench: Rc::clone(&reopened),
+          })
+        })
+        .unwrap();
+      assert_eq!(bench.borrow().opened[2..], [(0, 102), (1, 103)]);
+      encoders.encode(&(), false).unwrap();
+      assert_eq!(bench.borrow().coded[2..], [(0, 102, true), (1, 103, true)]);
+      encoders.on_failed(0, 0).unwrap();
       assert_eq!(bench.borrow().opened.len(), 4);
     }
 

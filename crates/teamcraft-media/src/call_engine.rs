@@ -88,6 +88,9 @@ pub struct CallEngine {
   subscriptions: HashMap<StreamId, u8>,
   /// How long the SFU keeps this device's slot after the connection was lost.
   maybe_reconnect_grace: Option<Duration>,
+  /// The video codecs every other device that receives video decodes, as the SFU last said
+  /// (#565); `None` before it said (an older SFU never does): H.264 only.
+  maybe_decodable: Option<Vec<VideoCodec>>,
   /// Tracks other devices publish.
   remote_video: HashMap<StreamId, IncomingVideo>,
   maybe_dave: Option<DaveParticipant>,
@@ -234,6 +237,10 @@ pub enum CallEngineEvent {
   UntrustedRoster,
   /// No authenticator: DAVE members are not bound to device identities (development only).
   UnauthenticatedKeys,
+  /// The video codecs every other device that receives video decodes changed (#565): a driver
+  /// checks its own tracks against [`CallEngine::video_codec_for`] and publishes a track anew in
+  /// another codec where the answer changed.
+  DecodableVideoCodecs(Vec<VideoCodec>),
   /// The SFU rejected a request.
   Error(ErrorBody),
 }
@@ -406,6 +413,7 @@ impl CallEngine {
       uplink_policy: UplinkPolicy::default(),
       subscriptions: HashMap::new(),
       maybe_reconnect_grace: None,
+      maybe_decodable: None,
       remote_video: HashMap::new(),
       maybe_dave: None,
       maybe_trusted_roster: None,
@@ -550,6 +558,21 @@ impl CallEngine {
 
   pub fn device_id(&self) -> DeviceId {
     self.config.device_id
+  }
+
+  /// The codec to publish a track in that the driver can encode as any of `candidates`, best
+  /// first (#565): the first one this device announced as an encoder and every other device that
+  /// receives video decodes ([`CallEngineEvent::DecodableVideoCodecs`]). H.264, which every
+  /// device decodes, when none of them is, and before the SFU said (an older SFU never does).
+  pub fn video_codec_for(&self, candidates: &[VideoCodec]) -> VideoCodec {
+    let Some(decodable) = &self.maybe_decodable else {
+      return VideoCodec::H264;
+    };
+    candidates
+      .iter()
+      .find(|codec| decodable.contains(codec) && self.config.capabilities.video_encoders.contains(codec))
+      .cloned()
+      .unwrap_or(VideoCodec::H264)
   }
 
   pub fn is_muted(&self) -> bool {
@@ -1093,6 +1116,13 @@ impl CallEngine {
       CallEvent::ConnectionReplaced => {
         self.is_over = true;
         self.event(CallEngineEvent::ConnectionReplaced);
+        Ok(())
+      },
+      CallEvent::DecodableVideoCodecs { codecs } => {
+        if self.maybe_decodable.as_ref() != Some(&codecs) {
+          self.maybe_decodable = Some(codecs.clone());
+          self.event(CallEngineEvent::DecodableVideoCodecs(codecs));
+        }
         Ok(())
       },
       CallEvent::Unknown => Ok(()),
@@ -1725,6 +1755,8 @@ impl CallEngine {
       }
     }
     let data = match decrypted {
+      // DAVE sends AV1 without its temporal delimiters and last OBU sizes (#565).
+      Ok(data) if codec == VideoCodec::Av1 => crate::video::av1_temporal_unit(&data),
       Ok(data) => data,
       Err(error) => {
         self.ask_for_keyframe(stream, now);
@@ -2160,6 +2192,59 @@ mod tests {
 
   mod signaling {
     use super::*;
+
+    /// A track goes out in the best codec the device encodes and every other device decodes; H.264
+    /// until the SFU says (an older SFU never does), and when it falls out of the list (#565).
+    #[test]
+    fn the_codec_follows_what_the_others_decode() {
+      let now = Instant::now();
+      let mut engine = CallEngine::new(
+        CallEngineConfig {
+          capabilities: MediaCapabilities {
+            video_encoders: vec![VideoCodec::Av1, VideoCodec::H264],
+            ..MediaCapabilities::default()
+          },
+          ..engine(1, now).config
+        },
+        now,
+      );
+      engine.join("t".into());
+      engine.handle_signal(event(1, joined(1, &[2])), now).unwrap();
+      let screen = [VideoCodec::Av1, VideoCodec::H264];
+      assert_eq!(engine.video_codec_for(&screen), VideoCodec::H264, "older SFU");
+
+      let all = CallEvent::DecodableVideoCodecs {
+        codecs: vec![VideoCodec::Av1, VideoCodec::Vp9, VideoCodec::H264],
+      };
+      engine.handle_signal(event(2, all.clone()), now).unwrap();
+      assert_eq!(engine.video_codec_for(&screen), VideoCodec::Av1);
+      assert_eq!(engine.video_codec_for(&[VideoCodec::H264]), VideoCodec::H264);
+      // VP9 is decoded by all, but this device doesn't encode it.
+      assert_eq!(engine.video_codec_for(&[VideoCodec::Vp9]), VideoCodec::H264);
+      assert!(drain(&mut engine).iter().any(|output| matches!(
+        output,
+        EngineOutput::Event(CallEngineEvent::DecodableVideoCodecs(codecs)) if codecs.len() == 3
+      )));
+
+      let h264_only = CallEvent::DecodableVideoCodecs {
+        codecs: vec![VideoCodec::H264],
+      };
+      engine.handle_signal(event(3, h264_only.clone()), now).unwrap();
+      assert_eq!(engine.video_codec_for(&screen), VideoCodec::H264);
+      engine.handle_signal(event(4, h264_only), now).unwrap();
+      let repeated = drain(&mut engine);
+      assert_eq!(
+        repeated
+          .iter()
+          .filter(|output| matches!(
+            output,
+            EngineOutput::Event(CallEngineEvent::DecodableVideoCodecs(_))
+          ))
+          .count(),
+        1,
+        "told once per change: {repeated:?}"
+      );
+    }
 
     #[test]
     fn join_sends_token_and_capabilities() {

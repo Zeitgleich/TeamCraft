@@ -1794,6 +1794,17 @@ impl ChatBackend for RemoteChat {
     });
   }
 
+  fn screen_share_policy(&self) -> teamcraft_proto::ScreenSharePolicy {
+    self
+      .mirror
+      .borrow()
+      .snapshot
+      .security
+      .maybe_screen_share_policy
+      .clone()
+      .unwrap_or_default()
+  }
+
   fn presence_policy(&self) -> teamcraft_proto::PresencePolicy {
     self
       .mirror

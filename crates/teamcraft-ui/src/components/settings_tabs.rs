@@ -713,6 +713,9 @@ pub fn apply_call_prefs(
   if is_new(|a, b| a.screen_mode == b.screen_mode) {
     call.screen_mode.set(calls.screen_mode);
   }
+  if is_new(|a, b| a.screen_resolution == b.screen_resolution) {
+    call.screen_resolution.set(calls.screen_resolution.clone());
+  }
 }
 
 /// Help & about: versions of the app and the server, debug info for a support request, the

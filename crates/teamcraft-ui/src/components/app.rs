@@ -1043,7 +1043,16 @@ pub(crate) fn connect_calls(state: AppState) {
       CallEvent::Camera(is_on) => backend.set_call_camera(is_on),
       CallEvent::CameraDevice(device) => backend.select_camera(Some(device)),
       CallEvent::Effect(effect) => backend.set_background_effect(effect),
-      CallEvent::StartScreenShare { has_sound, mode } => backend.start_screen_share(has_sound, mode),
+      CallEvent::StartScreenShare {
+        has_sound,
+        mode,
+        resolution,
+      } => {
+        // 4K only where the workspace allows it (#565); the UI offers it only then, but the
+        // policy may have changed since the choice was made.
+        let allowed = resolution.within(&backend.screen_share_policy().max_resolution);
+        backend.start_screen_share(has_sound, mode, allowed);
+      },
       CallEvent::StopScreenShare => backend.stop_screen_share(),
       CallEvent::StatusSounds(sounds) => backend.set_call_status_sounds(sounds),
       CallEvent::CameraQuality(quality) => backend.set_camera_quality(quality),

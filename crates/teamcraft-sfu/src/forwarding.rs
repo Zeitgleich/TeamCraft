@@ -36,8 +36,8 @@ use teamcraft_media::{
   rtp::{AudioLevel, RtpError, RtpHeader},
 };
 use teamcraft_proto::{
-  DeviceId, MAX_SIMULCAST_LAYERS, MediaCapabilities, MediaStreamId, ScreenAudioTrack, TransportFeedback,
-  VideoCodec, VideoLayerInfo, VideoPublicationId, VideoTrack, VideoTrackKind,
+  DeviceId, KNOWN_VIDEO_CODECS, MAX_SIMULCAST_LAYERS, MediaCapabilities, MediaStreamId, ScreenAudioTrack,
+  TransportFeedback, VideoCodec, VideoLayerInfo, VideoPublicationId, VideoTrack, VideoTrackKind,
 };
 use thiserror::Error;
 
@@ -309,6 +309,25 @@ impl Forwarder {
         layers: route.layers_needed.clone(),
       })
       .collect()
+  }
+
+  /// The video codecs every other participant that decodes video decodes, best first (#565):
+  /// what `device_id` can publish so that everyone may watch it. Participants without video
+  /// decoders (audio only) don't count; with nobody else, every codec there is. `None` for a
+  /// participant that encodes no video (it publishes nothing), or one that isn't there.
+  pub fn decodable_video_codecs(&self, device_id: DeviceId) -> Option<Vec<VideoCodec>> {
+    let publisher = self.participants.get(&device_id)?;
+    if publisher.capabilities.video_encoders.is_empty() {
+      return None;
+    }
+    let mut codecs = KNOWN_VIDEO_CODECS.to_vec();
+    for (other, participant) in &self.participants {
+      let decoders = &participant.capabilities.video_decoders;
+      if *other != device_id && !decoders.is_empty() {
+        codecs.retain(|codec| decoders.contains(codec));
+      }
+    }
+    Some(codecs)
   }
 
   /// Removes a participant with its tracks and subscriptions.

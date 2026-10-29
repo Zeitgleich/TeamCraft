@@ -909,7 +909,14 @@ mod tests {
     ignore = "needs OpenH264: --features openh264-source"
   )]
   fn a_still_screen_of_text_stays_sharp_through_keyframes() {
-    let layer = *screen_layers(HD, 30, ScreenContentMode::Detail).last().unwrap();
+    let layer = *screen_layers(
+      HD,
+      30,
+      ScreenContentMode::Detail,
+      &teamcraft_proto::ScreenShareResolution::Standard,
+    )
+    .last()
+    .unwrap();
     let mut encoder = OpenH264Encoder::new(&layer, VideoContent::Screen).unwrap();
     let mut decoder = OpenH264Decoder::new().unwrap();
     let mut skipped = Vec::new();

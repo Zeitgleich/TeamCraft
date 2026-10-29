@@ -86,7 +86,14 @@ const MAX_FEEDBACK_ENTRIES: usize = 1000;
 pub struct BweConfig {
   pub start_bps: u32,
   pub min_bps: u32,
+  /// The ceiling of the estimate while the sender declares no larger demand.
   pub max_bps: u32,
+  /// The ceiling a declared demand above [`BweConfig::max_bps`] lifts the estimate to, at most
+  /// (#565: a 4K screen share's top layer sends up to 16 Mbit/s, a camera's 3 more). Only a
+  /// sender that asks for it probes above `max_bps`: one that fills whatever the estimate allows
+  /// can overshoot a fast path into a standing queue the delay detector doesn't see once the
+  /// buffer is full (its loss stays in the band that holds the rate).
+  pub max_demand_bps: u32,
   /// Multiplicative growth per second while the path is not congested.
   pub increase_per_second: f64,
   /// Growth per second at the start (and after [`SendSideEstimator::measure_afresh`]) until the
@@ -212,8 +219,10 @@ impl Default for BweConfig {
       start_bps: 300_000,
       min_bps: 30_000,
       max_bps: 10_000_000,
+      max_demand_bps: 25_000_000,
       increase_per_second: 0.08,
-      // Triples every second: 300 kbit/s reach a 1440p screen share's 8 Mbit/s in three seconds.
+      // Triples every second: 300 kbit/s reach a 1440p screen share's 8 Mbit/s in three seconds,
+      // a 4K share's 15 in under four.
       start_increase_per_second: 2.0,
       decrease_factor: 0.85,
       // Slow enough that a probe of the next step (a whole layer more) shows congestion before
@@ -330,7 +339,7 @@ impl SendSideEstimator {
     self.estimate_bps = self
       .estimate_bps
       .max(f64::from(self.config.start_bps))
-      .clamp(f64::from(self.config.min_bps), f64::from(self.config.max_bps));
+      .clamp(f64::from(self.config.min_bps), self.ceiling_bps());
     self.delay = DelayDetector::new();
     self.acked.clear();
     self.loss_history.clear();
@@ -473,7 +482,16 @@ impl SendSideEstimator {
     }
     self.estimate_bps = self
       .estimate_bps
-      .clamp(f64::from(self.config.min_bps), f64::from(self.config.max_bps));
+      .clamp(f64::from(self.config.min_bps), self.ceiling_bps());
+  }
+
+  /// The most the estimate may be: [`BweConfig::max_bps`], or the declared demand up to
+  /// [`BweConfig::max_demand_bps`] when that is more.
+  fn ceiling_bps(&self) -> f64 {
+    let demand = self
+      .maybe_demand_bps
+      .map_or(0, |demand| demand.min(self.config.max_demand_bps));
+    f64::from(self.config.max_bps.max(demand))
   }
 
   /// The rate was cut to (a share of) what got through at `now`.
@@ -788,6 +806,25 @@ mod tests {
         "settled at {settled}"
       );
       assert!(sim.link.queue_delay(sim.now) < Duration::from_millis(250));
+    }
+
+    /// Issue #565: a 4K screen share needs about 16 Mbit/s. A sender that declares it may probe
+    /// past the 10 Mbit/s ceiling up to it; one that declares nothing stays below the ceiling.
+    #[test]
+    fn a_declared_demand_lifts_the_ceiling() {
+      let mut sim = Simulation::new(Link::new(40_000_000, 20, 0));
+      sim.run(Duration::from_secs(6));
+      assert_eq!(sim.estimator.estimate_bps(), BweConfig::default().max_bps);
+      sim.estimator.set_demand_bps(Some(16_000_000));
+      sim.run(Duration::from_secs(4));
+      assert_eq!(sim.estimator.estimate_bps(), 16_000_000);
+      sim.estimator.set_demand_bps(Some(80_000_000));
+      sim.run(Duration::from_secs(4));
+      assert_eq!(sim.estimator.estimate_bps(), BweConfig::default().max_demand_bps);
+      // The demand gone (the share stopped): back below the plain ceiling.
+      sim.estimator.set_demand_bps(None);
+      sim.run(Duration::from_secs(1));
+      assert!(sim.estimator.estimate_bps() <= BweConfig::default().max_bps);
     }
 
     #[test]

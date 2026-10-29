@@ -1,8 +1,8 @@
 //! Call video on the desktop (#437). The shell receives and decrypts the call's media; for every
 //! track the page shows it sends the frames over a Tauri channel, one binary message per frame
-//! (`video_message` in `apps/desktop/src/calls/video.rs`): H.264 (or VP9 from older browsers)
-//! that WebCodecs decodes here, or JPEG images where the webview can't decode H.264 (WebKitGTK
-//! without the codec). The own camera comes as JPEG images of the capture (with effects), drawn at
+//! (`video_message` in `apps/desktop/src/calls/video.rs`): H.264, AV1 (screen shares, where this
+//! webview decodes it: #565) or VP9 (older browsers) that WebCodecs decodes here, or JPEG images
+//! where the webview can't decode H.264 (WebKitGTK without the codec). The own camera comes as JPEG images of the capture (with effects), drawn at
 //! the size the tile covers in device pixels; the shell is told that size, so the images just
 //! cover it (#937).
 //!
@@ -14,7 +14,7 @@ use std::collections::BTreeMap;
 use thiserror::Error;
 
 #[cfg(target_arch = "wasm32")]
-pub use self::view::{can_show_video, hide, request_keyframe, show};
+pub use self::view::{can_show_video, decodable_codecs, hide, request_keyframe, show};
 
 /// Version of the frame message this page reads.
 const MESSAGE_VERSION: u8 = 1;
@@ -24,6 +24,7 @@ const KEYFRAME_FLAG: u8 = 0x01;
 const CODEC_H264: u8 = 1;
 const CODEC_VP9: u8 = 2;
 const CODEC_JPEG: u8 = 3;
+const CODEC_AV1: u8 = 4;
 /// Messages held back for a missing one before it counts as lost (fetches can overtake each
 /// other, a few frames' worth; a lost one never comes).
 const MAX_WAITING: usize = 8;
@@ -40,6 +41,7 @@ struct FrameHeader {
 enum FrameCodec {
   H264,
   Vp9,
+  Av1,
   /// One complete image.
   Jpeg,
 }
@@ -80,6 +82,7 @@ impl FrameHeader {
       CODEC_H264 => FrameCodec::H264,
       CODEC_VP9 => FrameCodec::Vp9,
       CODEC_JPEG => FrameCodec::Jpeg,
+      CODEC_AV1 => FrameCodec::Av1,
       other => return Err(FrameMessageError::UnknownCodec(other)),
     };
     let mut timestamp = [0; 8];
@@ -177,6 +180,7 @@ mod view {
     Canvas2d, EncodedVideoChunk, VideoDecoder, VideoFrame as WebVideoFrame, count_picture_drawn, dictionary,
     has_global,
   };
+  use teamcraft_proto::VideoCodec;
   use wasm_bindgen::JsCast;
   use wasm_bindgen::prelude::*;
   use wasm_bindgen_futures::JsFuture;
@@ -200,12 +204,42 @@ mod view {
   /// WebCodecs codec strings, as the browser's call module uses them (`call_web/video.rs`).
   const H264_CODEC: &str = "avc1.42e028";
   const VP9_CODEC: &str = "vp09.00.10.08";
+  const AV1_CODEC: &str = "av01.0.12M.08";
 
   thread_local! {
     static VIEWS: RefCell<HashMap<VideoSource, Rc<StreamView>>> = RefCell::default();
     /// Whether this webview decodes H.264 with WebCodecs: asked once, and `false` once a
     /// decoder for it could not be configured.
     static CAN_DECODE_H264: Cell<Option<bool>> = const { Cell::new(None) };
+    /// Whether this webview decodes AV1 with WebCodecs (#565); asked once.
+    static CAN_DECODE_AV1: Cell<Option<bool>> = const { Cell::new(None) };
+  }
+
+  /// The video codecs this page decodes with WebCodecs, for the shell to announce to a call
+  /// (#565): H.264 (the shell turns it into images where the page can't), and AV1 where WebCodecs
+  /// decodes it and H.264 too (Apple silicon from M3 in WKWebView, WebView2; the shell has no
+  /// images of AV1).
+  pub async fn decodable_codecs() -> Vec<VideoCodec> {
+    let mut codecs = vec![VideoCodec::H264];
+    // A page that can't decode H.264 asks the shell for images of every track it shows, and the
+    // shell has none of AV1.
+    if !can_decode_h264().await {
+      return codecs;
+    }
+    // async-ok: a thread-local Cell, not a signal.
+    let can_decode_av1 = match CAN_DECODE_AV1.get() {
+      Some(is_known) => is_known,
+      None => {
+        let is_supported = is_supported(AV1_CODEC).await;
+        // async-ok: a thread-local Cell, not a signal.
+        CAN_DECODE_AV1.set(Some(is_supported));
+        is_supported
+      },
+    };
+    if can_decode_av1 {
+      codecs.insert(0, VideoCodec::Av1);
+    }
+    codecs
   }
 
   /// Whether the page shows call video from the shell (it runs in the desktop app).
@@ -257,7 +291,9 @@ mod view {
     is_decoder_broken: Cell<bool>,
     decoder_errors: Cell<u32>,
     /// A VP9 decoder could not be configured; the shell can't make images of VP9 either.
-    is_vp9_unsupported: Cell<bool>,
+    /// A codec of this track's frames this webview has no decoder for (VP9, AV1): such frames
+    /// are skipped, the shell has no images of them.
+    maybe_unsupported: Cell<Option<FrameCodec>>,
     /// The shell was asked for JPEG images instead of H.264.
     is_sending_images: Cell<bool>,
     images_in_flight: Cell<u32>,
@@ -302,7 +338,7 @@ mod view {
         has_asked_for_keyframe: Cell::new(false),
         is_decoder_broken: Cell::new(false),
         decoder_errors: Cell::new(0),
-        is_vp9_unsupported: Cell::new(false),
+        maybe_unsupported: Cell::new(None),
         is_sending_images: Cell::new(false),
         images_in_flight: Cell::new(0),
         image_sequence: Cell::new(0),
@@ -423,7 +459,7 @@ mod view {
       }
       match header.codec {
         FrameCodec::Jpeg => self.draw_image(payload),
-        FrameCodec::H264 | FrameCodec::Vp9 => self.decode(header, &payload),
+        FrameCodec::H264 | FrameCodec::Vp9 | FrameCodec::Av1 => self.decode(header, &payload),
       }
       self.tell_shown_size();
     }
@@ -574,7 +610,7 @@ mod view {
     /// Decodes a frame. Deltas are skipped before the first keyframe, after a lost frame or a
     /// decoder error, and while the decoder is behind.
     fn decode(self: &Rc<Self>, header: FrameHeader, payload: &Uint8Array) {
-      if header.codec == FrameCodec::Vp9 && self.is_vp9_unsupported.get() {
+      if self.maybe_unsupported.get() == Some(header.codec) {
         return;
       }
       if self.is_decoder_broken.replace(false) {
@@ -658,16 +694,20 @@ mod view {
     }
 
     /// No decoder for `codec` here: H.264 comes as JPEG images from now on (for this track and
-    /// later ones); VP9 the shell can't turn into images, so such a track stays blank.
+    /// later ones); VP9 and AV1 the shell can't turn into images, so such a track stays blank
+    /// (a shell announces AV1 only where the page said it decodes it).
     fn configure_failed(self: &Rc<Self>, codec: FrameCodec) {
       match codec {
         FrameCodec::H264 => {
           CAN_DECODE_H264.set(Some(false));
           self.fall_back_to_images();
         },
-        FrameCodec::Vp9 => {
-          tracing::warn!("the webview does not decode VP9; this video stays blank");
-          self.is_vp9_unsupported.set(true);
+        FrameCodec::Vp9 | FrameCodec::Av1 => {
+          tracing::warn!(
+            ?codec,
+            "the webview does not decode this video's codec; it stays blank"
+          );
+          self.maybe_unsupported.set(Some(codec));
         },
         FrameCodec::Jpeg => {},
       }
@@ -718,6 +758,7 @@ mod view {
       let codec_string = match codec {
         FrameCodec::H264 => H264_CODEC,
         FrameCodec::Vp9 => VP9_CODEC,
+        FrameCodec::Av1 => AV1_CODEC,
         FrameCodec::Jpeg => return None,
       };
       let canvas = view.canvas.clone();
@@ -779,10 +820,15 @@ mod view {
   }
 
   async fn is_h264_supported() -> bool {
+    is_supported(H264_CODEC).await
+  }
+
+  /// Whether WebCodecs decodes `codec` here (`VideoDecoder.isConfigSupported`).
+  async fn is_supported(codec: &str) -> bool {
     if !has_global("VideoDecoder") {
       return false;
     }
-    let Some(promise) = dictionary(&[("codec", JsValue::from_str(H264_CODEC))])
+    let Some(promise) = dictionary(&[("codec", JsValue::from_str(codec))])
       .and_then(|config| VideoDecoder::is_config_supported(&config))
       .ok()
     else {
@@ -837,6 +883,12 @@ mod tests {
       assert_eq!(
         FrameHeader::parse(&jpeg).map(|header| header.codec),
         Ok(FrameCodec::Jpeg)
+      );
+      // A screen share in AV1 (#565).
+      let av1 = [1, 0, 4, 0, 0, 0, 0, 7, 0, 0, 0, 0, 0, 0, 0, 0, 0x12, 0];
+      assert_eq!(
+        FrameHeader::parse(&av1).map(|header| header.codec),
+        Ok(FrameCodec::Av1)
       );
     }
 

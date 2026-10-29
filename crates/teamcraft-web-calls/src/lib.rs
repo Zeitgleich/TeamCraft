@@ -48,9 +48,9 @@ use teamcraft_media::call_web::{
 };
 use teamcraft_media::effects::{BackgroundEffect as MediaEffect, needs_picture};
 use teamcraft_media::jitter::JitterBufferConfig;
-use teamcraft_media::video::{VideoResolution, camera_limit};
+use teamcraft_media::video::{ScreenProfile, VideoResolution, camera_limit};
 use teamcraft_proto::{
-  AudioCodec, CallId, DeviceId, MediaCapabilities, MediaStreamId, ScreenContentMode, VideoCodec,
+  AudioCodec, CallId, DeviceId, MediaCapabilities, MediaStreamId, ScreenContentMode, ScreenShareResolution,
   VideoTrackKind,
 };
 use tracing_subscriber::Layer;
@@ -170,14 +170,14 @@ enum Control {
   SetEffect(MediaEffect),
   StopCamera,
   Screen {
-    mode: ScreenContentMode,
+    profile: ScreenProfile,
     has_sound: bool,
     done: ScreenDone,
   },
   /// A screen the user already chose in a picker the page opened in the click (issue #930).
   PickedScreen {
     stream: MediaStream,
-    mode: ScreenContentMode,
+    profile: ScreenProfile,
     done: ScreenDone,
   },
   StopScreen,
@@ -269,12 +269,31 @@ pub async fn video_stats() -> Option<String> {
 /// the chosen screen, for [`share_screen`]. The page calls it synchronously in the click handler:
 /// Safari opens the picker only while the click's user activation lasts (issue #930). With
 /// `has_sound` (left out by pages from before #441: no sound) the picker also offers the tab's or
-/// the system's sound. Throws when the browser can't open one.
+/// the system's sound. `resolution` (`ScreenShareResolution` JSON, #565; left out: standard) is
+/// the share's largest size. Throws when the browser can't open one.
 #[wasm_bindgen]
-pub fn pick_screen(content_mode: String, has_sound: Option<bool>) -> Result<Promise, JsValue> {
-  let mode: ScreenContentMode = serde_json::from_str(&content_mode)
-    .map_err(|error| failure_value(ActionFailure::other(format!("unreadable screen mode: {error}"))))?;
-  call_web::request_screen(mode, has_sound.unwrap_or(false)).map_err(|error| failure_value(failure(error)))
+pub fn pick_screen(
+  content_mode: String,
+  has_sound: Option<bool>,
+  resolution: Option<String>,
+) -> Result<Promise, JsValue> {
+  let profile = screen_profile(&content_mode, resolution.as_deref())?;
+  call_web::request_screen(&profile, has_sound.unwrap_or(false))
+    .map_err(|error| failure_value(failure(error)))
+}
+
+/// A screen share's profile from the page's JSON: its mode and, when given, its size.
+fn screen_profile(content_mode: &str, maybe_resolution: Option<&str>) -> Result<ScreenProfile, JsValue> {
+  let unreadable = |what: &str, error: serde_json::Error| {
+    failure_value(ActionFailure::other(format!("unreadable screen {what}: {error}")))
+  };
+  let mode: ScreenContentMode =
+    serde_json::from_str(content_mode).map_err(|error| unreadable("mode", error))?;
+  let size: ScreenShareResolution = match maybe_resolution {
+    Some(json) => serde_json::from_str(json).map_err(|error| unreadable("resolution", error))?,
+    None => ScreenShareResolution::default(),
+  };
+  Ok(ScreenProfile { mode, size })
 }
 
 /// Shares the screen chosen in a picker [`pick_screen`] opened (`StartScreenShare` with the
@@ -284,12 +303,12 @@ pub async fn share_screen(
   has_sound: bool,
   content_mode: String,
   picked: Promise,
+  resolution: Option<String>,
 ) -> Result<JsValue, JsValue> {
   let host = host()?;
-  let mode: ScreenContentMode = serde_json::from_str(&content_mode)
-    .map_err(|error| failure_value(ActionFailure::other(format!("unreadable screen mode: {error}"))))?;
+  let profile = screen_profile(&content_mode, resolution.as_deref())?;
   host
-    .start_screen_share(has_sound, mode, Some(picked))
+    .start_screen_share(has_sound, profile, Some(picked))
     .await
     .map_err(failure_value)?;
   Ok(JsValue::UNDEFINED)
@@ -443,6 +462,8 @@ impl Host {
       )
     };
     let own_device = prepared.device_id;
+    // AV1 for screen shares where this browser encodes and decodes it (#565).
+    let codecs = call_web::video_codec_support().await;
     // Push-to-talk: the microphone opens only while the key is held.
     let is_muted_at_start = is_muted || self.state.borrow().push_to_talk.is_enabled;
     let config = WebCallConfig {
@@ -454,8 +475,8 @@ impl Host {
         device_id: own_device,
         capabilities: MediaCapabilities {
           audio_codecs: vec![AudioCodec::Opus],
-          video_encoders: vec![VideoCodec::H264],
-          video_decoders: vec![VideoCodec::H264],
+          video_encoders: codecs.encoders,
+          video_decoders: codecs.decoders,
           max_simulcast_layers: MAX_SIMULCAST_LAYERS,
           max_frame_fragments: teamcraft_proto::MAX_VIDEO_FRAME_FRAGMENTS,
         },
@@ -566,7 +587,14 @@ impl Host {
       CallAction::StartScreenShare {
         has_sound,
         content_mode,
-      } => self.start_screen_share(has_sound, content_mode, None).await?,
+        resolution,
+      } => {
+        let profile = ScreenProfile {
+          mode: content_mode,
+          size: resolution,
+        };
+        self.start_screen_share(has_sound, profile, None).await?
+      },
       CallAction::StopScreenShare => {
         self.control(Control::StopScreen);
         self.update_active(|active| {
@@ -628,10 +656,12 @@ impl Host {
       CallAction::SetBackgroundEffect { effect } => self.set_background(effect).await?,
       // The browser has no system effects panel.
       CallAction::OpenSystemVideoEffects => {},
+      // The decoders are the desktop page's; this module asks its browser itself.
       CallAction::Join {
         request,
         is_muted,
         is_camera_on,
+        video_decoders: _,
       } => {
         return self
           .join(
@@ -1088,15 +1118,15 @@ impl Host {
   async fn start_screen_share(
     &self,
     has_sound: bool,
-    mode: ScreenContentMode,
+    profile: ScreenProfile,
     maybe_picked: Option<Promise>,
   ) -> Result<(), ActionFailure> {
     let result = match maybe_picked {
-      Some(picked) => self.share_picked_screen(picked, mode, has_sound).await,
+      Some(picked) => self.share_picked_screen(picked, profile, has_sound).await,
       None => {
         self
           .ask_screen(|done| Control::Screen {
-            mode,
+            profile,
             has_sound,
             done,
           })
@@ -1143,7 +1173,7 @@ impl Host {
   async fn share_picked_screen(
     &self,
     picked: Promise,
-    mode: ScreenContentMode,
+    profile: ScreenProfile,
     has_sound: bool,
   ) -> Result<Option<bool>, WebCallError> {
     let stream = call_web::picked_screen(picked).await?;
@@ -1161,7 +1191,7 @@ impl Host {
         .controls
         .unbounded_send(Control::PickedScreen {
           stream: sent,
-          mode,
+          profile,
           done,
         })
         .is_ok()
@@ -1382,13 +1412,15 @@ async fn apply(call: &WebCall, control: Control) {
     Control::SetEffect(effect) => call.set_background_effect(effect),
     Control::StopCamera => call.stop_camera(),
     Control::Screen {
-      mode,
+      profile,
       has_sound,
       done,
-    } => drop(done.send(call.start_screen_share(mode, has_sound).await)),
-    Control::PickedScreen { stream, mode, done } => {
-      drop(done.send(call.share_screen_stream(stream, mode).await))
-    },
+    } => drop(done.send(call.start_screen_share(&profile, has_sound).await)),
+    Control::PickedScreen {
+      stream,
+      profile,
+      done,
+    } => drop(done.send(call.share_screen_stream(stream, &profile).await)),
     Control::StopScreen => call.stop_screen_share(),
     Control::Watch { stream_id, canvas } => call.watch_video(stream_id, canvas),
     Control::Unwatch(stream_id) => call.unwatch_video(stream_id),

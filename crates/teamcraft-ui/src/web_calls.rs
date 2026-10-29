@@ -31,7 +31,9 @@ use teamcraft_client_api::remote::{CallAction, CallActionAnswer, CallSnapshot};
 use teamcraft_core::CallKeySigner;
 use teamcraft_crypto::call_binding::{CallBindingError, CallId as CryptoCallId, SignedCallKeyBinding};
 use teamcraft_media::call_auth::{CallBindingSigner, CallKeyAuthenticator, DeviceCallKeyAuthenticator};
-use teamcraft_proto::{CallId, ConversationId, DeviceId, GatewayEvent, MediaStreamId, ScreenContentMode};
+use teamcraft_proto::{
+  CallId, ConversationId, DeviceId, GatewayEvent, MediaStreamId, ScreenContentMode, ScreenShareResolution,
+};
 use wasm_bindgen::JsCast;
 use wasm_bindgen::prelude::*;
 use wasm_bindgen_futures::{JsFuture, future_to_promise, spawn_local};
@@ -203,13 +205,21 @@ pub fn camera_view() -> Option<Element> {
 /// picker only while the click's user activation lasts, which the action queue outlasts (issue
 /// #930). `None` without a running call module, or when the browser can't open a picker; the share
 /// then goes the usual way, which says why it failed. With `has_sound` the picker also offers the
-/// tab's or the system's sound (#441).
-pub fn pick_screen(mode: ScreenContentMode, has_sound: bool) -> Option<Promise> {
+/// tab's or the system's sound (#441); `resolution` is the share's size (#565).
+pub fn pick_screen(
+  mode: ScreenContentMode,
+  resolution: &ScreenShareResolution,
+  has_sound: bool,
+) -> Option<Promise> {
   let module = current()?.loaded_module()?;
   module
     .call_sync(
       EXPORT_PICK_SCREEN,
-      &[json_value(&mode), JsValue::from_bool(has_sound)],
+      &[
+        json_value(&mode),
+        JsValue::from_bool(has_sound),
+        json_value(resolution),
+      ],
     )
     .and_then(|picked| picked.dyn_into().ok())
 }
@@ -282,13 +292,19 @@ impl WebCallHost {
     self: &Rc<Self>,
     has_sound: bool,
     mode: ScreenContentMode,
+    resolution: &ScreenShareResolution,
     picked: Promise,
   ) -> Result<CallActionAnswer, String> {
     let module = self.module().await?;
     module
       .call(
         EXPORT_SHARE_SCREEN,
-        &[JsValue::from_bool(has_sound), json_value(&mode), picked.into()],
+        &[
+          JsValue::from_bool(has_sound),
+          json_value(&mode),
+          picked.into(),
+          json_value(resolution),
+        ],
       )
       .await
       .map(|answer| answer.as_string())

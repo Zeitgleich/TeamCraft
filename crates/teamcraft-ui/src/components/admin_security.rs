@@ -1,5 +1,5 @@
 use leptos::prelude::*;
-use teamcraft_proto::{AdminSelfJoin, GuestDmStart, HistoryPolicy};
+use teamcraft_proto::{AdminSelfJoin, GuestDmStart, HistoryPolicy, ScreenShareResolution};
 
 use crate::components::admin_console::SectionHeader;
 use crate::components::admin_owners::OwnersPanel;
@@ -151,6 +151,25 @@ pub fn SecuritySection() -> impl IntoView {
           hint=Signal::derive(move || i18n.t("policy-backup-passphrase-hint"))
           checked=Signal::derive(move || draft.get().recovery.is_passphrase_allowed)
           on_change=move |value| policy.edit(|p| p.recovery.is_passphrase_allowed = value)
+        />
+      </fieldset>
+
+      <fieldset class="policy-group" prop:disabled=move || policy.is_locked()>
+        <legend>{move || i18n.t("policy-screen-share")}</legend>
+        <CheckRow
+          name="screen_share_uhd"
+          label=Signal::derive(move || i18n.t("policy-screen-share-uhd"))
+          hint=Signal::derive(move || i18n.t("policy-screen-share-uhd-hint"))
+          checked=Signal::derive(move || draft.get().screen_share.max_resolution == ScreenShareResolution::Uhd)
+          on_change=move |value| {
+            policy.edit(|p| {
+              p.screen_share.max_resolution = if value {
+                ScreenShareResolution::Uhd
+              } else {
+                ScreenShareResolution::Standard
+              };
+            })
+          }
         />
       </fieldset>
 

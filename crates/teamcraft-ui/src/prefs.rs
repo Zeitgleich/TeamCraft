@@ -385,6 +385,8 @@ pub struct CallPrefs {
   pub share_sound: bool,
   /// What a screen share keeps under pressure (detail: resolution, motion: frame rate).
   pub screen_mode: teamcraft_client_api::calls::ScreenContentMode,
+  /// How large a screen share may be (#565): standard (up to 1440p) until the user picks 4K.
+  pub screen_resolution: teamcraft_client_api::calls::ScreenShareResolution,
   /// Tones while the connection is lost and when it is back.
   pub status_sounds: teamcraft_client_api::calls::CallStatusSounds,
   /// The highest quality the camera is sent at (#967).
@@ -406,6 +408,7 @@ impl Default for CallPrefs {
       push_to_talk: false,
       share_sound: false,
       screen_mode: teamcraft_client_api::calls::ScreenContentMode::Detail,
+      screen_resolution: teamcraft_client_api::calls::ScreenShareResolution::Standard,
       status_sounds: teamcraft_client_api::calls::CallStatusSounds::All,
       camera_quality: teamcraft_client_api::calls::VideoQuality::Auto,
     }

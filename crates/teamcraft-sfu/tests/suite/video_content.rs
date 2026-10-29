@@ -23,7 +23,8 @@ use teamcraft_media::video::{VideoFrame, VideoResolution, screen_layers, simulca
 use teamcraft_media::video_capture::{CaptureError, CaptureFormat, FrameSender, VideoCapture};
 use teamcraft_media::video_pipeline::{VideoSendConfig, software_encoders};
 use teamcraft_proto::{
-  AudioCodec, DeviceId, MediaCapabilities, ScreenContentMode, VideoCodec, VideoTrackKind,
+  AudioCodec, DeviceId, MediaCapabilities, ScreenContentMode, ScreenShareResolution, VideoCodec,
+  VideoTrackKind,
 };
 use teamcraft_sfu::auth::DevTokenVerifier;
 use teamcraft_sfu::config::SfuConfig;
@@ -45,7 +46,12 @@ const MIN_PSNR_DB: f64 = 25.0;
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_shared_screen_reaches_the_viewer_with_its_content() {
   let capture = SyntheticCapture::new(PixelFormat::Bgrx);
-  let layers = screen_layers(SIZE, FRAMERATE, ScreenContentMode::Detail);
+  let layers = screen_layers(
+    SIZE,
+    FRAMERATE,
+    ScreenContentMode::Detail,
+    &ScreenShareResolution::Standard,
+  );
   check_content_arrives(VideoTrackKind::Screen, capture, layers).await;
 }
 

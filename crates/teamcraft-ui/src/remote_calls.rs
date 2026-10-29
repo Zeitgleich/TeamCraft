@@ -28,7 +28,7 @@ use teamcraft_client_api::failure::ActionFailure;
 use teamcraft_client_api::model::{ConversationId, UserId};
 use teamcraft_client_api::remote::{CALL_CHANGED_EVENT, CallAction, CallActionAnswer, CallSnapshot};
 use teamcraft_client_api::video_stats::VideoStatsJson;
-use teamcraft_proto::ScreenContentMode;
+use teamcraft_proto::{ScreenContentMode, ScreenShareResolution};
 
 use crate::auth::tauri::{call, invoke, listen};
 
@@ -212,12 +212,18 @@ impl RemoteCalls {
   /// Starts sharing the screen. Call it synchronously from the click: in the browser the picker
   /// opens right here, while the click's user activation lasts (issue #930), and the chosen
   /// screen is shared in the action's turn.
-  pub fn start_screen_share(&self, has_sound: bool, content_mode: ScreenContentMode) {
-    let maybe_picked_screen = self.pick_screen(content_mode, has_sound);
+  pub fn start_screen_share(
+    &self,
+    has_sound: bool,
+    content_mode: ScreenContentMode,
+    resolution: ScreenShareResolution,
+  ) {
+    let maybe_picked_screen = self.pick_screen(content_mode, &resolution, has_sound);
     self.enqueue(QueuedAction {
       action: CallAction::StartScreenShare {
         has_sound,
         content_mode,
+        resolution,
       },
       maybe_picked_screen,
     });
@@ -252,13 +258,21 @@ impl RemoteCalls {
   /// Opens the browser's screen picker now (the page's calls only; the desktop shell has its own).
   #[cfg_attr(
     not(target_arch = "wasm32"),
-    expect(unused_variables, reason = "only the page's picker takes the mode and sound")
+    expect(
+      unused_variables,
+      reason = "only the page's picker takes the mode, size and sound"
+    )
   )]
-  fn pick_screen(&self, content_mode: ScreenContentMode, has_sound: bool) -> Option<Promise> {
+  fn pick_screen(
+    &self,
+    content_mode: ScreenContentMode,
+    resolution: &ScreenShareResolution,
+    has_sound: bool,
+  ) -> Option<Promise> {
     match &self.link {
       CallLink::Shell => None,
       #[cfg(target_arch = "wasm32")]
-      CallLink::Page(_) => crate::web_calls::pick_screen(content_mode, has_sound),
+      CallLink::Page(_) => crate::web_calls::pick_screen(content_mode, resolution, has_sound),
     }
   }
 
@@ -382,15 +396,31 @@ impl RemoteCalls {
         CallAction::StartScreenShare {
           has_sound,
           content_mode,
+          resolution,
         },
-      ) => host.share_screen(has_sound, content_mode, picked).await,
+      ) => {
+        host
+          .share_screen(has_sound, content_mode, &resolution, picked)
+          .await
+      },
       (_, _, action) => self.carry_out(action).await,
     }
   }
 
-  async fn carry_out(&self, action: CallAction) -> Result<CallActionAnswer, String> {
+  #[cfg_attr(
+    not(target_arch = "wasm32"),
+    expect(unused_mut, reason = "only the webview's page decodes video")
+  )]
+  async fn carry_out(&self, mut action: CallAction) -> Result<CallActionAnswer, String> {
     match &self.link {
-      CallLink::Shell => call::<CallActionAnswer>("call_action", &json!({ "action": action })).await,
+      CallLink::Shell => {
+        // The shell announces what this page decodes of its video (#565).
+        #[cfg(target_arch = "wasm32")]
+        if let CallAction::Join { video_decoders, .. } = &mut action {
+          *video_decoders = crate::shell_video::decodable_codecs().await;
+        }
+        call::<CallActionAnswer>("call_action", &json!({ "action": action })).await
+      },
       #[cfg(target_arch = "wasm32")]
       CallLink::Page(host) => host.act(action).await,
     }
@@ -498,6 +528,7 @@ mod tests {
     assert!(is_carried_out_beside(&CallAction::StartScreenShare {
       has_sound: true,
       content_mode: ScreenContentMode::Detail,
+      resolution: ScreenShareResolution::Uhd,
     }));
     for action in [
       CallAction::StopScreenShare,
@@ -517,7 +548,9 @@ mod tests {
     for mode in [ScreenContentMode::Detail, ScreenContentMode::Motion] {
       for has_sound in [false, true] {
         assert!(
-          calls.pick_screen(mode, has_sound).is_none(),
+          calls
+            .pick_screen(mode, &ScreenShareResolution::Uhd, has_sound)
+            .is_none(),
           "{mode:?} {has_sound}"
         );
       }

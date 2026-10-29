@@ -206,7 +206,7 @@ async fn pump(
         let result = match maybe_stream {
           Some(stream) => call.share_video_stream(stream).await,
           None => call
-            .start_screen_share(Default::default(), false)
+            .start_screen_share(&Default::default(), false)
             .await
             .map(|_| ()),
         }
