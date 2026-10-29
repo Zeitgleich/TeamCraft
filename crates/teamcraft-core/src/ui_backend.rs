@@ -1213,6 +1213,10 @@ impl<S: LocalStore> ChatBackend for CoreChatBackend<S> {
     self.verified_policy().presence
   }
 
+  fn screen_share_policy(&self) -> teamcraft_proto::ScreenSharePolicy {
+    self.verified_policy().screen_share
+  }
+
   fn set_custom_status(&self, maybe_status: Option<CustomStatus>) {
     self.command(CoreCommand::SetCustomStatus { maybe_status });
   }

@@ -27,12 +27,12 @@ use teamcraft_media::effects::{
   TractSegmenter,
 };
 use teamcraft_media::system_audio::SystemAudioCapture;
-use teamcraft_media::video::{CAMERA_FRAMERATE, VideoResolution, screen_limits};
+use teamcraft_media::video::{CAMERA_FRAMERATE, ScreenProfile, VideoResolution};
 use teamcraft_media::video_capture::{CameraInfo, CaptureError, CaptureFormat, VideoCapture};
 use teamcraft_media::video_codec::OpenH264Decoder;
 use teamcraft_media::video_jpeg::JpegTranscoder;
 use teamcraft_media::video_pipeline::{BlackReport, FrameFilter};
-use teamcraft_proto::{MediaStreamId, ScreenContentMode, VideoCodec, VideoLayerInfo, VideoTrackKind};
+use teamcraft_proto::{MediaStreamId, VideoCodec, VideoLayerInfo, VideoTrackKind};
 use tracing::{debug, info, warn};
 
 use super::VideoSink;
@@ -244,11 +244,11 @@ pub(super) fn open_camera(
 #[cfg(target_os = "linux")]
 pub(super) fn open_screen(
   maybe_restore_token: Option<&str>,
-  mode: ScreenContentMode,
+  profile: &ScreenProfile,
   has_sound: bool,
 ) -> Result<OpenedScreen, CaptureError> {
   let (capture, maybe_token) =
-    teamcraft_media::capture_portal::PortalCapture::screen(screen_format(mode), maybe_restore_token)?;
+    teamcraft_media::capture_portal::PortalCapture::screen(screen_format(profile), maybe_restore_token)?;
   Ok(OpenedScreen {
     capture: Box::new(capture),
     maybe_token,
@@ -261,14 +261,14 @@ pub(super) fn open_screen(
 #[cfg(target_os = "windows")]
 pub(super) fn open_screen(
   maybe_restore_token: Option<&str>,
-  mode: ScreenContentMode,
+  profile: &ScreenProfile,
   has_sound: bool,
 ) -> Result<OpenedScreen, CaptureError> {
   use teamcraft_media::capture_windows::{ScreenSource, WindowsScreenCapture};
 
   let source = ScreenSource::from_token(maybe_restore_token);
   let maybe_token = source.to_token();
-  let capture = WindowsScreenCapture::open(source, screen_format(mode))?;
+  let capture = WindowsScreenCapture::open(source, screen_format(profile))?;
   Ok(OpenedScreen {
     capture: Box::new(capture),
     maybe_token,
@@ -284,7 +284,7 @@ pub(super) fn open_screen(
 #[cfg(target_os = "macos")]
 pub(super) fn open_screen(
   _maybe_restore_token: Option<&str>,
-  mode: ScreenContentMode,
+  profile: &ScreenProfile,
   has_sound: bool,
 ) -> Result<OpenedScreen, CaptureError> {
   use objc2_foundation::NSBundle;
@@ -294,7 +294,7 @@ pub(super) fn open_screen(
   let maybe_bundle_id = NSBundle::mainBundle()
     .bundleIdentifier()
     .map(|bundle_id| bundle_id.to_string());
-  let mut screen = ScreenCaptureKitScreen::pick(screen_format(mode), maybe_bundle_id.as_deref())?;
+  let mut screen = ScreenCaptureKitScreen::pick(screen_format(profile), maybe_bundle_id.as_deref())?;
   let maybe_sound = has_sound.then(|| Box::new(screen.sound()) as Box<dyn SystemAudioCapture>);
   Ok(OpenedScreen {
     capture: Box::new(screen),
@@ -317,7 +317,7 @@ pub(super) fn close_screen_picker() {}
 #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
 pub(super) fn open_screen(
   _maybe_restore_token: Option<&str>,
-  _mode: ScreenContentMode,
+  _profile: &ScreenProfile,
   _has_sound: bool,
 ) -> Result<OpenedScreen, CaptureError> {
   Err(CaptureError::NoDevice("screen capture on this platform"))
@@ -351,19 +351,33 @@ pub(super) fn camera_layers(source: VideoResolution, limit: VideoResolution) -> 
   teamcraft_media::video::camera_layers(source, CAMERA_FRAMERATE, limit)
 }
 
-/// The largest picture a screen share of `mode` asks the capture for (#530).
-fn screen_format(mode: ScreenContentMode) -> CaptureFormat {
-  let (resolution, framerate) = screen_limits(mode);
+/// The largest picture a screen share of `profile` asks the capture for (#530; 4K for a 4K share,
+/// #565).
+fn screen_format(profile: &ScreenProfile) -> CaptureFormat {
+  let (resolution, framerate) = profile.limits();
   CaptureFormat {
     resolution,
     framerate,
   }
 }
 
-/// Two layers for a screen: the picture within the mode's limits, and a half-size one for weak
-/// links.
-pub(super) fn screen_layers(format: CaptureFormat, mode: ScreenContentMode) -> Vec<VideoLayerInfo> {
-  teamcraft_media::video::screen_layers(format.resolution, format.framerate, mode)
+/// The layers of a screen: the picture within the profile's limits, and a half-size one for weak
+/// links (and a quarter-size one above 1440p).
+pub(super) fn screen_layers(format: CaptureFormat, profile: &ScreenProfile) -> Vec<VideoLayerInfo> {
+  profile.layers(format.resolution, format.framerate)
+}
+
+/// The video codecs this desktop decodes, for the call's capabilities (#565): H.264 always (the
+/// shell turns it into images where its page can't decode it), and what else the page told it
+/// it decodes with WebCodecs (AV1); the shell can't turn those into images.
+pub(super) fn decodable_codecs(page: &[VideoCodec]) -> Vec<VideoCodec> {
+  let mut codecs: Vec<VideoCodec> = page
+    .iter()
+    .filter(|codec| **codec == VideoCodec::Av1)
+    .cloned()
+    .collect();
+  codecs.push(VideoCodec::H264);
+  codecs
 }
 
 /// The chosen camera, opened, with the effects that go in front of it: what the call sends and
@@ -436,6 +450,7 @@ const JPEG_FLAG: u8 = 0x02;
 const CODEC_H264: u8 = 1;
 const CODEC_VP9: u8 = 2;
 const CODEC_JPEG: u8 = 3;
+const CODEC_AV1: u8 = 4;
 
 /// Sends a watched track's frames as they arrive, for the webview's WebCodecs decoder.
 pub(super) fn h264_sink(send: impl Fn(Vec<u8>) -> bool + Send + Sync + 'static) -> VideoSink {
@@ -505,14 +520,15 @@ fn transcode_to_jpeg(
 }
 
 /// One received frame for the webview, as a single binary channel message:
-/// `[version u8][flags u8: bit 0 keyframe, bit 1 JPEG][codec u8: 1 H.264, 2 VP9, 3 JPEG, 0 other]`
-/// `[reserved u8][stream id u32 BE][timestamp µs u64 BE]` and then the payload (H.264 in Annex B,
-/// or one complete JPEG image).
+/// `[version u8][flags u8: bit 0 keyframe, bit 1 JPEG][codec u8: 1 H.264, 2 VP9, 3 JPEG, 4 AV1,`
+/// `0 other][reserved u8][stream id u32 BE][timestamp µs u64 BE]` and then the payload (H.264 in
+/// Annex B, AV1 as OBUs (#565), or one complete JPEG image).
 pub(super) fn video_message(frame: &ReceivedVideoFrame) -> Vec<u8> {
   let codec = match frame.codec {
     VideoCodec::H264 => CODEC_H264,
     VideoCodec::Vp9 => CODEC_VP9,
-    _ => 0,
+    VideoCodec::Av1 => CODEC_AV1,
+    VideoCodec::Unknown(_) => 0,
   };
   let flags = if frame.is_keyframe { KEYFRAME_FLAG } else { 0 };
   message(flags, codec, frame.stream_id, timestamp_us(frame), &frame.data)
@@ -631,6 +647,8 @@ fn illustration(preset: UiBackgroundPreset) -> PresetBackground {
 
 #[cfg(test)]
 mod tests {
+  use teamcraft_proto::ScreenContentMode;
+
   use super::*;
 
   /// #819: every cause gets its own hint; "close other apps" only when another app holds it.
@@ -749,16 +767,38 @@ mod tests {
   fn cameras_get_three_layers_and_screens_two() {
     let limit = teamcraft_media::video::camera_limit(None);
     assert_eq!(camera_layers(camera_format(limit).resolution, limit).len(), 3);
-    let screen = screen_layers(
-      screen_format(ScreenContentMode::Detail),
-      ScreenContentMode::Detail,
-    );
+    let detail = ScreenProfile::default();
+    let screen = screen_layers(screen_format(&detail), &detail);
     assert_eq!(screen.len(), 2);
     assert_eq!(
       (screen[1].width, screen[1].height, screen[1].max_framerate),
       (2560, 1440, 30)
     );
     assert_eq!((screen[0].width, screen[0].height), (1280, 720));
+  }
+
+  /// A 4K share asks the capture for 4K (#565); the page's AV1 decoder joins H.264 (#565).
+  #[test]
+  fn uhd_screens_capture_4k_and_the_page_adds_its_decoders() {
+    let uhd = ScreenProfile {
+      mode: ScreenContentMode::Detail,
+      size: teamcraft_proto::ScreenShareResolution::Uhd,
+    };
+    let format = screen_format(&uhd);
+    assert_eq!(
+      (
+        format.resolution.width,
+        format.resolution.height,
+        format.framerate
+      ),
+      (3840, 2160, 30)
+    );
+    assert_eq!(screen_layers(format, &uhd).len(), 3);
+    assert_eq!(decodable_codecs(&[]), vec![VideoCodec::H264]);
+    assert_eq!(
+      decodable_codecs(&[VideoCodec::Av1, VideoCodec::H264, VideoCodec::Vp9]),
+      vec![VideoCodec::Av1, VideoCodec::H264]
+    );
   }
 
   #[test]
@@ -782,6 +822,15 @@ mod tests {
         1, 1, 1, 0, 1, 2, 3, 4, 0, 0, 0, 0, 0, 0x0f, 0x42, 0x40, 0, 0, 0, 1, 0x65
       ]
     );
+    // AV1 screen shares (#565): code 4, the OBUs as they came.
+    let av1 = ReceivedVideoFrame {
+      codec: VideoCodec::Av1,
+      is_keyframe: false,
+      data: vec![0x12, 0x00, 0x32],
+      ..frame
+    };
+    assert_eq!(&video_message(&av1)[..4], &[1, 0, 4, 0]);
+    assert_eq!(&video_message(&av1)[16..], &[0x12, 0x00, 0x32]);
   }
 
   #[test]
@@ -802,7 +851,7 @@ mod tests {
         },
         framerate: 15,
       },
-      ScreenContentMode::Detail,
+      &ScreenProfile::default(),
     )[0];
     let mut encoder = OpenH264Encoder::new(&layer, VideoContent::Camera).unwrap();
     let picture = encoder

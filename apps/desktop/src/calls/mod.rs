@@ -51,12 +51,12 @@ use teamcraft_media::camera_choice::CameraReport;
 use teamcraft_media::effects::{BackgroundImage, EffectHandle};
 use teamcraft_media::ringtone;
 use teamcraft_media::system_audio::SystemAudioCapture;
-use teamcraft_media::video::{VideoResolution, camera_limit};
+use teamcraft_media::video::{ScreenProfile, VideoResolution, camera_limit};
 use teamcraft_media::video_capture::{CameraInfo, CaptureError};
 use teamcraft_media::video_pipeline::{BlackReport, VideoSendConfig, VideoStartError, preferred_encoders};
 use teamcraft_proto::{
-  AudioCodec, ConversationId, DeviceId, GatewayEvent, MediaCapabilities, MediaStreamId, ScreenContentMode,
-  VideoCodec, VideoTrackKind,
+  AudioCodec, ConversationId, DeviceId, GatewayEvent, MediaCapabilities, MediaStreamId, VideoCodec,
+  VideoTrackKind,
 };
 use tokio::sync::{mpsc, oneshot};
 
@@ -314,10 +314,12 @@ impl CallHost {
 
   /// Joins the conversation's call with what the core prepared, leaving any other call first.
   /// `is_muted`: the microphone stays muted from the first frame.
+  /// `page_decoders`: what the page decodes of the call's video (#565).
   pub async fn join(
     &self,
     request: CallRequest,
     is_muted: bool,
+    page_decoders: &[VideoCodec],
     preparation: CallPreparation,
     tickets: Arc<dyn JoinTicketSource>,
   ) -> Result<(), String> {
@@ -332,7 +334,7 @@ impl CallHost {
       (state.microphone.clone(), state.speakers.clone())
     };
     let own_device = preparation.device_id;
-    let mut config = native_config(preparation, microphone, speakers)?;
+    let mut config = native_config(preparation, microphone, speakers, page_decoders)?;
     config.maybe_ticket_source = Some(tickets);
     config.status_cues = status_cues(lock(&self.state).status_sounds);
     // Push-to-talk: the microphone opens only while the key is held.
@@ -744,15 +746,17 @@ impl CallHost {
   /// Shows the system's screen/window picker and shares the choice as its own stream, with the
   /// computer's sound when `has_sound`. Sound that can't be captured here doesn't stop the share;
   /// the call state says so.
-  pub async fn start_screen_share(&self, has_sound: bool, mode: ScreenContentMode) -> Result<(), String> {
+  pub async fn start_screen_share(&self, has_sound: bool, profile: ScreenProfile) -> Result<(), String> {
     self.ensure_video_codec().await?;
     let Some(wait) = self.screen_picker.open() else {
       tracing::info!("a screen picker is open already");
       return Ok(());
     };
     let maybe_token = lock(&self.state).maybe_screen_token.clone();
-    let picking =
-      tokio::task::spawn_blocking(move || video::open_screen(maybe_token.as_deref(), mode, has_sound));
+    let picking = tokio::task::spawn_blocking({
+      let profile = profile.clone();
+      move || video::open_screen(maybe_token.as_deref(), &profile, has_sound)
+    });
     let opened = tokio::select! {
       opened = picking => opened.map_err(|error| error.to_string())?,
       () = wait.cancelled.notified() => {
@@ -782,7 +786,7 @@ impl CallHost {
     let config = VideoSendConfig {
       maybe_layer_plan: None,
       kind: VideoTrackKind::Screen,
-      layers: video::screen_layers(capture.format(), mode),
+      layers: video::screen_layers(capture.format(), &profile),
       capture,
       encoders: preferred_encoders(),
       maybe_filter: None,
@@ -1404,14 +1408,17 @@ fn native_config(
   preparation: CallPreparation,
   microphone: AudioDeviceChoice,
   speakers: AudioDeviceChoice,
+  page_decoders: &[VideoCodec],
 ) -> Result<NativeCallConfig, String> {
   let engine = CallEngineConfig {
     user_id: preparation.user_id,
     device_id: preparation.device_id,
     capabilities: MediaCapabilities {
       audio_codecs: vec![AudioCodec::Opus],
+      // The desktop's encoders are H.264 (VideoToolbox, VA-API, OpenH264); AV1 is decoded where its
+      // page does (#565).
       video_encoders: vec![VideoCodec::H264],
-      video_decoders: vec![VideoCodec::H264],
+      video_decoders: video::decodable_codecs(page_decoders),
       max_simulcast_layers: 3,
       max_frame_fragments: teamcraft_proto::MAX_VIDEO_FRAME_FRAGMENTS,
     },

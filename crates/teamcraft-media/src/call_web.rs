@@ -51,6 +51,7 @@ pub use picture::decode_picture;
 pub use segmentation_worker::{SegmentationWorker, WorkerMask};
 #[cfg(feature = "effects")]
 pub use video::CameraEffects;
+pub use video::CodecSupport;
 
 use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, HashMap, VecDeque};
@@ -65,8 +66,8 @@ use futures::channel::{mpsc, oneshot};
 use futures::future::{Either, select};
 use js_sys::{Array, Float32Array, Function, Object, Promise, Reflect, Uint8Array};
 use teamcraft_proto::{
-  CallClientMessage, CallServerMessage, DeviceId, MediaStreamId, SFU_GOING_AWAY_CLOSE_CODE,
-  ScreenContentMode, VideoCodec, VideoPublicationId, VideoTrack, VideoTrackKind,
+  CallClientMessage, CallServerMessage, DeviceId, MediaStreamId, SFU_GOING_AWAY_CLOSE_CODE, VideoCodec,
+  VideoPublicationId, VideoTrack, VideoTrackKind,
 };
 use thiserror::Error;
 use tracing::{debug, error, info, warn};
@@ -105,7 +106,7 @@ use crate::call_video::ReceivedVideoFrame;
 use crate::datagram::SimulcastLayer;
 use crate::jitter::{JitterBuffer, JitterBufferConfig, Playout};
 use crate::rtp::AudioLevel;
-use crate::video::{EncodedVideoFrame, TOP_LAYER, VideoResolution, chosen_layer};
+use crate::video::{EncodedVideoFrame, ScreenProfile, TOP_LAYER, VideoResolution, chosen_layer};
 use crate::web_api::{
   AudioData, AudioDecoder, AudioEncoder, EncodedAudioChunk, WORKLET_SOURCE, WebTransport,
   WebTransportBidirectionalStream, datagram_writable, dictionary, has_global,
@@ -667,11 +668,11 @@ impl WebCall {
   /// is sent (see [`WebCall::share_screen_stream`]).
   pub async fn start_screen_share(
     &self,
-    mode: ScreenContentMode,
+    profile: &ScreenProfile,
     has_sound: bool,
   ) -> Result<bool, WebCallError> {
-    let stream = video::capture_screen(mode, has_sound).await?;
-    self.share_screen_stream(stream, mode).await
+    let stream = video::capture_screen(profile, has_sound).await?;
+    self.share_screen_stream(stream, profile).await
   }
 
   /// Shares a screen the app asked for itself ([`request_screen`]) as the screen share, replacing
@@ -681,10 +682,10 @@ impl WebCall {
   pub async fn share_screen_stream(
     &self,
     stream: MediaStream,
-    mode: ScreenContentMode,
+    profile: &ScreenProfile,
   ) -> Result<bool, WebCallError> {
     let maybe_sound = screen_sound::sound_track(&stream);
-    self.start_video(stream, video::screen_plan(mode)).await?;
+    self.start_video(stream, video::screen_plan(profile)).await?;
     let Some(track) = maybe_sound else {
       return Ok(false);
     };
@@ -704,7 +705,7 @@ impl WebCall {
   /// running one.
   pub async fn share_video_stream(&self, stream: MediaStream) -> Result<(), WebCallError> {
     self
-      .start_video(stream, video::screen_plan(ScreenContentMode::default()))
+      .start_video(stream, video::screen_plan(&ScreenProfile::default()))
       .await
   }
 
@@ -807,8 +808,15 @@ pub async fn capture_camera(
 /// the click's user activation is gone (issue #930). [`picked_screen`] waits for the choice. With
 /// `has_sound` the picker also offers the tab's or the system's sound, where the browser can
 /// capture it (Chromium).
-pub fn request_screen(mode: ScreenContentMode, has_sound: bool) -> Result<Promise, WebCallError> {
-  video::request_screen(mode, has_sound)
+pub fn request_screen(profile: &ScreenProfile, has_sound: bool) -> Result<Promise, WebCallError> {
+  video::request_screen(profile, has_sound)
+}
+
+/// What this browser encodes and decodes of the video codecs a call may use (#565), for the
+/// call's [`MediaCapabilities`]: H.264 always (what every client sends and takes), AV1 where
+/// WebCodecs offers it for a screen share's top layer (encoder) and at all (decoder).
+pub async fn video_codec_support() -> video::CodecSupport {
+  video::codec_support().await
 }
 
 /// The screen the user chose in a picker [`request_screen`] opened (possibly in another wasm
@@ -1395,6 +1403,7 @@ impl CallState<'_> {
               self.update_layer(engine, track.stream_id);
             },
             CallEngineEvent::VideoUnpublished(_) => self.on_publication(&event),
+            CallEngineEvent::DecodableVideoCodecs(_) => self.follow_codecs(engine),
             CallEngineEvent::KeyframeRequested { stream_id, layer } => {
               if let Some(sender) = self.sender_of(*stream_id) {
                 sender.request_keyframe(*layer);
@@ -1760,10 +1769,45 @@ impl CallState<'_> {
     self.stop_video(engine, &kind);
     let publication = self.next_publication;
     self.next_publication = VideoPublicationId(publication.0.wrapping_add(1));
-    let sender = TrackSender::start(stream, plan, publication, self.inputs).await?;
-    engine.publish_video(publication, kind, VideoCodec::H264, sender.layers());
+    let codec = engine.video_codec_for(&plan.codecs);
+    let sender = TrackSender::start(stream, plan, codec.clone(), publication, self.inputs).await?;
+    engine.publish_video(publication, kind, codec, sender.layers());
     self.senders.push(sender);
+    // What the others decode may have changed while the capture started.
+    self.follow_codecs(engine);
     Ok(())
+  }
+
+  /// Publishes own tracks anew in another codec where the best one every viewer decodes changed
+  /// (#565: a device joined that can't decode AV1, or the last one that couldn't left). The
+  /// capture goes on; viewers see the track end and the new one start, with keyframes. A track
+  /// whose encoders can't open in the new codec keeps its own (viewers that can't decode it see
+  /// nothing until it ends).
+  fn follow_codecs(&mut self, engine: &mut CallEngine) {
+    for sender in &mut self.senders {
+      let wanted = engine.video_codec_for(sender.codecs());
+      if wanted == *sender.codec() {
+        continue;
+      }
+      let publication = self.next_publication;
+      let withdrawn = sender.publication.own.id;
+      match sender.switch_codec(wanted.clone(), publication, self.inputs) {
+        Ok(()) => {
+          self.next_publication = VideoPublicationId(publication.0.wrapping_add(1));
+          debug!(kind = ?sender.publication.kind, codec = %wanted, "video track goes out in another codec");
+          engine.withdraw_video(withdrawn);
+          engine.publish_video(
+            publication,
+            sender.publication.kind.clone(),
+            wanted,
+            sender.layers(),
+          );
+        },
+        Err(error) => {
+          warn!(%error, codec = %wanted, "video encoders can't switch codec; the track keeps its own")
+        },
+      }
+    }
   }
 
   /// Sends the screen share's sound. Only with a running share: a share stopped meanwhile took its

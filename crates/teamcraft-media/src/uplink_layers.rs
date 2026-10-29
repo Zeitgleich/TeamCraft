@@ -623,6 +623,43 @@ mod tests {
     assert!(uplink.allows(SCREEN, 0));
   }
 
+  /// A 4K share (#565) steps down through its three layers as the uplink shrinks: 4K at about 15
+  /// Mbit/s, 1080p at a quarter of that, 540p at a sixteenth.
+  #[test]
+  fn a_4k_screen_share_steps_down_layer_by_layer() {
+    let shares = crate::video::screen_layers(
+      crate::video::VideoResolution {
+        width: 3840,
+        height: 2160,
+      },
+      30,
+      teamcraft_proto::ScreenContentMode::Detail,
+      &teamcraft_proto::ScreenShareResolution::Uhd,
+    );
+    assert_eq!(shares.len(), 3);
+    let tracks = [OwnTrack {
+      stream: SCREEN,
+      kind: &VideoTrackKind::Screen,
+      layers: &shares,
+      adapts_bitrate: false,
+    }];
+    let start = Instant::now();
+    let at = |seconds: u64| start + Duration::from_secs(seconds);
+    let mut uplink = UplinkLayers::new(300_000);
+    uplink.on_estimate(25_000_000, &tracks, false, &policy(), at(0));
+    assert!(uplink.allows(SCREEN, 2));
+    // A 10 Mbit/s uplink (the estimator's old ceiling) can't carry 4K for long: down to 1080p.
+    uplink.on_estimate(10_000_000, &tracks, false, &policy(), at(1));
+    uplink.on_estimate(10_000_000, &tracks, false, &policy(), at(5));
+    assert!(!uplink.allows(SCREEN, 2));
+    assert!(uplink.allows(SCREEN, 1));
+    // A weak link keeps the 540p layer.
+    uplink.on_estimate(2_000_000, &tracks, false, &policy(), at(6));
+    uplink.on_estimate(2_000_000, &tracks, false, &policy(), at(10));
+    assert!(!uplink.allows(SCREEN, 1));
+    assert!(uplink.allows(SCREEN, 0));
+  }
+
   /// Issue #939: a step up that the uplink doesn't carry is undone at once; the next one waits,
   /// longer with every failure, and as before once a step held.
   #[test]

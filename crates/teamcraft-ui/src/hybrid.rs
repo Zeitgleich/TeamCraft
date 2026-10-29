@@ -12,7 +12,7 @@ use leptos::prelude::{Get, GetUntracked, RwSignal, Set};
 use std::rc::Rc;
 use teamcraft_client_api::calls::{
   CallMoveOffer, CallStatusSounds, CallsUnavailableReason, OrgBackgroundRule, RemoteVideoTrack,
-  ScreenContentMode, VideoQuality,
+  ScreenContentMode, ScreenShareResolution, VideoQuality,
 };
 use teamcraft_proto::OrgBackgroundId;
 
@@ -348,6 +348,10 @@ impl<C: ChatBackend + 'static> ChatBackend for Hybrid<C> {
 
   fn presence_policy(&self) -> PresencePolicy {
     self.chat.presence_policy()
+  }
+
+  fn screen_share_policy(&self) -> teamcraft_proto::ScreenSharePolicy {
+    self.chat.screen_share_policy()
   }
 
   fn set_activity(&self, is_idle: bool) {
@@ -1118,9 +1122,14 @@ impl<C: ChatBackend> CallBackend for Hybrid<C> {
     }
   }
 
-  fn start_screen_share(&self, has_sound: bool, content_mode: ScreenContentMode) {
+  fn start_screen_share(
+    &self,
+    has_sound: bool,
+    content_mode: ScreenContentMode,
+    resolution: ScreenShareResolution,
+  ) {
     if let Some(calls) = &self.maybe_calls {
-      calls.start_screen_share(has_sound, content_mode);
+      calls.start_screen_share(has_sound, content_mode, resolution);
     }
   }
 

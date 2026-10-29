@@ -50,6 +50,8 @@ pub enum CallEvent {
   StartScreenShare {
     has_sound: bool,
     mode: ScreenContentMode,
+    /// What the user picked; the app keeps it within the workspace's limit (#565).
+    resolution: ScreenShareResolution,
   },
   StopScreenShare,
   StatusSounds(CallStatusSounds),
@@ -86,6 +88,8 @@ pub struct CallState {
   pub share_sound: RwSignal<bool>,
   /// What a screen share keeps under pressure: resolution (detail) or frame rate (motion).
   pub screen_mode: RwSignal<ScreenContentMode>,
+  /// How large a screen share may be: up to 1440p, or 4K where the workspace allows it (#565).
+  pub screen_resolution: RwSignal<ScreenShareResolution>,
   pub has_hand_raised: RwSignal<bool>,
   pub is_deafened: RwSignal<bool>,
   /// An announced move of this call into a meeting room the user hasn't followed yet.
@@ -126,6 +130,7 @@ impl CallState {
       is_sharing_screen: RwSignal::new(false),
       share_sound: RwSignal::new(false),
       screen_mode: RwSignal::new(ScreenContentMode::default()),
+      screen_resolution: RwSignal::new(ScreenShareResolution::default()),
       has_hand_raised: RwSignal::new(false),
       is_deafened: RwSignal::new(false),
       move_offer: RwSignal::new(None),
@@ -220,6 +225,7 @@ impl CallState {
       self.emit(CallEvent::StartScreenShare {
         has_sound: self.share_sound.get_untracked(),
         mode: self.screen_mode.get_untracked(),
+        resolution: self.screen_resolution.get_untracked(),
       });
     } else {
       self.emit(CallEvent::StopScreenShare);

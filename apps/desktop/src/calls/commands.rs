@@ -9,6 +9,7 @@ use teamcraft_client_api::remote::{CallAction, CallActionAnswer, CallSnapshot};
 use teamcraft_client_api::remote::{ChatAnswer, ChatQuery};
 use teamcraft_client_api::video_stats::VideoStatsReport;
 use teamcraft_media::effects::BackgroundImage;
+use teamcraft_media::video::ScreenProfile;
 use teamcraft_proto::MediaStreamId;
 
 use super::{CallHost, ChannelId, CoreJoinTickets, push_to_talk, video};
@@ -274,11 +275,14 @@ pub async fn call_action(
       request,
       is_muted,
       is_camera_on,
+      video_decoders,
     } => {
       let runtime = core.current()?;
       let preparation = runtime.prepare_call(request.conversation).await?;
       let tickets = Arc::new(CoreJoinTickets::new(runtime, request.conversation));
-      calls.join(request, is_muted, preparation, tickets).await?;
+      calls
+        .join(request, is_muted, &video_decoders, preparation, tickets)
+        .await?;
       // The camera starts with the call (#453). One that can't start leaves the call running; the
       // answer says why.
       if is_camera_on {
@@ -299,7 +303,14 @@ pub async fn call_action(
     CallAction::StartScreenShare {
       has_sound,
       content_mode,
-    } => calls.start_screen_share(has_sound, content_mode).await?,
+      resolution,
+    } => {
+      let profile = ScreenProfile {
+        mode: content_mode,
+        size: resolution,
+      };
+      calls.start_screen_share(has_sound, profile).await?
+    },
     CallAction::StopScreenShare => calls.stop_screen_share().await,
     CallAction::OpenSystemVideoEffects => open_system_video_effects(&app)?,
     CallAction::SetPushToTalk {

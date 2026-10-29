@@ -68,6 +68,7 @@ impl FakeCalls {
         request,
         is_muted,
         is_camera_on,
+        ..
       } => {
         snapshot.incoming.clear();
         snapshot.running = vec![RunningCall {

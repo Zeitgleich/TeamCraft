@@ -131,6 +131,9 @@ struct RoomState {
   forwarder: Forwarder,
   dave: DaveCoordinator,
   next_stream_id: u32,
+  /// The video codecs each device was last told the others decode (#565); a device without an
+  /// entry hears them with its next (re)join.
+  decodable_announced: HashMap<DeviceId, Vec<VideoCodec>>,
 }
 
 /// What releasing a session's slot did.
@@ -431,6 +434,7 @@ impl Room {
       forwarder: Forwarder::new(config.forwarding),
       dave: DaveCoordinator::new(call_id)?,
       next_stream_id: 1,
+      decodable_announced: HashMap::new(),
     };
     Ok(Self {
       call_id,
@@ -720,6 +724,8 @@ impl Room {
       Some(_) => {
         let resumed = state.resume(participant_id, capabilities, handle, session, now);
         state.welcome(self.call_id, participant_id, package, self.reconnect_grace);
+        // Its capabilities may differ on the new connection: the others' codecs may change too.
+        state.announce_decodable_codecs(Some(participant_id));
         // After `joined`: what its tracks need now, which may have changed while it was away.
         state.apply(resumed.effects);
         if resumed.was_reconnecting {
@@ -762,6 +768,7 @@ impl Room {
         if let Some(participant) = info {
           state.broadcast_except(participant_id, CallEvent::ParticipantJoined { participant });
         }
+        state.announce_decodable_codecs(Some(participant_id));
         JoinOutcome::Joined
       },
     };
@@ -1077,6 +1084,8 @@ impl RoomState {
     self.apply(removal.effects);
     let outbound = self.dave.on_leave(participant_id);
     self.dispatch(outbound);
+    self.decodable_announced.remove(&participant_id);
+    self.announce_decodable_codecs(None);
     info!(call_id = %call_id, participant_id = %participant_id, "participant left");
   }
 
@@ -1120,6 +1129,30 @@ impl RoomState {
           },
         ),
       }
+    }
+  }
+
+  /// Tells each connected participant the video codecs the others decode (#565) when they
+  /// changed since it was last told, and `maybe_fresh` (a device that just joined or rejoined) in
+  /// any case. A reconnecting device hears them when it is back.
+  fn announce_decodable_codecs(&mut self, maybe_fresh: Option<DeviceId>) {
+    let devices: Vec<DeviceId> = self.participants.keys().copied().collect();
+    for device_id in devices {
+      if self.handle_of(device_id).is_none() {
+        self.decodable_announced.remove(&device_id);
+        continue;
+      }
+      let codecs = self.forwarder.decodable_video_codecs(device_id);
+      if maybe_fresh != Some(device_id) && self.decodable_announced.get(&device_id) == Some(&codecs) {
+        continue;
+      }
+      self.send_to(
+        device_id,
+        CallEvent::DecodableVideoCodecs {
+          codecs: codecs.clone(),
+        },
+      );
+      self.decodable_announced.insert(device_id, codecs);
     }
   }
 
@@ -1386,6 +1419,87 @@ mod tests {
       "a reconnecting device loses its slot at once"
     );
     assert!(devices.contains(&id(20)));
+  }
+
+  mod decodable_codecs {
+    use teamcraft_proto::KNOWN_VIDEO_CODECS;
+
+    use super::*;
+
+    fn decoding(codecs: &[VideoCodec]) -> MediaCapabilities {
+      MediaCapabilities {
+        video_encoders: vec![VideoCodec::Av1, VideoCodec::H264],
+        video_decoders: codecs.to_vec(),
+        ..MediaCapabilities::default()
+      }
+    }
+
+    fn announced(events: &[CallEvent]) -> Vec<Vec<VideoCodec>> {
+      events
+        .iter()
+        .filter_map(|event| match event {
+          CallEvent::DecodableVideoCodecs { codecs } => Some(codecs.clone()),
+          _ => None,
+        })
+        .collect()
+    }
+
+    /// A publisher hears what everyone else decodes: a newcomer that decodes less makes it fall
+    /// back, and its leaving lets it use the better codec again (#565).
+    #[test]
+    fn a_publisher_hears_what_the_others_decode() {
+      let rooms = Rooms::new(SfuConfig::default());
+      let both = [VideoCodec::Av1, VideoCodec::H264];
+      let (mut alice_rx, room, _) = join_capable(&rooms, 1, 10, decoding(&both));
+      assert_eq!(
+        announced(&drain(&mut alice_rx)),
+        vec![KNOWN_VIDEO_CODECS.to_vec()],
+        "alone: anything goes"
+      );
+
+      let (mut bob_rx, _, _) = join_capable(&rooms, 2, 20, decoding(&both));
+      assert_eq!(announced(&drain(&mut alice_rx)), vec![both.to_vec()]);
+      assert_eq!(announced(&drain(&mut bob_rx)), vec![both.to_vec()]);
+
+      let (mut carol_rx, _, carol_session) = join_capable(&rooms, 3, 30, decoding(&[VideoCodec::H264]));
+      assert_eq!(announced(&drain(&mut alice_rx)), vec![vec![VideoCodec::H264]]);
+      assert_eq!(announced(&drain(&mut bob_rx)), vec![vec![VideoCodec::H264]]);
+      assert_eq!(announced(&drain(&mut carol_rx)), vec![both.to_vec()]);
+
+      // Audio-only devices (no decoders: older clients, dial-ins) don't hold anyone back.
+      let (_dave_rx, _, _) = join_capable(&rooms, 4, 40, MediaCapabilities::default());
+      assert!(
+        announced(&drain(&mut alice_rx)).is_empty(),
+        "nothing changed for alice"
+      );
+
+      assert!(rooms.leave(&room, id(30), carol_session));
+      assert_eq!(announced(&drain(&mut alice_rx)), vec![both.to_vec()]);
+      assert_eq!(announced(&drain(&mut bob_rx)), vec![both.to_vec()]);
+    }
+  }
+
+  /// Joins user `user` with device `device` that has `capabilities`; returns its signaling queue,
+  /// the room and the session.
+  fn join_capable(
+    rooms: &Rooms,
+    user: i64,
+    device: i64,
+    capabilities: MediaCapabilities,
+  ) -> (Receiver<Outgoing>, Arc<Room>, SessionId) {
+    let (signal_tx, signal_rx) = mpsc::channel(64);
+    let handle = ParticipantHandle {
+      link: Arc::new(QuietLink),
+      signal_tx,
+    };
+    let (room, session, _) = rooms
+      .join(
+        grant(CALL, Some(CONVERSATION), user, device),
+        capabilities,
+        handle,
+      )
+      .unwrap();
+    (signal_rx, room, session)
   }
 
   /// Joins user `user` with device `device`; returns its signaling queue and session.

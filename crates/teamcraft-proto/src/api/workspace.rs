@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
 use crate::wire_enum::wire_enum;
-use crate::{Base64Bytes, DeviceId, HistoryPolicy, OrgBackgroundId, UnixMillis};
+use crate::{Base64Bytes, DeviceId, HistoryPolicy, OrgBackgroundId, ScreenShareResolution, UnixMillis};
 
 wire_enum! {
   /// Which log an entry belongs to.
@@ -472,6 +472,25 @@ impl Default for RecoveryPolicy {
   }
 }
 
+/// How sharp screen shares may be (#565). Clients apply it: a share asked for at a higher
+/// resolution than the policy allows is sent at the allowed one. Not a security boundary (the
+/// SFU doesn't check it); it keeps the bandwidth of shares within what the workspace wants.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct ScreenSharePolicy {
+  /// The largest picture people may share their screen at: `uhd` lets them pick 4K for a share,
+  /// `standard` keeps every share at up to 1440p.
+  pub max_resolution: ScreenShareResolution,
+}
+
+impl Default for ScreenSharePolicy {
+  fn default() -> Self {
+    // 4K is offered: each share still starts at the standard size unless its sharer picks 4K.
+    Self {
+      max_resolution: ScreenShareResolution::Uhd,
+    }
+  }
+}
+
 /// Default for [`OwnerPolicy::recommended_minimum`].
 pub const DEFAULT_RECOMMENDED_OWNERS: u8 = 2;
 
@@ -523,6 +542,8 @@ pub struct WorkspacePolicy {
   pub owners: OwnerPolicy,
   #[serde(default)]
   pub recovery: RecoveryPolicy,
+  #[serde(default)]
+  pub screen_share: ScreenSharePolicy,
 }
 
 /// The JSON document a policy entry's `payload` must contain (and the owner signs).
@@ -566,6 +587,7 @@ impl Default for WorkspacePolicy {
       client_updates: ClientUpdatePolicy::default(),
       owners: OwnerPolicy::default(),
       recovery: RecoveryPolicy::default(),
+      screen_share: ScreenSharePolicy::default(),
     }
   }
 }
@@ -752,6 +774,20 @@ mod tests {
     let older: PresencePolicy =
       serde_json::from_str(r#"{"statuses_enabled":true,"custom_status_enabled":true}"#).unwrap();
     assert_eq!(older.maybe_away_timeout_minutes, None);
+  }
+
+  #[test]
+  fn screen_share_allows_4k_by_default_and_older_policies_still_parse() {
+    let mut value = serde_json::to_value(WorkspacePolicy::default()).unwrap();
+    assert_eq!(
+      value["screen_share"],
+      serde_json::json!({"max_resolution": "uhd"})
+    );
+    value.as_object_mut().unwrap().remove("screen_share");
+    let older: WorkspacePolicy = serde_json::from_value(value).unwrap();
+    assert_eq!(older.screen_share, ScreenSharePolicy::default());
+    let limited: ScreenSharePolicy = serde_json::from_str(r#"{"max_resolution":"standard"}"#).unwrap();
+    assert_eq!(limited.max_resolution, ScreenShareResolution::Standard);
   }
 
   #[test]

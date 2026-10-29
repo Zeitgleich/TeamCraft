@@ -85,12 +85,14 @@ pub const EXPORT_VIDEO_STATS: &str = "video_stats";
 pub const EXPORT_NETWORK_CHANGED: &str = "network_changed";
 /// `stop() -> Promise`: leaves a running call; the page is signing out.
 pub const EXPORT_STOP: &str = "stop";
-/// `pick_screen(ScreenContentMode JSON, has_sound) -> Promise<MediaStream>`: opens the browser's
-/// screen picker at once (`getDisplayMedia`), offering the tab's or the system's sound with
-/// `has_sound` (#441; left out, no sound); call it synchronously in the click handler. Throws when
+/// `pick_screen(ScreenContentMode JSON, has_sound, ScreenShareResolution JSON) -> Promise<MediaStream>`:
+/// opens the browser's screen picker at once (`getDisplayMedia`), offering the tab's or the
+/// system's sound with `has_sound` (#441; left out, no sound), for a share of the resolution
+/// (#565; left out, standard); call it synchronously in the click handler. Throws when
 /// the browser can't open one; the page then falls back to [`EXPORT_ACT`], which reports why.
 pub const EXPORT_PICK_SCREEN: &str = "pick_screen";
-/// `share_screen(has_sound, ScreenContentMode JSON, Promise<MediaStream>) -> Promise<undefined>`:
+/// `share_screen(has_sound, ScreenContentMode JSON, Promise<MediaStream>, ScreenShareResolution JSON)
+/// -> Promise<undefined>` (the resolution left out: standard):
 /// shares the screen chosen in a picker [`EXPORT_PICK_SCREEN`] opened, as `act` would carry out
 /// `StartScreenShare` (a closed picker is no failure). The module owns the stream from here: it
 /// stops it when the call ended meanwhile or the share fails.

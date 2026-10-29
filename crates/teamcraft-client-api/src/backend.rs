@@ -28,7 +28,7 @@ use crate::admin::{
 use crate::calls::{
   ActiveCall, BackgroundEffect, BackgroundImageInfo, CallHistoryItem, CallMoveOffer, CallRequest,
   CallStatusSounds, CallsUnavailableReason, HuddleInfo, IncomingCall, MediaDevices, Participant,
-  RemoteVideoTrack, ScreenContentMode,
+  RemoteVideoTrack, ScreenContentMode, ScreenShareResolution,
 };
 use crate::calls::{
   CallPreview, CameraFallback, JoinMedia, OrgBackgroundRule, OrgBackgrounds, PreviewCamera,
@@ -121,6 +121,11 @@ pub trait ChatBackend {
   /// write their own, and the presets. The server enforces it; the UI only offers what it allows.
   fn presence_policy(&self) -> teamcraft_proto::PresencePolicy {
     teamcraft_proto::PresencePolicy::default()
+  }
+  /// How large screen shares may be (#565): the share options offer 4K only where the workspace
+  /// allows it, and a share asked for larger is sent at the allowed size.
+  fn screen_share_policy(&self) -> teamcraft_proto::ScreenSharePolicy {
+    teamcraft_proto::ScreenSharePolicy::default()
   }
 
   /// Whether the user follows the thread (followed threads feed the threads inbox).
@@ -766,7 +771,13 @@ pub trait CallBackend {
   /// Opens the system's video effects panel (macOS); nothing elsewhere.
   fn open_system_video_effects(&self) {}
   /// `has_sound`: share the computer's sound too (without the call's own).
-  fn start_screen_share(&self, _has_sound: bool, _mode: ScreenContentMode) {}
+  fn start_screen_share(
+    &self,
+    _has_sound: bool,
+    _mode: ScreenContentMode,
+    _resolution: ScreenShareResolution,
+  ) {
+  }
   fn set_push_to_talk(&self, _is_enabled: bool, _maybe_shortcut: Option<String>) {}
   /// The push-to-talk key inside the window went down (`true`) or up.
   fn set_talking(&self, _is_talking: bool) {}
