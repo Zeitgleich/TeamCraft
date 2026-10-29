@@ -157,8 +157,12 @@ impl VideoCapture for SyntheticCapture {
     let (format, captured) = (self.format, Arc::clone(&self.captured));
     let thread = std::thread::spawn(move || {
       let period = Duration::from_secs(1) / u32::from(FRAMERATE);
+      // Stamped when captured, as the platforms' captures do: a picture the encoder thread
+      // encodes again after a pause (a keyframe asked for, an idle screen) is stamped with the
+      // time since the last one and has to fall between the captured frames.
+      let start = std::time::Instant::now();
       for index in 0u64.. {
-        let timestamp_us = index * 33_333;
+        let timestamp_us = u64::try_from(start.elapsed().as_micros()).unwrap();
         let raw = draw(format, index);
         let picture = RawPicture {
           format,
@@ -240,14 +244,17 @@ fn average(a: u8, b: u8) -> u8 {
   ((u16::from(a) + u16::from(b)).div_ceil(2)) as u8
 }
 
-/// The captured frame a decoded picture came from: its timestamp went through the 90 kHz RTP
-/// clock, which rounds.
+/// The captured frame a decoded picture came from: the last one captured at or before its
+/// timestamp, which went through the 90 kHz RTP clock (it rounds). A picture the encoder thread
+/// encoded again when no frame came for a while (`video_pipeline`: a keyframe request waiting
+/// 150 ms, an idle screen) carries a later timestamp than the frame it shows (#989: a CI
+/// runner's capture paused that long).
 fn captured_at(captured: &BTreeMap<u64, VideoFrame>, timestamp_us: u64) -> &VideoFrame {
   captured
-    .range(timestamp_us.saturating_sub(100)..=timestamp_us + 100)
+    .range(..=timestamp_us + 100)
     .map(|(_, frame)| frame)
-    .next()
-    .unwrap_or_else(|| panic!("no captured frame at {timestamp_us} µs"))
+    .next_back()
+    .unwrap_or_else(|| panic!("no captured frame at or before {timestamp_us} µs"))
 }
 
 fn luma_psnr(a: &VideoFrame, b: &VideoFrame) -> f64 {
