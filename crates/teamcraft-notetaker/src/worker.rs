@@ -225,15 +225,17 @@ impl<A: ServerApi, S: LocalStore> Worker<A, S> {
     let policy = notetaker_policy(self.client.store()).unwrap_or_default();
     let is_active = policy.is_notetaker(me);
     let now_ms = unix_ms();
-    let groups: HashSet<ConversationId> = self
-      .client
-      .group_conversations()
-      .unwrap_or_default()
-      .into_iter()
-      .collect();
+    // Unreadable now: no session is stopped or started for it, the next tick reads again.
+    let groups: HashSet<ConversationId> = match self.client.group_conversations() {
+      Ok(conversations) => conversations.into_iter().collect(),
+      Err(error) => {
+        warn!(%error, "listing the conversations failed");
+        return;
+      },
+    };
     self.check_sessions(is_active, &groups);
     if is_active {
-      self.start_sessions(&policy, now_ms).await;
+      self.start_sessions(&policy, &groups, now_ms).await;
     }
     if now.saturating_duration_since(self.last_flush) >= Duration::from_secs(1) {
       self.last_flush = now;
@@ -297,15 +299,13 @@ impl<A: ServerApi, S: LocalStore> Worker<A, S> {
   }
 
   /// Joins the calls that requests ask for.
-  async fn start_sessions(&mut self, policy: &NotetakerPolicy, now_ms: i64) {
-    let conversations = match self.client.group_conversations() {
-      Ok(conversations) => conversations,
-      Err(error) => {
-        warn!(%error, "listing the conversations failed");
-        return;
-      },
-    };
-    for conversation in conversations {
+  async fn start_sessions(
+    &mut self,
+    policy: &NotetakerPolicy,
+    groups: &HashSet<ConversationId>,
+    now_ms: i64,
+  ) {
+    for conversation in groups.iter().copied() {
       if self.sessions.contains_key(&conversation) || self.has_unposted(conversation) {
         continue;
       }

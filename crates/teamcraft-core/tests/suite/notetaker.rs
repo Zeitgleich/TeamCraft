@@ -28,7 +28,10 @@ async fn a_members_request_reaches_the_notetaker_and_a_stop_ends_it() {
 
   let ledger = NotetakerLedger::load(notetaker.store.as_ref(), channel).unwrap();
   let join = ledger.join_in_force(i64::MAX / 2, None).unwrap();
-  assert_eq!((join.by, join.scope), (bob.client.user_id(), NotetakerScope::EveryCall));
+  assert_eq!(
+    (join.by, join.scope),
+    (bob.client.user_id(), NotetakerScope::EveryCall)
+  );
   // The request is a hidden control message: nobody's timeline shows it.
   assert!(alice.texts(channel).is_empty());
 
@@ -56,7 +59,10 @@ async fn under_admins_only_a_members_request_never_reaches_the_ledger() {
   run_commands(&mut alice, &alice_ui).await;
   settle(&mut [&mut alice, &mut bob, &mut notetaker]).await;
   let ledger = NotetakerLedger::load(notetaker.store.as_ref(), channel).unwrap();
-  assert_eq!(ledger.join_in_force(i64::MAX / 2, None).unwrap().by, alice.client.user_id());
+  assert_eq!(
+    ledger.join_in_force(i64::MAX / 2, None).unwrap().by,
+    alice.client.user_id()
+  );
 }
 
 #[tokio::test]
