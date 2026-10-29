@@ -2,8 +2,8 @@
 //! bandwidth down and back up and never stalls for long.
 //!
 //! Each client reaches a real SFU through a relay that can shape its uplink or downlink like a
-//! bottleneck: packets leave at the link's rate, wait in a queue of at most [`MAX_QUEUE_DELAY`]
-//! and are dropped when it is full. The presenter sends a busy 720p camera (moving shapes and
+//! bottleneck (`common::relay`): packets leave at the link's rate, wait in a queue of at most
+//! 250 ms and are dropped when it is full. The presenter sends a busy 720p camera (moving shapes and
 //! sensor noise, so OpenH264 uses its whole bitrate) with the desktop's layers.
 //!
 //! - Uplink: the presenter's uplink is limited to 500 kbit/s, then 2 Mbit/s, then not at all.
@@ -30,7 +30,7 @@
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
 use std::net::{Ipv6Addr, SocketAddr};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -45,17 +45,14 @@ use teamcraft_proto::{AudioCodec, DeviceId, MediaCapabilities, VideoCodec, Video
 use teamcraft_sfu::auth::DevTokenVerifier;
 use teamcraft_sfu::config::SfuConfig;
 use teamcraft_sfu::server::{CALL_PATH, Sfu};
-use tokio::net::UdpSocket;
-use tokio::sync::mpsc;
 use wtransport::Identity;
 
 use crate::common::busy_camera::{BusyCamera, FRAMERATE, HD};
+use crate::common::relay::Relay;
 
 /// The desktop's camera of a 720p camera: three layers from 1.5 Mbit/s (apps/desktop's
 /// `camera_layers`), at the busy camera's size and rate.
 const CAMERA_BITRATE_BPS: u32 = 1_500_000;
-/// The bottleneck's queue: a packet that would wait longer is dropped (a home router's buffer).
-const MAX_QUEUE_DELAY: Duration = Duration::from_millis(250);
 /// The limits of the uplink test, in order, after the warm-up; `None` lifts the limit.
 const UPLINK_STEPS: [(Option<u64>, Duration); 3] = [
   (Some(500_000), Duration::from_secs(12)),
@@ -767,127 +764,6 @@ fn luma_psnr(source: &VideoFrame, decoded: &VideoFrame) -> f64 {
     .sum();
   let mse = squared_error as f64 / a.len() as f64;
   10.0 * (255.0f64.powi(2) / mse.max(1e-9)).log10()
-}
-
-/// Relays one client's UDP to the SFU and back; each direction can be limited like a bottleneck.
-struct Relay {
-  address: SocketAddr,
-  to_sfu: Shaper,
-  to_client: Shaper,
-}
-
-/// Packets with the time they leave the bottleneck.
-type Departures = mpsc::UnboundedReceiver<(tokio::time::Instant, Vec<u8>)>;
-
-/// One direction of a [`Relay`]: packets leave at the limit's rate after waiting in a queue of
-/// at most [`MAX_QUEUE_DELAY`]; a packet that would wait longer is dropped.
-#[derive(Clone)]
-struct Shaper {
-  /// Bit/s; 0 for no limit.
-  limit_bps: Arc<AtomicU64>,
-  start: Instant,
-  log: Arc<Mutex<Vec<(Duration, usize, bool)>>>,
-}
-
-impl Shaper {
-  fn new(start: Instant) -> Self {
-    Self {
-      limit_bps: Arc::default(),
-      start,
-      log: Arc::default(),
-    }
-  }
-
-  fn set_limit(&self, maybe_limit_bps: Option<u64>) {
-    self
-      .limit_bps
-      .store(maybe_limit_bps.unwrap_or(0), Ordering::Relaxed);
-  }
-
-  /// The queue: packets go into the sender, and come out of the receiver with the time they
-  /// leave (dropped ones don't).
-  fn spawn_queue(&self) -> (mpsc::UnboundedSender<Vec<u8>>, Departures) {
-    let (packets, mut incoming) = mpsc::unbounded_channel::<Vec<u8>>();
-    let (departures, queue) = mpsc::unbounded_channel();
-    let shaper = self.clone();
-    tokio::spawn(async move {
-      let mut next_free = tokio::time::Instant::now();
-      while let Some(packet) = incoming.recv().await {
-        let now = tokio::time::Instant::now();
-        let at = shaper.start.elapsed();
-        let limit_bps = shaper.limit_bps.load(Ordering::Relaxed);
-        let departure = next_free.max(now);
-        if limit_bps > 0 && departure.saturating_duration_since(now) > MAX_QUEUE_DELAY {
-          shaper.log.lock().unwrap().push((at, packet.len(), true));
-          continue;
-        }
-        if limit_bps > 0 {
-          next_free = departure + Duration::from_secs_f64(packet.len() as f64 * 8.0 / limit_bps as f64);
-        } else {
-          next_free = departure;
-        }
-        shaper.log.lock().unwrap().push((at, packet.len(), false));
-        if departures.send((departure, packet)).is_err() {
-          return;
-        }
-      }
-    });
-    (packets, queue)
-  }
-}
-
-impl Relay {
-  async fn start(sfu: SocketAddr, start: Instant) -> Self {
-    let client_side = Arc::new(UdpSocket::bind((Ipv6Addr::LOCALHOST, 0)).await.unwrap());
-    let sfu_side = Arc::new(UdpSocket::bind((Ipv6Addr::LOCALHOST, 0)).await.unwrap());
-    sfu_side.connect(sfu).await.unwrap();
-    let address = client_side.local_addr().unwrap();
-    let (to_sfu, to_client) = (Shaper::new(start), Shaper::new(start));
-    let client: Arc<Mutex<Option<SocketAddr>>> = Arc::default();
-
-    let (into_sfu_queue, mut sfu_queue) = to_sfu.spawn_queue();
-    let (from_client, known_client) = (Arc::clone(&client_side), Arc::clone(&client));
-    tokio::spawn(async move {
-      let mut buffer = vec![0; 65_536];
-      while let Ok((len, from)) = from_client.recv_from(&mut buffer).await {
-        *known_client.lock().unwrap() = Some(from);
-        if into_sfu_queue.send(buffer[..len].to_vec()).is_err() {
-          return;
-        }
-      }
-    });
-    let towards_sfu = Arc::clone(&sfu_side);
-    tokio::spawn(async move {
-      while let Some((departure, packet)) = sfu_queue.recv().await {
-        tokio::time::sleep_until(departure).await;
-        let _ = towards_sfu.send(&packet).await;
-      }
-    });
-
-    let (into_client_queue, mut client_queue) = to_client.spawn_queue();
-    tokio::spawn(async move {
-      let mut buffer = vec![0; 65_536];
-      while let Ok(len) = sfu_side.recv(&mut buffer).await {
-        if into_client_queue.send(buffer[..len].to_vec()).is_err() {
-          return;
-        }
-      }
-    });
-    tokio::spawn(async move {
-      while let Some((departure, packet)) = client_queue.recv().await {
-        tokio::time::sleep_until(departure).await;
-        let maybe_client = *client.lock().unwrap();
-        if let Some(client) = maybe_client {
-          let _ = client_side.send_to(&packet, client).await;
-        }
-      }
-    });
-    Self {
-      address,
-      to_sfu,
-      to_client,
-    }
-  }
 }
 
 async fn wait_until_secured(call: &mut NativeCall) {

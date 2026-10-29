@@ -1815,7 +1815,10 @@ impl CallState<'_> {
     let publication = self.next_publication;
     self.next_publication = VideoPublicationId(publication.0.wrapping_add(1));
     let codec = engine.video_codec_for(&plan.codecs);
-    let sender = TrackSender::start(stream, plan, codec.clone(), publication, self.inputs).await?;
+    // Within the layers the SFU takes (#978): a 1080p camera's 180p only where it takes four.
+    let max_layers = engine.simulcast_layer_limit();
+    let sender =
+      TrackSender::start(stream, plan, codec.clone(), max_layers, publication, self.inputs).await?;
     engine.publish_video(publication, kind, codec, sender.layers());
     self.senders.push(sender);
     // What the others decode may have changed while the capture started.
@@ -3551,6 +3554,7 @@ mod tests {
       video_tracks: Vec::new(),
       screen_audio_tracks: Vec::new(),
       maybe_reconnect_grace_ms: Some(30_000),
+      maybe_max_simulcast_layers: Some(teamcraft_proto::MAX_SIMULCAST_LAYERS),
     }
   }
 

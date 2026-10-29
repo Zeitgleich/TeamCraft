@@ -172,6 +172,10 @@ pub enum CallEvent {
     /// it resumes the call. Older SFUs omit it and drop the slot at once.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     maybe_reconnect_grace_ms: Option<u64>,
+    /// The most simulcast layers the SFU takes per video track (#978). SFUs from before omit it
+    /// and take [`crate::LEGACY_SIMULCAST_LAYERS`]; a client publishes no more than that then.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    maybe_max_simulcast_layers: Option<u8>,
   },
   ParticipantJoined {
     participant: CallParticipant,
@@ -524,11 +528,12 @@ mod tests {
       video_tracks: Vec::new(),
       screen_audio_tracks: Vec::new(),
       maybe_reconnect_grace_ms: Some(30_000),
+      maybe_max_simulcast_layers: Some(4),
     };
     let json = serde_json::to_string(&joined).unwrap();
-    assert!(json.ends_with(r#""maybe_reconnect_grace_ms":30000}"#));
+    assert!(json.ends_with(r#""maybe_reconnect_grace_ms":30000,"maybe_max_simulcast_layers":4}"#));
     assert_eq!(serde_json::from_str::<CallEvent>(&json).unwrap(), joined);
-    // Older SFUs keep no slot.
+    // Older SFUs keep no slot and name no layer limit (#978: they take three).
     let old: CallEvent = serde_json::from_str(
       r#"{"type":"joined","call_id":"7","participant":{"user_id":"4","device_id":"5","audio_stream_id":9},"participants":[]}"#,
     )
@@ -537,6 +542,19 @@ mod tests {
       old,
       CallEvent::Joined {
         maybe_reconnect_grace_ms: None,
+        maybe_max_simulcast_layers: None,
+        ..
+      }
+    ));
+    // Fields of newer SFUs are ignored, as clients from before #978 ignore the layer limit.
+    let newer: CallEvent = serde_json::from_str(
+      r#"{"type":"joined","call_id":"7","participant":{"user_id":"4","device_id":"5","audio_stream_id":9},"participants":[],"maybe_max_simulcast_layers":4,"hint":"x"}"#,
+    )
+    .unwrap();
+    assert!(matches!(
+      newer,
+      CallEvent::Joined {
+        maybe_max_simulcast_layers: Some(4),
         ..
       }
     ));

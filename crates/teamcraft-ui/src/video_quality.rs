@@ -1,5 +1,6 @@
 //! The video quality menu of another device's video (#967), like a video player's: Auto, or at
-//! most a number of lines (1080p, 720p, 360p) among the layers the sender offers. Auto shows the
+//! most a number of lines (1080p, 720p, 360p, 180p) among the layers the sender offers: four from
+//! a 1080p camera (#978), three from a 720p one or where the SFU takes no more. Auto shows the
 //! quality arriving now, "Auto (720p)", from the media layer's stats. The menu itself is
 //! [`crate::components::video_quality`].
 
@@ -64,16 +65,19 @@ mod tests {
 
   #[test]
   fn the_menu_offers_auto_and_each_quality_sent_best_first() {
-    let full_hd = [(640, 360), (1280, 720), (1920, 1080)];
+    let full_hd = [(320, 180), (640, 360), (1280, 720), (1920, 1080)];
     assert_eq!(
       quality_choices(&full_hd),
       vec![
         VideoQuality::Auto,
         VideoQuality::Lines(1080),
         VideoQuality::Lines(720),
-        VideoQuality::Lines(360)
+        VideoQuality::Lines(360),
+        VideoQuality::Lines(180)
       ]
     );
+    // From an SFU that takes three layers (#978): the top three.
+    assert_eq!(quality_choices(&full_hd[1..]).len(), 4);
     // A portrait phone's 720p is 720 lines too; layers of the same lines count once.
     assert_eq!(
       quality_choices(&[(360, 640), (720, 1280), (720, 1280)]),

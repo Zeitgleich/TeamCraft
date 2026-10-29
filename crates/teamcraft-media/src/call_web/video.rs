@@ -41,7 +41,9 @@ use super::{
 };
 use crate::call_engine::OwnPublication;
 use crate::call_video::ReceivedVideoFrame;
-use crate::video::{CAMERA_FRAMERATE, LayerSizer, ScreenProfile, VideoResolution, camera_layers, fit_within};
+use crate::video::{
+  CAMERA_FRAMERATE, LayerSizer, ScreenProfile, VideoResolution, camera_layers, fit_within, within_layer_limit,
+};
 use crate::web_api::{
   Canvas2d, EncodedVideoChunk, VideoDecoder, VideoEncoder, VideoFrame as WebVideoFrame, count_picture_drawn,
 };
@@ -221,7 +223,8 @@ pub(super) struct TrackPlan {
 /// How a track's simulcast layers are cut from its picture.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum LayerShape {
-  /// A camera's layers (`video::camera_layers`: 1080p, 720p and 360p from a 1080p camera, #967),
+  /// A camera's layers (`video::camera_layers`: 1080p, 720p, 360p and 180p from a 1080p camera,
+  /// #967, #978),
   /// encoded in the latency mode that gives them their bitrate ([`camera_latency_mode`]).
   Camera,
   /// A screen share's layers (`video::screen_layers`: the picture and a half-size one, a
@@ -231,11 +234,13 @@ pub(super) enum LayerShape {
 
 impl TrackSender {
   /// Starts encoding the stream's video track as `plan.kind`, to be published under `publication`.
-  /// Its encoders encode `codec`, one of `plan.codecs`.
+  /// Its encoders encode `codec`, one of `plan.codecs`, in at most `max_layers` layers (the top
+  /// ones of the plan: what the SFU takes, #978).
   pub async fn start(
     stream: MediaStream,
     plan: TrackPlan,
     codec: VideoCodec,
+    max_layers: u8,
     publication: VideoPublicationId,
     inputs: &mpsc::UnboundedSender<Input>,
   ) -> Result<Self, WebCallError> {
@@ -270,6 +275,7 @@ impl TrackSender {
         Some(content_hint(profile)),
       ),
     };
+    let infos = within_layer_limit(&infos, max_layers);
     let sizer = LayerSizer::new(infos.clone(), limit);
     let encoding = Encoding {
       kind: plan.kind.clone(),

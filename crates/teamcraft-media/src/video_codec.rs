@@ -782,7 +782,8 @@ mod tests {
   }
 
   /// #967: a 1080p camera's 360p layer is shrunk from its 720p picture (2x2 averages), not by
-  /// three from 1080p; each encoder gets its layer's size, and a layer on its own the frame.
+  /// three from 1080p, and (#978) its 180p layer from the 360p one; each encoder gets its layer's
+  /// size, and a layer on its own the frame.
   #[test]
   fn lower_layers_are_shrunk_from_a_layer_twice_their_size() {
     let full_hd = VideoResolution {
@@ -800,27 +801,27 @@ mod tests {
     .unwrap();
     let frame = crate::video_capture::test_pattern(full_hd, 3, 0).unwrap();
     let encoded = simulcast.encode(&frame).unwrap();
-    assert_eq!(layers_of(&encoded), vec![0, 1, 2], "lowest first, as before");
+    assert_eq!(layers_of(&encoded), vec![0, 1, 2, 3], "lowest first, as before");
     let first = std::mem::take(&mut *seen.lock().unwrap());
     let input = |layer: u8| &first.iter().find(|(id, _)| *id == layer).unwrap().1;
-    let middle = frame.scaled(input(1).resolution()).unwrap();
-    assert_eq!(input(2), &frame);
-    assert_eq!(input(1), &middle);
-    assert_eq!(input(0), &middle.scaled(input(0).resolution()).unwrap());
-    assert_eq!(
-      (input(0).resolution().width, input(0).resolution().height),
-      (640, 360)
-    );
+    let hd = frame.scaled(input(2).resolution()).unwrap();
+    assert_eq!(input(3), &frame);
+    assert_eq!(input(2), &hd);
+    let quarter = hd.scaled(input(1).resolution()).unwrap();
+    assert_eq!(input(1), &quarter);
+    assert_eq!(input(0), &quarter.scaled(input(0).resolution()).unwrap());
+    let sides = |layer: u8| (input(layer).resolution().width, input(layer).resolution().height);
+    assert_eq!((sides(1), sides(0)), ((640, 360), (320, 180)));
 
     // Only the 360p layer needed: shrunk from the frame itself.
-    simulcast.set_needed_layers(&[0]);
+    simulcast.set_needed_layers(&[1]);
     simulcast.encode(&frame).unwrap();
     let alone = std::mem::take(&mut *seen.lock().unwrap());
     let small = VideoResolution {
       width: 640,
       height: 360,
     };
-    assert_eq!(alone, vec![(0, frame.scaled(small).unwrap())]);
+    assert_eq!(alone, vec![(1, frame.scaled(small).unwrap())]);
   }
 
   /// Records the frames it is given.

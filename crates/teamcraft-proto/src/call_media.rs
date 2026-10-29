@@ -10,8 +10,13 @@ use serde::{Deserialize, Serialize};
 use crate::wire_enum::wire_enum;
 use crate::{DeviceId, MediaStreamId};
 
-/// Highest number of simulcast layers per video track (the datagram header has 4 bits).
-pub const MAX_SIMULCAST_LAYERS: u8 = 3;
+/// Highest number of simulcast layers per video track (the datagram header has 4 bits). Four since
+/// #978: a 1080p camera sends 1080p, 720p, 360p and 180p. An SFU says how many it takes in
+/// [`crate::CallEvent::Joined`].
+pub const MAX_SIMULCAST_LAYERS: u8 = 4;
+/// The simulcast layers per video track SFUs from before #978 take, and say nothing about: a
+/// client publishes at most this many where `joined` names no limit.
+pub const LEGACY_SIMULCAST_LAYERS: u8 = 3;
 /// The most fragments (RTP packets) one video frame may have: about 4.5 MB in 1100 byte
 /// fragments, far above a keyframe of the largest picture sent (1440p), and a bound on what a
 /// receiver holds for one frame.
@@ -69,7 +74,8 @@ pub struct MediaCapabilities {
   pub video_encoders: Vec<VideoCodec>,
   /// Codecs the client can decode.
   pub video_decoders: Vec<VideoCodec>,
-  /// Simulcast layers the client can send per video track.
+  /// Simulcast layers the client can send per video track. Informational: the SFU takes up to
+  /// [`MAX_SIMULCAST_LAYERS`] from anyone.
   pub max_simulcast_layers: u8,
   /// The most fragments of one video frame the client reassembles; the SFU forwards it no layer
   /// with larger frames. Clients that don't send it take [`SHORT_VIDEO_FRAME_FRAGMENTS`].

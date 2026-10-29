@@ -344,9 +344,11 @@ fn camera_format(limit: VideoResolution) -> CaptureFormat {
   }
 }
 
-/// Three simulcast layers for a camera that delivers `source`, sent within `limit`: 1080p, 720p
-/// and 360p from a 1080p camera, 720p, 360p and 180p from a 720p one (`video::camera_layers`).
-/// The camera may capture more (4K, 60 fps); what is sent stays within the limit, at 30 fps.
+/// The simulcast layers for a camera that delivers `source`, sent within `limit`: 1080p, 720p,
+/// 360p and 180p from a 1080p camera (#978), 720p, 360p and 180p from a 720p one
+/// (`video::camera_layers`). The call keeps the top three where the SFU takes no more
+/// (`VideoSendConfig::within_layer_limit`). The camera may capture more (4K, 60 fps); what is sent
+/// stays within the limit, at 30 fps.
 pub(super) fn camera_layers(source: VideoResolution, limit: VideoResolution) -> Vec<VideoLayerInfo> {
   teamcraft_media::video::camera_layers(source, CAMERA_FRAMERATE, limit)
 }
@@ -740,7 +742,7 @@ mod tests {
       height: 2160,
     };
     let layers = camera_layers(uhd, camera_limit(None));
-    assert_eq!(layers.len(), 3);
+    assert_eq!(layers.len(), 4);
     let top = layers.last().unwrap();
     assert_eq!((top.width, top.height, top.max_framerate), (1920, 1080, 30));
     assert_eq!(top.max_bitrate_bps, CAMERA_MAX_BITRATE_BPS);
@@ -764,9 +766,9 @@ mod tests {
   }
 
   #[test]
-  fn cameras_get_three_layers_and_screens_two() {
+  fn cameras_get_four_layers_and_screens_two() {
     let limit = teamcraft_media::video::camera_limit(None);
-    assert_eq!(camera_layers(camera_format(limit).resolution, limit).len(), 3);
+    assert_eq!(camera_layers(camera_format(limit).resolution, limit).len(), 4);
     let detail = ScreenProfile::default();
     let screen = screen_layers(screen_format(&detail), &detail);
     assert_eq!(screen.len(), 2);

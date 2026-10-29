@@ -1561,6 +1561,8 @@ impl VideoState {
   ) {
     match request {
       OwnVideoRequest::Start(config, publication, done) => {
+        // Within the layers the SFU takes (#978): a 1080p camera's 180p only where it takes four.
+        let config = config.within_layer_limit(engine.simulcast_layer_limit());
         let kind = config.kind.clone();
         let encoded = encoded.clone();
         let task = tokio::task::spawn_blocking(move || VideoSender::start(config, encoded));

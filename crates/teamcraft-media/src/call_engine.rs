@@ -26,8 +26,9 @@ use std::time::Duration;
 use teamcraft_client_api::video_stats::VideoStatsReport;
 use teamcraft_proto::{
   Base64Bytes, CallClientMessage, CallEvent, CallId, CallParticipant, CallServerMessage, DaveKeyBinding,
-  DeviceId, ErrorBody, MediaCapabilities, MediaStreamId, ScreenAudioTrack, TransportFeedback, UserId,
-  VideoCodec, VideoLayerInfo, VideoPublicationId, VideoTrack, VideoTrackKind,
+  DeviceId, ErrorBody, LEGACY_SIMULCAST_LAYERS, MAX_SIMULCAST_LAYERS, MediaCapabilities, MediaStreamId,
+  ScreenAudioTrack, TransportFeedback, UserId, VideoCodec, VideoLayerInfo, VideoPublicationId, VideoTrack,
+  VideoTrackKind,
 };
 use thiserror::Error;
 use tracing::{debug, warn};
@@ -91,6 +92,9 @@ pub struct CallEngine {
   /// The video codecs every other device that receives video decodes, as the SFU last said
   /// (#565); `None` before it said (an older SFU never does): H.264 only.
   maybe_decodable: Option<Vec<VideoCodec>>,
+  /// The most simulcast layers per track the SFU takes, as its last `joined` said (#978;
+  /// [`LEGACY_SIMULCAST_LAYERS`] from an SFU that says nothing); `None` before the first.
+  maybe_sfu_layer_limit: Option<u8>,
   /// Tracks other devices publish.
   remote_video: HashMap<StreamId, IncomingVideo>,
   maybe_dave: Option<DaveParticipant>,
@@ -282,7 +286,7 @@ pub struct CallStats {
 }
 
 /// One kind of video (camera or screen) during a call. Encoded pictures count per layer: a
-/// captured frame becomes up to three pictures with simulcast.
+/// captured frame becomes up to four pictures with simulcast.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct VideoStats {
   /// Frames the own capture delivered.
@@ -414,6 +418,7 @@ impl CallEngine {
       subscriptions: HashMap::new(),
       maybe_reconnect_grace: None,
       maybe_decodable: None,
+      maybe_sfu_layer_limit: None,
       remote_video: HashMap::new(),
       maybe_dave: None,
       maybe_trusted_roster: None,
@@ -573,6 +578,15 @@ impl CallEngine {
       .find(|codec| decodable.contains(codec) && self.config.capabilities.video_encoders.contains(codec))
       .cloned()
       .unwrap_or(VideoCodec::H264)
+  }
+
+  /// The most simulcast layers a track may be planned with (#978): what the SFU said it takes,
+  /// three from an SFU from before that says nothing. Before the SFU's first answer, the most
+  /// there are: publications wait for that answer, and one planned with more layers than the
+  /// SFU takes then goes out with its lowest ones only (a 1080p camera's 180p to 720p), which
+  /// [`crate::video::within_layer_limit`] avoids for plans made once it is known.
+  pub fn simulcast_layer_limit(&self) -> u8 {
+    self.maybe_sfu_layer_limit.unwrap_or(MAX_SIMULCAST_LAYERS)
   }
 
   pub fn is_muted(&self) -> bool {
@@ -988,8 +1002,13 @@ impl CallEngine {
         video_tracks,
         screen_audio_tracks,
         maybe_reconnect_grace_ms,
+        maybe_max_simulcast_layers,
       } => {
         self.maybe_reconnect_grace = maybe_reconnect_grace_ms.map(Duration::from_millis);
+        // An SFU from before #978 says nothing and takes three; more than this version plans
+        // would be no use.
+        let limit = maybe_max_simulcast_layers.unwrap_or(LEGACY_SIMULCAST_LAYERS);
+        self.maybe_sfu_layer_limit = Some(limit.clamp(1, MAX_SIMULCAST_LAYERS));
         if let Phase::Rejoining { call_id: previous } = self.phase {
           let state = RejoinedState {
             participants,
@@ -1158,6 +1177,12 @@ impl CallEngine {
       call_id,
       participants,
     });
+    // Publications asked for while joining go out now that the SFU said how many layers it takes.
+    for pending in std::mem::take(&mut self.pending_publications) {
+      if !pending.is_withdrawn {
+        self.request_publication(pending);
+      }
+    }
     Ok(())
   }
 
@@ -1829,7 +1854,8 @@ impl CallEngine {
             .collect();
           self.bitrates_announced.insert(stream, own);
         }
-        self.add_own_track(pending.id, track);
+        let asked: Vec<u8> = pending.layers.iter().map(|info| info.layer).collect();
+        self.add_own_track(pending.id, track, asked);
       },
       maybe_withdrawn => {
         debug!(
@@ -1858,8 +1884,10 @@ impl CallEngine {
     self.pending_publications.remove(position)
   }
 
-  /// An own track the SFU confirmed for the driver's `publication`: frames go out on it.
-  fn add_own_track(&mut self, publication: VideoPublicationId, mut track: VideoTrack) {
+  /// An own track the SFU confirmed for the driver's `publication`: frames go out on it. `asked`
+  /// are the layers the driver encodes; those the SFU didn't take (#978: more than it takes)
+  /// are paused at once.
+  fn add_own_track(&mut self, publication: VideoPublicationId, mut track: VideoTrack, asked: Vec<u8>) {
     let stream = StreamId(track.stream_id.0);
     // Drivers find their track by it, also with an SFU that doesn't echo it.
     track.maybe_publication_id = Some(publication);
@@ -1871,7 +1899,13 @@ impl CallEngine {
     // layer list isn't limited.
     let own_layers: Vec<u8> = track.layers.iter().map(|info| info.layer).collect();
     if !own_layers.is_empty() {
-      self.sent_layers.insert(stream, own_layers.clone());
+      // Layers the driver encodes beyond the track's are announced as paused below.
+      let encoded = if asked.len() > own_layers.len() {
+        asked
+      } else {
+        own_layers.clone()
+      };
+      self.sent_layers.insert(stream, encoded);
       self.uplink_announced.insert(stream, own_layers.clone());
     }
     self.own_tracks.insert(stream, track.clone());
@@ -1898,14 +1932,26 @@ impl CallEngine {
     self.announce_uplink_layers();
   }
 
-  /// Asks the SFU for a publication and waits for its answer.
+  /// Asks the SFU for a publication and waits for its answer. Only while in the call: a
+  /// publication asked for before the SFU's `joined` goes out with it, within the layers the SFU
+  /// takes (#978), and one asked for while away goes out on the rejoin. Layers beyond what the
+  /// SFU takes are left out, the top ones: their numbers stay those the driver encodes.
   fn request_publication(&mut self, pending: PendingPublication) {
-    self.signal(CallClientMessage::PublishVideo {
-      kind: pending.kind.clone(),
-      codec: pending.codec.clone(),
-      layers: pending.layers.clone(),
-      maybe_publication_id: Some(pending.id),
-    });
+    if self.is_in_call() {
+      let limit = usize::from(self.simulcast_layer_limit());
+      if pending.layers.len() > limit {
+        debug!(
+          layers = pending.layers.len(),
+          limit, "the SFU takes fewer layers than the track has; the top ones are left out"
+        );
+      }
+      self.signal(CallClientMessage::PublishVideo {
+        kind: pending.kind.clone(),
+        codec: pending.codec.clone(),
+        layers: pending.layers.iter().take(limit).copied().collect(),
+        maybe_publication_id: Some(pending.id),
+      });
+    }
     self.pending_publications.push_back(pending);
   }
 
@@ -3074,6 +3120,7 @@ mod tests {
         participants,
         screen_audio_tracks,
         maybe_reconnect_grace_ms,
+        maybe_max_simulcast_layers,
         ..
       } = joined(1, &[2])
       else {
@@ -3086,6 +3133,7 @@ mod tests {
         video_tracks: vec![remote, own],
         screen_audio_tracks,
         maybe_reconnect_grace_ms,
+        maybe_max_simulcast_layers,
       };
       alice.handle_signal(event(1, kept), now).unwrap();
       assert_eq!(
@@ -3152,6 +3200,7 @@ mod tests {
         participants,
         screen_audio_tracks,
         maybe_reconnect_grace_ms,
+        maybe_max_simulcast_layers,
         ..
       } = joined(1, &[2])
       else {
@@ -3164,6 +3213,7 @@ mod tests {
         video_tracks: vec![remote],
         screen_audio_tracks,
         maybe_reconnect_grace_ms,
+        maybe_max_simulcast_layers,
       };
       alice.handle_signal(event(1, kept), now).unwrap();
       assert!(
@@ -3205,6 +3255,7 @@ mod tests {
         participants,
         screen_audio_tracks,
         maybe_reconnect_grace_ms,
+        maybe_max_simulcast_layers,
         ..
       } = joined(1, &[2])
       else {
@@ -3217,6 +3268,7 @@ mod tests {
         video_tracks: vec![own],
         screen_audio_tracks,
         maybe_reconnect_grace_ms,
+        maybe_max_simulcast_layers,
       };
       alice.handle_signal(event(1, kept), now).unwrap();
       let outputs = drain(&mut alice);
@@ -3281,6 +3333,7 @@ mod tests {
         video_tracks,
         screen_audio_tracks,
         maybe_reconnect_grace_ms,
+        maybe_max_simulcast_layers,
         ..
       } = joined(1, &[])
       else {
@@ -3293,6 +3346,7 @@ mod tests {
         video_tracks,
         screen_audio_tracks,
         maybe_reconnect_grace_ms,
+        maybe_max_simulcast_layers,
       };
       assert!(matches!(
         alice.handle_signal(event(1, other_call), now),
@@ -3898,6 +3952,7 @@ mod tests {
         participants,
         screen_audio_tracks,
         maybe_reconnect_grace_ms,
+        maybe_max_simulcast_layers,
         ..
       } = joined(id, &[])
       else {
@@ -3910,6 +3965,7 @@ mod tests {
         video_tracks,
         screen_audio_tracks,
         maybe_reconnect_grace_ms,
+        maybe_max_simulcast_layers,
       }
     }
 
@@ -3924,6 +3980,149 @@ mod tests {
         output,
         EngineOutput::Signal(CallClientMessage::UnpublishVideo { .. })
       )
+    }
+  }
+
+  /// #978: how many layers a track goes out with depends on what the SFU takes.
+  mod layer_limit {
+    use super::*;
+
+    const PUBLICATION: VideoPublicationId = VideoPublicationId(7);
+
+    #[test]
+    fn the_limit_is_the_sfus_and_three_from_an_sfu_that_says_none() {
+      let now = Instant::now();
+      let mut alice = engine(1, now);
+      // Before the SFU's answer: the most there are.
+      assert_eq!(alice.simulcast_layer_limit(), MAX_SIMULCAST_LAYERS);
+      alice.join("t".into());
+      alice.handle_signal(event(1, joined_by(1, None)), now).unwrap();
+      assert_eq!(alice.simulcast_layer_limit(), LEGACY_SIMULCAST_LAYERS);
+      let mut bob = engine(2, now);
+      bob.join("t".into());
+      bob.handle_signal(event(1, joined_by(2, Some(4))), now).unwrap();
+      assert_eq!(bob.simulcast_layer_limit(), 4);
+      // A newer SFU that takes more: no more than this version plans.
+      let mut carol = engine(3, now);
+      carol.join("t".into());
+      carol.handle_signal(event(1, joined_by(3, Some(9))), now).unwrap();
+      assert_eq!(carol.simulcast_layer_limit(), MAX_SIMULCAST_LAYERS);
+    }
+
+    /// A camera started while joining is published once the SFU said how many layers it takes.
+    #[test]
+    fn a_publication_asked_for_while_joining_goes_out_with_joined() {
+      let now = Instant::now();
+      let mut alice = engine(1, now);
+      alice.join("t".into());
+      drain(&mut alice);
+      alice.publish_video(PUBLICATION, VideoTrackKind::Camera, VideoCodec::H264, layers(4));
+      // Withdrawn before the answer: never asked for.
+      alice.publish_video(
+        VideoPublicationId(8),
+        VideoTrackKind::Screen,
+        VideoCodec::H264,
+        layers(1),
+      );
+      alice.withdraw_video(VideoPublicationId(8));
+      assert!(published_layers(&drain(&mut alice)).is_empty());
+      alice.handle_signal(event(1, joined_by(1, Some(4))), now).unwrap();
+      assert_eq!(published_layers(&drain(&mut alice)), vec![4]);
+    }
+
+    /// An SFU from before #978 takes three layers: a four-layer track goes out with its lowest
+    /// three, and the driver pauses its top one (a camera planned before the SFU answered).
+    #[test]
+    fn an_sfu_from_before_gets_three_layers_and_the_top_one_pauses() {
+      let now = Instant::now();
+      let mut alice = engine(1, now);
+      alice.join("t".into());
+      alice.handle_signal(event(1, joined_by(1, None)), now).unwrap();
+      drain(&mut alice);
+      alice.publish_adaptive_video(PUBLICATION, VideoTrackKind::Camera, VideoCodec::H264, layers(4));
+      assert_eq!(published_layers(&drain(&mut alice)), vec![3]);
+      let track = VideoTrack {
+        maybe_publication_id: Some(PUBLICATION),
+        ..video_track(50, 1, 3)
+      };
+      alice
+        .handle_signal(event(2, CallEvent::VideoPublished { track }), now)
+        .unwrap();
+      let outputs = drain(&mut alice);
+      assert!(
+        outputs.contains(&EngineOutput::Event(CallEngineEvent::LayersNeeded {
+          stream_id: MediaStreamId(50),
+          layers: vec![0, 1, 2],
+        })),
+        "{outputs:?}"
+      );
+      let top = EncodedVideoFrame {
+        layer: SimulcastLayer::new(3).unwrap(),
+        ..video_frame()
+      };
+      assert_eq!(
+        alice.send_video(MediaStreamId(50), &top, now),
+        VideoSendOutcome::LayerPaused
+      );
+    }
+
+    /// An SFU that takes four gets all four.
+    #[test]
+    fn a_current_sfu_gets_all_four_layers() {
+      let now = Instant::now();
+      let mut alice = engine_joined(1, now);
+      drain(&mut alice);
+      alice.publish_adaptive_video(PUBLICATION, VideoTrackKind::Camera, VideoCodec::H264, layers(4));
+      assert_eq!(published_layers(&drain(&mut alice)), vec![4]);
+      let track = VideoTrack {
+        maybe_publication_id: Some(PUBLICATION),
+        ..video_track(50, 1, 4)
+      };
+      alice
+        .handle_signal(event(2, CallEvent::VideoPublished { track }), now)
+        .unwrap();
+      let outputs = drain(&mut alice);
+      assert!(
+        !outputs
+          .iter()
+          .any(|output| matches!(output, EngineOutput::Event(CallEngineEvent::LayersNeeded { .. }))),
+        "{outputs:?}"
+      );
+    }
+
+    /// The number of layers of each publication asked for in `outputs`.
+    fn published_layers(outputs: &[EngineOutput]) -> Vec<usize> {
+      outputs
+        .iter()
+        .filter_map(|output| match output {
+          EngineOutput::Signal(CallClientMessage::PublishVideo { layers, .. }) => Some(layers.len()),
+          _ => None,
+        })
+        .collect()
+    }
+
+    fn joined_by(id: i64, maybe_max_simulcast_layers: Option<u8>) -> CallEvent {
+      let CallEvent::Joined {
+        call_id,
+        participant,
+        participants,
+        video_tracks,
+        screen_audio_tracks,
+        maybe_reconnect_grace_ms,
+        ..
+      } = joined(id, &[])
+      else {
+        unreachable!()
+      };
+      CallEvent::Joined {
+        call_id,
+        participant,
+        participants,
+        video_tracks,
+        screen_audio_tracks,
+        maybe_reconnect_grace_ms,
+        maybe_max_simulcast_layers,
+      }
     }
   }
 
@@ -4308,6 +4507,7 @@ mod tests {
       video_tracks: Vec::new(),
       screen_audio_tracks: Vec::new(),
       maybe_reconnect_grace_ms: Some(30_000),
+      maybe_max_simulcast_layers: Some(MAX_SIMULCAST_LAYERS),
     }
   }
 
@@ -4335,17 +4535,22 @@ mod tests {
   }
 
   fn layers(count: u8) -> Vec<VideoLayerInfo> {
-    [(320, 180, 150_000), (640, 360, 500_000), (1280, 720, 1_500_000)]
-      .into_iter()
-      .zip(0..count)
-      .map(|((width, height, max_bitrate_bps), layer)| VideoLayerInfo {
-        layer,
-        width,
-        height,
-        max_framerate: 30,
-        max_bitrate_bps,
-      })
-      .collect()
+    [
+      (320, 180, 150_000),
+      (640, 360, 500_000),
+      (1280, 720, 1_500_000),
+      (1920, 1080, 3_000_000),
+    ]
+    .into_iter()
+    .zip(0..count)
+    .map(|((width, height, max_bitrate_bps), layer)| VideoLayerInfo {
+      layer,
+      width,
+      height,
+      max_framerate: 30,
+      max_bitrate_bps,
+    })
+    .collect()
   }
 
   fn dave_proposals(
