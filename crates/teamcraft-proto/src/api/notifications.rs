@@ -159,6 +159,15 @@ pub struct NotificationSettings {
     skip_serializing_if = "Option::is_none"
   )]
   pub maybe_uses_desktop_attention: Option<bool>,
+  /// Which messages notify in conversations the user never configured and whose space has no level
+  /// (issue #1011). Reads: the user's own choice; absent: they never chose, `default_level` applies.
+  /// Writes: absent keeps the stored choice.
+  #[serde(rename = "level", default, skip_serializing_if = "Option::is_none")]
+  pub maybe_level: Option<NotificationLevel>,
+  /// Read only: the instance default for people who never chose a level (`[notifications]
+  /// default_level`). Servers from before the setting send nothing.
+  #[serde(rename = "default_level", default, skip_serializing_if = "Option::is_none")]
+  pub maybe_default_level: Option<NotificationLevel>,
 }
 
 /// `GET`/`PUT /api/v1/conversations/{id}/notification-settings`; `PUT` replaces both fields.
@@ -374,10 +383,21 @@ mod tests {
       send_read_receipts: false,
       maybe_dnd_schedule: None,
       maybe_uses_desktop_attention: None,
+      maybe_level: None,
+      maybe_default_level: None,
     };
     assert_eq!(
       serde_json::to_string(&settings).unwrap(),
       r#"{"auto_follow_mentioned_threads":true,"push_mode":"away_only","send_read_receipts":false}"#
+    );
+    let with_levels = NotificationSettings {
+      maybe_level: Some(NotificationLevel::Mentions),
+      maybe_default_level: Some(NotificationLevel::All),
+      ..settings
+    };
+    assert_eq!(
+      serde_json::to_string(&with_levels).unwrap(),
+      r#"{"auto_follow_mentioned_threads":true,"push_mode":"away_only","send_read_receipts":false,"level":"mentions","default_level":"all"}"#
     );
     let unknown: PushMode = serde_json::from_str("\"sometimes\"").unwrap();
     assert_eq!(unknown, PushMode::Unknown("sometimes".into()));

@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT u.auto_follow_mentioned_threads,\n                COALESCE(s.push_mode, 'away_only') AS \"push_mode!\", s.send_read_receipts, s.dnd_schedule,\n                s.uses_desktop_attention\n         FROM users u LEFT JOIN user_notification_settings s ON s.user_id = u.id\n         WHERE u.id = $1",
+  "query": "SELECT u.auto_follow_mentioned_threads,\n                COALESCE(s.push_mode, 'away_only') AS \"push_mode!\", s.send_read_receipts, s.dnd_schedule,\n                s.uses_desktop_attention, s.notification_level\n         FROM users u LEFT JOIN user_notification_settings s ON s.user_id = u.id\n         WHERE u.id = $1",
   "describe": {
     "columns": [
       {
@@ -52,6 +52,17 @@
             "name": "uses_desktop_attention"
           }
         }
+      },
+      {
+        "ordinal": 5,
+        "name": "notification_level",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "user_notification_settings",
+            "name": "notification_level"
+          }
+        }
       }
     ],
     "parameters": {
@@ -64,8 +75,9 @@
       null,
       true,
       true,
+      true,
       true
     ]
   },
-  "hash": "a8f656a318c43b7221ae0132a6b7080a041da2c3501db5b8a0ab22ac42f4e0e9"
+  "hash": "4b847224dce12a8de8eb7925cc0b7682a56123b380c064ca7d122d6435d6b0d1"
 }

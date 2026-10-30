@@ -11,7 +11,10 @@ use utoipa::ToSchema;
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
 use crate::wire_enum::wire_enum;
-use crate::{BrandAssetSlot, BrandColors, BrandLinks, ConversationId, SignInMethod, SpaceId, UnixMillis};
+use crate::{
+  BrandAssetSlot, BrandColors, BrandLinks, ConversationId, NotificationLevel, SignInMethod, SpaceId,
+  UnixMillis,
+};
 
 /// Default of [`LimitSettings::max_space_image_bytes`]: a 256×256 PNG stays well below it.
 pub const DEFAULT_MAX_SPACE_IMAGE_BYTES: u64 = 1024 * 1024;
@@ -387,12 +390,20 @@ fn default_one_to_one_call_ends_for_both() -> bool {
 pub struct NotificationRuntimeSettings {
   /// People who never chose send read receipts in DMs and group DMs.
   pub read_receipts_default: bool,
+  /// Which messages notify people who never chose a level: `all` or `mentions` (issue #1011).
+  #[serde(default = "default_notification_level")]
+  pub default_level: NotificationLevel,
   /// Urgent DMs are pushed again this often until acknowledged.
   pub urgent_repeat_interval_secs: u64,
   pub urgent_max_pushes: u32,
   /// While a desktop is in use, phone pushes wait this long (0: none while the desktop is attentive).
   pub mobile_push_delay_secs: u64,
   pub is_desktop_attention_enabled: bool,
+}
+
+/// Groups stored before the setting existed get the built-in default.
+fn default_notification_level() -> NotificationLevel {
+  NotificationLevel::All
 }
 
 /// The mail digest of missed mentions. Placeholders: `{count}` `{url}`.

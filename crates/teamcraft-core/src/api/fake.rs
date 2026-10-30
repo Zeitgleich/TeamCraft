@@ -5851,5 +5851,7 @@ fn default_notification_settings() -> NotificationSettings {
     send_read_receipts: true,
     maybe_dnd_schedule: None,
     maybe_uses_desktop_attention: None,
+    maybe_level: None,
+    maybe_default_level: None,
   }
 }

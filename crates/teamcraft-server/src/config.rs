@@ -7,7 +7,7 @@ use figment::Figment;
 use figment::providers::{Env, Format, Toml};
 use secrecy::SecretString;
 use serde::{Deserialize, Serialize};
-use teamcraft_proto::{ConversationId, GuestDmStart, SignInMethod, SpaceId};
+use teamcraft_proto::{ConversationId, GuestDmStart, NotificationLevel, SignInMethod, SpaceId};
 
 /// Prefix of environment overrides. Nested keys are separated by a double underscore:
 /// `TEAMCRAFT_OIDC__ISSUER`, `TEAMCRAFT_OIDC__ROLES__GUEST`, `TEAMCRAFT_DATABASE__URL`.
@@ -1076,6 +1076,9 @@ pub struct CalDavConfig {
 pub struct NotificationsConfig {
   /// Whether users who never chose send read receipts in DMs and group DMs.
   pub read_receipts_default: bool,
+  /// Which messages push for people who never chose a level for the conversation, its space or in
+  /// general (`all` or `mentions`; issue #1011). Integration channels push only mentions anyway.
+  pub default_level: NotificationLevel,
   /// Time between repeated pushes for an urgent DM nobody acknowledged.
   pub urgent_repeat_interval_secs: u64,
   /// How often an urgent DM is pushed in total, the first push included. `1` disables repeats.
@@ -1499,6 +1502,7 @@ impl Default for NotificationsConfig {
   fn default() -> Self {
     Self {
       read_receipts_default: true,
+      default_level: NotificationLevel::All,
       urgent_repeat_interval_secs: 120,
       urgent_max_pushes: 5,
       urgent_scheduler_interval_secs: 15,

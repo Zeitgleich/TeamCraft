@@ -89,14 +89,35 @@ same list as a "Chats" tab (still labelled "Home" in the mobile shells until the
 
 ## Preferences
 
-| What                              | Where                                                   |
-|-----------------------------------|---------------------------------------------------------|
-| Level (all / mentions / none)     | `GET`/`PUT /conversations/{id}/notification-settings`   |
-| Mute until a time                 | same; also shown as `muted_until` in `my_membership`    |
-| Do-not-disturb schedule           | `GET`/`PUT /me/notification-settings` (`dnd_schedule`)  |
-| Push mode (`away_only`, `always`) | same                                                    |
-| Auto-follow mentioned threads     | same                                                    |
-| Send read receipts                | same (default: `[notifications] read_receipts_default`) |
+| What                              | Where                                                           |
+|-----------------------------------|-----------------------------------------------------------------|
+| Level (all / mentions / none)     | `GET`/`PUT /conversations/{id}/notification-settings`           |
+| Mute until a time                 | same; also shown as `muted_until` in `my_membership`            |
+| Do-not-disturb schedule           | `GET`/`PUT /me/notification-settings` (`dnd_schedule`)          |
+| Push mode (`away_only`, `always`) | same                                                            |
+| Auto-follow mentioned threads     | same                                                            |
+| Send read receipts                | same (default: `[notifications] read_receipts_default`)         |
+| Level of everything else          | same (`level`; default: `[notifications] default_level`, `all`) |
+
+### Default level
+
+Which messages notify where the user never chose (issue #1011): the conversation's own level, else
+the user's level for its space, else the user's own level (`level` in `/me/notification-settings`,
+"Phone push notifications" in the settings), else the instance default `[notifications]
+default_level` (admin console, `all` or `mentions`; built-in `all`). `GET` answers `level` only when
+the user chose one, and `default_level` always; a `PUT` without `level` keeps the stored choice, so
+clients that don't know the field change nothing. The desktop and web clients keep their desktop level
+on the device (default `all` as well) and send the phone level only once it differs from the
+instance default or the user chose before, so a user who never chose follows a later change of the
+default. Integration channels notify only for mentions at any level, on the server and in the desktop
+notifier.
+
+Upgrading from before the default was `all`: memberships and spaces nobody configured follow the new
+default, so their phones get channel messages too. A conversation set to "mentions" explicitly keeps
+it. On the desktop and web, preferences stored with the old default read "mentions" for the desktop
+and phone level; they can't tell the default from a deliberate choice, so "mentions" becomes "all"
+once (`level_defaults_revision`); "nothing" stays. Users who want mentions only pick it again.
+Choosing "nothing" for the phone silences its pushes and call rings (calls still ring in open apps).
 
 ### Muting a whole space
 
@@ -158,8 +179,8 @@ For each recipient without a live connection the server decides from metadata it
    the user is *at a desktop or web session* (attentive, or recently active on it; see below), pushes to
    phones wait for the grace delay and go out only if the message is still unread then. Push mode
    `always` skips both.
-4. **Level**: mentions, DMs and replies in followed threads push; other messages only in `all`
-   conversations; integration channels only for mentions.
+4. **Level** (see "Default level"): mentions, DMs and replies in followed threads push; other
+   messages only in `all` conversations; integration channels only for mentions.
 
 Calls ring every device of the callee (desktop, web and phones alike) unless the conversation is muted or
 DND is on without an override.

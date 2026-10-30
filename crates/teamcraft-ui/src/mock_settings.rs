@@ -330,6 +330,7 @@ fn default_runtime() -> RuntimeSettingsResponse {
     },
     notifications: NotificationRuntimeSettings {
       read_receipts_default: true,
+      default_level: teamcraft_proto::NotificationLevel::All,
       urgent_repeat_interval_secs: 120,
       urgent_max_pushes: 5,
       mobile_push_delay_secs: 30,
