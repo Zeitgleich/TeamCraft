@@ -331,6 +331,12 @@
   box-shadow: var(--shadow-card);
 }
 
+/* Its z-index makes the bar a stacking context, so its menus can't rise above the composer
+   (z-index 6, .drop-strip-anchor + .composer) on their own: the bar rises with them. */
+.msg-toolbar.has-open-menu {
+  z-index: 41;
+}
+
 .msg-toolbar .icon-btn.is-on {
   color: var(--accent);
 }

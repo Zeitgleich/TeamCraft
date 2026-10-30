@@ -35,8 +35,8 @@ const HIDE_GRACE: Duration = Duration::from_millis(120);
 const OVERLAP_PX: f64 = 16.0;
 /// Space kept between the bar and the top of the visible list.
 const EDGE_PX: f64 = 4.0;
-/// Room the "more" menu needs below its button, in rem (it grows with the text size); with less
-/// it opens upwards.
+/// Room the "more" menu is assumed to need before it is measured, in rem (it grows with the text
+/// size).
 const MENU_HEIGHT_REM: f64 = 18.75;
 /// Space between the "more" button and its menu.
 const MENU_GAP_PX: f64 = 4.0;
@@ -283,12 +283,27 @@ fn ToolbarBar(host: ToolbarHost, active: ActiveMessage) -> impl IntoView {
   let is_saved = move || extras.get().is_some_and(|extras| extras.is_saved);
   let react_button = NodeRef::<html::Button>::new();
   let more_button = NodeRef::<html::Button>::new();
-  let placement = move || {
-    more_button
+  let menu = NodeRef::<html::Div>::new();
+  let placement = RwSignal::new(MenuPlacement::default());
+  // Placed when it opens with an assumed height, then again with the height it really has.
+  Effect::new(move |_| {
+    if host.open.get() != OpenMenu::More {
+      return;
+    }
+    let Some(button) = more_button.get_untracked() else {
+      return;
+    };
+    let maybe_measured = menu
+      .get()
+      .map(|menu| f64::from(menu.scroll_height()))
+      .filter(|height| *height > 0.0);
+    let menu_height = maybe_measured.unwrap_or_else(|| MENU_HEIGHT_REM * crate::viewport::rem_px());
+    let maybe_bounds = host
+      .container
       .get_untracked()
-      .map(|button| menu_placement(&button))
-      .unwrap_or_default()
-  };
+      .map(|list| list.get_bounding_client_rect());
+    placement.set(menu_placement(&button, maybe_bounds.as_ref(), menu_height));
+  });
   let run = move |action: MessageAction| {
     host.close_menu();
     message.with_value(|message| run_message_action(action, message, extras.get_untracked().as_ref()));
@@ -320,7 +335,6 @@ fn ToolbarBar(host: ToolbarHost, active: ActiveMessage) -> impl IntoView {
       "action-save"
     }
   };
-  let menu = NodeRef::<html::Div>::new();
   // The keyboard goes into the menu when it opens.
   Effect::new(move |_| {
     if let Some(element) = menu.get()
@@ -344,6 +358,7 @@ fn ToolbarBar(host: ToolbarHost, active: ActiveMessage) -> impl IntoView {
   view! {
     <div
       class="msg-toolbar"
+      class:has-open-menu=move || host.open.get() != OpenMenu::Nothing
       role="toolbar"
       aria-label=move || i18n.t("message-actions")
       style:top=move || format!("{}px", host.top.get())
@@ -433,11 +448,12 @@ fn ToolbarBar(host: ToolbarHost, active: ActiveMessage) -> impl IntoView {
       <Show when=move || host.open.get() == OpenMenu::More fallback=|| ()>
         <PopoverBackdrop on_close=Callback::new(move |()| host.close_menu()) popover=menu />
         <div
-          class=move || format!("popover msg-menu {}", placement().side.class())
+          class=move || format!("popover msg-menu {}", placement.with(|placement| placement.side.class()))
           style:position="fixed"
-          style:right=move || placement().right
-          style:top=move || placement().top
-          style:bottom=move || placement().bottom
+          style:right=move || placement.with(|placement| placement.right.clone())
+          style:top=move || placement.with(|placement| placement.top.clone())
+          style:bottom=move || placement.with(|placement| placement.bottom.clone())
+          style:max-height=move || placement.with(|placement| placement.max_height.clone())
           role="menu"
           aria-label=move || i18n.t("message-more")
           node_ref=menu
@@ -474,8 +490,14 @@ fn ToolbarBar(host: ToolbarHost, active: ActiveMessage) -> impl IntoView {
 }
 
 /// Where the "more" menu goes: fixed to the window (the list would clip it), below its button or
-/// above it when the window has no room below.
-fn menu_placement(button: &web_sys::Element) -> MenuPlacement {
+/// above it, whichever side of the visible list has room for `menu_height`; with room on neither,
+/// the roomier side, the menu scrolling. `maybe_bounds` is the list's box: its bottom edge is the
+/// composer's top, which the menu must not cover.
+fn menu_placement(
+  button: &web_sys::Element,
+  maybe_bounds: Option<&web_sys::DomRect>,
+  menu_height: f64,
+) -> MenuPlacement {
   let rect = button.get_bounding_client_rect();
   let (width, height) = web_sys::window()
     .map(|window| {
@@ -485,13 +507,18 @@ fn menu_placement(button: &web_sys::Element) -> MenuPlacement {
       (read(window.inner_width()), read(window.inner_height()))
     })
     .unwrap_or((1024.0, 768.0));
+  let (bounds_top, bounds_bottom) = maybe_bounds.map_or((0.0, height), |bounds| {
+    (bounds.top().max(0.0), bounds.bottom().min(height))
+  });
   let right = format!("{}px", (width - rect.right()).max(0.0));
-  let menu_height = MENU_HEIGHT_REM * crate::viewport::rem_px();
-  if height - rect.bottom() >= menu_height || rect.top() < height - rect.bottom() {
+  let room_below = (bounds_bottom - rect.bottom() - 2.0 * MENU_GAP_PX).max(0.0);
+  let room_above = (rect.top() - bounds_top - 2.0 * MENU_GAP_PX).max(0.0);
+  if room_below >= menu_height || (room_above < menu_height && room_below >= room_above) {
     MenuPlacement {
       right,
       top: format!("{}px", rect.bottom() + MENU_GAP_PX),
       bottom: "auto".into(),
+      max_height: format!("{room_below}px"),
       side: PopoverSide::Below,
     }
   } else {
@@ -499,6 +526,7 @@ fn menu_placement(button: &web_sys::Element) -> MenuPlacement {
       right,
       top: "auto".into(),
       bottom: format!("{}px", height - rect.top() + MENU_GAP_PX),
+      max_height: format!("{room_above}px"),
       side: PopoverSide::Above,
     }
   }
@@ -511,6 +539,8 @@ struct MenuPlacement {
   right: String,
   top: String,
   bottom: String,
+  /// What fits on that side; a longer menu scrolls.
+  max_height: String,
   /// The side it opens on, so it grows out of the button (#359).
   side: PopoverSide,
 }
