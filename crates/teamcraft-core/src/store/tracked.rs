@@ -298,24 +298,17 @@ impl<S: LocalStore> LocalStore for TrackedStore<S> {
     conversation: ConversationId,
     filter: MessageFilter,
   ) -> Result<Vec<StoredMessage>, StoreError> {
-    let revision = {
-      let mut cache = self.cache();
-      if let Some(messages) = cache.messages(conversation, filter) {
-        return Ok(messages);
-      }
-      if !cache.is_enabled() {
-        drop(cache);
-        return self.inner.messages(conversation, filter);
-      }
-      cache.revision(conversation)
-    };
-    let all = self.inner.messages(conversation, MessageFilter::All)?;
-    let matching = all
-      .iter()
-      .filter(|message| message.matches(filter))
-      .cloned()
-      .collect();
-    self.cache().fill(conversation, revision, all);
+    if !self.cache().is_enabled() {
+      return self.inner.messages(conversation, filter);
+    }
+    let mut matching = Vec::new();
+    self.with_all_messages(conversation, &mut |messages| {
+      matching = messages
+        .iter()
+        .filter(|message| message.matches(filter))
+        .cloned()
+        .collect();
+    })?;
     Ok(matching)
   }
 
@@ -331,20 +324,43 @@ impl<S: LocalStore> LocalStore for TrackedStore<S> {
     Some(self.cache().revision(conversation))
   }
 
-  /// Without copies when the cache holds the conversation; otherwise read (and kept) as by
-  /// [`Self::messages`].
   fn visit_messages(
     &self,
     conversation: ConversationId,
     filter: MessageFilter,
     visit: &mut dyn FnMut(&StoredMessage),
   ) -> Result<(), StoreError> {
-    if self.cache().visit(conversation, filter, visit) {
-      return Ok(());
-    }
-    for message in self.messages(conversation, filter)? {
-      visit(&message);
-    }
+    self.with_all_messages(conversation, &mut |messages| {
+      for message in messages.iter().filter(|message| message.matches(filter)) {
+        visit(message);
+      }
+    })
+  }
+
+  /// Without copies when the cache holds the conversation (the cache's lock is not held while
+  /// `read` runs); otherwise read from the store and kept, as by [`Self::messages`].
+  fn with_all_messages(
+    &self,
+    conversation: ConversationId,
+    read: &mut dyn FnMut(&[StoredMessage]),
+  ) -> Result<(), StoreError> {
+    let revision = {
+      let mut cache = self.cache();
+      if let Some(messages) = cache.shared(conversation) {
+        drop(cache);
+        read(&messages);
+        return Ok(());
+      }
+      if !cache.is_enabled() {
+        drop(cache);
+        read(&self.inner.messages(conversation, MessageFilter::All)?);
+        return Ok(());
+      }
+      cache.revision(conversation)
+    };
+    let all = self.inner.messages(conversation, MessageFilter::All)?;
+    read(&all);
+    self.cache().fill(conversation, revision, all);
     Ok(())
   }
 

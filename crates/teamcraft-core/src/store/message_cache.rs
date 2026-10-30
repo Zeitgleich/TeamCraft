@@ -8,17 +8,19 @@
 //! keep what they derived from them ([`super::LocalStore::message_revision`]).
 
 use std::collections::{HashMap, VecDeque};
+use std::sync::Arc;
 
 use teamcraft_proto::{ClientMessageId, ConversationId};
 
-use super::{MessageFilter, StoredMessage};
+use super::StoredMessage;
 
 /// What the cache holds and how much it may hold.
 #[derive(Debug, Default)]
 pub(crate) struct MessageCache {
   /// Messages kept in all conversations together; `0` keeps none (revisions are still counted).
   capacity: usize,
-  conversations: HashMap<ConversationId, Vec<StoredMessage>>,
+  /// Shared with readers ([`Self::shared`]); a write while one still reads copies it first.
+  conversations: HashMap<ConversationId, Arc<Vec<StoredMessage>>>,
   /// Least recently read first.
   recency: VecDeque<ConversationId>,
   held: usize,
@@ -45,37 +47,11 @@ impl MessageCache {
     (self.epoch << 32) | (writes & u64::from(u32::MAX))
   }
 
-  /// The conversation's messages matching `filter`, in display order, if it is held.
-  pub(crate) fn messages(
-    &mut self,
-    conversation: ConversationId,
-    filter: MessageFilter,
-  ) -> Option<Vec<StoredMessage>> {
-    let messages = self.conversations.get(&conversation)?;
-    let matching = messages
-      .iter()
-      .filter(|message| message.matches(filter))
-      .cloned()
-      .collect();
+  /// All of the conversation's messages in display order, if it is held, without a copy.
+  pub(crate) fn shared(&mut self, conversation: ConversationId) -> Option<Arc<Vec<StoredMessage>>> {
+    let messages = Arc::clone(self.conversations.get(&conversation)?);
     self.touch(conversation);
-    Some(matching)
-  }
-
-  /// Hands the conversation's messages matching `filter` to `visit`; `false` if it isn't held.
-  pub(crate) fn visit(
-    &mut self,
-    conversation: ConversationId,
-    filter: MessageFilter,
-    visit: &mut dyn FnMut(&StoredMessage),
-  ) -> bool {
-    let Some(messages) = self.conversations.get(&conversation) else {
-      return false;
-    };
-    for message in messages.iter().filter(|message| message.matches(filter)) {
-      visit(message);
-    }
-    self.touch(conversation);
-    true
+    Some(messages)
   }
 
   /// Keeps `messages` (all of the conversation, in display order) if nothing was written to the
@@ -86,7 +62,7 @@ impl MessageCache {
     }
     self.drop_conversation(conversation);
     self.held += messages.len();
-    self.conversations.insert(conversation, messages);
+    self.conversations.insert(conversation, Arc::new(messages));
     self.recency.push_back(conversation);
     while self.held > self.capacity
       && let Some(oldest) = self.recency.pop_front()
@@ -101,9 +77,10 @@ impl MessageCache {
   pub(crate) fn upsert(&mut self, message: &StoredMessage) {
     let conversation = message.conversation_id;
     self.bump(conversation);
-    let Some(messages) = self.conversations.get_mut(&conversation) else {
+    let Some(shared) = self.conversations.get_mut(&conversation) else {
       return;
     };
+    let messages = Arc::make_mut(shared);
     let had = remove_from(messages, message.client_message_id);
     // After the ones with the same key, like a new row in the database's order.
     let key = message.sort_key();
@@ -116,8 +93,8 @@ impl MessageCache {
 
   pub(crate) fn remove(&mut self, conversation: ConversationId, client_message_id: ClientMessageId) {
     self.bump(conversation);
-    if let Some(messages) = self.conversations.get_mut(&conversation)
-      && remove_from(messages, client_message_id)
+    if let Some(shared) = self.conversations.get_mut(&conversation)
+      && remove_from(Arc::make_mut(shared), client_message_id)
     {
       self.held -= 1;
     }
@@ -184,10 +161,10 @@ mod tests {
     let conversation = id(7);
     let revision = cache.revision(conversation);
     cache.fill(conversation, revision, Vec::new());
-    assert!(cache.messages(conversation, MessageFilter::All).is_some());
+    assert!(cache.shared(conversation).is_some());
 
     cache.forget_all();
-    assert!(cache.messages(conversation, MessageFilter::All).is_none());
+    assert!(cache.shared(conversation).is_none());
     assert_ne!(cache.revision(conversation), revision);
   }
 
@@ -198,7 +175,7 @@ mod tests {
     let revision = cache.revision(conversation);
     cache.remove(conversation, ClientMessageId::from_bytes([1; 16]));
     cache.fill(conversation, revision, Vec::new());
-    assert!(cache.messages(conversation, MessageFilter::All).is_none());
+    assert!(cache.shared(conversation).is_none());
   }
 
   #[test]
@@ -209,16 +186,10 @@ mod tests {
       let messages = (0..count).map(|n| message(raw, n)).collect();
       cache.fill(conversation, cache.revision(conversation), messages);
     }
-    assert!(cache.messages(id(1), MessageFilter::All).is_some());
+    assert!(cache.shared(id(1)).is_some());
     cache.fill(id(4), cache.revision(id(4)), vec![message(4, 0)]);
-    assert!(
-      cache.messages(id(2), MessageFilter::All).is_none(),
-      "the oldest read goes"
-    );
-    assert!(
-      cache.messages(id(1), MessageFilter::All).is_some(),
-      "read again, so kept"
-    );
+    assert!(cache.shared(id(2)).is_none(), "the oldest read goes");
+    assert!(cache.shared(id(1)).is_some(), "read again, so kept");
   }
 
   fn message(conversation: i64, client: u8) -> StoredMessage {

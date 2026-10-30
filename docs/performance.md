@@ -1024,7 +1024,9 @@ UI's reads of the open conversation each read and decoded all of it, several tim
 | Snapshot entry of the conversation  | 86–89 ms         | under 0.2 ms    |
 
 Every message, reaction or receipt in the channel set off this chain once more, and it grew with the
-channel. The core thread spent 7.8 s of CPU on the reads after a start; now 0.3 s. What changed:
+channel. The core thread spent 7.8 s of CPU on the reads after a start; now 0.3 s. Minimized for
+5 minutes on a working morning, with the log channel receiving messages, the whole process now uses
+0.22 % of a core (core thread 0.13 %), within the 0.5 % budget. What changed:
 
 - The UI's reads of a conversation come from a cache of decoded messages (`TrackedStore` message
   cache, up to 60,000 messages on the desktop, about 20 MiB here): it is filled on the first read
@@ -1034,8 +1036,11 @@ channel. The core thread spent 7.8 s of CPU on the reads after a start; now 0.3 
 - Row extras look their message up by its place in the order index; the catch-up cursor, older
   history and the read position ask the index for the oldest or newest server message instead of
   reading the conversation; parked messages and read receipts are listed by key range.
-- A feed window reads the conversation once for its count and rows, and gathers reactions and
-  replies in one pass instead of once per row.
+- A feed window, a thread and the activity feed borrow the cached conversation instead of copying
+  it, read it once for count and rows, and gather reactions and replies in one pass instead of once
+  per row. The sidebar entry counts in one pass by reference, and whether a message mentions the
+  user is decided once per message and edit while the mention rules stay the same: a log channel
+  with thousands of unread messages had its every text lowercased and split again on each change.
 
 The catch-up after a long absence (#972) waited on the disk: the store used SQLite's rollback journal
 with full syncs, about four syncs per write, and every received message was several writes. In 20

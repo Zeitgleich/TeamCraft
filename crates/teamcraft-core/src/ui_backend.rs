@@ -927,6 +927,20 @@ impl<S: LocalStore> CoreChatBackend<S> {
     }
   }
 
+  /// A conversation's messages lent to `read` without a copy where the store holds them.
+  pub(crate) fn with_all_messages(
+    &self,
+    conversation: ConversationId,
+    read: &mut dyn FnMut(&[StoredMessage]),
+  ) {
+    self.read(
+      self
+        .store
+        .with_all_messages(conversation, read)
+        .map_err(CoreError::from),
+    );
+  }
+
   pub(crate) fn all_messages(&self, conversation: ConversationId) -> Vec<StoredMessage> {
     self.read(
       self
@@ -1137,40 +1151,48 @@ impl<S: LocalStore> ChatBackend for CoreChatBackend<S> {
   }
 
   /// One read of the conversation for the count and the page.
+  /// The conversation is lent, not copied: the feed asks again on every change of the open
+  /// conversation, and a log channel changes all the time (issue #1000).
   fn message_page(&self, conversation: ConversationId, start: usize, len: usize) -> (usize, Vec<Message>) {
-    let all = self.all_messages(conversation);
-    let top_level: Vec<&StoredMessage> = all
-      .iter()
-      .filter(|message| {
-        (message.maybe_thread_id.is_none() || message.is_also_in_channel())
-          && !message.is_hidden()
-          && !is_deleted(message)
-      })
-      .collect();
-    let end = start.saturating_add(len).min(top_level.len());
-    let start = start.min(end);
-    let relations = Relations::of(&all);
-    let page = top_level[start..end]
-      .iter()
-      .map(|message| self.to_message_among(message, &relations))
-      .collect();
-    (top_level.len(), page)
+    let mut answer = (0, Vec::new());
+    self.with_all_messages(conversation, &mut |all| {
+      let top_level: Vec<&StoredMessage> = all
+        .iter()
+        .filter(|message| {
+          (message.maybe_thread_id.is_none() || message.is_also_in_channel())
+            && !message.is_hidden()
+            && !is_deleted(message)
+        })
+        .collect();
+      let end = start.saturating_add(len).min(top_level.len());
+      let start = start.min(end);
+      let relations = Relations::of(all);
+      let page = top_level[start..end]
+        .iter()
+        .map(|message| self.to_message_among(message, &relations))
+        .collect();
+      answer = (top_level.len(), page);
+    });
+    answer
   }
 
   fn thread(&self, conversation: ConversationId, thread: ThreadId) -> Vec<Message> {
-    let all = self.all_messages(conversation);
     let root_id = MessageId::from_snowflake(thread.snowflake());
-    let root = all
-      .iter()
-      .filter(|message| message.maybe_server_id == Some(root_id));
-    let replies = all.iter().filter(|message| {
-      message.maybe_thread_id == Some(thread) && !message.is_hidden() && !is_deleted(message)
+    let mut rows = Vec::new();
+    self.with_all_messages(conversation, &mut |all| {
+      let root = all
+        .iter()
+        .filter(|message| message.maybe_server_id == Some(root_id));
+      let replies = all.iter().filter(|message| {
+        message.maybe_thread_id == Some(thread) && !message.is_hidden() && !is_deleted(message)
+      });
+      let relations = Relations::of(all);
+      rows = root
+        .chain(replies)
+        .map(|message| self.to_message_among(message, &relations))
+        .collect();
     });
-    let relations = Relations::of(&all);
-    root
-      .chain(replies)
-      .map(|message| self.to_message_among(message, &relations))
-      .collect()
+    rows
   }
 
   fn followed_threads(&self) -> Vec<ThreadSummary> {

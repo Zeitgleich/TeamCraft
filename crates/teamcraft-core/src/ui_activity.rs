@@ -74,7 +74,10 @@ impl<S: LocalStore> CoreChatBackend<S> {
         items.extend(kept.items.iter().cloned());
         continue;
       }
-      let fresh = conversation_items(self.me_id(), &reads, conversation, &self.stored(conversation));
+      let mut fresh = Vec::new();
+      self.with_all_messages(conversation, &mut |messages| {
+        fresh = conversation_items(self.me_id(), &reads, conversation, messages);
+      });
       if let Some(revision) = maybe_revision {
         cache.insert(
           conversation,

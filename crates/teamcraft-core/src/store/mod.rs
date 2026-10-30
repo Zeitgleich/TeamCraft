@@ -630,6 +630,17 @@ pub trait LocalStore {
     }
     Ok(())
   }
+  /// Hands all of `conversation`'s messages, in display order, to `read` as one slice: for a reader
+  /// that looks at all of them to keep a few (a page of the feed with its reactions and replies).
+  /// A store that holds them in memory copies none. The default reads them as [`Self::messages`].
+  fn with_all_messages(
+    &self,
+    conversation: ConversationId,
+    read: &mut dyn FnMut(&[StoredMessage]),
+  ) -> Result<(), StoreError> {
+    read(&self.messages(conversation, MessageFilter::All)?);
+    Ok(())
+  }
   /// The messages at one place of the display order: the server message and the lines this device
   /// derived at `position` (lines sit at the ID of what they tell of), or every pending message.
   /// A row of the UI is looked up by its ID with it. The default scans; stores with an index on the
@@ -839,6 +850,14 @@ macro_rules! forward_local_store {
         visit: &mut dyn FnMut(&StoredMessage),
       ) -> Result<(), StoreError> {
         (**self).visit_messages(conversation, filter, visit)
+      }
+
+      fn with_all_messages(
+        &self,
+        conversation: ConversationId,
+        read: &mut dyn FnMut(&[StoredMessage]),
+      ) -> Result<(), StoreError> {
+        (**self).with_all_messages(conversation, read)
       }
 
       fn edge_server_id(
