@@ -6,6 +6,7 @@
 //!   Several pictures form a grid. A click opens the lightbox (`components::lightbox`).
 //! - Actions float over a picture's top right on hover, focus or long-press; nothing is shown
 //!   permanently. Other files are a compact card: icon, name, size, a download button and "…".
+//! - Audio is a card that plays it in the conversation (`components::audio_card`, #802).
 //!
 //! Downloads to disk run in the client core, which reports progress and the local path
 //! (`FileInfo::transfer`).
@@ -26,6 +27,7 @@ use crate::areas::{self, Place, lazy_area};
 use crate::channel_access::can_share_files;
 use crate::clock::format_date_time;
 use crate::components::attachment_menu;
+use crate::components::audio_card::{AudioCard, is_audio_card};
 use crate::components::empty_state::EmptyState;
 use crate::components::icons::{Icon, IconName};
 use crate::components::lightbox::prefers_reduced_motion;
@@ -83,7 +85,10 @@ pub fn MessageFiles(files: Vec<FileInfo>) -> impl IntoView {
   view! {
     <div class="msg-files">
       {media}
-      {cards.into_iter().map(|file| view! { <FileCard file=file /> }).collect_view()}
+      {cards.into_iter().map(|file| match is_audio_card(&file) {
+        true => view! { <AudioCard file=file /> }.into_any(),
+        false => view! { <FileCard file=file /> }.into_any(),
+      }).collect_view()}
       {download_all}
     </div>
   }
@@ -265,7 +270,7 @@ fn UploadTile(file: FileInfo, layout: TileLayout) -> impl IntoView {
 
 /// How far a transfer got, as a ring; a turning one before the first bytes moved.
 #[component]
-fn TransferRing(done_bytes: u64, total_bytes: u64) -> impl IntoView {
+pub(crate) fn TransferRing(done_bytes: u64, total_bytes: u64) -> impl IntoView {
   let percent = percent_of(done_bytes, total_bytes);
   match done_bytes {
     0 => view! { <span class="spinner" aria-hidden="true"></span> }.into_any(),
@@ -619,6 +624,8 @@ impl InlinePlayback {
       url,
       ..
     } = self;
+    // One thing plays at a time: an audio attachment pauses for the video.
+    state.audio.pause();
     state.active_inline_video.set(Some(key));
     is_playing.set(true);
     if url.with_untracked(Option::is_some) {
@@ -907,7 +914,7 @@ pub fn FileCard(file: FileInfo) -> impl IntoView {
 }
 
 /// The transfer state under a card's name; failures say why and offer a retry where one helps.
-fn transfer_status(transfer: &FileTransfer, actions: FileActions) -> AnyView {
+pub(crate) fn transfer_status(transfer: &FileTransfer, actions: FileActions) -> AnyView {
   let i18n = use_i18n();
   match transfer {
     FileTransfer::Remote => ().into_any(),
@@ -974,7 +981,7 @@ fn transfer_status(transfer: &FileTransfer, actions: FileActions) -> AnyView {
 
 /// The "…" menu of a file: share link, forward, save, the link to the message.
 #[component]
-fn FileMenu(actions: FileActions) -> impl IntoView {
+pub(crate) fn FileMenu(actions: FileActions) -> impl IntoView {
   let i18n = use_i18n();
   let is_open = RwSignal::new(false);
   let trigger = NodeRef::<html::Button>::new();
@@ -1086,7 +1093,7 @@ pub(crate) fn save_attachment(
 
 /// What the toolbar, the card, the "…" menu and the right-click menu do with one file.
 #[derive(Clone, Copy)]
-pub(crate) struct FileActions {
+pub struct FileActions {
   state: AppState,
   i18n: I18n,
   conversation: ConversationId,

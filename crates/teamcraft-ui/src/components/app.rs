@@ -161,6 +161,7 @@ pub fn Shell(backend: Rc<dyn Backend>, settings: Settings) -> impl IntoView {
   } else {
     sync_favicon(state);
   }
+  crate::audio_player::stop_when_leaving(state);
   if let Some((_, conversation)) = start {
     state.open_conversation(conversation);
   }

@@ -228,9 +228,10 @@ fn refused() -> String {
   "the browser refused the file".to_owned()
 }
 
-/// Only allowlisted pictures and videos get their own type; anything else stays opaque bytes, so a
-/// file that lies about its type is never rendered as a document. SVG is a document too (its scripts
-/// would run if the URL were opened in a tab): it stays opaque and is shown drawn into a PNG instead.
+/// Only allowlisted pictures, videos and audio get their own type; anything else stays opaque bytes,
+/// so a file that lies about its type is never rendered as a document. SVG is a document too (its
+/// scripts would run if the URL were opened in a tab): it stays opaque and is shown drawn into a PNG
+/// instead.
 fn blob_type(media_type: &str) -> &'static str {
   displayable_type(media_type).unwrap_or(OPAQUE_TYPE)
 }
@@ -240,9 +241,10 @@ mod tests {
   use super::*;
 
   #[test]
-  fn only_images_and_videos_keep_their_media_type() {
+  fn only_images_videos_and_audio_keep_their_media_type() {
     assert_eq!(blob_type("image/jpeg"), "image/jpeg");
     assert_eq!(blob_type("video/mp4"), "video/mp4");
+    assert_eq!(blob_type("audio/mpeg"), "audio/mpeg");
     assert_eq!(blob_type("text/html"), OPAQUE_TYPE);
     assert_eq!(
       blob_type("image/svg+xml"),

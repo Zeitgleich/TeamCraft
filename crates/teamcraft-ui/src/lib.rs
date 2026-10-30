@@ -17,6 +17,8 @@ pub mod activity_place;
 pub mod admin_live;
 pub mod areas;
 pub mod attention;
+pub mod audio;
+pub mod audio_player;
 pub mod auth;
 pub mod brand;
 pub mod bundle;

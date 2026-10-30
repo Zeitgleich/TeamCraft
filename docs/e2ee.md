@@ -481,8 +481,15 @@ badge. A click plays the video in the row (one at a time, paused when scrolled o
 64 MiB, as the player gets the whole decrypted file as a `blob:` (`MAX_INLINE_VIDEO_BYTES`); bigger videos
 open in the lightbox. The desktop app's CSP allows `media-src 'self' blob:` for this, as the web client's does.
 
-An attachment's file is untrusted content from another member. Only images and videos get a `blob:`
-of their own media type; everything else is opaque bytes. SVG is a document that can carry scripts,
+**Audio** (#802). An audio file (`audio/*`, or by extension when the type is generic) is a card with the app's
+own player. Nothing is downloaded until play is pressed; then the core decrypts the file in memory like a
+video, and the app's one `<audio>` element (not part of the page's layout) plays it from a `blob:` URL. One
+attachment plays at a time; the URL is revoked when another one plays, the conversation is left or no card
+shows the file any more. Files above the user's limit (`AudioLimit`, 16 to 128 MiB, default 64 MiB) are only
+saved. The length the sender's browser read from the file's metadata (`duration_ms`) shows before playing.
+
+An attachment's file is untrusted content from another member. Only images, videos and known audio types get
+a `blob:` of their own media type; everything else is opaque bytes. SVG is a document that can carry scripts,
 and a `blob:` URL has the page's origin, so an SVG is never shown as itself: the page decodes it in an
 `<img>` that is never attached to the document (no scripts, no network), draws it into a canvas and
 shows only the resulting PNG. Thumbnails of SVG are drawn by the sender's browser the same way, or by

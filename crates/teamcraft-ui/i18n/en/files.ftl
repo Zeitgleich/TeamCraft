@@ -234,6 +234,13 @@ video-unmute = Unmute
 video-volume = Volume
 video-fullscreen = Full screen
 video-exit-fullscreen = Exit full screen
+# Audio attachments playing in the conversation (#802)
+audio-play = Play { $name }
+audio-pause = Pause { $name }
+audio-loading = Loading { $name }
+audio-too-large = Too large to play here
+audio-unplayable = This audio format can't be played here.
+audio-unavailable = The audio couldn't be loaded.
 
 ## Settings: sections, search and rows (#327)
 # Files view and setup checklist (issue #301)

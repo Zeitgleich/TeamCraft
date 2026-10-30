@@ -115,6 +115,35 @@ pub async fn video_poster(file: &web_sys::File, max_side: u32) -> Option<VideoPo
   poster
 }
 
+/// The length of an audio file, read by the browser from its metadata through a `blob:` URL it
+/// streams from (#802): the message shows it before anyone plays the file. `None` where the browser
+/// can't read the format or takes too long.
+pub async fn audio_duration_ms(file: &web_sys::File) -> Option<u64> {
+  let source = web_sys::Url::create_object_url_with_blob(file).ok()?;
+  let maybe_duration_ms = duration_from(&source).await;
+  drop(web_sys::Url::revoke_object_url(&source));
+  maybe_duration_ms
+}
+
+async fn duration_from(source: &str) -> Option<u64> {
+  let audio = web_sys::window()?
+    .document()?
+    .create_element("audio")
+    .ok()?
+    .dyn_into::<web_sys::HtmlMediaElement>()
+    .ok()?;
+  audio.set_muted(true);
+  audio.set_preload("metadata");
+  // The listener goes on before the source, so the event is not missed.
+  let loaded = event_within(&audio, "loadedmetadata", VIDEO_LOAD_TIMEOUT);
+  audio.set_src(source);
+  let is_loaded = JsFuture::from(loaded).await.is_ok();
+  let duration = audio.duration();
+  audio.remove_attribute("src").ok();
+  audio.load();
+  (is_loaded && duration.is_finite() && duration > 0.0).then_some((duration * 1000.0) as u64)
+}
+
 async fn poster_from(source: &str, max_side: u32) -> Option<VideoPoster> {
   let video = web_sys::window()?
     .document()?

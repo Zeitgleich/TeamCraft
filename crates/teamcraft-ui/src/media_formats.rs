@@ -44,9 +44,10 @@ pub fn media_type_for(file_name: &str, browser_type: &str) -> String {
     .to_owned()
 }
 
-/// Media types the page hands the browser as themselves (in `<img>` and `<video>`): pictures and
-/// videos that can't carry scripts. Everything else, SVG and HTML included, stays opaque bytes.
-const DISPLAYABLE_TYPES: [&str; 18] = [
+/// Media types the page hands the browser as themselves (in `<img>`, `<video>` and the audio
+/// player): pictures, videos and audio that can't carry scripts. Everything else, SVG and HTML
+/// included, stays opaque bytes.
+const DISPLAYABLE_TYPES: [&str; 25] = [
   "image/png",
   "image/jpeg",
   "image/gif",
@@ -65,6 +66,14 @@ const DISPLAYABLE_TYPES: [&str; 18] = [
   "video/ogg",
   "video/quicktime",
   "video/x-matroska",
+  // The blob types of `audio::AudioFormat` (#802).
+  "audio/mpeg",
+  "audio/mp4",
+  "audio/aac",
+  "audio/ogg",
+  "audio/wav",
+  "audio/flac",
+  "audio/webm",
 ];
 
 /// The essence of a media type: without parameters, trimmed, lowercase

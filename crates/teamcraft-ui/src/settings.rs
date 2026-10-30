@@ -25,6 +25,7 @@ const KEY_FAVORITE_ORDER: &str = "teamcraft.favorite_order";
 const KEY_MEDIA_CACHE_LIMIT: &str = "teamcraft.media_cache_limit";
 const KEY_MEDIA_CACHE_MAX_AGE: &str = "teamcraft.media_cache_max_age";
 const KEY_PREVIEW_LIMIT: &str = "teamcraft.preview_limit";
+const KEY_AUDIO_LIMIT: &str = "teamcraft.audio_limit";
 /// Per account: `teamcraft.last_open.<user id>`, a [`LastOpen`].
 const KEY_LAST_OPEN_PREFIX: &str = "teamcraft.last_open.";
 /// Conversations the quick switcher remembers as recently visited.
@@ -268,6 +269,61 @@ impl PreviewLimit {
   }
 }
 
+/// Up to which size an audio attachment plays in the conversation (#802); a larger one offers the
+/// download only. The player holds the whole decrypted file in memory while it has it (the core has
+/// no streaming read for the page), like a video playing in its row (`MAX_INLINE_VIDEO_BYTES`). Read
+/// when a card is shown.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AudioLimit {
+  Mib16,
+  Mib32,
+  Mib64,
+  Mib128,
+}
+
+impl AudioLimit {
+  pub const ALL: [AudioLimit; 4] = [Self::Mib16, Self::Mib32, Self::Mib64, Self::Mib128];
+  /// As large as a video that plays in its row.
+  pub const DEFAULT: AudioLimit = Self::Mib64;
+
+  pub fn slug(self) -> &'static str {
+    match self {
+      Self::Mib16 => "16mb",
+      Self::Mib32 => "32mb",
+      Self::Mib64 => "64mb",
+      Self::Mib128 => "128mb",
+    }
+  }
+
+  pub fn from_slug(slug: &str) -> Option<Self> {
+    Self::ALL.into_iter().find(|limit| limit.slug() == slug)
+  }
+
+  pub fn bytes(self) -> u64 {
+    const MIB: u64 = 1024 * 1024;
+    match self {
+      Self::Mib16 => 16 * MIB,
+      Self::Mib32 => 32 * MIB,
+      Self::Mib64 => 64 * MIB,
+      Self::Mib128 => 128 * MIB,
+    }
+  }
+
+  /// Whether a file of `size_bytes` plays in the conversation; the limit itself does.
+  pub fn allows(self, size_bytes: u64) -> bool {
+    size_bytes <= self.bytes()
+  }
+
+  /// The stored choice, else the default.
+  pub fn load() -> Self {
+    load(KEY_AUDIO_LIMIT, Self::from_slug).unwrap_or(Self::DEFAULT)
+  }
+
+  pub fn save(self) {
+    store_string(KEY_AUDIO_LIMIT, self.slug());
+  }
+}
+
 /// Where the data comes from. Only development builds with the `demo` feature have a choice; every
 /// other build always signs in to a server.
 #[cfg(feature = "demo")]
@@ -494,6 +550,33 @@ fn local_storage() -> Option<web_sys::Storage> {
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  mod audio_limit {
+    use super::*;
+
+    #[test]
+    fn the_default_matches_inline_video_and_the_limit_itself_plays() {
+      let limit = AudioLimit::DEFAULT;
+      assert_eq!(limit.bytes(), crate::media_layout::MAX_INLINE_VIDEO_BYTES);
+      assert!(limit.allows(limit.bytes()));
+      assert!(!limit.allows(limit.bytes() + 1));
+    }
+
+    #[test]
+    fn slugs_round_trip_and_limits_grow() {
+      for limit in AudioLimit::ALL {
+        assert_eq!(AudioLimit::from_slug(limit.slug()), Some(limit));
+      }
+      assert!(
+        AudioLimit::ALL
+          .windows(2)
+          .all(|pair| pair[0].bytes() < pair[1].bytes())
+      );
+      assert_eq!(AudioLimit::from_slug("512mb"), None);
+      // Outside a browser nothing is stored: the default.
+      assert_eq!(AudioLimit::load(), AudioLimit::DEFAULT);
+    }
+  }
 
   mod preview_limit {
     use super::*;

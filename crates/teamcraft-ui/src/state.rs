@@ -8,6 +8,7 @@ use leptos::prelude::*;
 
 use crate::activity_place::ActivityFilter;
 use crate::admin::AdminSection;
+use crate::audio_player::AudioPlayer;
 use crate::backend::Backend;
 use crate::calls::CallState;
 use crate::lightbox::MediaKey;
@@ -301,6 +302,8 @@ pub struct AppState {
   before_activity: StoredValue<Option<Place>>,
   /// The video playing inside its message row; one at a time (#483).
   pub active_inline_video: RwSignal<Option<MediaKey>>,
+  /// The one audio player of the app; one attachment plays at a time (#802).
+  pub audio: AudioPlayer,
   /// The layout the window's size calls for (`viewport.rs`).
   pub layout: RwSignal<Layout>,
   /// Text of the search box, kept when leaving and re-entering the search page.
@@ -435,6 +438,7 @@ impl AppState {
       activity_filter: RwSignal::new(ActivityFilter::default()),
       before_activity: StoredValue::new(None),
       active_inline_video: RwSignal::new(None),
+      audio: AudioPlayer::new(),
       layout: RwSignal::new(current_layout()),
       search_query: RwSignal::new(String::new()),
       switcher_query: RwSignal::new(String::new()),
