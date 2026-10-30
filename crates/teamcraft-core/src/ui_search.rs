@@ -21,7 +21,7 @@ use teamcraft_client_api::search::{
 use crate::client::stored_account_data;
 use crate::error::CoreError;
 use crate::records;
-use crate::search::ConversationScope;
+use crate::search_scope::ConversationScope;
 use crate::store::{LocalStore, MessageContent, MessageFilter, StoredMessage, Table};
 use crate::ui_backend::{CoreChatBackend, CoreCommand, UnreadCounts};
 

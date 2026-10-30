@@ -27,6 +27,8 @@ use tantivy::tokenizer::{AsciiFoldingFilter, Language, LowerCaser, SimpleTokeniz
 use tantivy::{Directory, Index, TantivyDocument};
 use teamcraft_proto::{ClientMessageId, ConversationId, Id, MessageId, Snowflake, UserId};
 
+pub use crate::search_scope::ConversationScope;
+
 use crate::error::CoreError;
 use crate::store::{LocalStore, MessageContent, MessageFilter, StoredMessage, Table};
 
@@ -53,15 +55,6 @@ pub struct SearchQuery {
   pub has_file: bool,
   pub has_link: bool,
   pub in_thread: bool,
-}
-
-/// The conversations a search looks in.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub enum ConversationScope {
-  #[default]
-  All,
-  /// Only these; an empty set finds nothing (an `in:` filter that names no conversation).
-  Only(BTreeSet<ConversationId>),
 }
 
 /// A matching message.
@@ -153,15 +146,6 @@ impl SearchService {
       }
     }
     Ok(())
-  }
-}
-
-impl ConversationScope {
-  pub fn includes(&self, conversation: ConversationId) -> bool {
-    match self {
-      Self::All => true,
-      Self::Only(conversations) => conversations.contains(&conversation),
-    }
   }
 }
 
