@@ -48,6 +48,7 @@
     "allow-core-query",
     "allow-core-attachment",
     "allow-core-save-attachment",
+    "allow-core-save-attachments",
     "allow-core-stage-file",
     "allow-core-focus",
     "allow-core-stop",

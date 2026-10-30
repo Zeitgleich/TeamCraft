@@ -100,11 +100,7 @@ fn DownloadAll(files: Vec<FileInfo>) -> impl IntoView {
   let state = use_app_state();
   let i18n = use_i18n();
   let count = files.len();
-  let download = move |_| {
-    for file in &files {
-      FileActions::new(state, file).download();
-    }
-  };
+  let download = move |_| save_attachments(state, i18n, &files);
   view! {
     <div class="files-bar">
       <span class="files-count">{move || i18n.t_count("files-count", count)}</span>
@@ -1087,6 +1083,35 @@ pub(crate) fn save_attachment(
       // The user closed the dialog.
       Ok(false) => {},
       Err(error) => state.show_error(i18n.t("file-save-failed"), error),
+    }
+  });
+}
+
+/// Saves all `files` of one message. In the desktop app the system's folder dialog asks once where
+/// to, and the core saves every file into that folder (#1014): a save dialog per file competed for
+/// the window and only the first file was saved. Each file's card shows its progress and result.
+/// In the browser each file goes to the browser's downloads.
+fn save_attachments(state: AppState, i18n: I18n, files: &[FileInfo]) {
+  let Some(first) = files.first() else {
+    return;
+  };
+  if !crate::auth::tauri::is_available() {
+    for file in files {
+      state.write(|backend| backend.download_attachment(file.conversation, file.message, &file.file_id));
+    }
+    return;
+  }
+  let args = serde_json::json!({
+    "conversation": first.conversation,
+    "message": first.message,
+    "file_ids": files.iter().map(|file| file.file_id.as_str()).collect::<Vec<_>>(),
+  });
+  spawn_local(async move {
+    match crate::auth::tauri::call::<usize>("core_save_attachments", &args).await {
+      // The user closed the dialog.
+      Ok(0) => {},
+      Ok(count) => state.show_brief_toast(i18n.t_count("files-saving", count)),
+      Err(error) => state.show_error(i18n.t("files-save-failed"), error),
     }
   });
 }

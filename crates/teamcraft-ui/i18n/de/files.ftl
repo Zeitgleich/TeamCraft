@@ -7,6 +7,11 @@ files-count = { $count ->
    *[other] { $count } Dateien
   }
 files-download-all = Alle herunterladen
+files-saving = { $count ->
+    [one] { $count } Datei wird gespeichert …
+   *[other] { $count } Dateien werden gespeichert …
+  }
+files-save-failed = Die Dateien konnten nicht gespeichert werden.
 
 ## Einrichtung der Schlüssel
 # ---- Meetings ----

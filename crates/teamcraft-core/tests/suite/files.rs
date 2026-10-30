@@ -365,6 +365,59 @@ async fn a_file_saved_through_the_dialog_goes_to_the_picked_path() {
   std::fs::remove_dir_all(&directory).unwrap();
 }
 
+/// "Download all" in the desktop app (#1014): every file of the message goes into the one folder
+/// the user picked, running side by side; files of the same name each get their own, and a file
+/// that was there before stays.
+#[tokio::test]
+async fn download_all_saves_every_file_into_the_picked_folder() {
+  let (_server, mut alice, mut bob, channel) = channel_with_two().await;
+  let alice_ui = backend_of(&alice);
+  alice_ui.send_message(with_files(
+    channel,
+    "",
+    vec![
+      file("image.jpg", "image/jpeg", b"one".to_vec()),
+      file("image.jpg", "image/jpeg", b"two".to_vec()),
+      file("notes.txt", "text/plain", b"three".to_vec()),
+    ],
+  ));
+  run_commands(&mut alice, &alice_ui).await;
+  settle(&mut [&mut alice, &mut bob]).await;
+  let bob_ui = backend_of(&bob);
+  let received = last(&bob_ui, channel);
+  let files = bob_ui.message_extras(channel, &[received.id])[0].files.clone();
+  let folder = std::env::temp_dir().join(format!("teamcraft-download-all-{}", std::process::id()));
+  std::fs::create_dir_all(&folder).unwrap();
+  std::fs::write(folder.join("notes.txt"), b"old").unwrap();
+
+  let mut downloads = Downloads::new(3);
+  for file in &files {
+    downloads.save_into(channel, file.file_id.parse().unwrap(), folder.clone());
+  }
+  assert!(downloads.start_due(&mut bob.client).await);
+  for _ in 0..files.len() {
+    let finished = downloads.next_finished().await;
+    assert!(Downloads::finish(&mut bob.client, finished));
+  }
+
+  let files = bob_ui.message_extras(channel, &[received.id])[0].files.clone();
+  let mut saved: Vec<Vec<u8>> = files
+    .iter()
+    .map(|file| match &file.transfer {
+      FileTransfer::Local { path } => {
+        assert_eq!(std::path::Path::new(path).parent(), Some(folder.as_path()));
+        std::fs::read(path).unwrap()
+      },
+      other => panic!("not saved: {other:?}"),
+    })
+    .collect();
+  saved.sort();
+  assert_eq!(saved, vec![b"one".to_vec(), b"three".to_vec(), b"two".to_vec()]);
+  assert_eq!(std::fs::read(folder.join("notes.txt")).unwrap(), b"old");
+  assert_eq!(std::fs::read_dir(&folder).unwrap().count(), 4);
+  std::fs::remove_dir_all(&folder).unwrap();
+}
+
 /// A save target that can't be written (its folder went away, no permission to write there) leaves
 /// the file failed with that reason, not a bare "Transfer failed" (#807).
 #[tokio::test]

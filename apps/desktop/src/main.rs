@@ -95,7 +95,7 @@ fn main() -> anyhow::Result<()> {
   let builder = builder.plugin(tauri_plugin_clipboard_manager::init());
   builder
     .plugin(tauri_plugin_opener::init())
-    // The save dialog of "Save…" (core_save_attachment); the webview gets no dialog permission.
+    // The save and folder dialogs of "Save…" and "Download all" (core_save_attachment[s]); the webview gets no dialog permission.
     .plugin(tauri_plugin_dialog::init())
     .plugin(tauri_plugin_global_shortcut::Builder::new().build())
     .plugin(tauri_plugin_notification::init())
@@ -258,6 +258,7 @@ fn main() -> anyhow::Result<()> {
       core::commands::core_query,
       core::commands::core_attachment,
       core::commands::core_save_attachment,
+      core::commands::core_save_attachments,
       core::commands::core_stage_file,
       core::commands::core_stop,
       core::media::core_media_get,
