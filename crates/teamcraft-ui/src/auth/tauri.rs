@@ -16,8 +16,9 @@ use super::{
 use teamcraft_client_api::call_window::CallWindow;
 use teamcraft_client_api::os_notify::{NotificationSound, NotificationTag, OsNotification, TagTarget};
 
+use crate::clock::now_ms;
 use crate::feedback::{ActionFailure, FailureKind, NotificationFailure};
-use crate::model::ConversationId;
+use crate::model::{ConversationId, TimestampMs};
 use crate::reactive::OwnerLiveness;
 
 /// Prefix of the i18n keys the server commands answer with.
@@ -867,6 +868,19 @@ pub fn notification_permission() -> Option<String> {
 /// synchronously and [`Self::answer`] waits for the user's reply afterwards.
 pub struct NotificationPermissionRequest {
   maybe_promise: Option<js_sys::Promise>,
+  /// When the request was made; `None` where nothing was asked.
+  maybe_asked_at_ms: Option<TimestampMs>,
+}
+
+/// The browser's reply to a [`NotificationPermissionRequest`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct NotificationPermissionAnswer {
+  /// `granted`, `denied`, or `default` when no prompt was shown. `None` where the browser has no
+  /// notifications.
+  pub maybe_permission: Option<String>,
+  /// How long the browser took to reply, where it was asked. A `denied` in a few milliseconds came
+  /// without a prompt (a private window, #893); a person needs longer to read one.
+  pub maybe_reply_after_ms: Option<i64>,
 }
 
 /// Starts the browser's permission prompt. Call it first thing in the click handler, before any
@@ -875,19 +889,38 @@ pub fn request_notification_permission() -> NotificationPermissionRequest {
   let maybe_promise = (notification_permission().as_deref() == Some("default"))
     .then(start_permission_request)
     .flatten();
-  NotificationPermissionRequest { maybe_promise }
+  let maybe_asked_at_ms = maybe_promise.as_ref().map(|_| now_ms());
+  NotificationPermissionRequest {
+    maybe_promise,
+    maybe_asked_at_ms,
+  }
 }
 
 impl NotificationPermissionRequest {
-  /// The permission once the user answered (or the browser gave none): `granted`, `denied`, or
-  /// `default` when no prompt was shown. `None` where the browser has no notifications.
-  pub async fn answer(self) -> Option<String> {
+  /// The permission once the user answered (or the browser gave none), and how long that took.
+  pub async fn answer(self) -> NotificationPermissionAnswer {
     if let Some(promise) = self.maybe_promise {
       // A rejected request is the same as no answer; the permission below says what is the case.
       let _ = JsFuture::from(promise).await;
     }
-    notification_permission()
+    NotificationPermissionAnswer {
+      maybe_permission: notification_permission(),
+      maybe_reply_after_ms: self.maybe_asked_at_ms.map(|asked_at| now_ms() - asked_at),
+    }
   }
+}
+
+/// Whether this browser can receive Web Push (a service worker and the Push API). Without it, as in
+/// some private windows, turning notifications on can't work, so the app doesn't offer it.
+pub fn has_web_push() -> bool {
+  let Some(window) = web_sys::window() else {
+    return false;
+  };
+  let has_push_manager = js_sys::Reflect::has(&window, &JsValue::from_str("PushManager")).unwrap_or(false);
+  let has_service_worker = js_sys::Reflect::get(&window, &JsValue::from_str("navigator"))
+    .and_then(|navigator| js_sys::Reflect::get(&navigator, &JsValue::from_str("serviceWorker")))
+    .is_ok_and(|worker| !worker.is_undefined() && !worker.is_null());
+  has_push_manager && has_service_worker
 }
 
 fn start_permission_request() -> Option<js_sys::Promise> {

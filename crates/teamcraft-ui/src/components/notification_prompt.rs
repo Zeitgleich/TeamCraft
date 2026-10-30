@@ -3,7 +3,8 @@
 //! device". Browsers (Safari above all) only show their permission prompt from a click, so the
 //! request always runs from a button, never on load, and is started inside the click handler itself
 //! (before any `await`), or Safari and Chrome refuse it without a prompt (#893). The banner always
-//! says what came of it. The desktop app has OS notifications and never shows the banner.
+//! says what came of it, including the refusal without a prompt of a private window. The desktop
+//! app has OS notifications and never shows the banner.
 
 use leptos::prelude::*;
 
@@ -27,6 +28,9 @@ const SNOOZED_KEY_PREFIX: &str = "teamcraft.notification_prompt.";
 const SNOOZE_MS: i64 = 7 * 24 * 60 * 60 * 1000;
 /// How long the confirmation "Notifications are on" stays before the banner goes.
 const CONFIRMATION_MS: u64 = 4_000;
+/// A `denied` faster than this came from the browser itself, not from a person reading a prompt:
+/// private windows refuse at once without showing one (#893).
+const PROMPTLESS_REPLY_MS: i64 = 500;
 
 /// What came of the user's click on "Turn on".
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -35,13 +39,16 @@ pub enum AllowOutcome {
   On,
   /// The browser says no (the user declined, or blocked notifications for this site before).
   Blocked,
+  /// The browser said no at once without showing a prompt: a private window, where notifications
+  /// are not available, or a browser setting that blocks every site.
+  Refused,
   /// The browser showed no prompt and the question is still open (a quieter permission UI behind
   /// the address bar's bell, or a browser that blocks prompts).
   NoPrompt,
 }
 
 /// Asks above the app to turn on notifications, while this browser's permission is undecided and
-/// the user has not said "Not now" in the last [`SNOOZE_MS`].
+/// the browser can receive Web Push and the user has not said "Not now" in the last [`SNOOZE_MS`].
 #[component]
 pub fn NotificationPrompt() -> impl IntoView {
   let i18n = use_i18n();
@@ -54,6 +61,7 @@ pub fn NotificationPrompt() -> impl IntoView {
     !tauri::is_available()
       && is_offered(
         tauri::notification_permission().as_deref(),
+        tauri::has_web_push(),
         maybe_snoozed_at,
         now_ms(),
       ),
@@ -102,7 +110,7 @@ pub fn NotificationPrompt() -> impl IntoView {
               {move || i18n.t("notif-prompt-later")}
             </button>
           })}
-          {(outcome == Some(AllowOutcome::Blocked)).then(|| view! {
+          {matches!(outcome, Some(AllowOutcome::Blocked | AllowOutcome::Refused)).then(|| view! {
             <button class="btn btn-small" on:click=close>
               {move || i18n.t("notif-prompt-close")}
             </button>
@@ -120,6 +128,7 @@ fn outcome_text_key(maybe_outcome: Option<AllowOutcome>) -> &'static str {
     Some(AllowOutcome::On) => "notif-prompt-on",
     Some(AllowOutcome::Blocked) => "notif-prompt-blocked",
     Some(AllowOutcome::NoPrompt) => "notif-prompt-no-prompt",
+    Some(AllowOutcome::Refused) => "notif-prompt-refused",
   }
 }
 
@@ -132,8 +141,8 @@ pub async fn allow_notifications(
   maybe_session: Option<SessionControl>,
   request: tauri::NotificationPermissionRequest,
 ) -> Result<AllowOutcome, ActionFailure> {
-  let maybe_permission = request.answer().await;
-  if let Some(outcome) = permission_outcome(maybe_permission.as_deref()) {
+  let answer = request.answer().await;
+  if let Some(outcome) = permission_outcome(&answer) {
     return Ok(outcome);
   }
   let Some(session) = maybe_session else {
@@ -149,12 +158,20 @@ pub async fn allow_notifications(
   Ok(AllowOutcome::On)
 }
 
-/// What the browser's permission says about a click: `None` where it is granted and the push
+/// What the browser's answer says about a click: `None` where it is granted and the push
 /// subscription is still to do.
-fn permission_outcome(maybe_permission: Option<&str>) -> Option<AllowOutcome> {
-  match maybe_permission {
+fn permission_outcome(answer: &tauri::NotificationPermissionAnswer) -> Option<AllowOutcome> {
+  match answer.maybe_permission.as_deref() {
     Some("granted") => None,
     Some("default") => Some(AllowOutcome::NoPrompt),
+    // Asked just now and refused faster than anyone reads a prompt: none was shown.
+    Some("denied")
+      if answer
+        .maybe_reply_after_ms
+        .is_some_and(|after| after < PROMPTLESS_REPLY_MS) =>
+    {
+      Some(AllowOutcome::Refused)
+    },
     // Denied, or a browser without notifications (then there is nothing to ask for).
     _ => Some(AllowOutcome::Blocked),
   }
@@ -170,9 +187,16 @@ fn push_key(me: UserId) -> String {
 }
 
 /// The banner asks only while the browser's answer is open (`default`: never when granted, never
-/// when denied, not where there are no notifications) and "Not now" is older than [`SNOOZE_MS`].
-fn is_offered(maybe_permission: Option<&str>, maybe_snoozed_at: Option<i64>, now: i64) -> bool {
+/// when denied, not where there are no notifications), the browser can receive Web Push (without
+/// it turning them on can only fail) and "Not now" is older than [`SNOOZE_MS`].
+fn is_offered(
+  maybe_permission: Option<&str>,
+  has_web_push: bool,
+  maybe_snoozed_at: Option<i64>,
+  now: i64,
+) -> bool {
   maybe_permission == Some("default")
+    && has_web_push
     && maybe_snoozed_at.is_none_or(|snoozed_at| now.saturating_sub(snoozed_at) >= SNOOZE_MS)
 }
 
@@ -185,18 +209,29 @@ mod tests {
 
   #[test]
   fn asks_only_while_the_browser_has_not_been_answered() {
-    assert!(is_offered(Some("default"), None, NOW));
-    assert!(!is_offered(Some("granted"), None, NOW));
-    assert!(!is_offered(Some("denied"), None, NOW));
-    assert!(!is_offered(None, None, NOW), "no notifications in this browser");
+    assert!(is_offered(Some("default"), true, None, NOW));
+    assert!(!is_offered(Some("granted"), true, None, NOW));
+    assert!(!is_offered(Some("denied"), true, None, NOW));
+    assert!(
+      !is_offered(None, true, None, NOW),
+      "no notifications in this browser"
+    );
+  }
+
+  #[test]
+  fn does_not_ask_where_web_push_is_missing() {
+    assert!(
+      !is_offered(Some("default"), false, None, NOW),
+      "a private window without service worker or Push API"
+    );
   }
 
   #[test]
   fn not_now_waits_a_week_before_asking_again() {
-    assert!(!is_offered(Some("default"), Some(NOW - SNOOZE_MS + 1), NOW));
-    assert!(is_offered(Some("default"), Some(NOW - SNOOZE_MS), NOW));
+    assert!(!is_offered(Some("default"), true, Some(NOW - SNOOZE_MS + 1), NOW));
+    assert!(is_offered(Some("default"), true, Some(NOW - SNOOZE_MS), NOW));
     assert!(
-      !is_offered(Some("default"), Some(NOW + 60_000), NOW),
+      !is_offered(Some("default"), true, Some(NOW + 60_000), NOW),
       "a snooze from a clock that was ahead still hides it"
     );
   }
@@ -204,27 +239,53 @@ mod tests {
   #[test]
   fn every_answer_of_the_browser_has_an_outcome_the_user_is_told() {
     assert_eq!(
-      permission_outcome(Some("granted")),
+      permission_outcome(&answer(Some("granted"), Some(3_000))),
       None,
       "subscribing is still to do"
     );
-    assert_eq!(permission_outcome(Some("denied")), Some(AllowOutcome::Blocked));
     assert_eq!(
-      permission_outcome(Some("default")),
+      permission_outcome(&answer(Some("denied"), Some(3_000))),
+      Some(AllowOutcome::Blocked)
+    );
+    assert_eq!(
+      permission_outcome(&answer(Some("default"), Some(3_000))),
       Some(AllowOutcome::NoPrompt),
       "no prompt was shown"
     );
-    assert_eq!(permission_outcome(None), Some(AllowOutcome::Blocked));
+    assert_eq!(
+      permission_outcome(&answer(None, None)),
+      Some(AllowOutcome::Blocked)
+    );
     let texts = [
       None,
       Some(AllowOutcome::On),
       Some(AllowOutcome::Blocked),
       Some(AllowOutcome::NoPrompt),
+      Some(AllowOutcome::Refused),
     ]
     .map(outcome_text_key);
     assert_eq!(
       texts.len(),
       texts.iter().collect::<std::collections::HashSet<_>>().len()
+    );
+  }
+
+  #[test]
+  fn an_instant_denial_is_told_apart_from_a_blocked_site() {
+    assert_eq!(
+      permission_outcome(&answer(Some("denied"), Some(4))),
+      Some(AllowOutcome::Refused),
+      "a private window refuses without a prompt"
+    );
+    assert_eq!(
+      permission_outcome(&answer(Some("denied"), Some(PROMPTLESS_REPLY_MS))),
+      Some(AllowOutcome::Blocked),
+      "a person read the prompt and declined"
+    );
+    assert_eq!(
+      permission_outcome(&answer(Some("denied"), None)),
+      Some(AllowOutcome::Blocked),
+      "denied before, so nothing was asked"
     );
   }
 
@@ -238,10 +299,21 @@ mod tests {
         "notif-prompt-on",
         "notif-prompt-blocked",
         "notif-prompt-no-prompt",
+        "notif-prompt-refused",
         "notif-prompt-close",
       ] {
         assert_ne!(translate(locale, key, None), key, "{locale:?} lacks {key}");
       }
+    }
+  }
+
+  fn answer(
+    maybe_permission: Option<&str>,
+    maybe_reply_after_ms: Option<i64>,
+  ) -> tauri::NotificationPermissionAnswer {
+    tauri::NotificationPermissionAnswer {
+      maybe_permission: maybe_permission.map(str::to_owned),
+      maybe_reply_after_ms,
     }
   }
 }
