@@ -326,6 +326,21 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     Ok(())
   }
 
+  /// The conversation's verified devices for a running call, after catching up its group: a
+  /// device that joins the call without being in the devices the call was prepared with is
+  /// usually one added to the conversation since (the notetaker added during the call, e2ee.md
+  /// §8.2), whose addition this device may not have processed yet. A failed catch-up (offline)
+  /// leaves the group as this device knows it.
+  pub async fn refresh_call_devices(
+    &mut self,
+    conversation: ConversationId,
+  ) -> Result<Vec<VerifiedDevice>, CoreError> {
+    if let Err(error) = self.sync_mls(conversation).await {
+      tracing::debug!(conversation_id = %conversation, %error, "catching up the call's group failed");
+    }
+    self.verified_call_devices(conversation).await
+  }
+
   /// The devices of the conversation's MLS group, their certificates verified against the pinned
   /// identities: who may be in its call. This device included.
   pub async fn verified_call_devices(

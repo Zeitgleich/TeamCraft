@@ -936,6 +936,22 @@ impl Engine {
       .await
   }
 
+  /// The running call's verified devices afresh, after catching up the conversation's group (a
+  /// device added during the call joins it, e2ee.md §8.2).
+  pub(crate) async fn call_devices(
+    &mut self,
+    conversation: ConversationId,
+  ) -> Result<Vec<teamcraft_crypto::identity::VerifiedDevice>, TeamCraftError> {
+    let was_running = matches!(self.client, ClientSlot::Running { .. });
+    let mut client = self.take_client().await?;
+    let result = client.refresh_call_devices(conversation).await;
+    self.client = ClientSlot::Idle(client);
+    if was_running {
+      self.start().await?;
+    }
+    Ok(result?)
+  }
+
   /// A fresh join token for the conversation's call, to rejoin after a lost connection.
   pub(crate) async fn call_join_token(
     &mut self,

@@ -10,7 +10,7 @@ use crate::calls::{
 };
 use crate::components::call_audio_menu::AudioMenu;
 use crate::components::call_chat::{CallChat, CallChatPanel, CallChatToast};
-use crate::components::call_notetaker::{NotetakerBanner, ask_notetaker_in, use_notetaker_in_call};
+use crate::components::call_notetaker::{NotetakerBanner, use_notetaker_in_call};
 use crate::components::call_prejoin::call_heading;
 use crate::components::call_video::{
   BackgroundPicker, LiveVideo, PickerSize, VideoSource, VideoTile, can_share_screen, can_show_video,
@@ -60,8 +60,7 @@ pub fn CallScreen(request: CallRequest) -> impl IntoView {
   // who is in the call; the badge, the banner and its tile say so to everybody.
   let others =
     Memo::new(move |_| remote.with(|tiles| tiles.iter().map(|tile| tile.user.id).collect::<Vec<_>>()));
-  let notetaker = use_notetaker_in_call(request.conversation, others);
-  let is_notetaker_asked = RwSignal::new(false);
+  let (notetaker, notetaker_invite) = use_notetaker_in_call(request.conversation, others);
   let is_notetaker_present =
     Memo::new(move |_| notetaker.get().is_some_and(|notetaker| notetaker.is_present));
   let remote_sharer = Memo::new(move |_| {
@@ -522,7 +521,7 @@ pub fn CallScreen(request: CallRequest) -> impl IntoView {
         })
       }}
       <crate::components::add_to_call::CallMoveBanner />
-      <NotetakerBanner conversation=request.conversation notetaker=notetaker is_asked=is_notetaker_asked />
+      <NotetakerBanner conversation=request.conversation notetaker=notetaker is_asked=notetaker_invite.is_asked />
       <div class="call-body">
         <div class="call-stage-wrap">{stage}</div>
         <Show when=move || chat.is_open.get() fallback=|| ()>
@@ -735,15 +734,19 @@ pub fn CallScreen(request: CallRequest) -> impl IntoView {
             on_press=move || state.overlay.set(Overlay::AddToCall(request.conversation))
           />
         </Show>
-        // The notetaker joins only where it is a member already (e2ee.md §8.2).
+        // Where the notetaker is no member yet, the button adds it first (e2ee.md §8.2).
         <Show
-          when=move || notetaker.get().is_some_and(|notetaker| notetaker.can_invite) && !is_notetaker_asked.get()
+          when=move || notetaker.get().is_some_and(|notetaker| notetaker.can_invite) && !notetaker_invite.is_busy()
           fallback=|| ()
         >
           <ControlButton
             icon=IconName::Compose
             label=Signal::derive(move || i18n.t("call-notetaker-add"))
-            on_press=move || ask_notetaker_in(request.conversation, is_notetaker_asked)
+            on_press=move || {
+              if let Some(found) = notetaker.get_untracked() {
+                notetaker_invite.press(&found);
+              }
+            }
           />
         </Show>
         // A phone's control bar keeps to what a call needs.

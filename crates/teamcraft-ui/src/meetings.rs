@@ -557,6 +557,33 @@ pub fn attending_users(meeting: &MeetingResponse) -> Vec<UserId> {
     .collect()
 }
 
+/// The edit that adds `user` to the invitees of the meeting `me` organizes and changes nothing
+/// else: the notetaker added during one of its calls (e2ee.md §8.2). The invitees go as a whole
+/// list, as the meeting has them now.
+pub fn adding_invitee(meeting: &MeetingResponse, me: UserId, user: UserId) -> UpdateMeetingRequest {
+  let form = ScheduleForm::from_meeting(meeting, me);
+  let mut invitees: Vec<MeetingInvitee> = form
+    .members
+    .into_iter()
+    .filter(|member| *member != user)
+    .map(|user_id| MeetingInvitee::User { user_id })
+    .collect();
+  invitees.push(MeetingInvitee::User { user_id: user });
+  invitees.extend(
+    form
+      .externals
+      .into_iter()
+      .map(|external| MeetingInvitee::External {
+        email: external.email,
+        maybe_name: Some(external.name).filter(|name| !name.is_empty()),
+      }),
+  );
+  UpdateMeetingRequest {
+    maybe_invitees: Some(invitees),
+    ..UpdateMeetingRequest::default()
+  }
+}
+
 /// A live meeting where `me` is the host, so guests and members with its link may wait in its
 /// lobby. Also without `has_lobby`: guests of the shared link and members always wait there.
 pub fn hosts_lobby(meeting: &MeetingResponse, me: UserId) -> bool {
@@ -1304,6 +1331,31 @@ mod tests {
       form.maybe_notetaker = Some(bot);
       let invitees = form.to_request(NOW).unwrap().invitees;
       assert_eq!(invitees, [MeetingInvitee::User { user_id: bot }]);
+    }
+
+    #[test]
+    fn adding_the_notetaker_during_a_call_keeps_everybody_else_invited() {
+      let me = UserId::from_snowflake(teamcraft_proto::Snowflake::new(1).unwrap());
+      let alice = UserId::from_snowflake(teamcraft_proto::Snowflake::new(5).unwrap());
+      let bot = UserId::from_snowflake(teamcraft_proto::Snowflake::new(99).unwrap());
+      let mut meeting = fixture_meeting(me);
+      let mut guest = attendee(None, Some("guest@example.com".into()));
+      guest.maybe_name = Some("Guest".into());
+      meeting.attendees = vec![attendee(Some(me), None), attendee(Some(alice), None), guest];
+      let request = adding_invitee(&meeting, me, bot);
+      assert_eq!(
+        request.maybe_invitees,
+        Some(vec![
+          MeetingInvitee::User { user_id: alice },
+          MeetingInvitee::User { user_id: bot },
+          MeetingInvitee::External {
+            email: "guest@example.com".into(),
+            maybe_name: Some("Guest".into()),
+          },
+        ])
+      );
+      assert_eq!(request.maybe_title, None, "nothing else changes");
+      assert_eq!(request.maybe_starts_at, None);
     }
 
     #[test]

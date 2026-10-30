@@ -141,6 +141,16 @@
   gap: 4px;
 }
 
+/* The notetaker heads the people to invite, set apart from them, with where its audio goes. */
+.invite-notetaker {
+  padding-bottom: 4px;
+  border-bottom: 1px solid var(--border);
+}
+
+.invite-notetaker .muted-text {
+  margin: 0 0 0 26px;
+}
+
 .invite-external {
   display: flex;
   align-items: center;

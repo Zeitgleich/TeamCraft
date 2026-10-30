@@ -102,6 +102,14 @@ pub struct CallEngine {
   maybe_authenticator: Option<Arc<dyn CallKeyAuthenticator>>,
   /// DAVE keys of other members from verified call key bindings (e2ee.md §8).
   verified_keys: HashMap<DeviceId, Vec<u8>>,
+  /// The driver can bring the trusted roster up to date during the call
+  /// ([`Self::enable_roster_refresh`]).
+  refreshes_roster: bool,
+  /// DAVE changes held, in order, while the driver brings the trusted roster up to date: they
+  /// named a device the roster doesn't have yet (one added to the conversation during the call).
+  held_dave: Vec<CallEvent>,
+  /// The driver was asked for the roster of the changes held now ([`Self::take_roster_request`]).
+  is_roster_requested: bool,
   /// A member failed key verification: media stays off for this call.
   is_compromised: bool,
   /// The call is over for this device whatever happens to the connection: the SFU refused the
@@ -424,6 +432,9 @@ impl CallEngine {
       maybe_trusted_roster: None,
       maybe_authenticator: None,
       verified_keys: HashMap::new(),
+      refreshes_roster: false,
+      held_dave: Vec::new(),
+      is_roster_requested: false,
       is_compromised: false,
       is_over: false,
       has_reported_unauthenticated_keys: false,
@@ -481,6 +492,9 @@ impl CallEngine {
     }
     self.last_event_seq = 0;
     self.verified_keys.clear();
+    // DAVE starts over on the new connection: what was held belongs to the old group.
+    self.held_dave.clear();
+    self.is_roster_requested = false;
     // Another network: its capacity is unknown, measure afresh.
     self.uplink = SendSideEstimator::new(self.config.bwe);
     self.uplink_layers = UplinkLayers::new(self.config.bwe.start_bps);
@@ -523,6 +537,37 @@ impl CallEngine {
   /// rejected.
   pub fn set_trusted_roster(&mut self, devices: impl IntoIterator<Item = DeviceId>) {
     self.maybe_trusted_roster = Some(devices.into_iter().collect());
+  }
+
+  /// The driver can bring the trusted roster up to date during the call (e2ee.md §8.2: the
+  /// notetaker added to the conversation while the call runs). A DAVE change that names a device
+  /// outside the roster is then held, and [`Self::take_roster_request`] asks the driver for the
+  /// conversation's devices as the client core knows them now; [`Self::resume_after_roster`]
+  /// applies what was held, with whatever roster and authenticator the driver set meanwhile.
+  /// Without it such a change fails as before.
+  pub fn enable_roster_refresh(&mut self) {
+    self.refreshes_roster = true;
+  }
+
+  /// Whether DAVE changes wait for a newer trusted roster that the driver hasn't been asked for
+  /// yet; `true` once per wait.
+  pub fn take_roster_request(&mut self) -> bool {
+    let is_due = !self.held_dave.is_empty() && !self.is_roster_requested;
+    if is_due {
+      self.is_roster_requested = true;
+    }
+    is_due
+  }
+
+  /// Applies the DAVE changes held for a newer roster, after the driver set the roster (and the
+  /// authenticator) it got, or kept the old ones when it got none. A device still unknown fails
+  /// now as it would have without the wait.
+  pub fn resume_after_roster(&mut self) -> Result<(), CallEngineError> {
+    self.is_roster_requested = false;
+    for event in std::mem::take(&mut self.held_dave) {
+      self.apply_dave_change(event)?;
+    }
+    Ok(())
   }
 
   /// Signs this device's DAVE key and verifies other members' keys (e2ee.md §8). Without one,
@@ -1052,31 +1097,9 @@ impl CallEngine {
         Ok(())
       },
       CallEvent::DaveExternalSender { package } => self.on_external_sender(package.as_slice()),
-      CallEvent::DaveProposals {
-        epoch,
-        proposals,
-        expected_participants,
-        key_bindings,
-      } => {
-        self.verify_bindings(&key_bindings)?;
-        self.on_proposals(epoch, proposals.as_slice(), &expected_participants)
-      },
-      CallEvent::DaveAnnounceCommit { commit, .. } => {
-        self.dave()?.process_commit(commit.as_slice())?;
-        self.verify_members()?;
-        self.report_secured();
-        Ok(())
-      },
-      CallEvent::DaveWelcome {
-        welcome,
-        key_bindings,
-      } => {
-        self.verify_bindings(&key_bindings)?;
-        self.dave()?.process_welcome(welcome.as_slice())?;
-        self.verify_members()?;
-        self.report_secured();
-        Ok(())
-      },
+      change @ (CallEvent::DaveProposals { .. }
+      | CallEvent::DaveAnnounceCommit { .. }
+      | CallEvent::DaveWelcome { .. }) => self.on_dave_change(change),
       CallEvent::TransportFeedback { feedback } => {
         self.on_uplink_feedback(&feedback, now);
         Ok(())
@@ -1572,6 +1595,64 @@ impl CallEngine {
       maybe_key_binding,
     });
     Ok(())
+  }
+
+  /// A DAVE membership change: applied now, or held while the trusted roster is brought up to
+  /// date (a device added to the conversation during the call).
+  fn on_dave_change(&mut self, change: CallEvent) -> Result<(), CallEngineError> {
+    if !self.held_dave.is_empty() || self.names_unknown_device(&change) {
+      self.held_dave.push(change);
+      return Ok(());
+    }
+    self.apply_dave_change(change)
+  }
+
+  /// Whether `change` brings bindings of a device outside the trusted roster, which a driver that
+  /// refreshes the roster gets the chance to know first.
+  fn names_unknown_device(&self, change: &CallEvent) -> bool {
+    let (true, Some(roster)) = (self.refreshes_roster, &self.maybe_trusted_roster) else {
+      return false;
+    };
+    let bindings = match change {
+      CallEvent::DaveProposals { key_bindings, .. } | CallEvent::DaveWelcome { key_bindings, .. } => {
+        key_bindings
+      },
+      _ => return false,
+    };
+    bindings
+      .iter()
+      .any(|binding| binding.device_id != self.config.device_id && !roster.contains(&binding.device_id))
+  }
+
+  fn apply_dave_change(&mut self, change: CallEvent) -> Result<(), CallEngineError> {
+    match change {
+      CallEvent::DaveProposals {
+        epoch,
+        proposals,
+        expected_participants,
+        key_bindings,
+      } => {
+        self.verify_bindings(&key_bindings)?;
+        self.on_proposals(epoch, proposals.as_slice(), &expected_participants)
+      },
+      CallEvent::DaveAnnounceCommit { commit, .. } => {
+        self.dave()?.process_commit(commit.as_slice())?;
+        self.verify_members()?;
+        self.report_secured();
+        Ok(())
+      },
+      CallEvent::DaveWelcome {
+        welcome,
+        key_bindings,
+      } => {
+        self.verify_bindings(&key_bindings)?;
+        self.dave()?.process_welcome(welcome.as_slice())?;
+        self.verify_members()?;
+        self.report_secured();
+        Ok(())
+      },
+      _ => Ok(()),
+    }
   }
 
   /// Verifies relayed call key bindings and remembers the bound keys.
@@ -4177,6 +4258,70 @@ mod tests {
       let proposals = propose(&gateway, 3, &key_package);
       let result = alice.handle_signal(event(3, dave_proposals(0, proposals, &[1, 3], Vec::new())), now);
       assert!(matches!(result, Err(CallEngineError::Dave(_))));
+    }
+
+    #[test]
+    fn a_device_added_during_the_call_waits_for_the_refreshed_roster() {
+      let now = Instant::now();
+      let authenticators = authenticators(&[1, 2, 3]);
+      let gateway = DaveExternalSender::new().unwrap();
+      let mut alice = joined_engine(1, &[], &gateway, Some(&authenticators[&1]), now);
+      alice.set_trusted_roster([device(2)]);
+      alice.enable_roster_refresh();
+      let mut notetaker = joined_engine(3, &[1], &gateway, Some(&authenticators[&3]), now);
+      let (key_package, notetaker_binding) = key_package_of(&mut notetaker);
+      let proposals = propose(&gateway, 3, &key_package);
+      let bindings = vec![binding(3, notetaker_binding.unwrap())];
+      alice
+        .handle_signal(event(3, dave_proposals(0, proposals, &[1, 3], bindings)), now)
+        .unwrap();
+      assert!(
+        drain(&mut alice)
+          .iter()
+          .all(|output| !matches!(output, EngineOutput::Signal(CallClientMessage::DaveCommit { .. }))),
+        "held until the roster knows device 3"
+      );
+      assert!(alice.take_roster_request());
+      assert!(!alice.take_roster_request(), "asked once per wait");
+      alice.set_trusted_roster([device(2), device(3)]);
+      alice.resume_after_roster().unwrap();
+      take_commit(&mut alice);
+      assert!(!alice.take_roster_request());
+    }
+
+    #[test]
+    fn a_device_still_unknown_after_the_refresh_is_rejected() {
+      let now = Instant::now();
+      let gateway = DaveExternalSender::new().unwrap();
+      let mut alice = joined_engine(1, &[], &gateway, None, now);
+      alice.set_trusted_roster([device(2)]);
+      alice.enable_roster_refresh();
+      let mut mallory = joined_engine(3, &[], &gateway, None, now);
+      let (key_package, _) = key_package_of(&mut mallory);
+      let proposals = propose(&gateway, 3, &key_package);
+      let bindings = vec![binding(3, b"not a binding".to_vec())];
+      alice
+        .handle_signal(event(3, dave_proposals(0, proposals, &[1, 3], bindings)), now)
+        .unwrap();
+      assert!(alice.take_roster_request());
+      // The core knows no such device: the roster stays, and the change fails as it would have.
+      assert!(alice.resume_after_roster().is_err());
+    }
+
+    #[test]
+    fn without_a_refresh_an_unknown_device_fails_at_once() {
+      let now = Instant::now();
+      let authenticators = authenticators(&[1, 3]);
+      let gateway = DaveExternalSender::new().unwrap();
+      let mut alice = joined_engine(1, &[], &gateway, Some(&authenticators[&1]), now);
+      alice.set_trusted_roster([device(2)]);
+      let mut notetaker = joined_engine(3, &[], &gateway, Some(&authenticators[&3]), now);
+      let (key_package, notetaker_binding) = key_package_of(&mut notetaker);
+      let proposals = propose(&gateway, 3, &key_package);
+      let bindings = vec![binding(3, notetaker_binding.unwrap())];
+      let result = alice.handle_signal(event(3, dave_proposals(0, proposals, &[1, 3], bindings)), now);
+      assert!(result.is_err());
+      assert!(!alice.take_roster_request());
     }
 
     #[test]

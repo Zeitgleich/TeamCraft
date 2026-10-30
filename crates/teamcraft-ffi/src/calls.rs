@@ -23,7 +23,7 @@ use teamcraft_media::call_auth::{CallBindingSigner, DeviceCallKeyAuthenticator};
 use teamcraft_media::call_cues::StatusCues;
 use teamcraft_media::call_engine::{CallEngineConfig, CallEngineEvent, OwnPublication};
 use teamcraft_media::call_native::{
-  JoinTicketSource, NativeCall, NativeCallConfig, NativeCallError, TicketFuture,
+  JoinTicketSource, NativeCall, NativeCallConfig, NativeCallError, TicketFuture, TrustFuture, TrustSource,
 };
 use teamcraft_media::call_resilience::{JoinTicket, JoinTicketError};
 use teamcraft_media::datagram::SimulcastLayer;
@@ -281,6 +281,14 @@ struct EngineJoinTickets {
   conversation: ConversationId,
 }
 
+/// The call's verified devices afresh from the engine thread, when a device added to the
+/// conversation during the call joins it (e2ee.md §8.2); this device keeps signing with its key.
+struct EngineTrust {
+  jobs: mpsc::UnboundedSender<Job>,
+  conversation: ConversationId,
+  signer: Arc<dyn CallBindingSigner>,
+}
+
 #[uniffi::export]
 impl CallSession {
   pub fn set_muted(&self, is_muted: bool) {
@@ -466,7 +474,7 @@ pub(crate) async fn join(
   let network_rx = network.subscribe();
   let conversation = preparation.conversation;
   let own_device = preparation.device_id;
-  let mut config = native_config(preparation)?;
+  let mut config = native_config(preparation, &jobs)?;
   config.is_muted_at_start = is_muted;
   config.maybe_ticket_source = Some(Arc::new(EngineJoinTickets { jobs, conversation }));
   let camera = CameraSlot::default();
@@ -1005,8 +1013,12 @@ fn ended(conversation: ConversationId, reason: CallEndReason) -> CallStateInfo {
 }
 
 /// The phone's default microphone and output (Telecom routes them); H.264 video, sent from the
-/// app's camera frames and received once Cisco's OpenH264 is installed for decoding.
-fn native_config(preparation: CallPreparation) -> Result<NativeCallConfig, TeamCraftError> {
+/// app's camera frames and received once Cisco's OpenH264 is installed for decoding. The trusted
+/// roster is refreshed through `jobs` when a device added during the call joins.
+fn native_config(
+  preparation: CallPreparation,
+  jobs: &mpsc::UnboundedSender<Job>,
+) -> Result<NativeCallConfig, TeamCraftError> {
   let video_decoders = if openh264_library::is_available() {
     vec![VideoCodec::H264]
   } else {
@@ -1024,11 +1036,16 @@ fn native_config(preparation: CallPreparation) -> Result<NativeCallConfig, TeamC
     },
     bwe: BweConfig::default(),
   };
-  let authenticator =
-    DeviceCallKeyAuthenticator::from_verified(Arc::new(CoreSigner(preparation.signer)), preparation.devices)
-      .map_err(|error| TeamCraftError::Call(error.to_string()))?;
+  let signer: Arc<dyn CallBindingSigner> = Arc::new(CoreSigner(preparation.signer));
+  let authenticator = DeviceCallKeyAuthenticator::from_verified(Arc::clone(&signer), preparation.devices)
+    .map_err(|error| TeamCraftError::Call(error.to_string()))?;
   let ticket = JoinTicket::from(preparation.join);
   let mut config = NativeCallConfig::device_bound(ticket.sfu_url, ticket.token, engine, authenticator);
+  config.maybe_trust_source = Some(Arc::new(EngineTrust {
+    jobs: jobs.clone(),
+    conversation: preparation.conversation,
+    signer,
+  }));
   // A development SFU's self-signed certificates; rejoins use their fresh token's.
   config.certificate_hashes = ticket.certificate_hashes;
   config.source = AudioSource::Microphone(AudioDeviceChoice::Default);
@@ -1073,6 +1090,30 @@ impl JoinTicketSource for EngineJoinTickets {
       })?;
       // With this token's certificate hashes: a restarted SFU may have a new self-signed one.
       Ok(JoinTicket::from(join))
+    })
+  }
+}
+
+impl TrustSource for EngineTrust {
+  fn fetch(&self) -> TrustFuture {
+    let (reply, answer) = oneshot::channel();
+    let conversation = self.conversation;
+    let job: Job = Box::new(move |engine| {
+      Box::pin(async move {
+        // The call thread may have given up waiting.
+        let _ = reply.send(engine.call_devices(conversation).await);
+      })
+    });
+    let is_sent = self.jobs.send(job).is_ok();
+    let signer = Arc::clone(&self.signer);
+    Box::pin(async move {
+      let stopped = || TeamCraftError::EngineStopped.to_string();
+      if !is_sent {
+        return Err(stopped());
+      }
+      let answered: Result<Vec<VerifiedDevice>, TeamCraftError> = answer.await.map_err(|_| stopped())?;
+      let devices = answered.map_err(|error| error.to_string())?;
+      DeviceCallKeyAuthenticator::from_verified(signer, devices).map_err(|error| error.to_string())
     })
   }
 }

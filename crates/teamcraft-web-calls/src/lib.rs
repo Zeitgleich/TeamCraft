@@ -44,8 +44,8 @@ use teamcraft_media::call_resilience::{
 };
 use teamcraft_media::call_view::{CallRoster, started_screen_sound, status_cues};
 use teamcraft_media::call_web::{
-  self, CameraEffects, LocalTicketFuture, MediaAccessReason, MediaInput, MicrophoneMeter, WebCall,
-  WebCallConfig, WebCallError, WebJoinTicketSource, decode_picture,
+  self, CameraEffects, LocalTicketFuture, LocalTrustFuture, MediaAccessReason, MediaInput, MicrophoneMeter,
+  WebCall, WebCallConfig, WebCallError, WebJoinTicketSource, WebTrustSource, decode_picture,
 };
 use teamcraft_media::effects::{BackgroundEffect as MediaEffect, needs_picture};
 use teamcraft_media::jitter::JitterBufferConfig;
@@ -106,6 +106,9 @@ struct Callbacks {
   /// them gives none: no background effects then.
   maybe_background_rule: Option<Function>,
   maybe_background_picture: Option<Function>,
+  /// The trusted devices afresh, for a device added to the conversation during the call
+  /// (`page_calls`). A page from before it gives none: such a device ends the call then.
+  maybe_roster: Option<Function>,
 }
 
 #[derive(Default)]
@@ -209,6 +212,11 @@ struct PageAuthenticator;
 /// Fresh join tokens from the page's client core, for rejoining after a lost connection.
 struct PageTickets;
 
+/// The call's trusted devices afresh from the page's client core (`roster`).
+struct PageRoster {
+  conversation: teamcraft_proto::ConversationId,
+}
+
 /// Takes the page's callbacks; call once after the module is initialized.
 #[wasm_bindgen]
 pub fn start(callbacks: JsValue) -> Result<(), JsValue> {
@@ -224,6 +232,7 @@ pub fn start(callbacks: JsValue) -> Result<(), JsValue> {
     maybe_failed: function(&callbacks, "failed").ok(),
     maybe_background_rule: function(&callbacks, "background_rule").ok(),
     maybe_background_picture: function(&callbacks, "background_picture").ok(),
+    maybe_roster: function(&callbacks, "roster").ok(),
   };
   let on_device_change = Closure::<dyn FnMut()>::new(|| {
     if let Ok(host) = host() {
@@ -510,6 +519,11 @@ impl Host {
       jitter: JitterBufferConfig::default(),
       resilience: ResilienceConfig::browser(),
       maybe_ticket_source: Some(Rc::new(PageTickets)),
+      maybe_trust_source: self.callbacks.maybe_roster.is_some().then(|| {
+        Rc::new(PageRoster {
+          conversation: request.conversation,
+        }) as Rc<dyn WebTrustSource>
+      }),
       status_cues: status_cues(sounds),
       maybe_worklet_url: Some(self.worklet_url.clone()),
       is_muted_at_start,
@@ -1539,6 +1553,26 @@ impl WebJoinTicketSource for PageTickets {
         sfu_url: prepared.sfu_url,
         token: prepared.token,
       })
+    })
+  }
+}
+
+impl WebTrustSource for PageRoster {
+  fn fetch(&self) -> LocalTrustFuture {
+    let conversation = self.conversation;
+    Box::pin(async move {
+      let host = host().map_err(|_| "the page is gone".to_owned())?;
+      let roster = host
+        .callbacks
+        .maybe_roster
+        .as_ref()
+        .ok_or("the page gives no roster")?;
+      let id = serde_json::to_string(&conversation).map_err(|error| error.to_string())?;
+      let answer = call_promise(roster, &JsValue::from_str(&id))
+        .await
+        .map_err(|failure| failure.to_wire())?;
+      let text = answer.as_string().ok_or("the roster is no text")?;
+      serde_json::from_str(&text).map_err(|error| error.to_string())
     })
   }
 }

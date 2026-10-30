@@ -59,7 +59,7 @@ use teamcraft_core::{
   PendingEnrollment, UnreadableStore, parse_recovery_key, platform,
 };
 use teamcraft_crypto::backup::Argon2Settings;
-use teamcraft_crypto::identity::IdentityPublicKey;
+use teamcraft_crypto::identity::{IdentityPublicKey, VerifiedDevice};
 use teamcraft_crypto::secret::SecretBytes;
 use teamcraft_proto::DeviceLinkPlatform;
 use teamcraft_proto::{
@@ -332,6 +332,12 @@ pub fn runs_here() -> bool {
 /// Only in the tab that runs the core.
 pub async fn prepare_call(conversation: ConversationId) -> Result<CallPreparation, String> {
   ask(|reply| Request::PrepareCall(conversation, reply)).await?
+}
+
+/// The running call's verified devices afresh, after catching up the conversation's group: a
+/// device added during the call joins it (e2ee.md §8.2). Only in the tab that runs the core.
+pub async fn call_devices(conversation: ConversationId) -> Result<Vec<VerifiedDevice>, String> {
+  ask(|reply| Request::CallDevices(conversation, reply)).await?
 }
 
 /// Whether the workspace requires an organization background behind the camera image for this
@@ -1024,6 +1030,10 @@ enum Request {
   NetworkChanged,
   /// What joining a conversation's call needs (`web_calls`).
   PrepareCall(ConversationId, oneshot::Sender<Result<CallPreparation, String>>),
+  CallDevices(
+    ConversationId,
+    oneshot::Sender<Result<Vec<VerifiedDevice>, String>>,
+  ),
   /// The picture behind a camera: the user's own or the organization's (#439).
   BackgroundPicture(BackgroundEffect, oneshot::Sender<Result<Vec<u8>, String>>),
   /// The user opened a conversation; a running catch-up takes it next (issue #247).
@@ -1627,6 +1637,16 @@ impl Core {
       Request::PrepareCall(conversation, reply) => {
         let result = match self.client.as_mut() {
           Some(client) => client.prepare_call(conversation).await.map_err(describe_failure),
+          None => Err(not_set_up()),
+        };
+        drop(reply.send(result));
+      },
+      Request::CallDevices(conversation, reply) => {
+        let result = match self.client.as_mut() {
+          Some(client) => client
+            .refresh_call_devices(conversation)
+            .await
+            .map_err(describe_failure),
           None => Err(not_set_up()),
         };
         drop(reply.send(result));

@@ -600,8 +600,11 @@ can fetch it, and the notetaker refuses a key whose hash isn't the signed one. A
 settings key (`[secrets]`) can't store it: then put the key into the notetaker's own configuration
 (`openrouter.api_key`) and enter it in the console all the same, which signs only its hash.
 
-**In a call.** "Add notetaker" in the call's menu asks it in (where it is a member of the conversation
-and the user may add it). While it is in the call, everybody sees a banner and a changed encryption
+**In a call.** "Add notetaker" in the call's menu asks it in, for whoever the policy lets add it. It
+need not be a member of the conversation before: in a channel where the user manages members, or in a
+meeting the user organizes, the button adds it to the conversation first (from its join on, like an
+integration bot) and then asks it in. In a DM it is offered only where it is a member already.
+Scheduling a meeting offers it as the first entry of the people to invite. While it is in the call, everybody sees a banner and a changed encryption
 badge, its tile says "Notetaker – transcribing", and it posts a message saying where the audio goes.
 "Remove notetaker" (for whoever added it, admins and, by default, anybody) or a meeting host's "Remove"
 stops it: it leaves, transcribes what it heard and posts the result. It leaves on its own a minute
