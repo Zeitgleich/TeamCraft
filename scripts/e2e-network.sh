@@ -27,6 +27,7 @@ for line in sys.stdin:
 # Postgres, Keycloak, Garage (S3 and admin), Mailpit (HTTP and SMTP). pasta gets a PATH of system
 # directories and the command by its full path: under SELinux it may not search the home directory,
 # and each lookup there is reported as a denial. The tests get the caller's PATH back.
-exec env PATH=/usr/bin:/bin pasta --config-net -T 5432,8080,3900,3903,8025,1025 -- \
+# The output goes through a pipe: written to a file directly, pasta loses what the tests print.
+env PATH=/usr/bin:/bin pasta --config-net -T 5432,8080,3900,3903,8025,1025 -- \
   /usr/bin/env PATH="$PATH" E2E_NETNS=1 E2E_REQUIRED=1 \
-  "$binary" --ignored --test-threads=1 --nocapture "${filter[@]}"
+  "$binary" --ignored --test-threads=1 --nocapture "${filter[@]}" 2>&1 | cat
