@@ -251,7 +251,7 @@ def render_page(channels, site, site_url, repo, env):
         "</main>",
         render_footer(channels, site, repo_url, has_linux_repositories=bool(linux_repositories)),
     ])
-    return PAGE.format(csp=CSP, body=body)
+    return PAGE.format(csp=CSP, body=body, site_url=site_url)
 
 
 def render_header(repo_url):
@@ -1032,6 +1032,19 @@ PAGE = """<!doctype html>
 <meta name="theme-color" content="#ffffff" media="(prefers-color-scheme: light)">
 <meta name="theme-color" content="#0b0f16" media="(prefers-color-scheme: dark)">
 <meta name="description" content="TeamCraft: self-hosted, end-to-end encrypted team chat, calls and meetings. Downloads for Windows, macOS, Linux and Android.">
+<meta property="og:type" content="website">
+<meta property="og:site_name" content="TeamCraft">
+<meta property="og:title" content="TeamCraft – encrypted team chat, calls and meetings">
+<meta property="og:description" content="Self-hosted, end-to-end encrypted team chat, calls and meetings. Downloads for Windows, macOS, Linux and Android.">
+<meta property="og:url" content="{site_url}/">
+<meta property="og:image" content="{site_url}/og-image.png">
+<meta property="og:image:width" content="1200">
+<meta property="og:image:height" content="630">
+<meta property="og:image:alt" content="TeamCraft – encrypted team chat, calls and meetings">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="TeamCraft – encrypted team chat, calls and meetings">
+<meta name="twitter:description" content="Self-hosted, end-to-end encrypted team chat, calls and meetings. Downloads for Windows, macOS, Linux and Android.">
+<meta name="twitter:image" content="{site_url}/og-image.png">
 <title>TeamCraft – encrypted team chat, calls and meetings</title>
 <link rel="icon" href="favicon.svg" type="image/svg+xml">
 <link rel="icon" href="favicon.png" type="image/png" sizes="32x32">
