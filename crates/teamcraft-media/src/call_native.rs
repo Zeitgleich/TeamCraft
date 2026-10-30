@@ -189,6 +189,8 @@ enum Command {
   #[cfg(feature = "call-view")]
   VideoStats(oneshot::Sender<teamcraft_client_api::video_stats::VideoStatsReport>),
   Leave,
+  /// Leaves with the hang-up tone.
+  HangUp,
 }
 
 /// The shared screen's sound being captured and encoded.
@@ -593,6 +595,13 @@ impl NativeCall {
     let _ = self.commands.send(Command::Leave);
     self.task.await.map_err(|_| NativeCallError::TaskEnded)?
   }
+
+  /// Leaves a 1:1 call that ends for both (issue #997): the SFU hears of the leave at once, then
+  /// the hang-up tone plays out (as the status sounds setting allows) before the speakers close.
+  pub async fn hang_up(self) -> Result<CallStats, NativeCallError> {
+    let _ = self.commands.send(Command::HangUp);
+    self.task.await.map_err(|_| NativeCallError::TaskEnded)?
+  }
 }
 
 /// The system's trusted roots. Android keeps them where rustls-native-certs doesn't look, so it
@@ -677,6 +686,8 @@ async fn run_call(
   let (encoded_tx, mut encoded_rx) = mpsc::unbounded_channel::<(VideoTrackKind, EncodedVideoFrame)>();
   sinks.flush(&mut engine, &mut capture, connection.maybe_link.as_ref())?;
 
+  // The sound the call ends with when it is left by choice (the hang-up tone).
+  let mut maybe_farewell = None;
   let result = loop {
     tokio::select! {
       event = connection.next_event() => match event {
@@ -822,6 +833,10 @@ async fn run_call(
             // The caller may have given up waiting.
             let _ = done.send(report);
           },
+          Some(Command::HangUp) => {
+            maybe_farewell = Some(CallCue::HungUp);
+            break Ok(());
+          },
           Some(Command::Leave) | None => break Ok(()),
         }
       },
@@ -840,11 +855,18 @@ async fn run_call(
   if let Some(mut screen_audio) = maybe_screen_audio {
     screen_audio.capture.stop();
   }
-  if matches!(result, Err(NativeCallError::ConnectionLost)) {
-    sinks.play_to_end(CallCue::ConnectionLost, &devices).await;
+  // Left before a last sound plays: the SFU frees the slot, and the other side of a 1:1 call hears
+  // of the end without waiting for it.
+  connection.close();
+  let maybe_last_cue = match &result {
+    Err(NativeCallError::ConnectionLost) => Some(CallCue::ConnectionLost),
+    Ok(()) => maybe_farewell,
+    Err(_) => None,
+  };
+  if let Some(cue) = maybe_last_cue {
+    sinks.play_to_end(cue, &devices).await;
   }
   devices.close();
-  connection.close();
   sinks.video.finish_stopping().await;
   let mut stats = sinks.stats;
   let video = sinks.video.totals();

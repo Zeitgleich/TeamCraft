@@ -246,6 +246,7 @@ calls-background-hint = Wird auf deinem Gerät angewendet, bevor dein Video gese
 # ---- Meetings ----
 call-connecting = Verbindung wird hergestellt …
 call-reconnecting = Verbindung unterbrochen, wird wiederhergestellt …
+call-ended = Anruf beendet
 control-deafen = Anrufton stummschalten
 control-undeafen = Anrufton einschalten
 

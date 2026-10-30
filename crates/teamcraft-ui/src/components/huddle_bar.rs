@@ -189,7 +189,9 @@ pub fn CallPill() -> impl IntoView {
           }
           title=move || i18n.t("call-open")
         >
-          <span class="small">{move || i18n.t("call-in-progress")}</span>
+          <span class="small" role="status">
+            {move || if call.has_ended.get() { i18n.t("call-ended") } else { i18n.t("call-in-progress") }}
+          </span>
           <span translate="no">{move || format!("# {}", name.get())}</span>
         </button>
         <button

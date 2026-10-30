@@ -7,6 +7,8 @@
 //! - **Reconnected:** a short rising two-tone once the call is back.
 //! - **Connection lost:** three falling tones when the call ends because rejoining failed.
 //! - **Someone else reconnecting:** one quieter "du-dun" when another participant's connection drops.
+//! - **Hung up:** three short beeps of the phone's busy tone when a 1:1 call ends for both (issue
+//!   #997), on the side that hung up and on the side that was left.
 //!
 //! The tones are synthesized (sine waves with raised-cosine edges, so they don't click); there is
 //! no sound file. They stay well below speech level and play regardless of mute or deafen: they
@@ -47,6 +49,14 @@ const OTHER_RECONNECTING: &[Note] = &[
   Note::rest(0.06),
   Note::tone(440.0, 0.18),
 ];
+/// The busy tone of a phone line that was hung up (425 Hz, the European line tone), three times.
+const HUNG_UP: &[Note] = &[
+  Note::tone(425.0, 0.2),
+  Note::rest(0.15),
+  Note::tone(425.0, 0.2),
+  Note::rest(0.15),
+  Note::tone(425.0, 0.2),
+];
 
 /// Which status sounds play.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -68,6 +78,9 @@ pub enum CallCue {
   /// The call ended because rejoining failed.
   ConnectionLost,
   OtherReconnecting,
+  /// A 1:1 call ended for both: this side hung up, or the other one did. About the own call, so
+  /// it plays with "only my connection" too.
+  HungUp,
 }
 
 /// Plays cues into 20 ms playback frames.
@@ -186,6 +199,7 @@ pub fn synthesize(cue: CallCue) -> Vec<f32> {
     CallCue::Reconnected => (RECONNECTED, CUE_AMPLITUDE),
     CallCue::ConnectionLost => (CONNECTION_LOST, CUE_AMPLITUDE),
     CallCue::OtherReconnecting => (OTHER_RECONNECTING, OTHERS_CUE_AMPLITUDE),
+    CallCue::HungUp => (HUNG_UP, CUE_AMPLITUDE),
   };
   let mut samples = Vec::new();
   for note in notes {
@@ -242,6 +256,7 @@ mod tests {
       CallCue::Reconnected,
       CallCue::ConnectionLost,
       CallCue::OtherReconnecting,
+      CallCue::HungUp,
     ] {
       let samples = synthesize(cue);
       let peak = samples.iter().fold(0.0f32, |peak, sample| peak.max(sample.abs()));
@@ -309,6 +324,26 @@ mod tests {
     assert!(own_only.next_samples(FRAME).iter().all(|sample| *sample == 0.0));
     own_only.play(CallCue::ConnectionLost);
     assert!(!own_only.is_playing(CallCue::ConnectionLost));
+  }
+
+  /// Issue #997: the hang-up tone plays once (no loop) and follows the status sounds setting.
+  #[test]
+  fn the_hang_up_tone_plays_once_unless_the_sounds_are_off() {
+    let mut player = CuePlayer::new(StatusCues::OwnOnly);
+    player.play(CallCue::HungUp);
+    assert!(player.is_playing(CallCue::HungUp));
+    let length = synthesize(CallCue::HungUp).len();
+    // One frame past the end: the player notices the end when asked for more.
+    let played: Vec<f32> = (0..=length.div_ceil(FRAME))
+      .flat_map(|_| player.next_samples(FRAME))
+      .collect();
+    assert!(played.iter().any(|sample| sample.abs() > 0.01));
+    assert!(!player.is_playing(CallCue::HungUp));
+    assert!(player.next_samples(FRAME).iter().all(|sample| *sample == 0.0));
+
+    let mut off = CuePlayer::new(StatusCues::Off);
+    off.play(CallCue::HungUp);
+    assert!(!off.is_playing(CallCue::HungUp));
   }
 
   fn device(raw: i64) -> DeviceId {

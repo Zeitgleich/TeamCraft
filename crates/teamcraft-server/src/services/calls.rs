@@ -10,6 +10,12 @@
 //! `roster_grace_secs` while the SFU is fresh from a restart and its devices rejoin), a call left
 //! with nobody ends. When the SFU that sent rosters falls silent for `roster_timeout_secs`, every
 //! call ends: nothing confirms anybody is still in one.
+//!
+//! A 1:1 direct message call ends for both as soon as one side leaves (issue #997, the instance
+//! setting `one_to_one_call_ends_for_both`): the SFU reports a device as gone only after its
+//! reconnect grace period, so a short drop doesn't end it. The other side's devices hear
+//! `call_end` with [`CallEndCause::OneSideLeft`] and leave by themselves; a device that doesn't
+//! (an older app, one that missed the event) is disconnected by the SFU a little later.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicI64, Ordering};
@@ -20,7 +26,7 @@ use jsonwebtoken::{Algorithm, EncodingKey, Header};
 use secrecy::ExposeSecret;
 use subtle::ConstantTimeEq;
 use teamcraft_proto::{
-  CALL_JOIN_TOKEN_AUDIENCE, CallId, CallJoinClaims, CallJoinTokenResponse, CallRosterEntry,
+  CALL_JOIN_TOKEN_AUDIENCE, CallEndCause, CallId, CallJoinClaims, CallJoinTokenResponse, CallRosterEntry,
   CallStateResponse, ChannelRole, ConversationId, ConversationKind, CreateCallJoinTokenRequest,
   DependencyName, DeviceId, GatewayEvent, ListRunningCallsResponse, MoveCallRequest, SfuControlAction,
   SfuControlRequest, SfuParticipantReport, SfuRosterReport, UnixMillis, UserId,
@@ -40,6 +46,9 @@ use crate::state::AppState;
 const CONTROL_TIMEOUT: Duration = Duration::from_secs(5);
 /// How long a join token waits for the SFU's roster when the conversation has no call here.
 const PRE_TOKEN_ROSTER_TIMEOUT: Duration = Duration::from_secs(1);
+/// How long the devices left behind in a 1:1 call that ended for both get to leave by themselves
+/// (with the hang-up tone) before the SFU is told to disconnect them.
+const LEFT_BEHIND_DISCONNECT_DELAY: Duration = Duration::from_secs(5);
 /// Pauses before the background retries of a failed roster read at start. They stop early once a
 /// roster arrived; the SFU's periodic roster covers anything later.
 const STARTUP_ROSTER_RETRIES: [Duration; 6] = [
@@ -114,6 +123,11 @@ struct ActiveCall {
   maybe_added_ring: Option<AddedRing>,
   /// Set when this DM call moved into a meeting chat: a second move goes nowhere else.
   maybe_moved_to: Option<ConversationId>,
+  /// The conversation's kind, once known (a join token or join report names it; a call taken over
+  /// from the SFU learns it from the database).
+  maybe_kind: Option<ConversationKind>,
+  /// Two people were in the call at the same time: one of them leaving a 1:1 call ends it.
+  has_had_both_sides: bool,
 }
 
 /// The people added to a call that moved into a meeting (`move_call`), rung on behalf of `by`.
@@ -159,6 +173,13 @@ pub enum LeaveChange {
     conversation_id: ConversationId,
     call_id: CallId,
   },
+  /// One side of a 1:1 call left: the call ended for both, and `left_behind` (the other side's
+  /// devices) leave it by themselves.
+  EndedForBoth {
+    conversation_id: ConversationId,
+    call_id: CallId,
+    left_behind: Vec<CallRosterEntry>,
+  },
 }
 
 /// What dropping participants (a roster, an expiry, leaving on all devices) changed.
@@ -171,6 +192,8 @@ pub struct RosterChanges {
   /// Devices the SFU has in a call the server knows, without the server having heard of their
   /// join: handled like a join report.
   pub missing_joins: Vec<SfuParticipantReport>,
+  /// Calls taken over from the SFU, with who started them: their conversation's kind is looked up.
+  pub adopted: Vec<(ConversationId, UserId)>,
 }
 
 #[derive(Debug, Error)]
@@ -186,6 +209,15 @@ pub enum CallsSetupError {
 }
 
 impl ActiveCall {
+  /// One side of a 1:1 call is gone: it was a direct message call with both sides in it, nobody
+  /// moved it into a meeting, and only one person is left in it.
+  fn is_down_to_one_side(&self) -> bool {
+    self.maybe_kind == Some(ConversationKind::Dm)
+      && self.maybe_moved_to.is_none()
+      && self.has_had_both_sides
+      && people_in(&self.participants) == 1
+  }
+
   fn snapshot(
     &self,
     conversation_id: ConversationId,
@@ -456,6 +488,8 @@ impl CallService {
         is_ringing: false,
         maybe_added_ring: None,
         maybe_moved_to: None,
+        maybe_kind: None,
+        has_had_both_sides: false,
       },
     );
     Ok(call_id)
@@ -498,6 +532,7 @@ impl CallService {
       return JoinChange::Unchanged;
     }
     call.participants.push(entry);
+    call.has_had_both_sides |= people_in(&call.participants) >= 2;
     match call.maybe_started {
       None => {
         call.maybe_started = Some(Started {
@@ -603,6 +638,7 @@ impl CallService {
     drop(active);
     changes.changes.extend(adopted.changes);
     changes.users.extend(adopted.users);
+    changes.adopted.extend(adopted.adopted);
     changes
   }
 
@@ -651,6 +687,7 @@ impl CallService {
         by: started_by,
         at: call.maybe_started_at.unwrap_or(now_ms),
       };
+      let has_had_both_sides = people_in(&participants) >= 2;
       let adopted = ActiveCall {
         call_id: call.call_id,
         last_token_at: now,
@@ -661,6 +698,9 @@ impl CallService {
         is_ringing: false,
         maybe_added_ring: None,
         maybe_moved_to: None,
+        // Looked up by the caller (`RosterChanges::adopted`).
+        maybe_kind: None,
+        has_had_both_sides,
       };
       info!(%conversation_id, call_id = %call.call_id, "call taken over from the SFU's roster");
       result
@@ -671,6 +711,7 @@ impl CallService {
         started.by,
         started.at,
       )));
+      result.adopted.push((conversation_id, started.by));
       // A join token handed out since the restart opened an empty call there: the running one wins.
       active.insert(conversation_id, adopted);
     }
@@ -684,6 +725,36 @@ impl CallService {
     // Bounded by the calls that end within one grace period.
     recently_ended.retain(|_, at| now.saturating_duration_since(*at) < grace);
     recently_ended.insert(call_id, now);
+  }
+
+  /// Notes the kind of the conversation of `call_id` (a 1:1 call ends when one side leaves).
+  fn note_kind(&self, conversation_id: ConversationId, call_id: CallId, kind: ConversationKind) {
+    let mut active = self.lock();
+    if let Some(call) = active.get_mut(&conversation_id)
+      && call.call_id == call_id
+    {
+      call.maybe_kind = Some(kind);
+    }
+  }
+
+  /// Ends `call_id` for both when one side of the 1:1 call is gone
+  /// ([`ActiveCall::is_down_to_one_side`]): the devices still in it are `left_behind`. `None` when
+  /// the call goes on, or ended already (a repeat changes nothing).
+  fn end_if_one_side_left(&self, conversation_id: ConversationId, call_id: CallId) -> Option<LeaveChange> {
+    let mut active = self.lock();
+    let call = active.get(&conversation_id)?;
+    if call.call_id != call_id || !call.is_down_to_one_side() {
+      return None;
+    }
+    let left_behind = active.remove(&conversation_id)?.participants;
+    drop(active);
+    self.forget_controls(conversation_id);
+    self.note_ended(call_id, Instant::now());
+    Some(LeaveChange::EndedForBoth {
+      conversation_id,
+      call_id,
+      left_behind,
+    })
   }
 
   fn recently_ended(&self) -> std::sync::MutexGuard<'_, HashMap<CallId, Instant>> {
@@ -1002,6 +1073,9 @@ pub async fn create_join_token(
   }
   adopt_before_first_token(state, calls, conversation_id).await;
   let call_id = calls.call_for(conversation_id, Instant::now(), || state.next_id())?;
+  let kind = access.view.conversation.kind;
+  let ends_when_one_side_leaves = kind == ConversationKind::Dm && ends_one_to_one_calls(state);
+  calls.note_kind(conversation_id, call_id, kind);
   let claims = calls.claims(
     conversation_id,
     call_id,
@@ -1015,7 +1089,13 @@ pub async fn create_join_token(
     sfu_url: calls.sfu_url.clone(),
     expires_at: UnixMillis(i64::try_from(claims.exp).unwrap_or(i64::MAX).saturating_mul(1000)),
     sfu_certificate_sha256: calls.sfu_certificate_sha256.clone(),
+    ends_when_one_side_leaves,
   })
+}
+
+/// Whether a 1:1 call ends for both when one side leaves (the instance setting, issue #997).
+fn ends_one_to_one_calls(state: &AppState) -> bool {
+  state.settings.get().policy.one_to_one_call_ends_for_both
 }
 
 /// A SHA-256 written as hex, with or without colons, as 64 lowercase hex digits.
@@ -1154,6 +1234,7 @@ pub async fn report_joined(state: &AppState, report: SfuParticipantReport) -> Re
       .try_into()
       .unwrap_or(i64::MAX),
   );
+  calls.note_kind(conversation_id, report.call_id, conversation.conversation.kind);
   let change = calls.participant_joined(conversation_id, entry, rings, now);
   let members = state.database.conversation_member_ids(conversation_id).await?;
   record_join(state, &change, report.user_id).await;
@@ -1313,7 +1394,8 @@ pub async fn move_call(
   Ok(())
 }
 
-/// The SFU reports that a device left. The last one leaving ends the call.
+/// The SFU reports that a device left. The last one leaving ends the call, and so does one side
+/// of a 1:1 call leaving.
 pub async fn report_left(state: &AppState, report: SfuParticipantReport) -> Result<(), ApiError> {
   let calls = calls_of(state)?;
   let conversation_id = calls
@@ -1323,7 +1405,7 @@ pub async fn report_left(state: &AppState, report: SfuParticipantReport) -> Resu
     user_id: report.user_id,
     device_id: report.device_id,
   };
-  let change = calls.participant_left(conversation_id, entry);
+  let change = settle_one_to_one(state, calls, calls.participant_left(conversation_id, entry));
   if matches!(change, LeaveChange::Unchanged) {
     return Ok(());
   }
@@ -1431,11 +1513,18 @@ pub async fn leave_call_everywhere(
 /// Tells the members what dropping participants changed, joins the devices the SFU had that the
 /// server missed, and refreshes the presence of those who left.
 async fn publish_roster_changes(state: &AppState, changes: RosterChanges) {
+  let Some(calls) = state.maybe_calls.as_ref() else {
+    return;
+  };
+  note_adopted_kinds(state, calls, &changes.adopted).await;
   for change in changes.changes {
+    let change = settle_one_to_one(state, calls, change);
     let conversation_id = match &change {
       LeaveChange::Unchanged => continue,
       LeaveChange::Updated(snapshot) => snapshot.conversation_id,
-      LeaveChange::Ended { conversation_id, .. } => *conversation_id,
+      LeaveChange::Ended { conversation_id, .. } | LeaveChange::EndedForBoth { conversation_id, .. } => {
+        *conversation_id
+      },
     };
     if let Err(error) = publish_leave(state, conversation_id, change).await {
       warn!(%conversation_id, %error, "publishing a call roster change failed");
@@ -1459,7 +1548,7 @@ async fn publish_leave(
   conversation_id: ConversationId,
   change: LeaveChange,
 ) -> Result<(), ApiError> {
-  if let LeaveChange::Ended { call_id, .. } = &change {
+  if let LeaveChange::Ended { call_id, .. } | LeaveChange::EndedForBoth { call_id, .. } = &change {
     tokio::spawn(crate::push::routing::end_ring(state.clone(), *call_id));
     finish_history(state, *call_id).await;
   }
@@ -1477,11 +1566,100 @@ async fn publish_leave(
         &GatewayEvent::CallEnd {
           conversation_id,
           call_id,
+          cause: CallEndCause::LastLeft,
         },
       );
     },
+    LeaveChange::EndedForBoth {
+      conversation_id,
+      call_id,
+      left_behind,
+    } => {
+      info!(
+        conversation_id = %conversation_id,
+        call_id = %call_id,
+        left_behind = left_behind.len(),
+        "one side left the 1:1 call: it ended for both"
+      );
+      state.hub.publish(
+        members,
+        &GatewayEvent::CallEnd {
+          conversation_id,
+          call_id,
+          cause: CallEndCause::OneSideLeft,
+        },
+      );
+      let users: HashSet<UserId> = left_behind.iter().map(|entry| entry.user_id).collect();
+      for user in &users {
+        refresh_caller_presence(state, *user).await;
+      }
+      spawn_disconnect_left_behind(state.clone(), call_id, users);
+    },
   }
   Ok(())
+}
+
+/// Ends a 1:1 call for both once one side of it is gone (issue #997), when the instance setting
+/// asks for it: an [`LeaveChange::Updated`] that leaves one person in a 1:1 call becomes
+/// [`LeaveChange::EndedForBoth`]. Every other change stays as it is.
+fn settle_one_to_one(state: &AppState, calls: &CallService, change: LeaveChange) -> LeaveChange {
+  let LeaveChange::Updated(snapshot) = &change else {
+    return change;
+  };
+  if !ends_one_to_one_calls(state) {
+    return change;
+  }
+  calls
+    .end_if_one_side_left(snapshot.conversation_id, snapshot.call_id)
+    .unwrap_or(change)
+}
+
+/// Looks up the conversation kind of calls taken over from the SFU after a restart: a 1:1 call
+/// among them still ends when one side leaves.
+async fn note_adopted_kinds(state: &AppState, calls: &CallService, adopted: &[(ConversationId, UserId)]) {
+  for (conversation_id, started_by) in adopted {
+    let Some(call_id) = calls.running_call(*conversation_id) else {
+      continue;
+    };
+    match state
+      .database
+      .get_conversation(*conversation_id, *started_by)
+      .await
+    {
+      Ok(Some(found)) => calls.note_kind(*conversation_id, call_id, found.conversation.kind),
+      Ok(None) => {},
+      Err(error) => warn!(%conversation_id, %error, "looking up the kind of a call taken over failed"),
+    }
+  }
+}
+
+/// The devices left behind in a 1:1 call that ended for both leave by themselves when they hear
+/// `call_end`; one that doesn't (an older app, a device that missed the event while its media kept
+/// running) would stay alone on the SFU, and its roster would bring the call back. After
+/// [`LEFT_BEHIND_DISCONNECT_DELAY`] the SFU disconnects whatever is still there. Best effort:
+/// without host controls nothing is sent, and a call the SFU no longer has is fine.
+fn spawn_disconnect_left_behind(state: AppState, call_id: CallId, users: HashSet<UserId>) {
+  if users.is_empty() {
+    return;
+  }
+  tokio::spawn(async move {
+    sleep(LEFT_BEHIND_DISCONNECT_DELAY).await;
+    let Ok(calls) = calls_of(&state) else { return };
+    if !calls.has_controls() {
+      return;
+    }
+    for user_id in users {
+      let request = SfuControlRequest {
+        call_id,
+        by_user_id: user_id,
+        action: SfuControlAction::DisconnectUser { user_id },
+      };
+      match calls.send_control(&request).await {
+        Ok(()) => debug!(%call_id, "disconnected a device left behind in a 1:1 call"),
+        Err(error) => debug!(%call_id, %error, "nothing left behind to disconnect"),
+      }
+    }
+  });
 }
 
 /// Being in a call is part of a user's presence ("in a call"); tell the people who see it.
@@ -1623,6 +1801,15 @@ fn spawn_ring_timeout(state: AppState, conversation_id: ConversationId, call_id:
       Err(error) => warn!(%error, "could not publish the end of ringing"),
     }
   });
+}
+
+/// How many people the roster's devices belong to.
+fn people_in(participants: &[CallRosterEntry]) -> usize {
+  participants
+    .iter()
+    .map(|entry| entry.user_id)
+    .collect::<HashSet<_>>()
+    .len()
 }
 
 fn state_response(snapshot: CallSnapshot) -> CallStateResponse {
@@ -2261,6 +2448,187 @@ MCowBQYDK2VwAyEA8YVjY2Zv9XPhv003tFAgzW7J6gfDn+ICj5xCB2LXMVg=
       config.maybe_sfu_control_url = Some(url.to_owned());
       config.maybe_sfu_registration_token = Some("sfu-token-for-tests".to_owned().into());
       CallService::new(&config, TEST_SIGNING_KEY_PEM.as_bytes()).unwrap()
+    }
+  }
+
+  /// Issue #997: a 1:1 call ends for both when one side leaves.
+  mod one_to_one {
+    use super::*;
+
+    /// Longer than the test config's `roster_grace_secs`: the SFU has settled.
+    const SETTLED: u64 = 600;
+
+    #[test]
+    fn one_side_leaving_ends_the_call_for_both() {
+      let service = service();
+      direct_call(&service, &[entry(4, 40), entry(5, 50), entry(5, 51)]);
+
+      let change = service.participant_left(id(1), entry(4, 40));
+      let LeaveChange::Updated(snapshot) = &change else {
+        panic!("{change:?}");
+      };
+
+      assert_eq!(
+        service.end_if_one_side_left(snapshot.conversation_id, snapshot.call_id),
+        Some(LeaveChange::EndedForBoth {
+          conversation_id: id(1),
+          call_id: id(100),
+          left_behind: vec![entry(5, 50), entry(5, 51)],
+        })
+      );
+      assert_eq!(service.running_call(id(1)), None);
+      assert!(!service.is_in_call(id(5)), "the other side is out of the roster");
+      // Idempotent: the end is told once, and a late leave of the other side changes nothing.
+      assert_eq!(service.end_if_one_side_left(id(1), id(100)), None);
+      assert_eq!(
+        service.participant_left(id(1), entry(5, 50)),
+        LeaveChange::Unchanged
+      );
+      // A roster from while the devices were leaving doesn't bring the call back.
+      let late = named_roster(SETTLED, 1, 100, &[entry(5, 50)]);
+      assert!(
+        service
+          .reconcile(&late, Instant::now(), UnixMillis(5_000))
+          .changes
+          .is_empty()
+      );
+      assert_eq!(service.running_call(id(1)), None);
+    }
+
+    #[test]
+    fn a_device_of_a_side_that_is_still_in_the_call_leaving_ends_nothing() {
+      let service = service();
+      direct_call(&service, &[entry(4, 40), entry(4, 41), entry(5, 50)]);
+
+      service.participant_left(id(1), entry(4, 40));
+
+      assert_eq!(service.end_if_one_side_left(id(1), id(100)), None);
+      assert!(service.is_device_in_call(id(1), id(50)));
+    }
+
+    #[test]
+    fn a_group_call_of_three_goes_on_when_one_leaves() {
+      let service = service();
+      running_call(
+        &service,
+        id(1),
+        id(100),
+        &[entry(4, 40), entry(5, 50), entry(6, 60)],
+      );
+      service.note_kind(id(1), id(100), ConversationKind::Group);
+      service.participant_left(id(1), entry(4, 40));
+      assert_eq!(service.end_if_one_side_left(id(1), id(100)), None);
+      service.participant_left(id(1), entry(5, 50));
+      assert_eq!(
+        service.end_if_one_side_left(id(1), id(100)),
+        None,
+        "not a 1:1 call, even with one person left"
+      );
+      assert_eq!(service.running_call(id(1)), Some(id(100)));
+    }
+
+    #[test]
+    fn a_call_nobody_answered_ends_only_with_its_caller() {
+      let service = service();
+      direct_call(&service, &[entry(4, 40), entry(4, 41)]);
+
+      service.participant_left(id(1), entry(4, 40));
+
+      assert_eq!(service.end_if_one_side_left(id(1), id(100)), None);
+      assert_eq!(service.running_call(id(1)), Some(id(100)));
+    }
+
+    #[test]
+    fn a_call_that_moved_into_a_meeting_is_not_ended_for_both() {
+      let service = service();
+      direct_call(&service, &[entry(4, 40), entry(5, 50)]);
+      service.mark_moved(id(1), id(2)).unwrap();
+
+      service.participant_left(id(1), entry(4, 40));
+
+      assert_eq!(service.end_if_one_side_left(id(1), id(100)), None);
+    }
+
+    #[test]
+    fn another_call_of_the_conversation_is_not_ended() {
+      let service = service();
+      direct_call(&service, &[entry(4, 40), entry(5, 50)]);
+      service.participant_left(id(1), entry(4, 40));
+
+      assert_eq!(service.end_if_one_side_left(id(1), id(999)), None);
+      assert_eq!(service.running_call(id(1)), Some(id(100)));
+    }
+
+    /// The SFU keeps a lost device's slot through its reconnect grace period and only then reports
+    /// it gone; while it is fresh from a restart, the server gives devices the same time.
+    #[test]
+    fn a_short_drop_that_reconnects_in_time_ends_nothing() {
+      let service = service();
+      let start = Instant::now();
+      direct_call(&service, &[entry(4, 40), entry(5, 50)]);
+
+      let meanwhile = service.reconcile(&roster(2, &[(100, &[entry(5, 50)])]), start, UnixMillis(5_000));
+      assert!(meanwhile.changes.is_empty());
+      service.participant_joined(id(1), entry(4, 40), false, UnixMillis(2));
+      let back = service.reconcile(
+        &roster(32, &[(100, &[entry(4, 40), entry(5, 50)])]),
+        start + Duration::from_secs(30),
+        UnixMillis(35_000),
+      );
+
+      assert!(back.changes.is_empty());
+      assert_eq!(service.end_if_one_side_left(id(1), id(100)), None);
+      assert_eq!(service.running_call(id(1)), Some(id(100)));
+    }
+
+    /// The roster expiry drops a device the SFU no longer has; one side gone ends the call.
+    #[test]
+    fn a_side_the_sfu_dropped_ends_the_call() {
+      let service = service();
+      direct_call(&service, &[entry(4, 40), entry(5, 50)]);
+
+      let changes = service.reconcile(
+        &roster(SETTLED, &[(100, &[entry(5, 50)])]),
+        Instant::now(),
+        UnixMillis(5_000),
+      );
+
+      assert!(matches!(&changes.changes[..], [LeaveChange::Updated(_)]));
+      assert!(matches!(
+        service.end_if_one_side_left(id(1), id(100)),
+        Some(LeaveChange::EndedForBoth { left_behind, .. }) if left_behind == vec![entry(5, 50)]
+      ));
+    }
+
+    /// Calls live in memory: a restarted server takes a 1:1 call over from the SFU, learns its
+    /// kind from the database, and still ends it when one side leaves.
+    #[test]
+    fn a_call_taken_over_after_a_restart_still_ends_for_both() {
+      let service = service();
+      let changes = service.reconcile(
+        &named_roster(SETTLED, 1, 100, &[entry(4, 40), entry(5, 50)]),
+        Instant::now(),
+        UnixMillis(5_000),
+      );
+      assert_eq!(changes.adopted, vec![(id(1), id(4))]);
+      service.participant_left(id(1), entry(5, 50));
+      assert_eq!(
+        service.end_if_one_side_left(id(1), id(100)),
+        None,
+        "the kind is not known yet"
+      );
+      service.note_kind(id(1), id(100), ConversationKind::Dm);
+
+      assert!(matches!(
+        service.end_if_one_side_left(id(1), id(100)),
+        Some(LeaveChange::EndedForBoth { left_behind, .. }) if left_behind == vec![entry(4, 40)]
+      ));
+    }
+
+    /// A running direct message call `100` of conversation `1` with `entries` in it.
+    fn direct_call(service: &CallService, entries: &[CallRosterEntry]) {
+      running_call(service, id(1), id(100), entries);
+      service.note_kind(id(1), id(100), ConversationKind::Dm);
     }
   }
 

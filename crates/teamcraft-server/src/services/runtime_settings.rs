@@ -179,6 +179,7 @@ fn apply(settings: &mut Settings, section: &RuntimeSettingsSection) {
         .clone_from(&rules.default_channels);
       settings.policy.maybe_remove_deactivated_after_days = rules.maybe_remove_deactivated_after_days;
       settings.policy.admin_join_request_days = rules.admin_join_request_days;
+      settings.policy.one_to_one_call_ends_for_both = rules.one_to_one_call_ends_for_both;
     },
     RuntimeSettingsSection::Notifications(values) => {
       let notifications = &mut settings.notifications;
@@ -282,6 +283,7 @@ fn view(settings: &Settings, sources: Vec<RuntimeSettingsState>) -> RuntimeSetti
       default_channels: settings.policy.default_channels.clone(),
       maybe_remove_deactivated_after_days: settings.policy.maybe_remove_deactivated_after_days,
       admin_join_request_days: settings.policy.admin_join_request_days,
+      one_to_one_call_ends_for_both: settings.policy.one_to_one_call_ends_for_both,
     },
     notifications: NotificationRuntimeSettings {
       read_receipts_default: notifications.read_receipts_default,

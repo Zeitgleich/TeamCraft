@@ -6,7 +6,7 @@
 use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
-use teamcraft_proto::{CallRosterEntry, ConversationId, GatewayEvent, MediaStreamId, UserId};
+use teamcraft_proto::{CallEndCause, CallRosterEntry, ConversationId, GatewayEvent, MediaStreamId, UserId};
 
 use crate::calls::{
   ActiveCall, BackgroundEffect, CallEndReason, CallRequest, IncomingCall, RemoteVideoTrack, RunningCall,
@@ -25,6 +25,9 @@ pub struct CallView {
   /// This device's roster entry, once it joined a call: tells the user's other devices in a call
   /// from this one's entry still listed just after it left (issue #976).
   pub maybe_this_device: Option<CallRosterEntry>,
+  /// The active call is a 1:1 call that ends for both when one side leaves (issue #997, the
+  /// server's word in the join token).
+  pub ends_when_one_side_leaves: bool,
 }
 
 /// What a gateway call event says about the user's calls: the part [`CallView`] needs. The web
@@ -43,6 +46,9 @@ pub enum CallSignal {
   },
   Ended {
     conversation: ConversationId,
+    /// Absent from older senders, and when the last participant left.
+    #[serde(default, skip_serializing_if = "CallEndCause::is_last_left")]
+    cause: CallEndCause,
   },
   /// Someone calls the user.
   Ring {
@@ -79,8 +85,13 @@ impl CallSignal {
         is_ringing: *is_ringing,
         devices: participants.clone(),
       }),
-      GatewayEvent::CallEnd { conversation_id, .. } => Some(Self::Ended {
+      GatewayEvent::CallEnd {
+        conversation_id,
+        cause,
+        ..
+      } => Some(Self::Ended {
         conversation: *conversation_id,
+        cause: *cause,
       }),
       GatewayEvent::CallRing {
         conversation_id,
@@ -134,10 +145,57 @@ impl CallView {
     self.maybe_this_device = Some(entry);
   }
 
+  /// Whether the call this device joins ends for both when one side leaves, as its join token said.
+  pub fn set_ends_when_one_side_leaves(&mut self, ends: bool) {
+    self.ends_when_one_side_leaves = ends;
+  }
+
   /// This device left the call (or it ended).
   pub fn end_active(&mut self) {
     self.maybe_active = None;
     self.video_tracks.clear();
+    self.ends_when_one_side_leaves = false;
+  }
+
+  /// Leaving now ends the active call for both (issue #997): a 1:1 call with the other person in it,
+  /// and none of the user's other devices. The leaving device then plays the hang-up tone, like
+  /// the other side does when it hears of the end.
+  pub fn is_leave_a_hang_up(&self) -> bool {
+    let (Some(active), Some(this_device)) = (&self.maybe_active, self.maybe_this_device) else {
+      return false;
+    };
+    if !self.ends_when_one_side_leaves || active.maybe_moved_to.is_some() {
+      return false;
+    }
+    let Some(running) = self.running.get(&active.conversation) else {
+      return false;
+    };
+    let is_other_side_in = running
+      .devices
+      .iter()
+      .any(|entry| entry.user_id != this_device.user_id);
+    let is_another_own_device_in = running
+      .devices
+      .iter()
+      .any(|entry| entry.user_id == this_device.user_id && entry.device_id != this_device.device_id);
+    is_other_side_in && !is_another_own_device_in
+  }
+
+  /// The signal ends the call this device is in for both (issue #997): the other side of the 1:1
+  /// call left. The device then leaves with the hang-up tone. A call that moved into a meeting
+  /// isn't ended that way; the device follows it there.
+  pub fn is_end_of_active(&self, signal: &CallSignal) -> bool {
+    let CallSignal::Ended {
+      conversation,
+      cause: CallEndCause::OneSideLeft,
+    } = signal
+    else {
+      return false;
+    };
+    self
+      .maybe_active
+      .as_ref()
+      .is_some_and(|active| active.conversation == *conversation && active.maybe_moved_to.is_none())
   }
 
   /// Stops ringing on this device; the call goes on for the others.
@@ -179,7 +237,10 @@ impl CallView {
           },
         );
       },
-      CallSignal::Ended { conversation } => {
+      CallSignal::Ended { conversation, cause } => {
+        if self.is_end_of_active(&CallSignal::Ended { conversation, cause }) {
+          self.maybe_end_reason = Some(CallEndReason::OtherSideLeft);
+        }
         self.running.remove(&conversation);
         self.incoming.remove(&conversation);
       },
@@ -261,6 +322,7 @@ mod tests {
       view.apply_gateway_event(&GatewayEvent::CallEnd {
         conversation_id: conversation(5),
         call_id: call(),
+        cause: CallEndCause::LastLeft,
       });
       assert!(view.running.is_empty());
     }
@@ -358,6 +420,110 @@ mod tests {
         elsewhere.maybe_active.and_then(|active| active.maybe_moved_to),
         None
       );
+    }
+  }
+
+  /// Issue #997: a 1:1 call ends for both when one side leaves.
+  mod one_to_one {
+    use super::*;
+
+    #[test]
+    fn the_other_side_leaving_ends_the_active_call_with_its_reason() {
+      let mut view = direct_view(&[entry(1, 10), entry(2, 20)]);
+      let signal = ended(5, CallEndCause::OneSideLeft);
+
+      assert!(view.is_end_of_active(&signal));
+      assert!(view.apply_signal(signal));
+      assert_eq!(view.maybe_end_reason, Some(CallEndReason::OtherSideLeft));
+      assert!(view.running.is_empty());
+    }
+
+    #[test]
+    fn only_a_one_side_end_of_the_own_call_ends_it() {
+      let view = direct_view(&[entry(1, 10), entry(2, 20)]);
+      assert!(!view.is_end_of_active(&ended(5, CallEndCause::LastLeft)));
+      assert!(!view.is_end_of_active(&ended(6, CallEndCause::OneSideLeft)));
+      assert!(!CallView::default().is_end_of_active(&ended(5, CallEndCause::OneSideLeft)));
+      let mut last_left = direct_view(&[entry(1, 10)]);
+      last_left.apply_signal(ended(5, CallEndCause::LastLeft));
+      assert_eq!(last_left.maybe_end_reason, None);
+    }
+
+    #[test]
+    fn a_call_that_moved_into_a_meeting_follows_the_move_instead() {
+      let mut view = direct_view(&[entry(1, 10), entry(2, 20)]);
+      view.apply_gateway_event(&GatewayEvent::CallMove {
+        conversation_id: conversation(5),
+        call_id: call(),
+        to_conversation_id: conversation(6),
+        moved_by: user(2),
+      });
+      assert!(!view.is_end_of_active(&ended(5, CallEndCause::OneSideLeft)));
+      assert!(!view.is_leave_a_hang_up());
+    }
+
+    #[test]
+    fn leaving_hangs_up_when_it_ends_the_call_for_both() {
+      assert!(direct_view(&[entry(1, 10), entry(2, 20), entry(2, 21)]).is_leave_a_hang_up());
+      assert!(
+        !direct_view(&[entry(1, 10)]).is_leave_a_hang_up(),
+        "nobody answered yet"
+      );
+      assert!(
+        !direct_view(&[entry(1, 10), entry(1, 11), entry(2, 20)]).is_leave_a_hang_up(),
+        "the user's other device stays in the call"
+      );
+      let mut not_ending = direct_view(&[entry(1, 10), entry(2, 20)]);
+      not_ending.set_ends_when_one_side_leaves(false);
+      assert!(!not_ending.is_leave_a_hang_up(), "the server keeps it running");
+      not_ending.set_ends_when_one_side_leaves(true);
+      not_ending.end_active();
+      assert!(!not_ending.ends_when_one_side_leaves, "forgotten with the call");
+    }
+
+    #[test]
+    fn the_cause_round_trips_and_an_older_sender_means_the_last_left() {
+      let signal = ended(5, CallEndCause::OneSideLeft);
+      let json = serde_json::to_string(&signal).unwrap();
+      assert!(json.contains("one_side_left"), "{json}");
+      assert_eq!(serde_json::from_str::<CallSignal>(&json).unwrap(), signal);
+      let older: CallSignal = serde_json::from_str(r#"{"signal":"ended","conversation":"5"}"#).unwrap();
+      assert_eq!(older, ended(5, CallEndCause::LastLeft));
+      let newer: CallSignal =
+        serde_json::from_str(r#"{"signal":"ended","conversation":"5","cause":"transferred"}"#).unwrap();
+      assert_eq!(newer, ended(5, CallEndCause::Unknown));
+      let mut view = direct_view(&[entry(1, 10), entry(2, 20)]);
+      assert!(!view.is_end_of_active(&newer));
+      view.apply_signal(newer);
+      assert_eq!(view.maybe_end_reason, None);
+    }
+
+    /// This device (user 1, device 10) in the DM call of conversation 5 with `devices` in it.
+    fn direct_view(devices: &[CallRosterEntry]) -> CallView {
+      let mut view = CallView::default();
+      view.set_this_device(entry(1, 10));
+      view.start_active(
+        CallRequest {
+          conversation: conversation(5),
+          kind: CallKind::Direct,
+        },
+        BackgroundEffect::None,
+      );
+      view.set_ends_when_one_side_leaves(true);
+      view.apply_gateway_event(&GatewayEvent::CallUpdate {
+        conversation_id: conversation(5),
+        call_id: call(),
+        is_ringing: false,
+        participants: devices.to_vec(),
+      });
+      view
+    }
+
+    fn ended(raw: i64, cause: CallEndCause) -> CallSignal {
+      CallSignal::Ended {
+        conversation: conversation(raw),
+        cause,
+      }
     }
   }
 

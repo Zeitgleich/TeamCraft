@@ -24,7 +24,7 @@ use teamcraft_media::call_auth::{CallKeyAuthenticator, DeviceCallKeyAuthenticato
 use teamcraft_media::call_engine::CallStats;
 use teamcraft_media::call_engine::{CallEngineConfig, CallEngineEvent};
 use teamcraft_media::call_native::{NativeCall, NativeCallConfig};
-use teamcraft_proto::{DeviceId, GatewayEvent, MediaCapabilities, UserId};
+use teamcraft_proto::{CallEndCause, DeviceId, GatewayEvent, MediaCapabilities, UserId};
 use teamcraft_server::config::{CallsConfig, MailTexts, MeetingsConfig};
 use teamcraft_server::testing::{TEST_ISSUER, TestApp, TestUser};
 use teamcraft_sfu::auth::{JwtJoinTokenConfig, JwtJoinTokenVerifier};
@@ -126,6 +126,101 @@ async fn dm_call_rings_and_both_sides_hear_each_other() {
       .iter()
       .any(|event| matches!(event, GatewayEvent::CallEnd { .. })),
     "no call_end: {events:?}"
+  );
+  app.stop().await;
+}
+
+/// Issue #997: Alice hangs up a 1:1 call. Bob's devices hear at once that it ended for both, and a
+/// device of his that doesn't leave by itself (this headless client, like an older app) is
+/// disconnected by the SFU a little later, so the call can't come back from the SFU's roster.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn hanging_up_a_dm_call_ends_it_for_the_other_side_too() {
+  let sfu = bind_sfu();
+  let port = sfu.local_addr().unwrap().port();
+  let certificate_hash = *sfu.certificate_hash().as_ref();
+  let sfu_url = format!(
+    "https://{}{CALL_PATH}",
+    SocketAddr::new(Ipv6Addr::LOCALHOST.into(), port)
+  );
+  let control_listener = tokio::net::TcpListener::bind((Ipv6Addr::LOCALHOST, 0))
+    .await
+    .unwrap();
+  let control_url = format!("http://{}", control_listener.local_addr().unwrap());
+  let mut config = calls_config(&sfu_url);
+  config.maybe_sfu_control_url = Some(control_url);
+  let Some(app) = TestApp::start_with_calls_config(&config, SIGNING_KEY_PEM).await else {
+    return;
+  };
+  let sfu = sfu.with_reporter(Arc::new(HttpReporter::new(app.base_url.clone(), SFU_TOKEN)));
+  let router = control_router(sfu.control(), SFU_TOKEN);
+  tokio::spawn(async move { axum::serve(control_listener, router).await });
+  tokio::spawn(sfu.run());
+
+  let (alice, bob) = (owner(), member("bob"));
+  let (alice_id, bob_id) = (user_id(&app, &alice).await, user_id(&app, &bob).await);
+  let (alice_device, bob_device) = (
+    register_device(&app, &alice).await,
+    register_device(&app, &bob).await,
+  );
+  let dm = app.post(&alice, "/dms", json!({ "user_id": bob_id })).await.id();
+  let mut bob_socket = ws::connect(&app, &bob, &bob_device).await;
+  let mut authenticators = authenticators(&[(&alice_id, &alice_device), (&bob_id, &bob_device)]);
+  let mut alice_call = join(
+    &app,
+    &alice,
+    &alice_id,
+    &alice_device,
+    &dm,
+    &bob_device,
+    &mut authenticators,
+    certificate_hash,
+    330.0,
+  )
+  .await;
+  let mut bob_call = join(
+    &app,
+    &bob,
+    &bob_id,
+    &bob_device,
+    &dm,
+    &alice_device,
+    &mut authenticators,
+    certificate_hash,
+    550.0,
+  )
+  .await;
+  wait_for(&mut alice_call, |event| {
+    matches!(event, CallEngineEvent::Secured { .. })
+  })
+  .await;
+  wait_for(&mut bob_call, |event| {
+    matches!(event, CallEngineEvent::Secured { .. })
+  })
+  .await;
+  ws::events(&mut bob_socket, QUIET).await;
+
+  alice_call.hang_up().await.unwrap();
+
+  let events = ws::events(&mut bob_socket, Duration::from_secs(2)).await;
+  assert!(
+    events.iter().any(|event| matches!(
+      event,
+      GatewayEvent::CallEnd {
+        cause: CallEndCause::OneSideLeft,
+        ..
+      }
+    )),
+    "no call_end for both: {events:?}"
+  );
+  let is_disconnected = tokio::time::timeout(Duration::from_secs(15), async {
+    while bob_call.next_event().await.is_some() {}
+  })
+  .await
+  .is_ok();
+  assert!(is_disconnected, "the device left behind stayed on the SFU");
+  assert_eq!(
+    app.get(&bob, &format!("/conversations/{dm}/call")).await.status,
+    StatusCode::NOT_FOUND
   );
   app.stop().await;
 }

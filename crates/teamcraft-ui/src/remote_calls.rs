@@ -21,8 +21,8 @@ use js_sys::Promise;
 use leptos::task::spawn_local;
 use serde_json::json;
 use teamcraft_client_api::calls::{
-  ActiveCall, CallPreview, CallRequest, CameraFallback, EffectsOffer, HuddleInfo, IncomingCall, JoinMedia,
-  MediaDevices, OwnCallDevices, Participant, PreviewCamera, RemoteVideoTrack,
+  ActiveCall, CallEndReason, CallPreview, CallRequest, CameraFallback, EffectsOffer, HuddleInfo,
+  IncomingCall, JoinMedia, MediaDevices, OwnCallDevices, Participant, PreviewCamera, RemoteVideoTrack,
 };
 use teamcraft_client_api::failure::ActionFailure;
 use teamcraft_client_api::model::{ConversationId, UserId};
@@ -151,6 +151,10 @@ impl RemoteCalls {
 
   pub fn active(&self) -> Option<ActiveCall> {
     self.snapshot.borrow().maybe_active.clone()
+  }
+
+  pub fn end_reason(&self) -> Option<CallEndReason> {
+    self.snapshot.borrow().maybe_end_reason
   }
 
   pub fn incoming(&self) -> Vec<IncomingCall> {

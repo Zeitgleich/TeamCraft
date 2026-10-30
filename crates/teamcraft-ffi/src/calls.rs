@@ -1139,6 +1139,7 @@ mod tests {
     hub.on_gateway_event(&GatewayEvent::CallEnd {
       conversation_id: conversation(5),
       call_id: call(1),
+      cause: teamcraft_proto::CallEndCause::LastLeft,
     });
 
     assert_eq!(*listener.incoming.lock().unwrap(), vec!["5".to_string()]);

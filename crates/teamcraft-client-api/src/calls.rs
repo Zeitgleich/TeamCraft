@@ -789,6 +789,8 @@ pub enum CallEndReason {
   },
   /// The connection broke and rejoining didn't succeed within the grace period.
   ConnectionLost,
+  /// The other side of a 1:1 call left, so the call ended for both (issue #997).
+  OtherSideLeft,
 }
 
 /// Push-to-talk: the microphone is open only while the shortcut is held.

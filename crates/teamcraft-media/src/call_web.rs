@@ -413,6 +413,8 @@ enum Command {
   #[cfg(feature = "call-view")]
   VideoStats(oneshot::Sender<teamcraft_client_api::video_stats::VideoStatsReport>),
   Leave,
+  /// Leaves with the hang-up tone.
+  HangUp,
 }
 
 /// How a session ended, as far as rejoining cares.
@@ -794,6 +796,13 @@ impl WebCall {
     let _ = self.inputs.unbounded_send(Input::Command(Command::Leave));
     (&mut self.finished).await.map_err(|_| WebCallError::Ended)?
   }
+
+  /// Leaves a 1:1 call that ends for both (issue #997): the SFU hears of the leave at once, then
+  /// the hang-up tone plays out (as the status sounds setting allows) before the audio closes.
+  pub async fn hang_up(mut self) -> Result<CallStats, WebCallError> {
+    let _ = self.inputs.unbounded_send(Input::Command(Command::HangUp));
+    (&mut self.finished).await.map_err(|_| WebCallError::Ended)?
+  }
 }
 
 /// A call dropped without [`WebCall::leave`] still ends: the task holds its own input sender, so it
@@ -981,6 +990,7 @@ async fn run_call(
     maybe_ticket_source: config.maybe_ticket_source.clone(),
     cues: CuePlayer::new(config.status_cues),
     is_ending_lost: false,
+    is_hanging_up: false,
     inputs: &inputs,
     events: &events,
     jitter: config.jitter,
@@ -1083,6 +1093,9 @@ struct CallState<'a> {
   cues: CuePlayer,
   /// Rejoining failed; the call ends once the "connection lost" sound has played.
   is_ending_lost: bool,
+  /// The call was left with the hang-up tone: the sessions are closed, and the call ends once
+  /// the tone has played. Nothing but the audio clock counts any more.
+  is_hanging_up: bool,
   inputs: &'a mpsc::UnboundedSender<Input>,
   events: &'a mpsc::UnboundedSender<CallEngineEvent>,
   jitter: JitterBufferConfig,
@@ -1137,6 +1150,10 @@ impl CallState<'_> {
     engine: &mut CallEngine,
     audio: &mut WebAudio,
   ) -> Result<Flow, WebCallError> {
+    // Left already: only the tone plays out (or the page leaves for good).
+    if self.is_hanging_up && !matches!(input, Input::Pulse | Input::Command(Command::Leave)) {
+      return Ok(Flow::Continue);
+    }
     match input {
       Input::Signal { generation, message } => {
         if self.watch.is_current(generation) {
@@ -1331,6 +1348,18 @@ impl CallState<'_> {
     report
   }
 
+  /// Leaves the call at once (the SFU frees the slot, and the other side of a 1:1 call hears of
+  /// the end without waiting), then lets the hang-up tone play out. Nothing is sent any more.
+  fn hang_up(&mut self) {
+    info!("hanging up");
+    self.sessions.close_all();
+    self.maybe_transport = None;
+    self.lost_transports.clear();
+    self.is_muted = true;
+    self.is_hanging_up = true;
+    self.cues.play(CallCue::HungUp);
+  }
+
   /// Runs what fell due since the last pulse: audio frames, the feedback timer, video captures.
   async fn on_pulse(&mut self, engine: &mut CallEngine, audio: &WebAudio) -> Result<Flow, WebCallError> {
     self.pulses.taken();
@@ -1341,6 +1370,13 @@ impl CallState<'_> {
       if self.is_ending_lost && !self.cues.is_playing(CallCue::ConnectionLost) {
         return Err(WebCallError::ConnectionLost);
       }
+      if self.is_hanging_up && !self.cues.is_playing(CallCue::HungUp) {
+        return Ok(Flow::Leave);
+      }
+    }
+    // No keep-alives, rejoins or video once left.
+    if self.is_hanging_up {
+      return Ok(Flow::Continue);
     }
     if self.timer_cadence.due(now) > 0
       && let Flow::Leave = self.on_timer_tick(engine, now)?
@@ -1797,6 +1833,7 @@ impl CallState<'_> {
         self.update_layer(engine, stream_id);
       },
       Command::Leave => return Ok(Flow::Leave),
+      Command::HangUp => self.hang_up(),
     }
     Ok(Flow::Continue)
   }

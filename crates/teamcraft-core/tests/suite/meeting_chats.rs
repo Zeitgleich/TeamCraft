@@ -724,6 +724,7 @@ mod call_moves {
       &GatewayEvent::CallEnd {
         conversation_id: dm,
         call_id: call,
+        cause: teamcraft_proto::CallEndCause::LastLeft,
       },
     );
     alice.client.pump(&mut gateway).await.unwrap();

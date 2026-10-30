@@ -26,6 +26,11 @@ pub struct CallJoinTokenResponse {
   /// confidentiality.
   #[serde(default, skip_serializing_if = "Vec::is_empty")]
   pub sfu_certificate_sha256: Vec<String>,
+  /// The call is a 1:1 direct message call that ends for both as soon as one side leaves (issue
+  /// #997, the instance setting `one_to_one_call_ends_for_both`): a device hanging up plays the
+  /// hang-up tone. Absent from older servers: such a call keeps running for the other side.
+  #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+  pub ends_when_one_side_leaves: bool,
 }
 
 // Join tokens don't belong in logs.
@@ -36,7 +41,30 @@ impl std::fmt::Debug for CallJoinTokenResponse {
       .field("token", &"[redacted]")
       .field("sfu_url", &self.sfu_url)
       .field("expires_at", &self.expires_at)
+      .field("ends_when_one_side_leaves", &self.ends_when_one_side_leaves)
       .finish()
+  }
+}
+
+/// Why a call ended (`call_end`).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum CallEndCause {
+  /// The last participant left, or the server lost the call (its SFU fell silent).
+  #[default]
+  LastLeft,
+  /// A 1:1 direct message call: one side left (hung up, closed the app, or was dropped after the
+  /// reconnect grace period), so the call ended for both (issue #997). Devices still in it leave by
+  /// themselves, with the hang-up tone and a short "Call ended".
+  OneSideLeft,
+  /// A cause of a newer server: taken as [`Self::LastLeft`].
+  #[serde(other)]
+  Unknown,
+}
+
+impl CallEndCause {
+  pub fn is_last_left(&self) -> bool {
+    *self == Self::LastLeft
   }
 }
 

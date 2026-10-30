@@ -369,9 +369,12 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     for (conversation, call_id) in ended {
       tracing::info!(conversation_id = %conversation, %call_id, "a call ended without this device hearing of it");
       self.forget_call(conversation, call_id)?;
+      // Why it ended is unknown here; a device still in a 1:1 call that ended for both is
+      // disconnected by the SFU.
       self.emit_call_event(&GatewayEvent::CallEnd {
         conversation_id: conversation,
         call_id,
+        cause: teamcraft_proto::CallEndCause::LastLeft,
       });
     }
     for (conversation, call) in listed {

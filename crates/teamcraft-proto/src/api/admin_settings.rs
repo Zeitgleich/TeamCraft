@@ -365,6 +365,10 @@ pub struct ServerRulesSettings {
   /// `admin_self_join = owner_approval`). Absent from older servers: the default.
   #[serde(default = "default_admin_join_request_days")]
   pub admin_join_request_days: u32,
+  /// A 1:1 direct message call ends for both as soon as one side leaves (issue #997); off, it keeps
+  /// running until the last person leaves. Absent from older servers: on, the default.
+  #[serde(default = "default_one_to_one_call_ends_for_both")]
+  pub one_to_one_call_ends_for_both: bool,
 }
 
 /// How long an admin's request to join a private channel waits for an owner by default: a week
@@ -373,6 +377,10 @@ pub const DEFAULT_ADMIN_JOIN_REQUEST_DAYS: u32 = 7;
 
 fn default_admin_join_request_days() -> u32 {
   DEFAULT_ADMIN_JOIN_REQUEST_DAYS
+}
+
+fn default_one_to_one_call_ends_for_both() -> bool {
+  true
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]

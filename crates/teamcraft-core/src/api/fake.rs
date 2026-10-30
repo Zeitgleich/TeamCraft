@@ -2720,6 +2720,7 @@ impl ServerApi for FakeServerApi {
         sfu_url: "https://sfu.invalid/call".to_owned(),
         expires_at: UnixMillis(0),
         sfu_certificate_sha256: Vec::new(),
+        ends_when_one_side_leaves: false,
       })
     })
   }
@@ -5423,6 +5424,7 @@ impl State {
       return Some(GatewayEvent::CallEnd {
         conversation_id: conversation,
         call_id,
+        cause: teamcraft_proto::CallEndCause::LastLeft,
       });
     }
     Some(GatewayEvent::CallUpdate {
