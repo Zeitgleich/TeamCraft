@@ -8,6 +8,9 @@
 //! every conversation may depend on (names, spaces, preferences). Tables the snapshot doesn't read
 //! (MLS state, sync cursors, search segments, …) are not noted at all.
 //!
+//! With [`TrackedStore::with_message_cache`] it keeps the decoded messages of the conversations
+//! read last and a revision per conversation ([`MessageCache`], issue #1000).
+//!
 //! It also notes the image attachments whose message went away – deleted, withdrawn by its sender,
 //! or its conversation no longer listed for this user – so the host drops their renditions from the
 //! persistent media cache (#749, [`TrackedStore::take_removed_renditions`]).
@@ -17,9 +20,10 @@ use std::sync::{Arc, Mutex, PoisonError};
 
 use teamcraft_proto::{AttachmentId, ClientMessageId, ConversationId, MessageId, UserId};
 
+use super::message_cache::MessageCache;
 use super::{
-  AttachmentRef, LocalStore, MediaRange, MessageContent, MessageFilter, StoreError, StoredMessage, Table,
-  WriteTally,
+  AttachmentRef, LocalStore, MediaRange, MessageContent, MessageEdge, MessageFilter, MessageSlot, StoreError,
+  StoredMessage, Table, WriteTally,
 };
 
 /// Records of [`Table::Account`] every conversation entry reads (unread marks, mention rules).
@@ -41,6 +45,7 @@ pub struct TrackedStore<S> {
   inner: S,
   changes: Arc<Mutex<StoreChanges>>,
   removed_renditions: Arc<Mutex<VecDeque<RemovedRendition>>>,
+  messages: Arc<Mutex<MessageCache>>,
 }
 
 /// An image attachment whose message went away: its cached rendition goes too. Identifies the entry
@@ -89,10 +94,18 @@ enum Change {
 
 impl<S: LocalStore> TrackedStore<S> {
   pub fn new(inner: S) -> Self {
+    Self::with_message_cache(inner, 0)
+  }
+
+  /// Also keeps up to `max_messages` decoded messages of the conversations read last, for a store
+  /// whose reads are expensive (SQLCipher decrypts and checks every page it reads). Stores that
+  /// already hold everything in memory gain nothing from it.
+  pub fn with_message_cache(inner: S, max_messages: usize) -> Self {
     Self {
       inner,
       changes: Arc::default(),
       removed_renditions: Arc::default(),
+      messages: Arc::new(Mutex::new(MessageCache::new(max_messages))),
     }
   }
 
@@ -190,6 +203,11 @@ impl<S: LocalStore> TrackedStore<S> {
     }
   }
 
+  fn cache(&self) -> std::sync::MutexGuard<'_, MessageCache> {
+    // Invariant-free data: at worst a conversation is read from the disk again.
+    self.messages.lock().unwrap_or_else(PoisonError::into_inner)
+  }
+
   fn lock(&self) -> std::sync::MutexGuard<'_, StoreChanges> {
     // Invariant-free data: a panic elsewhere leaves a usable (at worst incomplete) set of notes.
     self.changes.lock().unwrap_or_else(PoisonError::into_inner)
@@ -230,6 +248,10 @@ impl<S: LocalStore> LocalStore for TrackedStore<S> {
     self.inner.list(table)
   }
 
+  fn list_prefix(&self, table: Table, prefix: &str) -> Result<Vec<(String, Vec<u8>)>, StoreError> {
+    self.inner.list_prefix(table, prefix)
+  }
+
   fn upsert_message(&self, message: &StoredMessage) -> Result<(), StoreError> {
     // Only a deletion takes files away (an edit changes the text); only then is the old one read.
     if matches!(message.content, MessageContent::Deleted)
@@ -240,6 +262,7 @@ impl<S: LocalStore> LocalStore for TrackedStore<S> {
       self.note_removed([old]);
     }
     self.inner.upsert_message(message)?;
+    self.cache().upsert(message);
     self.note(Change::Conversation(message.conversation_id));
     Ok(())
   }
@@ -260,12 +283,52 @@ impl<S: LocalStore> LocalStore for TrackedStore<S> {
     self.inner.message_by_server_id(conversation, server_id)
   }
 
+  fn edge_server_id(
+    &self,
+    conversation: ConversationId,
+    edge: MessageEdge,
+  ) -> Result<Option<MessageId>, StoreError> {
+    self.inner.edge_server_id(conversation, edge)
+  }
+
+  /// From the cache when it holds the conversation; otherwise read whole and kept, unless a write
+  /// to it came in between (the read may predate it).
   fn messages(
     &self,
     conversation: ConversationId,
     filter: MessageFilter,
   ) -> Result<Vec<StoredMessage>, StoreError> {
-    self.inner.messages(conversation, filter)
+    let revision = {
+      let mut cache = self.cache();
+      if let Some(messages) = cache.messages(conversation, filter) {
+        return Ok(messages);
+      }
+      if !cache.is_enabled() {
+        drop(cache);
+        return self.inner.messages(conversation, filter);
+      }
+      cache.revision(conversation)
+    };
+    let all = self.inner.messages(conversation, MessageFilter::All)?;
+    let matching = all
+      .iter()
+      .filter(|message| message.matches(filter))
+      .cloned()
+      .collect();
+    self.cache().fill(conversation, revision, all);
+    Ok(matching)
+  }
+
+  fn messages_at(
+    &self,
+    conversation: ConversationId,
+    slot: MessageSlot,
+  ) -> Result<Vec<StoredMessage>, StoreError> {
+    self.inner.messages_at(conversation, slot)
+  }
+
+  fn message_revision(&self, conversation: ConversationId) -> Option<u64> {
+    Some(self.cache().revision(conversation))
   }
 
   fn media_messages(
@@ -280,6 +343,7 @@ impl<S: LocalStore> LocalStore for TrackedStore<S> {
   fn delete_messages(&self, conversation: ConversationId) -> Result<(), StoreError> {
     self.note_removed(self.inner.messages(conversation, MessageFilter::All)?);
     self.inner.delete_messages(conversation)?;
+    self.cache().remove_conversation(conversation);
     self.note(Change::Conversation(conversation));
     Ok(())
   }
@@ -293,6 +357,7 @@ impl<S: LocalStore> LocalStore for TrackedStore<S> {
       self.note_removed([old]);
     }
     self.inner.delete_message(conversation, client_message_id)?;
+    self.cache().remove(conversation, client_message_id);
     self.note(Change::Conversation(conversation));
     Ok(())
   }
@@ -310,7 +375,12 @@ impl<S: LocalStore> LocalStore for TrackedStore<S> {
   }
 
   fn end_writes(&self) -> Result<(), StoreError> {
-    self.inner.end_writes()
+    let ended = self.inner.end_writes();
+    if ended.is_err() {
+      // The group may have been rolled back: the cache may hold writes the disk doesn't.
+      self.cache().forget_all();
+    }
+    ended
   }
 
   fn write_soon(&self) {
@@ -544,6 +614,97 @@ mod tests {
         maybe_verified_commit: None,
         maybe_server_change: None,
       }
+    }
+  }
+
+  mod message_cache {
+    use super::*;
+
+    #[test]
+    fn it_is_a_store_with_a_cache() {
+      exercise_store(&TrackedStore::with_message_cache(MemoryStore::new(), 100));
+    }
+
+    #[test]
+    fn reads_after_writes_through_it_see_them_in_order() {
+      let store = TrackedStore::with_message_cache(MemoryStore::new(), 100);
+      store.upsert_message(&text(1, Some(300), None)).unwrap();
+      store.upsert_message(&text(2, Some(100), None)).unwrap();
+      assert_eq!(clients(&store, MessageFilter::All), [2, 1], "read and kept");
+
+      store.upsert_message(&text(3, Some(200), None)).unwrap();
+      store.upsert_message(&text(4, None, None)).unwrap();
+      store.upsert_message(&text(5, Some(400), Some(100))).unwrap();
+      assert_eq!(clients(&store, MessageFilter::All), [2, 3, 1, 5, 4]);
+      assert_eq!(clients(&store, MessageFilter::TopLevel), [2, 3, 1, 4]);
+      assert_eq!(clients(&store, MessageFilter::Thread(id(100))), [5]);
+
+      // An outbox message that was sent moves to its place.
+      store.upsert_message(&text(4, Some(250), None)).unwrap();
+      store
+        .delete_message(id(7), ClientMessageId::from_bytes([2; 16]))
+        .unwrap();
+      assert_eq!(clients(&store, MessageFilter::All), [3, 4, 1, 5]);
+      assert_eq!(
+        clients(&store, MessageFilter::All),
+        clients_of(store.inner().messages(id(7), MessageFilter::All).unwrap()),
+        "the cache says what the store says"
+      );
+    }
+
+    #[test]
+    fn a_conversation_larger_than_the_cache_is_read_from_the_store_each_time() {
+      let store = TrackedStore::with_message_cache(MemoryStore::new(), 1);
+      store.upsert_message(&text(1, Some(100), None)).unwrap();
+      store.upsert_message(&text(2, Some(200), None)).unwrap();
+      assert_eq!(clients(&store, MessageFilter::All), [1, 2]);
+      store.upsert_message(&text(3, Some(300), None)).unwrap();
+      assert_eq!(clients(&store, MessageFilter::All), [1, 2, 3]);
+    }
+
+    #[test]
+    fn the_revision_moves_with_each_write_to_the_conversation_only() {
+      let store = TrackedStore::with_message_cache(MemoryStore::new(), 100);
+      let before = store.message_revision(id(7));
+      store.upsert_message(&text(1, Some(100), None)).unwrap();
+      let after = store.message_revision(id(7));
+      assert_ne!(before, after);
+      store.put(Table::Members, "7", b"[]").unwrap();
+      assert_eq!(store.message_revision(id(7)), after);
+      assert_eq!(store.message_revision(id(8)), before);
+    }
+
+    fn text(client: u8, maybe_server: Option<i64>, maybe_thread: Option<i64>) -> StoredMessage {
+      StoredMessage {
+        conversation_id: id(7),
+        client_message_id: ClientMessageId::from_bytes([client; 16]),
+        maybe_server_id: maybe_server.map(id),
+        sender_user_id: id(1),
+        maybe_thread_id: maybe_thread.map(id),
+        sent_at_ms: i64::from(client),
+        content: MessageContent::Text {
+          body: format!("message {client}"),
+          mentions: Vec::new(),
+          meta: Default::default(),
+        },
+        is_edited: false,
+        edits: Vec::new(),
+        maybe_edit_id: None,
+        is_pinned: false,
+        maybe_verified_commit: None,
+        maybe_server_change: None,
+      }
+    }
+
+    fn clients(store: &TrackedStore<MemoryStore>, filter: MessageFilter) -> Vec<u8> {
+      clients_of(store.messages(id(7), filter).unwrap())
+    }
+
+    fn clients_of(messages: Vec<StoredMessage>) -> Vec<u8> {
+      messages
+        .iter()
+        .map(|message| message.client_message_id.as_bytes()[0])
+        .collect()
     }
   }
 

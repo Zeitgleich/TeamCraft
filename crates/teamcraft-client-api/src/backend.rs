@@ -97,6 +97,14 @@ pub trait ChatBackend {
   }
   /// Top-level messages `start..start + len`, oldest first. Out-of-range parts are clipped.
   fn messages(&self, conversation: ConversationId, start: usize, len: usize) -> Vec<Message>;
+  /// [`Self::message_count`] and [`Self::messages`] together, for a feed window: a backend that
+  /// reads the whole conversation for each of them reads it once here.
+  fn message_page(&self, conversation: ConversationId, start: usize, len: usize) -> (usize, Vec<Message>) {
+    (
+      self.message_count(conversation),
+      self.messages(conversation, start, len),
+    )
+  }
   /// The thread root followed by its replies, oldest first.
   fn thread(&self, conversation: ConversationId, thread: ThreadId) -> Vec<Message>;
   fn followed_threads(&self) -> Vec<ThreadSummary>;

@@ -199,7 +199,7 @@ pub fn read_receipts(
 ) -> Result<BTreeMap<UserId, MessageId>, CoreError> {
   let prefix = format!("{conversation}/");
   let mut receipts = BTreeMap::new();
-  for (key, value) in store.list(Table::ReadReceipts)? {
+  for (key, value) in store.list_prefix(Table::ReadReceipts, &prefix)? {
     let Some(user) = key.strip_prefix(&prefix) else {
       continue;
     };

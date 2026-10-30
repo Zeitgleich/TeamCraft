@@ -6,7 +6,8 @@ use teamcraft_client_api::actions::{
   PermalinkTarget, ReplyPreview, SavedItem, WorkspaceEvent,
 };
 use teamcraft_client_api::model::{
-  Bookmark, ConversationId, IntegrationSource, Message, MessageId, NewIntegrationSource, ThreadId, UserId,
+  Bookmark, ConversationId, IntegrationSource, Message, MessageId, NewIntegrationSource, PENDING_ID_BIT,
+  ThreadId, UserId,
 };
 use teamcraft_client_api::receipts::{is_read_by_all, seen_by};
 use teamcraft_proto::{ClientMessageId, SourceChange, SourceId};
@@ -19,7 +20,8 @@ use crate::link_preview::is_allowed;
 use crate::read_state;
 use crate::records;
 use crate::store::{
-  BookmarkItem, ConversationEvent, LocalStore, MessageContent, MessageMeta, Priority, StoredMessage, Table,
+  BookmarkItem, ConversationEvent, LocalStore, MessageContent, MessageMeta, MessageSlot, Priority,
+  StoredMessage, Table,
 };
 use crate::ui_backend::{CoreChatBackend, CoreCommand, ui_message_id};
 
@@ -462,19 +464,31 @@ impl<S: LocalStore> CoreChatBackend<S> {
     conversation: ConversationId,
     messages: &[MessageId],
   ) -> Vec<MessageExtras> {
-    let all = self.all_messages(conversation);
     let data = self.read(stored_account_data(self.store_ref()));
     let ticks = Ticks::read(self, conversation);
     messages
       .iter()
       .filter_map(|id| {
+        // Looked up by its place: the UI asks for each row it shows, and reading the whole
+        // conversation per row kept a core busy in a large channel (issue #1000).
+        let slot = if teamcraft_proto::Id::snowflake(*id).get() & PENDING_ID_BIT != 0 {
+          MessageSlot::Pending
+        } else {
+          MessageSlot::At(*id)
+        };
+        let candidates = self.read(
+          self
+            .store_ref()
+            .messages_at(conversation, slot)
+            .map_err(CoreError::from),
+        );
         // A server can give a message the ID a derived line sits at (a commit's, issue #811; the
         // announcement a line moved to is hidden, issue #818); the line wins, so the ID clash
         // can't hide it.
-        let stored = all
+        let stored = candidates
           .iter()
           .find(|stored| stored.is_local_line() && ui_message_id(stored) == *id)
-          .or_else(|| all.iter().find(|stored| ui_message_id(stored) == *id))?;
+          .or_else(|| candidates.iter().find(|stored| ui_message_id(stored) == *id))?;
         let mut extras = MessageExtras::new(*id);
         extras.is_read = ticks.is_read(stored, self.me_id());
         extras.is_pinned = stored.is_pinned;
@@ -496,7 +510,7 @@ impl<S: LocalStore> CoreChatBackend<S> {
           ));
         }
         match &stored.content {
-          MessageContent::Text { meta, .. } => self.fill_from_meta(&mut extras, meta, &all),
+          MessageContent::Text { meta, .. } => self.fill_from_meta(&mut extras, meta, conversation),
           MessageContent::Event { event } => {
             extras.maybe_workspace_event = workspace_event(event, stored);
           },
@@ -515,11 +529,16 @@ impl<S: LocalStore> CoreChatBackend<S> {
       .collect()
   }
 
-  fn fill_from_meta(&self, extras: &mut MessageExtras, meta: &MessageMeta, all: &[StoredMessage]) {
+  fn fill_from_meta(&self, extras: &mut MessageExtras, meta: &MessageMeta, conversation: ConversationId) {
     extras.maybe_reply = meta.maybe_reply_to.as_ref().map(|reply| ReplyPreview {
-      maybe_message: all
-        .iter()
-        .find(|stored| stored.client_message_id == reply.target)
+      maybe_message: self
+        .read(
+          self
+            .store_ref()
+            .message(conversation, reply.target)
+            .map_err(CoreError::from),
+        )
+        .as_ref()
         .map(ui_message_id),
       author: reply.author,
       excerpt: reply.excerpt.clone(),

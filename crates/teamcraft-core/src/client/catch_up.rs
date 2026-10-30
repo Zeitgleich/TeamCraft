@@ -28,7 +28,7 @@ use super::sync::ResyncPart;
 use crate::api::{ApiError, ServerApi};
 use crate::error::CoreError;
 use crate::records;
-use crate::store::{LocalStore, MessageFilter, Table};
+use crate::store::{LocalStore, MessageEdge, Table};
 
 /// Key prefix of the "still catching up" marks in [`Table::SyncState`], one per conversation.
 pub(crate) const CATCHING_UP_PREFIX: &str = "catching_up/";
@@ -468,15 +468,16 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     &self,
     conversation: ConversationId,
   ) -> Result<ListMessagesQuery, CoreError> {
-    let server_ids = self
-      .store
-      .messages(conversation, MessageFilter::All)?
-      .into_iter()
-      .filter_map(|message| message.maybe_server_id);
     let (maybe_before, maybe_after) = if self.is_history_loaded(conversation)? {
-      (None, server_ids.max())
+      (
+        None,
+        self.store.edge_server_id(conversation, MessageEdge::Newest)?,
+      )
     } else {
-      (server_ids.min(), None)
+      (
+        self.store.edge_server_id(conversation, MessageEdge::Oldest)?,
+        None,
+      )
     };
     Ok(ListMessagesQuery {
       maybe_before,

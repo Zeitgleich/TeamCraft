@@ -26,7 +26,8 @@ use teamcraft_crypto::secret::SymmetricKey;
 use teamcraft_proto::{Base64Bytes, ClientMessageId, ConversationId, MessageId};
 
 use super::{
-  LocalStore, MediaRange, MemoryStore, MessageFilter, StoreError, StoredMessage, Table, WriteTally,
+  LocalStore, MediaRange, MemoryStore, MessageEdge, MessageFilter, StoreError, StoredMessage, Table,
+  WriteTally,
 };
 
 const ENTRY_NAMESPACE: &str = "entry";
@@ -259,6 +260,10 @@ impl<B: RecordBackend> LocalStore for SealedStore<B> {
     self.cache.list(table)
   }
 
+  fn list_prefix(&self, table: Table, prefix: &str) -> Result<Vec<(String, Vec<u8>)>, StoreError> {
+    self.cache.list_prefix(table, prefix)
+  }
+
   fn upsert_message(&self, message: &StoredMessage) -> Result<(), StoreError> {
     self.cache.upsert_message(message)?;
     // Sealed at once: a message is written about once, so there is nothing to save by waiting.
@@ -285,6 +290,14 @@ impl<B: RecordBackend> LocalStore for SealedStore<B> {
     server_id: MessageId,
   ) -> Result<Option<StoredMessage>, StoreError> {
     self.cache.message_by_server_id(conversation, server_id)
+  }
+
+  fn edge_server_id(
+    &self,
+    conversation: ConversationId,
+    edge: MessageEdge,
+  ) -> Result<Option<MessageId>, StoreError> {
+    self.cache.edge_server_id(conversation, edge)
   }
 
   fn messages(

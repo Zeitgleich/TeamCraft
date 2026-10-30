@@ -48,7 +48,8 @@ use crate::error::CoreError;
 use crate::notify_rules::{MentionPreferences, load_mention_preferences};
 use crate::records::{self, Draft};
 use crate::store::{
-  BookmarkItem, ConversationEvent, LocalStore, MessageContent, MessageFilter, StoredMessage, Table,
+  BookmarkItem, ConversationEvent, LocalStore, MessageContent, MessageEdge, MessageFilter, StoredMessage,
+  Table,
 };
 
 /// Requests from the UI that need the server; the sync task drains and runs them.
@@ -423,6 +424,8 @@ pub struct CoreChatBackend<S> {
   transfers: crate::transfers::Transfers,
   /// When reads last asked the server for something, so the UI's repeated reads don't flood it.
   pub(crate) requests: RefCell<crate::ui_people::RequestLog>,
+  /// The activity feed's entries per conversation, kept while it doesn't change.
+  pub(crate) activity: RefCell<HashMap<ConversationId, crate::ui_activity::KeptActivity>>,
   #[cfg(not(target_arch = "wasm32"))]
   pub(crate) search: RefCell<crate::ui_search::UiSearchState>,
 }
@@ -438,6 +441,7 @@ impl<S: LocalStore> CoreChatBackend<S> {
       typing: crate::TypingState::default(),
       transfers: crate::transfers::Transfers::new(),
       requests: RefCell::default(),
+      activity: RefCell::default(),
       #[cfg(not(target_arch = "wasm32"))]
       search: RefCell::new(Default::default()),
     }
@@ -841,6 +845,12 @@ impl<S: LocalStore> CoreChatBackend<S> {
   }
 
   pub(crate) fn to_message(&self, stored: &StoredMessage, all: &[StoredMessage]) -> Message {
+    self.to_message_among(stored, &Relations::of(all))
+  }
+
+  /// [`Self::to_message`] for one of many rows of the same conversation, with its reactions and
+  /// replies gathered once for all of them.
+  fn to_message_among(&self, stored: &StoredMessage, relations: &Relations<'_>) -> Message {
     let id = ui_message_id(stored);
     let body = match &stored.content {
       // Text sent with files names them when it has no text of its own (search: `has:file`).
@@ -870,13 +880,7 @@ impl<S: LocalStore> CoreChatBackend<S> {
       _ => (MessageKind::User, stored.sender_user_id),
     };
     let reply_count = stored.maybe_server_id.map_or(0, |server_id| {
-      let thread = ThreadId::from_snowflake(server_id.snowflake());
-      all
-        .iter()
-        .filter(|message| {
-          message.maybe_thread_id == Some(thread) && !message.is_hidden() && !is_deleted(message)
-        })
-        .count()
+      relations.reply_count(ThreadId::from_snowflake(server_id.snowflake()))
     });
     Message {
       id,
@@ -886,7 +890,11 @@ impl<S: LocalStore> CoreChatBackend<S> {
       sent_at: stored.sent_at_ms,
       body,
       is_edited: stored.is_edited,
-      reactions: reactions_of(stored.client_message_id, all, self.me),
+      reactions: reactions_of(
+        stored.client_message_id,
+        relations.reactions_to(stored.client_message_id),
+        self.me,
+      ),
       reply_count: u32::try_from(reply_count).unwrap_or(u32::MAX),
       maybe_thread: stored.maybe_thread_id,
     }
@@ -1061,10 +1069,13 @@ impl<S: LocalStore> ChatBackend for CoreChatBackend<S> {
     // Parked under "<conversation>/<client message ID>" (`client::messaging`); the keys suffice.
     let prefix = format!("{conversation}/");
     self
-      .read(self.store.list(Table::Undecrypted).map_err(CoreError::from))
-      .iter()
-      .filter(|(key, _)| key.starts_with(&prefix))
-      .count()
+      .read(
+        self
+          .store
+          .list_prefix(Table::Undecrypted, &prefix)
+          .map_err(CoreError::from),
+      )
+      .len()
   }
 
   fn message_count(&self, conversation: ConversationId) -> usize {
@@ -1095,6 +1106,11 @@ impl<S: LocalStore> ChatBackend for CoreChatBackend<S> {
   }
 
   fn messages(&self, conversation: ConversationId, start: usize, len: usize) -> Vec<Message> {
+    self.message_page(conversation, start, len).1
+  }
+
+  /// One read of the conversation for the count and the page.
+  fn message_page(&self, conversation: ConversationId, start: usize, len: usize) -> (usize, Vec<Message>) {
     let all = self.all_messages(conversation);
     let top_level: Vec<&StoredMessage> = all
       .iter()
@@ -1106,10 +1122,12 @@ impl<S: LocalStore> ChatBackend for CoreChatBackend<S> {
       .collect();
     let end = start.saturating_add(len).min(top_level.len());
     let start = start.min(end);
-    top_level[start..end]
+    let relations = Relations::of(&all);
+    let page = top_level[start..end]
       .iter()
-      .map(|message| self.to_message(message, &all))
-      .collect()
+      .map(|message| self.to_message_among(message, &relations))
+      .collect();
+    (top_level.len(), page)
   }
 
   fn thread(&self, conversation: ConversationId, thread: ThreadId) -> Vec<Message> {
@@ -1121,9 +1139,10 @@ impl<S: LocalStore> ChatBackend for CoreChatBackend<S> {
     let replies = all.iter().filter(|message| {
       message.maybe_thread_id == Some(thread) && !message.is_hidden() && !is_deleted(message)
     });
+    let relations = Relations::of(&all);
     root
       .chain(replies)
-      .map(|message| self.to_message(message, &all))
+      .map(|message| self.to_message_among(message, &relations))
       .collect()
   }
 
@@ -1410,7 +1429,12 @@ impl<S: LocalStore> ChatBackend for CoreChatBackend<S> {
 
   fn newest_message(&self, conversation: ConversationId) -> Option<MessageId> {
     // The same message `CoreCommand::MarkRead` sends as the read position.
-    newest_server_id(&self.all_messages(conversation))
+    self.read(
+      self
+        .store
+        .edge_server_id(conversation, MessageEdge::Newest)
+        .map_err(CoreError::from),
+    )
   }
 
   fn is_waiting_for_device(&self, conversation: ConversationId) -> bool {
@@ -2062,9 +2086,49 @@ pub(crate) fn is_deleted(message: &StoredMessage) -> bool {
 }
 
 /// Aggregates reaction messages: the latest add/remove per (user, emoji) wins.
-fn reactions_of(target: ClientMessageId, all: &[StoredMessage], me: UserId) -> Vec<Reaction> {
+/// What the messages of a conversation say about each other, gathered in one pass: a page of rows
+/// would otherwise scan the whole conversation once per row for its reactions and replies.
+struct Relations<'a> {
+  /// Reaction messages by the message they react to, in conversation order (the latest counts).
+  reactions: HashMap<ClientMessageId, Vec<&'a StoredMessage>>,
+  /// Shown replies per thread.
+  replies: HashMap<ThreadId, usize>,
+}
+
+impl<'a> Relations<'a> {
+  fn of(all: &'a [StoredMessage]) -> Self {
+    let mut reactions: HashMap<ClientMessageId, Vec<&'a StoredMessage>> = HashMap::new();
+    let mut replies: HashMap<ThreadId, usize> = HashMap::new();
+    for message in all {
+      if let MessageContent::Reaction { target, .. } = &message.content {
+        reactions.entry(*target).or_default().push(message);
+      }
+      if let Some(thread) = message.maybe_thread_id
+        && !message.is_hidden()
+        && !is_deleted(message)
+      {
+        *replies.entry(thread).or_default() += 1;
+      }
+    }
+    Self { reactions, replies }
+  }
+
+  fn reactions_to(&self, target: ClientMessageId) -> impl Iterator<Item = &'a StoredMessage> + '_ {
+    self.reactions.get(&target).into_iter().flatten().copied()
+  }
+
+  fn reply_count(&self, thread: ThreadId) -> usize {
+    self.replies.get(&thread).copied().unwrap_or(0)
+  }
+}
+
+fn reactions_of<'a>(
+  target: ClientMessageId,
+  messages: impl IntoIterator<Item = &'a StoredMessage>,
+  me: UserId,
+) -> Vec<Reaction> {
   let mut latest: HashMap<(UserId, String), bool> = HashMap::new();
-  for message in all {
+  for message in messages {
     if let MessageContent::Reaction {
       target: reacted,
       emoji,

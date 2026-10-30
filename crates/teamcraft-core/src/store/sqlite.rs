@@ -15,9 +15,11 @@ use zeroize::Zeroizing;
 use super::sql_group::{
   Migration, MigrationKind, WriteGroup, run_migrations, sqlite_error as database_error,
 };
+use super::sqlite_log::{LOG_PRAGMAS, PurgeState};
 use super::sqlite_wipe::wipe_free_pages;
 use super::{
-  DatabaseKeySource, LocalStore, MediaRange, MessageFilter, StoreError, StoredMessage, Table, WriteTally,
+  DatabaseKeySource, LocalStore, MediaRange, MessageEdge, MessageFilter, MessageSlot, StoreError,
+  StoredMessage, Table, WriteTally,
 };
 
 /// The layout steps of this store, in order ([`run_migrations`]). Released 1.0 databases carry
@@ -79,6 +81,7 @@ pub struct SqlCipherStore {
 struct Inner {
   connection: Connection,
   group: WriteGroup,
+  purge: PurgeState,
 }
 
 impl SqlCipherStore {
@@ -112,17 +115,20 @@ impl SqlCipherStore {
       })
       .map_err(|_| StoreError::WrongKey)?;
     // Freed pages are zeroed (before encryption), so an old copy of a rewritten or deleted record
-    // doesn't stay readable to whoever later gets the key (issue #391). The rollback journal holds
-    // old pages during a transaction; it is unlinked afterwards, not overwritten, so its blocks may
-    // linger on disk until reused (encrypted with the database key).
+    // doesn't stay readable to whoever later gets the key (issue #391). The write-ahead log holds
+    // old pages (encrypted with the database key) until it is purged.
     connection
-      .execute_batch("PRAGMA secure_delete = ON;")
+      .execute_batch(&format!("{LOG_PRAGMAS} PRAGMA secure_delete = ON;"))
       .map_err(database_error)?;
     run_migrations(&connection, MIGRATIONS)?;
     let mut group = WriteGroup::default();
     group.watch_other_connections(&connection)?;
     Ok(Self {
-      inner: Mutex::new(Inner { connection, group }),
+      inner: Mutex::new(Inner {
+        connection,
+        group,
+        purge: PurgeState::new(),
+      }),
     })
   }
 
@@ -134,7 +140,9 @@ impl SqlCipherStore {
   /// Runs a write; a failure inside a group of writes undoes the whole group when it ends.
   fn write(&self, statement: impl FnOnce(&Connection) -> rusqlite::Result<usize>) -> Result<(), StoreError> {
     let mut inner = self.lock();
-    let Inner { connection, group } = &mut *inner;
+    let Inner {
+      connection, group, ..
+    } = &mut *inner;
     group.check_open(connection)?;
     let result = statement(&inner.connection);
     match result {
@@ -188,6 +196,31 @@ impl LocalStore for SqlCipherStore {
       .map_err(database_error)?;
     let rows = statement
       .query_map(params![table.name()], |row| Ok((row.get(0)?, row.get(1)?)))
+      .map_err(database_error)?;
+    rows.collect::<Result<_, _>>().map_err(database_error)
+  }
+
+  /// A range of the primary key `(tbl, key)`: keys compare bytewise (UTF-8 in code point order),
+  /// so the keys starting with `prefix` are those from it up to the next string after all of them.
+  fn list_prefix(&self, table: Table, prefix: &str) -> Result<Vec<(String, Vec<u8>)>, StoreError> {
+    let Some(end) = prefix_end(prefix) else {
+      return Ok(
+        self
+          .list(table)?
+          .into_iter()
+          .filter(|(key, _)| key.starts_with(prefix))
+          .collect(),
+      );
+    };
+    let inner = self.lock();
+    let mut statement = inner
+      .connection
+      .prepare_cached("SELECT key, value FROM kv WHERE tbl = ?1 AND key >= ?2 AND key < ?3 ORDER BY key")
+      .map_err(database_error)?;
+    let rows = statement
+      .query_map(params![table.name(), prefix, end], |row| {
+        Ok((row.get(0)?, row.get(1)?))
+      })
       .map_err(database_error)?;
     rows.collect::<Result<_, _>>().map_err(database_error)
   }
@@ -269,6 +302,73 @@ impl LocalStore for SqlCipherStore {
       }
     }
     Ok(None)
+  }
+
+  /// Walks the order index from the end: server messages sort by their ID in `sort_group` 0, so the
+  /// first record there with a server ID is the answer; lines this device derived share the group
+  /// and are skipped.
+  fn edge_server_id(
+    &self,
+    conversation: ConversationId,
+    edge: MessageEdge,
+  ) -> Result<Option<MessageId>, StoreError> {
+    let order = match edge {
+      MessageEdge::Oldest => "ASC",
+      MessageEdge::Newest => "DESC",
+    };
+    let inner = self.lock();
+    let mut statement = inner
+      .connection
+      .prepare_cached(&format!(
+        "SELECT record FROM messages WHERE conversation_id = ?1 AND sort_group = 0 ORDER BY sort_value {order}"
+      ))
+      .map_err(database_error)?;
+    let mut rows = statement
+      .query(params![conversation.snowflake().get()])
+      .map_err(database_error)?;
+    while let Some(row) = rows.next().map_err(database_error)? {
+      let record: Vec<u8> = row.get(0).map_err(database_error)?;
+      if let Some(server_id) = decode_message(&record)?.maybe_server_id {
+        return Ok(Some(server_id));
+      }
+    }
+    Ok(None)
+  }
+
+  /// One place of the order index.
+  fn messages_at(
+    &self,
+    conversation: ConversationId,
+    slot: MessageSlot,
+  ) -> Result<Vec<StoredMessage>, StoreError> {
+    let conversation = conversation.snowflake().get();
+    let inner = self.lock();
+    let records: Vec<Vec<u8>> = match slot {
+      MessageSlot::At(position) => inner
+        .connection
+        .prepare_cached(
+          "SELECT record FROM messages WHERE conversation_id = ?1 AND sort_group = 0 AND sort_value = ?2",
+        )
+        .and_then(|mut statement| {
+          statement
+            .query_map(params![conversation, position.snowflake().get()], |row| {
+              row.get(0)
+            })?
+            .collect()
+        }),
+      MessageSlot::Pending => inner
+        .connection
+        .prepare_cached(
+          "SELECT record FROM messages WHERE conversation_id = ?1 AND sort_group = 1 ORDER BY sort_value",
+        )
+        .and_then(|mut statement| {
+          statement
+            .query_map(params![conversation], |row| row.get(0))?
+            .collect()
+        }),
+    }
+    .map_err(database_error)?;
+    records.iter().map(|record| decode_message(record)).collect()
   }
 
   fn messages(
@@ -396,20 +496,78 @@ impl LocalStore for SqlCipherStore {
 
   fn begin_writes(&self) -> Result<(), StoreError> {
     let mut inner = self.lock();
-    let Inner { connection, group } = &mut *inner;
+    let Inner {
+      connection, group, ..
+    } = &mut *inner;
     group.begin(connection)
   }
 
   fn end_writes(&self) -> Result<(), StoreError> {
     let mut inner = self.lock();
-    let Inner { connection, group } = &mut *inner;
-    group.end(connection)
+    let Inner {
+      connection,
+      group,
+      purge,
+    } = &mut *inner;
+    group.end(connection)?;
+    // The group is committed whatever happens to the purge: a failed one stays due and must not
+    // make the committed writes look failed.
+    if !group.is_open() {
+      purge.run_if_due(connection);
+    }
+    Ok(())
+  }
+
+  /// Writes the log back into the database (whose freed pages `secure_delete` zeroes) and
+  /// truncates it, so no old page version stays in the log file. Inside a group of writes it waits
+  /// for the group's commit: a checkpoint before would write half of the group to the database.
+  fn purge_freed(&self) -> Result<(), StoreError> {
+    let mut inner = self.lock();
+    let Inner {
+      connection,
+      group,
+      purge,
+    } = &mut *inner;
+    purge.force();
+    if !group.is_open() {
+      purge.run_if_due(connection);
+    }
+    Ok(())
+  }
+
+  fn purge_freed_soon(&self) {
+    let mut inner = self.lock();
+    let Inner {
+      connection,
+      group,
+      purge,
+    } = &mut *inner;
+    purge.is_due = true;
+    if !group.is_open() {
+      purge.run_if_due(connection);
+    }
   }
 
   fn write_tally(&self) -> Option<WriteTally> {
     let mut inner = self.lock();
-    let Inner { connection, group } = &mut *inner;
+    let Inner {
+      connection, group, ..
+    } = &mut *inner;
     Some(group.tally(connection))
+  }
+}
+
+impl Drop for SqlCipherStore {
+  fn drop(&mut self) {
+    // Closing the app is the last chance to clear what the interval kept back.
+    let mut inner = self.lock();
+    let Inner {
+      connection, purge, ..
+    } = &mut *inner;
+    if purge.is_due {
+      purge.force();
+      purge.run_if_due(connection);
+    }
   }
 }
 
@@ -439,6 +597,20 @@ fn migrate_to_v1(connection: &Connection) -> Result<(), StoreError> {
   Ok(())
 }
 
+/// The first string after every string that starts with `prefix`: its last character raised by
+/// one. `None` when there is none (empty, or only the highest code points).
+fn prefix_end(prefix: &str) -> Option<String> {
+  let mut chars: Vec<char> = prefix.chars().collect();
+  while let Some(last) = chars.pop() {
+    let next = (u32::from(last) + 1..=u32::from(char::MAX)).find_map(char::from_u32);
+    if let Some(next) = next {
+      chars.push(next);
+      return Some(chars.into_iter().collect());
+    }
+  }
+  None
+}
+
 #[cfg(test)]
 mod tests {
   use rand_core::OsRng;
@@ -449,6 +621,14 @@ mod tests {
   use crate::store::tests::exercise_store;
 
   /// Issue #391: freed pages are zeroed, so a deleted record's old copy doesn't stay in the file.
+  #[test]
+  fn a_prefix_ends_after_every_key_that_starts_with_it() {
+    assert_eq!(prefix_end("7/").as_deref(), Some("70"));
+    assert_eq!(prefix_end("a\u{10FFFF}").as_deref(), Some("b"));
+    assert_eq!(prefix_end(""), None);
+    assert_eq!(prefix_end("\u{10FFFF}"), None);
+  }
+
   #[test]
   fn freed_pages_are_overwritten() {
     let key = StaticKeySource::new(SymmetricKey::generate(&mut OsRng));

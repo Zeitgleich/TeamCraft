@@ -350,8 +350,8 @@ for months must keep fresh ones on the server:
   times use the system clock openmls checks against.
 - **Wiping.** A deleted package's stored bundle (private init and leaf keys) is overwritten in
   memory before it goes, and so is every old copy of the MLS storage in the store's cache. The
-  local database zeroes freed pages (SQLite `secure_delete`), and the native store truncates its
-  write-ahead log after a deletion, and after saves of the MLS storage at most every 30 seconds
+  local database zeroes freed pages (SQLite `secure_delete`), and the native stores (SQLCipher on
+  the desktop, sealed SQLite on mobile, §9.4) truncate their write-ahead log after a deletion, and after saves of the MLS storage at most every 30 seconds
   (a checkpoint costs two or three syncs and the MLS storage is saved for every processed
   message; measured when the storage was one record: about 20 ms per save at 64 KiB, 320 ms at
   1 MiB; since #424 a save writes only the entries that changed, §9.5). What the
@@ -2387,6 +2387,20 @@ saved on this device. Without that, memory and disk would diverge silently and t
 roll the MLS state back. A newer version of the app that upgrades the database (`versionchange`) gets
 it: the old page closes its connection, stops writing and asks for a reload.
 
+**Journal (native).** Both SQLite stores write ahead (`journal_mode = WAL`) with
+`synchronous = NORMAL`: a commit appends its pages to the log (encrypted with the database key by
+SQLCipher, sealed records on mobile) without syncing the disk; the log is synced and written back
+at checkpoints. A commit stays atomic and survives a crash of the app; only a power loss or an OS
+crash can take back the last commits, and then whole groups of writes (§9.5), never half of one.
+The client repairs that like a lost write: the sync reads again what came after its stored cursors,
+the outbox sends again under the same client message ID (the server deduplicates), and an own
+commit the server took but the device lost shows the device an epoch behind, which asks to be
+added back (§4.6). Until 1.0.11 the desktop store used SQLite's rollback journal with full syncs:
+every single write cost about four syncs (create and sync the journal, sync the database, delete
+the journal), and a catch-up after a long absence spent minutes waiting for the disk (#972). The
+log holds old page versions until it is purged (§4.3.1, "Wiping"); a store whose database is set
+aside (§9.5) takes its log with it.
+
 **Eviction (web).** The core asks for persistent storage (`navigator.storage.persist()`) when it
 opens the store; browsers grant it by their own rules (installed or often used sites, or the user
 agrees). Without it the browser may delete the origin's data under storage pressure, and Safari
@@ -2470,7 +2484,7 @@ fields and an `Unknown` catch-all, so newer records are read or skipped, not mis
 only partly open), whose key no longer opens it (the keystore lost or replaced the key), or whose
 layout is newer is not a generic failure: the app says what happened and offers to set the device
 up again (recovery passphrase or linking, §5, §6), after a confirmation. The desktop sets the old
-file aside (`<user>.db.unreadable-<time>`, never deleted), the mobile apps likewise with their
+file and its journal or log aside (`<user>.db.unreadable-<time>`, never deleted), the mobile apps likewise with their
 database and its log (`<account>.teamcraft.db.unreadable-<time>`, issue #414); the browser deletes
 the database, because its key wrapping lives in the same database (if another tab doesn't let go
 of it within seconds, the reset fails with that reason). Data from a newer version is never reset
