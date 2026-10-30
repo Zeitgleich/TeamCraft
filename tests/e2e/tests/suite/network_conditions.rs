@@ -14,6 +14,7 @@
 
 use std::time::{Duration, Instant};
 
+use teamcraft_core::connection::ConnectionState;
 use teamcraft_core::store::LocalStore;
 use teamcraft_e2e::app::{App, DiskDir, disk_store, mobile_store};
 use teamcraft_e2e::netem::{Condition, PortConditions};
@@ -53,7 +54,7 @@ async fn a_long_dead_link_then_the_network_is_back() {
   let mut plan = Plan::steady(
     "long dead link, network signal",
     Condition::Blackhole,
-    Duration::from_secs(45),
+    Duration::from_secs(120),
   );
   plan.signals_network = true;
   run(plan).await;
@@ -67,7 +68,7 @@ async fn a_long_dead_link_without_a_signal() {
   run(Plan::steady(
     "long dead link, no signal",
     Condition::Blackhole,
-    Duration::from_secs(45),
+    Duration::from_secs(120),
   ))
   .await;
 }
@@ -251,8 +252,8 @@ async fn run_local<S: LocalStore + Clone + 'static>(
   expected.push(before);
 
   // The condition holds while alice and bob keep writing.
+  let states = app.record_states();
   let started = Instant::now();
-  let mut maybe_noticed: Option<Duration> = None;
   let mut live_delays: Vec<Duration> = Vec::new();
   let mut sent = 0_usize;
   for (condition, duration) in &plan.steps {
@@ -275,9 +276,6 @@ async fn run_local<S: LocalStore + Clone + 'static>(
         );
       }
       expected.push(message);
-      if maybe_noticed.is_none() && !app.is_connected() {
-        maybe_noticed = Some(started.elapsed());
-      }
       tokio::time::sleep(WRITE_EVERY).await;
     }
   }
@@ -289,16 +287,28 @@ async fn run_local<S: LocalStore + Clone + 'static>(
   }
   let after = write(&mut alice, channels[0], &format!("{}: after", plan.name)).await;
   expected.push(after.clone());
-  let first_live = app.wait_for(&after.0, &after.1, ARRIVAL_TIMEOUT).await;
-  let maybe_connected = app.is_connected().then(|| restored.elapsed());
-  let mut all_arrived = Duration::ZERO;
-  for (channel, text) in &expected {
-    all_arrived = all_arrived.max(app.wait_for(channel, text, ARRIVAL_TIMEOUT).await);
-  }
+  app.wait_for(&after.0, &after.1, ARRIVAL_TIMEOUT).await;
+  let first_live = restored.elapsed();
+  app.wait_all(&expected, ARRIVAL_TIMEOUT).await;
+  let all_arrived = restored.elapsed();
+  app.wait_connected(ARRIVAL_TIMEOUT).await;
   app.assert_each_once(&channels, &expected);
+  let states = states.borrow().clone();
+  let maybe_noticed = states
+    .iter()
+    .find(|(_, state)| *state != ConnectionState::Connected)
+    .map(|(at, _)| at.saturating_duration_since(started));
+  let maybe_reconnected = states
+    .iter()
+    .find(|(at, state)| *at >= restored && *state == ConnectionState::Connected)
+    .map(|(at, _)| at.saturating_duration_since(restored));
+  let reconnects = states
+    .iter()
+    .filter(|(_, state)| *state == ConnectionState::Connecting)
+    .count();
   eprintln!(
     "network ({store_name}): {}: bad for {:.1} s, {} messages meanwhile; steady delivery {} ms; noticed after {}; \
-     after the link was back: connected {}, newest message {} ms, all {} ms{}",
+     {reconnects} connection attempts; after the link was back: connected {}, newest message {} ms, all {} ms{}",
     plan.name,
     bad_for.as_secs_f64(),
     sent,
@@ -307,8 +317,8 @@ async fn run_local<S: LocalStore + Clone + 'static>(
       "{:.1} s",
       noticed.as_secs_f64()
     )),
-    maybe_connected.map_or("—".to_owned(), |connected| format!(
-      "{} ms",
+    maybe_reconnected.map_or("stayed connected".to_owned(), |connected| format!(
+      "after {} ms",
       connected.as_millis()
     )),
     first_live.as_millis(),

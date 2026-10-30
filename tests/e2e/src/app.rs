@@ -4,8 +4,10 @@
 //!
 //! The runner is not `Send`: tests run it on a `tokio::task::LocalSet`.
 
+use std::cell::RefCell;
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
+use std::rc::Rc;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -43,6 +45,9 @@ pub struct App<S = DiskStore> {
   handle: RunnerHandle,
   task: tokio::task::JoinHandle<()>,
 }
+
+/// The connection states an app went through, with when each began ([`App::record_states`]).
+pub type StateLog = Rc<RefCell<Vec<(Instant, ConnectionState)>>>;
 
 /// A fresh directory on a disk, removed when dropped.
 pub struct DiskDir(PathBuf);
@@ -153,6 +158,35 @@ impl<S: LocalStore + Clone + 'static> App<S> {
         _ => None,
       })
       .collect()
+  }
+
+  /// How long until every one of `expected` showed, counted from now.
+  pub async fn wait_all(&self, expected: &[(ConversationId, String)], timeout: Duration) -> Duration {
+    let started = Instant::now();
+    for (channel, text) in expected {
+      let left = timeout.saturating_sub(started.elapsed());
+      self.wait_for(channel, text, left).await;
+    }
+    started.elapsed()
+  }
+
+  /// The connection's states with the time each began, recorded from now by a task beside the
+  /// test (every 10 ms) for as long as the returned log is held.
+  pub fn record_states(&self) -> StateLog {
+    let log: StateLog = Rc::new(RefCell::new(vec![(Instant::now(), self.state())]));
+    let (status, weak) = (self.status.clone(), Rc::downgrade(&log));
+    tokio::task::spawn_local(async move {
+      while let Some(log) = weak.upgrade() {
+        let state = status.get();
+        let is_new = log.borrow().last().is_none_or(|(_, last)| *last != state);
+        if is_new {
+          log.borrow_mut().push((Instant::now(), state));
+        }
+        drop(log);
+        tokio::time::sleep(Duration::from_millis(10)).await;
+      }
+    });
+    log
   }
 
   /// Every expected message is there, and no text twice.
