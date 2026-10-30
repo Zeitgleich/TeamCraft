@@ -55,6 +55,11 @@ use tokio::task::LocalSet;
 use super::media::{KeptKey, MediaSlot};
 use crate::auth::{AuthError, AuthService, TokenPeek, TokenStore, token_fingerprint};
 
+/// Decoded messages the core keeps of the conversations read last (`TrackedStore` message cache,
+/// issue #1000): SQLCipher decrypts and checks every page it reads, and the UI reads the open
+/// conversation several times per change. About 1 KiB each in memory; a busy log channel of 30,000
+/// messages fits with a few smaller conversations beside it.
+const MESSAGE_CACHE_MESSAGES: usize = 60_000;
 /// Wrong short codes allowed before a link approval is dropped.
 const MAX_APPROVAL_MISSES: u8 = 3;
 /// Retries (outbox, uploads, previews), staggered commits and the other periodic upkeep; also the
@@ -1052,9 +1057,10 @@ impl Core {
       Some(store) => store.clone(),
       None => {
         let key = KeptKey::new(&self.key);
-        let store = TrackedStore::new(Arc::new(
-          SqlCipherStore::open(&path, &key).map_err(|error| open_error(error.into()))?,
-        ));
+        let store = TrackedStore::with_message_cache(
+          Arc::new(SqlCipherStore::open(&path, &key).map_err(|error| open_error(error.into()))?),
+          MESSAGE_CACHE_MESSAGES,
+        );
         self.store = Some(store.clone());
         if let Some(database_key) = key.take() {
           self.media.open(&self.config.data_dir, self.user, &database_key);
@@ -1122,8 +1128,9 @@ impl Core {
     }
   }
 
-  /// Renames the unreadable database (and its journal) beside itself and opens a new one. The old
-  /// file stays for support; nothing is deleted.
+  /// Renames the unreadable database (and its journal or write-ahead log) beside itself and opens a
+  /// new one. The old files stay for support; nothing is deleted. The log goes with its database:
+  /// left behind, it would be read as the new database's.
   async fn reset_store(&mut self) -> Result<(), String> {
     if !matches!(self.status, CoreStatus::StoreUnreadable { .. }) {
       return Err("the local data is readable; nothing to reset".to_owned());
@@ -1133,13 +1140,14 @@ impl Core {
     self.store = None;
     let path = self.config.data_dir.join(format!("{}.db", self.user));
     let suffix = format!("unreadable-{}", SystemClock.now_ms());
-    for (file, aside) in [
-      (path.clone(), path.with_extension(format!("db.{suffix}"))),
+    let companions = ["db-journal", "db-wal", "db-shm"].map(|extension| {
       (
-        path.with_extension("db-journal"),
-        path.with_extension(format!("db-journal.{suffix}")),
-      ),
-    ] {
+        path.with_extension(extension),
+        path.with_extension(format!("{extension}.{suffix}")),
+      )
+    });
+    let database = (path.clone(), path.with_extension(format!("db.{suffix}")));
+    for (file, aside) in std::iter::once(database).chain(companions) {
       match std::fs::rename(&file, &aside) {
         Ok(()) => tracing::warn!(path = %aside.display(), "set the unreadable local database aside"),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {},

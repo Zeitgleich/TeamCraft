@@ -28,7 +28,7 @@ use crate::notify_rules::MentionPreferences;
 use crate::read_state::PresenceIndex;
 use crate::records;
 use crate::store::{LocalStore, StoreChanges, Table};
-use crate::ui_backend::{CoreChatBackend, is_deleted};
+use crate::ui_backend::CoreChatBackend;
 
 /// The parts of the snapshot as last built, each with the revision it last changed at.
 pub struct SnapshotCache {
@@ -464,16 +464,17 @@ fn part_of<S: LocalStore>(
   response: &ConversationResponse,
   shared: &Shared,
 ) -> ConversationChange {
-  let top_level = backend.top_level(response.id);
-  let shown = top_level.iter().filter(|message| !is_deleted(message));
-  let message_count = shown.clone().count();
-  let maybe_last_activity = shown.map(|message| message.sent_at_ms).max();
   let maybe_mark: Option<MessageId> = shared.account.unread_mark(response.id);
-  let unread = backend.unread_among(response, maybe_mark, top_level);
+  let counts = backend.entry_counts(
+    response,
+    maybe_mark,
+    shared.users.get(&backend.me_id()),
+    &shared.preferences,
+  );
   ConversationChange {
-    conversation: backend.conversation_view(response, &shared.users, &shared.preferences, &unread),
-    message_count,
-    maybe_last_activity,
+    conversation: backend.conversation_view(response, &shared.users, counts.unread),
+    message_count: counts.messages,
+    maybe_last_activity: counts.maybe_last_activity,
   }
 }
 

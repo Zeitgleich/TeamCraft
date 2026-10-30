@@ -70,6 +70,18 @@ impl LocalStore for MemoryStore {
     )
   }
 
+  fn list_prefix(&self, table: Table, prefix: &str) -> Result<Vec<(String, Vec<u8>)>, StoreError> {
+    Ok(
+      self
+        .lock()
+        .tables
+        .range((table, prefix.to_string())..)
+        .take_while(|((entry_table, key), _)| *entry_table == table && key.starts_with(prefix))
+        .map(|((_, key), value)| (key.clone(), value.clone()))
+        .collect(),
+    )
+  }
+
   fn upsert_message(&self, message: &StoredMessage) -> Result<(), StoreError> {
     let key = (message.conversation_id, *message.client_message_id.as_bytes());
     let mut inner = self.lock();

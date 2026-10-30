@@ -340,11 +340,12 @@ pub fn last_activity_of(
 impl MessageWindow {
   /// `len` messages of a conversation's feed from `start` on.
   pub fn read(backend: &impl ChatBackend, conversation: ConversationId, start: usize, len: usize) -> Self {
+    let (total, messages) = backend.message_page(conversation, start, len);
     Self {
       conversation,
       start,
-      total: backend.message_count(conversation),
-      messages: backend.messages(conversation, start, len),
+      total,
+      messages,
       undecrypted: backend.undecrypted_count(conversation),
     }
   }

@@ -18,7 +18,7 @@ use crate::api::{ApiError, ServerApi};
 use crate::convert;
 use crate::error::CoreError;
 use crate::records::{self, OutboxEntry};
-use crate::store::{EditRecord, LocalStore, MessageContent, MessageFilter, Priority, StoredMessage, Table};
+use crate::store::{EditRecord, LocalStore, MessageContent, MessageEdge, Priority, StoredMessage, Table};
 
 /// Result of [`Client::flush_outbox`].
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -204,11 +204,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
   /// Loads one page of older history before the oldest message this device has. Returns how many
   /// messages arrived; `0` means the beginning (or the history this device may see) is reached.
   pub async fn load_older_messages(&mut self, conversation: ConversationId) -> Result<usize, CoreError> {
-    let maybe_oldest = self
-      .store
-      .messages(conversation, MessageFilter::All)?
-      .into_iter()
-      .find_map(|message| message.maybe_server_id);
+    let maybe_oldest = self.store.edge_server_id(conversation, MessageEdge::Oldest)?;
     let query = ListMessagesQuery {
       maybe_before: maybe_oldest,
       maybe_after: None,
@@ -216,9 +212,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     };
     let page = self.api.list_messages(conversation, &query).await?;
     let count = page.messages.len();
-    for message in page.messages {
-      self.receive_message(message)?;
-    }
+    self.receive_page(page.messages)?;
     Ok(count)
   }
 
@@ -239,9 +233,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     };
     let page = self.api.list_messages(conversation, &query).await?;
     let count = page.messages.len();
-    for message in page.messages {
-      self.receive_message(message)?;
-    }
+    self.receive_page(page.messages)?;
     Ok(count)
   }
 
@@ -267,9 +259,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
         None => self.api.list_messages(conversation, &query).await?,
       };
       total += page.messages.len();
-      for message in page.messages {
-        self.receive_message(message)?;
-      }
+      self.receive_page(page.messages)?;
       records::put_json(&self.store, Table::SyncState, &history_key(conversation), &true)?;
       if query.maybe_before.is_none() {
         // That was the newest page: what came since arrives as gateway events.
@@ -278,12 +268,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     }
     // Without a stored server message (an empty conversation, or only own messages not sent yet)
     // there is no cursor: the newest page is read, and what came since arrives as events.
-    let mut maybe_cursor = self
-      .store
-      .messages(conversation, MessageFilter::All)?
-      .into_iter()
-      .filter_map(|message| message.maybe_server_id)
-      .max();
+    let mut maybe_cursor = self.store.edge_server_id(conversation, MessageEdge::Newest)?;
     loop {
       let is_newest_page = maybe_cursor.is_none();
       let page = match maybe_first.take() {
@@ -298,10 +283,8 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
         },
       };
       total += page.messages.len();
-      for message in page.messages {
-        maybe_cursor = maybe_cursor.max(Some(message.id));
-        self.receive_message(message)?;
-      }
+      maybe_cursor = maybe_cursor.max(page.messages.iter().map(|message| message.id).max());
+      self.receive_page(page.messages)?;
       // The newest page's `has_more` speaks of older messages, not newer ones.
       if is_newest_page || !page.has_more {
         return Ok(total);
@@ -312,6 +295,20 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
   /// Whether the first page of history was loaded (the first catch-up of a conversation).
   pub(crate) fn is_history_loaded(&self, conversation: ConversationId) -> Result<bool, CoreError> {
     Ok(records::get_json::<bool>(&self.store, Table::SyncState, &history_key(conversation))?.is_some())
+  }
+
+  /// [`Self::receive_message`] for a page of messages, as one group of writes: a message is
+  /// several writes (the message, its effects, the parked copy's removal), and on SQLCipher each
+  /// write on its own is a commit with its syncs; a catch-up after a long absence read pages of
+  /// them one commit at a time (issue #972). Receiving is idempotent, so a crash that drops the
+  /// group only means the page is read again.
+  fn receive_page(&mut self, messages: Vec<MessageResponse>) -> Result<(), CoreError> {
+    self.atomically(|client| {
+      for message in messages {
+        client.receive_message(message)?;
+      }
+      Ok(())
+    })
   }
 
   /// Decrypts and stores a message from the server. Messages whose content key hasn't arrived yet
@@ -386,12 +383,15 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       },
       Err(CoreError::Message(MessageError::UnknownKey(_)))
       | Err(CoreError::NoContentKey(_))
-      | Err(CoreError::UnknownSender { .. }) => records::put_json(
-        &self.store,
-        Table::Undecrypted,
-        &undecrypted_key(&message),
-        &message,
-      ),
+      | Err(CoreError::UnknownSender { .. }) => {
+        let key = undecrypted_key(&message);
+        // A retry of a message parked already (new keys arrived, but not its own) writes nothing:
+        // every epoch change retries all parked messages of the conversation (issue #1000).
+        if self.store.get(Table::Undecrypted, &key)?.is_some() {
+          return Ok(());
+        }
+        records::put_json(&self.store, Table::Undecrypted, &key, &message)
+      },
       Err(error) => {
         // Tampered or wrongly attributed ciphertext: never shown (e2ee.md §4.4).
         tracing::warn!(conversation_id = %conversation, message_id = %message.id, %error, "dropped undecryptable message");
@@ -404,14 +404,15 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
   /// and deletes are ignored (moderator deletion is a server-side feature, PLAN.md).
   /// Tries the parked messages of a conversation again (after new content keys arrived).
   pub(crate) fn retry_undecrypted(&mut self, conversation: ConversationId) -> Result<(), CoreError> {
-    let parked: Vec<MessageResponse> = records::list_json(&self.store, Table::Undecrypted)?;
-    for message in parked
-      .into_iter()
-      .filter(|message| message.conversation_id == conversation)
-    {
-      self.receive_message(message)?;
-    }
-    Ok(())
+    let parked: Vec<(String, MessageResponse)> =
+      records::list_json_with_prefix(&self.store, Table::Undecrypted, &format!("{conversation}/"))?;
+    self.receive_page(
+      parked
+        .into_iter()
+        .map(|(_, message)| message)
+        .filter(|message| message.conversation_id == conversation)
+        .collect(),
+    )
   }
 
   /// Messages this device received but can't read yet.

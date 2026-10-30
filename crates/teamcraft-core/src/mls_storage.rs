@@ -413,7 +413,7 @@ mod tests {
   use teamcraft_proto::{ClientMessageId, ConversationId, MessageId};
 
   use super::*;
-  use crate::store::{MediaRange, MemoryStore, MessageFilter, StoreError, StoredMessage};
+  use crate::store::{MediaRange, MemoryStore, MessageEdge, MessageFilter, StoreError, StoredMessage};
 
   #[test]
   fn entry_keys_round_trip_and_never_name_the_old_record() {
@@ -985,6 +985,10 @@ mod tests {
       self.cache.list(table)
     }
 
+    fn list_prefix(&self, table: Table, prefix: &str) -> Result<Vec<(String, Vec<u8>)>, StoreError> {
+      self.cache.list_prefix(table, prefix)
+    }
+
     fn upsert_message(&self, message: &StoredMessage) -> Result<(), StoreError> {
       self.cache.upsert_message(message)
     }
@@ -1020,6 +1024,14 @@ mod tests {
       server_id: MessageId,
     ) -> Result<Option<StoredMessage>, StoreError> {
       self.cache.message_by_server_id(conversation, server_id)
+    }
+
+    fn edge_server_id(
+      &self,
+      conversation: ConversationId,
+      edge: MessageEdge,
+    ) -> Result<Option<MessageId>, StoreError> {
+      self.cache.edge_server_id(conversation, edge)
     }
 
     fn delete_messages(&self, conversation: ConversationId) -> Result<(), StoreError> {
