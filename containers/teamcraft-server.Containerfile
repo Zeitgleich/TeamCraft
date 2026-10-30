@@ -23,7 +23,7 @@ RUN --mount=type=cache,id=teamcraft-cargo-registry,target=/usr/local/cargo/regis
     cargo build --release --locked -p teamcraft-server --bin teamcraft-server \
  && install -D target/release/teamcraft-server /out/teamcraft-server
 
-FROM gcr.io/distroless/cc-debian13:nonroot@sha256:83b9b50586253821cf63ffcec87d3d94265a093ad30da232039af962dd8f4edf
+FROM gcr.io/distroless/cc-debian13:nonroot@sha256:3ee00291cf386ec52a552e6a858d555debd74776eb4bfa53fa3df2cd6677515e
 LABEL org.opencontainers.image.title="teamcraft-server" \
       org.opencontainers.image.description="TeamCraft REST API and gateway" \
       org.opencontainers.image.source="https://github.com/Zeitgleich/TeamCraft" \
