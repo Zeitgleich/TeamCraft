@@ -298,7 +298,10 @@ fn ToolbarBar(host: ToolbarHost, active: ActiveMessage) -> impl IntoView {
       .map(|menu| f64::from(menu.scroll_height()))
       .filter(|height| *height > 0.0);
     let menu_height = maybe_measured.unwrap_or_else(|| MENU_HEIGHT_REM * crate::viewport::rem_px());
-    let maybe_bounds = host.container.get_untracked().map(|list| list.get_bounding_client_rect());
+    let maybe_bounds = host
+      .container
+      .get_untracked()
+      .map(|list| list.get_bounding_client_rect());
     placement.set(menu_placement(&button, maybe_bounds.as_ref(), menu_height));
   });
   let run = move |action: MessageAction| {
@@ -504,8 +507,9 @@ fn menu_placement(
       (read(window.inner_width()), read(window.inner_height()))
     })
     .unwrap_or((1024.0, 768.0));
-  let (bounds_top, bounds_bottom) =
-    maybe_bounds.map_or((0.0, height), |bounds| (bounds.top().max(0.0), bounds.bottom().min(height)));
+  let (bounds_top, bounds_bottom) = maybe_bounds.map_or((0.0, height), |bounds| {
+    (bounds.top().max(0.0), bounds.bottom().min(height))
+  });
   let right = format!("{}px", (width - rect.right()).max(0.0));
   let room_below = (bounds_bottom - rect.bottom() - 2.0 * MENU_GAP_PX).max(0.0);
   let room_above = (rect.top() - bounds_top - 2.0 * MENU_GAP_PX).max(0.0);
