@@ -1075,6 +1075,13 @@ group (e2ee.md §4.6). It now pins whom the commit's signed change names first. 
 conversation's queue reads the member list and each device list once, instead of again for every
 entry, one round trip after the other. With the issue's 80 ms to the server the saving is larger.
 
+The mobile apps (Android, iOS) never told the core which conversation is open, so after a long
+absence the one opened from a notification waited behind every other conversation, shown as an empty
+conversation with "?" for its name until then. Their reads of a conversation's messages now set the
+catch-up focus, as the desktop's do. Mobile store, the network back after 15 s, a direct message new
+to the device opened from its notification: it shows 4.7 s after the network is back without the
+focus (once the whole backlog is in), 0.6 s with it.
+
 **Bad links** (`network_conditions.rs`, desktop store, writers sending every 0.7 s):
 
 | Link                                       | Noticed by the app        | After it was good again           |

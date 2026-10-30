@@ -5,12 +5,12 @@
 //! message sent to the conversation the user looks at right after the network came back shows, and
 //! until the whole backlog is there. Real server, real Keycloak tokens, real MLS.
 
-use std::cell::Cell;
 use std::rc::Rc;
 use std::time::{Duration, Instant};
 
 use teamcraft_core::store::LocalStore;
 use teamcraft_e2e::app::{App, DiskDir, disk_store, mobile_store};
+use teamcraft_e2e::netem::{Condition, PortConditions};
 use teamcraft_e2e::peer::settle;
 use teamcraft_e2e::relay::TcpRelay;
 use teamcraft_e2e::scenario::space_with;
@@ -32,6 +32,8 @@ const FAR_RTT: Duration = Duration::from_millis(30);
 /// Shorter than the absence: the server forgets the session (the resume window passed).
 const RESUME_WINDOW_SECS: u64 = 5;
 const ARRIVAL_TIMEOUT: Duration = Duration::from_secs(180);
+/// How long the network is still away when the app opens (only inside the network namespace).
+const OFFLINE_AT_START: Duration = Duration::from_secs(15);
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "benchmark of a few minutes: scripts/e2e-network.sh -- long_absence"]
@@ -110,6 +112,14 @@ async fn come_back<S: LocalStore + Clone + 'static>(store_name: &str, open_store
   for (channel, text) in expected.iter().rev().step_by(MESSAGES) {
     bob.wait_for_text(*channel, text).await;
   }
+  // Erin, who shares no space with carol, opens a direct message with her meanwhile: a
+  // conversation and a person new to her device, which she opens first when she comes back (a tap
+  // on its notification).
+  let mut erin = Peer::enroll(&stack, "erin").await;
+  let dm = erin.client.open_dm(me).await.expect("opening a DM");
+  let dm_text = "a direct message while carol was away";
+  erin.client.send_text(dm, None, dm_text).await.unwrap();
+  expected.push((dm, dm_text.to_owned()));
   tokio::time::sleep(Duration::from_secs(RESUME_WINDOW_SECS + 1)).await;
   eprintln!(
     "long_absence: {CHANGED} conversations changed ({MESSAGES} messages, {MEMBER_CHANGES} member changes each) in {:.1} s",
@@ -120,18 +130,29 @@ async fn come_back<S: LocalStore + Clone + 'static>(store_name: &str, open_store
   let relay = TcpRelay::start_with_latency(&server_address, FAR_RTT)
     .await
     .unwrap();
-  let focused = changed[0];
+  // The new direct message is what the notification opens.
+  let focused = dm;
+  // The phone opens the app before its network is back ("the server can't be reached").
+  let maybe_link = PortConditions::take(relay.port);
+  if let Some(link) = &maybe_link {
+    link.set(Condition::Blackhole);
+  }
   let started = Instant::now();
   let app = Rc::new(App::start_focused(
     &format!("http://127.0.0.1:{}", relay.port),
     tokens,
     store,
-    Some(focused),
+    // E2E_NO_FOCUS: as the mobile apps were before they told the core what is open (issue #972).
+    std::env::var_os("E2E_NO_FOCUS").is_none().then_some(focused),
   ));
-  let connected_at = watch_connected(&app, started);
   let reads = app.read_like_mobile(me);
+  if let Some(link) = &maybe_link {
+    tokio::time::sleep(OFFLINE_AT_START).await;
+    link.set(Condition::Clear);
+    app.network.notify();
+  }
   let live_text = "sent right after carol came back";
-  alice.client.send_text(focused, None, live_text).await.unwrap();
+  erin.client.send_text(focused, None, live_text).await.unwrap();
   app.wait_for(&focused, live_text, ARRIVAL_TIMEOUT).await;
   let live_at = started.elapsed();
   expected.push((focused, live_text.to_owned()));
@@ -140,13 +161,14 @@ async fn come_back<S: LocalStore + Clone + 'static>(store_name: &str, open_store
   }
   let all_at = started.elapsed();
   app.wait_connected(ARRIVAL_TIMEOUT).await;
-  app.assert_each_once(&conversations, &expected);
+  let mut all_conversations = conversations.clone();
+  all_conversations.push(dm);
+  app.assert_each_once(&all_conversations, &expected);
   let reads = reads.borrow().clone();
   eprintln!(
-    "long_absence ({store_name}): after coming back: connected after {} ms, the live message showed after {} ms, \
+    "long_absence ({store_name}): after coming back: the live message showed after {} ms, \
      the whole backlog ({} messages) after {} ms; UI reads meanwhile: {}, waited up to {} ms, took up to {} ms, \
      up to {} conversations and {} people without a name",
-    connected_at.get().map_or(0, |at| at.as_millis()),
     live_at.as_millis(),
     expected.len(),
     all_at.as_millis(),
@@ -161,30 +183,6 @@ async fn come_back<S: LocalStore + Clone + 'static>(store_name: &str, open_store
   }
   drop(relay);
   stack.stop().await;
-}
-
-/// When the app's connection was first up, counted from `started`, noted by a task beside the test.
-fn watch_connected<S: LocalStore + Clone + 'static>(
-  app: &Rc<App<S>>,
-  started: Instant,
-) -> Rc<Cell<Option<Duration>>> {
-  let at = Rc::new(Cell::new(None));
-  let (app, noted) = (Rc::downgrade(app), at.clone());
-  tokio::task::spawn_local(async move {
-    // The status starts out as "connected" before the first attempt: only a connection after an
-    // attempt counts.
-    let mut has_tried = false;
-    while let Some(app) = app.upgrade() {
-      has_tried |= !app.is_connected();
-      if has_tried && app.is_connected() {
-        noted.set(Some(started.elapsed()));
-        return;
-      }
-      drop(app);
-      tokio::time::sleep(Duration::from_millis(10)).await;
-    }
-  });
-  at
 }
 
 /// `CONVERSATIONS` channels with alice, bob and carol, each with a first message.
