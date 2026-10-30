@@ -11,8 +11,8 @@
 use leptos::prelude::{Get, GetUntracked, RwSignal, Set};
 use std::rc::Rc;
 use teamcraft_client_api::calls::{
-  CallMoveOffer, CallStatusSounds, CallsUnavailableReason, OrgBackgroundRule, RemoteVideoTrack,
-  ScreenContentMode, ScreenShareResolution, VideoQuality,
+  CallEndReason, CallMoveOffer, CallStatusSounds, CallsUnavailableReason, OrgBackgroundRule,
+  RemoteVideoTrack, ScreenContentMode, ScreenShareResolution, VideoQuality,
 };
 use teamcraft_proto::OrgBackgroundId;
 
@@ -1033,6 +1033,10 @@ impl<C: ChatBackend> CallBackend for Hybrid<C> {
 
   fn active_call(&self) -> Option<ActiveCall> {
     self.maybe_calls.as_ref().and_then(RemoteCalls::active)
+  }
+
+  fn call_end_reason(&self) -> Option<CallEndReason> {
+    self.maybe_calls.as_ref().and_then(RemoteCalls::end_reason)
   }
 
   fn incoming_calls(&self) -> Vec<IncomingCall> {

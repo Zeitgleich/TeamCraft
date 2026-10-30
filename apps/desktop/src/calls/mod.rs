@@ -25,7 +25,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
-use teamcraft_client_api::call_view::CallView;
+use teamcraft_client_api::call_view::{CallSignal, CallView};
 use teamcraft_client_api::calls::{
   ActiveCall, BackgroundEffect as UiBackgroundEffect, CallEndReason, CallPreview, CallRequest,
   CallStatusSounds, CameraFallback, DevicePresence, MediaDevice, MediaDevices, PreviewCamera, PushToTalk,
@@ -197,6 +197,8 @@ enum Control {
   /// Reads what the call's video does (stats for nerds, #938).
   VideoStats(oneshot::Sender<Option<VideoStatsReport>>),
   Leave,
+  /// Leaves with the hang-up tone: a 1:1 call that ended for both (#997).
+  HangUp,
 }
 
 /// Shows the UI a failure as `failure::ActionFailure` wire text.
@@ -255,10 +257,16 @@ impl CallHost {
     self.codecs.ensure().await
   }
 
-  /// For the core runtime: applies the gateway's call events on whatever thread they arrive.
+  /// For the core runtime: applies the gateway's call events on whatever thread they arrive. A
+  /// 1:1 call this device is in that ended for both is left with the hang-up tone (#997).
   pub fn gateway_handler(self: &Arc<Self>) -> Arc<dyn Fn(GatewayEvent) + Send + Sync> {
     let host = Arc::clone(self);
-    Arc::new(move |event| host.on_gateway_event(event))
+    Arc::new(move |event| {
+      if host.on_gateway_event(event) {
+        let host = Arc::clone(&host);
+        tauri::async_runtime::spawn(async move { host.control(Control::HangUp).await });
+      }
+    })
   }
 
   pub fn snapshot(&self) -> CallSnapshot {
@@ -345,6 +353,7 @@ impl CallHost {
       user_id: preparation.user_id,
       device_id: own_device,
     };
+    let ends_when_one_side_leaves = preparation.join.ends_when_one_side_leaves;
     let mut config = native_config(preparation, microphone, speakers, page_decoders)?;
     config.maybe_ticket_source = Some(tickets);
     config.status_cues = status_cues(lock(&self.state).status_sounds);
@@ -359,6 +368,9 @@ impl CallHost {
       let background = state.background;
       state.view.set_this_device(this_device);
       state.view.start_active(request, background);
+      state
+        .view
+        .set_ends_when_one_side_leaves(ends_when_one_side_leaves);
       if let Some(active) = state.view.maybe_active.as_mut() {
         active.is_muted = is_muted_at_start;
       }
@@ -382,10 +394,16 @@ impl CallHost {
     Ok(())
   }
 
+  /// Leaves the call; leaving a 1:1 call that then ends for both plays the hang-up tone (#997).
   pub async fn leave(&self) {
     self.screen_picker.cancel();
+    let is_hang_up = lock(&self.state).view.is_leave_a_hang_up();
     if let Some(call) = self.media.lock().await.take() {
-      call.leave().await;
+      if is_hang_up {
+        call.hang_up().await;
+      } else {
+        call.leave().await;
+      }
     }
     lock(&self.state).view.end_active();
     lock(&self.video_sinks).clear();
@@ -1059,10 +1077,19 @@ impl CallHost {
     }
   }
 
-  fn on_gateway_event(&self, event: GatewayEvent) {
-    if lock(&self.state).view.apply_gateway_event(&event) {
+  /// Applies a call event; `true` when it ended the 1:1 call this device is in for both, which
+  /// the caller then leaves.
+  fn on_gateway_event(&self, event: GatewayEvent) -> bool {
+    let (is_end_of_active, is_changed) = {
+      let mut state = lock(&self.state);
+      let is_end_of_active =
+        CallSignal::from_gateway(&event).is_some_and(|signal| state.view.is_end_of_active(&signal));
+      (is_end_of_active, state.view.apply_gateway_event(&event))
+    };
+    if is_changed {
       self.changed();
     }
+    is_end_of_active
   }
 
   fn changed(&self) {
@@ -1109,7 +1136,15 @@ impl Drop for PickerWait<'_> {
 
 impl MediaCall {
   async fn leave(self) {
-    let _ = self.controls.send(Control::Leave);
+    self.end(Control::Leave).await;
+  }
+
+  async fn hang_up(self) {
+    self.end(Control::HangUp).await;
+  }
+
+  async fn end(self, control: Control) {
+    let _ = self.controls.send(control);
     if let Err(error) = self.task.await {
       tracing::warn!(%error, "call task failed");
     }
@@ -1181,6 +1216,7 @@ async fn run_media(
   let microphone_level = call.microphone_level();
   let mut level_tick = tokio::time::interval(CALL_LEVEL_INTERVAL);
   level_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+  let mut is_hang_up = false;
   loop {
     tokio::select! {
       _ = level_tick.tick() => shared.levels.publish(microphone_level.get()),
@@ -1258,6 +1294,10 @@ async fn run_media(
         Some(Control::VideoStats(done)) => drop(done.send(call.video_stats().await)),
         Some(Control::StatusSounds(sounds)) => call.set_status_cues(status_cues(sounds)),
         Some(Control::NetworkChanged) => call.network_changed(),
+        Some(Control::HangUp) => {
+          is_hang_up = true;
+          break;
+        },
         Some(Control::Leave) | None => break,
       },
       Some(failure) = failed_rx.recv() => {
@@ -1291,7 +1331,12 @@ async fn run_media(
       },
     }
   }
-  match call.leave().await {
+  let left = if is_hang_up {
+    call.hang_up().await
+  } else {
+    call.leave().await
+  };
+  match left {
     Ok(stats) => tracing::info!(
       frames_sent = stats.frames_sent,
       frames_received = stats.frames_received,
@@ -1569,7 +1614,7 @@ fn lock<T>(state: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 
 #[cfg(test)]
 mod tests {
-  use teamcraft_proto::{CallId, Id, Snowflake, UserId};
+  use teamcraft_proto::{CallEndCause, CallId, Id, Snowflake, UserId};
 
   use super::*;
 
@@ -1616,6 +1661,32 @@ mod tests {
     assert_eq!(host.snapshot().incoming.len(), 1);
     host.decline(conversation(5));
     assert!(host.snapshot().incoming.is_empty());
+  }
+
+  /// Issue #997: the other side of a 1:1 call left, so it ended for both; the host leaves it.
+  #[test]
+  fn a_call_that_ended_for_both_is_left_with_its_reason() {
+    let host = host();
+    lock(&host.state).view.start_active(
+      CallRequest {
+        conversation: conversation(5),
+        kind: teamcraft_client_api::calls::CallKind::Direct,
+      },
+      UiBackgroundEffect::None,
+    );
+    let ended = |conversation_id, cause| GatewayEvent::CallEnd {
+      conversation_id,
+      call_id: CallId::from_snowflake(Snowflake::new(99).unwrap()),
+      cause,
+    };
+
+    assert!(!host.on_gateway_event(ended(conversation(6), CallEndCause::OneSideLeft)));
+    assert!(!host.on_gateway_event(ended(conversation(5), CallEndCause::LastLeft)));
+    assert!(host.on_gateway_event(ended(conversation(5), CallEndCause::OneSideLeft)));
+    assert_eq!(
+      host.snapshot().maybe_end_reason,
+      Some(CallEndReason::OtherSideLeft)
+    );
   }
 
   #[tokio::test]

@@ -11,10 +11,10 @@ use std::fmt;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-  AdminJoinRequestChange, CallId, CallRosterEntry, ConversationId, CustomStatus, DeviceActivity, DeviceId,
-  DeviceLinkClosedReason, DeviceLinkRequest, ErrorBody, LobbyState, MeetingId, MessageId, MessageResponse,
-  MlsMessageResponse, PresenceState, RecoveryRequestId, SpaceId, SystemEventResponse, ThreadId, UnixMillis,
-  UserGroupId, UserId, UserSummary, WorkspaceLogKind,
+  AdminJoinRequestChange, CallEndCause, CallId, CallRosterEntry, ConversationId, CustomStatus,
+  DeviceActivity, DeviceId, DeviceLinkClosedReason, DeviceLinkRequest, ErrorBody, LobbyState, MeetingId,
+  MessageId, MessageResponse, MlsMessageResponse, PresenceState, RecoveryRequestId, SpaceId,
+  SystemEventResponse, ThreadId, UnixMillis, UserGroupId, UserId, UserSummary, WorkspaceLogKind,
 };
 
 /// How long a client waits before it reports that the user stopped being attentive, so the server
@@ -230,10 +230,13 @@ pub enum GatewayEvent {
     is_ringing: bool,
     participants: Vec<CallRosterEntry>,
   },
-  /// The last participant left: the call is over.
+  /// The call is over: the last participant left, or one side of a 1:1 call did (`cause`).
   CallEnd {
     conversation_id: ConversationId,
     call_id: CallId,
+    /// Absent from older servers, and when the last participant left.
+    #[serde(default, skip_serializing_if = "CallEndCause::is_last_left")]
+    cause: CallEndCause,
   },
   /// Somebody added people to the DM or group DM call `call_id`: the call moves into the meeting
   /// chat `to_conversation_id`. Devices in the call leave it and join the meeting's call; the DM

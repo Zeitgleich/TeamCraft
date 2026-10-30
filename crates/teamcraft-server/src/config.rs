@@ -236,6 +236,10 @@ pub struct PolicyConfig {
   /// Days an admin's request to join a private channel waits for the channel's owners before it
   /// expires (admin.md §2.4, `admin_self_join = owner_approval`).
   pub admin_join_request_days: u32,
+  /// A 1:1 direct message call ends for both as soon as one side leaves: hangs up, closes the app,
+  /// or is dropped after the reconnect grace period (issue #997). Off, it keeps running until the
+  /// last person leaves.
+  pub one_to_one_call_ends_for_both: bool,
   /// Days a direct message deleted with a deleted account is remembered for the remaining
   /// participants, so their devices that were offline that long still drop it with its local
   /// history on the next sync (admin.md §3.2.1). After that it only leaves the list.
@@ -1360,6 +1364,7 @@ impl Default for PolicyConfig {
       default_channels: Vec::new(),
       maybe_remove_deactivated_after_days: None,
       admin_join_request_days: teamcraft_proto::DEFAULT_ADMIN_JOIN_REQUEST_DAYS,
+      one_to_one_call_ends_for_both: true,
       deleted_conversations_kept_days: 180,
     }
   }

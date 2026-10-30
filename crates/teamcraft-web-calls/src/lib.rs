@@ -198,6 +198,8 @@ enum Control {
   NetworkChanged,
   VideoStats(oneshot::Sender<Option<VideoStatsReport>>),
   Leave,
+  /// Leaves with the hang-up tone: a 1:1 call that ended for both (#997).
+  HangUp,
 }
 
 /// Signs and verifies call key bindings in the page, which holds the device key (e2ee.md §8).
@@ -317,14 +319,21 @@ pub async fn share_screen(
   Ok(JsValue::UNDEFINED)
 }
 
-/// A call event from the gateway (`CallSignal` JSON).
+/// A call event from the gateway (`CallSignal` JSON). A 1:1 call this page is in that ended for
+/// both is left with the hang-up tone (#997).
 #[wasm_bindgen]
 pub fn signal(signal: String) {
   match (host(), serde_json::from_str::<CallSignal>(&signal)) {
     (Ok(host), Ok(signal)) => {
-      let is_changed = host.state.borrow_mut().view.apply_signal(signal);
+      let (is_end_of_active, is_changed) = {
+        let view = &mut host.state.borrow_mut().view;
+        (view.is_end_of_active(&signal), view.apply_signal(signal))
+      };
       if is_changed {
         host.changed();
+      }
+      if is_end_of_active {
+        host.control(Control::HangUp);
       }
     },
     (_, Err(error)) => tracing::warn!(%error, "unreadable call signal"),
@@ -473,6 +482,7 @@ impl Host {
       )
     };
     let own_device = prepared.device_id;
+    let ends_when_one_side_leaves = prepared.ends_when_one_side_leaves;
     // AV1 for screen shares where this browser encodes and decodes it (#565).
     let codecs = call_web::video_codec_support().await;
     // Push-to-talk: the microphone opens only while the key is held.
@@ -515,6 +525,7 @@ impl Host {
         device_id: own_device,
       });
       view.start_active(request, BackgroundEffect::None);
+      view.set_ends_when_one_side_leaves(ends_when_one_side_leaves);
       if let Some(active) = view.maybe_active.as_mut() {
         active.is_muted = is_muted_at_start;
       }
@@ -580,6 +591,10 @@ impl Host {
 
   async fn act(self: &Rc<Self>, action: CallAction) -> Result<CallActionAnswer, ActionFailure> {
     match action {
+      // Leaving a 1:1 call that then ends for both plays the hang-up tone (#997).
+      CallAction::Leave if self.state.borrow().view.is_leave_a_hang_up() => {
+        self.end_media(Control::HangUp).await
+      },
       CallAction::Leave => self.leave().await,
       CallAction::SetMuted { is_muted } => self.control(Control::Mute(is_muted)),
       CallAction::SetDeafened { is_deafened } => self.control(Control::Deafen(is_deafened)),
@@ -704,10 +719,15 @@ impl Host {
   }
 
   async fn leave(&self) {
+    self.end_media(Control::Leave).await;
+  }
+
+  /// Ends the running call with `control` (a leave or a hang-up) and waits until it finished.
+  async fn end_media(&self, control: Control) {
     let maybe_media = self.maybe_media.borrow_mut().take();
     if let Some(media) = maybe_media {
       // A closed channel means the call already ended; waiting still lets it finish.
-      let _ = media.controls.unbounded_send(Control::Leave);
+      let _ = media.controls.unbounded_send(control);
       let _ = media.finished.await;
     }
   }
@@ -1373,6 +1393,7 @@ async fn run_media(
   own_device: DeviceId,
 ) {
   let mut roster = CallRoster::new(own_device);
+  let mut is_hang_up = false;
   loop {
     let next = {
       let event = pin!(call.next_event());
@@ -1391,10 +1412,19 @@ async fn run_media(
       // The call ended on its own (the SFU closed it, or rejoining failed).
       Either::Left(None) => break,
       Either::Right(None | Some(Control::Leave)) => break,
+      Either::Right(Some(Control::HangUp)) => {
+        is_hang_up = true;
+        break;
+      },
       Either::Right(Some(control)) => apply(&call, control).await,
     }
   }
-  let result = call.leave().await.map(|stats| {
+  let left = if is_hang_up {
+    call.hang_up().await
+  } else {
+    call.leave().await
+  };
+  let result = left.map(|stats| {
     tracing::info!(
       frames_sent = stats.frames_sent,
       frames_received = stats.frames_received,
@@ -1451,7 +1481,7 @@ async fn apply(call: &WebCall, control: Control) {
     Control::StatusSounds(sounds) => call.set_status_cues(status_cues(sounds)),
     Control::NetworkChanged => call.network_changed(),
     Control::VideoStats(done) => drop(done.send(call.video_stats().await)),
-    Control::Leave => {},
+    Control::Leave | Control::HangUp => {},
   }
 }
 

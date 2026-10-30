@@ -585,6 +585,7 @@ mod tests {
         sfu_url: "https://sfu.example.com:4433/call".into(),
         expires_at: UnixMillis(0),
         sfu_certificate_sha256: vec!["ab".repeat(32), "not hex".into(), vec!["CD"; 32].join(":")],
+        ends_when_one_side_leaves: false,
       };
       let ticket = JoinTicket::from(response);
       assert_eq!(ticket.certificate_hashes, vec![[0xab; 32], [0xcd; 32]]);

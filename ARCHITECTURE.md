@@ -530,6 +530,24 @@ device: "on another device" shows only when another device of the user is in the
 this device's own entry still listed for a moment after it left (a device knows its entry once it
 joined a call; before that the user being listed counts).
 
+**A 1:1 call ends for both** (#997). In a direct message, a call between the two people ends as
+soon as one side is gone: hung up, the app closed, or dropped by the roster reconciliation above
+(the SFU reports a lost device only after its reconnect grace period, so a short drop that
+reconnects ends nothing). The server decides it, so every client behaves the same: when a leave
+leaves one person in a DM call that had both in it (and didn't move into a meeting), it ends the
+call, closes its history entry and sends `call_end` with `cause: one_side_left` to all devices of
+both. Devices still in the call leave by themselves, play the hang-up tone (a synthesized status
+cue, three beeps of the busy tone, following the user's call status sounds setting) and show
+"Call ended" for a moment before the chat. The side that hangs up plays the same tone: the join
+token says whether the call ends that way (`ends_when_one_side_leaves`), and a leave that ends it
+(the other person in the call, none of the user's other devices) leaves the SFU at once and then
+plays the tone. Five seconds after the end the server tells the SFU to disconnect devices still
+left behind (an older app, one that missed the event), so its roster can't bring the call back. A
+call taken over after a server restart learns its conversation's kind from the database and ends
+the same way. The instance setting `one_to_one_call_ends_for_both` (admin.md §6.3, default on)
+turns it off; group DMs, channel huddles and meetings run until the last person leaves, and so
+does a DM call once it moved into a meeting.
+
 **Browsers** can't migrate a WebTransport session to another network; when it closes, the
 browser driver rejoins as above, spreading the first attempt when the session's close code
 (`closed`'s `closeCode`) is `SFU_GOING_AWAY_CLOSE_CODE`. Where the browser reports the session's

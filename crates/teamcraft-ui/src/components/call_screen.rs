@@ -121,7 +121,9 @@ pub fn CallScreen(request: CallRequest) -> impl IntoView {
   let privacy_code = Memo::new(move |_| {
     state.read(|backend| backend.active_call().and_then(|active| active.maybe_privacy_code))
   });
-  let is_connecting = Memo::new(move |_| is_real && state.read(|backend| backend.active_call().is_none()));
+  let is_connecting = Memo::new(move |_| {
+    is_real && !call.has_ended.get() && state.read(|backend| backend.active_call().is_none())
+  });
   let is_reconnecting = Memo::new(move |_| {
     state.read(|backend| backend.active_call().is_some_and(|active| active.is_reconnecting))
   });
@@ -496,6 +498,9 @@ pub fn CallScreen(request: CallRequest) -> impl IntoView {
         </Show>
         <Show when=move || is_connecting.get() fallback=|| ()>
           <span class="muted-text" role="status">{move || i18n.t("call-connecting")}</span>
+        </Show>
+        <Show when=move || call.has_ended.get() fallback=|| ()>
+          <span class="muted-text" role="status">{move || i18n.t("call-ended")}</span>
         </Show>
         <Show when=move || is_reconnecting.get() fallback=|| ()>
           <span class="muted-text" role="status">{move || i18n.t("call-reconnecting")}</span>

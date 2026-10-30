@@ -748,7 +748,7 @@ Groups that are stored and reset as a whole:
 
 | Group            | Values                                                                                                                                        |
 |------------------|-----------------------------------------------------------------------------------------------------------------------------------------------|
-| `server_rules`   | invites need a verified e-mail address; default spaces and channels for new members; days until deactivated users are removed from all chats; days until an admin's request to join a private channel expires (§2.4.1) |
+| `server_rules`   | invites need a verified e-mail address; default spaces and channels for new members; days until deactivated users are removed from all chats; days until an admin's request to join a private channel expires (§2.4.1); whether a 1:1 call ends for both when one side hangs up (default on) |
 | `notifications`  | read receipt default, urgent repeat interval and count, phone push delay, desktop attention                                                   |
 | `email_digest`   | on/off, default and shortest interval, grace period, subjects and texts                                                                       |
 | `shares`         | on/off, default and longest expiry, download cap, links per user                                                                              |

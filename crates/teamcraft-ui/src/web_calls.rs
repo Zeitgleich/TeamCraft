@@ -410,6 +410,7 @@ impl WebCallHost {
       trusted_devices,
       requires_background: crate::web_core::requires_org_background().await,
       certificate_sha256: preparation.join.sfu_certificate_sha256,
+      ends_when_one_side_leaves: preparation.join.ends_when_one_side_leaves,
     })
   }
 

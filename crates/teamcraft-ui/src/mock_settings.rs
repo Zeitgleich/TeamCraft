@@ -326,6 +326,7 @@ fn default_runtime() -> RuntimeSettingsResponse {
       default_channels: Vec::new(),
       maybe_remove_deactivated_after_days: None,
       admin_join_request_days: teamcraft_proto::DEFAULT_ADMIN_JOIN_REQUEST_DAYS,
+      one_to_one_call_ends_for_both: true,
     },
     notifications: NotificationRuntimeSettings {
       read_receipts_default: true,

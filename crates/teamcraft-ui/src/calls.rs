@@ -3,6 +3,7 @@
 
 use std::collections::HashMap;
 use std::rc::Rc;
+use std::time::Duration;
 
 use leptos::prelude::*;
 
@@ -112,6 +113,9 @@ pub struct AudioMenuEntry {
   /// The call uses it.
   pub is_checked: bool,
 }
+
+/// How long "Call ended" shows before the app is back in the chat (#997).
+const CALL_ENDED_SHOWN: Duration = Duration::from_millis(1500);
 
 /// Ids browsers give stand-ins for other devices: Chrome's "default" and Windows'
 /// "communications" device. They are no device of their own to offer.
@@ -244,6 +248,9 @@ pub fn audio_menu_entries(devices: &[MediaDevice], chosen: &str) -> Vec<AudioMen
 #[derive(Clone, Copy)]
 pub struct CallState {
   pub phase: RwSignal<CallPhase>,
+  /// The other side of the 1:1 call left, so it ended for both (#997): the call screen, or the
+  /// call pill, says "Call ended" for a moment before the app is back in the chat.
+  pub has_ended: RwSignal<bool>,
   pub maybe_request: RwSignal<Option<CallRequest>>,
   pub incoming: RwSignal<Option<IncomingCall>>,
   pub camera_id: RwSignal<String>,
@@ -297,6 +304,7 @@ impl CallState {
   pub fn new() -> Self {
     Self {
       phase: RwSignal::new(CallPhase::Idle),
+      has_ended: RwSignal::new(false),
       maybe_request: RwSignal::new(None),
       incoming: RwSignal::new(None),
       camera_id: RwSignal::new(String::new()),
@@ -528,6 +536,7 @@ impl CallState {
     self.is_sharing_screen.set(false);
     self.has_hand_raised.set(false);
     self.is_deafened.set(false);
+    self.has_ended.set(false);
     self.phase.set(CallPhase::Active);
     if let Some(request) = self.maybe_request.get_untracked() {
       // The media layer starts as chosen, in one action (#453): a muted microphone stays muted
@@ -543,8 +552,24 @@ impl CallState {
     }
   }
 
+  /// The call ended for both (the other side of a 1:1 call left, #997): "Call ended" shows for a
+  /// moment, then the call screen closes as on leaving. A new call started meanwhile stays.
+  pub fn show_ended(&self) {
+    self.has_ended.set(true);
+    let call = *self;
+    set_timeout(
+      move || {
+        if call.has_ended.get_untracked() {
+          call.leave();
+        }
+      },
+      CALL_ENDED_SHOWN,
+    );
+  }
+
   pub fn leave(&self) {
     let was_active = self.phase.get_untracked() == CallPhase::Active;
+    self.has_ended.set(false);
     self.phase.set(CallPhase::Idle);
     self.maybe_request.set(None);
     self.is_sharing_screen.set(false);

@@ -116,6 +116,10 @@ pub struct PreparedCall {
   /// The SFU certificates' SHA-256s (hex) when they are self-signed (development, tests).
   #[serde(default)]
   pub certificate_sha256: Vec<String>,
+  /// A 1:1 call that ends for both when one side leaves (issue #997): hanging up plays the
+  /// hang-up tone.
+  #[serde(default)]
+  pub ends_when_one_side_leaves: bool,
 }
 
 /// How the browser's call module composites the background effects (#439).
@@ -228,6 +232,7 @@ mod tests {
       trusted_devices: vec![id_from_raw(20)],
       requires_background: false,
       certificate_sha256: Vec::new(),
+      ends_when_one_side_leaves: true,
     };
     let json = serde_json::to_string(&prepared).unwrap();
     assert_eq!(serde_json::from_str::<PreparedCall>(&json).unwrap(), prepared);

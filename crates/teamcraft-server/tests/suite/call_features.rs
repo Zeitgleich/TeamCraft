@@ -222,8 +222,15 @@ mod history {
     assert_ne!(second, call);
     report(&s.app, "joined", &second, &s.alice_id, &s.alice_device).await;
     report(&s.app, "joined", &second, &s.bob_id, &s.bob_device).await;
+    // Alice hanging up ends the 1:1 call for both (#997): Bob's device leaves a call that is over.
     report(&s.app, "left", &second, &s.alice_id, &s.alice_device).await;
-    report(&s.app, "left", &second, &s.bob_id, &s.bob_device).await;
+    assert_eq!(
+      s.app
+        .get(&s.bob, &format!("/conversations/{}/call", s.dm))
+        .await
+        .status,
+      StatusCode::NOT_FOUND
+    );
     let listed = s
       .app
       .get(&s.bob, &format!("/conversations/{}/system-events", s.dm))

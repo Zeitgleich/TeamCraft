@@ -129,6 +129,9 @@ default_channels = []
 # Days an admin's request to join a private channel waits for the channel's owners before it
 # expires (admin.md §2.4.1, `admin_self_join = owner_approval`), 1 to 90.
 admin_join_request_days = 7
+# A 1:1 direct message call ends for both as soon as one side leaves (hangs up, closes the app, or
+# is dropped after the reconnect grace period). false: it runs until the last person leaves.
+one_to_one_call_ends_for_both = true
 # Direct messages deleted with a deleted account are remembered this many days for the other
 # participants, so a device offline that long still drops them with their local history.
 deleted_conversations_kept_days = 180

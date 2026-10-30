@@ -141,6 +141,7 @@ const SERVER_RULES: &[FieldDef] = &[
   },
   optional_amount("remove_deactivated_after_days", 1, 3_650, DAYS),
   amount("admin_join_request_days", 1, 90, DAYS),
+  flag("one_to_one_call_ends_for_both"),
 ];
 const NOTIFICATIONS: &[FieldDef] = &[
   flag("read_receipts_default"),

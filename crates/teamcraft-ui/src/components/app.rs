@@ -14,8 +14,8 @@ use crate::auth::tauri;
 use crate::backend::Backend;
 use crate::calls::CallPhase;
 use crate::calls::{
-  AudioDeviceChange, AudioKind, AudioOffer, BackgroundEffect, CallEvent, CallRequest, CallStatusSounds,
-  CameraFallback, MediaDevices, VideoQuality, audio_device_change,
+  AudioDeviceChange, AudioKind, AudioOffer, BackgroundEffect, CallEndReason, CallEvent, CallRequest,
+  CallStatusSounds, CameraFallback, MediaDevices, VideoQuality, audio_device_change,
 };
 use crate::clock::now_ms;
 use crate::components::announcement_banner::AnnouncementBanner;
@@ -1213,7 +1213,8 @@ pub(crate) fn connect_calls(state: AppState) {
   });
   // The shell ended the call (the other side hung up, the connection dropped): leave the screen.
   // Only the end of the call the screen is for: switching to another one (a call that moved into a
-  // meeting) ends the previous call first.
+  // meeting) ends the previous call first. A 1:1 call that ended for both says so for a moment
+  // first (#997).
   let was_connected_to = Cell::new(None);
   Effect::new(move |_| {
     let maybe_connected_to = state.read(|backend| backend.active_call().map(|active| active.conversation));
@@ -1228,7 +1229,12 @@ pub(crate) fn connect_calls(state: AppState) {
       && maybe_was_connected_to.is_some_and(is_requested)
       && call.phase.get_untracked() == CallPhase::Active
     {
-      call.leave();
+      let maybe_reason = untrack(|| state.read(|backend| backend.call_end_reason()));
+      if maybe_reason == Some(CallEndReason::OtherSideLeft) {
+        call.show_ended();
+      } else {
+        call.leave();
+      }
     }
   });
   // A join that failed (a refused microphone, an unreachable call server) already told the user

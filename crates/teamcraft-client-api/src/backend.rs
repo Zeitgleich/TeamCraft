@@ -26,8 +26,8 @@ use crate::admin::{
   SelfJoinOutcome, SettingsTestKind,
 };
 use crate::calls::{
-  ActiveCall, BackgroundEffect, BackgroundImageInfo, CallHistoryItem, CallMoveOffer, CallRequest,
-  CallStatusSounds, CallsUnavailableReason, HuddleInfo, IncomingCall, MediaDevices, Participant,
+  ActiveCall, BackgroundEffect, BackgroundImageInfo, CallEndReason, CallHistoryItem, CallMoveOffer,
+  CallRequest, CallStatusSounds, CallsUnavailableReason, HuddleInfo, IncomingCall, MediaDevices, Participant,
   RemoteVideoTrack, ScreenContentMode, ScreenShareResolution,
 };
 use crate::calls::{
@@ -737,6 +737,10 @@ pub trait CallBackend {
 
   /// The call this device is in.
   fn active_call(&self) -> Option<ActiveCall> {
+    None
+  }
+  /// Why the last call ended other than by leaving (the other side of a 1:1 call left, #997).
+  fn call_end_reason(&self) -> Option<CallEndReason> {
     None
   }
   /// Calls ringing for the user that they haven't answered or declined.

@@ -314,6 +314,198 @@ mod direct_messages {
 
     let kinds: Vec<_> = events.iter().map(|e| e["type"].as_str().unwrap()).collect();
     assert_eq!(kinds, ["call_start", "call_ring", "call_end"]);
+    assert_eq!(events[2].get("cause"), None, "the last one left");
+    app.stop().await;
+  }
+}
+
+/// Issue #997: a 1:1 call ends for both when one side leaves.
+mod one_to_one {
+  use super::*;
+
+  #[tokio::test]
+  async fn one_side_hanging_up_ends_the_call_for_both_and_all_their_devices() {
+    let app = app!(30);
+    let (alice, bob) = (owner(), member("bob"));
+    let (alice_device, bob_phone, bob_desktop) = (
+      register_device(&app, &alice).await,
+      register_device(&app, &bob).await,
+      register_device(&app, &bob).await,
+    );
+    let (alice_id, bob_id) = (user_id(&app, &alice).await, user_id(&app, &bob).await);
+    let dm = app.post(&alice, "/dms", json!({ "user_id": bob_id })).await.id();
+    let mut alice_socket = ws::connect(&app, &alice, &alice_device).await;
+    let mut bob_phone_socket = ws::connect(&app, &bob, &bob_phone).await;
+    let mut bob_desktop_socket = ws::connect(&app, &bob, &bob_desktop).await;
+
+    let token = app
+      .post(
+        &alice,
+        &format!("/conversations/{dm}/call/join-token"),
+        json!({ "device_id": alice_device }),
+      )
+      .await;
+    assert_eq!(token.body["ends_when_one_side_leaves"], true, "{}", token.body);
+    let call_id = token.body["call_id"].as_str().unwrap().to_owned();
+    report(
+      &app,
+      "joined",
+      Some(SFU_TOKEN),
+      &call_id,
+      &alice_id,
+      &alice_device,
+    )
+    .await;
+    join_token(&app, &bob, &dm, &bob_phone).await;
+    report(&app, "joined", Some(SFU_TOKEN), &call_id, &bob_id, &bob_phone).await;
+    join_token(&app, &bob, &dm, &bob_desktop).await;
+    report(&app, "joined", Some(SFU_TOKEN), &call_id, &bob_id, &bob_desktop).await;
+    for socket in [&mut alice_socket, &mut bob_phone_socket, &mut bob_desktop_socket] {
+      ws::events(socket, QUIET).await;
+    }
+
+    // One of Bob's devices leaving ends nothing: Bob is still in the call.
+    report(&app, "left", Some(SFU_TOKEN), &call_id, &bob_id, &bob_desktop).await;
+    let update = call_events(&ws::events(&mut alice_socket, QUIET).await);
+    assert_eq!(update.len(), 1, "{update:?}");
+    assert_eq!(update[0]["type"], "call_update");
+
+    // Alice hangs up: the call ends for both, on every device.
+    report(&app, "left", Some(SFU_TOKEN), &call_id, &alice_id, &alice_device).await;
+    for socket in [&mut alice_socket, &mut bob_phone_socket, &mut bob_desktop_socket] {
+      let events = call_events(&ws::events(socket, QUIET).await);
+      let last = events.last().unwrap();
+      assert_eq!(
+        (
+          last["type"].as_str(),
+          last["call_id"].as_str(),
+          last["cause"].as_str()
+        ),
+        (Some("call_end"), Some(call_id.as_str()), Some("one_side_left")),
+        "{events:?}"
+      );
+    }
+    assert_eq!(
+      app.get(&bob, &format!("/conversations/{dm}/call")).await.status,
+      StatusCode::NOT_FOUND
+    );
+    // Bob's phone leaving by itself is no news, and nobody hears of the call again.
+    assert_eq!(
+      report(&app, "left", Some(SFU_TOKEN), &call_id, &bob_id, &bob_phone).await,
+      StatusCode::NOT_FOUND
+    );
+    assert!(call_events(&ws::events(&mut alice_socket, QUIET).await).is_empty());
+    // The history has the call with its end.
+    let history = app.get(&alice, "/calls/history").await;
+    let entry = history.body["calls"]
+      .as_array()
+      .unwrap()
+      .iter()
+      .find(|entry| entry["call_id"] == call_id.as_str())
+      .cloned()
+      .unwrap();
+    assert!(entry["ended_at"].as_i64().is_some(), "{entry}");
+    assert_eq!(entry["is_missed"], false);
+    app.stop().await;
+  }
+
+  #[tokio::test]
+  async fn with_the_setting_off_the_call_runs_until_the_last_leaves() {
+    let app = app!(30);
+    let (alice, bob) = (owner(), member("bob"));
+    let mut rules = app.get(&alice, "/admin/settings").await.body["server_rules"].clone();
+    assert_eq!(rules["one_to_one_call_ends_for_both"], true, "on by default");
+    rules["one_to_one_call_ends_for_both"] = json!(false);
+    let saved = app
+      .put(
+        &alice,
+        "/admin/settings",
+        json!({"section": "server_rules", "values": rules}),
+      )
+      .await;
+    assert_eq!(saved.status, StatusCode::OK, "{}", saved.body);
+    let (alice_device, bob_device) = (
+      register_device(&app, &alice).await,
+      register_device(&app, &bob).await,
+    );
+    let (alice_id, bob_id) = (user_id(&app, &alice).await, user_id(&app, &bob).await);
+    let dm = app.post(&alice, "/dms", json!({ "user_id": bob_id })).await.id();
+    let mut bob_socket = ws::connect(&app, &bob, &bob_device).await;
+    let token = app
+      .post(
+        &alice,
+        &format!("/conversations/{dm}/call/join-token"),
+        json!({ "device_id": alice_device }),
+      )
+      .await;
+    assert_eq!(token.body.get("ends_when_one_side_leaves"), None);
+    let call_id = token.body["call_id"].as_str().unwrap().to_owned();
+    report(
+      &app,
+      "joined",
+      Some(SFU_TOKEN),
+      &call_id,
+      &alice_id,
+      &alice_device,
+    )
+    .await;
+    join_token(&app, &bob, &dm, &bob_device).await;
+    report(&app, "joined", Some(SFU_TOKEN), &call_id, &bob_id, &bob_device).await;
+    ws::events(&mut bob_socket, QUIET).await;
+
+    report(&app, "left", Some(SFU_TOKEN), &call_id, &alice_id, &alice_device).await;
+
+    let events = call_events(&ws::events(&mut bob_socket, QUIET).await);
+    let kinds: Vec<_> = events.iter().map(|e| e["type"].as_str().unwrap()).collect();
+    assert_eq!(kinds, ["call_update"]);
+    assert_eq!(
+      app.get(&bob, &format!("/conversations/{dm}/call")).await.status,
+      StatusCode::OK
+    );
+    app.stop().await;
+  }
+
+  #[tokio::test]
+  async fn a_channel_call_is_no_one_to_one_call() {
+    let app = app!(30);
+    let (alice, bob) = (owner(), member("bob"));
+    let channel = channel_with(&app, &[&bob]).await;
+    let (alice_device, bob_device) = (
+      register_device(&app, &alice).await,
+      register_device(&app, &bob).await,
+    );
+    let (alice_id, bob_id) = (user_id(&app, &alice).await, user_id(&app, &bob).await);
+    let token = app
+      .post(
+        &alice,
+        &format!("/conversations/{channel}/call/join-token"),
+        json!({ "device_id": alice_device }),
+      )
+      .await;
+    assert_eq!(token.body.get("ends_when_one_side_leaves"), None);
+    let call_id = token.body["call_id"].as_str().unwrap().to_owned();
+    report(
+      &app,
+      "joined",
+      Some(SFU_TOKEN),
+      &call_id,
+      &alice_id,
+      &alice_device,
+    )
+    .await;
+    join_token(&app, &bob, &channel, &bob_device).await;
+    report(&app, "joined", Some(SFU_TOKEN), &call_id, &bob_id, &bob_device).await;
+
+    report(&app, "left", Some(SFU_TOKEN), &call_id, &alice_id, &alice_device).await;
+
+    assert_eq!(
+      app
+        .get(&bob, &format!("/conversations/{channel}/call"))
+        .await
+        .status,
+      StatusCode::OK,
+      "a huddle runs until the last one leaves"
+    );
     app.stop().await;
   }
 }

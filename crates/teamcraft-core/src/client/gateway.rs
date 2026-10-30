@@ -626,6 +626,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       GatewayEvent::CallEnd {
         conversation_id,
         call_id,
+        ..
       } => {
         self.forget_call(conversation_id, call_id)?;
         self.emit_call_event(&event);
