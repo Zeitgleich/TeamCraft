@@ -278,6 +278,7 @@ error-call-camera-unsupported = Das Bildformat dieser Kamera wird nicht unterst�
 error-call-camera-not-connected = Die iPhone-Kamera hat sich nicht verbunden: Sie wurde auf dem iPhone abgelehnt, oder das iPhone ist gesperrt oder zu weit entfernt. Erlaube sie auf dem iPhone oder wähle eine andere Kamera.
 error-call-camera-unavailable = Die Kamera lässt sich nicht öffnen. Wähle eine andere Kamera oder versuche es erneut.
 error-call-screen-unavailable = Dein Bildschirm kann von hier aus nicht geteilt werden.
+error-call-screen-needs-wayland = Bildschirmfreigabe braucht eine Wayland-Sitzung. Dein Desktop läuft mit X11: Melde dich ab, wähle auf dem Anmeldebildschirm die Wayland-Sitzung und melde dich wieder an.
 error-call-screen-denied = macOS lässt TeamCraft deinen Bildschirm nicht teilen, auch wenn TeamCraft dort eingeschaltet ist. Wähle in den Systemeinstellungen unter Datenschutz & Sicherheit → Bildschirm- & Systemaudioaufnahme TeamCraft aus und entferne es mit −. Beende TeamCraft dann, öffne es erneut und teile noch einmal; erlaube es, wenn macOS fragt.
 call-screen-settings-open = Systemeinstellungen öffnen
 error-call-screen-needs-click = Dein Browser hat die Bildschirmauswahl nicht geöffnet. Wähle erneut „Bildschirm teilen“ und dann, was geteilt wird.

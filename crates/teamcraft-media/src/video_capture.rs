@@ -104,6 +104,10 @@ pub enum CaptureError {
   Cancelled(&'static str),
   #[error("capture: {0}")]
   Device(String),
+  /// Screen sharing on Linux works only through the desktop portal, which X11 sessions don't
+  /// offer for screens (KDE): the user has to sign in to a Wayland session.
+  #[error("screen sharing needs a Wayland session")]
+  NeedsWayland,
   /// Another app holds the camera.
   #[error("the camera is in use by another app: {0}")]
   InUse(String),

@@ -143,6 +143,19 @@ impl PortalCapture {
     wanted: CaptureFormat,
     maybe_restore_token: Option<&str>,
   ) -> Result<(Self, Option<String>), CaptureError> {
+    Self::open_screen(wanted, maybe_restore_token).map_err(|error| {
+      let session = DesktopSession::from_env(
+        std::env::var("XDG_SESSION_TYPE").ok().as_deref(),
+        std::env::var_os("WAYLAND_DISPLAY").is_some(),
+      );
+      screen_error_in(session, error)
+    })
+  }
+
+  fn open_screen(
+    wanted: CaptureFormat,
+    maybe_restore_token: Option<&str>,
+  ) -> Result<(Self, Option<String>), CaptureError> {
     let (proxy, session, node, size, fd, maybe_token) = portal_runtime()?.block_on(async {
       let proxy = Screencast::new().await.map_err(portal_error)?;
       let session = proxy
@@ -643,6 +656,39 @@ fn portal_runtime() -> Result<&'static tokio::runtime::Runtime, CaptureError> {
     .map_err(|error| CaptureError::Device(format!("portal runtime: {error}")))
 }
 
+/// The kind of graphical session the app runs in, as far as screen sharing cares.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DesktopSession {
+  Wayland,
+  X11,
+  Unknown,
+}
+
+impl DesktopSession {
+  /// From `XDG_SESSION_TYPE` and whether `WAYLAND_DISPLAY` is set (a Wayland compositor started
+  /// without a login manager sets only that).
+  fn from_env(maybe_session_type: Option<&str>, has_wayland_display: bool) -> Self {
+    match maybe_session_type {
+      _ if has_wayland_display => Self::Wayland,
+      Some("wayland") => Self::Wayland,
+      Some("x11") => Self::X11,
+      _ => Self::Unknown,
+    }
+  }
+}
+
+/// A failed screen share as the user should hear it: on X11 the portal has no screens to offer
+/// (KDE's portal shares screens on Wayland only), so the answer is "use Wayland", not a portal
+/// error. The user's own answers in the picker stay what they are; the portal is tried first
+/// because some desktops (GNOME) share screens on X11 too.
+fn screen_error_in(session: DesktopSession, error: CaptureError) -> CaptureError {
+  match (session, error) {
+    (_, error @ (CaptureError::Cancelled(_) | CaptureError::Denied(_))) => error,
+    (DesktopSession::X11, _) => CaptureError::NeedsWayland,
+    (_, error) => error,
+  }
+}
+
 /// The screen picker's answer: closed without a choice, or refused.
 fn picker_error(error: ashpd::Error) -> CaptureError {
   match error {
@@ -768,6 +814,40 @@ mod tests {
     assert_eq!(picture_range(100, 0, 100, true), ChunkContent::Empty);
     assert_eq!(picture_range(100, 60, 50, false), ChunkContent::OutOfRange);
     assert_eq!(picture_range(100, usize::MAX, 2, false), ChunkContent::OutOfRange);
+  }
+
+  #[test]
+  fn a_failed_share_on_x11_asks_for_wayland() {
+    let x11 = DesktopSession::from_env(Some("x11"), false);
+    assert_eq!(x11, DesktopSession::X11);
+    assert!(matches!(
+      screen_error_in(x11, CaptureError::Device("portal: no ScreenCast".into())),
+      CaptureError::NeedsWayland
+    ));
+    assert!(matches!(
+      screen_error_in(x11, CaptureError::NoDevice("screen")),
+      CaptureError::NeedsWayland
+    ));
+    // What the user answered in the picker stays.
+    assert!(matches!(
+      screen_error_in(x11, CaptureError::Cancelled("screen")),
+      CaptureError::Cancelled("screen")
+    ));
+    assert!(matches!(
+      screen_error_in(x11, CaptureError::Denied("screen")),
+      CaptureError::Denied("screen")
+    ));
+    // On Wayland (also a compositor without a login manager) and unknown sessions, as it was.
+    for session in [
+      DesktopSession::from_env(Some("wayland"), false),
+      DesktopSession::from_env(Some("tty"), true),
+      DesktopSession::from_env(None, false),
+    ] {
+      assert!(matches!(
+        screen_error_in(session, CaptureError::Device("portal".into())),
+        CaptureError::Device(_)
+      ));
+    }
   }
 
   #[test]
