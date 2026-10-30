@@ -51,8 +51,8 @@ use teamcraft_media::effects::{BackgroundEffect as MediaEffect, needs_picture};
 use teamcraft_media::jitter::JitterBufferConfig;
 use teamcraft_media::video::{ScreenProfile, VideoResolution, camera_limit};
 use teamcraft_proto::{
-  AudioCodec, CallId, DeviceId, MediaCapabilities, MediaStreamId, ScreenContentMode, ScreenShareResolution,
-  VideoTrackKind,
+  AudioCodec, CallId, CallRosterEntry, DeviceId, MediaCapabilities, MediaStreamId, ScreenContentMode,
+  ScreenShareResolution, VideoTrackKind,
 };
 use tracing_subscriber::Layer;
 use tracing_subscriber::filter::LevelFilter;
@@ -510,6 +510,10 @@ impl Host {
       let state = &mut *self.state.borrow_mut();
       state.requires_background = requires_background;
       let view = &mut state.view;
+      view.set_this_device(CallRosterEntry {
+        user_id: prepared.user_id,
+        device_id: own_device,
+      });
       view.start_active(request, BackgroundEffect::None);
       if let Some(active) = view.maybe_active.as_mut() {
         active.is_muted = is_muted_at_start;
@@ -1341,6 +1345,7 @@ impl Host {
         preview_camera: state.preview_camera,
         // The browser opens the camera the user picks or none: no fallback here.
         maybe_camera_fallback: None,
+        maybe_this_device: state.view.maybe_this_device,
       }
     };
     let Ok(json) = serde_json::to_string(&snapshot) else {

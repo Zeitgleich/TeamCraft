@@ -56,8 +56,8 @@ use teamcraft_media::video::{ScreenProfile, VideoResolution, camera_limit};
 use teamcraft_media::video_capture::{CameraInfo, CaptureError};
 use teamcraft_media::video_pipeline::{BlackReport, VideoSendConfig, VideoStartError, preferred_encoders};
 use teamcraft_proto::{
-  AudioCodec, ConversationId, DeviceId, GatewayEvent, MediaCapabilities, MediaStreamId, VideoCodec,
-  VideoTrackKind,
+  AudioCodec, CallRosterEntry, ConversationId, DeviceId, GatewayEvent, MediaCapabilities, MediaStreamId,
+  VideoCodec, VideoTrackKind,
 };
 use tokio::sync::{mpsc, oneshot};
 
@@ -273,6 +273,7 @@ impl CallHost {
       maybe_end_reason: state.view.maybe_end_reason,
       preview_camera: state.preview_camera,
       maybe_camera_fallback: state.maybe_camera_fallback.clone(),
+      maybe_this_device: state.view.maybe_this_device,
     }
   }
 
@@ -340,6 +341,10 @@ impl CallHost {
       (state.microphone.clone(), state.speakers.clone())
     };
     let own_device = preparation.device_id;
+    let this_device = CallRosterEntry {
+      user_id: preparation.user_id,
+      device_id: own_device,
+    };
     let mut config = native_config(preparation, microphone, speakers, page_decoders)?;
     config.maybe_ticket_source = Some(tickets);
     config.status_cues = status_cues(lock(&self.state).status_sounds);
@@ -352,6 +357,7 @@ impl CallHost {
     {
       let mut state = lock(&self.state);
       let background = state.background;
+      state.view.set_this_device(this_device);
       state.view.start_active(request, background);
       if let Some(active) = state.view.maybe_active.as_mut() {
         active.is_muted = is_muted_at_start;

@@ -517,6 +517,19 @@ own devices from a call at once ("Leave on all devices", `POST
 /api/v1/conversations/{id}/call/leave`): the SFU closes them with `connection_replaced`, so they
 don't rejoin, and the server drops them whatever the SFU answered.
 
+**The roster on the clients** (#976). Clients keep the running calls of the user's conversations
+from the `call_start`, `call_update` and `call_end` events; the call bar of a conversation ("Call
+in progress", or "You are in this call on another device") shows while that roster lists its call.
+Events can be lost for good: a gateway session the server forgot (a restart, the resume window
+passed) starts afresh without the events in between, and a call the server lost in a restart ends
+without any. So after every gateway connection, once caught up, and when the user comes back to the
+app (its attention report turns attentive), the client reads the calls running in its
+conversations (`GET /api/v1/calls`) and hands its call handling a `call_end` for each call the list
+no longer has and a `call_update` for each one whose roster it missed. The roster is kept per
+device: "on another device" shows only when another device of the user is in the call, not for
+this device's own entry still listed for a moment after it left (a device knows its entry once it
+joined a call; before that the user being listed counts).
+
 **Browsers** can't migrate a WebTransport session to another network; when it closes, the
 browser driver rejoins as above, spreading the first attempt when the session's close code
 (`closed`'s `closeCode`) is `SFU_GOING_AWAY_CLOSE_CODE`. Where the browser reports the session's

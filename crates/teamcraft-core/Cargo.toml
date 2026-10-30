@@ -166,6 +166,8 @@ web-sys = { version = "0.3.83", features = [
 
 [target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
 tokio = { workspace = true, features = ["rt", "macros", "time", "test-util"] }
+# The call view the apps keep from the call events, for the roster tests (tests/suite/calls.rs).
+teamcraft-client-api = { path = "../teamcraft-client-api" }
 # A TLS server with a certificate nobody trusts, as a TLS-inspecting proxy presents (api/http.rs
 # tests); both already in the tree (rcgen through wtransport, tokio-rustls through reqwest).
 rcgen = "0.14.10"

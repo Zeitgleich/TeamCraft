@@ -39,6 +39,10 @@ A fresh session costs what changed since the device was last caught up, not what
   an app started again) already while the server answers `resume`: the session kept every event in
   between, so nothing read then can be missed. With events to replay the counts are read only after the
   replay (`counted_through`).
+- Every connection, fresh or resumed, ends its catch-up with the presence of the people it knows and,
+  where the app handles calls, the calls running in the user's conversations (`GET /calls`, issue
+  #976): call events lost with a forgotten session would otherwise leave a call on screen that ended.
+  The list is read after the replay, so it can't undo a newer event.
 
 The client logs where the time of each connection went (`gateway connection caught up` with the phases;
 `Client::last_connection_phases`); docs/performance.md, "Coming back: requests and round trips", has the

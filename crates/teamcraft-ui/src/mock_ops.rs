@@ -146,6 +146,7 @@ impl CallBackend for MockBackend {
   fn huddle(&self, conversation: ConversationId) -> Option<HuddleInfo> {
     (conversation == id_from_raw::<ConversationId>(12)).then(|| HuddleInfo {
       participants: vec![id_from_raw(2), id_from_raw(3)],
+      own_devices: Default::default(),
     })
   }
 }

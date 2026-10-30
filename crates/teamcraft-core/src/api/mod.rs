@@ -363,6 +363,10 @@ pub trait ServerApi {
     conversation: ConversationId,
   ) -> impl Future<Output = Result<Option<CallStateResponse>, ApiError>>;
 
+  /// The calls running in the user's conversations (`GET /calls`, issue #976). `None` from a server
+  /// without the endpoint.
+  fn running_calls(&self) -> impl Future<Output = Result<Option<Vec<CallStateResponse>>, ApiError>>;
+
   /// "Meet now" (`POST /meetings/instant`); `invitees` become members of its chat.
   fn create_instant_meeting(
     &self,

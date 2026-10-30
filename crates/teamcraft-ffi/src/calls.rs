@@ -939,7 +939,11 @@ fn apply_event(
     CallEngineEvent::EndedByHost { .. } => return Some(CallEndReason::EndedByHost),
     // Joined from somewhere else as this device: this side just leaves.
     CallEngineEvent::ConnectionReplaced => return Some(CallEndReason::Left),
-    CallEngineEvent::Error(error) => warn!(error_code = ?error.error_code, "the SFU rejected a call request"),
+    CallEngineEvent::Error(error) => warn!(
+      error_code = ?error.error_code,
+      message = %error.message,
+      "the SFU rejected a call request"
+    ),
     _ => {},
   }
   state.reconnecting_count = count(reconnecting.len());

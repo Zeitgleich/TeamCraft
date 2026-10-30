@@ -2,7 +2,7 @@
 //! `teamcraft-media`; these types only describe what the UI shows and lets the user pick.
 
 use serde::{Deserialize, Serialize};
-use teamcraft_proto::{BackgroundId, CallBackgroundMode, OrgBackgroundId};
+use teamcraft_proto::{BackgroundId, CallBackgroundMode, CallRosterEntry, OrgBackgroundId};
 pub use teamcraft_proto::{ScreenContentMode, ScreenShareResolution};
 
 use crate::model::{ConversationId, TimestampMs, UserId};
@@ -519,6 +519,57 @@ pub struct Participant {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HuddleInfo {
   pub participants: Vec<UserId>,
+  /// Whether the user is in the call with a device other than this one.
+  #[serde(default)]
+  pub own_devices: OwnCallDevices,
+}
+
+/// The user's own devices in a call this device is not in (issue #976). The roster is kept per
+/// device; which of its entries is this device is known once this device joined a call.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OwnCallDevices {
+  /// This device doesn't know its own entry (it hasn't joined a call yet, or the roster names no
+  /// devices): the user being listed is all there is to go by.
+  #[default]
+  Unknown,
+  /// No device of the user but this one is listed: this device left, and the roster still says
+  /// so for a moment (or a leave of this device got lost).
+  NoneElsewhere,
+  /// Another device of the user is in the call.
+  Elsewhere,
+}
+
+impl HuddleInfo {
+  /// Whether `me` is in this call on another device: what "You are in this call on another
+  /// device" and its "Leave on all devices / Join here too / Bring the call here" stand for.
+  pub fn is_on_other_device(&self, me: UserId) -> bool {
+    match self.own_devices {
+      OwnCallDevices::Unknown => self.participants.contains(&me),
+      OwnCallDevices::NoneElsewhere => false,
+      OwnCallDevices::Elsewhere => true,
+    }
+  }
+}
+
+impl OwnCallDevices {
+  /// Where the user of `this_device` is in a call with the roster `devices`.
+  pub fn of(maybe_this_device: Option<CallRosterEntry>, devices: &[CallRosterEntry]) -> Self {
+    let Some(this_device) = maybe_this_device else {
+      return Self::Unknown;
+    };
+    if devices.is_empty() {
+      return Self::Unknown;
+    }
+    let is_elsewhere = devices
+      .iter()
+      .any(|entry| entry.user_id == this_device.user_id && entry.device_id != this_device.device_id);
+    if is_elsewhere {
+      Self::Elsewhere
+    } else {
+      Self::NoneElsewhere
+    }
+  }
 }
 
 /// A move of the user's DM call into a meeting room, as a member of the DM's encryption group
@@ -779,7 +830,11 @@ pub struct RemoteVideoTrack {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RunningCall {
   pub conversation: ConversationId,
+  /// Each person once.
   pub participants: Vec<UserId>,
+  /// Each device in the call (a person may be in it with several).
+  #[serde(default, skip_serializing_if = "Vec::is_empty")]
+  pub devices: Vec<CallRosterEntry>,
   /// DMs ring until someone else joins.
   pub is_ringing: bool,
 }
@@ -1184,6 +1239,59 @@ mod preset_tests {
       (BackgroundPreset::LakeMorning, "\"lake_morning\""),
     ] {
       assert_eq!(serde_json::to_string(&preset).unwrap(), wire);
+    }
+  }
+}
+
+#[cfg(test)]
+mod huddle_tests {
+  use super::*;
+  use crate::model::id_from_raw;
+
+  #[test]
+  fn another_device_counts_only_when_the_roster_lists_one() {
+    let (me, other) = (id_from_raw(1), id_from_raw(2));
+    let this_device = entry(me, 10);
+    let mine_elsewhere = [entry(me, 10), entry(me, 11), entry(other, 20)];
+    let only_this_one = [entry(me, 10), entry(other, 20)];
+    assert_eq!(
+      OwnCallDevices::of(Some(this_device), &mine_elsewhere),
+      OwnCallDevices::Elsewhere
+    );
+    assert_eq!(
+      OwnCallDevices::of(Some(this_device), &only_this_one),
+      OwnCallDevices::NoneElsewhere
+    );
+    assert_eq!(
+      OwnCallDevices::of(Some(this_device), &[entry(other, 20)]),
+      OwnCallDevices::NoneElsewhere
+    );
+    assert_eq!(OwnCallDevices::of(None, &mine_elsewhere), OwnCallDevices::Unknown);
+    assert_eq!(
+      OwnCallDevices::of(Some(this_device), &[]),
+      OwnCallDevices::Unknown
+    );
+  }
+
+  /// Issue #976: the bar says "on another device" only for a device other than this one; without
+  /// knowing its own entry, the user being listed counts as before.
+  #[test]
+  fn the_bar_offers_the_other_device_choices_only_for_another_device() {
+    let (me, other) = (id_from_raw(1), id_from_raw(2));
+    let huddle = |own_devices| HuddleInfo {
+      participants: vec![me, other],
+      own_devices,
+    };
+    assert!(huddle(OwnCallDevices::Elsewhere).is_on_other_device(me));
+    assert!(!huddle(OwnCallDevices::NoneElsewhere).is_on_other_device(me));
+    assert!(huddle(OwnCallDevices::Unknown).is_on_other_device(me));
+    assert!(!huddle(OwnCallDevices::Unknown).is_on_other_device(id_from_raw(3)));
+  }
+
+  fn entry(user: UserId, device: u64) -> CallRosterEntry {
+    CallRosterEntry {
+      user_id: user,
+      device_id: id_from_raw(device),
     }
   }
 }

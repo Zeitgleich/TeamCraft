@@ -295,7 +295,8 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     self.finish_connection().await
   }
 
-  /// Every connection, once caught up: presence is read again (events in between were lost), then
+  /// Every connection, once caught up: presence and the running calls are read again (events in
+  /// between were lost), then
   /// the connection is counted, which tells the UI and the upkeep to do their once-per-connection
   /// reads. A failed presence read doesn't fail the connection; the next one retries.
   async fn finish_connection(&mut self) -> Result<(), CoreError> {
@@ -303,6 +304,11 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       tracing::warn!(%error, "could not read presence after connecting");
     }
     self.trace_lap("presence");
+    // Call events in between may have been lost (issue #976).
+    if let Err(error) = self.reconcile_calls().await {
+      tracing::warn!(%error, "could not read the running calls after connecting");
+    }
+    self.trace_lap("calls");
     read_state::update_marks(&self.store, |marks| {
       marks.connections += 1;
       // Meeting updates in between may have been lost.

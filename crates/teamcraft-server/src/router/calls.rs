@@ -1,4 +1,4 @@
-//! Calls: state, join tokens, moving and leaving, history, and the SFU's internal reports.
+//! Calls: state (per conversation and the caller's running calls), join tokens, moving and leaving, history, and the SFU's internal reports.
 
 use axum::routing::post;
 use utoipa::OpenApi;
@@ -13,6 +13,7 @@ use crate::state::AppState;
 pub(super) fn routes() -> OpenApiRouter<AppState> {
   OpenApiRouter::with_openapi(Schemas::openapi())
     .routes(routes!(handlers::list_call_history_handler))
+    .routes(routes!(handlers::list_running_calls_handler))
     .routes(routes!(handlers::get_call_handler))
     .routes(routes!(handlers::create_call_join_token_handler))
     .routes(routes!(handlers::leave_call_everywhere_handler))

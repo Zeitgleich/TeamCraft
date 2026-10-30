@@ -44,7 +44,7 @@ use teamcraft_proto::{
 };
 use teamcraft_proto::{
   CallJoinTokenResponse, CallStateResponse, ChangeWebPushSubscriptionRequest, CreateCallJoinTokenRequest,
-  ErrorCode, MoveCallRequest,
+  ErrorCode, ListRunningCallsResponse, MoveCallRequest,
 };
 use teamcraft_proto::{
   CategoryId, CategoryResponse, CreateCategoryRequest, CreateInviteRequest, CreateSpaceRequest,
@@ -668,6 +668,15 @@ impl<T: AccessTokenSource> ServerApi for HttpServerApi<T> {
     match self.get(&format!("/conversations/{conversation}/call")).await {
       Ok(call) => Ok(Some(call)),
       Err(error) if error.error_code() == Some(&ErrorCode::CallNotFound) => Ok(None),
+      Err(error) => Err(error),
+    }
+  }
+
+  async fn running_calls(&self) -> Result<Option<Vec<CallStateResponse>>, ApiError> {
+    match self.get::<ListRunningCallsResponse>("/calls").await {
+      Ok(list) => Ok(Some(list.calls)),
+      // A server from before the endpoint: the call events alone keep the roster.
+      Err(error) if error.is_not_found() => Ok(None),
       Err(error) => Err(error),
     }
   }

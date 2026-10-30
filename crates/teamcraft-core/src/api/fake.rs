@@ -44,7 +44,8 @@ use teamcraft_proto::{
   OrgBackgroundId,
 };
 use teamcraft_proto::{
-  CallId, CallJoinTokenResponse, CallStateResponse, CreateCallJoinTokenRequest, MoveCallRequest,
+  CallId, CallJoinTokenResponse, CallRosterEntry, CallStateResponse, CreateCallJoinTokenRequest,
+  MoveCallRequest,
 };
 use teamcraft_proto::{
   CategoryId, CategoryResponse, CreateCategoryRequest, CreateInviteRequest, CreateSpaceRequest,
@@ -127,6 +128,9 @@ struct State {
   cancelled_meetings: Vec<teamcraft_proto::MeetingId>,
   /// The running call of each conversation (a new one after [`FakeServer::end_call`]).
   calls: HashMap<ConversationId, CallId>,
+  /// Who is in each conversation's call, as the SFU reported it ([`FakeServer::join_call`]); a
+  /// conversation is listed only while somebody is in its call.
+  call_rosters: BTreeMap<ConversationId, CallStateResponse>,
   /// Instant meetings by the idempotency key they were created with.
   instant_meetings: HashMap<IdempotencyKey, MeetingResponse>,
   /// Calls moved into a meeting (`move_call`), in order.
@@ -930,7 +934,79 @@ impl FakeServer {
 
   /// The conversation's call ends: the next join token opens a new call with a new ID.
   pub fn end_call(&self, conversation: ConversationId) {
-    self.lock().calls.remove(&conversation);
+    let mut state = self.lock();
+    state.calls.remove(&conversation);
+    state.call_rosters.remove(&conversation);
+  }
+
+  /// The SFU reports that `device` of `user` joined the conversation's call: the first one starts it.
+  /// Members hear `call_start` or `call_update`, as from the server.
+  pub fn join_call(&self, conversation: ConversationId, user: UserId, device: DeviceId) {
+    let mut state = self.lock();
+    let call_id = match state.calls.get(&conversation) {
+      Some(call_id) => *call_id,
+      None => {
+        let call_id = state.next_id();
+        state.calls.insert(conversation, call_id);
+        call_id
+      },
+    };
+    let entry = CallRosterEntry {
+      user_id: user,
+      device_id: device,
+    };
+    let is_start = !state.call_rosters.contains_key(&conversation);
+    let roster = state
+      .call_rosters
+      .entry(conversation)
+      .or_insert_with(|| CallStateResponse {
+        call_id,
+        conversation_id: conversation,
+        started_by: user,
+        started_at: UnixMillis(0),
+        is_ringing: false,
+        participants: Vec::new(),
+      });
+    if roster.participants.contains(&entry) {
+      return;
+    }
+    roster.participants.push(entry);
+    let roster = roster.clone();
+    let event = if is_start {
+      GatewayEvent::CallStart {
+        conversation_id: conversation,
+        call_id,
+        started_by: roster.started_by,
+        started_at: roster.started_at,
+        is_ringing: roster.is_ringing,
+        participants: roster.participants,
+      }
+    } else {
+      GatewayEvent::CallUpdate {
+        conversation_id: conversation,
+        call_id,
+        is_ringing: roster.is_ringing,
+        participants: roster.participants,
+      }
+    };
+    let members = state.member_ids(conversation);
+    state.publish(members, &event);
+  }
+
+  /// The SFU reports that `device` of `user` left the conversation's call: exactly that device
+  /// leaves the roster, the last one ends the call. Members hear `call_update` or `call_end`.
+  pub fn leave_call(&self, conversation: ConversationId, user: UserId, device: DeviceId) {
+    let mut state = self.lock();
+    if let Some(event) = state.leave_call(conversation, user, device) {
+      let members = state.member_ids(conversation);
+      state.publish(members, &event);
+    }
+  }
+
+  /// Like [`Self::leave_call`], but nobody hears of it: the event the server should have sent got
+  /// lost (a server that restarted while it ended, a report it couldn't place).
+  pub fn leave_call_unannounced(&self, conversation: ConversationId, user: UserId, device: DeviceId) {
+    self.lock().leave_call(conversation, user, device);
   }
 
   /// The calls moved into a meeting so far, in order.
@@ -2659,6 +2735,25 @@ impl ServerApi for FakeServerApi {
         is_ringing: false,
         participants: Vec::new(),
       }))
+    })
+  }
+
+  /// The rosters of the calls in the caller's conversations ([`FakeServer::join_call`]).
+  async fn running_calls(&self) -> Result<Option<Vec<CallStateResponse>>, ApiError> {
+    self.with(|state, me| {
+      Ok(Some(
+        state
+          .call_rosters
+          .values()
+          .filter(|roster| {
+            state
+              .conversations
+              .get(&roster.conversation_id)
+              .is_some_and(|entry| entry.members.contains_key(&me))
+          })
+          .cloned()
+          .collect(),
+      ))
     })
   }
 
@@ -5304,6 +5399,47 @@ impl State {
     }
     let everyone: Vec<UserId> = self.users.keys().copied().collect();
     self.publish(everyone, &GatewayEvent::ProfileUpdate { user_id: user });
+  }
+
+  /// Takes `device` out of the conversation's call roster; the event members should hear, if the
+  /// roster changed.
+  fn leave_call(
+    &mut self,
+    conversation: ConversationId,
+    user: UserId,
+    device: DeviceId,
+  ) -> Option<GatewayEvent> {
+    let entry = CallRosterEntry {
+      user_id: user,
+      device_id: device,
+    };
+    let roster = self.call_rosters.get_mut(&conversation)?;
+    let position = roster.participants.iter().position(|known| *known == entry)?;
+    roster.participants.remove(position);
+    let call_id = roster.call_id;
+    if roster.participants.is_empty() {
+      self.call_rosters.remove(&conversation);
+      self.calls.remove(&conversation);
+      return Some(GatewayEvent::CallEnd {
+        conversation_id: conversation,
+        call_id,
+      });
+    }
+    Some(GatewayEvent::CallUpdate {
+      conversation_id: conversation,
+      call_id,
+      is_ringing: roster.is_ringing,
+      participants: roster.participants.clone(),
+    })
+  }
+
+  /// The members of a conversation (none for an unknown one).
+  fn member_ids(&self, conversation: ConversationId) -> Vec<UserId> {
+    self
+      .conversations
+      .get(&conversation)
+      .map(|entry| entry.members.keys().copied().collect())
+      .unwrap_or_default()
   }
 
   fn publish(&mut self, users: impl IntoIterator<Item = UserId>, event: &GatewayEvent) {

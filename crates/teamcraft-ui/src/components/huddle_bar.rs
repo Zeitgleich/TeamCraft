@@ -48,9 +48,11 @@ pub fn HuddleBarContent(conversation: ConversationId) -> impl IntoView {
       })
       .unwrap_or_default()
   });
+  // Only for another device of the user (issue #976): this device's own entry, still listed for a
+  // moment after it left, is none.
   let is_on_other_device = Memo::new(move |_| {
     let me = state.me().id;
-    !is_in_call.get() && huddle.get().is_some_and(|info| info.participants.contains(&me))
+    !is_in_call.get() && huddle.get().is_some_and(|info| info.is_on_other_device(me))
   });
   let join_alongside = move |_| {
     call.is_camera_on.set(false);

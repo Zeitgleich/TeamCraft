@@ -280,6 +280,9 @@ pub struct Client<A, S> {
   /// The call this device last prepared to join per conversation: a call move is followed only
   /// when announced for that very call (docs/meetings.md, "A call becomes a meeting").
   call_ids: HashMap<ConversationId, teamcraft_proto::CallId>,
+  /// The calls the call event sink last heard of, per conversation: what [`Client::reconcile_calls`]
+  /// compares with the server's list (issue #976).
+  heard_calls: HashMap<ConversationId, calls::HeardCall>,
   maybe_preview_fetcher: Option<Box<dyn crate::link_preview::PreviewFetcher>>,
   maybe_jwks_source: Option<Box<dyn JwksSource>>,
   /// When the key packages were last checked ([`Client::renew_key_packages_if_due`]).
@@ -410,6 +413,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       maybe_call_sink: None,
       link_requests: Default::default(),
       call_ids: HashMap::new(),
+      heard_calls: HashMap::new(),
       maybe_preview_fetcher,
       maybe_jwks_source,
       last_key_package_check_ms: i64::MIN,

@@ -1827,7 +1827,11 @@ impl Core {
         return Ok(());
       },
       ChatAction::SetAttention { is_attentive } => {
+        let is_back = *is_attentive && self.maybe_attention != Some(true);
         self.send_attention(*is_attentive).await;
+        if is_back {
+          self.reconcile_calls().await;
+        }
         return Ok(());
       },
       ChatAction::AcceptKeyChange { user } => {
@@ -2207,6 +2211,20 @@ impl Core {
   fn drop_expired_typing(&self) {
     if self.client.as_ref().is_some_and(Client::drop_expired_typing) {
       self.changed();
+    }
+  }
+
+  /// The user came back to the app: its call bars are checked against the server's running calls
+  /// (issue #976), in case a call event got lost while they were away. Only while connected: a new
+  /// connection checks anyway.
+  async fn reconcile_calls(&mut self) {
+    if !self.connection.is_connected() {
+      return;
+    }
+    if let Some(client) = self.client.as_mut()
+      && let Err(error) = client.reconcile_calls().await
+    {
+      tracing::warn!(%error, "could not read the running calls");
     }
   }
 

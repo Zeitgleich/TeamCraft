@@ -6,7 +6,7 @@
 use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
-use teamcraft_proto::{ConversationId, GatewayEvent, MediaStreamId, UserId};
+use teamcraft_proto::{CallRosterEntry, ConversationId, GatewayEvent, MediaStreamId, UserId};
 
 use crate::calls::{
   ActiveCall, BackgroundEffect, CallEndReason, CallRequest, IncomingCall, RemoteVideoTrack, RunningCall,
@@ -22,6 +22,9 @@ pub struct CallView {
   /// Others' video in the active call.
   pub video_tracks: BTreeMap<MediaStreamId, RemoteVideoTrack>,
   pub maybe_end_reason: Option<CallEndReason>,
+  /// This device's roster entry, once it joined a call: tells the user's other devices in a call
+  /// from this one's entry still listed just after it left (issue #976).
+  pub maybe_this_device: Option<CallRosterEntry>,
 }
 
 /// What a gateway call event says about the user's calls: the part [`CallView`] needs. The web
@@ -34,6 +37,9 @@ pub enum CallSignal {
     conversation: ConversationId,
     participants: Vec<UserId>,
     is_ringing: bool,
+    /// The devices in the call (empty from an older sender).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    devices: Vec<CallRosterEntry>,
   },
   Ended {
     conversation: ConversationId,
@@ -71,6 +77,7 @@ impl CallSignal {
         conversation: *conversation_id,
         participants: participants.iter().map(|entry| entry.user_id).collect(),
         is_ringing: *is_ringing,
+        devices: participants.clone(),
       }),
       GatewayEvent::CallEnd { conversation_id, .. } => Some(Self::Ended {
         conversation: *conversation_id,
@@ -122,6 +129,11 @@ impl CallView {
     self.maybe_end_reason = None;
   }
 
+  /// This device's roster entry, as the join token named it.
+  pub fn set_this_device(&mut self, entry: CallRosterEntry) {
+    self.maybe_this_device = Some(entry);
+  }
+
   /// This device left the call (or it ended).
   pub fn end_active(&mut self) {
     self.maybe_active = None;
@@ -152,6 +164,7 @@ impl CallView {
         conversation,
         participants,
         is_ringing,
+        devices,
       } => {
         if !is_ringing {
           self.incoming.remove(&conversation);
@@ -161,6 +174,7 @@ impl CallView {
           RunningCall {
             conversation,
             participants: people(participants),
+            devices,
             is_ringing,
           },
         );
@@ -238,6 +252,11 @@ mod tests {
       assert_eq!(
         view.running[&conversation(5)].participants,
         vec![user(1), user(2)]
+      );
+      assert_eq!(
+        view.running[&conversation(5)].devices,
+        vec![entry(1, 10), entry(2, 20), entry(2, 21)],
+        "each device"
       );
       view.apply_gateway_event(&GatewayEvent::CallEnd {
         conversation_id: conversation(5),
