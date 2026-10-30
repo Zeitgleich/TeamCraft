@@ -216,6 +216,7 @@ impl PendingEnrollment {
       maybe_call_sink: None,
       link_requests: Default::default(),
       call_ids: HashMap::new(),
+      heard_calls: HashMap::new(),
       maybe_preview_fetcher,
       maybe_jwks_source,
       last_key_package_check_ms: i64::MIN,

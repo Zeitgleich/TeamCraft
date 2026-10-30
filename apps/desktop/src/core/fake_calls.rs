@@ -57,6 +57,7 @@ impl FakeCalls {
     snapshot.running = vec![RunningCall {
       conversation,
       participants: vec![self.carol],
+      devices: Vec::new(),
       is_ringing: true,
     }];
   }
@@ -74,6 +75,7 @@ impl FakeCalls {
         snapshot.running = vec![RunningCall {
           conversation: request.conversation,
           participants: vec![self.carol],
+          devices: Vec::new(),
           is_ringing: false,
         }];
         snapshot.maybe_active = Some(ActiveCall {

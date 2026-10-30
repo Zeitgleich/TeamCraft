@@ -72,6 +72,13 @@ pub struct CallStateResponse {
   pub participants: Vec<CallRosterEntry>,
 }
 
+/// `GET /api/v1/calls`: the calls running in the caller's conversations, so a client can check the
+/// roster its call events built (issue #976): one it missed the end of is gone from this list.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize, ToSchema)]
+pub struct ListRunningCallsResponse {
+  pub calls: Vec<CallStateResponse>,
+}
+
 /// `POST {sfu}/internal/v1/calls/control`: a meeting host's action, which the server has authorized,
 /// forwarded to the SFU running the call. Internal: authenticated with the SFU registration token.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]

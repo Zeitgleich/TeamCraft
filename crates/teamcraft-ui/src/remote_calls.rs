@@ -22,7 +22,7 @@ use leptos::task::spawn_local;
 use serde_json::json;
 use teamcraft_client_api::calls::{
   ActiveCall, CallPreview, CallRequest, CameraFallback, EffectsOffer, HuddleInfo, IncomingCall, JoinMedia,
-  MediaDevices, Participant, PreviewCamera, RemoteVideoTrack,
+  MediaDevices, OwnCallDevices, Participant, PreviewCamera, RemoteVideoTrack,
 };
 use teamcraft_client_api::failure::ActionFailure;
 use teamcraft_client_api::model::{ConversationId, UserId};
@@ -182,8 +182,21 @@ impl RemoteCalls {
 
   /// The drop-in call running in a conversation, if anyone is in it.
   pub fn huddle(&self, conversation: ConversationId) -> Option<HuddleInfo> {
-    let participants = roster_of(&self.snapshot.borrow(), conversation);
-    (!participants.is_empty()).then_some(HuddleInfo { participants })
+    let snapshot = self.snapshot.borrow();
+    let participants = roster_of(&snapshot, conversation);
+    if participants.is_empty() {
+      return None;
+    }
+    let devices = snapshot
+      .running
+      .iter()
+      .find(|running| running.conversation == conversation)
+      .map(|running| running.devices.as_slice())
+      .unwrap_or_default();
+    Some(HuddleInfo {
+      participants,
+      own_devices: OwnCallDevices::of(snapshot.maybe_this_device, devices),
+    })
   }
 
   /// Whether the user is in a call (on any device), per the server roster.
@@ -523,6 +536,7 @@ mod tests {
   use super::*;
   use teamcraft_client_api::calls::{BackgroundEffect, CallKind, RunningCall};
   use teamcraft_client_api::model::id_from_raw;
+  use teamcraft_proto::CallRosterEntry;
 
   /// #439: the browser's call module runs the effects in the call where the page can.
   #[test]
@@ -602,6 +616,7 @@ mod tests {
       running: vec![RunningCall {
         conversation,
         participants: vec![carol],
+        devices: Vec::new(),
         is_ringing: false,
       }],
       devices: MediaDevices::default(),
@@ -610,9 +625,40 @@ mod tests {
       maybe_end_reason: None,
       preview_camera: PreviewCamera::Off,
       maybe_camera_fallback: None,
+      maybe_this_device: None,
     };
     assert_eq!(roster_of(&snapshot, conversation), vec![carol, dave]);
     assert!(roster_of(&snapshot, id_from_raw(8)).is_empty());
+  }
+
+  /// Issue #976: this device's own entry, still listed just after it left, is no other device; the
+  /// account's second device is.
+  #[test]
+  fn the_huddle_tells_this_device_from_the_users_other_devices() {
+    let conversation: ConversationId = id_from_raw(7);
+    let (me, carol): (UserId, UserId) = (id_from_raw(1), id_from_raw(2));
+    let entry = |user, device| CallRosterEntry {
+      user_id: user,
+      device_id: id_from_raw(device),
+    };
+    let snapshot = |devices: Vec<CallRosterEntry>| CallSnapshot {
+      running: vec![RunningCall {
+        conversation,
+        participants: vec![me, carol],
+        devices,
+        is_ringing: false,
+      }],
+      maybe_this_device: Some(entry(me, 10)),
+      ..CallSnapshot::default()
+    };
+    let calls = RemoteCalls::new(snapshot(vec![entry(me, 10), entry(carol, 20)]), CallLink::Shell);
+    let huddle = calls.huddle(conversation).unwrap();
+    assert_eq!(huddle.participants, vec![me, carol]);
+    assert!(!huddle.is_on_other_device(me), "only this device is listed");
+
+    calls.replace_snapshot(snapshot(vec![entry(me, 11), entry(carol, 20)]));
+    assert!(calls.huddle(conversation).unwrap().is_on_other_device(me));
+    assert!(calls.huddle(id_from_raw(8)).is_none());
   }
 
   /// Issue #399: an action that changed nothing must not re-render the UI.
@@ -624,6 +670,7 @@ mod tests {
       running: vec![RunningCall {
         conversation: id_from_raw(7),
         participants: vec![id_from_raw(2)],
+        devices: Vec::new(),
         is_ringing: true,
       }],
       ..CallSnapshot::default()

@@ -165,7 +165,9 @@ impl CallRoster {
       // Remote tracks changed (see update_video_tracks); the snapshot lists them.
       CallEngineEvent::VideoPublished(_) | CallEngineEvent::VideoUnpublished(_) => {},
       CallEngineEvent::Error(error) => {
-        tracing::warn!(error_code = ?error.error_code, "the SFU rejected a call request");
+        // The SFU's message names the request's subject ("unknown video track …"): the error
+        // carries no request id (issue #976).
+        tracing::warn!(error_code = ?error.error_code, message = %error.message, "the SFU rejected a call request");
         return false;
       },
       CallEngineEvent::UntrustedRoster | CallEngineEvent::UnauthenticatedKeys => {

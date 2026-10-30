@@ -22,8 +22,8 @@ use subtle::ConstantTimeEq;
 use teamcraft_proto::{
   CALL_JOIN_TOKEN_AUDIENCE, CallId, CallJoinClaims, CallJoinTokenResponse, CallRosterEntry,
   CallStateResponse, ChannelRole, ConversationId, ConversationKind, CreateCallJoinTokenRequest,
-  DependencyName, DeviceId, GatewayEvent, MoveCallRequest, SfuControlAction, SfuControlRequest,
-  SfuParticipantReport, SfuRosterReport, UnixMillis, UserId,
+  DependencyName, DeviceId, GatewayEvent, ListRunningCallsResponse, MoveCallRequest, SfuControlAction,
+  SfuControlRequest, SfuParticipantReport, SfuRosterReport, UnixMillis, UserId,
 };
 use thiserror::Error;
 use time::OffsetDateTime;
@@ -919,6 +919,20 @@ impl CallService {
     Some(call.snapshot(conversation_id, started.by, started.at))
   }
 
+  /// Every running call (one with at least one participant), by conversation.
+  fn running_snapshots(&self) -> Vec<CallSnapshot> {
+    let active = self.lock();
+    let mut snapshots: Vec<CallSnapshot> = active
+      .iter()
+      .filter_map(|(conversation_id, call)| {
+        let started = call.maybe_started?;
+        Some(call.snapshot(*conversation_id, started.by, started.at))
+      })
+      .collect();
+    snapshots.sort_by_key(|snapshot| snapshot.conversation_id);
+    snapshots
+  }
+
   fn lock(&self) -> std::sync::MutexGuard<'_, HashMap<ConversationId, ActiveCall>> {
     // No invariant spans a panic point, so a poisoned map is still consistent.
     self.active.lock().unwrap_or_else(PoisonError::into_inner)
@@ -1070,6 +1084,36 @@ pub async fn get_call(
     .snapshot(conversation_id)
     .map(state_response)
     .ok_or_else(ApiError::call_not_found)
+}
+
+/// The calls running in the caller's conversations (issue #976): a client compares its roster with
+/// this after every gateway connection and when the user comes back to it, so a call whose end it
+/// missed doesn't stay on screen. Without any call running (or without calls configured) nothing
+/// is read from the database.
+pub async fn list_running_calls(
+  state: &AppState,
+  caller: &AuthenticatedUser,
+) -> Result<ListRunningCallsResponse, ApiError> {
+  let Some(calls) = state.maybe_calls.as_ref() else {
+    return Ok(ListRunningCallsResponse::default());
+  };
+  let running = calls.running_snapshots();
+  if running.is_empty() {
+    return Ok(ListRunningCallsResponse::default());
+  }
+  let member_of: HashSet<ConversationId> = state
+    .database
+    .conversation_ids_of_user(caller.user.id)
+    .await?
+    .into_iter()
+    .collect();
+  Ok(ListRunningCallsResponse {
+    calls: running
+      .into_iter()
+      .filter(|snapshot| member_of.contains(&snapshot.conversation_id))
+      .map(state_response)
+      .collect(),
+  })
 }
 
 /// Checks the SFU's bearer token for the internal endpoints.
@@ -1828,6 +1872,89 @@ MCowBQYDK2VwAyEA8YVjY2Zv9XPhv003tFAgzW7J6gfDn+ICj5xCB2LXMVg=
       let a = service.call_for(id(1), now, || Ok(id(100))).unwrap();
       let b = service.call_for(id(2), now, || Ok(id(200))).unwrap();
       assert_ne!(a, b);
+    }
+  }
+
+  /// Issue #976: the roster is keyed by device, a leave removes exactly that device, and the last
+  /// one leaving ends the call, whoever leaves first.
+  mod leaves {
+    use super::*;
+
+    #[test]
+    fn a_leave_removes_only_the_device_that_left() {
+      let service = service();
+      running_call(
+        &service,
+        id(1),
+        id(100),
+        &[entry(4, 40), entry(4, 41), entry(5, 50)],
+      );
+
+      let change = service.participant_left(id(1), entry(4, 40));
+
+      assert!(matches!(
+        &change,
+        LeaveChange::Updated(snapshot) if snapshot.participants == vec![entry(4, 41), entry(5, 50)]
+      ));
+      assert!(!service.is_device_in_call(id(1), id(40)));
+      assert!(
+        service.is_device_in_call(id(1), id(41)),
+        "the user's other device stays"
+      );
+    }
+
+    #[test]
+    fn the_last_leave_ends_the_call_in_either_order() {
+      for (first, second) in [(entry(4, 40), entry(5, 50)), (entry(5, 50), entry(4, 40))] {
+        let service = service();
+        running_call(&service, id(1), id(100), &[entry(4, 40), entry(5, 50)]);
+
+        assert!(matches!(
+          service.participant_left(id(1), first),
+          LeaveChange::Updated(snapshot) if snapshot.participants == vec![second]
+        ));
+        assert_eq!(
+          service.participant_left(id(1), second),
+          LeaveChange::Ended {
+            conversation_id: id(1),
+            call_id: id(100),
+          }
+        );
+        assert!(service.running_snapshots().is_empty(), "{first:?} first");
+        assert_eq!(
+          service.participant_left(id(1), second),
+          LeaveChange::Unchanged,
+          "a repeated report"
+        );
+      }
+    }
+
+    #[test]
+    fn a_leave_of_a_device_not_in_the_call_changes_nothing() {
+      let service = service();
+      running_call(&service, id(1), id(100), &[entry(4, 40)]);
+
+      assert_eq!(
+        service.participant_left(id(1), entry(4, 41)),
+        LeaveChange::Unchanged
+      );
+      assert_eq!(service.running_snapshots().len(), 1);
+    }
+
+    #[test]
+    fn only_calls_with_somebody_in_them_are_listed() {
+      let service = service();
+      running_call(&service, id(2), id(200), &[entry(4, 40)]);
+      running_call(&service, id(1), id(100), &[entry(5, 50)]);
+      // A join token alone opens no running call.
+      service.call_for(id(3), Instant::now(), || Ok(id(300))).unwrap();
+
+      let listed: Vec<(ConversationId, CallId)> = service
+        .running_snapshots()
+        .into_iter()
+        .map(|snapshot| (snapshot.conversation_id, snapshot.call_id))
+        .collect();
+      assert_eq!(listed, vec![(id(1), id(100)), (id(2), id(200))]);
     }
   }
 

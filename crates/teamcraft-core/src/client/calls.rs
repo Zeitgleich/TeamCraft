@@ -2,14 +2,16 @@
 //! per-call DAVE key, and the verified certificates of the devices that may be in the call. Media
 //! runs outside the core (`teamcraft-media`); the device's private key stays inside it.
 
+use std::collections::BTreeMap;
 use std::fmt;
 
 use serde::{Deserialize, Serialize};
 use teamcraft_crypto::call_binding::{CallBindingError, CallId as CryptoCallId, SignedCallKeyBinding};
 use teamcraft_crypto::identity::{DeviceKeyPair, VerifiedDevice};
 use teamcraft_proto::{
-  CallId, CallJoinTokenResponse, ConversationId, ConversationKind, CreateCallJoinTokenRequest,
-  CreateInstantMeetingRequest, DeviceId, GatewayEvent, IdempotencyKey, MoveCallRequest, UserId,
+  CallId, CallJoinTokenResponse, CallRosterEntry, CallStateResponse, ConversationId, ConversationKind,
+  CreateCallJoinTokenRequest, CreateInstantMeetingRequest, DeviceId, GatewayEvent, IdempotencyKey,
+  MoveCallRequest, UserId,
 };
 
 use super::Client;
@@ -43,6 +45,14 @@ pub struct CallMoveRecord {
   /// This device asked for the move: it follows without the user's tap.
   #[serde(default)]
   pub is_requested_here: bool,
+}
+
+/// A call as the call event sink last heard of it (`call_start` / `call_update`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) struct HeardCall {
+  call_id: CallId,
+  is_ringing: bool,
+  participants: Vec<CallRosterEntry>,
 }
 
 /// Everything joining a conversation's call needs from the core (e2ee.md §8).
@@ -327,9 +337,101 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     Ok(self.group_or_error(conversation)?.verified_members(&directory)?)
   }
 
+  /// Compares the calls the call event sink heard of with the server's list of running calls and
+  /// tells the sink what it missed (issue #976): a call that ended without its `call_end` reaching
+  /// this device ends, and a call whose start or roster change it missed comes as `call_update`.
+  /// Events can be lost for good: a session the server forgot (a restart, the resume window passed)
+  /// starts afresh without the events in between, and a call the server lost in a restart ends
+  /// without any. Runs after every gateway connection and when the user comes back to the app. A
+  /// client without a sink, or a server without the list, changes nothing.
+  pub async fn reconcile_calls(&mut self) -> Result<(), CoreError> {
+    if self.maybe_call_sink.is_none() {
+      return Ok(());
+    }
+    let Some(running) = self.api.running_calls().await? else {
+      return Ok(());
+    };
+    let listed: BTreeMap<ConversationId, CallStateResponse> = running
+      .into_iter()
+      .map(|call| (call.conversation_id, call))
+      .collect();
+    let mut ended: Vec<(ConversationId, CallId)> = self
+      .heard_calls
+      .iter()
+      .filter(|(conversation, heard)| {
+        listed
+          .get(conversation)
+          .is_none_or(|call| call.call_id != heard.call_id)
+      })
+      .map(|(conversation, heard)| (*conversation, heard.call_id))
+      .collect();
+    ended.sort_unstable();
+    for (conversation, call_id) in ended {
+      tracing::info!(conversation_id = %conversation, %call_id, "a call ended without this device hearing of it");
+      self.forget_call(conversation, call_id)?;
+      self.emit_call_event(&GatewayEvent::CallEnd {
+        conversation_id: conversation,
+        call_id,
+      });
+    }
+    for (conversation, call) in listed {
+      if self.heard_calls.get(&conversation) == Some(&HeardCall::of(&call)) {
+        continue;
+      }
+      tracing::debug!(conversation_id = %conversation, call_id = %call.call_id, "a call roster this device missed");
+      self.emit_call_event(&GatewayEvent::CallUpdate {
+        conversation_id: conversation,
+        call_id: call.call_id,
+        is_ringing: call.is_ringing,
+        participants: call.participants,
+      });
+    }
+    Ok(())
+  }
+
+  /// Hands a call event to the sink and notes what the sink now knows of the call.
   pub(super) fn emit_call_event(&mut self, event: &GatewayEvent) {
+    match event {
+      GatewayEvent::CallStart {
+        conversation_id,
+        call_id,
+        is_ringing,
+        participants,
+        ..
+      }
+      | GatewayEvent::CallUpdate {
+        conversation_id,
+        call_id,
+        is_ringing,
+        participants,
+      } => {
+        self.heard_calls.insert(
+          *conversation_id,
+          HeardCall {
+            call_id: *call_id,
+            is_ringing: *is_ringing,
+            participants: participants.clone(),
+          },
+        );
+      },
+      // The sink drops the conversation's call, whichever call the event names.
+      GatewayEvent::CallEnd { conversation_id, .. } => {
+        self.heard_calls.remove(conversation_id);
+      },
+      _ => {},
+    }
     if let Some(sink) = &mut self.maybe_call_sink {
       sink(event);
+    }
+  }
+}
+
+impl HeardCall {
+  fn of(call: &CallStateResponse) -> Self {
+    Self {
+      call_id: call.call_id,
+      is_ringing: call.is_ringing,
+      participants: call.participants.clone(),
     }
   }
 }

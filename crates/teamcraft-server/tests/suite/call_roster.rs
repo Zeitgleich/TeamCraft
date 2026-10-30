@@ -147,6 +147,61 @@ mod channels {
     assert_eq!(reply.status, StatusCode::NOT_FOUND, "{}", reply.body);
     app.stop().await;
   }
+
+  /// Issue #976: the list a client checks its roster against names the members' running calls
+  /// only, and a call both left is gone from it, whoever left first.
+  #[tokio::test]
+  async fn the_running_calls_list_follows_the_roster_for_members_only() {
+    let app = app!(30);
+    let (alice, bob) = (owner(), member("bob"));
+    let channel = channel_with(&app, &[&bob]).await;
+    let (alice_device, bob_device) = (
+      register_device(&app, &alice).await,
+      register_device(&app, &bob).await,
+    );
+    let (alice_id, bob_id) = (user_id(&app, &alice).await, user_id(&app, &bob).await);
+    for (first, second) in [
+      ((&alice_id, &alice_device), (&bob_id, &bob_device)),
+      ((&bob_id, &bob_device), (&alice_id, &alice_device)),
+    ] {
+      let call_id = join_token(&app, &alice, &channel, &alice_device).await;
+      report(
+        &app,
+        "joined",
+        Some(SFU_TOKEN),
+        &call_id,
+        &alice_id,
+        &alice_device,
+      )
+      .await;
+      report(&app, "joined", Some(SFU_TOKEN), &call_id, &bob_id, &bob_device).await;
+
+      let listed = running_calls(&app, &bob).await;
+      assert_eq!(listed.len(), 1, "{listed:?}");
+      assert_eq!(listed[0]["conversation_id"], channel.as_str());
+      assert_eq!(listed[0]["call_id"], call_id.as_str());
+      assert_eq!(listed[0]["participants"].as_array().unwrap().len(), 2);
+      assert!(
+        running_calls(&app, &member("eve")).await.is_empty(),
+        "not a member"
+      );
+
+      report(&app, "left", Some(SFU_TOKEN), &call_id, first.0, first.1).await;
+      let listed = running_calls(&app, &alice).await;
+      assert_eq!(listed[0]["participants"].as_array().unwrap().len(), 1);
+      assert_eq!(listed[0]["participants"][0]["device_id"], second.1.as_str());
+      report(&app, "left", Some(SFU_TOKEN), &call_id, second.0, second.1).await;
+      assert!(running_calls(&app, &alice).await.is_empty());
+      assert!(running_calls(&app, &bob).await.is_empty());
+    }
+    app.stop().await;
+  }
+
+  async fn running_calls(app: &TestApp, user: &TestUser) -> Vec<Value> {
+    let reply = app.get(user, "/calls").await;
+    assert_eq!(reply.status, StatusCode::OK, "{}", reply.body);
+    reply.body["calls"].as_array().unwrap().clone()
+  }
 }
 
 mod direct_messages {

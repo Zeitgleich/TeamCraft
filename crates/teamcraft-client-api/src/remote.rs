@@ -4,7 +4,9 @@
 
 use serde::{Deserialize, Serialize};
 
-use teamcraft_proto::{BackgroundId, Base64Bytes, CategoryId, HistoryPolicy, OrgBackgroundId, SignInReason};
+use teamcraft_proto::{
+  BackgroundId, Base64Bytes, CallRosterEntry, CategoryId, HistoryPolicy, OrgBackgroundId, SignInReason,
+};
 
 use crate::actions::{
   BrowsableChannel, CategoryInfo, ChannelChanges, FileInfo, LinkedMessage, MediaAnchor, MediaPage,
@@ -64,6 +66,10 @@ pub struct CallSnapshot {
   /// The camera that stood in when the chosen one didn't open, at the last camera start (#819).
   #[serde(default)]
   pub maybe_camera_fallback: Option<CameraFallback>,
+  /// This device's roster entry, once it joined a call (issue #976): which of a running call's
+  /// devices are the user's others.
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub maybe_this_device: Option<CallRosterEntry>,
 }
 
 /// Something the user did in or about a call.
