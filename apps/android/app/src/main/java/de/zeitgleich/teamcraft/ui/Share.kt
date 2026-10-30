@@ -11,8 +11,11 @@ const val MAX_SHARED_FILES = 10
 /** Longest shared text taken into the composer; the rest is dropped. */
 const val MAX_SHARED_TEXT_CHARS = 64 * 1024
 
-/** Text and files another app shared into TeamCraft, waiting for the user to pick a conversation. */
-data class SharedContent(val text: String, val uris: List<Uri>) {
+/**
+ * Text and files another app shared into TeamCraft, waiting for the user to pick a conversation.
+ * [maybeTarget] is the conversation the share sheet's direct share shortcut picked ([ShareShortcuts]).
+ */
+data class SharedContent(val text: String, val uris: List<Uri>, val maybeTarget: String? = null) {
   val isEmpty: Boolean get() = text.isBlank() && uris.isEmpty()
 }
 
@@ -39,6 +42,7 @@ fun sharedContent(intent: Intent, packageName: String): SharedContent? {
   val content = SharedContent(
     text = text.take(MAX_SHARED_TEXT_CHARS).trim(),
     uris = uris.filter { isForeignContent(it.scheme, it.authority, packageName) }.take(MAX_SHARED_FILES),
+    maybeTarget = ShareShortcuts.targetOf(intent),
   )
   return content.takeUnless { it.isEmpty }
 }

@@ -123,6 +123,7 @@ import de.zeitgleich.teamcraft.ui.HomeFilter
 import de.zeitgleich.teamcraft.ui.channelSections
 import de.zeitgleich.teamcraft.ui.directSections
 import de.zeitgleich.teamcraft.ui.isDirect
+import de.zeitgleich.teamcraft.ui.listName
 import de.zeitgleich.teamcraft.ui.badgeTone
 import de.zeitgleich.teamcraft.ui.tabBadge
 import de.zeitgleich.teamcraft.ui.toggled
@@ -576,7 +577,7 @@ private fun ColumnScope.RemainingEmptyState(icon: ImageVector, title: String, te
 }
 
 @Composable
-private fun EmptyState(icon: ImageVector, title: String, text: String, maybeAction: Pair<String, () -> Unit>?) {
+internal fun EmptyState(icon: ImageVector, title: String, text: String, maybeAction: Pair<String, () -> Unit>?) {
   Box(Modifier.fillMaxSize().padding(horizontal = Spacing.xxl), contentAlignment = Alignment.Center) {
     EmptyStateContent(icon, title, text, maybeAction)
   }
@@ -651,7 +652,7 @@ private fun DirectFilter(value: String, onChange: (String) -> Unit) {
 }
 
 @Composable
-private fun EmptyHint(text: String) {
+internal fun EmptyHint(text: String) {
   Text(
     text,
     style = MaterialTheme.typography.bodyMedium,
@@ -662,12 +663,14 @@ private fun EmptyHint(text: String) {
 }
 
 @Composable
-private fun SectionHeader(title: SectionTitle) {
+internal fun SectionHeader(title: SectionTitle) {
   val text = when (title) {
     SectionTitle.Favorites -> stringResource(R.string.favorites)
     SectionTitle.Channels -> stringResource(R.string.channels)
     SectionTitle.DirectMessages -> stringResource(R.string.direct_messages)
     SectionTitle.Activity -> stringResource(R.string.nav_activity)
+    SectionTitle.Notes -> stringResource(R.string.notes_title)
+    SectionTitle.Recent -> stringResource(R.string.share_recent)
     is SectionTitle.Space -> title.name
   }
   Text(
@@ -833,7 +836,7 @@ private fun TitleLine(conversation: ConversationItem, maybeEntry: ChatListEntry?
   val isUnread = conversation.unreadCount > 0u
   Row(verticalAlignment = Alignment.CenterVertically) {
     Text(
-      conversation.name,
+      conversation.listName(stringResource(R.string.notes_title)),
       modifier = Modifier.weight(1f),
       maxLines = 1,
       overflow = TextOverflow.Ellipsis,
@@ -915,9 +918,16 @@ private fun listTime(context: Context, sentAt: Long): String {
   return DateUtils.formatDateTime(context, sentAt, flags)
 }
 
-/** A round marker: the DM peer's picture, or the conversation's initial (people) or its kind (channels). */
+/**
+ * A round marker: the DM peer's picture, or the conversation's initial (people) or its kind
+ * (channels); the notes show a bookmark.
+ */
 @Composable
-private fun ConversationAvatar(conversation: ConversationItem) {
+internal fun ConversationAvatar(conversation: ConversationItem) {
+  if (conversation.isNotesToSelf) {
+    NotesAvatar()
+    return
+  }
   val isPerson = conversation.kind == ConversationKind.DIRECT || conversation.kind == ConversationKind.GROUP
   val label = if (isPerson || conversation.kind == ConversationKind.INTEGRATION) conversation.name.firstOrNull()?.uppercase() ?: "?" else prefix(conversation.kind)
   Box {
@@ -950,6 +960,21 @@ private fun ConversationAvatar(conversation: ConversationItem) {
           .semantics { contentDescription = description },
       )
     }
+  }
+}
+
+@Composable
+private fun NotesAvatar() {
+  Box(
+    Modifier.size(AVATAR_SIZE).background(MaterialTheme.colorScheme.primaryContainer, CircleShape),
+    contentAlignment = Alignment.Center,
+  ) {
+    Icon(
+      painterResource(R.drawable.ic_bookmark),
+      contentDescription = null,
+      tint = MaterialTheme.colorScheme.onPrimaryContainer,
+      modifier = Modifier.size(22.dp),
+    )
   }
 }
 
