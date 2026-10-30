@@ -35,9 +35,10 @@ class PushStats(context: Context) {
   fun recordIgnored(reason: IgnoreReason) {
     val editor = prefs.edit()
     when (reason) {
-      IgnoreReason.SUPPRESSED -> editor
-        .putInt(KEY_SUPPRESSED, suppressedCount + 1)
-        .putLong(KEY_LAST_SUPPRESSED_AT, System.currentTimeMillis())
+      IgnoreReason.SUPPRESSED ->
+        editor
+          .putInt(KEY_SUPPRESSED, suppressedCount + 1)
+          .putLong(KEY_LAST_SUPPRESSED_AT, System.currentTimeMillis())
       IgnoreReason.UNKNOWN_KIND -> editor.putInt(KEY_UNKNOWN, unknownCount + 1)
     }
     editor.apply()

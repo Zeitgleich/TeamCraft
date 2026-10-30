@@ -88,6 +88,28 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     self.register_push_with(provider, token, push_key).await
   }
 
+  /// The platform handed the app its device token again (every app start, a UnifiedPush
+  /// distributor that reconnected or moved the endpoint): registers it, under the push key the
+  /// device already holds when it registered with `provider` before. A fresh key on every delivery
+  /// made wake-ups sealed in the meantime unreadable, and a request the server applied but whose
+  /// answer was lost left server and device with different keys, so every later wake-up opened to
+  /// nothing (issue #826). Always sends, also for an unchanged token: the server may have
+  /// forgotten the registration after a push service called it gone.
+  pub async fn register_push_keeping_key(
+    &mut self,
+    provider: PushProvider,
+    token: &str,
+  ) -> Result<(), CoreError> {
+    let is_same_provider = self.registered_push_provider()?.as_ref() == Some(&provider);
+    let maybe_key = if is_same_provider {
+      self.stored_push_key()?
+    } else {
+      None
+    };
+    let push_key = maybe_key.unwrap_or_else(|| SymmetricKey::generate(&mut OsRng));
+    self.register_push_with(provider, token, push_key).await
+  }
+
   /// The platform handed out a new device token (a browser rotated its Web Push subscription,
   /// e2ee.md §7): registers it under the push key the server already has, so wake-ups in flight stay
   /// readable. Does nothing when no push of `provider` is registered or the token is the registered
