@@ -7,7 +7,7 @@ use leptos::prelude::*;
 
 use crate::components::icons::{Icon, IconName};
 use crate::i18n::use_i18n;
-use crate::reactive::{use_interval_while, use_page_visible};
+use crate::reactive::{provide_scoped_context, use_interval_while, use_page_visible};
 use crate::state::{AppState, use_app_state};
 use crate::video_stats::{DrawnRate, StatsTarget, StatsWindow, TileMeasure, stats_rows, stats_text};
 
@@ -33,7 +33,8 @@ impl VideoStatsHub {
       move || is_on.get() && is_page_visible.get(),
       move || hub.poll(state),
     );
-    provide_context(hub);
+    // Not past the call screen: what the screens' place shows next has no stats (#1016).
+    provide_scoped_context(hub);
     hub
   }
 

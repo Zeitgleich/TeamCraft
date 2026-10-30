@@ -22,6 +22,7 @@ use crate::components::thread_panel::{ThreadPanel, conversation_label};
 use crate::components::typing_indicator::TypingIndicator;
 use crate::i18n::use_i18n;
 use crate::model::{ConversationId, Message, MessageId, MessageKind, TimestampMs, UserId};
+use crate::reactive::provide_scoped_context;
 use crate::state::{AppState, SidePanel, use_app_state};
 
 /// How long a message's toast stays.
@@ -200,7 +201,7 @@ impl CallChat {
 /// The panel: the conversation's feed and composer, or a thread of it that was opened from there.
 #[component]
 pub fn CallChatPanel(chat: CallChat) -> impl IntoView {
-  provide_context(BesideCall);
+  provide_scoped_context(BesideCall);
   let state = use_app_state();
   let i18n = use_i18n();
   let conversation = chat.conversation;
