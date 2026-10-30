@@ -57,6 +57,7 @@ search-invalid = nicht lesbar
 search-invalid-hint = Einige Filter sind nicht lesbar und werden ignoriert. Datumsangaben sehen so aus: 2026-10-31.
 search-syntax = Alle Wörter müssen passen. Nutze "Anführungszeichen" für eine Wortgruppe, from:name, in:kanal, space:bereich, has:file, has:link, before:2026-10-31, after:2026-10-01 und in-thread.
 search-start = Gib Wörter ein oder füge einen Filter hinzu, um zu suchen.
+search-pending = Suche läuft…
 search-empty = Nichts gefunden. Probiere weniger Wörter oder entferne einen Filter.
 search-count = { $count ->
     [one] { $count } Ergebnis

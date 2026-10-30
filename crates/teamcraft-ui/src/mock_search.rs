@@ -97,7 +97,11 @@ impl MockBackend {
         })
       })
       .collect();
-    SearchResults { hits, total }
+    SearchResults {
+      hits,
+      total,
+      is_pending: false,
+    }
   }
 }
 

@@ -77,6 +77,7 @@ pub fn SearchView() -> impl IntoView {
   let status = move || match pane.get() {
     Pane::Mentions => i18n.t_count("search-count", mentions.get().len()),
     Pane::Results if parsed.get().is_empty() => i18n.t("search-start"),
+    Pane::Results if results.get().is_pending => i18n.t("search-pending"),
     Pane::Results => {
       let total = results.get().total;
       if total == 0 {

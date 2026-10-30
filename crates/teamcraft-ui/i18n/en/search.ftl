@@ -57,6 +57,7 @@ search-invalid = can't be read
 search-invalid-hint = Some filters can't be read and are ignored. Dates look like 2026-10-31.
 search-syntax = Words must all match. Use "quotes" for a phrase, from:name, in:channel, space:name, has:file, has:link, before:2026-10-31, after:2026-10-01 and in-thread.
 search-start = Type words or add a filter to search.
+search-pending = Searching…
 search-empty = Nothing found. Try fewer words or remove a filter.
 search-count = { $count ->
     [one] { $count } result
