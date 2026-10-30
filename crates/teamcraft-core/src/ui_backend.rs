@@ -796,6 +796,16 @@ impl<S: LocalStore> CoreChatBackend<S> {
     self.unread_among(response, maybe_mark, self.top_level(response.id))
   }
 
+  /// [`Self::top_level`] one by one, by reference.
+  pub(crate) fn visit_top_level(&self, conversation: ConversationId, visit: &mut dyn FnMut(&StoredMessage)) {
+    self.read(
+      self
+        .store
+        .visit_messages(conversation, MessageFilter::TopLevel, visit)
+        .map_err(CoreError::from),
+    );
+  }
+
   /// A conversation's top-level messages, deleted ones included.
   pub(crate) fn top_level(&self, conversation: ConversationId) -> Vec<StoredMessage> {
     self.read(
@@ -813,6 +823,21 @@ impl<S: LocalStore> CoreChatBackend<S> {
     maybe_mark: Option<MessageId>,
     messages: Vec<StoredMessage>,
   ) -> Vec<StoredMessage> {
+    let is_unread = self.unread_check(response, maybe_mark);
+    messages
+      .into_iter()
+      .filter(|message| is_unread(message))
+      .collect()
+  }
+
+  /// Whether a top-level message of `response`'s conversation is unread, given the user's "mark
+  /// unread" ([`Self::unread_among`] one message at a time).
+  pub(crate) fn unread_check(
+    &self,
+    response: &ConversationResponse,
+    maybe_mark: Option<MessageId>,
+  ) -> impl Fn(&StoredMessage) -> bool + use<S> {
+    let me = self.me;
     let maybe_last_read = response
       .maybe_my_membership
       .as_ref()
@@ -821,27 +846,18 @@ impl<S: LocalStore> CoreChatBackend<S> {
     // #818) counts like a message at its place: the server's read position covers it once a later
     // message was read; one newer than all of them is read once this device marked the
     // conversation read after it arrived.
-    let maybe_lines_read = if messages.iter().any(StoredMessage::is_local_line) {
-      self.read(lines_read_through(&self.store, response.id))
-    } else {
-      None
-    };
-    messages
-      .into_iter()
-      .filter(|message| {
-        let is_read_line = message
-          .line_position()
-          .is_some_and(|at| maybe_lines_read.is_some_and(|read| at <= read));
-        match (unread_position(message), maybe_mark, maybe_last_read) {
-          (Some(id), Some(mark), _) => id >= mark,
-          (Some(id), None, Some(last_read)) => {
-            message.sender_user_id != self.me && id > last_read && !is_read_line
-          },
-          (Some(_), None, None) => message.sender_user_id != self.me && !is_read_line,
-          (None, _, _) => false,
-        }
-      })
-      .collect()
+    let maybe_lines_read = self.read(lines_read_through(&self.store, response.id));
+    move |message: &StoredMessage| {
+      let is_read_line = message
+        .line_position()
+        .is_some_and(|at| maybe_lines_read.is_some_and(|read| at <= read));
+      match (unread_position(message), maybe_mark, maybe_last_read) {
+        (Some(id), Some(mark), _) => id >= mark,
+        (Some(id), None, Some(last_read)) => message.sender_user_id != me && id > last_read && !is_read_line,
+        (Some(_), None, None) => message.sender_user_id != me && !is_read_line,
+        (None, _, _) => false,
+      }
+    }
   }
 
   pub(crate) fn to_message(&self, stored: &StoredMessage, all: &[StoredMessage]) -> Message {

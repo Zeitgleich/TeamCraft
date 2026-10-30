@@ -616,6 +616,20 @@ pub trait LocalStore {
         .find(|message| message.maybe_server_id == Some(server_id)),
     )
   }
+  /// Hands each message of [`Self::messages`] to `visit` by reference, for a reader that sums them
+  /// up (counts, the newest, the unread ones) and keeps few: a store that holds them in memory
+  /// copies none. The default reads them as [`Self::messages`] does.
+  fn visit_messages(
+    &self,
+    conversation: ConversationId,
+    filter: MessageFilter,
+    visit: &mut dyn FnMut(&StoredMessage),
+  ) -> Result<(), StoreError> {
+    for message in self.messages(conversation, filter)? {
+      visit(&message);
+    }
+    Ok(())
+  }
   /// The messages at one place of the display order: the server message and the lines this device
   /// derived at `position` (lines sit at the ID of what they tell of), or every pending message.
   /// A row of the UI is looked up by its ID with it. The default scans; stores with an index on the
@@ -816,6 +830,15 @@ macro_rules! forward_local_store {
         slot: MessageSlot,
       ) -> Result<Vec<StoredMessage>, StoreError> {
         (**self).messages_at(conversation, slot)
+      }
+
+      fn visit_messages(
+        &self,
+        conversation: ConversationId,
+        filter: MessageFilter,
+        visit: &mut dyn FnMut(&StoredMessage),
+      ) -> Result<(), StoreError> {
+        (**self).visit_messages(conversation, filter, visit)
       }
 
       fn edge_server_id(

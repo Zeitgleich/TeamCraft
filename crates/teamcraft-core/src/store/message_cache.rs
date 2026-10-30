@@ -61,6 +61,23 @@ impl MessageCache {
     Some(matching)
   }
 
+  /// Hands the conversation's messages matching `filter` to `visit`; `false` if it isn't held.
+  pub(crate) fn visit(
+    &mut self,
+    conversation: ConversationId,
+    filter: MessageFilter,
+    visit: &mut dyn FnMut(&StoredMessage),
+  ) -> bool {
+    let Some(messages) = self.conversations.get(&conversation) else {
+      return false;
+    };
+    for message in messages.iter().filter(|message| message.matches(filter)) {
+      visit(message);
+    }
+    self.touch(conversation);
+    true
+  }
+
   /// Keeps `messages` (all of the conversation, in display order) if nothing was written to the
   /// conversation since `revision`, when it was read, and they fit.
   pub(crate) fn fill(&mut self, conversation: ConversationId, revision: u64, messages: Vec<StoredMessage>) {

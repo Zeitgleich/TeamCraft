@@ -331,6 +331,23 @@ impl<S: LocalStore> LocalStore for TrackedStore<S> {
     Some(self.cache().revision(conversation))
   }
 
+  /// Without copies when the cache holds the conversation; otherwise read (and kept) as by
+  /// [`Self::messages`].
+  fn visit_messages(
+    &self,
+    conversation: ConversationId,
+    filter: MessageFilter,
+    visit: &mut dyn FnMut(&StoredMessage),
+  ) -> Result<(), StoreError> {
+    if self.cache().visit(conversation, filter, visit) {
+      return Ok(());
+    }
+    for message in self.messages(conversation, filter)? {
+      visit(&message);
+    }
+    Ok(())
+  }
+
   fn media_messages(
     &self,
     conversation: ConversationId,

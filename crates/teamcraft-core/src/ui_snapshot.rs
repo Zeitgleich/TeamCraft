@@ -464,12 +464,21 @@ fn part_of<S: LocalStore>(
   response: &ConversationResponse,
   shared: &Shared,
 ) -> ConversationChange {
-  let top_level = backend.top_level(response.id);
-  let shown = top_level.iter().filter(|message| !is_deleted(message));
-  let message_count = shown.clone().count();
-  let maybe_last_activity = shown.map(|message| message.sent_at_ms).max();
   let maybe_mark: Option<MessageId> = shared.account.unread_mark(response.id);
-  let unread = backend.unread_among(response, maybe_mark, top_level);
+  let is_unread = backend.unread_check(response, maybe_mark);
+  let mut message_count = 0;
+  let mut maybe_last_activity = None;
+  let mut unread = Vec::new();
+  // By reference: a large channel's messages are not copied for a count (issue #1000).
+  backend.visit_top_level(response.id, &mut |message| {
+    if !is_deleted(message) {
+      message_count += 1;
+      maybe_last_activity = maybe_last_activity.max(Some(message.sent_at_ms));
+    }
+    if is_unread(message) {
+      unread.push(message.clone());
+    }
+  });
   ConversationChange {
     conversation: backend.conversation_view(response, &shared.users, &shared.preferences, &unread),
     message_count,
