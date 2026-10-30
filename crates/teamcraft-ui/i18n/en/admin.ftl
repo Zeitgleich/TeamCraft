@@ -69,6 +69,7 @@ admin-retention-messages = { $count ->
 admin-retention-forever = Keep everything
 admin-no-content = Message text, files and reactions are end-to-end encrypted and not visible to admins.
 admin-join = Add myself to this channel
+admin-join-again = Request access again
 admin-assign-owner = Assign owner
 admin-archive = Archive
 admin-join-done = You asked to join. Once a member's app lets you in, the members see that a workspace admin joined.

@@ -653,6 +653,144 @@ async fn an_admin_joins_by_themselves_under_the_default_full_history() {
   );
 }
 
+/// Issue #907: the members refused an admin's self-join (here the policy forbade it at the time;
+/// in the field an older app signed full history). Nothing tells the admin's device, so it shows
+/// that it waits and posts the self-add again later, which lets it in once the members accept it.
+mod refused_self_join {
+  use std::sync::Arc;
+
+  use teamcraft_core::client::is_waiting_for_admission;
+  use teamcraft_core::clock::ManualClock;
+  use teamcraft_core::store::Table;
+
+  use super::*;
+
+  #[tokio::test]
+  async fn the_self_add_is_posted_again_when_due_and_lets_the_admin_in() {
+    let (clock, mut alice, mut bob, mut carol, channel) = refused().await;
+    assert!(
+      is_waiting_for_admission(&bob.store, channel).unwrap(),
+      "shown as waiting"
+    );
+    assert_eq!(bob.client.retry_due_self_adds().await.unwrap(), 0, "not due yet");
+
+    alice
+      .client
+      .publish_policy(policy(AdminSelfJoin::Visible))
+      .await
+      .unwrap();
+    settle(&mut [&mut alice, &mut bob, &mut carol]).await;
+    clock.advance(retry_ms());
+    assert_eq!(bob.client.retry_due_self_adds().await.unwrap(), 1);
+    settle(&mut [&mut alice, &mut bob, &mut carol]).await;
+
+    assert!(
+      bob.client.has_group(channel).unwrap(),
+      "let in by the second self-add"
+    );
+    assert!(!is_waiting_for_admission(&bob.store, channel).unwrap());
+    clock.advance(retry_ms() * 100);
+    assert_eq!(
+      bob.client.retry_due_self_adds().await.unwrap(),
+      0,
+      "nothing left to ask"
+    );
+  }
+
+  #[tokio::test]
+  async fn a_refused_self_add_waits_longer_after_each_attempt() {
+    let (clock, mut alice, mut bob, mut carol, channel) = refused().await;
+    clock.advance(retry_ms());
+    assert_eq!(bob.client.retry_due_self_adds().await.unwrap(), 1);
+    settle(&mut [&mut alice, &mut bob, &mut carol]).await;
+    assert!(!bob.client.has_group(channel).unwrap(), "refused again");
+
+    clock.advance(retry_ms());
+    assert_eq!(
+      bob.client.retry_due_self_adds().await.unwrap(),
+      0,
+      "the second wait is twice as long"
+    );
+    clock.advance(retry_ms());
+    assert_eq!(bob.client.retry_due_self_adds().await.unwrap(), 1);
+    assert!(is_waiting_for_admission(&bob.store, channel).unwrap());
+  }
+
+  /// An earlier version marked the channel once and never asked again: after the update the next
+  /// sync posts the self-add at once.
+  #[tokio::test]
+  async fn the_mark_of_an_earlier_version_is_posted_again_on_the_next_sync() {
+    let (_clock, mut alice, mut bob, mut carol, channel) = refused().await;
+    bob
+      .store
+      .delete(Table::SyncState, &format!("self_add/{channel}"))
+      .unwrap();
+    bob
+      .store
+      .put(Table::SyncState, &format!("self-add/{channel}"), b"true")
+      .unwrap();
+    alice
+      .client
+      .publish_policy(policy(AdminSelfJoin::Visible))
+      .await
+      .unwrap();
+    settle(&mut [&mut alice, &mut bob, &mut carol]).await;
+
+    bob.client.full_sync().await.unwrap();
+    settle(&mut [&mut alice, &mut bob, &mut carol]).await;
+    assert!(bob.client.has_group(channel).unwrap());
+    assert!(!is_waiting_for_admission(&bob.store, channel).unwrap());
+  }
+
+  /// Alice owns the workspace, Bob is an admin whose self-join to Carol's private channel the
+  /// members refused, on a clock the test moves.
+  async fn refused() -> (
+    Arc<ManualClock>,
+    Peer,
+    Peer,
+    Peer,
+    teamcraft_proto::ConversationId,
+  ) {
+    let server = FakeServer::new();
+    let clock = Arc::new(ManualClock::new(1_800_000_000_000));
+    let mut alice = Peer::enroll(&server, "Alice").await;
+    let mut bob = Peer::enroll_on_clock(
+      server.add_user("Bob"),
+      "Bob",
+      common::settings(),
+      Box::new(clock.clone()),
+    )
+    .await;
+    let mut carol = Peer::enroll(&server, "Carol").await;
+    let (alice_id, bob_id) = (alice.client.user_id(), bob.client.user_id());
+    alice
+      .client
+      .publish_roster(&[(alice_id, RosterRole::Owner), (bob_id, RosterRole::Admin)])
+      .await
+      .unwrap();
+    alice
+      .client
+      .publish_policy(policy(AdminSelfJoin::Disabled))
+      .await
+      .unwrap();
+    server.set_admin(bob_id);
+    settle(&mut [&mut alice, &mut bob, &mut carol]).await;
+    let channel = carol
+      .client
+      .create_channel(carol.space().await, "private")
+      .await
+      .unwrap();
+    bob.client.admin_add_member(channel, bob_id).await.unwrap();
+    settle(&mut [&mut alice, &mut bob, &mut carol]).await;
+    assert!(!bob.client.has_group(channel).unwrap(), "refused");
+    (clock, alice, bob, carol, channel)
+  }
+
+  fn retry_ms() -> i64 {
+    i64::try_from(common::settings().self_add_retry.as_millis()).unwrap()
+  }
+}
+
 /// Issue #776 (admin.md §2.4): under `owner_approval` the admin asks, a channel owner's client
 /// adds them with its own commit and tells everybody; the server's request is only a hint.
 mod owner_approval {

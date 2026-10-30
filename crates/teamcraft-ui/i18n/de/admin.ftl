@@ -69,6 +69,7 @@ admin-retention-messages = { $count ->
 admin-retention-forever = Alles behalten
 admin-no-content = Nachrichtentext, Dateien und Reaktionen sind Ende-zu-Ende-verschlüsselt und für Admins nicht sichtbar.
 admin-join = Mich zu diesem Kanal hinzufügen
+admin-join-again = Zugang erneut anfragen
 admin-assign-owner = Eigentümer zuweisen
 admin-archive = Archivieren
 admin-join-done = Beitritt angefragt. Sobald die App eines Mitglieds dich hineinlässt, sehen die Mitglieder, dass ein Workspace-Admin beigetreten ist.

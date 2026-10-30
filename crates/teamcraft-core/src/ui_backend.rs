@@ -1517,6 +1517,9 @@ impl<S: LocalStore> ChatBackend for CoreChatBackend<S> {
       Some(crate::client::DmSetupStatus::Failed) => issues.push(MembershipIssue::EncryptionSetupFailed),
       None => {},
     }
+    if self.read(crate::client::is_waiting_for_admission(&self.store, conversation)) {
+      issues.push(MembershipIssue::WaitingForAdmission);
+    }
     issues.extend(
       self
         .read(crate::client::pending_user_additions(&self.store, conversation))

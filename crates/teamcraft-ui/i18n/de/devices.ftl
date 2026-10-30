@@ -26,6 +26,7 @@ device-waiting-title = Dieses Gerät ist für diese Unterhaltung noch nicht voll
 device-waiting-body = Du kannst lesen, was deine anderen Geräte lesen konnten. Neue Nachrichten bleiben eventuell gesperrt, bis eines deiner anderen Geräte oder ein Mitglied dieser Unterhaltung online ist.
 left-in-group-unknown = Jemand
 group-refused = Der Server lässt dieses Gerät die verschlüsselte Gruppe dieser Unterhaltung nicht lesen. Neue Nachrichten fehlen eventuell.
+waiting-for-admission = Warte darauf, in diesen Kanal eingelassen zu werden. Die App eines Mitglieds lässt dich herein, sobald sie online ist, und diese App fragt von selbst erneut. Lesbar sind nur Nachrichten ab deinem Beitritt.
 never-set-up = { $name } hat TeamCraft nie eingerichtet. { $name } sieht diese Unterhaltung, falls sich { $name } später auf einem Gerät anmeldet.
 waiting-first-device = { $name } hat TeamCraft noch nicht fertig eingerichtet. Du kannst trotzdem schon schreiben: { $name } sieht deine Nachrichten, sobald die Einrichtung abgeschlossen ist.
 devices-unverified = { $name } kann nicht verschlüsselt hinzugefügt werden: Keines der Geräte ließ sich prüfen. Bitte { $name }, sich neu anzumelden; ein neues Gerät wird von selbst versucht.

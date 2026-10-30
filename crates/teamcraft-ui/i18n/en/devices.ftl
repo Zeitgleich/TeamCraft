@@ -26,6 +26,7 @@ device-waiting-title = This device isn't fully set up for this conversation yet
 device-waiting-body = You can read what your other devices could. New messages may stay locked until one of your other devices or a member of this conversation is online.
 left-in-group-unknown = Someone
 group-refused = The server doesn't let this device read the encrypted group of this conversation. New messages may be missing.
+waiting-for-admission = Waiting to be let into this channel. A member's app lets you in when it's online, and this app asks again on its own. Only messages from when you joined on will be readable.
 never-set-up = { $name } never set up TeamCraft. { $name } will see this conversation if they sign in on a device later.
 waiting-first-device = { $name } hasn't finished setting up TeamCraft yet. You can write anyway: { $name } will see your messages once setup is done.
 devices-unverified = { $name } can't be added to the encryption: none of their devices could be verified. Ask { $name } to sign in again; a new device is tried by itself.
