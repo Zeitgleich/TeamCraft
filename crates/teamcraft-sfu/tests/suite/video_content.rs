@@ -146,8 +146,10 @@ mod portal {
 }
 
 /// Sends `capture` from one participant and checks that the other decodes at least
-/// [`WANTED_PICTURES`] pictures with content within `deadline`; with `maybe_captured` (what a
-/// synthetic capture sent, by timestamp) each one also has to show its frame.
+/// [`WANTED_PICTURES`] pictures with content within `deadline`. With `maybe_captured` (what a
+/// synthetic capture sent, by timestamp) every picture has to have content and show its frame;
+/// without (a real capture) dark pictures are allowed while a camera's exposure settles, as long
+/// as the pictures with content come and the last one has content.
 async fn check_content_arrives(
   kind: VideoTrackKind,
   capture: Box<dyn VideoCapture>,
@@ -171,7 +173,18 @@ async fn check_content_arrives(
 
   let decoded: Arc<Mutex<Vec<VideoFrame>>> = Arc::default();
   let deadline = tokio::time::Instant::now() + deadline;
-  while tokio::time::Instant::now() < deadline && decoded.lock().unwrap().len() < WANTED_PICTURES {
+  let is_synthetic = maybe_captured.is_some();
+  let with_content = |decoded: &[VideoFrame]| {
+    decoded
+      .iter()
+      .filter(|picture| PictureStats::of(picture).content() == PictureContent::Detailed)
+      .count()
+  };
+  let is_enough = |decoded: &[VideoFrame]| match is_synthetic {
+    true => decoded.len() >= WANTED_PICTURES,
+    false => with_content(decoded) >= WANTED_PICTURES,
+  };
+  while tokio::time::Instant::now() < deadline && !is_enough(&decoded.lock().unwrap()) {
     // The presenter's events must be read for its call to go on.
     let _ = tokio::time::timeout(Duration::from_millis(5), presenter.next_event()).await;
     if let Ok(Some(CallEngineEvent::VideoPublished(track))) =
@@ -196,13 +209,20 @@ async fn check_content_arrives(
     "{kind:?}: {} pictures decoded",
     decoded.len()
   );
+  let Some(captured) = maybe_captured else {
+    let last = PictureStats::of(decoded.last().unwrap());
+    assert!(
+      with_content(&decoded) >= WANTED_PICTURES && last.content() == PictureContent::Detailed,
+      "{kind:?}: {} of {} pictures with content, the last {last:?}",
+      with_content(&decoded),
+      decoded.len()
+    );
+    return;
+  };
   for picture in decoded.iter() {
     let stats = PictureStats::of(picture);
     assert_eq!(stats.content(), PictureContent::Detailed, "{kind:?}: {stats:?}");
   }
-  let Some(captured) = maybe_captured else {
-    return;
-  };
   let captured = captured.lock().unwrap();
   for picture in decoded.iter() {
     let source = captured_at(&captured, picture.timestamp_us())
