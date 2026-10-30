@@ -30,7 +30,7 @@ const MEMBER_CHANGES: usize = 3;
 const FAR_RTT: Duration = Duration::from_millis(30);
 /// Shorter than the absence: the server forgets the session (the resume window passed).
 const RESUME_WINDOW_SECS: u64 = 5;
-const ARRIVAL_TIMEOUT: Duration = Duration::from_secs(600);
+const ARRIVAL_TIMEOUT: Duration = Duration::from_secs(180);
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "benchmark of a few minutes: scripts/e2e-network.sh -- long_absence"]
