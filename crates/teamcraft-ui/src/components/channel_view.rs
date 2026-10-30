@@ -182,14 +182,17 @@ fn CatchingUpNote(info: Memo<Option<Conversation>>) -> impl IntoView {
 fn DeviceAccessBanner(conversation: ConversationId) -> impl IntoView {
   let state = use_app_state();
   let i18n = use_i18n();
-  // A DM waiting for its welcome says so in its own banner, with a retry (#278).
+  // A DM waiting for its welcome says so in its own banner, with a retry (#278), and so does a
+  // channel this device asked to be let into (#907).
   let is_waiting = Memo::new(move |_| {
     state.read(|backend| {
       backend.is_waiting_for_device(conversation)
         && !backend.membership_issues(conversation).iter().any(|issue| {
           matches!(
             issue,
-            MembershipIssue::EncryptionSetup { .. } | MembershipIssue::EncryptionSetupFailed
+            MembershipIssue::EncryptionSetup { .. }
+              | MembershipIssue::EncryptionSetupFailed
+              | MembershipIssue::WaitingForAdmission
           )
         })
     })
@@ -286,6 +289,7 @@ fn MembershipIssueBanners(conversation: ConversationId, info: Memo<Option<Conver
           ),
           MembershipIssue::EncryptionSetup { .. } => ("status", i18n.t("dm-setup-pending"), None),
           MembershipIssue::EncryptionSetupFailed => ("alert", i18n.t("dm-setup-failed"), None),
+          MembershipIssue::WaitingForAdmission => ("status", i18n.t("waiting-for-admission"), None),
           MembershipIssue::Unknown => return None,
         };
         // The DM's setup has its own retry: asking the other side's devices for a welcome (#278).

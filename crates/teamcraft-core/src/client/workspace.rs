@@ -3,9 +3,7 @@
 
 use rand_core::OsRng;
 use serde::{Deserialize, Serialize};
-use teamcraft_crypto::membership::{
-  HistoryShare, MembershipAction, MembershipChange, SignedMembershipChange,
-};
+use teamcraft_crypto::membership::{MembershipAction, MembershipChange, SignedMembershipChange};
 use teamcraft_crypto::workspace::{WorkspaceLog, sign_log_entry};
 use teamcraft_proto::{
   AddConversationMemberRequest, AppendWorkspaceLogRequest, Base64Bytes, ClientMessageId, ConversationId,
@@ -548,13 +546,12 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
         },
       )
       .await?;
-    // A self-join asks only for the history from the join on: committers refuse a signed self-add
-    // that asks for more (e2ee.md §4.7), whatever the workspace default says.
-    let history = if user == self.user_id() {
-      HistoryShare::FromJoin
-    } else {
-      self.implicit_history_in(conversation, user).await?
-    };
+    if user == self.user_id() {
+      // A self-join asks only for the history from the join on (e2ee.md §4.7), whatever the
+      // workspace default says, and is posted again if no member lets this device in (#907).
+      return self.post_self_add_change(conversation).await;
+    }
+    let history = self.implicit_history_in(conversation, user).await?;
     self
       .post_admin_change(
         conversation,

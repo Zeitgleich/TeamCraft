@@ -79,6 +79,11 @@ impl Upkeep {
         Ok(caught_up) => is_changed |= caught_up > 0,
         Err(error) => tracing::debug!(%error, "skipped conversations not synced yet"),
       }
+      // Self-adds no member answered (issue #907); a local read while none is due.
+      match client.retry_due_self_adds().await {
+        Ok(posted) => is_changed |= posted > 0,
+        Err(error) => tracing::debug!(%error, "self-adds not posted again yet"),
+      }
       // Devices registered by setups given up before this one finished (issue #415); a local read
       // while there are none.
       if let Err(error) = client.revoke_abandoned_devices().await {

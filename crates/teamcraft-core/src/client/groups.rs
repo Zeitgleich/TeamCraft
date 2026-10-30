@@ -2442,6 +2442,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
             Table::AppliedChanges,
             &super::member_device::device_add_key(conversation),
           )?;
+          client.forget_self_add(conversation)?;
           client.welcome_handled(welcome)?;
           client.remember_member_keys(conversation, &directory, welcome.id.snowflake().unix_millis())?;
           // Everything up to the welcome belongs to epochs before we joined; everything after it

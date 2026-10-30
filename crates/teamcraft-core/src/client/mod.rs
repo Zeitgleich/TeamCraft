@@ -41,6 +41,7 @@ mod read_ahead;
 mod removal;
 #[cfg(not(target_arch = "wasm32"))]
 mod segments;
+mod self_add;
 mod server_changes;
 mod sources;
 mod sync;
@@ -101,6 +102,7 @@ pub use pending_actions::{PendingAction, PendingActionSettings, StatusChange};
 pub use pending_add::{UserAddWait, pending_user_additions};
 #[cfg(not(target_arch = "wasm32"))]
 pub use segments::SegmentPrefetch;
+pub use self_add::is_waiting_for_admission;
 pub use sources::HistoryScan;
 pub use sync_trace::SyncPhase;
 use teamcraft_crypto::membership::ChangeId;
@@ -160,6 +162,11 @@ pub struct ClientSettings {
   /// A device without a group (a welcome it couldn't join) waits twice as long after each rejoin
   /// request, up to this.
   pub rejoin_retry_max: std::time::Duration,
+  /// A channel member's device that posted a self-add and isn't in the group after this long posts
+  /// it again: the members may have refused it (issue #907).
+  pub self_add_retry: std::time::Duration,
+  /// The wait before the next self-add doubles with each one, up to this.
+  pub self_add_retry_max: std::time::Duration,
   /// Somebody added to a conversation who has no device for this long is shown as having never set
   /// up the app, and the wait for their first device ends (their first device still gets them in,
   /// should it ever appear).
@@ -345,6 +352,8 @@ impl Default for ClientSettings {
       device_add_attempts: 6,
       rejoin_retry: std::time::Duration::from_secs(10 * 60),
       rejoin_retry_max: std::time::Duration::from_secs(24 * 60 * 60),
+      self_add_retry: std::time::Duration::from_secs(30 * 60),
+      self_add_retry_max: std::time::Duration::from_secs(24 * 60 * 60),
       pending_addition_expiry: std::time::Duration::from_secs(90 * 24 * 60 * 60),
       rejoin_cooldown: std::time::Duration::from_secs(30 * 60),
       change_announcement_window: std::time::Duration::from_secs(10 * 60),

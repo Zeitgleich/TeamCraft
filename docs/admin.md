@@ -186,7 +186,9 @@ signature (freshness above).
 
 An admin could add *themselves* to a private channel and read what is posted there from then on. A
 self-join asks only for the history from the join on: members' apps refuse a signed self-add that
-asks for more, whatever the workspace default (e2ee.md §4.7). That is allowed, but never silent:
+asks for more, whatever the workspace default (e2ee.md §4.7). Until a member's app lets the admin's
+device in, the channel says it waits and the device asks again on its own; the console's button then
+reads "Request access again" and is gone once the admin is in. That is allowed, but never silent:
 
 - Per instance setting `admin_self_join` for private channels:
   - `visible` (default) – allowed; members see "Paul joined this channel as a workspace admin"
