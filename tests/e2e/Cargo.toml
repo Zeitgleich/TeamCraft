@@ -28,13 +28,15 @@ e2e = [
   "dep:tokio",
   "dep:tokio-tungstenite",
   "dep:futures-util",
+  "dep:tracing-subscriber",
 ]
 # Drives the web client in headless Chromium (needs a trunk build of teamcraft-ui, see README.md).
 browser = ["e2e", "dep:chromiumoxide", "dep:rcgen", "dep:sha2", "dep:time"]
 
 [dependencies]
 teamcraft-client-api = { path = "../../crates/teamcraft-client-api", optional = true }
-teamcraft-core = { path = "../../crates/teamcraft-core", optional = true, features = ["ui"] }
+# `sealed-sqlite`: the mobile apps' store, so the network tests run on both stores.
+teamcraft-core = { path = "../../crates/teamcraft-core", optional = true, features = ["ui", "sealed-sqlite"] }
 teamcraft-crypto = { workspace = true, optional = true }
 teamcraft-media = { path = "../../crates/teamcraft-media", optional = true, features = ["native"] }
 teamcraft-proto = { workspace = true, optional = true }
@@ -52,6 +54,8 @@ chromiumoxide = { version = "0.9", optional = true, default-features = false }
 rcgen = { version = "0.14.10", optional = true }
 sha2 = { version = "0.11.0", optional = true }
 time = { version = "0.3", optional = true }
+# The client core's log in a test that sets E2E_LOG (crate::app), to see why a scenario failed.
+tracing-subscriber = { workspace = true, optional = true }
 futures-util = { version = "0.3", optional = true, default-features = false, features = ["std", "sink"] }
 # Raw gateway connections (resume with a chosen sequence number, a consumer that stops reading); the
 # same version the core and the server use.
