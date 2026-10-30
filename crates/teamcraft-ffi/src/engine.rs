@@ -1,11 +1,13 @@
 //! The engine thread: owns the store, the client and the sync loop, and runs the jobs the
 //! [`crate::TeamCraft`] handle posts, one at a time, on a current-thread runtime.
 
+use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::future::Future;
 use std::panic::AssertUnwindSafe;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
+use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -95,12 +97,13 @@ pub(crate) struct Engine {
   /// The enrolled identity's fingerprint (empty before enrollment).
   pub(crate) identity_fingerprint: String,
   pub(crate) maybe_recovery: Option<crate::bridge::PendingRecovery>,
-  maybe_link_offer: Option<LinkOffer>,
+  maybe_link_offer: Option<Rc<LinkOffer>>,
   /// What the new device tells the user's other devices about itself while it waits.
   maybe_link_announcement: Option<LinkAnnouncement>,
   /// The open link requests of other devices, readable while the sync loop owns the client.
   link_requests: LinkRequestList,
-  maybe_new_link: Option<NewDeviceLink<HttpRendezvous>>,
+  /// The new device's wait in the relay, which runs beside the jobs (issue #999).
+  new_link: NewLinkWait,
   maybe_approval: Option<PendingApproval>,
   /// Stops the wait for the receipt of the keys this device sent, which runs beside the jobs
   /// (issue #415).
@@ -120,6 +123,14 @@ pub(crate) struct SyncSignals {
   /// by every read of a conversation's messages, as on the desktop; until it was, a conversation
   /// opened from a notification after a long absence waited for every other one (issue #972).
   pub(crate) catch_up_focus: CatchUpFocus,
+}
+
+/// The new device's wait in the relay ([`Engine::wait_for_link_peer`]): a task on the engine thread
+/// beside the jobs, and the link it leaves once the other device answered. Dropping it ends the wait.
+#[derive(Default)]
+struct NewLinkWait {
+  maybe_task: Option<JoinHandle<()>>,
+  link: Rc<RefCell<Option<NewDeviceLink<HttpRendezvous>>>>,
 }
 
 /// What opening the engine needs, checked once. The handle keeps it while the local store is
@@ -412,7 +423,7 @@ impl Engine {
       maybe_link_offer: None,
       maybe_link_announcement: None,
       link_requests: LinkRequestList::default(),
-      maybe_new_link: None,
+      new_link: NewLinkWait::default(),
       maybe_approval: None,
       maybe_receipt: None,
       calls: CallHub::default(),
@@ -480,7 +491,7 @@ impl Engine {
   /// #415). Not while a link is in progress here; enrolling is one job, so it never overlaps. A
   /// failure (offline) is retried when the app asks for the account state again.
   async fn drop_abandoned_setup(&self) {
-    if self.maybe_link_offer.is_some() || self.maybe_new_link.is_some() {
+    if self.maybe_link_offer.is_some() || self.new_link.is_linked() {
       return;
     }
     let settings = self.client_settings();
@@ -501,7 +512,7 @@ impl Engine {
     }
     self.maybe_link_offer = None;
     self.maybe_link_announcement = None;
-    self.maybe_new_link = None;
+    self.new_link = NewLinkWait::default();
     PendingEnrollment::forget_unfinished(&self.api(), &self.store, &SystemClock, SIGN_OUT_REVOKE_PATIENCE)
       .await?;
     Ok(())
@@ -526,12 +537,12 @@ impl Engine {
   ) -> Result<String, TeamCraftError> {
     let offer = LinkOffer::generate();
     let code = offer.to_code();
-    self.maybe_link_offer = Some(offer);
+    self.maybe_link_offer = Some(Rc::new(offer));
     self.maybe_link_announcement = Some(LinkAnnouncement {
       device_name,
       platform: platform.into(),
     });
-    self.maybe_new_link = None;
+    self.new_link = NewLinkWait::default();
     Ok(code)
   }
 
@@ -550,25 +561,25 @@ impl Engine {
     Ok(())
   }
 
-  pub(crate) async fn wait_for_link_peer(&mut self) -> Result<String, TeamCraftError> {
+  /// New device: waits in the relay for the other device; the receiver gets the short code both
+  /// show. The wait runs beside the jobs, as long as no device answers: run as a job it held the
+  /// engine, so the announcement that makes the other devices answer ([`Self::announce_device_link`])
+  /// never went out (issue #999). A new link or a reset ends it, and with it the receiver.
+  pub(crate) fn wait_for_link_peer(
+    &mut self,
+  ) -> Result<oneshot::Receiver<Result<String, TeamCraftError>>, TeamCraftError> {
     let offer = self
       .maybe_link_offer
-      .as_ref()
+      .clone()
       .ok_or(TeamCraftError::NoLinkInProgress)?;
-    let link = NewDeviceLink::connect(&self.api(), offer).await?;
-    let short_code = link.short_code();
-    self.maybe_new_link = Some(link);
-    Ok(short_code)
+    Ok(self.new_link.start(self.api(), offer))
   }
 
   pub(crate) async fn finish_device_link(
     &mut self,
     device_name: String,
   ) -> Result<AccountState, TeamCraftError> {
-    let link = self
-      .maybe_new_link
-      .take()
-      .ok_or(TeamCraftError::NoLinkInProgress)?;
+    let link = self.new_link.take().ok_or(TeamCraftError::NoLinkInProgress)?;
     self.maybe_link_offer = None;
     self.maybe_link_announcement = None;
     let secrets = link.receive_secrets(&self.store, &device_name).await?;
@@ -1297,6 +1308,44 @@ impl Engine {
 
   pub(crate) fn api(&self) -> Api {
     HttpServerApi::new(self.server_url.clone(), self.tokens.clone())
+  }
+}
+
+impl NewLinkWait {
+  /// Joins the relay and waits there; a wait still running for an earlier link ends.
+  fn start(&mut self, api: Api, offer: Rc<LinkOffer>) -> oneshot::Receiver<Result<String, TeamCraftError>> {
+    *self = Self::default();
+    let slot = self.link.clone();
+    let (answer, receiver) = oneshot::channel();
+    self.maybe_task = Some(tokio::task::spawn_local(async move {
+      let result = match NewDeviceLink::connect(&api, &offer).await {
+        Ok(link) => {
+          let short_code = link.short_code();
+          *slot.borrow_mut() = Some(link);
+          Ok(short_code)
+        },
+        Err(error) => Err(error.into()),
+      };
+      // The app may have stopped waiting (a cancelled coroutine); the link stays for a later finish.
+      let _ = answer.send(result);
+    }));
+    receiver
+  }
+
+  fn is_linked(&self) -> bool {
+    self.link.borrow().is_some()
+  }
+
+  fn take(&mut self) -> Option<NewDeviceLink<HttpRendezvous>> {
+    self.link.borrow_mut().take()
+  }
+}
+
+impl Drop for NewLinkWait {
+  fn drop(&mut self) {
+    if let Some(task) = &self.maybe_task {
+      task.abort();
+    }
   }
 }
 

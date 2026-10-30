@@ -237,9 +237,14 @@ impl TeamCraft {
     self.call(|engine| Box::pin(engine.announce_device_link())).await
   }
 
-  /// New device: waits until the other device joined; returns the short code both show.
+  /// New device: waits until the other device joined; returns the short code both show. The other
+  /// calls go on meanwhile, [`Self::announce_device_link`] above all (issue #999).
   pub async fn wait_for_link_peer(&self) -> Result<String, TeamCraftError> {
-    self.call(|engine| Box::pin(engine.wait_for_link_peer())).await
+    let peer = self
+      .call(|engine| Box::pin(async move { engine.wait_for_link_peer() }))
+      .await?;
+    // A new link or a sign-out ended the wait.
+    peer.await.map_err(|_| TeamCraftError::NoLinkInProgress)?
   }
 
   /// New device: receives the keys after the user confirmed the code, and enrolls.

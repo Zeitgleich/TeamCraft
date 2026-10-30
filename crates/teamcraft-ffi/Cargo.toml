@@ -45,7 +45,7 @@ tokio = { workspace = true, features = ["rt", "rt-multi-thread", "sync", "time",
 uniffi = "0.32.2"
 
 [dev-dependencies]
-tokio = { workspace = true, features = ["rt", "macros", "time"] }
+tokio = { workspace = true, features = ["rt", "macros", "time", "net", "io-util"] }
 # The Happy Eyeballs test kit (`api::black_hole`) for `http_fetch`'s tests.
 teamcraft-core = { path = "../teamcraft-core", default-features = false, features = ["ui", "sealed-sqlite", "test-support"] }
 # The other side of the dev-stack conversation is a plain core client.
