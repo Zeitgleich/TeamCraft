@@ -32,6 +32,7 @@ import de.zeitgleich.teamcraft.R
 import de.zeitgleich.teamcraft.core.ChatSnapshot
 import de.zeitgleich.teamcraft.core.Conversation
 import de.zeitgleich.teamcraft.core.User
+import de.zeitgleich.teamcraft.ui.UserAvatar
 import de.zeitgleich.teamcraft.ui.theme.LocalTeamCraftColors
 import de.zeitgleich.teamcraft.ui.theme.darkStatusBarBackdrop
 
@@ -120,7 +121,7 @@ private fun peerStatus(peer: User): String {
   )
 }
 
-/** The person's initial on their hue with a presence dot, or the channel's marker. */
+/** The person's picture or initial on their hue with a presence dot, or the channel's marker. */
 @Composable
 private fun HeaderAvatar(name: String, maybeKind: String?, maybePeer: User?) {
   val colors = LocalTeamCraftColors.current
@@ -132,18 +133,20 @@ private fun HeaderAvatar(name: String, maybeKind: String?, maybePeer: User?) {
   }
   val hue = (maybePeer?.avatarHue ?: name.hashCode()).mod(360).toFloat()
   Box {
-    Box(
-      Modifier
-        .size(HEADER_AVATAR)
-        .background(if (isPeople) Color.hsl(hue, 0.45f, 0.45f) else colors.chromeText.copy(alpha = 0.14f), CircleShape),
-      contentAlignment = Alignment.Center,
-    ) {
-      Text(
-        label,
-        style = MaterialTheme.typography.titleSmall,
-        color = colors.chromeText,
-        modifier = Modifier.clearAndSetSemantics {},
-      )
+    UserAvatar(maybePeer?.id, Modifier.size(HEADER_AVATAR)) {
+      Box(
+        Modifier
+          .size(HEADER_AVATAR)
+          .background(if (isPeople) Color.hsl(hue, 0.45f, 0.45f) else colors.chromeText.copy(alpha = 0.14f), CircleShape),
+        contentAlignment = Alignment.Center,
+      ) {
+        Text(
+          label,
+          style = MaterialTheme.typography.titleSmall,
+          color = colors.chromeText,
+          modifier = Modifier.clearAndSetSemantics {},
+        )
+      }
     }
     maybePeer?.let { peer ->
       Box(

@@ -8,26 +8,35 @@ import android.graphics.Canvas
 import android.graphics.Paint
 import android.graphics.Shader
 import android.util.Log
+import android.util.LruCache
 import androidx.core.graphics.drawable.IconCompat
 import java.io.File
 import java.util.concurrent.ConcurrentHashMap
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.withContext
 import uniffi.teamcraft_ffi.TeamCraft
 
 /**
- * The profile pictures of the people who write to the user, for notifications. A picture is read
- * from the core on demand (never from the push payload), kept as a file in the app's cache folder
- * and drawn as a circle. Without a picture, or until it arrives, the caller falls back to the
- * generated initials ([PersonIcons]). Pictures are refreshed after [PICTURE_MAX_AGE_MS]; people
- * without one are asked again after [MISSING_MAX_AGE_MS].
+ * The profile pictures of people, for the app's screens (issue #846) and its notifications. A
+ * picture is read from the core on demand (never from the push payload), kept as a file in the
+ * app's cache folder and drawn as a circle; the last [MEMORY_ENTRIES] decoded circles stay in
+ * memory. Without a picture, or until it arrives, the caller falls back to the generated initials.
+ * Pictures are refreshed after [PICTURE_MAX_AGE_MS]; people without one are asked again after
+ * [MISSING_MAX_AGE_MS].
  */
 class AvatarCache(
   private val context: Context,
   private val core: suspend () -> TeamCraft,
 ) {
   private val inFlight = ConcurrentHashMap.newKeySet<String>()
+  private val memory = LruCache<String, Bitmap>(MEMORY_ENTRIES)
+  private val changeCount = MutableStateFlow(0)
+
+  /** Counts changed pictures: a screen reads its picture again when this moves. */
+  val changes: StateFlow<Int> = changeCount
 
   /** Counts [clear]s: a refresh that started before one must not write its picture afterwards. */
   private var generation = 0
@@ -36,44 +45,55 @@ class AvatarCache(
   /** The circular picture of `userId` if one is cached; never touches the network. */
   fun maybeIcon(userId: String): IconCompat? = maybeBitmap(userId)?.let(IconCompat::createWithBitmap)
 
+  /** Decodes from the cache folder unless the picture is in memory; call off the main thread. */
   fun maybeBitmap(userId: String): Bitmap? {
+    memory.get(userId)?.let { return it }
     val file = pictureFile(userId) ?: return null
     if (!file.isFile) return null
-    return decodeCircle(file)
+    return decodeCircle(file)?.also { memory.put(userId, it) }
   }
+
+  /** The picture if it is decoded already; never touches the disk, so a screen can ask while drawing. */
+  fun maybeDecoded(userId: String): Bitmap? = memory.get(userId)
+
+  /** [maybeBitmap] on the IO dispatcher. */
+  suspend fun loadBitmap(userId: String): Bitmap? = withContext(Dispatchers.IO) { maybeBitmap(userId) }
 
   /**
    * Makes sure a fresh picture is cached. Answers `true` when a new picture arrived, so the caller
    * can update what it already shows; `false` for no change, no picture, or a failure (a failed
    * fetch is retried with the next message).
    */
-  suspend fun refresh(userId: String): Boolean {
+  suspend fun refresh(userId: String): Boolean = withContext(Dispatchers.IO) { fetchIfStale(userId) }
+
+  private suspend fun fetchIfStale(userId: String): Boolean {
     val picture = pictureFile(userId) ?: return false
     val missing = missingFile(userId) ?: return false
     if (isFresh(picture, PICTURE_MAX_AGE_MS) || isFresh(missing, MISSING_MAX_AGE_MS)) return false
     if (!inFlight.add(userId)) return false
     val startedIn = synchronized(writeLock) { generation }
     return try {
-      withContext(Dispatchers.IO) {
-        val bytes = core().avatarPicture(userId, MAX_PICTURE_BYTES)
-        // Under the lock, so a sign-out's clear() can't be followed by this write.
-        synchronized(writeLock) {
-          when {
-            generation != startedIn -> false
-            bytes == null -> {
-              picture.delete()
-              missing.parentFile?.mkdirs()
-              missing.writeBytes(ByteArray(0))
-              missing.setLastModified(System.currentTimeMillis())
-              false
-            }
-            !isDecodable(bytes) -> false
-            else -> {
-              picture.parentFile?.mkdirs()
-              picture.writeBytes(bytes)
-              missing.delete()
-              true
-            }
+      val bytes = core().avatarPicture(userId, MAX_PICTURE_BYTES)
+      // Under the lock, so a sign-out's clear() can't be followed by this write.
+      synchronized(writeLock) {
+        when {
+          generation != startedIn -> false
+          bytes == null -> {
+            val hadPicture = picture.delete()
+            missing.parentFile?.mkdirs()
+            missing.writeBytes(ByteArray(0))
+            missing.setLastModified(System.currentTimeMillis())
+            // A picture that was removed leaves the screens too.
+            if (hadPicture) changed(userId)
+            false
+          }
+          !isDecodable(bytes) -> false
+          else -> {
+            picture.parentFile?.mkdirs()
+            picture.writeBytes(bytes)
+            missing.delete()
+            changed(userId)
+            true
           }
         }
       }
@@ -92,8 +112,15 @@ class AvatarCache(
   fun clear() {
     synchronized(writeLock) {
       generation++
+      memory.evictAll()
       runCatching { directory().deleteRecursively() }
+      changeCount.value++
     }
+  }
+
+  private fun changed(userId: String) {
+    memory.remove(userId)
+    changeCount.value++
   }
 
   private fun directory() = File(context.cacheDir, DIRECTORY)
@@ -128,6 +155,9 @@ class AvatarCache(
     private const val DIRECTORY = "avatars"
     private const val TAG = "TeamCraftNotify"
     private const val SIZE_PX = 128
+
+    /** Decoded circles kept in memory: [SIZE_PX] squared ARGB is 64 KiB each, so 4 MiB at most. */
+    private const val MEMORY_ENTRIES = 64
     private const val MAX_PICTURE_BYTES = 2_097_152u // 2 MiB; unsigned arithmetic is not a constant expression
     private const val PICTURE_MAX_AGE_MS = 12L * 60 * 60 * 1000
     private const val MISSING_MAX_AGE_MS = 60L * 60 * 1000
