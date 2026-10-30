@@ -30,7 +30,8 @@ use teamcraft_proto::{ClientMessageId, ConversationId, Id, MessageId, Snowflake,
 use crate::error::CoreError;
 use crate::store::{LocalStore, MessageContent, MessageFilter, StoredMessage, Table};
 
-/// Results per search before filtering.
+/// Matches per search, counted after the filters: a filter applied after the cap would drop
+/// everything when other conversations fill it (issue #873).
 const MAX_CANDIDATES: usize = 2_000;
 /// Indexing memory per writer (tantivy's minimum is 15 MB).
 const WRITER_MEMORY_BYTES: usize = 15_000_000;
@@ -44,7 +45,7 @@ const FLAG_THREAD: u64 = 4;
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct SearchQuery {
   pub terms: Vec<String>,
-  pub maybe_conversation: Option<ConversationId>,
+  pub conversations: ConversationScope,
   pub maybe_sender: Option<UserId>,
   /// Only messages sent before this time (Unix milliseconds).
   pub maybe_before_ms: Option<i64>,
@@ -52,6 +53,15 @@ pub struct SearchQuery {
   pub has_file: bool,
   pub has_link: bool,
   pub in_thread: bool,
+}
+
+/// The conversations a search looks in.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub enum ConversationScope {
+  #[default]
+  All,
+  /// Only these; an empty set finds nothing (an `in:` filter that names no conversation).
+  Only(BTreeSet<ConversationId>),
 }
 
 /// A matching message.
@@ -103,7 +113,7 @@ impl SearchService {
 
   /// Searches the local store and every imported segment.
   pub fn search(&mut self, store: &impl LocalStore, query: &SearchQuery) -> Result<SearchResults, CoreError> {
-    let local_messages = searchable_messages(store, query.maybe_conversation)?;
+    let local_messages = searchable_messages(store, &query.conversations)?;
     let local_index = build_index(local_messages.iter())?;
     let mut matches: BTreeMap<[u8; 16], SearchMatch> = BTreeMap::new();
     for found in run_query(&local_index, query)? {
@@ -143,6 +153,15 @@ impl SearchService {
       }
     }
     Ok(())
+  }
+}
+
+impl ConversationScope {
+  pub fn includes(&self, conversation: ConversationId) -> bool {
+    match self {
+      Self::All => true,
+      Self::Only(conversations) => conversations.contains(&conversation),
+    }
   }
 }
 
@@ -202,11 +221,11 @@ pub fn is_searchable(message: &StoredMessage) -> bool {
 
 fn searchable_messages(
   store: &impl LocalStore,
-  maybe_conversation: Option<ConversationId>,
+  scope: &ConversationScope,
 ) -> Result<Vec<StoredMessage>, CoreError> {
-  let conversations: Vec<ConversationId> = match maybe_conversation {
-    Some(conversation) => vec![conversation],
-    None => store
+  let conversations: Vec<ConversationId> = match scope {
+    ConversationScope::Only(conversations) => conversations.iter().copied().collect(),
+    ConversationScope::All => store
       .list(Table::Conversations)?
       .into_iter()
       .filter_map(|(key, _)| serde_json::from_value(serde_json::Value::String(key)).ok())
@@ -251,22 +270,28 @@ fn run_query(index: &Index, query: &SearchQuery) -> Result<Vec<SearchMatch>, Cor
   } else {
     fuzzy_query(&query.terms, &fields)
   };
+  // Every match in score order, so the filters see all of them before the cap.
+  let all_docs = usize::try_from(searcher.num_docs()).unwrap_or(usize::MAX);
   let top = searcher
-    .search(&parsed, &TopDocs::with_limit(MAX_CANDIDATES).order_by_score())
+    .search(&parsed, &TopDocs::with_limit(all_docs).order_by_score())
     .map_err(search_error)?;
   let mut found = Vec::new();
   for (_, address) in top {
     let document: TantivyDocument = searcher.doc(address).map_err(search_error)?;
     if let Some(hit) = to_match(&fields, &document, query) {
       found.push(hit);
+      if found.len() == MAX_CANDIDATES {
+        break;
+      }
     }
   }
   Ok(found)
 }
 
 /// Every analysed word of every term must match (AND), in its English or German form (OR), allowing
-/// typos: edit distance 0 up to 3 characters, 1 up to 7, then 2. User input is never parsed as
-/// query syntax, only tokenised.
+/// typos: edit distance 0 up to 3 characters, 1 up to 7, then 2. Words with digits (amounts, years,
+/// ticket numbers) match exactly: `3000` must not find `2000`. User input is never parsed as query
+/// syntax, only tokenised.
 fn fuzzy_query(terms: &[String], fields: &Fields) -> Box<dyn Query> {
   let mut analyzers = analyzers();
   let mut required: Vec<(Occur, Box<dyn Query>)> = Vec::new();
@@ -291,6 +316,7 @@ fn fuzzy_query(terms: &[String], fields: &Fields) -> Box<dyn Query> {
         .into_iter()
         .map(|(field, text)| {
           let distance = match text.chars().count() {
+            _ if text.contains(|ch: char| ch.is_ascii_digit()) => 0,
             0..=3 => 0,
             4..=7 => 1,
             _ => 2,
@@ -325,9 +351,7 @@ fn to_match(fields: &Fields, document: &TantivyDocument, query: &SearchQuery) ->
   let server_id = document.get_first(fields.server_id)?.as_i64()?;
   let sent_at_ms = document.get_first(fields.sent_at)?.as_i64()?;
   let flags = document.get_first(fields.flags)?.as_u64()?;
-  let is_wanted = query
-    .maybe_conversation
-    .is_none_or(|wanted| wanted == conversation_id)
+  let is_wanted = query.conversations.includes(conversation_id)
     && query.maybe_sender.is_none_or(|wanted| wanted == sender)
     && query.maybe_before_ms.is_none_or(|before| sent_at_ms < before)
     && query.maybe_after_ms.is_none_or(|after| sent_at_ms > after)
@@ -620,6 +644,64 @@ mod tests {
   }
 
   #[test]
+  fn numbers_match_exactly() {
+    let store = MemoryStore::new();
+    store.put(Table::Conversations, "10", b"{}").unwrap();
+    for stored in [
+      message(1, 1, "Invoice over 3000 sent", None),
+      message(2, 1, "Invoice over 2000 sent", None),
+      message(3, 1, "Ticket 30001 closed", None),
+    ] {
+      store.upsert_message(&stored).unwrap();
+    }
+    let mut service = SearchService::new();
+    assert_eq!(ids(service.search(&store, &terms(&["3000"])).unwrap()), vec![1]);
+    assert_eq!(
+      ids(service.search(&store, &terms(&["invoice", "2000"])).unwrap()),
+      vec![2]
+    );
+  }
+
+  /// #873: matches elsewhere must not use up the candidates before the filters run.
+  #[test]
+  fn filters_apply_before_the_candidate_cap() {
+    let store = MemoryStore::new();
+    let (busy, direct) = (id::<ConversationId>(10), id::<ConversationId>(11));
+    for conversation in [busy, direct] {
+      store
+        .put(Table::Conversations, &conversation.to_string(), b"{}")
+        .unwrap();
+    }
+    for index in 0..=MAX_CANDIDATES {
+      let mut stored = message(1, 1, "deploy 3000 done", None);
+      stored.client_message_id = ClientMessageId::from_bytes(numbered(index));
+      store.upsert_message(&stored).unwrap();
+    }
+    let mut wanted = message(7, 2, "deploy 3000 done", None);
+    wanted.conversation_id = direct;
+    store.upsert_message(&wanted).unwrap();
+    let mut service = SearchService::new();
+
+    let everywhere = service.search(&store, &terms(&["3000"])).unwrap();
+    assert_eq!(everywhere.hits.len(), MAX_CANDIDATES);
+    let from_two = SearchQuery {
+      maybe_sender: Some(id(2)),
+      ..terms(&["3000"])
+    };
+    assert_eq!(ids(service.search(&store, &from_two).unwrap()), vec![7]);
+    let in_direct = SearchQuery {
+      conversations: ConversationScope::Only(BTreeSet::from([direct])),
+      ..terms(&["3000"])
+    };
+    assert_eq!(ids(service.search(&store, &in_direct).unwrap()), vec![7]);
+    let nowhere = SearchQuery {
+      conversations: ConversationScope::Only(BTreeSet::new()),
+      ..terms(&["3000"])
+    };
+    assert!(service.search(&store, &nowhere).unwrap().hits.is_empty());
+  }
+
+  #[test]
   fn segments_round_trip_and_only_point_to_local_messages() {
     let local = message(1, 1, "budget planning for spring", None);
     let remote = message(2, 1, "budget numbers attached", None);
@@ -679,6 +761,13 @@ mod tests {
       maybe_verified_commit: None,
       maybe_server_change: None,
     }
+  }
+
+  /// A client message ID unique per `index`, starting with a byte no other test message uses.
+  fn numbered(index: usize) -> [u8; 16] {
+    let mut bytes = [0xEE; 16];
+    bytes[8..].copy_from_slice(&(index as u64).to_be_bytes());
+    bytes
   }
 
   fn terms(words: &[&str]) -> SearchQuery {

@@ -7,10 +7,12 @@
 
 #[cfg(not(target_arch = "wasm32"))]
 use std::cell::RefCell;
+use std::collections::{BTreeSet, HashMap};
 
 use serde::{Deserialize, Serialize};
+use teamcraft_client_api::backend::ChatBackend;
 use teamcraft_client_api::backend::SearchBackend;
-use teamcraft_client_api::model::{ConversationId, Message};
+use teamcraft_client_api::model::{Conversation, ConversationId, Message, SpaceId};
 use teamcraft_client_api::search::{
   Filter, ParsedQuery, SavedSearch, SearchHit, SearchResults, find_ci, has_file, has_link, is_in_space,
   make_snippet,
@@ -19,8 +21,9 @@ use teamcraft_client_api::search::{
 use crate::client::stored_account_data;
 use crate::error::CoreError;
 use crate::records;
+use crate::search::ConversationScope;
 use crate::store::{LocalStore, MessageContent, MessageFilter, StoredMessage, Table};
-use crate::ui_backend::{CoreChatBackend, CoreCommand};
+use crate::ui_backend::{CoreChatBackend, CoreCommand, UnreadCounts};
 
 /// Hits shown per search.
 const MAX_HITS: usize = 50;
@@ -30,6 +33,13 @@ struct SavedSearchRecord {
   id: u64,
   name: String,
   query: String,
+}
+
+/// What hits of one search share, read once per search instead of once per hit.
+struct HitContext {
+  conversations: HashMap<ConversationId, Conversation>,
+  space_names: HashMap<SpaceId, String>,
+  messages: HashMap<ConversationId, Vec<StoredMessage>>,
 }
 
 /// Search state kept between calls: imported segments stay open.
@@ -44,15 +54,21 @@ impl<S: LocalStore> SearchBackend for CoreChatBackend<S> {
     if query.is_empty() {
       return SearchResults::default();
     }
-    let candidates = self.term_candidates(query);
+    let mut context = self.hit_context();
+    let scope = conversation_scope(query, &context);
+    let candidates = self.term_candidates(query, &scope);
     let mut hits: Vec<SearchHit> = candidates
       .iter()
-      .filter_map(|stored| self.to_hit(stored, query))
+      .filter_map(|stored| self.to_hit(stored, query, &mut context))
       .collect();
     hits.sort_by_key(|hit| std::cmp::Reverse(hit.message.sent_at));
     let total = hits.len();
     hits.truncate(MAX_HITS);
-    SearchResults { hits, total }
+    SearchResults {
+      hits,
+      total,
+      is_pending: false,
+    }
   }
 
   fn recent_mentions(&self) -> Vec<SearchHit> {
@@ -65,9 +81,10 @@ impl<S: LocalStore> SearchBackend for CoreChatBackend<S> {
     mentions.sort_by_key(|message| std::cmp::Reverse(message.sent_at_ms));
     mentions.truncate(MAX_HITS);
     let empty = teamcraft_client_api::search::parse_query("");
+    let mut context = self.hit_context();
     mentions
       .iter()
-      .filter_map(|stored| self.to_hit(stored, &empty))
+      .filter_map(|stored| self.to_hit(stored, &empty, &mut context))
       .collect()
   }
 
@@ -120,11 +137,12 @@ impl<S: LocalStore> SearchBackend for CoreChatBackend<S> {
 }
 
 impl<S: LocalStore> CoreChatBackend<S> {
-  /// Messages whose text matches all terms.
+  /// Messages of the conversations in `scope` whose text matches all terms.
   #[cfg(not(target_arch = "wasm32"))]
-  fn term_candidates(&self, query: &ParsedQuery) -> Vec<StoredMessage> {
+  fn term_candidates(&self, query: &ParsedQuery, scope: &ConversationScope) -> Vec<StoredMessage> {
     let core_query = crate::search::SearchQuery {
       terms: query.terms().iter().map(|term| term.to_string()).collect(),
+      conversations: scope.clone(),
       ..Default::default()
     };
     let results = match self
@@ -161,11 +179,12 @@ impl<S: LocalStore> CoreChatBackend<S> {
 
   /// Browser: plain substring matching over the local store.
   #[cfg(target_arch = "wasm32")]
-  fn term_candidates(&self, query: &ParsedQuery) -> Vec<StoredMessage> {
+  fn term_candidates(&self, query: &ParsedQuery, scope: &ConversationScope) -> Vec<StoredMessage> {
     let terms = query.terms();
     self
       .conversation_ids()
       .into_iter()
+      .filter(|conversation| scope.includes(*conversation))
       .flat_map(|conversation| self.stored(conversation))
       .filter(|stored| {
         terms
@@ -175,30 +194,55 @@ impl<S: LocalStore> CoreChatBackend<S> {
       .collect()
   }
 
-  fn to_hit(&self, stored: &StoredMessage, query: &ParsedQuery) -> Option<SearchHit> {
+  /// Conversations and space names as the sidebar shows them, read once for a whole search. No
+  /// unread counts: search doesn't show them, and counting reads every message.
+  fn hit_context(&self) -> HitContext {
+    let users = self.summaries();
+    HitContext {
+      conversations: self
+        .conversations_raw()
+        .iter()
+        .map(|response| {
+          let conversation = self.conversation_view(response, &users, UnreadCounts::default());
+          (conversation.id, conversation)
+        })
+        .collect(),
+      space_names: ChatBackend::spaces(self)
+        .into_iter()
+        .map(|space| (space.id, space.name))
+        .collect(),
+      messages: HashMap::new(),
+    }
+  }
+
+  fn to_hit(
+    &self,
+    stored: &StoredMessage,
+    query: &ParsedQuery,
+    context: &mut HitContext,
+  ) -> Option<SearchHit> {
     if !matches!(
       stored.content,
       MessageContent::Text { .. } | MessageContent::File { .. }
     ) {
       return None;
     }
-    let conversation =
-      teamcraft_client_api::backend::ChatBackend::conversation(self, stored.conversation_id)?;
-    let all = self.stored(stored.conversation_id);
-    let message: Message = self.message_view(stored, &all);
-    let author = teamcraft_client_api::backend::ChatBackend::user(self, stored.sender_user_id);
+    let conversation = context.conversations.get(&stored.conversation_id)?.clone();
+    let all = context
+      .messages
+      .entry(stored.conversation_id)
+      .or_insert_with(|| self.stored(stored.conversation_id));
+    let message: Message = self.message_view(stored, all);
+    let author = ChatBackend::user(self, stored.sender_user_id);
     let (username, display_name) = author
       .map(|user| (user.username, user.display_name))
       .unwrap_or_default();
-    let maybe_space_name = conversation.maybe_space.and_then(|space| {
-      teamcraft_client_api::backend::ChatBackend::spaces(self)
-        .into_iter()
-        .find(|candidate| candidate.id == space)
-        .map(|found| found.name)
-    });
+    let maybe_space_name = conversation
+      .maybe_space
+      .and_then(|space| context.space_names.get(&space).cloned());
     let passes = query.filters().iter().all(|filter| match filter {
       Filter::From(name) => username.eq_ignore_ascii_case(name) || find_ci(&display_name, name).is_some(),
-      Filter::In(name) => find_ci(&conversation.name, name).is_some(),
+      Filter::In(name) => is_named(&conversation, name),
       Filter::InSpace(name) => is_in_space(maybe_space_name.as_deref().unwrap_or_default(), name),
       Filter::HasFile => matches!(stored.content, MessageContent::File { .. }) || has_file(&message.body),
       Filter::HasLink => has_link(&message.body),
@@ -239,6 +283,39 @@ impl<S: LocalStore> CoreChatBackend<S> {
   fn search_state(&self) -> &RefCell<UiSearchState> {
     &self.search
   }
+}
+
+/// The conversations the query's `in:` and `space:` filters leave, so the term search only looks
+/// there: matches elsewhere would otherwise fill its candidates and leave none here (issue #873).
+fn conversation_scope(query: &ParsedQuery, context: &HitContext) -> ConversationScope {
+  let filters = query.filters();
+  let is_scoped = filters
+    .iter()
+    .any(|filter| matches!(filter, Filter::In(_) | Filter::InSpace(_)));
+  if !is_scoped {
+    return ConversationScope::All;
+  }
+  let conversations: BTreeSet<ConversationId> = context
+    .conversations
+    .values()
+    .filter(|conversation| {
+      filters.iter().all(|filter| match filter {
+        Filter::In(name) => is_named(conversation, name),
+        Filter::InSpace(name) => conversation
+          .maybe_space
+          .and_then(|space| context.space_names.get(&space))
+          .is_some_and(|space_name| is_in_space(space_name, name)),
+        _ => true,
+      })
+    })
+    .map(|conversation| conversation.id)
+    .collect();
+  ConversationScope::Only(conversations)
+}
+
+/// `in:name` matches a conversation whose name contains `name`, ignoring case.
+fn is_named(conversation: &Conversation, name: &str) -> bool {
+  find_ci(&conversation.name, name).is_some()
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -292,6 +369,29 @@ mod tests {
     );
   }
 
+  /// #873: `in:"@Name"` with a word finds the message in that direct message, and the channel's
+  /// messages don't crowd it out.
+  #[test]
+  fn a_direct_message_filter_with_a_word_finds_the_message() {
+    let backend = backend();
+    assert_eq!(backend.search(&parse_query("3000")).total, 2);
+
+    for raw in [r#"in:"@Bob" 3000"#, "in:@bob 3000", r#"3000 in:@"bob""#] {
+      let results = backend.search(&parse_query(raw));
+      assert_eq!(results.total, 1, "{raw}");
+      assert_eq!(results.hits[0].message.body, "Order 3000 shipped", "{raw}");
+      assert_eq!(results.hits[0].conversation_name, "bob", "{raw}");
+    }
+    let in_channel = backend.search(&parse_query("in:#finance 3000"));
+    assert_eq!(in_channel.total, 1);
+    assert_eq!(in_channel.hits[0].conversation_name, "finance");
+    assert_eq!(backend.search(&parse_query("in:@bob budget")).total, 0);
+    assert_eq!(backend.search(&parse_query("in:@carol 3000")).total, 0);
+    assert_eq!(backend.search(&parse_query(r#"in:"@Bob""#)).total, 1);
+    // Direct messages are in no space.
+    assert_eq!(backend.search(&parse_query(r#"3000 space:"Project A""#)).total, 1);
+  }
+
   #[test]
   fn mentions_and_saved_searches() {
     let backend = backend();
@@ -315,6 +415,7 @@ mod tests {
       id::<teamcraft_client_api::model::UserId>(2),
       id::<ConversationId>(10),
     );
+    let mut summaries = Vec::new();
     for (user, name) in [(alice, "alice"), (bob, "bob")] {
       let summary = UserSummary {
         id: user,
@@ -328,6 +429,7 @@ mod tests {
         is_deleted: false,
       };
       records::put_json(&store, Table::Users, &user.to_string(), &summary).unwrap();
+      summaries.push(summary);
     }
     let space = id::<teamcraft_proto::SpaceId>(5);
     let project = SpaceResponse {
@@ -370,15 +472,34 @@ mod tests {
       maybe_image: None,
     };
     records::put_json(&store, Table::Conversations, &channel.to_string(), &conversation).unwrap();
-    for (client, sender, body, mentions) in [
-      (1u8, alice, "The budget draft is attached", vec![]),
-      (2, bob, "Budget review moved", vec![]),
-      (3, bob, "@alice the budget is final", vec![alice]),
-      (4, alice, "Lunch?", vec![]),
+    // A DM has no name of its own: it is named after the other person.
+    let direct = id::<ConversationId>(11);
+    let dm = ConversationResponse {
+      id: direct,
+      maybe_space_id: None,
+      kind: ConversationKind::Dm,
+      maybe_name: None,
+      participants: summaries,
+      ..conversation
+    };
+    records::put_json(&store, Table::Conversations, &direct.to_string(), &dm).unwrap();
+    for (conversation_id, client, sender, body, mentions) in [
+      (channel, 1u8, alice, "The budget draft is attached", vec![]),
+      (channel, 2, bob, "Budget review moved", vec![]),
+      (channel, 3, bob, "@alice the budget is final", vec![alice]),
+      (channel, 4, alice, "Lunch?", vec![]),
+      (
+        channel,
+        5,
+        alice,
+        "Quarter closed at 3000 units, not 2000",
+        vec![],
+      ),
+      (direct, 6, bob, "Order 3000 shipped", vec![]),
     ] {
       store
         .upsert_message(&StoredMessage {
-          conversation_id: channel,
+          conversation_id,
           client_message_id: ClientMessageId::from_bytes([client; 16]),
           maybe_server_id: Some(id::<MessageId>(100 + i64::from(client))),
           sender_user_id: sender,

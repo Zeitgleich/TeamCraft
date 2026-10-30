@@ -180,9 +180,12 @@ fn is_filter_key(key: &str) -> bool {
 
 fn classify_filter(key: &str, value: &str) -> TokenKind {
   let value = value.trim_matches('"');
-  let named = |value: &str| value.trim_start_matches(['@', '#']).to_owned();
+  // `in:"@Ada Lovelace"` and `in:@"Ada Lovelace"` both name the conversation "Ada Lovelace".
+  let named = |value: &str| value.trim_start_matches(['@', '#']).trim_matches('"').to_owned();
   match (key, value) {
     (_, "") => TokenKind::Invalid,
+    // `in:@` names nothing; as a filter it would match every conversation.
+    ("from" | "in", value) if named(value).is_empty() => TokenKind::Invalid,
     ("from", value) => TokenKind::Filter(Filter::From(named(value))),
     ("in", value) => TokenKind::Filter(Filter::In(named(value))),
     ("space", value) => TokenKind::Filter(Filter::InSpace(value.to_owned())),
@@ -406,6 +409,10 @@ pub struct SearchResults {
   pub hits: Vec<SearchHit>,
   /// Matches in total; `hits` is capped.
   pub total: usize,
+  /// The answer is still being worked out (the desktop and web cores answer asynchronously), so
+  /// "nothing found" must not be shown yet.
+  #[serde(default)]
+  pub is_pending: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -432,6 +439,62 @@ mod tests {
     assert!(filters.contains(&&Filter::HasFile));
     assert!(filters.contains(&&Filter::InThread));
     assert!(filters.contains(&&Filter::After(parse_date("2026-10-02").expect("date"))));
+  }
+
+  mod conversation_filter {
+    use super::*;
+
+    #[test]
+    fn a_direct_message_is_named_with_or_without_quotes() {
+      for raw in [
+        r#"in:"@Alice Example" 3000"#,
+        r#"in:@"Alice Example" 3000"#,
+        r#"3000 in:"Alice Example""#,
+      ] {
+        let query = parse_query(raw);
+        assert_eq!(query.terms(), ["3000"], "{raw}");
+        assert_eq!(query.filters(), [&Filter::In("Alice Example".into())], "{raw}");
+      }
+      let unquoted = parse_query("in:@alice 3000");
+      assert_eq!(unquoted.terms(), ["3000"]);
+      assert_eq!(unquoted.filters(), [&Filter::In("alice".into())]);
+    }
+
+    #[test]
+    fn a_channel_is_named_with_or_without_its_hash() {
+      for raw in [
+        "in:#dev budget review",
+        "budget in:dev review",
+        r##"in:"#dev" budget review"##,
+      ] {
+        let query = parse_query(raw);
+        assert_eq!(query.terms(), ["budget", "review"], "{raw}");
+        assert_eq!(query.filters(), [&Filter::In("dev".into())], "{raw}");
+      }
+      let spaced = parse_query(r##"in:"#team news" plan"##);
+      assert_eq!(spaced.filters(), [&Filter::In("team news".into())]);
+    }
+
+    #[test]
+    fn a_filter_alone_is_a_query() {
+      let query = parse_query(r#"in:"@Alice Example""#);
+      assert!(query.terms().is_empty());
+      assert!(!query.is_empty());
+    }
+
+    #[test]
+    fn empty_and_malformed_names_are_flagged() {
+      for raw in ["in:", "in:@", "in:\"\"", "in:@\"\"", "from:#"] {
+        let query = parse_query(raw);
+        assert_eq!(query.tokens[0].kind, TokenKind::Invalid, "{raw}");
+        assert!(query.is_empty(), "{raw}");
+      }
+      assert!(parse_query("").is_empty());
+      assert!(parse_query("   ").tokens.is_empty());
+      // An unclosed quote takes the rest of the line as the name, nothing is lost or panics.
+      let unclosed = parse_query(r#"in:"@Alice Example 3000"#);
+      assert_eq!(unclosed.filters(), [&Filter::In("Alice Example 3000".into())]);
+    }
   }
 
   #[test]

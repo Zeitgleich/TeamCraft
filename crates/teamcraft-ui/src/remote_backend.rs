@@ -1843,7 +1843,12 @@ impl SearchBackend for RemoteChat {
       .join(" ");
     match self.ask(ChatQuery::Search { query: raw }) {
       Some(ChatAnswer::SearchResults { results }) => results,
-      _ => SearchResults::default(),
+      // Asked; the UI reads again when the answer arrives.
+      None => SearchResults {
+        is_pending: true,
+        ..SearchResults::default()
+      },
+      Some(_) => SearchResults::default(),
     }
   }
 
