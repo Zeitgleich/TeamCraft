@@ -223,7 +223,8 @@ What it shows:
   720p included, saves about 0.7 ms on the encoders' layer scaling and the conversion.
 - Scaling adds no noticeable latency (about 1 ms at 4K). The latency is the encoders': OpenH264
   encodes the three layers in about 7 ms; VideoToolbox waits for each layer's picture in turn
-  (12 to 15 ms) while the CPU idles, as on Linux with VA-API above.
+  (12 to 15 ms) while the CPU idles, as on Linux with VA-API above. Since #990 the layers
+  encode at once.
 - Segmentation (3 ms) is the largest single cost of an effect, the GPU compositor itself is
   below 1 ms.
 - The hardware rows' CPU time varies by 1 to 2 ms between runs (GStreamer's and VideoToolbox's
@@ -478,7 +479,7 @@ pictures after the scroll stops (on a still screen the next picture once a secon
 keyframe with the one after). Encoding costs a little more while a layer is held (detail scroll: 0.85 ms
 CPU per frame against 0.6), and a rebuilt encoder answers each frame before the next (3.4 ms wall
 per frame against 0.4: the first encoder of a layer, whose first picture takes longer than the
-50 ms wait, then hands each picture out with the next frame).
+50 ms wait, then hands each picture out with the next frame; fixed in #990, below).
 
 Through the real SFU (`screen_layer_bitrate` in the SFU suite, release build with
 `--features teamcraft-media/gstreamer`; the viewer picks each layer and measures 4 s of it):
@@ -489,6 +490,50 @@ Through the real SFU (`screen_layer_bitrate` in the SFU suite, release build wit
 |       | 1440p |   6635 | 537 (8 %)         | 575 (9 %)        | –                      |
 | 720p  | 360p  |    500 | 6428 (1286 %)     | 314 (63 %)       | 480–585 (8 frames)     |
 |       | 720p  |   2000 | 269 (13 %)        | 259 (13 %)       | 334–351                |
+
+### Each picture with its own frame (issue #990)
+
+The first VideoToolbox session of a process takes 55 to 71 ms for its first picture (a 1440p or
+4K screen layer, a 720p camera; later sessions 12 to 35 ms), longer than the 50 ms the encoder
+waited. That picture then came out with the next frame, and every picture after it too, for as
+long as the encoder lived: a camera's pictures a frame late, a still screen's latest change until
+the next picture pushed it out, up to a second later. Measured per frame by reading the frame
+counter of `test_pattern` from the decoded pictures (`every_hardware_picture_shows_its_own_frame`
+in `video_gstreamer.rs` fails on the old code when it runs alone, so that its camera is the
+process's first session):
+
+| Encoder (first of the process)  | Before: frame shown for frames 0, 1, 2, … | After          |
+|---------------------------------|-------------------------------------------|----------------|
+| 1440p screen layer, 30 fps      | –, 0, 1, 2, … (first wait 60 ms)          | 0, 1, 2, … (55 ms) |
+| 1440p screen layer, once a second | –, 0, 1, 2, … (each change a second late) | 0, 1, 2, …    |
+| 720p camera, 30 fps             | –, 0, 1, 2, … (first wait 62 ms)          | 0, 1, 2, … (71 ms) |
+| Later encoders, rebuilt ones    | 0, 1, 2, …                                | 0, 1, 2, …     |
+
+Now a pipeline's first picture may take 500 ms; a later one that misses its 50 ms is dropped when
+it comes, and the next frame is a keyframe (the pictures after it would refer to the dropped one).
+Waiting for each picture made the layers' times add up, which the late encoder had hidden: a
+simulcast frame now hands every layer its frame first and then takes their pictures, so the
+layers encode at once. `screen_bench`, 8 s per row, before and after, with the process's first
+VideoToolbox session the share's ("cold") and with one started before it ("warm", a camera on):
+
+| Profile, scene                | Before cold      | Before warm       | After cold       | After warm       |
+|-------------------------------|------------------|-------------------|------------------|------------------|
+| detail (1440p30), scroll      | 5.4 ms, 30.0 fps | 24.4 ms, 29.9 fps | 17.0 ms, 29.9 fps | 9.4 ms, 30.0 fps |
+| detail, still                 | 6.0 ms, 30.0 fps | 24.1 ms, 29.9 fps | 17.6 ms, 29.9 fps | 9.5 ms, 30.0 fps |
+| motion (1080p60), scroll      | 3.9 ms, 60.0 fps | 14.3 ms, 54.4 fps | 8.9 ms, 59.9 fps | 5.6 ms, 59.9 fps |
+| motion, still                 | 4.3 ms, 60.0 fps | 13.2 ms, 59.2 fps | 10.7 ms, 59.9 fps | 5.7 ms, 59.9 fps |
+| 4K detail (4K30), scroll      | 12.7 ms, 30.0 fps | 8.0 ms, 30.0 fps | 29.5 ms, 24.9 fps | 24.6 ms, 28.8 fps |
+| 4K detail, still              | 16.4 ms, 30.0 fps | 44.1 ms, 17.8 fps | 28.3 ms, 24.7 fps | 29.1 ms, 25.7 fps |
+| detail, `--frames changes`    | 7.9 ms, 9.1 fps  | 25.3 ms, 9.1 fps  | 15.1 ms, 9.1 fps | 19.3 ms, 9.1 fps |
+| 4K detail, `--frames changes` | 9.2 ms, 9.1 fps  | 17.7 ms, 9.1 fps  | 31.2 ms, 9.1 fps | 20.2 ms, 9.1 fps |
+
+The time is the wall time of a frame's encoding; the CPU time per frame stays as it was (0.9 to
+2.3 ms, 2.5 to 5.4 ms with `--frames changes`). Before, the frame rate depended on whether a
+layer's first picture had missed its wait (the cold 4K rows, and the warm 4K scroll, whose 4K
+layer is rebuilt and missed it then). VideoToolbox takes 20 to 41 ms for a 4K picture, more than a
+frame at 30 fps, so a 4K share whose every frame changes now reaches 25 to 29 fps: keeping 30 would
+need two frames in the encoder at once, with each picture sent when it comes out rather than with
+the next frame.
 
 ## Clients
 

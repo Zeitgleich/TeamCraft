@@ -47,6 +47,22 @@ pub trait VideoEncoder {
     frame: &VideoFrame,
     is_keyframe_forced: bool,
   ) -> Result<Option<EncodedPicture>, VideoCodecError>;
+
+  /// Hands `frame` to an encoder that works on its own (hardware), so that the layers of a frame
+  /// encode at once: one after the other they took the sum of their times, 38 ms for a 4K share at
+  /// 30 fps (#990). [`Self::finish`] with the same frame gives its picture. Others encode there.
+  fn start(&mut self, _frame: &VideoFrame, _is_keyframe_forced: bool) -> Result<(), VideoCodecError> {
+    Ok(())
+  }
+
+  /// The picture of `frame`, after [`Self::start`] with it, as [`Self::encode`] gives it.
+  fn finish(
+    &mut self,
+    frame: &VideoFrame,
+    is_keyframe_forced: bool,
+  ) -> Result<Option<EncodedPicture>, VideoCodecError> {
+    self.encode(frame, is_keyframe_forced)
+  }
 }
 
 /// Decodes one stream.
@@ -99,6 +115,8 @@ pub struct FallbackEncoder {
   layer: VideoLayerInfo,
   content: VideoContent,
   stall: StallWatch,
+  /// The hardware encoder was just given up: software's first picture is a keyframe.
+  is_switching: bool,
 }
 
 /// Builds the software encoder a [`FallbackEncoder`] switches to (OpenH264; a fake in tests).
@@ -269,6 +287,7 @@ impl FallbackEncoder {
       layer: *layer,
       content,
       stall: StallWatch::default(),
+      is_switching: false,
     }
   }
 
@@ -277,14 +296,15 @@ impl FallbackEncoder {
     self.maybe_hardware.is_some()
   }
 
-  /// What the hardware made of `frame`; [`HardwareAnswer::Gone`] once it failed or stalled (it
-  /// is then dropped, and software takes over).
+  /// What the hardware made of `frame` (handed to it with [`VideoEncoder::start`] or not);
+  /// [`HardwareAnswer::Gone`] once it failed or stalled (it is then dropped, and software takes
+  /// over).
   fn encode_in_hardware(&mut self, frame: &VideoFrame, is_keyframe_forced: bool) -> HardwareAnswer {
     let Some(hardware) = self.maybe_hardware.as_mut() else {
       return HardwareAnswer::Gone;
     };
     let layer = (self.layer.width, self.layer.height);
-    match hardware.encode(frame, is_keyframe_forced) {
+    match hardware.finish(frame, is_keyframe_forced) {
       Ok(Some(picture)) => {
         self.stall = StallWatch::default();
         HardwareAnswer::Encoded(Some(picture))
@@ -299,18 +319,23 @@ impl FallbackEncoder {
         self.give_up_hardware("it gave no pictures".into())
       },
       Ok(None) => HardwareAnswer::Encoded(None),
-      Err(error) => {
-        let encoder = self.hardware_name;
-        warn!(%error, encoder, ?layer, "hardware encoder failed; continuing in software");
-        self.give_up_hardware(error.to_string())
-      },
+      Err(error) => self.hardware_failed(&error),
     }
   }
 
-  /// Drops the hardware encoder, which failed for `reason`; software takes over.
+  fn hardware_failed(&mut self, error: &VideoCodecError) -> HardwareAnswer {
+    let encoder = self.hardware_name;
+    let layer = (self.layer.width, self.layer.height);
+    warn!(%error, encoder, ?layer, "hardware encoder failed; continuing in software");
+    self.give_up_hardware(error.to_string())
+  }
+
+  /// Drops the hardware encoder, which failed for `reason`; software takes over, starting with a
+  /// keyframe.
   fn give_up_hardware(&mut self, reason: String) -> HardwareAnswer {
     self.maybe_hardware = None;
     self.maybe_hardware_failure = Some(reason);
+    self.is_switching = true;
     HardwareAnswer::Gone
   }
 
@@ -344,17 +369,34 @@ impl VideoEncoder for FallbackEncoder {
     frame: &VideoFrame,
     is_keyframe_forced: bool,
   ) -> Result<Option<EncodedPicture>, VideoCodecError> {
-    let was_hardware = self.is_hardware();
+    self.start(frame, is_keyframe_forced)?;
+    self.finish(frame, is_keyframe_forced)
+  }
+
+  fn start(&mut self, frame: &VideoFrame, is_keyframe_forced: bool) -> Result<(), VideoCodecError> {
+    if let Some(hardware) = self.maybe_hardware.as_mut()
+      && let Err(error) = hardware.start(frame, is_keyframe_forced)
+    {
+      self.hardware_failed(&error);
+    }
+    Ok(())
+  }
+
+  fn finish(
+    &mut self,
+    frame: &VideoFrame,
+    is_keyframe_forced: bool,
+  ) -> Result<Option<EncodedPicture>, VideoCodecError> {
     if let HardwareAnswer::Encoded(maybe_picture) = self.encode_in_hardware(frame, is_keyframe_forced) {
       return Ok(maybe_picture);
     }
-    let is_switching = was_hardware;
     let software = match self.maybe_software.take() {
       Some(software) => software,
       None => {
         (self.make_software)(&self.layer, self.content).map_err(|error| self.without_software(&error))?
       },
     };
+    let is_switching = std::mem::take(&mut self.is_switching);
     let software = self.maybe_software.insert(software);
     software.encode(frame, is_keyframe_forced || is_switching)
   }
@@ -513,34 +555,37 @@ impl SimulcastEncoder {
 
   /// Encodes `frame` for every needed layer, lowest layer first. A layer half the size of a
   /// larger one is shrunk from that one's picture (2x2 averages): a 1080p camera's 360p layer
-  /// from its 720p one rather than by three from 1080p, which is sharper and cheaper (#967).
+  /// from its 720p one rather than by three from 1080p, which is sharper and cheaper (#967). Every
+  /// layer gets its frame before the first picture is taken, so hardware encoders work on them at
+  /// once (#990).
   pub fn encode(&mut self, frame: &VideoFrame) -> Result<Vec<EncodedVideoFrame>, VideoCodecError> {
     let timestamp = EncodedVideoFrame::rtp_timestamp(frame.timestamp_us());
     let mut encoded = Vec::new();
-    // The pictures scaled so far, largest first: each needed layer, from the top down.
-    let mut scaled: Vec<VideoFrame> = Vec::new();
-    for layer in self.layers.iter_mut().rev().filter(|layer| layer.is_needed) {
-      let size = VideoResolution {
-        width: layer.info.width,
-        height: layer.info.height,
-      };
-      let source = scaled
-        .iter()
-        .find(|picture| {
-          let larger = picture.resolution();
-          larger.width == size.width * 2 && larger.height == size.height * 2
-        })
-        .unwrap_or(frame);
-      let maybe_shrunk = if source.resolution() == size {
-        None
-      } else {
-        Some(source.scaled(size)?)
-      };
-      let wants_keyframe = std::mem::take(&mut layer.wants_keyframe);
-      let maybe_picture = layer
+    let mut started = Vec::new();
+    let maybe_failure = self.start_layers(frame, &mut started).err();
+    let mut layers_left = started.into_iter();
+    if let Some(error) = maybe_failure {
+      self.ask_keyframes_again(layers_left);
+      return Err(error);
+    }
+    while let Some(StartedLayer {
+      index,
+      maybe_shrunk,
+      wants_keyframe,
+    }) = layers_left.next()
+    {
+      let layer = &mut self.layers[index];
+      let maybe_picture = match layer
         .encoder
-        .encode(maybe_shrunk.as_ref().unwrap_or(source), wants_keyframe)?;
-      scaled.extend(maybe_shrunk);
+        .finish(maybe_shrunk.as_ref().unwrap_or(frame), wants_keyframe)
+      {
+        Ok(maybe_picture) => maybe_picture,
+        Err(error) => {
+          layer.wants_keyframe = wants_keyframe;
+          self.ask_keyframes_again(layers_left);
+          return Err(error);
+        },
+      };
       let Some(picture) = maybe_picture else {
         // A dropped frame doesn't satisfy a keyframe request: the next frame asks again.
         layer.wants_keyframe = wants_keyframe;
@@ -558,6 +603,64 @@ impl SimulcastEncoder {
     encoded.reverse();
     Ok(encoded)
   }
+
+  /// Hands `frame` to each needed layer's encoder, from the top down, into `started`. A layer
+  /// half the size of a larger one is shrunk from that one's picture.
+  fn start_layers(
+    &mut self,
+    frame: &VideoFrame,
+    started: &mut Vec<StartedLayer>,
+  ) -> Result<(), VideoCodecError> {
+    for (index, layer) in self.layers.iter_mut().enumerate().rev() {
+      if !layer.is_needed {
+        continue;
+      }
+      let size = VideoResolution {
+        width: layer.info.width,
+        height: layer.info.height,
+      };
+      let source = started
+        .iter()
+        .filter_map(|layer| layer.maybe_shrunk.as_ref())
+        .find(|picture| {
+          let larger = picture.resolution();
+          larger.width == size.width * 2 && larger.height == size.height * 2
+        })
+        .unwrap_or(frame);
+      let maybe_shrunk = if source.resolution() == size {
+        None
+      } else {
+        Some(source.scaled(size)?)
+      };
+      let wants_keyframe = layer.wants_keyframe;
+      layer
+        .encoder
+        .start(maybe_shrunk.as_ref().unwrap_or(source), wants_keyframe)?;
+      layer.wants_keyframe = false;
+      started.push(StartedLayer {
+        index,
+        maybe_shrunk,
+        wants_keyframe,
+      });
+    }
+    Ok(())
+  }
+
+  /// The layers of `unfinished` gave no picture: their keyframe requests stand.
+  fn ask_keyframes_again(&mut self, unfinished: impl Iterator<Item = StartedLayer>) {
+    for layer in unfinished {
+      self.layers[layer.index].wants_keyframe |= layer.wants_keyframe;
+    }
+  }
+}
+
+/// A layer handed its frame ([`VideoEncoder::start`]) whose picture is still to be taken.
+struct StartedLayer {
+  /// Its place in [`SimulcastEncoder`]'s layers.
+  index: usize,
+  /// Its picture, where the frame is shrunk for it.
+  maybe_shrunk: Option<VideoFrame>,
+  wants_keyframe: bool,
 }
 
 /// [`VideoFrame`] as OpenH264's input (contiguous I420, no padding).
@@ -824,6 +927,94 @@ mod tests {
     assert_eq!(alone, vec![(1, frame.scaled(small).unwrap())]);
   }
 
+  /// #990: every layer gets its frame before the first picture is taken (hardware encoders then
+  /// work on them at once rather than one after the other), and takes back the same frame; a
+  /// layer that gives nothing keeps its keyframe request.
+  #[test]
+  fn simulcast_hands_every_layer_its_frame_before_taking_pictures() {
+    let layers = simulcast_layers(HD, 30, 2_000_000, 3);
+    let log: StageLog = Arc::default();
+    let mut simulcast = SimulcastEncoder::new(&layers, |info| {
+      Ok(Box::new(Staged {
+        layer: info.layer,
+        log: Arc::clone(&log),
+      }) as Box<dyn VideoEncoder>)
+    })
+    .unwrap();
+    let encoded = simulcast.encode(&test_pattern(HD, 0)).unwrap();
+    // Layer 1 gave no picture (`Staged`).
+    assert_eq!(layers_of(&encoded), vec![0, 2]);
+    let log = std::mem::take(&mut *log.lock().unwrap());
+    let steps: Vec<_> = log.iter().map(|(step, layer, _)| (*step, *layer)).collect();
+    assert_eq!(
+      steps,
+      vec![
+        ("start", 2),
+        ("start", 1),
+        ("start", 0),
+        ("finish", 2),
+        ("finish", 1),
+        ("finish", 0)
+      ]
+    );
+    for (_, layer, size) in &log {
+      assert_eq!(*size, sizes_of(&layers)[usize::from(*layer)], "layer {layer}");
+    }
+    assert!(simulcast.wants_keyframe(), "layer 1 still waits for its keyframe");
+  }
+
+  /// Logs `start` and `finish` with the size of the frame; layer 1 gives no picture.
+  struct Staged {
+    layer: u8,
+    log: StageLog,
+  }
+
+  /// `start` or `finish`, the layer, the size of its frame.
+  type StageLog = Arc<Mutex<Vec<(&'static str, u8, VideoResolution)>>>;
+
+  impl VideoEncoder for Staged {
+    fn codec(&self) -> VideoCodec {
+      VideoCodec::H264
+    }
+
+    fn name(&self) -> &'static str {
+      "staged"
+    }
+
+    fn encode(
+      &mut self,
+      _frame: &VideoFrame,
+      _is_keyframe_forced: bool,
+    ) -> Result<Option<EncodedPicture>, VideoCodecError> {
+      unreachable!("a simulcast frame starts and finishes")
+    }
+
+    fn start(&mut self, frame: &VideoFrame, _is_keyframe_forced: bool) -> Result<(), VideoCodecError> {
+      self
+        .log
+        .lock()
+        .unwrap()
+        .push(("start", self.layer, frame.resolution()));
+      Ok(())
+    }
+
+    fn finish(
+      &mut self,
+      frame: &VideoFrame,
+      is_keyframe_forced: bool,
+    ) -> Result<Option<EncodedPicture>, VideoCodecError> {
+      self
+        .log
+        .lock()
+        .unwrap()
+        .push(("finish", self.layer, frame.resolution()));
+      Ok((self.layer != 1).then(|| EncodedPicture {
+        is_keyframe: is_keyframe_forced,
+        data: vec![0, 0, 0, 1, 0x65],
+      }))
+    }
+  }
+
   /// Records the frames it is given.
   struct Seeing {
     layer: u8,
@@ -1013,6 +1204,18 @@ mod tests {
       assert_eq!(encoder.name(), "fake software");
     }
 
+    /// #990: hardware that fails as it is handed a frame (`VideoEncoder::start`, as a simulcast
+    /// frame does) hands over as well; the frame is encoded in software, as a keyframe.
+    #[test]
+    fn hardware_failing_to_take_a_frame_hands_over() {
+      let (mut encoder, software_log) = fallback_encoder(FakeEncoder::FailsToStart);
+      encoder.start(&frame(0), false).unwrap();
+      assert!(!encoder.is_hardware());
+      assert!(encoder.finish(&frame(0), false).unwrap().is_some());
+      assert!(encoder.encode(&frame(1), false).unwrap().is_some());
+      assert_eq!(*software_log.lock().unwrap(), vec![true, false]);
+    }
+
     /// Issue #935: when software can't take over either, the error names both encoders and why
     /// each one failed.
     #[test]
@@ -1105,6 +1308,8 @@ mod tests {
       EveryOther(u32),
       /// No picture for this many frames, then one per frame.
       StartsAfter(u32),
+      /// Fails as it is handed a frame.
+      FailsToStart,
     }
 
     impl VideoEncoder for FakeEncoder {
@@ -1127,7 +1332,7 @@ mod tests {
         });
         match self {
           Self::Stalled => Ok(None),
-          Self::Failing => Err(VideoCodecError::Codec("device lost".into())),
+          Self::Failing | Self::FailsToStart => Err(VideoCodecError::Codec("device lost".into())),
           Self::EveryOther(count) => {
             *count += 1;
             Ok(if *count % 2 == 0 { picture } else { None })
@@ -1139,6 +1344,13 @@ mod tests {
             *remaining -= 1;
             Ok(None)
           },
+        }
+      }
+
+      fn start(&mut self, _frame: &VideoFrame, _is_keyframe_forced: bool) -> Result<(), VideoCodecError> {
+        match self {
+          Self::FailsToStart => Err(VideoCodecError::Codec("device lost".into())),
+          _ => Ok(()),
         }
       }
     }

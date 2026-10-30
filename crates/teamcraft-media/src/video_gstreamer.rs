@@ -6,9 +6,10 @@
 //! pipeline per layer: `appsrc` (NV12 frames) → hardware encoder → Baseline caps (in the profile
 //! name the element accepts, [`HardwareElement::profile`]) → `h264parse` (SPS/PPS before every
 //! keyframe, and Annex B from encoders that only give AVC, like VideoToolbox) → `appsink` (Annex B
-//! access units). Encoders that can't be built (no plugin, no
-//! GPU, unsupported size) return `None`, and [`FallbackEncoder`] switches to OpenH264 if one fails
-//! or stops giving pictures later.
+//! access units). Each picture is the one of the frame just pushed, told by its timestamp: one
+//! that comes too late is dropped rather than handed out with a later frame (#990). Encoders that
+//! can't be built (no plugin, no GPU, unsupported size) return `None`, and [`FallbackEncoder`]
+//! switches to OpenH264 if one fails or stops giving pictures later.
 //!
 //! [`FallbackEncoder`]: crate::video_codec::FallbackEncoder
 
@@ -25,8 +26,13 @@ use crate::video_codec::{EncodedPicture, VideoCodecError, VideoContent, VideoEnc
 
 /// Keyframe distance in frames, like OpenH264's.
 const KEYFRAME_INTERVAL_FRAMES: u32 = 300;
-/// How long one frame may take through the encoder before it counts as dropped.
+/// How long one frame may take through the encoder before it counts as dropped: its picture, if
+/// it comes later, is dropped too (#990).
 const PULL_TIMEOUT_MS: u64 = 50;
+/// How long a pipeline's first picture may take: the first VideoToolbox session of a process
+/// gives it after 55 to 115 ms (a 1440p or 4K screen layer, a 720p camera; #990), later sessions
+/// within 35 ms.
+const FIRST_PULL_TIMEOUT_MS: u64 = 500;
 
 /// A hardware H.264 encoder for one layer.
 pub struct GstreamerEncoder {
@@ -40,6 +46,12 @@ pub struct GstreamerEncoder {
   slice_height: usize,
   element: &'static str,
   has_delivered: bool,
+  /// Whether this pipeline gave a picture yet: until then it may take [`FIRST_PULL_TIMEOUT_MS`].
+  has_answered: bool,
+  /// The next frame becomes a keyframe: a picture was dropped that later ones would refer to.
+  wants_keyframe: bool,
+  /// The timestamp of the frame [`VideoEncoder::start`] pushed, until its picture is taken.
+  maybe_started_us: Option<u64>,
   /// What holds a screen layer at its bitrate, for elements that need it
   /// ([`HardwareElement::is_screen_quality_governed`]).
   maybe_governed: Option<Governed>,
@@ -103,17 +115,22 @@ impl GstreamerEncoder {
     None
   }
 
-  /// Notes the picture of `frame` for the [`QualityGovernor`], if the layer has one, and rebuilds
-  /// the encoder at the quality it asks for: the next picture is a keyframe. Where that fails the
-  /// layer keeps its encoder and quality, ungoverned.
-  fn govern(&mut self, frame: &VideoFrame, bytes: usize, is_keyframe: bool) {
+  /// Notes the picture of the frame of `timestamp_us` for the [`QualityGovernor`], if the layer
+  /// has one, and rebuilds the encoder at the quality it asks for: the next picture is a keyframe.
+  /// Where that fails the layer keeps its encoder and quality, ungoverned.
+  fn govern(&mut self, timestamp_us: u64, bytes: usize, is_keyframe: bool) {
     let Some(governed) = &mut self.maybe_governed else {
       return;
     };
-    let Some(quality) = governed
-      .governor
-      .note_picture(frame.timestamp_us(), bytes, is_keyframe)
-    else {
+    let Some(quality) = governed.governor.note_picture(timestamp_us, bytes, is_keyframe) else {
+      return;
+    };
+    self.rebuild_at(quality);
+  }
+
+  /// Rebuilds a governed screen layer's encoder at `quality`.
+  fn rebuild_at(&mut self, quality: f64) {
+    let Some(governed) = &self.maybe_governed else {
       return;
     };
     let layer = governed.layer;
@@ -192,8 +209,62 @@ impl GstreamerEncoder {
       slice_height,
       element,
       has_delivered: false,
+      has_answered: false,
+      wants_keyframe: false,
+      maybe_started_us: None,
       maybe_governed: None,
     })
+  }
+
+  /// Drops the pictures waiting in the sink: they come from frames whose wait ran out, and sent
+  /// now each would show a frame late, and every picture after it as well (#990). Whether there
+  /// were any: the next picture must then be a keyframe, as the ones after them refer to them.
+  fn drop_late_pictures(&self) -> bool {
+    let mut has_dropped = false;
+    while let Some(sample) = self.sink.try_pull_sample(gst::ClockTime::ZERO) {
+      debug!(
+        element = self.element,
+        timestamp_us = ?sample_timestamp_us(&sample),
+        "dropping a picture that came too late"
+      );
+      has_dropped = true;
+    }
+    has_dropped
+  }
+
+  /// The picture of the frame of `timestamp_us`, just pushed, with any late ones before it
+  /// (dropped), or `None` when it doesn't come within its wait. Where a late picture came, a
+  /// picture that isn't a keyframe refers to it and is dropped as well, and the next frame becomes
+  /// a keyframe.
+  fn pull_picture(&mut self, timestamp_us: u64) -> Option<gst::Sample> {
+    let timeout_ms = if self.has_answered {
+      PULL_TIMEOUT_MS
+    } else {
+      FIRST_PULL_TIMEOUT_MS
+    };
+    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(timeout_ms);
+    let mut has_late = false;
+    loop {
+      let left = deadline.saturating_duration_since(std::time::Instant::now());
+      let left = gst::ClockTime::from_nseconds(u64::try_from(left.as_nanos()).unwrap_or(u64::MAX));
+      let sample = self.sink.try_pull_sample(left)?;
+      // A picture without a timestamp counts as the frame's, as every picture did before #990.
+      let is_late = sample_timestamp_us(&sample).is_some_and(|picture_us| picture_us < timestamp_us);
+      if is_late {
+        debug!(element = self.element, "dropping a picture that came too late");
+        has_late = true;
+        continue;
+      }
+      self.has_answered = true;
+      let is_keyframe = sample
+        .buffer()
+        .is_some_and(|buffer| !buffer.flags().contains(gst::BufferFlags::DELTA_UNIT));
+      if has_late && !is_keyframe {
+        self.wants_keyframe = true;
+        return None;
+      }
+      return Some(sample);
+    }
   }
 
   /// The pipeline's first error message (with the element's debug detail), if it reported one.
@@ -226,7 +297,15 @@ impl VideoEncoder for GstreamerEncoder {
     frame: &VideoFrame,
     is_keyframe_forced: bool,
   ) -> Result<Option<EncodedPicture>, VideoCodecError> {
+    self.start(frame, is_keyframe_forced)?;
+    self.finish(frame, is_keyframe_forced)
+  }
+
+  /// Pushes `frame` into the pipeline: the encoder works on it while the other layers get theirs.
+  fn start(&mut self, frame: &VideoFrame, is_keyframe_forced: bool) -> Result<(), VideoCodecError> {
     let frame = frame.at_size(self.resolution)?;
+    let has_dropped = self.drop_late_pictures();
+    let is_keyframe_forced = is_keyframe_forced || has_dropped || std::mem::take(&mut self.wants_keyframe);
     if is_keyframe_forced {
       let event = gstreamer_video::DownstreamForceKeyUnitEvent::builder()
         .all_headers(true)
@@ -241,10 +320,22 @@ impl VideoEncoder for GstreamerEncoder {
       let reason = self.bus_error().unwrap_or_else(|| format!("{flow:?}"));
       return Err(VideoCodecError::Codec(format!("GStreamer: {reason}")));
     }
-    let Some(sample) = self
-      .sink
-      .try_pull_sample(gst::ClockTime::from_mseconds(PULL_TIMEOUT_MS))
-    else {
+    self.maybe_started_us = Some(frame.timestamp_us());
+    Ok(())
+  }
+
+  /// Waits for the picture of the frame [`Self::start`] pushed (pushes `frame` first if it
+  /// didn't).
+  fn finish(
+    &mut self,
+    frame: &VideoFrame,
+    is_keyframe_forced: bool,
+  ) -> Result<Option<EncodedPicture>, VideoCodecError> {
+    if self.maybe_started_us.is_none() {
+      self.start(frame, is_keyframe_forced)?;
+    }
+    let timestamp_us = self.maybe_started_us.take().unwrap_or(frame.timestamp_us());
+    let Some(sample) = self.pull_picture(timestamp_us) else {
       if let Some(error) = self.bus_error() {
         return Err(VideoCodecError::Codec(format!("GStreamer: {error}")));
       }
@@ -268,7 +359,7 @@ impl VideoEncoder for GstreamerEncoder {
       .map_err(gstreamer_error)?
       .as_slice()
       .to_vec();
-    self.govern(&frame, data.len(), is_keyframe);
+    self.govern(timestamp_us, data.len(), is_keyframe);
     Ok(Some(EncodedPicture { is_keyframe, data }))
   }
 }
@@ -542,6 +633,15 @@ fn nv12_layout(info: &gstreamer_video::VideoInfo) -> Result<(usize, usize), Vide
   Ok((stride, chroma_offset / stride))
 }
 
+/// The timestamp (µs) of the frame `sample` is the picture of, as pushed into the pipeline: the
+/// encoder moves its pictures 1000 hours on (`GstVideoEncoder`, for decoding times before 0) and
+/// says so in the segment.
+fn sample_timestamp_us(sample: &gst::Sample) -> Option<u64> {
+  let pts = sample.buffer()?.pts()?;
+  let segment = sample.segment()?.downcast_ref::<gst::ClockTime>()?;
+  Some(segment.to_running_time(pts)?.useconds())
+}
+
 fn gstreamer_error(error: impl std::fmt::Debug) -> VideoCodecError {
   VideoCodecError::Codec(format!("GStreamer: {error:?}"))
 }
@@ -622,6 +722,183 @@ mod tests {
       "decoded {decoded} of {}",
       pictures.len()
     );
+  }
+
+  /// The frame counter of a [`test_pattern`] picture (8 bits in blocks along its top rows).
+  fn frame_counter(frame: &VideoFrame) -> u64 {
+    let size = frame.resolution();
+    let (width, height) = (usize::from(size.width), usize::from(size.height));
+    let row = height / 32;
+    (0..8)
+      .filter(|bit| frame.planes().0[row * width + (2 * bit + 1) * width / 16] > 128)
+      .map(|bit| 1 << bit)
+      .sum()
+  }
+
+  /// #990: every picture shows the frame it was encoded for, in a camera layer, a screen layer
+  /// at 30 fps and once a second (a still screen sends its changes only), and in a screen layer
+  /// its [`QualityGovernor`] rebuilt. A picture that missed its wait came out with the next frame
+  /// instead, and every one after it too: a still screen's change up to a second late. Only the
+  /// process's first VideoToolbox session was that slow: run alone, the camera here is it.
+  /// Hardware only, like above.
+  #[test]
+  #[cfg_attr(
+    not(feature = "openh264-source"),
+    ignore = "decodes with OpenH264: --features openh264-source"
+  )]
+  fn every_hardware_picture_shows_its_own_frame() {
+    let screen = VideoResolution {
+      width: 2560,
+      height: 1440,
+    };
+    let screen_layer = *screen_layers(
+      screen,
+      30,
+      ScreenContentMode::Detail,
+      &ScreenShareResolution::Standard,
+    )
+    .last()
+    .unwrap();
+    let camera_layer = simulcast_layers(HD, 30, 1_500_000, 1)[0];
+    let cases = [
+      (camera_layer, VideoContent::Camera, 33_333u64),
+      (screen_layer, VideoContent::Screen, 33_333),
+      (screen_layer, VideoContent::Screen, 1_000_000),
+    ];
+    for (layer, content, interval_us) in cases {
+      let Some(mut encoder) = GstreamerEncoder::new(&layer, content) else {
+        assert!(
+          std::env::var_os("TEAMCRAFT_REQUIRE_HARDWARE_ENCODER").is_none(),
+          "no hardware encoder"
+        );
+        return;
+      };
+      let size = VideoResolution {
+        width: layer.width,
+        height: layer.height,
+      };
+      let mut decoder = OpenH264Decoder::new().unwrap();
+      let mut shown = Vec::new();
+      for index in 0..24u64 {
+        if index == 12 && encoder.maybe_governed.is_some() {
+          // A new quality, as for scrolled text: the encoder is rebuilt.
+          encoder.rebuild_at(SCREEN_QUALITY / 2.0);
+          assert!(!encoder.has_answered, "rebuilt");
+        }
+        let frame = test_pattern(size, index, index * interval_us).unwrap();
+        if let Some(picture) = encoder.encode(&frame, index == 0).unwrap()
+          && let Some(decoded) = decoder.decode(&picture.data, frame.timestamp_us()).unwrap()
+        {
+          shown.push((index, frame_counter(&decoded)));
+        }
+      }
+      let late: Vec<_> = shown.iter().filter(|(index, counter)| index != counter).collect();
+      assert!(
+        late.is_empty(),
+        "{content:?} {}x{} every {interval_us} µs: (frame, shown) {late:?}",
+        layer.width,
+        layer.height
+      );
+      assert!(shown.len() >= 20, "only {} of 24 pictures", shown.len());
+    }
+  }
+
+  /// An encoder pipeline that holds each frame for `sleep-time` µs (`identity`) and passes it on
+  /// as its picture: a slow encoder, in every GStreamer.
+  fn slow_pipeline(sleep_us: u32) -> GstreamerEncoder {
+    gst::init().unwrap();
+    let layer = simulcast_layers(HD, 30, 1_500_000, 1)[0];
+    let description = format!(
+      "appsrc name=source is-live=true format=time ! identity name=slow sleep-time={sleep_us} ! \
+       appsink name=sink sync=false"
+    );
+    GstreamerEncoder::build(&description, "identity", &layer, VideoContent::Camera).unwrap()
+  }
+
+  fn set_sleep(encoder: &GstreamerEncoder, sleep_us: u32) {
+    let slow = encoder.pipeline.by_name("slow").unwrap();
+    slow.set_property("sleep-time", sleep_us);
+  }
+
+  /// The frame counter of a picture `slow_pipeline` passed on (the frame's NV12 bytes).
+  fn passed_counter(picture: &EncodedPicture) -> u64 {
+    let frame = VideoFrame::new(HD, 0, picture.data.clone()).unwrap();
+    frame_counter(&frame)
+  }
+
+  /// #990: a pipeline's first picture may take longer than the others (VideoToolbox starts its
+  /// first session in a process in up to 110 ms): it is waited for, not handed out with the next
+  /// frame, after which every picture came a frame late.
+  #[test]
+  fn a_slow_first_picture_is_waited_for() {
+    let mut encoder = slow_pipeline(150_000);
+    let first = test_pattern(HD, 0, 0).unwrap();
+    let picture = encoder.encode(&first, true).unwrap().expect("the first picture");
+    assert_eq!(passed_counter(&picture), 0);
+    set_sleep(&encoder, 0);
+    for index in 1..6u64 {
+      let frame = test_pattern(HD, index, index * 33_333).unwrap();
+      let picture = encoder.encode(&frame, false).unwrap().expect("a picture");
+      assert_eq!(passed_counter(&picture), index, "the picture of frame {index}");
+    }
+  }
+
+  /// #990: a picture that misses its wait is dropped when it comes, not handed out with the next
+  /// frame (which would leave every picture after it a frame late), and that frame is a keyframe:
+  /// the pictures after the dropped one would refer to it.
+  #[test]
+  fn a_late_picture_is_dropped_and_the_next_frame_is_a_keyframe() {
+    let mut encoder = slow_pipeline(0);
+    let keyframe_requests = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0));
+    let requests = keyframe_requests.clone();
+    let sink_pad = encoder.sink.static_pad("sink").unwrap();
+    sink_pad.add_probe(gst::PadProbeType::EVENT_DOWNSTREAM, move |_, info| {
+      if let Some(gst::PadProbeData::Event(event)) = &info.data
+        && gstreamer_video::DownstreamForceKeyUnitEvent::parse(event).is_ok()
+      {
+        requests.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+      }
+      gst::PadProbeReturn::Ok
+    });
+    let frame = |index: u64| test_pattern(HD, index, index * 33_333).unwrap();
+    let picture = encoder.encode(&frame(0), false).unwrap().expect("a picture");
+    assert_eq!(passed_counter(&picture), 0);
+    // Frame 1 takes three times its wait.
+    set_sleep(&encoder, 150_000);
+    assert!(
+      encoder.encode(&frame(1), false).unwrap().is_none(),
+      "frame 1 is late"
+    );
+    set_sleep(&encoder, 0);
+    std::thread::sleep(std::time::Duration::from_millis(200));
+    for index in 2..6u64 {
+      let picture = encoder.encode(&frame(index), false).unwrap().expect("a picture");
+      assert_eq!(passed_counter(&picture), index, "the picture of frame {index}");
+    }
+    assert_eq!(
+      keyframe_requests.load(std::sync::atomic::Ordering::SeqCst),
+      1,
+      "frame 2 is a keyframe"
+    );
+  }
+
+  #[test]
+  fn a_picture_names_its_frame_through_the_encoders_segment() {
+    gst::init().unwrap();
+    // As VideoToolbox gives them: 1000 hours on, said so by the segment's start.
+    let offset = gst::ClockTime::from_seconds(1000 * 3600);
+    let mut segment = gst::FormattedSegment::<gst::ClockTime>::new();
+    segment.set_start(offset);
+    segment.set_position(offset);
+    let mut buffer = gst::Buffer::new();
+    buffer
+      .get_mut()
+      .unwrap()
+      .set_pts(offset + gst::ClockTime::from_useconds(1_033_333));
+    let sample = gst::Sample::builder().buffer(&buffer).segment(&segment).build();
+    assert_eq!(sample_timestamp_us(&sample), Some(1_033_333));
+    let unstamped = gst::Sample::builder().buffer(&gst::Buffer::new()).build();
+    assert_eq!(sample_timestamp_us(&unstamped), None);
   }
 
   /// A screen layer whose width isn't a multiple of four: GStreamer pads its rows, and the
