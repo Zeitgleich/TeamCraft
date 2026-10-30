@@ -221,6 +221,7 @@ impl PendingEnrollment {
       maybe_jwks_source,
       last_key_package_check_ms: i64::MIN,
       mls_current: Default::default(),
+      maybe_backlog_reads: None,
       maybe_replay_left: None,
       device_activity: DeviceActivity::Active,
       member_join_attempts: HashMap::new(),

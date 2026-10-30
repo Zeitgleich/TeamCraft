@@ -43,10 +43,8 @@ impl UserTokens {
   /// A valid access token (blocks for a moment when a new one is fetched).
   pub fn token(&self) -> Result<String, String> {
     let mut cache = self.cache.lock().map_err(|_| "token cache poisoned".to_owned())?;
-    if let Some((token, fetched_at)) = cache.as_ref()
-      && fetched_at.elapsed() < REFRESH_AFTER
-    {
-      return Ok(token.clone());
+    if let Some(token) = fresh(cache.as_ref()) {
+      return Ok(token);
     }
     let token = fetch(&self.user)?;
     *cache = Some((token.clone(), Instant::now()));
@@ -66,9 +64,23 @@ impl UserTokens {
 impl AccessTokenSource for UserTokens {
   fn access_token(&self) -> Result<String, ApiError> {
     self.uses.fetch_add(1, Ordering::Relaxed);
-    // `block_in_place` needs the multi-thread runtime, which every e2e test uses.
-    tokio::task::block_in_place(|| self.token()).map_err(ApiError::Token)
+    let maybe_cached = self.cache.lock().ok().and_then(|cache| fresh(cache.as_ref()));
+    if let Some(token) = maybe_cached {
+      return Ok(token);
+    }
+    // A fetch blocks for a moment, on a thread of its own: `block_in_place` refuses the app's
+    // runner, which runs on a `LocalSet` (crate::app).
+    std::thread::scope(|scope| scope.spawn(|| self.token()).join())
+      .unwrap_or_else(|_| Err("the token fetch panicked".to_owned()))
+      .map_err(ApiError::Token)
   }
+}
+
+/// The cached token while it is fresh enough.
+fn fresh(cached: Option<&(String, Instant)>) -> Option<String> {
+  cached
+    .filter(|(_, fetched_at)| fetched_at.elapsed() < REFRESH_AFTER)
+    .map(|(token, _)| token.clone())
 }
 
 fn fetch(user: &str) -> Result<String, String> {

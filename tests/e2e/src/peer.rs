@@ -15,16 +15,17 @@ use teamcraft_proto::{ConversationId, GatewayClientMessage, ThreadId, UserId, Wo
 use crate::stack::Stack;
 use crate::tokens::UserTokens;
 
-pub type DevClient = Client<HttpServerApi<UserTokens>, Arc<MemoryStore>>;
+pub type DevClient<S = Arc<MemoryStore>> = Client<HttpServerApi<UserTokens>, S>;
 
 /// The recovery passphrase every test account uses (also typed into the web client).
 pub const PASSPHRASE: &str = "e2e recovery passphrase";
 const WAIT_TIMEOUT: Duration = Duration::from_secs(30);
 
-pub struct Peer {
+/// `S` is the client's store: in memory unless a test needs the disk (`Peer::enroll_with_store`).
+pub struct Peer<S = Arc<MemoryStore>> {
   pub name: String,
-  pub client: DevClient,
-  pub store: Arc<MemoryStore>,
+  pub client: DevClient<S>,
+  pub store: S,
   pub gateway: HttpGateway,
   pub tokens: UserTokens,
 }
@@ -36,8 +37,14 @@ impl Peer {
   }
 
   pub async fn enroll_device(stack: &Stack, user: &str, device_name: &str) -> Peer {
+    Peer::enroll_with_store(stack, user, device_name, Arc::new(MemoryStore::new())).await
+  }
+}
+
+impl<S: LocalStore + Clone> Peer<S> {
+  /// Enrolls the dev user's first device on `store` and connects its gateway.
+  pub async fn enroll_with_store(stack: &Stack, user: &str, device_name: &str, store: S) -> Peer<S> {
     let tokens = stack.tokens(user);
-    let store = Arc::new(MemoryStore::new());
     let api = HttpServerApi::new(stack.base_url.clone(), tokens.clone());
     let mut client = PendingEnrollment::new()
       .complete(
@@ -132,7 +139,7 @@ impl Peer {
   }
 
   /// Pumps the gateway until `done` holds; fails after 30 s.
-  pub async fn wait_until(&mut self, what: &str, mut done: impl FnMut(&mut Peer) -> bool) {
+  pub async fn wait_until(&mut self, what: &str, mut done: impl FnMut(&mut Self) -> bool) {
     let deadline = Instant::now() + WAIT_TIMEOUT;
     loop {
       self.pump().await;

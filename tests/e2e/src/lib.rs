@@ -6,11 +6,13 @@
 // harness reports skips on stderr.
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::print_stderr)]
 
+pub mod app;
 pub mod bridge;
 #[cfg(feature = "browser")]
 pub mod browser;
 pub mod call;
 pub mod mail;
+pub mod netem;
 pub mod peer;
 pub mod process;
 pub mod raw_gateway;

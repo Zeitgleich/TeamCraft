@@ -857,6 +857,36 @@ mod rejection {
   }
 }
 
+/// A member catching up reads whom a commit's signed change names before it processes the commit
+/// (issue #972).
+mod named_in_change {
+  use super::*;
+  use crate::mls::users_named_in_change;
+
+  #[test]
+  fn a_signed_commit_names_its_target_and_signer() {
+    let mut world = World::new();
+    let change = world.signed_change(ALICE, add(DAVE, HistoryShare::Full));
+    let dave = world.dave.key_package();
+    let output = world.commit_change(&change, &[dave]);
+    assert_eq!(
+      users_named_in_change(&output.commit),
+      [UserId::new(DAVE), UserId::new(ALICE)]
+    );
+  }
+
+  #[test]
+  fn anything_else_names_nobody() {
+    let mut world = World::new();
+    let dave = world.dave.key_package();
+    let unsigned = world.raw_alice_commit(&[dave], &[], Vec::new());
+    assert!(users_named_in_change(&unsigned).is_empty());
+    for garbage in [&[][..], &[0, 1, 2], &[0xff; 64]] {
+      assert!(users_named_in_change(garbage).is_empty());
+    }
+  }
+}
+
 mod key_package_lifetime {
   use super::*;
   use crate::mls::{KEY_PACKAGE_LIFETIME_SECS, inspect_key_package};

@@ -304,6 +304,9 @@ pub struct Client<A, S> {
   /// Conversations whose MLS queue was caught up since the gateway (re)connected; the outbox
   /// sends into the others only after catching up (e2ee.md §4.6).
   mls_current: std::collections::BTreeSet<ConversationId>,
+  /// What one pass over a conversation's MLS queue read for all its entries (issue #972); `None`
+  /// outside of a pass, where each entry reads afresh.
+  maybe_backlog_reads: Option<groups::BacklogReads>,
   /// Events of a resume replay still to come: the counters are read once it has drained, because
   /// `GET /unread` already counts the missed messages the replay delivers (issue #183).
   maybe_replay_left: Option<u64>,
@@ -418,6 +421,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       maybe_jwks_source,
       last_key_package_check_ms: i64::MIN,
       mls_current: Default::default(),
+      maybe_backlog_reads: None,
       maybe_replay_left: None,
       device_activity: DeviceActivity::Active,
       member_join_attempts: HashMap::new(),

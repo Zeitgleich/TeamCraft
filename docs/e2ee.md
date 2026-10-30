@@ -871,6 +871,16 @@ on the gateway's `conversation_delete` or, offline, on the next full sync
 a direct message's local history; it can already withhold or delete the ciphertext it stores, so
 this adds no access to content.
 
+A device that reads a commit late (it slept, or caught up after hours) verifies it against identities
+pinned before processing: of whom the server lists in the conversation now, and of the user the
+commit's signed change adds or removes and its signer, read from the commit's authenticated data
+(which MLS doesn't encrypt). Somebody who was added and has left again since is no longer on the
+server's list; without their pinned key the add commit was refused and the device fell out of the
+group, with every later message unreadable until it was added back (issue #972). Reading the names
+first trusts nothing: the change and every added leaf are verified as before. openmls spends the
+commit's handshake key while it decrypts, so a refused commit can't be processed again; the
+identities have to be pinned before.
+
 A device that joins from a welcome made before somebody's removal pins the identities of everybody
 the welcome's tree holds, not only of whom the server lists, and verifies every leaf as before; the
 removal commit follows in the queue. openmls spends the device's key package while it decrypts the
