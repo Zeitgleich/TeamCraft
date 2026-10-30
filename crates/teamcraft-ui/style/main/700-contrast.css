@@ -20,8 +20,7 @@
   }
 
   .badge-count,
-  .unread-dot,
-  .dot-unread {
+  .unread-dot {
     forced-color-adjust: none;
   }
 

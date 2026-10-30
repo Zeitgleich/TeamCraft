@@ -169,10 +169,10 @@
   transform: scaleY(1);
 }
 
-/* Unread on a space tile (#715), as on the macOS Dock: mentions as a white bold number in a round
-   system-red bubble on the top-right corner, overlapping the tile, with a thin ring in the rail's
-   colour that cuts it out of the tile. The number is capped (rail.rs), so the bubble stays round
-   or nearly so. Unread messages without a mention are a small neutral dot in the same place. */
+/* Unread on a space tile (#715, #955), as on the macOS Dock: the number of unread messages, white
+   and bold in a system-red bubble on the top-right corner, overlapping the tile. A ring in the rail's
+   colour cuts it out of the tile, so it reads on any space picture and next to the current space's
+   pill. The number is capped at "99+" (rail.rs), so the bubble keeps its size. */
 .space-btn .badge-count {
   position: absolute;
   right: -5px;
@@ -186,17 +186,6 @@
   letter-spacing: 0;
   font-weight: var(--weight-bold);
   line-height: 18px;
-  box-shadow: 0 0 0 2px var(--chrome);
-}
-
-.space-btn .dot-unread {
-  position: absolute;
-  right: -3px;
-  top: -3px;
-  width: 10px;
-  height: 10px;
-  border-radius: 50%;
-  background: var(--chrome-strong);
   box-shadow: 0 0 0 2px var(--chrome);
 }
 

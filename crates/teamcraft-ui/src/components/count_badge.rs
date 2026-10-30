@@ -74,5 +74,7 @@ mod tests {
     assert_eq!(capped_label(9, Some(9)), "9");
     assert_eq!(capped_label(10, Some(9)), "9+");
     assert_eq!(capped_label(1_234, None), "1234");
+    assert_eq!(capped_label(99, Some(99)), "99");
+    assert_eq!(capped_label(100, Some(99)), "99+");
   }
 }
