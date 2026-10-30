@@ -21,7 +21,10 @@ use std::{
   time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
-use teamcraft_media::{datagram::StreamId, dave::DaveEpoch};
+use teamcraft_media::{
+  datagram::{PADDING_STREAM, StreamId},
+  dave::DaveEpoch,
+};
 use teamcraft_proto::{
   Base64Bytes, CallClientMessage, CallEvent, CallId, CallParticipant, CallRosterEntry, ConversationId,
   DeviceId, ErrorBody, ErrorCode, MAX_SIMULCAST_LAYERS, MediaCapabilities, MediaStreamId,
@@ -1096,13 +1099,13 @@ impl RoomState {
     loop {
       let stream_id = StreamId(self.next_stream_id);
       self.next_stream_id = self.next_stream_id.wrapping_add(1);
-      if !self.forwarder.is_stream_in_use(stream_id) {
+      if stream_id != PADDING_STREAM && !self.forwarder.is_stream_in_use(stream_id) {
         return stream_id;
       }
     }
   }
 
-  /// Sends the signaling a forwarding decision caused.
+  /// Sends the signaling (and the probing padding) a forwarding decision caused.
   fn apply(&self, effects: Vec<Effect>) {
     for effect in effects {
       match effect {
@@ -1129,6 +1132,14 @@ impl RoomState {
             layers,
           },
         ),
+        // A few datagrams every few seconds at most, queued without blocking.
+        Effect::Padding { receiver, datagrams } => {
+          if let Some(handle) = self.handle_of(receiver) {
+            for datagram in &datagrams {
+              handle.link.send_datagram(datagram);
+            }
+          }
+        },
       }
     }
   }

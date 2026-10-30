@@ -3,9 +3,11 @@
 //! picture but the SFU's resume probes of the 360p layer, about 15 frames every 5 s (30 frames in
 //! 8 s here with the three layers; with four, 150 to 190 frames, most of them 180p).
 //!
-//! The SFU still probes the 360p layer now and then (the downlink estimate grows while the link
-//! isn't full, and the next layer is the probe); the link drops it and the viewer is back on 180p,
-//! once after a stall of 5 s. So the test asks for 180p most of the time, not all of it.
+//! Until #994 the SFU probed the 360p layer now and then (the downlink estimate grows while the
+//! link isn't full, and the next layer was the probe); the link dropped it, and the picture stood
+//! still for 2.6 to 5.2 s until the viewer was back on 180p. Now padding bursts probe the link
+//! before a switch up, and the viewer keeps 180p without a stall: every frame 180p, the longest
+//! gap under 200 ms on a laptop (eight copies in parallel too).
 //!
 //! The presenter sends a busy camera at 1080p (the suite's busy camera scaled up, so OpenH264
 //! spends each layer's whole bitrate: 360p needs its 375 kbit/s) in the layers the desktop plans
@@ -55,6 +57,10 @@ const MEASURE: Duration = Duration::from_secs(12);
 /// The fewest 180p frames the viewer gets meanwhile: 2 a second, for a loaded CI runner that
 /// encodes far fewer than the camera's 30 (a laptop: about 20 a second).
 const MIN_FRAMES_AT_180P: usize = 24;
+/// The longest the viewer's picture may stand still meanwhile: a probe of the next layer stalled
+/// it for 2.6 to 5.2 s, a pause until the resume probe for 2 s at least; room above the under
+/// 200 ms of a laptop for a CI runner that encodes the busy 1080p picture slowly.
+const MAX_GAP: Duration = Duration::from_millis(1500);
 
 /// #978: the viewer limited below 360p gets the 1080p camera's 180p layer, and keeps getting it.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -97,9 +103,16 @@ async fn a_viewer_limited_below_360p_gets_the_180p_layer() {
     at_180p >= MIN_FRAMES_AT_180P,
     "only {at_180p} frames at 180p in {MEASURE:?}: {watched:?}"
   );
+  // Nothing above 180p gets through this link: a frame of a higher layer is one of a switch up
+  // the link can't carry.
   assert!(
-    at_180p * 2 >= total,
+    at_180p * 10 >= total * 9,
     "only {at_180p} of {total} frames at 180p in {MEASURE:?}: {watched:?}"
+  );
+  assert!(
+    watched.longest_gap < MAX_GAP,
+    "the picture stood still for {:?} in {MEASURE:?}: {watched:?}",
+    watched.longest_gap
   );
 }
 

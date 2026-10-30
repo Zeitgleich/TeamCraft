@@ -194,6 +194,9 @@ struct PacketGroup {
 struct SentPacket {
   at: Instant,
   bytes: usize,
+  /// Padding of a probe burst: sent back to back on purpose, its queue and loss aren't
+  /// congestion.
+  is_probe: bool,
 }
 
 #[derive(Debug)]
@@ -267,6 +270,17 @@ impl SendSideEstimator {
 
   /// Numbers the next datagram of `bytes` bytes sent at `now`.
   pub fn on_send(&mut self, bytes: usize, now: Instant) -> TransportSeq {
+    self.number(bytes, now, false)
+  }
+
+  /// Numbers the next datagram of a probe burst (padding sent back to back to measure the path,
+  /// #994): its delay and loss don't count as congestion, the queue it builds up is the point,
+  /// and the prober answers what it shows.
+  pub fn on_send_probe(&mut self, bytes: usize, now: Instant) -> TransportSeq {
+    self.number(bytes, now, true)
+  }
+
+  fn number(&mut self, bytes: usize, now: Instant, is_probe: bool) -> TransportSeq {
     let seq = self.next_seq;
     self.next_seq = seq.next();
     let extended = if self.sent.is_empty() && self.highest_sent == 0 {
@@ -275,7 +289,14 @@ impl SendSideEstimator {
       unwrap_seq(seq.0, self.highest_sent)
     };
     self.highest_sent = self.highest_sent.max(extended);
-    self.sent.insert(extended, SentPacket { at: now, bytes });
+    self.sent.insert(
+      extended,
+      SentPacket {
+        at: now,
+        bytes,
+        is_probe,
+      },
+    );
     self.forget_old(now);
     self.maybe_first_send_at.get_or_insert(now);
     self.recent_sends.push_back((now, bytes));
@@ -292,13 +313,16 @@ impl SendSideEstimator {
       let Some(sent) = self.sent.remove(&(base + offset as u64)) else {
         continue;
       };
-      // Loss of packets sent before the last cut to what got through was answered by it.
-      let is_counted = self.maybe_loss_counts_from.is_none_or(|from| sent.at >= from);
+      // Loss of packets sent before the last cut to what got through was answered by it; that
+      // of a probe burst answers the probe (`limit_to`).
+      let is_counted = !sent.is_probe && self.maybe_loss_counts_from.is_none_or(|from| sent.at >= from);
       reported += usize::from(is_counted);
       match maybe_arrival_us {
         Some(arrival_us) => {
           let arrival = receiver_epoch + Duration::from_micros(*arrival_us);
-          self.delay.on_packet(sent.at, arrival, now);
+          if !sent.is_probe {
+            self.delay.on_packet(sent.at, arrival, now);
+          }
           self.acked.push_back((arrival, sent.bytes));
         },
         None => lost += usize::from(is_counted),
@@ -356,6 +380,33 @@ impl SendSideEstimator {
     self.has_grown_recovering = false;
     self.maybe_overuse_since = None;
     self.has_cut_to_delivered = false;
+  }
+
+  /// A probe showed the path carries no more than `bps` (the SFU's padding burst before a layer
+  /// switch up, #994): the estimate drops to it. It counts as a delay-based cut at that rate: the
+  /// fast start ends, the faster growth of a recovery waits as after any other congestion, and
+  /// the queue the burst left doesn't cut the estimate again.
+  pub fn limit_to(&mut self, bps: u32, now: Instant) {
+    let limit = f64::from(bps);
+    self.estimate_bps = self
+      .estimate_bps
+      .min(limit)
+      .clamp(f64::from(self.config.min_bps), self.ceiling_bps());
+    self.is_starting = false;
+    self.note_congestion(now, limit);
+    // The burst's own queue is still draining: like after a delay-based cut, no further one
+    // until the detector reported normal again.
+    self.maybe_last_decrease_at = Some(now);
+    self.is_holding_after_decrease = true;
+  }
+
+  /// A probe showed the path carries `bps` (#994): the estimate is at least that, up to its
+  /// ceiling. A path that got better is used without waiting for the estimate to grow there.
+  pub fn raise_to(&mut self, bps: u32) {
+    self.estimate_bps = self
+      .estimate_bps
+      .max(f64::from(bps))
+      .clamp(f64::from(self.config.min_bps), self.ceiling_bps());
   }
 
   pub fn estimate_bps(&self) -> u32 {
@@ -1075,6 +1126,58 @@ mod tests {
         "one step down from the estimate, not to what got through: {estimate}"
       );
       assert!(estimator.is_starting, "the burst ends the fast start");
+    }
+
+    /// #994: the queue and loss of a probe burst aren't congestion; what it showed is applied by
+    /// `limit_to` and `raise_to`.
+    #[test]
+    fn probes_are_answered_by_what_they_showed_not_as_congestion() {
+      let mut estimator = SendSideEstimator::new(BweConfig::default());
+      estimator.set_demand_bps(Some(3_000_000));
+      let epoch = Instant::now();
+      // Media every 33 ms on time; a burst of 20 probe datagrams every 330 ms that queues 32 ms
+      // per datagram (250 kbit/s), half of them lost.
+      let mut seq = 0u16;
+      let mut arrivals_us = Vec::new();
+      let mut now = epoch;
+      for frame in 0..90u64 {
+        now = epoch + Duration::from_millis(33 * frame);
+        estimator.on_send(PACKET_BYTES, now);
+        arrivals_us.push(Some(33 * frame * 1000 + 20_000));
+        if frame % 10 == 0 {
+          for index in 0..20u64 {
+            estimator.on_send_probe(1000, now);
+            arrivals_us.push((index % 2 == 0).then_some(33 * frame * 1000 + 20_000 + 32_000 * index));
+          }
+        }
+        if frame % 3 == 2 {
+          let feedback = TransportFeedback {
+            base_seq: seq,
+            arrivals_us: std::mem::take(&mut arrivals_us),
+          };
+          seq = seq.wrapping_add(feedback.arrivals_us.len() as u16);
+          estimator.on_feedback(&feedback, now + Duration::from_millis(30), epoch);
+        }
+      }
+      assert_eq!(estimator.usage(), BandwidthUsage::Normal);
+      assert_eq!(estimator.loss_ratio(), 0.0);
+      assert!(estimator.is_starting, "no congestion: still the fast start");
+      assert!(
+        estimator.estimate_bps() > 1_000_000,
+        "{}",
+        estimator.estimate_bps()
+      );
+
+      estimator.limit_to(250_000, now);
+      assert_eq!(estimator.estimate_bps(), 250_000);
+      assert!(
+        !estimator.is_starting,
+        "a probe that fell short ends the fast start"
+      );
+      estimator.raise_to(900_000);
+      assert_eq!(estimator.estimate_bps(), 900_000);
+      estimator.raise_to(40_000_000);
+      assert_eq!(estimator.estimate_bps(), 10_000_000, "up to the ceiling only");
     }
   }
 

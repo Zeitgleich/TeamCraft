@@ -629,8 +629,30 @@ Settings → Chats).
   quality menu (#967). Down at
   once, up one layer at a time once the budget covered it with 15 % headroom for 2 s (0.5 s while
   the estimate is in its fast start: it only grows then, and the hold validates nothing; a screen
-  share's viewer got the sharp layer 2 s after the estimate covered it); a paused camera is
-  tried again at its lowest layer every 5 s. Other viewers of the same camera are not affected.
+  share's viewer got the sharp layer 2 s after the estimate covered it). A camera drops to its
+  lowest layer at once but is paused only once the budget stays below that for 2 s; a paused
+  camera is tried again at its lowest layer 2 s later, then 4 and 8 s apart (it was every 5 s:
+  a CI runner's viewer saw no picture for 5.3 s after its link's estimate collapsed). Other
+  viewers of the same camera are not affected.
+
+  Before a step up the SFU checks that the viewer's downlink carries it (`probe`, #994): the
+  estimate grows while the link isn't full, and switching to the next layer to find out stalled
+  the picture of a viewer whose link couldn't take it (a 250 kbit/s viewer of a 1080p camera:
+  gaps of 2.6–5.2 s every few seconds). The SFU sends a burst of padding datagrams back to back
+  (50 ms of the new total, at least four of 1000 bytes) on a stream it never assigns; receivers
+  report their arrival like any datagram's and drop them (every client does, also those from
+  before). The bottleneck spaces them out at its rate, so their arrival times show what the link
+  carries. A burst that gets through lets the step follow 0.5 s after the estimate covers it, and
+  after the fast start raises the estimate there (at most twice what it was sent for; during it,
+  jumping ahead switched a screen share's viewer to the sharp layer before the presenter's own
+  uplink carried it); one that falls short limits the estimate to what got through (never below
+  what keeps the current layers), and the next one waits 2 s, then 4 s.
+  Bursts also go out before the estimate covers a step, so a link that got better is found
+  within seconds instead of after the estimate's slow growth after congestion. Their queue and
+  loss don't count as congestion. Receivers that send no feedback switch up as before. After
+  (`weak_downlink`, laptop): every frame 180p, longest gap 150–200 ms (8 runs in parallel); a
+  simulated 250 kbit/s link that becomes 10 Mbit/s reaches the top layer after 4.7 s (6.6 s
+  before).
 
   Measured (`bandwidth_limits` in the SFU's test suite: real SFU, a 720p camera with sensor noise,
   a bottleneck with a 250 ms queue; OpenH264, laptop, release build):

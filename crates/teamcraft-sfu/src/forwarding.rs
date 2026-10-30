@@ -19,6 +19,9 @@
 //!   number; the receiver's feedback drives a [`SendSideEstimator`]. A new subscription measures
 //!   the receiver's downlink afresh (#941). Incoming datagrams with a transport sequence number
 //!   are recorded for the sender's own (uplink) estimation.
+//! - **Probes before a switch up (#994):** a receiver that sends feedback gets a higher layer only
+//!   once a padding burst showed its link carries it ([`crate::probe`]); a burst that falls short
+//!   limits the estimate instead of a picture that stalls.
 //!
 //! - **Reconnecting participants** keep their streams and subscriptions but receive nothing until
 //!   they are back ([`Forwarder::suspend`], [`Forwarder::resume`]); a new path starts with fresh
@@ -41,7 +44,10 @@ use teamcraft_proto::{
 };
 use thiserror::Error;
 
-use crate::layers::{LayerAllocationConfig, LayerAllocator, TrackDemand, full_demand_bps};
+use crate::layers::{
+  LayerAllocationConfig, LayerAllocator, ProbeRequest, TrackDemand, UpgradeProof, full_demand_bps,
+};
+use crate::probe::{DownlinkProbe, ProbeConfig, ProbeOutcome, padding_datagram};
 use crate::speakers::{SpeakerSelectionConfig, SpeakerSelector};
 
 /// Video tracks (camera, screen share) one participant may publish at the same time.
@@ -66,6 +72,7 @@ pub struct ForwardingConfig {
   pub layers: LayerAllocationConfig,
   pub bwe: BweConfig,
   pub keyframes: KeyframeRequestConfig,
+  pub probe: ProbeConfig,
   /// A layer counts as stopped when a lower layer of its track kept arriving this long without
   /// it; receivers get the best lower layer that still flows. Above the gaps of a
   /// layer that runs (a still screen sends its picture again every second, `SCREEN_IDLE_REFRESH`),
@@ -115,6 +122,12 @@ pub enum Effect {
     stream_id: StreamId,
     layers: Vec<u8>,
   },
+  /// Padding that probes a receiver's downlink, numbered for it: to be sent as they are, back to
+  /// back.
+  Padding {
+    receiver: DeviceId,
+    datagrams: Vec<Vec<u8>>,
+  },
 }
 
 /// What a leaving participant took with it.
@@ -136,6 +149,12 @@ struct ParticipantRoute {
   /// Base for the receiver's arrival times in its feedback (only differences matter).
   feedback_epoch: Instant,
   allocator: LayerAllocator,
+  /// Probes of the downlink before a switch up.
+  probe: DownlinkProbe,
+  /// The probe the allocation waits for.
+  maybe_probe_request: Option<ProbeRequest>,
+  /// The receiver sent transport feedback: its downlink can be probed.
+  has_feedback: bool,
   /// The connection was lost: nothing is sent to it until it is back.
   is_suspended: bool,
 }
@@ -206,6 +225,7 @@ impl Default for ForwardingConfig {
       layers: LayerAllocationConfig::default(),
       bwe: BweConfig::default(),
       keyframes: KeyframeRequestConfig::default(),
+      probe: ProbeConfig::default(),
       layer_stalled_after: Duration::from_millis(1500),
     }
   }
@@ -247,6 +267,9 @@ impl Forwarder {
       uplink: FeedbackRecorder::new(now),
       feedback_epoch: now,
       allocator: LayerAllocator::new(),
+      probe: DownlinkProbe::new(),
+      maybe_probe_request: None,
+      has_feedback: false,
       is_suspended: false,
     };
     self.participants.insert(device_id, route);
@@ -259,6 +282,7 @@ impl Forwarder {
       return Vec::new();
     };
     participant.is_suspended = true;
+    participant.maybe_probe_request = None;
     let mut effects = Vec::new();
     if let Some(speakers) = self.speakers.remove(device_id, now) {
       effects.push(Effect::ActiveSpeakers(speakers));
@@ -298,6 +322,9 @@ impl Forwarder {
     participant.uplink = FeedbackRecorder::new(now);
     participant.feedback_epoch = now;
     participant.allocator = LayerAllocator::new();
+    participant.probe = DownlinkProbe::new();
+    participant.maybe_probe_request = None;
+    participant.has_feedback = false;
     participant.is_suspended = false;
     self
       .video_tracks
@@ -659,6 +686,23 @@ impl Forwarder {
     participant
       .downlink
       .on_feedback(feedback, now, participant.feedback_epoch);
+    participant.has_feedback = true;
+    match participant.probe.on_feedback(&self.config.probe, feedback, now) {
+      // During the fast start the estimate triples every second on its own; jumping ahead of it
+      // switched a screen share's viewer to the sharp layer before the presenter's uplink
+      // estimate (in its own fast start) carried that layer, and the presenter stopped it again
+      // (screen_sharpness on CI). After congestion the estimate grows slowly: there the probe
+      // lifts it.
+      Some(ProbeOutcome::Carried { measured_bps }) if !participant.downlink.is_in_fast_start() => {
+        participant.downlink.raise_to(measured_bps);
+      },
+      Some(ProbeOutcome::Carried { .. }) => {},
+      Some(ProbeOutcome::FellShort {
+        measured_bps,
+        floor_bps,
+      }) => participant.downlink.limit_to(measured_bps.max(floor_bps), now),
+      None => {},
+    }
     self.on_timer(receiver, now)
   }
 
@@ -666,6 +710,7 @@ impl Forwarder {
   /// get their resume probe even when no feedback arrives.
   pub fn on_timer(&mut self, receiver: DeviceId, now: Instant) -> Vec<Effect> {
     let mut effects = self.reallocate(receiver, now);
+    effects.extend(self.probe_downlink(receiver, now));
     let streams: Vec<StreamId> = self
       .video_tracks
       .iter()
@@ -709,6 +754,33 @@ impl Forwarder {
       .values()
       .map(|route| route.track.clone())
       .collect()
+  }
+
+  /// A padding burst for the probe `receiver`'s allocation waits for, when one may go out.
+  fn probe_downlink(&mut self, receiver: DeviceId, now: Instant) -> Option<Effect> {
+    let config = self.config.probe;
+    let participant = self.participants.get_mut(&receiver)?;
+    participant.probe.on_timer(&config, now);
+    let request = participant.maybe_probe_request?;
+    if participant.is_suspended || !participant.probe.may_start(now) {
+      return None;
+    }
+    let sizes = DownlinkProbe::burst_sizes(&config, request.target_bps);
+    let mut datagrams = Vec::with_capacity(sizes.len());
+    let mut maybe_first_seq = None;
+    for bytes in &sizes {
+      let seq = participant.downlink.on_send_probe(*bytes, now);
+      maybe_first_seq.get_or_insert(seq);
+      datagrams.push(padding_datagram(*bytes, seq));
+    }
+    participant.probe.started(
+      request.target_bps,
+      request.floor_bps,
+      maybe_first_seq?,
+      &sizes,
+      now,
+    );
+    Some(Effect::Padding { receiver, datagrams })
   }
 
   /// Current downlink estimate of a receiver.
@@ -836,9 +908,19 @@ impl Forwarder {
     } else {
       self.config.layers
     };
-    let allocation = participant
-      .allocator
-      .allocate(&layers_config, estimate, &demands, now);
+    let proof = if participant.has_feedback {
+      UpgradeProof::Shown {
+        bps: participant.probe.shown_bps(&self.config.probe, now),
+      }
+    } else {
+      UpgradeProof::NotRequired
+    };
+    let allocation =
+      participant
+        .allocator
+        .allocate_with_proof(&layers_config, estimate, proof, &demands, now);
+    participant.maybe_probe_request = allocation.maybe_probe;
+    let allocation = allocation.layers;
 
     let stalled_after = self.config.layer_stalled_after;
     let mut effects = Vec::new();
@@ -1929,6 +2011,56 @@ mod tests {
       assert_eq!(settled_layer_of(&four_layers(), 900_000), Some(1));
     }
 
+    /// #994: a receiver whose link carries only 180p is never switched up to 360p to find out
+    /// (the switch dropped packets and stalled its picture for seconds): padding bursts find out,
+    /// and 180p keeps flowing without a gap.
+    #[test]
+    fn a_weak_link_is_probed_with_padding_not_with_the_next_layer() {
+      let run = simulate(
+        &four_layers(),
+        &[(Duration::ZERO, 250_000)],
+        Duration::from_secs(60),
+      );
+      let settled = Duration::from_secs(10);
+      let upper: Vec<&(Duration, Option<u8>)> = run
+        .iter()
+        .filter(|(at, maybe_layer)| *at >= settled && maybe_layer.is_some_and(|layer| layer > 0))
+        .collect();
+      assert!(upper.is_empty(), "layers above 180p after {settled:?}: {upper:?}");
+      let padding = run
+        .iter()
+        .filter(|(_, maybe_layer)| maybe_layer.is_none())
+        .count();
+      assert!(padding > 0, "the link was never probed");
+      let at_180p = run
+        .iter()
+        .filter(|(at, maybe_layer)| *at >= settled && *maybe_layer == Some(0))
+        .count();
+      // 30 frames of one datagram a second for 50 s.
+      assert!(at_180p >= 1490, "only {at_180p} datagrams at 180p");
+    }
+
+    /// #994: once a weak link gets better, the probes show it soon and the receiver is switched
+    /// up layer by layer: the top layer of a 1080p camera within 10 s of the change (6.6 s when the
+    /// next layer was the probe, 4.7 s now).
+    #[test]
+    fn a_link_that_gets_better_is_used_soon() {
+      let better_at = Duration::from_secs(30);
+      let run = simulate(
+        &four_layers(),
+        &[(Duration::ZERO, 250_000), (better_at, 10_000_000)],
+        Duration::from_secs(60),
+      );
+      let first_top = run
+        .iter()
+        .find(|(at, maybe_layer)| *at >= better_at && *maybe_layer == Some(3))
+        .map(|(at, _)| *at - better_at);
+      assert!(
+        first_top.is_some_and(|after| after <= Duration::from_secs(10)),
+        "top layer {first_top:?} after the link got better"
+      );
+    }
+
     /// Runs a publisher sending all its layers at their bitrates and a receiver behind a link of
     /// `capacity_bps` that reports feedback every 100 ms; returns the receiver's dominant layer in
     /// the last 20 of 60 s (the estimate ramps up at 8 %/s from 300 kbit/s).
@@ -1938,6 +2070,39 @@ mod tests {
 
     /// [`settled_layer`] for a track of `layers`.
     fn settled_layer_of(layers: &[VideoLayerInfo], capacity_bps: u64) -> Option<u8> {
+      let run = simulate(layers, &[(Duration::ZERO, capacity_bps)], Duration::from_secs(60));
+      // The layer most datagrams arrived on in the last 20 s (probes upward are brief).
+      let layers_seen: Vec<u8> = run
+        .iter()
+        .filter(|(at, _)| *at >= Duration::from_secs(40))
+        .filter_map(|(_, maybe_layer)| *maybe_layer)
+        .collect();
+      if layers_seen.is_empty() {
+        return None;
+      }
+      // Datagrams per frame grow with the layer's bitrate; normalized so time spent counts, not
+      // bytes.
+      let lowest_bps = layers.first().map_or(1, |info| info.max_bitrate_bps.max(1));
+      layers
+        .iter()
+        .max_by_key(|info| {
+          let weight = usize::try_from(info.max_bitrate_bps / lowest_bps)
+            .unwrap_or(1)
+            .max(1);
+          layers_seen.iter().filter(|seen| **seen == info.layer).count() / weight
+        })
+        .map(|info| info.layer)
+    }
+
+    /// Runs a publisher sending all of `layers` at their bitrates (a keyframe every second) and a
+    /// receiver behind a link whose capacity follows `capacities` (from when, bit/s), reporting
+    /// feedback every 100 ms, for `duration`. Returns every datagram sent to the receiver: when,
+    /// and its layer (`None`: padding).
+    fn simulate(
+      layers: &[VideoLayerInfo],
+      capacities: &[(Duration, u64)],
+      duration: Duration,
+    ) -> Vec<(Duration, Option<u8>)> {
       let (mut forwarder, start) = room(3);
       forwarder
         .publish_video(
@@ -1951,15 +2116,26 @@ mod tests {
         .unwrap();
       let top = layers.last().map_or(0, |info| info.layer);
       forwarder.subscribe(device(2), VIDEO, Some(top), start).unwrap();
-      let mut link = Link::new(capacity_bps);
+      let mut link = Link::new(capacities.first().map_or(u64::MAX, |(_, bps)| *bps));
       let mut recorder = FeedbackRecorder::new(start);
       let mut in_flight: Vec<(Instant, TransportSeq)> = Vec::new();
       let mut frame_number = 0u16;
       let mut now = start;
-      let end = start + Duration::from_secs(60);
+      let end = start + duration;
       let mut next_feedback = start + Duration::from_millis(100);
-      let mut layers_seen: Vec<u8> = Vec::new();
+      let mut sent: Vec<(Duration, Option<u8>)> = Vec::new();
+      let mut send = |link: &mut Link, delivered: &[u8], now: Instant, in_flight: &mut Vec<_>| {
+        let parsed = DatagramHeader::parse(delivered).unwrap();
+        let is_padding = parsed.stream_id == teamcraft_media::datagram::PADDING_STREAM;
+        sent.push((now - start, (!is_padding).then_some(parsed.layer.value())));
+        if let (Some(arrival), Some(seq)) = (link.send(delivered.len(), now), parsed.maybe_transport_seq) {
+          in_flight.push((arrival, seq));
+        }
+      };
       while now < end {
+        if let Some((_, capacity_bps)) = capacities.iter().rev().find(|(from, _)| now - start >= *from) {
+          link.capacity_bps = *capacity_bps;
+        }
         // 30 fps; a keyframe every second so layer switches can happen.
         let is_keyframe = frame_number.is_multiple_of(30);
         for info in layers {
@@ -1982,15 +2158,7 @@ mod tests {
             .unwrap();
             for (receiver, delivered) in forwarder.route(device(1), &datagram, now).unwrap().deliveries {
               assert_eq!(receiver, device(2));
-              let parsed = DatagramHeader::parse(&delivered).unwrap();
-              if now >= end - Duration::from_secs(20) {
-                layers_seen.push(parsed.layer.value());
-              }
-              if let (Some(arrival), Some(seq)) =
-                (link.send(delivered.len(), now), parsed.maybe_transport_seq)
-              {
-                in_flight.push((arrival, seq));
-              }
+              send(&mut link, &delivered, now, &mut in_flight);
             }
           }
         }
@@ -2006,28 +2174,21 @@ mod tests {
         });
         if now >= next_feedback {
           next_feedback += Duration::from_millis(100);
-          match recorder.take_feedback() {
+          let effects = match recorder.take_feedback() {
             Some(feedback) => forwarder.on_transport_feedback(device(2), &feedback, now),
             None => forwarder.on_timer(device(2), now),
           };
+          for effect in effects {
+            if let Effect::Padding { receiver, datagrams } = effect {
+              assert_eq!(receiver, device(2));
+              for datagram in &datagrams {
+                send(&mut link, datagram, now, &mut in_flight);
+              }
+            }
+          }
         }
       }
-      // The layer most datagrams arrived on in the last 20 s (probes upward are brief).
-      if layers_seen.is_empty() {
-        return None;
-      }
-      // Datagrams per frame grow with the layer's bitrate; normalized so time spent counts, not
-      // bytes.
-      let lowest_bps = layers.first().map_or(1, |info| info.max_bitrate_bps.max(1));
-      layers
-        .iter()
-        .max_by_key(|info| {
-          let weight = usize::try_from(info.max_bitrate_bps / lowest_bps)
-            .unwrap_or(1)
-            .max(1);
-          layers_seen.iter().filter(|seen| **seen == info.layer).count() / weight
-        })
-        .map(|info| info.layer)
+      sent
     }
   }
 

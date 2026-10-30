@@ -2974,6 +2974,43 @@ mod tests {
         Some(EngineOutput::Signal(CallClientMessage::TransportFeedback { .. }))
       ));
     }
+
+    /// #994: the SFU probes a receiver's downlink with padding on a stream it never assigns; the
+    /// receiver reports its arrival like any datagram's and otherwise drops it.
+    #[test]
+    fn padding_is_reported_and_dropped() {
+      let now = Instant::now();
+      let (_alice, mut bob) = secured_pair(now);
+      drain(&mut bob);
+      for seq in 0..4 {
+        let padding = MediaDatagram {
+          header: DatagramHeader {
+            stream_id: crate::datagram::PADDING_STREAM,
+            layer: SimulcastLayer::BASE,
+            maybe_transport_seq: Some(crate::datagram::TransportSeq(seq)),
+          },
+          rtp: &[0; 993],
+        }
+        .to_bytes(MAX_DATAGRAM_BYTES)
+        .unwrap();
+        bob.handle_datagram(&padding, now + Duration::from_millis(u64::from(seq) * 32));
+      }
+      assert!(drain(&mut bob).is_empty(), "padding is no media");
+      bob.on_timer(now);
+      let Some(EngineOutput::Signal(CallClientMessage::TransportFeedback { feedback })) = bob.poll_output()
+      else {
+        panic!("no feedback for the padding");
+      };
+      assert_eq!(feedback.base_seq, 0);
+      assert_eq!(
+        feedback
+          .arrivals_us
+          .iter()
+          .filter(|arrival| arrival.is_some())
+          .count(),
+        4
+      );
+    }
   }
 
   mod reconnect {
