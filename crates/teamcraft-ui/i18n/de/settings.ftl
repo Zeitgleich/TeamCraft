@@ -391,6 +391,7 @@ settings-f-remove_deactivated_after_days = Deaktivierte Nutzer aus allen Chats e
 settings-f-admin_join_request_days = Beitrittsanfragen von Admins zu privaten Kanälen laufen ab nach
 settings-f-one_to_one_call_ends_for_both = 1:1-Anrufe enden für beide, wenn eine Seite auflegt
 settings-f-read_receipts_default = Lesebestätigungen standardmäßig senden
+settings-f-default_level = Standardmäßig benachrichtigen über
 settings-f-urgent_repeat_interval_secs = Dringende Nachrichten wiederholen alle
 settings-f-urgent_max_pushes = Höchstzahl Pushes je dringender Nachricht
 settings-f-mobile_push_delay_secs = Push aufs Handy verzögern, solange der Desktop genutzt wird

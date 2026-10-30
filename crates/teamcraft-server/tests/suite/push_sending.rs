@@ -21,7 +21,9 @@ use p256::SecretKey;
 use p256::elliptic_curve::sec1::ToEncodedPoint;
 use reqwest::StatusCode;
 use serde_json::json;
-use teamcraft_proto::{DeviceActivity, GatewayClientMessage, PushKind, PushProvider, PushWakeUp};
+use teamcraft_proto::{
+  DeviceActivity, GatewayClientMessage, NotificationLevel, PushKind, PushProvider, PushWakeUp,
+};
 use teamcraft_server::auth::BoxFuture;
 use teamcraft_server::push::crypto::{VapidKey, decrypt_web_push, open_wakeup};
 use teamcraft_server::push::{
@@ -219,12 +221,10 @@ mod routing {
     let Some(app) = start(&recorder).await else { return };
     let s = scene(&app).await;
     let carol_id = user_id(&app, &s.carol).await;
+    set_level(&app, &s.carol, &s.channel, "mentions").await;
 
     send(&app, &s.alice, &s.channel, &s.alice_device, 1).await;
-    assert!(
-      recorder.wait_for(0).await.is_empty(),
-      "the default level is mentions"
-    );
+    assert!(recorder.wait_for(0).await.is_empty(), "carol chose mentions");
 
     let mut body = message_body(2, &s.alice_device);
     body["mentioned_user_ids"] = json!([carol_id]);
@@ -237,6 +237,66 @@ mod routing {
     assert_eq!(pushes[0].wake_up.kind, PushKind::Mention);
     assert!(pushes[0].wake_up.is_urgent);
     assert_eq!(pushes[0].urgency, Urgency::High);
+    app.stop().await;
+  }
+
+  #[tokio::test]
+  async fn channel_messages_push_to_people_who_never_chose_a_level() {
+    let recorder = Recorder::default();
+    let Some(app) = start(&recorder).await else { return };
+    let s = scene(&app).await;
+
+    send(&app, &s.alice, &s.channel, &s.alice_device, 1).await;
+    let pushes = recorder.wait_for(1).await;
+    assert_eq!(pushes.len(), 1, "the instance default is all: {pushes:?}");
+    assert_eq!(pushes[0].wake_up.kind, PushKind::Message);
+    app.stop().await;
+  }
+
+  #[tokio::test]
+  async fn the_users_own_level_beats_the_default_and_a_channel_choice_beats_both() {
+    let recorder = Recorder::default();
+    let Some(app) = start(&recorder).await else { return };
+    let s = scene(&app).await;
+    let settings = app.get(&s.carol, "/me/notification-settings").await.body;
+    let mut mentions = settings.clone();
+    mentions["level"] = json!("mentions");
+    let put = app.put(&s.carol, "/me/notification-settings", mentions).await;
+    assert_eq!(put.status, StatusCode::OK, "{}", put.body);
+
+    send(&app, &s.alice, &s.channel, &s.alice_device, 1).await;
+    assert!(recorder.wait_for(0).await.is_empty(), "carol chose mentions");
+
+    // A client that doesn't know the level leaves it out; carol's choice stays.
+    app.put(&s.carol, "/me/notification-settings", settings).await;
+    send(&app, &s.alice, &s.channel, &s.alice_device, 2).await;
+    assert!(recorder.wait_for(0).await.is_empty(), "the choice was kept");
+
+    set_level(&app, &s.carol, &s.channel, "all").await;
+    send(&app, &s.alice, &s.channel, &s.alice_device, 3).await;
+    assert_eq!(
+      recorder.wait_for(1).await.len(),
+      1,
+      "the channel's own level wins"
+    );
+    app.stop().await;
+  }
+
+  #[tokio::test]
+  async fn an_instance_default_of_mentions_applies_to_people_who_never_chose() {
+    let recorder = Recorder::default();
+    let Some(app) = TestApp::start_with_push(
+      |settings| settings.notifications.default_level = NotificationLevel::Mentions,
+      recorder.dispatcher(),
+    )
+    .await
+    else {
+      return;
+    };
+    let s = scene(&app).await;
+
+    send(&app, &s.alice, &s.channel, &s.alice_device, 1).await;
+    assert!(recorder.wait_for(0).await.is_empty(), "the default is mentions");
     app.stop().await;
   }
 
@@ -584,6 +644,8 @@ mod preferences {
     let recorder = Recorder::default();
     let Some(app) = start(&recorder).await else { return };
     let s = scene(&app).await;
+    set_level(&app, &s.carol, &s.channel, "mentions").await;
+    set_level(&app, &s.alice, &s.channel, "mentions").await;
     let root = send(&app, &s.alice, &s.channel, &s.alice_device, 1).await;
     let carol_device = &s.carol_push_device;
 
@@ -1944,6 +2006,8 @@ mod read_elsewhere {
     let Some(app) = start(&recorder).await else { return };
     let s = scene(&app).await;
     let carol_id = user_id(&app, &s.carol).await;
+    // Only carol's pushes count here.
+    set_level(&app, &s.alice, &s.channel, "mentions").await;
     let root = send_in(&app, &s.carol, &s.channel, &s.carol_push_device, 1, None, &[]).await;
     let reply = send_in(
       &app,

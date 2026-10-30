@@ -98,7 +98,7 @@ pub fn decide(input: &PolicyInput) -> Decision {
       return Decision::Skip(SkipReason::ThreadNotFollowedByPreference);
     }
   }
-  match input.prefs.effective_level_in(&id, maybe_space.as_deref()) {
+  match level_for(input, &id, maybe_space.as_deref()) {
     NotifyLevel::Nothing => Decision::Skip(SkipReason::LevelNothing),
     NotifyLevel::All => Decision::Notify,
     NotifyLevel::Mentions => {
@@ -114,6 +114,15 @@ pub fn decide(input: &PolicyInput) -> Decision {
         Decision::Skip(SkipReason::NotMentioned)
       }
     },
+  }
+}
+
+/// Integration channels notify only for mentions, as the push routing does (notifications.md,
+/// "Level"): machine output at "all messages" would never stop.
+fn level_for(input: &PolicyInput, id: &str, maybe_space: Option<&str>) -> NotifyLevel {
+  match input.prefs.effective_level_in(id, maybe_space) {
+    NotifyLevel::All if input.conversation.kind == ConversationKind::Integration => NotifyLevel::Mentions,
+    level => level,
   }
 }
 
@@ -646,7 +655,7 @@ mod tests {
 
   #[test]
   fn direct_messages_notify_at_the_mentions_level() {
-    let prefs = NotificationPrefs::default();
+    let prefs = mentions_only();
     assert_eq!(
       decide(&input(&prefs, ConversationKind::Direct, "hello")),
       Decision::Notify
@@ -655,13 +664,39 @@ mod tests {
 
   #[test]
   fn channel_messages_need_a_mention_at_the_mentions_level() {
-    let prefs = NotificationPrefs::default();
+    let prefs = mentions_only();
     assert_eq!(
       decide(&input(&prefs, ConversationKind::Public, "lunch?")),
       Decision::Skip(SkipReason::NotMentioned)
     );
     assert_eq!(
       decide(&input(&prefs, ConversationKind::Public, "ping @alice")),
+      Decision::Notify
+    );
+  }
+
+  #[test]
+  fn channel_messages_notify_by_default() {
+    let prefs = NotificationPrefs::default();
+    assert_eq!(
+      decide(&input(&prefs, ConversationKind::Public, "lunch?")),
+      Decision::Notify
+    );
+  }
+
+  #[test]
+  fn integration_channels_notify_only_for_mentions_even_at_all() {
+    let prefs = NotificationPrefs::default();
+    assert_eq!(
+      decide(&input(&prefs, ConversationKind::Integration, "build 42 passed")),
+      Decision::Skip(SkipReason::NotMentioned)
+    );
+    assert_eq!(
+      decide(&input(
+        &prefs,
+        ConversationKind::Integration,
+        "@alice build 42 failed"
+      )),
       Decision::Notify
     );
   }
@@ -685,7 +720,7 @@ mod tests {
 
   #[test]
   fn a_conversation_override_wins_over_the_global_level() {
-    let mut prefs = NotificationPrefs::default();
+    let mut prefs = mentions_only();
     prefs.set_conversation(
       &conversation(ConversationKind::Public).id.to_string(),
       ConversationNotify {
@@ -962,6 +997,13 @@ mod tests {
     assert_eq!(preview("a\n\n b   c"), "a b c");
     let long = "x".repeat(300);
     assert_eq!(preview(&long).chars().count(), PREVIEW_CHARS + 1);
+  }
+
+  fn mentions_only() -> NotificationPrefs {
+    NotificationPrefs {
+      desktop: NotifyLevel::Mentions,
+      ..NotificationPrefs::default()
+    }
   }
 
   fn input<'a>(prefs: &'a NotificationPrefs, kind: ConversationKind, body: &'a str) -> PolicyInput<'a> {

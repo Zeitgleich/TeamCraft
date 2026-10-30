@@ -189,7 +189,12 @@ pub fn default_dnd_window() -> DndWindow {
 #[serde(default)]
 pub struct NotificationPrefs {
   pub desktop: NotifyLevel,
+  /// Phone pushes; the server enforces it (the user's level in `/me/notification-settings`).
   pub push: NotifyLevel,
+  /// Which defaults `desktop` and `push` were stored with: preferences from before
+  /// [`LEVEL_DEFAULTS_REVISION`] read as 0 (field default), new ones get the current revision.
+  #[serde(default)]
+  pub level_defaults_revision: u32,
   pub push_when: PushWhen,
   /// Don't push to the phone while the desktop app is active, for this many minutes after activity.
   pub push_delay_minutes: u32,
@@ -235,14 +240,18 @@ pub struct NotificationPrefs {
   pub own_sound_limits: OwnSoundLimits,
 }
 
+/// Revision of the level defaults. 1 (issue #1011): "all messages" instead of "mentions".
+pub const LEVEL_DEFAULTS_REVISION: u32 = 1;
+
 /// Default of "remind before a meeting" (notifications.md, "Meeting reminders").
 pub const DEFAULT_MEETING_REMINDER_MINUTES: u16 = 5;
 
 impl Default for NotificationPrefs {
   fn default() -> Self {
     Self {
-      desktop: NotifyLevel::Mentions,
-      push: NotifyLevel::Mentions,
+      desktop: NotifyLevel::All,
+      push: NotifyLevel::All,
+      level_defaults_revision: LEVEL_DEFAULTS_REVISION,
       push_when: PushWhen::AwayOrOffline,
       push_delay_minutes: 2,
       attention_input_secs: DEFAULT_ATTENTION_INPUT_SECS,
@@ -270,6 +279,21 @@ impl Default for NotificationPrefs {
 }
 
 impl NotificationPrefs {
+  /// Moves preferences stored with the old defaults to the new ones (issue #1011). "Mentions" was
+  /// the default before, and stored preferences can't tell it from a deliberate choice, so it reads
+  /// as the old default and becomes "all messages"; "nothing" was always chosen and stays.
+  pub fn upgrade_level_defaults(&mut self) {
+    if self.level_defaults_revision >= LEVEL_DEFAULTS_REVISION {
+      return;
+    }
+    for level in [&mut self.desktop, &mut self.push] {
+      if *level == NotifyLevel::Mentions {
+        *level = NotifyLevel::All;
+      }
+    }
+    self.level_defaults_revision = LEVEL_DEFAULTS_REVISION;
+  }
+
   /// Adds a keyword to a list unless it is empty or already there (case-insensitive).
   pub fn add_keyword(list: &mut Vec<String>, keyword: &str) {
     let keyword = keyword.trim();
@@ -732,7 +756,9 @@ pub struct Preferences {
 impl Preferences {
   /// Parses stored JSON; anything unreadable falls back to the defaults.
   pub fn from_json(text: &str) -> Self {
-    serde_json::from_str(text).unwrap_or_default()
+    let mut prefs: Self = serde_json::from_str(text).unwrap_or_default();
+    prefs.notifications.upgrade_level_defaults();
+    prefs
   }
 
   pub fn to_json(&self) -> String {
@@ -845,6 +871,46 @@ mod tests {
     assert_eq!(newer.notifications.desktop, NotifyLevel::All);
   }
 
+  mod level_defaults {
+    use super::*;
+
+    #[test]
+    fn new_preferences_notify_for_all_messages() {
+      let notes = Preferences::from_json("{}").notifications;
+      assert_eq!((notes.desktop, notes.push), (NotifyLevel::All, NotifyLevel::All));
+      assert_eq!(NotificationPrefs::default().desktop, NotifyLevel::All);
+    }
+
+    #[test]
+    fn the_old_mentions_default_becomes_all_once() {
+      let old = Preferences::from_json(r#"{"notifications":{"desktop":"mentions","push":"mentions"}}"#);
+      assert_eq!(
+        (old.notifications.desktop, old.notifications.push),
+        (NotifyLevel::All, NotifyLevel::All)
+      );
+      assert_eq!(old.notifications.level_defaults_revision, LEVEL_DEFAULTS_REVISION);
+    }
+
+    #[test]
+    fn a_level_chosen_with_the_new_defaults_is_kept() {
+      let mut prefs = Preferences::default();
+      prefs.notifications.desktop = NotifyLevel::Mentions;
+      prefs.notifications.push = NotifyLevel::Mentions;
+      let reloaded = Preferences::from_json(&prefs.to_json()).notifications;
+      assert_eq!(
+        (reloaded.desktop, reloaded.push),
+        (NotifyLevel::Mentions, NotifyLevel::Mentions)
+      );
+    }
+
+    #[test]
+    fn nothing_stays_nothing() {
+      let old =
+        Preferences::from_json(r#"{"notifications":{"desktop":"nothing","push":"all"}}"#).notifications;
+      assert_eq!((old.desktop, old.push), (NotifyLevel::Nothing, NotifyLevel::All));
+    }
+  }
+
   #[test]
   fn keywords_are_trimmed_and_deduplicated() {
     let mut list = vec!["Deploy".to_owned()];
@@ -857,15 +923,15 @@ mod tests {
   #[test]
   fn conversation_overrides_apply_and_clean_up() {
     let mut prefs = NotificationPrefs::default();
-    assert_eq!(prefs.effective_level("7"), NotifyLevel::Mentions);
+    assert_eq!(prefs.effective_level("7"), NotifyLevel::All);
     prefs.set_conversation(
       "7",
       ConversationNotify {
-        maybe_level: Some(NotifyLevel::All),
+        maybe_level: Some(NotifyLevel::Mentions),
         mute: MuteFor::Off,
       },
     );
-    assert_eq!(prefs.effective_level("7"), NotifyLevel::All);
+    assert_eq!(prefs.effective_level("7"), NotifyLevel::Mentions);
     assert!(!prefs.is_muted("7"));
     prefs.set_conversation(
       "7",

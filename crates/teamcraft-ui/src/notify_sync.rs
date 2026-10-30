@@ -1,7 +1,8 @@
 //! Keeps the notification preferences that the server enforces in step with the server.
 //!
 //! Push routing runs on the server, so push mode, the do-not-disturb schedule, read receipts,
-//! thread auto-follow and the per-conversation level and mute time are stored there. The rest of the
+//! thread auto-follow, the phone push level and the per-conversation level and mute time are stored
+//! there. The rest of the
 //! notification preferences (desktop level, keywords, highlights) stay on the device. On start the
 //! server's values are applied to the local preferences; afterwards every local change of a server
 //! field is sent. Both directions are pure mappings, tested below.
@@ -232,6 +233,15 @@ pub fn apply_global(prefs: &mut Preferences, server: &NotificationSettings) {
   prefs.privacy.share_read_receipts = server.send_read_receipts;
   // Servers from before the setting say nothing: attention is used there.
   prefs.notifications.uses_desktop_attention = server.maybe_uses_desktop_attention.unwrap_or(true);
+  // The user's own level, else the instance default; servers from before the setting say nothing.
+  if let Some(level) = server
+    .maybe_level
+    .as_ref()
+    .or(server.maybe_default_level.as_ref())
+    .and_then(level_from_server)
+  {
+    prefs.notifications.push = level;
+  }
 }
 
 /// Local preferences as server settings; fields the UI has no control for come from `previous`.
@@ -250,6 +260,37 @@ pub fn global_from_prefs(
     send_read_receipts: prefs.privacy.share_read_receipts,
     maybe_dnd_schedule: dnd_to_server(&notes.dnd, zone, previous.maybe_dnd_schedule.as_ref()),
     maybe_uses_desktop_attention: Some(notes.uses_desktop_attention),
+    maybe_level: push_level_to_server(notes.push, previous),
+    maybe_default_level: previous.maybe_default_level.clone(),
+  }
+}
+
+/// The phone push level as the user's own choice, unless the user never chose and it still is the
+/// instance default (so a later change of the default reaches them). A server from before the
+/// setting gets nothing.
+fn push_level_to_server(push: NotifyLevel, previous: &NotificationSettings) -> Option<NotificationLevel> {
+  let default = previous.maybe_default_level.as_ref()?;
+  let wanted = level_to_server(push);
+  if previous.maybe_level.is_none() && wanted == *default {
+    return None;
+  }
+  Some(wanted)
+}
+
+fn level_to_server(level: NotifyLevel) -> NotificationLevel {
+  match level {
+    NotifyLevel::All => NotificationLevel::All,
+    NotifyLevel::Mentions => NotificationLevel::Mentions,
+    NotifyLevel::Nothing => NotificationLevel::None,
+  }
+}
+
+fn level_from_server(level: &NotificationLevel) -> Option<NotifyLevel> {
+  match level {
+    NotificationLevel::All => Some(NotifyLevel::All),
+    NotificationLevel::Mentions => Some(NotifyLevel::Mentions),
+    NotificationLevel::None => Some(NotifyLevel::Nothing),
+    NotificationLevel::Unknown(_) => None,
   }
 }
 
@@ -407,23 +448,14 @@ pub fn notify_from_server(
 /// "mentions".
 pub fn space_to_server(notify: &ConversationNotify, now: TimestampMs) -> SpaceNotificationSettings {
   SpaceNotificationSettings {
-    maybe_level: notify.maybe_level.map(|level| match level {
-      NotifyLevel::All => NotificationLevel::All,
-      NotifyLevel::Mentions => NotificationLevel::Mentions,
-      NotifyLevel::Nothing => NotificationLevel::None,
-    }),
+    maybe_level: notify.maybe_level.map(level_to_server),
     maybe_muted_until: mute_until(notify.mute, now).map(UnixMillis),
   }
 }
 
 pub fn space_from_server(server: &SpaceNotificationSettings, now: TimestampMs) -> ConversationNotify {
   ConversationNotify {
-    maybe_level: server.maybe_level.as_ref().and_then(|level| match level {
-      NotificationLevel::All => Some(NotifyLevel::All),
-      NotificationLevel::Mentions => Some(NotifyLevel::Mentions),
-      NotificationLevel::None => Some(NotifyLevel::Nothing),
-      NotificationLevel::Unknown(_) => None,
-    }),
+    maybe_level: server.maybe_level.as_ref().and_then(level_from_server),
     mute: mute_from(server.maybe_muted_until, now),
   }
 }
@@ -480,8 +512,11 @@ mod tests {
           urgent_scope: teamcraft_proto::UrgentScope::Direct,
         }),
         maybe_uses_desktop_attention: Some(true),
+        maybe_level: Some(NotificationLevel::Mentions),
+        maybe_default_level: Some(NotificationLevel::All),
       };
       apply_global(&mut prefs, &server);
+      assert_eq!(prefs.notifications.push, NotifyLevel::Mentions);
       assert_eq!(prefs.notifications.push_when, PushWhen::Always);
       assert!(!prefs.privacy.share_read_receipts);
       let dnd = &prefs.notifications.dnd;
@@ -611,6 +646,8 @@ mod tests {
         send_read_receipts: true,
         maybe_dnd_schedule: None,
         maybe_uses_desktop_attention: None,
+        maybe_level: None,
+        maybe_default_level: None,
       };
       apply_global(&mut prefs, &server);
       let dnd = &prefs.notifications.dnd;
@@ -719,6 +756,74 @@ mod tests {
       },
     ] {
       assert_eq!(space_from_server(&space_to_server(&notify, NOW), NOW), notify);
+    }
+  }
+
+  mod push_level {
+    use super::*;
+
+    #[test]
+    fn a_user_who_never_chose_gets_the_instance_default_and_keeps_following_it() {
+      let server = server(None, Some(NotificationLevel::All));
+      let mut prefs = Preferences::default();
+      prefs.notifications.push = NotifyLevel::Mentions;
+      apply_global(&mut prefs, &server);
+      assert_eq!(prefs.notifications.push, NotifyLevel::All);
+      let sent = global_from_prefs(&prefs, &server, &LocalZone::current(NOW));
+      assert_eq!(sent.maybe_level, None, "still the default, nothing to store");
+      assert_eq!(sent, server, "no write");
+    }
+
+    #[test]
+    fn picking_a_level_stores_it_as_the_users_own() {
+      let server = server(None, Some(NotificationLevel::All));
+      let mut prefs = Preferences::default();
+      apply_global(&mut prefs, &server);
+      prefs.notifications.push = NotifyLevel::Mentions;
+      let sent = global_from_prefs(&prefs, &server, &LocalZone::current(NOW));
+      assert_eq!(sent.maybe_level, Some(NotificationLevel::Mentions));
+    }
+
+    #[test]
+    fn an_explicit_choice_is_kept_even_when_it_equals_the_default() {
+      let server = server(
+        Some(NotificationLevel::Mentions),
+        Some(NotificationLevel::Mentions),
+      );
+      let mut prefs = Preferences::default();
+      apply_global(&mut prefs, &server);
+      assert_eq!(prefs.notifications.push, NotifyLevel::Mentions);
+      let sent = global_from_prefs(&prefs, &server, &LocalZone::current(NOW));
+      assert_eq!(sent.maybe_level, Some(NotificationLevel::Mentions));
+    }
+
+    #[test]
+    fn an_older_server_gets_no_level() {
+      let server = server(None, None);
+      let mut prefs = Preferences::default();
+      apply_global(&mut prefs, &server);
+      assert_eq!(
+        prefs.notifications.push,
+        NotifyLevel::All,
+        "the local value stays"
+      );
+      let sent = global_from_prefs(&prefs, &server, &LocalZone::current(NOW));
+      assert_eq!(sent.maybe_level, None);
+    }
+
+    fn server(
+      maybe_level: Option<NotificationLevel>,
+      maybe_default_level: Option<NotificationLevel>,
+    ) -> NotificationSettings {
+      NotificationSettings {
+        auto_follow_mentioned_threads: true,
+        push_mode: PushMode::AwayOnly,
+        send_read_receipts: true,
+        maybe_dnd_schedule: None,
+        maybe_uses_desktop_attention: Some(true),
+        maybe_level,
+        maybe_default_level,
+      }
     }
   }
 }

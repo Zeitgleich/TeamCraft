@@ -216,8 +216,8 @@ async fn push_to_recipient(
   now: OffsetDateTime,
 ) {
   let verdict = decide(RecipientState {
-    level_is_all: recipient.notification_level == NotificationLevel::All,
-    level_is_none: is_muted(&recipient, now),
+    level_is_all: level(state, &recipient) == NotificationLevel::All,
+    level_is_none: is_muted(state, &recipient, now),
     is_mentioned: event.mentioned.contains(&recipient.user),
     is_direct: matches!(event.kind, ConversationKind::Dm | ConversationKind::Group),
     is_integration: event.is_integration,
@@ -303,7 +303,7 @@ pub async fn notify_ring(
   });
   for recipient in recipients {
     let verdict = decide_ring(
-      is_muted(&recipient, now),
+      is_muted(&state, &recipient, now),
       is_dnd(
         &recipient,
         now,
@@ -653,9 +653,18 @@ fn always_pushes(recipient: &PushRecipientRow) -> bool {
   PushMode::from(recipient.push_mode.clone()) == PushMode::Always
 }
 
-fn is_muted(recipient: &PushRecipientRow, now: OffsetDateTime) -> bool {
-  recipient.notification_level == NotificationLevel::None
+fn is_muted(state: &AppState, recipient: &PushRecipientRow, now: OffsetDateTime) -> bool {
+  level(state, recipient) == NotificationLevel::None
     || notifications::is_muted(recipient.maybe_muted_until, now)
+}
+
+/// The recipient's level for the conversation, with the instance default for somebody who never
+/// chose one (issue #1011).
+fn level(state: &AppState, recipient: &PushRecipientRow) -> NotificationLevel {
+  recipient
+    .maybe_notification_level
+    .clone()
+    .unwrap_or_else(|| state.settings.get().notifications.default_level.clone())
 }
 
 /// DND, manual or scheduled, unless an override (allowed sender, urgent message) lets this through.
@@ -1033,7 +1042,7 @@ mod tests {
     fn recipient(presence_pref: &str, maybe_dnd_schedule: Option<String>) -> PushRecipientRow {
       PushRecipientRow {
         user: user(1),
-        notification_level: NotificationLevel::All,
+        maybe_notification_level: Some(NotificationLevel::All),
         presence_pref: presence_pref.into(),
         maybe_dnd_until: None,
         maybe_muted_until: None,

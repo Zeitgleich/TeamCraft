@@ -391,6 +391,7 @@ settings-f-remove_deactivated_after_days = Remove deactivated users from all cha
 settings-f-admin_join_request_days = Admins' requests to join a private channel expire after
 settings-f-one_to_one_call_ends_for_both = 1:1 calls end for both when one side hangs up
 settings-f-read_receipts_default = Send read receipts by default
+settings-f-default_level = Notify by default about
 settings-f-urgent_repeat_interval_secs = Repeat urgent messages every
 settings-f-urgent_max_pushes = Most pushes for an urgent message
 settings-f-mobile_push_delay_secs = Delay phone pushes while the desktop is in use

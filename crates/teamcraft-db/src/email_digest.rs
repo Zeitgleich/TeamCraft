@@ -114,6 +114,7 @@ impl Database {
          JOIN memberships ms ON ms.conversation_id = m.conversation_id AND ms.user_id = $1
          JOIN conversations c ON c.id = m.conversation_id
          LEFT JOIN space_members sm ON sm.space_id = c.space_id AND sm.user_id = $1
+         LEFT JOIN user_notification_settings uns ON uns.user_id = $1
          LEFT JOIN threads_followed tf ON tf.conversation_id = m.conversation_id
            AND tf.thread_id = m.thread_id AND tf.user_id = $1 AND tf.state = 'following'
          WHERE $1 = ANY(m.mentioned_user_ids)
@@ -122,8 +123,9 @@ impl Database {
            AND m.id >= tc_snowflake_floor(ms.joined_at)
            AND m.id > COALESCE(CASE WHEN m.thread_id IS NULL THEN ms.last_read_message_id
                                     ELSE COALESCE(tf.last_read_message_id, ms.last_read_message_id) END, 0)
-           AND (CASE WHEN ms.notification_overridden OR sm.notification_level IS NULL
-                     THEN ms.notification_level ELSE sm.notification_level END) <> 'none'
+           -- The instance default is never 'none', so a user without any choice counts.
+           AND COALESCE(CASE WHEN ms.notification_overridden THEN ms.notification_level
+                             ELSE COALESCE(sm.notification_level, uns.notification_level) END, 'all') <> 'none'
            AND (CASE WHEN ms.notification_overridden THEN ms.muted_until
                      ELSE GREATEST(ms.muted_until, sm.muted_until) END IS NULL
                 OR (CASE WHEN ms.notification_overridden THEN ms.muted_until

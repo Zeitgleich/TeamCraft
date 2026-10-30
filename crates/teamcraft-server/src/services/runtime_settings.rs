@@ -6,9 +6,9 @@ use serde_json::json;
 use teamcraft_db::StoredSetting;
 use teamcraft_proto::{
   EmailDigestSettings, IntegrationSettings, LimitSettings, LocalAccountSettings, MailTextSettings,
-  MeetingMailSettings, NotificationRuntimeSettings, Permission, RuntimeSettingsKey, RuntimeSettingsResponse,
-  RuntimeSettingsSection, RuntimeSettingsState, ServerRulesSettings, SettingSource, ShareSettings,
-  SignInMethod, SignInPageSettings, Target,
+  MeetingMailSettings, NotificationLevel, NotificationRuntimeSettings, Permission, RuntimeSettingsKey,
+  RuntimeSettingsResponse, RuntimeSettingsSection, RuntimeSettingsState, ServerRulesSettings, SettingSource,
+  ShareSettings, SignInMethod, SignInPageSettings, Target,
 };
 use tracing::warn;
 
@@ -184,6 +184,7 @@ fn apply(settings: &mut Settings, section: &RuntimeSettingsSection) {
     RuntimeSettingsSection::Notifications(values) => {
       let notifications = &mut settings.notifications;
       notifications.read_receipts_default = values.read_receipts_default;
+      notifications.default_level = values.default_level.clone();
       notifications.urgent_repeat_interval_secs = values.urgent_repeat_interval_secs;
       notifications.urgent_max_pushes = values.urgent_max_pushes;
       notifications.mobile_push_delay_secs = values.mobile_push_delay_secs;
@@ -287,6 +288,7 @@ fn view(settings: &Settings, sources: Vec<RuntimeSettingsState>) -> RuntimeSetti
     },
     notifications: NotificationRuntimeSettings {
       read_receipts_default: notifications.read_receipts_default,
+      default_level: notifications.default_level.clone(),
       urgent_repeat_interval_secs: notifications.urgent_repeat_interval_secs,
       urgent_max_pushes: notifications.urgent_max_pushes,
       mobile_push_delay_secs: notifications.mobile_push_delay_secs,
@@ -379,6 +381,14 @@ fn validate(section: &RuntimeSettingsSection) -> Result<(), ApiError> {
       }
     },
     RuntimeSettingsSection::Notifications(values) => {
+      if !matches!(
+        values.default_level,
+        NotificationLevel::All | NotificationLevel::Mentions
+      ) {
+        return Err(ApiError::InvalidRequest(
+          "default_level must be all or mentions".into(),
+        ));
+      }
       check_range(
         "urgent_repeat_interval_secs",
         values.urgent_repeat_interval_secs,

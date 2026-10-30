@@ -34,6 +34,8 @@ const GROUPS: [&str; 10] = [
 ];
 /// The sign-in methods an admin can choose, as the form's values: comma-separated, in order.
 const METHOD_CHOICES: [&str; 4] = ["sso,local", "local,sso", "sso", "local"];
+/// The notification levels an instance default can be (`none` would silence everybody).
+const LEVEL_CHOICES: [&str; 2] = ["all", "mentions"];
 
 /// How a field is edited and checked.
 #[derive(Clone, Copy)]
@@ -53,6 +55,8 @@ enum Kind {
   IdList,
   /// The sign-in methods in order, one of [`METHOD_CHOICES`].
   Methods,
+  /// A notification level, one of [`LEVEL_CHOICES`].
+  Level,
   /// One language's entry of a text map (`help_text.de`); empty means none.
   MapText,
   /// An https link that may be empty (none).
@@ -145,6 +149,10 @@ const SERVER_RULES: &[FieldDef] = &[
 ];
 const NOTIFICATIONS: &[FieldDef] = &[
   flag("read_receipts_default"),
+  FieldDef {
+    id: "default_level",
+    kind: Kind::Level,
+  },
   amount("urgent_repeat_interval_secs", 1, U64_MAX, SECONDS),
   count("urgent_max_pushes"),
   amount("mobile_push_delay_secs", 1, U64_MAX, SECONDS),
@@ -410,6 +418,30 @@ fn FieldRow(
       }
       .into_any()
     },
+    Kind::Level => {
+      let i18n = use_i18n();
+      let dom_id = leak_key(dom_id);
+      view! {
+        <div class="field">
+          <label for=dom_id>{move || i18n.t(label)}</label>
+          <select
+            id=dom_id
+            class="input"
+            prop:value=move || value.get()
+            on:change=move |ev| on_input.run(event_target_value(&ev))
+          >
+            {LEVEL_CHOICES
+              .into_iter()
+              .map(|choice| {
+                let key = level_choice_key(choice);
+                view! { <option value=choice selected=move || value.get() == choice>{move || i18n.t(key)}</option> }
+              })
+              .collect_view()}
+          </select>
+        </div>
+      }
+      .into_any()
+    },
     Kind::IdList => view! {
       <TextAreaField
         id=leak_key(dom_id)
@@ -437,6 +469,14 @@ fn method_choice_key(choice: &str) -> &'static str {
     "sso" => "settings-methods-sso",
     "local" => "settings-methods-local",
     _ => "settings-methods-sso-local",
+  }
+}
+
+/// The i18n key of a notification level, worded as in the user's own settings.
+fn level_choice_key(choice: &str) -> &'static str {
+  match choice {
+    "mentions" => "notify-level-mentions",
+    _ => "notify-level-all",
   }
 }
 
@@ -507,7 +547,9 @@ fn value_text(kind: Kind, maybe_value: Option<&Value>) -> String {
       .as_u64()
       .map(|raw| format_scaled(raw, scale))
       .unwrap_or_default(),
-    Kind::Text | Kind::Area | Kind::MapText | Kind::Link => value.as_str().unwrap_or_default().to_owned(),
+    Kind::Text | Kind::Area | Kind::MapText | Kind::Link | Kind::Level => {
+      value.as_str().unwrap_or_default().to_owned()
+    },
     Kind::Methods => value
       .as_array()
       .map(|methods| {
@@ -593,6 +635,13 @@ fn field_json(kind: Kind, typed: &str) -> Result<Value, &'static str> {
         .find(|choice| *choice == typed)
         .unwrap_or(METHOD_CHOICES[0]);
       Ok(json!(choice.split(',').collect::<Vec<_>>()))
+    },
+    Kind::Level => {
+      let choice = LEVEL_CHOICES
+        .into_iter()
+        .find(|choice| *choice == typed)
+        .unwrap_or(LEVEL_CHOICES[0]);
+      Ok(json!(choice))
     },
     Kind::IdList => {
       let items = parse_list(typed);

@@ -262,6 +262,10 @@ partitions_ahead_months = 3
 [notifications]
 # Users who never chose send read receipts in DMs and group DMs (receipts are reciprocal).
 read_receipts_default = true
+# Which messages notify people who never chose a level for a conversation, its space or in general:
+# "all" or "mentions" (mentions, keywords and direct messages). Integration channels notify only for
+# mentions either way. Also in the admin console.
+default_level = "all"
 urgent_repeat_interval_secs = 120
 urgent_max_pushes = 5
 urgent_scheduler_interval_secs = 15

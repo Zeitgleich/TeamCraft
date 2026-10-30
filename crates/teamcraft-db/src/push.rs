@@ -18,7 +18,9 @@ pub struct PushDeviceRow {
 #[derive(Debug, Clone)]
 pub struct PushRecipientRow {
   pub user: UserId,
-  pub notification_level: NotificationLevel,
+  /// The level of the conversation, else of its space, else the user's own default; `None`: the
+  /// user never chose any of these, the instance default applies.
+  pub maybe_notification_level: Option<NotificationLevel>,
   pub presence_pref: String,
   pub maybe_dnd_until: Option<OffsetDateTime>,
   pub maybe_muted_until: Option<OffsetDateTime>,
@@ -44,9 +46,10 @@ impl Database {
   ) -> Result<Vec<PushRecipientRow>, DbError> {
     let rows = sqlx::query!(
       r#"SELECT m.user_id,
-                -- A conversation the member never configured follows their setting for its space.
-                CASE WHEN m.notification_overridden OR sm.notification_level IS NULL
-                     THEN m.notification_level ELSE sm.notification_level END AS "notification_level!",
+                -- A conversation the member never configured follows their setting for its space,
+                -- else their own default level (NULL: the instance default).
+                CASE WHEN m.notification_overridden THEN m.notification_level
+                     ELSE COALESCE(sm.notification_level, s.notification_level) END AS "notification_level?",
                 CASE WHEN m.notification_overridden THEN m.muted_until
                      ELSE GREATEST(m.muted_until, sm.muted_until) END AS muted_until,
                 u.presence_pref, u.dnd_until,
@@ -84,7 +87,7 @@ impl Database {
         Some(last) if last.user == user => last.devices.push(device),
         _ => recipients.push(PushRecipientRow {
           user,
-          notification_level: NotificationLevel::from(row.notification_level),
+          maybe_notification_level: row.notification_level.map(NotificationLevel::from),
           presence_pref: row.presence_pref,
           maybe_dnd_until: row.dnd_until,
           maybe_muted_until: row.muted_until,

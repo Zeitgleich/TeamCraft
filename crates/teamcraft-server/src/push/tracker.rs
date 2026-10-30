@@ -510,7 +510,7 @@ mod tests {
       HeldPush {
         recipient: PushRecipientRow {
           user: user(user_raw),
-          notification_level: teamcraft_proto::NotificationLevel::All,
+          maybe_notification_level: Some(teamcraft_proto::NotificationLevel::All),
           presence_pref: "auto".into(),
           maybe_dnd_until: None,
           maybe_muted_until: None,
