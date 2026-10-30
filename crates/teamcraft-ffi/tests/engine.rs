@@ -179,6 +179,96 @@ mod brand {
   }
 }
 
+/// Issue #999: the new device waits in the relay until another device answers; asking the other
+/// devices for a prompt must go out meanwhile, not after the wait.
+mod device_link {
+  use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+  use tokio::net::{TcpListener, TcpStream};
+  use tokio::sync::mpsc;
+
+  use super::*;
+
+  #[tokio::test]
+  async fn asking_the_other_devices_goes_out_while_the_new_device_waits() {
+    let directory = temp_dir();
+    let (server_url, mut requests) = held_server().await;
+    let teamcraft = Arc::new(
+      TeamCraft::new(
+        config_at(&directory, [7; 32], &server_url),
+        tokens(Some("token")),
+        listener(),
+      )
+      .unwrap(),
+    );
+    teamcraft
+      .start_device_link("Test phone".into(), LinkPlatform::Android)
+      .await
+      .unwrap();
+    let waiting = tokio::spawn({
+      let teamcraft = teamcraft.clone();
+      async move { teamcraft.wait_for_link_peer().await }
+    });
+    // The wait's first request is held unanswered: the wait goes on as long as the test runs.
+    assert!(requests.recv().await.unwrap().starts_with("GET "));
+
+    // The server's refusal is the answer: the request went out.
+    assert!(teamcraft.announce_device_link().await.is_err());
+    assert!(
+      requests
+        .recv()
+        .await
+        .unwrap()
+        .starts_with("POST /api/v1/device-links ")
+    );
+    assert!(!waiting.is_finished(), "still waiting for the other device");
+
+    // A new link ends the earlier wait.
+    teamcraft
+      .start_device_link("Test phone".into(), LinkPlatform::Android)
+      .await
+      .unwrap();
+    assert!(matches!(
+      waiting.await.unwrap(),
+      Err(TeamCraftError::NoLinkInProgress)
+    ));
+    std::fs::remove_dir_all(&directory).unwrap();
+  }
+
+  /// A server that holds its first request unanswered and refuses every later one; the request
+  /// lines arrive at the receiver in order.
+  async fn held_server() -> (String, mpsc::UnboundedReceiver<String>) {
+    let listener = TcpListener::bind("[::1]:0").await.unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    let (lines, requests) = mpsc::unbounded_channel();
+    tokio::spawn(async move {
+      let mut held = Vec::new();
+      loop {
+        let (mut stream, _) = listener.accept().await.unwrap();
+        lines.send(request_line(&mut stream).await).unwrap();
+        if held.is_empty() {
+          held.push(stream);
+        } else {
+          let refusal = "HTTP/1.1 503 Service Unavailable\r\ncontent-length: 0\r\nconnection: close\r\n\r\n";
+          stream.write_all(refusal.as_bytes()).await.unwrap();
+        }
+      }
+    });
+    (url, requests)
+  }
+
+  /// Reads the request's head; returns its first line.
+  async fn request_line(stream: &mut TcpStream) -> String {
+    let mut head = Vec::new();
+    let mut byte = [0u8; 1];
+    while !head.ends_with(b"\r\n\r\n") {
+      stream.read_exact(&mut byte).await.unwrap();
+      head.push(byte[0]);
+    }
+    let head = String::from_utf8_lossy(&head);
+    head.lines().next().unwrap_or_default().to_owned()
+  }
+}
+
 fn tokens(maybe_token: Option<&str>) -> Arc<dyn TokenProvider> {
   Arc::new(Tokens(maybe_token.map(str::to_string)))
 }
@@ -188,8 +278,12 @@ fn listener() -> Arc<dyn EventListener> {
 }
 
 fn config(directory: &std::path::Path, key: [u8; 32]) -> AppConfig {
+  config_at(directory, key, UNREACHABLE_SERVER)
+}
+
+fn config_at(directory: &std::path::Path, key: [u8; 32], server_url: &str) -> AppConfig {
   AppConfig {
-    server_url: UNREACHABLE_SERVER.into(),
+    server_url: server_url.into(),
     data_dir: directory.to_string_lossy().into_owned(),
     account: "tester".into(),
     database_key: key.to_vec(),
