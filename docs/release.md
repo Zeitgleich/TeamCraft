@@ -175,7 +175,9 @@ The bump commit (`Release X.Y.Z`, signed off by `github-actions[bot]`) is pushed
 and carries no skip marker. `main` requires the `ci-gate` check (repository ruleset; see AGENTS.md,
 "Merging"), and GitHub Actions can't be exempted from a repository ruleset, so the run pushes the
 commit to a helper branch `nightly/bump-X.Y.Z`, marks its `ci-gate` as passed (the bump only changes
-version numbers of a tree whose CI was green), pushes it to `main` and deletes the helper branch. The annotated tag's message is the highlights
+version numbers of a tree whose CI was green), pushes it to `main` and deletes the helper branch. Waiting for CI takes minutes, so `main` may have moved
+by then and the push is rejected; the run then bumps again on the new `main` (up to five times) and lists
+the commits that came after the checked CI run. The annotated tag's message is the highlights
 (`scripts/nightly-notes.py`): the title of every merged pull request (newest first, at most 15, then
 "and N more"; `security` and `breaking` ones first), and the `breaking` ones again under
 `### Breaking`. Write pull request titles for readers; `skip-release-notes` leaves one out. Labels
