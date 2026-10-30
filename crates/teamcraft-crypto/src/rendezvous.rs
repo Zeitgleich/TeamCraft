@@ -33,6 +33,7 @@ use x25519_dalek::{EphemeralSecret, PublicKey as X25519PublicKey, SharedSecret};
 use zeroize::Zeroizing;
 
 use crate::domain;
+use crate::rng::CompatRng;
 use crate::secret::{SYMMETRIC_KEY_LEN, SecretBytes, SymmetricKey};
 
 const CHALLENGE_LEN: usize = 16;
@@ -128,7 +129,7 @@ impl Initiator {
   pub fn new(key: &RendezvousKey, rng: &mut impl CryptoRngCore) -> Self {
     Self {
       keys: AuthKeys::derive(key),
-      ephemeral: EphemeralSecret::random_from_rng(&mut *rng),
+      ephemeral: EphemeralSecret::random_from_rng(&mut CompatRng(&mut *rng)),
       challenge: challenge(rng),
     }
   }
@@ -203,7 +204,7 @@ impl Responder {
   /// Starts the handshake: the returned `hello` goes to the initiator first.
   pub fn new(key: &RendezvousKey, rng: &mut impl CryptoRngCore) -> Result<(Self, Vec<u8>), RendezvousError> {
     let keys = AuthKeys::derive(key);
-    let ephemeral = EphemeralSecret::random_from_rng(&mut *rng);
+    let ephemeral = EphemeralSecret::random_from_rng(&mut CompatRng(&mut *rng));
     let challenge = challenge(rng);
     let mut body = challenge.to_vec();
     body.extend_from_slice(&commitment(X25519PublicKey::from(&ephemeral).as_bytes()));
@@ -502,7 +503,7 @@ mod tests {
       let (_, honest_auth) = responder.receive_auth_hello(&auth_hello, &mut OsRng).unwrap();
       let opened = open_handshake(&keys.responder, &honest_auth).unwrap();
       let mut swapped = opened.expose_secret()[..CHALLENGE_LEN].to_vec();
-      let other = EphemeralSecret::random_from_rng(OsRng);
+      let other = EphemeralSecret::random_from_rng(&mut CompatRng(&mut OsRng));
       swapped.extend_from_slice(X25519PublicKey::from(&other).as_bytes());
       let forged = seal_handshake(&keys.responder, &swapped, &mut OsRng).unwrap();
       assert!(matches!(
