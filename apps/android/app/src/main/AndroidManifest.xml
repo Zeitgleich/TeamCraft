@@ -54,6 +54,10 @@
         <category android:name="android.intent.category.DEFAULT" />
         <data android:mimeType="*/*" />
       </intent-filter>
+      <!-- Direct share: the notes and recent conversations in the system share sheet (#829). -->
+      <meta-data
+        android:name="android.app.shortcuts"
+        android:resource="@xml/shortcuts" />
     </activity>
 
     <!-- Reply and mark-as-read from notifications, phone and Android Auto alike. -->

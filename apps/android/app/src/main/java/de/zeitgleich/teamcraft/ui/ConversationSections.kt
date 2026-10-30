@@ -10,6 +10,12 @@ sealed interface SectionTitle {
   data object Channels : SectionTitle
   data object DirectMessages : SectionTitle
 
+  /** The user's notes to themself, pinned above everything (the share picker, issue #829). */
+  data object Notes : SectionTitle
+
+  /** The most recently active conversations (the share picker). */
+  data object Recent : SectionTitle
+
   /** The Activity tab's one list (shown without a header). */
   data object Activity : SectionTitle
 }
@@ -50,6 +56,12 @@ enum class HomeFilter {
     Groups -> item.kind == ConversationKind.GROUP
   }
 }
+
+/**
+ * The name lists show: the notes have none of their own (they are named after the other people,
+ * and there are none), so they are called [notesTitle] in the user's language.
+ */
+fun ConversationItem.listName(notesTitle: String): String = if (isNotesToSelf) notesTitle else name
 
 /** DMs and group DMs live outside spaces and have their own tab. */
 val ConversationItem.isDirect: Boolean
