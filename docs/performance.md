@@ -1051,8 +1051,46 @@ that still can't be read is not written again on every retry, and both SQLite st
 (btrfs on NVMe, 1.5 KB record): 17.6 ms with the rollback journal, 6.0 ms with WAL and full syncs,
 0.04 ms with WAL and `NORMAL`.
 
-Still open from #972: the gateway connects only after the catch-up, so live events wait for it; that
-part is tracked separately.
+### Coming back and bad networks, end to end (issue #972)
+
+`tests/e2e` runs the app as the apps do (the sync runner with its connection supervisor, the
+desktop's store on a disk, or the mobile store with `E2E_STORE=mobile`) against the real server,
+Keycloak and MLS, and makes its link to the server bad in the kernel (`tc netem`, `nft`) inside a
+rootless network namespace: `scripts/e2e-network.sh`. Each scenario checks that every message
+arrives exactly once.
+
+**Coming back** (`long_absence.rs`): 38 conversations, 12 of them changed while the device was away
+(40 messages each, somebody added and removed three times), the session expired, 30 ms round trip.
+
+| Coming back                      | Before                                         | Fixed   |
+|----------------------------------|------------------------------------------------|---------|
+| Messages readable afterwards     | `main`: 313 stayed parked, the device fell out | all 481 |
+| Per changed conversation         | 1.2 s (with the identity fix alone)            | 0.24 s  |
+| Connected after                  | 16.4 s (with the identity fix alone)           | 4.8 s   |
+| Message sent to the open channel | `main`: never                                  | 0.6 s   |
+
+The device verified each late commit against identities pinned from today's member list; somebody
+added and gone again since was not on it, the commit was refused and the device fell out of the
+group (e2ee.md §4.6). It now pins whom the commit's signed change names first. A pass over a
+conversation's queue reads the member list and each device list once, instead of again for every
+entry, one round trip after the other. With the issue's 80 ms to the server the saving is larger.
+
+**Bad links** (`network_conditions.rs`, desktop store, writers sending every 0.7 s):
+
+| Link                                       | Noticed by the app        | After it was good again           |
+|--------------------------------------------|---------------------------|-----------------------------------|
+| No UDP at all                              | nothing to notice         | live throughout (≤ 21 ms)         |
+| Loss 5–60 %, changing every 4 s, 80±60 ms  | stays connected           | all there after 28 ms             |
+| Drop-outs: 2 s dead, 3 s fine, eight times | stays connected           | all there after 34 ms             |
+| Dead 30 s, then 96 kbit/s with 300 ms      | stays connected           | all there after 224 ms            |
+| Resets for 10 s                            | at once                   | connected after 2.8 s (backoff)   |
+| Dead 8 s                                   | not (shorter than a beat) | 4.8 s (TCP retransmission)        |
+| Dead 120 s, past the resume window         | after 53 s, now ≤ 35 s    | connected after 0.6–0.8 s, all in |
+
+A silently dead link (no signal from the OS) was found only after two heartbeat intervals without a
+frame plus the probe slack, 53 s in which the app showed "connected". Every heartbeat now has to be
+answered within 10 s (`heartbeat_answer_timeout`). The gateway still connects after the catch-up;
+with the focused conversation caught up first (0.6 s above) that is no longer what users wait for.
 
 ### Android (first numbers)
 
