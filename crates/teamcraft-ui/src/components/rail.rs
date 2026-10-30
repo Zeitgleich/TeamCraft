@@ -8,12 +8,12 @@ use crate::components::icons::{Icon, IconName};
 use crate::components::rail_menus::{RailCreateMenu, RailFocusMenu};
 use crate::components::space_tile::SpaceTileContent;
 use crate::i18n::use_i18n;
-use crate::model::{ConversationKind, Space};
+use crate::model::{ConversationKind, Space, SpaceId};
 use crate::sections::{RailBadge, badge_count, has_urgent_activity};
 use crate::state::{AppState, Overlay, RailEntry, use_app_state};
 
-/// The largest count a space tile's badge shows; more reads "9+".
-const RAIL_BADGE_CAP: u32 = 9;
+/// The largest count a space tile's badge shows; more reads "99+", so the badge keeps its size.
+const RAIL_BADGE_CAP: u32 = 99;
 
 /// Space switcher on the far left (Mattermost "team sidebar"). On top the global places with a
 /// label under each icon: Chats (the DMs, which live outside spaces) and Activity, whose list takes
@@ -248,21 +248,23 @@ fn AllSpacesButton() -> impl IntoView {
   }
 }
 
-/// Mentions as a number in a red bubble on the tile's corner (up to 9, then "9+", so it always fits
-/// the bubble), other unread messages as a small neutral dot there (#715). The memo per space keeps
-/// a change elsewhere from touching this tile.
+/// The space's unread messages as a number in a red bubble on the tile's corner, up to "99+"
+/// (#955), so a busy space stands out from a quiet one.
 #[component]
 fn RailBadgeView(badge: Memo<RailBadge>) -> impl IntoView {
   view! {
     <CountBadge
-      count=Signal::derive(move || badge.get().mention_count)
+      count=Signal::derive(move || badge.get().count)
       is_decorative=true
       maybe_cap=RAIL_BADGE_CAP
     />
-    <Show when=move || { let current = badge.get(); current.mention_count == 0 && current.has_unread } fallback=|| ()>
-      <span class="dot-unread" aria-hidden="true"></span>
-    </Show>
   }
+}
+
+/// What the rail entry of `space` counts: only the space's own channels, DMs have their own entry.
+/// It reads through `state`, so a memo of it follows every new or read message.
+fn space_badge(state: AppState, space: SpaceId) -> RailBadge {
+  RailBadge::of(&state.with_mutes(state.read(|backend| backend.space_conversations(space))))
 }
 
 #[component]
@@ -270,10 +272,8 @@ fn SpaceButton(space: Space) -> impl IntoView {
   let state = use_app_state();
   let i18n = use_i18n();
   let id = space.id;
-  // Only the space's own channels count; DMs have their own entry.
-  let badge = Memo::new(move |_| {
-    RailBadge::of(&state.with_mutes(state.read(|backend| backend.space_conversations(id))))
-  });
+  // The memo per space keeps a change elsewhere from touching this tile.
+  let badge = Memo::new(move |_| space_badge(state, id));
   let is_current = move || state.rail.get() == RailEntry::Space && state.space.get() == id;
   let is_muted = move || {
     state
@@ -285,16 +285,15 @@ fn SpaceButton(space: Space) -> impl IntoView {
     let name = space.name.clone();
     move || {
       let current = badge.get();
-      if current.mention_count > 0 {
-        i18n.t_count_with(
+      let unread = current.count.to_string();
+      match (current.count, current.mention_count) {
+        (0, _) => name.clone(),
+        (_, 0) => i18n.t_with("rail-space-unread", &[("name", &name), ("unread", &unread)]),
+        (_, mentions) => i18n.t_count_with(
           "rail-space-mentions",
-          current.mention_count as usize,
-          &[("name", &name)],
-        )
-      } else if current.has_unread {
-        i18n.t_with("rail-space-unread", &[("name", &name)])
-      } else {
-        name.clone()
+          mentions as usize,
+          &[("name", &name), ("unread", &unread)],
+        ),
       }
     }
   };
@@ -315,5 +314,108 @@ fn SpaceButton(space: Space) -> impl IntoView {
         <RailBadgeView badge=badge />
       </button>
     </li>
+  }
+}
+
+#[cfg(test)]
+mod tests {
+  use std::rc::Rc;
+
+  use super::*;
+  use crate::backend::Backend;
+  use crate::mock::MockBackend;
+  use crate::model::{ConversationId, TimestampMs};
+  use crate::prefs::{ConversationNotify, MuteFor};
+  use crate::settings::Settings;
+
+  const NOW: TimestampMs = 1_792_584_000_000;
+
+  #[test]
+  fn another_space_counts_its_own_channels_whichever_space_is_open() {
+    let (_, state) = demo_state();
+    let (open, other) = spaces(state);
+    state.open_space(open);
+    let before = (space_badge(state, open), space_badge(state, other));
+    assert_eq!(
+      before.1,
+      RailBadge {
+        count: 5,
+        mention_count: 1
+      },
+      "Project B: 5 unread in #planning, one of them a mention"
+    );
+    assert!(before.0.count > 0 && before.0 != before.1);
+    state.open_space(other);
+    assert_eq!((space_badge(state, open), space_badge(state, other)), before);
+  }
+
+  #[test]
+  fn the_badge_follows_new_and_read_messages() {
+    let (mock, state) = demo_state();
+    let (_, other) = spaces(state);
+    let badge = Memo::new(move |_| space_badge(state, other));
+    assert_eq!(badge.get().count, 5);
+
+    mock.receive(channel(state, other, "general"), false);
+    state.backend_changed();
+    assert_eq!(
+      badge.get(),
+      RailBadge {
+        count: 6,
+        mention_count: 1
+      }
+    );
+
+    state.write(|backend| backend.mark_read(channel(state, other, "planning")));
+    assert_eq!(
+      badge.get(),
+      RailBadge {
+        count: 1,
+        mention_count: 0
+      }
+    );
+  }
+
+  #[test]
+  fn a_muted_space_counts_only_its_mentions() {
+    let (_, state) = demo_state();
+    let (_, other) = spaces(state);
+    state.settings.prefs.update(|prefs| {
+      prefs.notifications.set_space(
+        &other.to_string(),
+        ConversationNotify {
+          maybe_level: None,
+          mute: MuteFor::Forever,
+        },
+      );
+    });
+    assert_eq!(
+      space_badge(state, other),
+      RailBadge {
+        count: 1,
+        mention_count: 1
+      }
+    );
+  }
+
+  fn demo_state() -> (Rc<MockBackend>, AppState) {
+    let mock = Rc::new(MockBackend::new(NOW));
+    let backend: Rc<dyn Backend> = mock.clone();
+    (mock, AppState::new(backend, Settings::for_tests(), None))
+  }
+
+  /// The demo's two spaces: Project A, then Project B.
+  fn spaces(state: AppState) -> (SpaceId, SpaceId) {
+    let spaces = state.read(|backend| backend.spaces());
+    (spaces[0].id, spaces[1].id)
+  }
+
+  fn channel(state: AppState, space: SpaceId, name: &str) -> ConversationId {
+    state
+      .read(|backend| backend.space_conversations(space))
+      .into_iter()
+      .find(|conversation| conversation.name == name)
+      .map(|conversation| conversation.id)
+      .expect("a demo channel")
   }
 }

@@ -258,25 +258,30 @@ pub fn build_direct(
   }
 }
 
-/// What a space rail entry shows for its conversations: a mention count, or a dot for unread
-/// messages in conversations that aren't muted.
+/// What a space's rail entry counts for its conversations (#955): the sum of the red numbers their
+/// sidebar rows show ([`row_badge`]), so a muted conversation adds only its mentions. The mentions
+/// are counted apart for the accessible name.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct RailBadge {
+  pub count: u32,
   pub mention_count: u32,
-  pub has_unread: bool,
 }
 
 impl RailBadge {
   pub fn of(conversations: &[Conversation]) -> Self {
-    Self {
-      mention_count: conversations
-        .iter()
-        .map(|conversation| conversation.mention_count)
-        .sum(),
-      has_unread: conversations
-        .iter()
-        .any(|conversation| conversation.unread_count > 0 && !conversation.is_muted),
-    }
+    conversations.iter().fold(Self::default(), |sum, conversation| {
+      let red = row_badge(
+        conversation.unread_count,
+        conversation.mention_count,
+        conversation.is_muted,
+      )
+      .filter(|badge| badge.tone == RowBadgeTone::Red)
+      .map_or(0, |badge| badge.count);
+      Self {
+        count: sum.count.saturating_add(red),
+        mention_count: sum.mention_count.saturating_add(conversation.mention_count),
+      }
+    })
   }
 }
 
@@ -851,20 +856,49 @@ mod tests {
   }
 
   #[test]
-  fn rail_badges_skip_muted_unread_but_count_mentions() {
-    let mut muted = conversation(1, SidebarCategory::Channels, 4, false);
-    muted.is_muted = true;
-    muted.mention_count = 1;
+  fn a_space_badge_sums_the_unread_messages_of_its_conversations() {
+    let mut engineering = conversation(1, SidebarCategory::Channels, 12, false);
+    engineering.mention_count = 2;
+    let general = conversation(2, SidebarCategory::Channels, 3, false);
+    let read = conversation(3, SidebarCategory::Channels, 0, false);
     assert_eq!(
-      RailBadge::of(std::slice::from_ref(&muted)),
+      RailBadge::of(&[engineering, general, read]),
       RailBadge {
-        mention_count: 1,
-        has_unread: false
+        count: 15,
+        mention_count: 2
       }
     );
-    let unread = conversation(2, SidebarCategory::Channels, 2, false);
-    assert!(RailBadge::of(&[muted, unread]).has_unread);
     assert_eq!(RailBadge::of(&[]), RailBadge::default());
+  }
+
+  #[test]
+  fn a_space_badge_counts_only_the_mentions_of_muted_conversations() {
+    let mut muted = conversation(1, SidebarCategory::Channels, 40, false);
+    muted.is_muted = true;
+    assert_eq!(RailBadge::of(std::slice::from_ref(&muted)), RailBadge::default());
+    muted.mention_count = 1;
+    let unread = conversation(2, SidebarCategory::Channels, 2, false);
+    assert_eq!(
+      RailBadge::of(&[muted, unread]),
+      RailBadge {
+        count: 3,
+        mention_count: 1
+      }
+    );
+  }
+
+  #[test]
+  fn a_mention_counts_although_the_unread_count_lags_behind() {
+    let mut lagging = conversation(1, SidebarCategory::Channels, 0, false);
+    lagging.mention_count = 2;
+    assert_eq!(RailBadge::of(&[lagging]).count, 2);
+  }
+
+  #[test]
+  fn a_space_badge_saturates_instead_of_overflowing() {
+    let huge = conversation(1, SidebarCategory::Channels, u32::MAX, false);
+    let more = conversation(2, SidebarCategory::Channels, 5, false);
+    assert_eq!(RailBadge::of(&[huge, more]).count, u32::MAX);
   }
 
   #[test]

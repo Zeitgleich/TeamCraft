@@ -331,6 +331,21 @@ impl MockBackend {
   pub fn set_typing(&self, typing: Vec<crate::model::TypingNow>) {
     self.state.borrow_mut().typing = typing;
   }
+
+  /// A top-level message from someone else arrives in `conversation`, as the core counts it.
+  #[cfg(test)]
+  pub fn receive(&self, conversation: ConversationId, is_mention: bool) {
+    let mut state = self.state.borrow_mut();
+    if let Some(conv) = state
+      .conversations
+      .iter_mut()
+      .find(|conv| conv.id == conversation)
+    {
+      conv.unread_count += 1;
+      conv.mention_count += u32::from(is_mention);
+    }
+    state.refresh_space_badges();
+  }
 }
 
 impl ChatBackend for MockBackend {

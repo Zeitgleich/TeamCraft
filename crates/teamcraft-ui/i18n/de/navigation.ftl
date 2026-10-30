@@ -9,11 +9,11 @@ menu-log-out = Abmelden
 ## Space-Leiste
 rail-label = Spaces
 rail-add-space = Spaces durchsuchen oder anlegen
-rail-space-mentions = { $name }, { $count ->
-    [one] { $count } ungelesene Erwähnung
-   *[other] { $count } ungelesene Erwähnungen
+rail-space-mentions = { $name }, { $unread } ungelesen, { $count ->
+    [one] { $count } Erwähnung
+   *[other] { $count } Erwähnungen
   }
-rail-space-unread = { $name }, ungelesene Nachrichten
+rail-space-unread = { $name }, { $unread } ungelesen
 rail-chats-unread = Chats, { $count } ungelesen
 rail-chats = Chats
 rail-activity = Aktivität

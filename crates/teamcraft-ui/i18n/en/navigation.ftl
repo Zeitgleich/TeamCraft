@@ -9,11 +9,11 @@ menu-log-out = Log out
 ## Space rail
 rail-label = Spaces
 rail-add-space = Browse or create spaces
-rail-space-mentions = { $name }, { $count ->
-    [one] { $count } unread mention
-   *[other] { $count } unread mentions
+rail-space-mentions = { $name }, { $unread } unread, { $count ->
+    [one] { $count } mention
+   *[other] { $count } mentions
   }
-rail-space-unread = { $name }, unread messages
+rail-space-unread = { $name }, { $unread } unread
 rail-chats-unread = Chats, { $count } unread
 rail-chats = Chats
 rail-activity = Activity
