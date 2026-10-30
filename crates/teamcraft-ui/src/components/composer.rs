@@ -6,6 +6,7 @@ use teamcraft_client_api::actions::{FileSource, MessagePriority, OutgoingFile, O
 use teamcraft_client_api::admin::format_bytes;
 use wasm_bindgen_futures::JsFuture;
 
+use crate::audio::AudioFormat;
 use crate::clock::now_ms;
 use crate::components::avatar::{Avatar, AvatarSize};
 use crate::components::composer_commands::{self, CommandButton, Notice, NoticeEvent, Outcome};
@@ -920,7 +921,11 @@ pub fn Composer(
               true => raster::video_poster(&file, APP_THUMBNAIL_SIDE).await,
               false => None,
             };
-            let maybe_duration_ms = maybe_poster.as_ref().and_then(|poster| poster.maybe_duration_ms);
+            // An audio file's length, likewise, for its card (#802).
+            let maybe_duration_ms = match AudioFormat::of(&media_type, &file.name()) {
+              Some(_) => raster::audio_duration_ms(&file).await,
+              None => maybe_poster.as_ref().and_then(|poster| poster.maybe_duration_ms),
+            };
             let maybe_thumbnail = match (&maybe_bytes, wants_thumbnail) {
               _ if maybe_poster.is_some() => maybe_poster.map(|poster| poster.jpeg),
               (Some(bytes), true) => raster::app_thumbnail(bytes, &media_type, APP_THUMBNAIL_SIDE).await,

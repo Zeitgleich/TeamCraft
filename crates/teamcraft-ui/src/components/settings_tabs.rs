@@ -23,7 +23,7 @@ use crate::i18n::{Locale, use_i18n};
 use crate::keys::t_with_shortcuts;
 use crate::prefs::{CallPrefs, Density, ImageSize, SidebarSort, TextSize, Zoom};
 use crate::reactive::SetIfAlive;
-use crate::settings::{MediaCacheLimit, MediaCacheMaxAge, PreviewLimit, SendMode, Theme};
+use crate::settings::{AudioLimit, MediaCacheLimit, MediaCacheMaxAge, PreviewLimit, SendMode, Theme};
 use crate::state::use_app_state;
 
 /// The tray icon styles' values in the settings' choices (their wire names).
@@ -270,6 +270,7 @@ pub fn PreferencesSection() -> impl IntoView {
   let media_cache_limit = RwSignal::new(MediaCacheLimit::load());
   let media_cache_max_age = RwSignal::new(MediaCacheMaxAge::load());
   let preview_limit = RwSignal::new(PreviewLimit::load());
+  let audio_limit = RwSignal::new(AudioLimit::load());
   let language_options: Vec<(String, String)> = Locale::ALL
     .into_iter()
     .map(|locale| (locale.tag().to_owned(), format!("language-{}", locale.tag())))
@@ -390,6 +391,18 @@ pub fn PreferencesSection() -> impl IntoView {
           if let Some(limit) = PreviewLimit::from_slug(&slug) {
             limit.save();
             preview_limit.set(limit);
+          }
+        })
+      />
+      <SelectRow
+        label="settings-audio-limit"
+        hint="settings-audio-limit-hint"
+        options=slug_options(&AudioLimit::ALL.map(AudioLimit::slug), "settings-audio-limit-")
+        value=Signal::derive(move || audio_limit.get().slug().to_owned())
+        on_change=Callback::new(move |slug: String| {
+          if let Some(limit) = AudioLimit::from_slug(&slug) {
+            limit.save();
+            audio_limit.set(limit);
           }
         })
       />

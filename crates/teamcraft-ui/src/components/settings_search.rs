@@ -61,6 +61,7 @@ const ENTRIES: &[(SettingsTab, &str)] = &[
   (SettingsTab::Preferences, "settings-media-cache"),
   (SettingsTab::Preferences, "settings-media-cache-age"),
   (SettingsTab::Preferences, "settings-preview-limit"),
+  (SettingsTab::Preferences, "settings-audio-limit"),
   (SettingsTab::Preferences, "settings-autostart"),
   (SettingsTab::Preferences, "settings-close-to-tray"),
   (SettingsTab::Preferences, "settings-start-minimized"),
