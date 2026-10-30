@@ -8,7 +8,9 @@ use std::collections::BTreeSet;
 use rand_core::OsRng;
 use teamcraft_crypto::content_key::ContentKey;
 use teamcraft_crypto::mls::ConversationGroup;
-use teamcraft_proto::{Base64Bytes, ConversationId, ListMlsMessagesQuery, PostMlsCommitRequest, UserId};
+use teamcraft_proto::{
+  Base64Bytes, ConversationId, ListMlsMessagesQuery, MlsMessageResponse, PostMlsCommitRequest, UserId,
+};
 
 use super::Client;
 use super::groups::rejoin_key;
@@ -38,6 +40,9 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     if !self.may_refound_notes(conversation, users, directory)? {
       return Ok(false);
     }
+    // Tried at most every `rejoin_retry`, like joining as a further device: a server that answers
+    // with an epoch near the limit and then refuses the commit can't make this device spin.
+    self.member_join_attempts.insert(conversation, self.now_ms());
     let query = ListMlsMessagesQuery {
       maybe_after: None,
       maybe_limit: Some(1),
@@ -74,24 +79,13 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     };
     match self.api.post_mls_commit(conversation, &request).await {
       Ok(response) => {
-        if let Some(group) = self.groups.get_mut(&conversation) {
-          group.confirm_commit(&self.provider)?;
+        if let Err(error) = self.keep_refounded_group(conversation, &response.commit) {
+          // Nothing of it reached the store (one group of writes): a later sync founds anew.
+          if let Err(drop_error) = self.drop_group(conversation) {
+            tracing::debug!(conversation_id = %conversation, %drop_error, "could not drop an unsaved group");
+          }
+          return Err(error);
         }
-        self.atomically(|client| {
-          client.forget_key_history(conversation)?;
-          client.persist_group_at(conversation, &response.commit)?;
-          client
-            .store
-            .delete(Table::AppliedChanges, &device_add_key(conversation))?;
-          client
-            .store
-            .delete(Table::AppliedChanges, &rejoin_key(conversation))?;
-          client
-            .store
-            .delete(Table::AppliedChanges, &current_key_wait_key(conversation))?;
-          Ok(())
-        })?;
-        self.start_refounded_key(conversation)?;
         self.member_join_attempts.remove(&conversation);
         self.retry_undecrypted(conversation)?;
         tracing::info!(conversation_id = %conversation, epoch, "founded the notes' group anew");
@@ -107,6 +101,35 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
         Err(error.into())
       },
     }
+  }
+
+  /// Merges the accepted commit and stores the group, its cursor and a fresh current key in one
+  /// group of writes: a group stored without that key would keep writing with the old one, which
+  /// the lost devices know, and would never be founded again.
+  fn keep_refounded_group(
+    &mut self,
+    conversation: ConversationId,
+    commit: &MlsMessageResponse,
+  ) -> Result<(), CoreError> {
+    self
+      .groups
+      .get_mut(&conversation)
+      .ok_or(CoreError::NoGroup(conversation))?
+      .confirm_commit(&self.provider)?;
+    self.atomically(|client| {
+      client.forget_key_history(conversation)?;
+      client.persist_group_at(conversation, commit)?;
+      client
+        .store
+        .delete(Table::AppliedChanges, &device_add_key(conversation))?;
+      client
+        .store
+        .delete(Table::AppliedChanges, &rejoin_key(conversation))?;
+      client
+        .store
+        .delete(Table::AppliedChanges, &current_key_wait_key(conversation))?;
+      client.start_refounded_key(conversation)
+    })
   }
 
   /// The checks of [`Self::refound_notes`] that need nothing from the server.
@@ -145,7 +168,8 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
   }
 
   /// A fresh current content key for the new group: the old one may be known to the lost
-  /// devices. The old keys stay in the ring (and the key bag) for the history.
+  /// devices. The old keys stay in the ring (and the key bag) for the history. Inside the group of
+  /// writes of [`Self::keep_refounded_group`].
   fn start_refounded_key(&mut self, conversation: ConversationId) -> Result<(), CoreError> {
     let key = ContentKey::generate(&mut OsRng);
     let key_id = key.id();

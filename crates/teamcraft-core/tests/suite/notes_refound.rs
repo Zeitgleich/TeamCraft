@@ -5,9 +5,12 @@
 
 use crate::common;
 
+use std::sync::Arc;
+
 use common::{Peer, link_device, settings, settle};
 use teamcraft_core::api::ServerApi;
 use teamcraft_core::api::fake::FakeServer;
+use teamcraft_core::clock::ManualClock;
 use teamcraft_core::{ClientSettings, GroupAccess};
 use teamcraft_proto::{ConversationId, ListMlsMessagesQuery};
 
@@ -138,6 +141,42 @@ async fn a_made_up_epoch_beyond_the_limit_founds_nothing() {
   laptop.client.full_sync().await.unwrap();
   assert_eq!(laptop.client.mls_epoch(notes).unwrap(), None);
   assert_eq!(server_epoch(&laptop, notes).await, 4);
+}
+
+#[tokio::test]
+async fn a_failed_attempt_is_tried_again_only_after_the_rejoin_retry() {
+  let server = FakeServer::new();
+  let mut phone = Peer::enroll_with_settings(&server, "Alice", notes_settings()).await;
+  let notes = notes_of(&mut phone).await;
+  let laptop_clock = Arc::new(ManualClock::new(1_800_000_000_000));
+  let mut laptop = Peer::enroll_on_clock(
+    phone.api.clone(),
+    "Alice laptop",
+    notes_settings(),
+    Box::new(laptop_clock.clone()),
+  )
+  .await;
+  laptop
+    .client
+    .revoke_device(phone.client.device_id())
+    .await
+    .unwrap();
+  let epoch = server_epoch(&laptop, notes).await;
+
+  // The commit is lost (as it would be refused): nothing is founded, and the next sync right
+  // after doesn't redo the work.
+  server.drop_next_commit(laptop.client.user_id());
+  let _ = laptop.client.full_sync().await;
+  assert_eq!(laptop.client.mls_epoch(notes).unwrap(), None);
+  laptop.client.full_sync().await.unwrap();
+  assert_eq!(laptop.client.mls_epoch(notes).unwrap(), None, "held back");
+  assert_eq!(server_epoch(&laptop, notes).await, epoch);
+
+  let retry = notes_settings().rejoin_retry;
+  laptop_clock.advance(i64::try_from(retry.as_millis()).unwrap());
+  laptop.client.full_sync().await.unwrap();
+  assert_eq!(laptop.client.group_access(notes).unwrap(), GroupAccess::Member);
+  assert_eq!(server_epoch(&laptop, notes).await, epoch + 1);
 }
 
 fn notes_settings() -> ClientSettings {

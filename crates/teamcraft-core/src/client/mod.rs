@@ -162,7 +162,8 @@ pub struct ClientSettings {
   /// request, up to this.
   pub rejoin_retry_max: std::time::Duration,
   /// The notes' group is founded anew (e2ee.md §4.6, "Re-founding the notes") only while the
-  /// server's queue is at most at this epoch: each epoch costs one commit on this device.
+  /// server's queue is at most at this epoch: each epoch costs one commit on this device, and a
+  /// failed attempt is tried again after `rejoin_retry`.
   pub max_refound_epoch: u64,
   /// Somebody added to a conversation who has no device for this long is shown as having never set
   /// up the app, and the wait for their first device ends (their first device still gets them in,
@@ -349,7 +350,7 @@ impl Default for ClientSettings {
       device_add_attempts: 6,
       rejoin_retry: std::time::Duration::from_secs(10 * 60),
       rejoin_retry_max: std::time::Duration::from_secs(24 * 60 * 60),
-      max_refound_epoch: 10_000,
+      max_refound_epoch: 1_000,
       pending_addition_expiry: std::time::Duration::from_secs(90 * 24 * 60 * 60),
       rejoin_cooldown: std::time::Duration::from_secs(30 * 60),
       change_announcement_window: std::time::Duration::from_secs(10 * 60),

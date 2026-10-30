@@ -958,8 +958,11 @@ content key (the lost devices know the old ones; those stay in the ring and the 
 history), and devices linked later join the new group as usual. A device of the old group that
 still runs can't read the new group: it falls out on that commit and asks to be added back
 (§4.6, "Falling out and coming back"), which only works if the user's list names it. At most
-`max_refound_epoch` (client, default 10 000) epochs are skipped this way, so a server can't make
-a device spin on a made-up epoch.
+`max_refound_epoch` (client, default 1 000) epochs are skipped this way, and an attempt that
+fails (an epoch conflict, a lost answer) is tried again only after `rejoin_retry`, so a server
+can't make a device spin on a made-up epoch. The group, its cursor and the fresh content key are
+stored in one group of writes (§9.5): after a crash the device has either no group (and founds
+again, one epoch on) or the group with the fresh key, never the group with the old key.
 
 This never applies to a conversation with another person's devices: those are added back by the
 other members (§4.6, rejoin), never replaced by one device alone. What a hostile server can still

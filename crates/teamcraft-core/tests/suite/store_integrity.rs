@@ -11,12 +11,13 @@ use crate::common;
 use common::{PASSPHRASE, Peer, TestClient, clock, link_device, settings, settle};
 use openmls_rust_crypto::OpenMlsRustCrypto;
 use openmls_traits::OpenMlsProvider as _;
+use teamcraft_core::api::ServerApi;
 use teamcraft_core::api::fake::{FakeGateway, FakeServer, FakeServerApi};
 use teamcraft_core::store::{
   ConversationEvent, LocalStore, MemoryStore, MessageContent, MessageFilter, StoreError, StoredMessage, Table,
 };
 use teamcraft_core::workspace::RosterRole;
-use teamcraft_core::{Client, LinkOffer, PendingEnrollment};
+use teamcraft_core::{Client, GroupAccess, LinkOffer, PendingEnrollment};
 use teamcraft_core::{mls_storage, records};
 use teamcraft_proto::{ClientMessageId, ConversationId};
 
@@ -214,6 +215,59 @@ mod kill_points {
       }
     }
     panic!("processing never finished within {MAX_KILL_POINTS} writes");
+  }
+
+  /// Issue #910: a crash on any write while a recovered device founds the notes anew leaves no
+  /// group (founded again on the next start) or the group with a fresh key, never the group
+  /// writing with the key the lost device knows.
+  #[tokio::test]
+  async fn a_crash_while_the_notes_are_founded_anew_never_keeps_the_old_key() {
+    for kill_point in 0..MAX_KILL_POINTS {
+      let server = FakeServer::new();
+      let mut phone = Peer::enroll_with_settings(&server, "Alice", settings().with_notes_to_self()).await;
+      let me = phone.client.user_id();
+      let notes = phone.client.open_dm(me).await.unwrap();
+      phone.client.send_text(notes, None, "buy milk").await.unwrap();
+      let old_key = phone.content_key_of(notes, "buy milk").await;
+      let store = Arc::new(KillPointStore::default());
+      let mut laptop = PendingEnrollment::new()
+        .complete(
+          phone.api.clone(),
+          store.clone(),
+          clock(),
+          settings().with_notes_to_self(),
+          common::options(PASSPHRASE),
+        )
+        .await
+        .unwrap();
+      laptop.revoke_device(phone.client.device_id()).await.unwrap();
+
+      store.crash_after(kill_point);
+      let synced = laptop.full_sync().await;
+      let has_crashed = store.has_crashed();
+      if !has_crashed {
+        synced.unwrap();
+      }
+
+      let durable = store.durable();
+      let mut reopened = reopen(&laptop, durable.clone());
+      reopened.full_sync().await.unwrap();
+      assert_eq!(
+        reopened.group_access(notes).unwrap(),
+        GroupAccess::Member,
+        "kill point {kill_point}: the notes stay locked"
+      );
+      reopened.send_text(notes, None, "eggs").await.unwrap();
+      let key = content_key_of(&reopened, &durable, notes, "eggs").await;
+      assert_ne!(
+        key, old_key,
+        "kill point {kill_point}: writing with the lost device's key"
+      );
+      if !has_crashed {
+        return;
+      }
+    }
+    panic!("founding the notes anew never finished within {MAX_KILL_POINTS} writes");
   }
 
   /// Issue #424: the MLS state is one record per entry; a crash on any write of a save leaves
@@ -665,6 +719,34 @@ fn reopen<S: LocalStore>(client: &Client<FakeServerApi, S>, durable: Arc<MemoryS
   Client::open(client.api().clone(), durable, clock(), settings())
     .unwrap()
     .expect("the account survived")
+}
+
+/// The content key ID the server stored for the text message `text` in `store`.
+async fn content_key_of<S: LocalStore>(
+  client: &Client<FakeServerApi, S>,
+  store: &MemoryStore,
+  conversation: ConversationId,
+  text: &str,
+) -> Vec<u8> {
+  let server_id = store
+    .messages(conversation, MessageFilter::TopLevel)
+    .unwrap()
+    .into_iter()
+    .find(|message| matches!(&message.content, MessageContent::Text { body, .. } if body == text))
+    .and_then(|message| message.maybe_server_id)
+    .unwrap();
+  client
+    .api()
+    .list_messages(conversation, &teamcraft_proto::ListMessagesQuery::default())
+    .await
+    .unwrap()
+    .messages
+    .into_iter()
+    .find(|message| message.id == server_id)
+    .unwrap()
+    .content_key_id
+    .as_slice()
+    .to_vec()
 }
 
 /// Every own message without a server ID is in the outbox: nothing shows "sending" forever.
