@@ -461,8 +461,9 @@ fn surface(state: AppState, i18n: I18n, here: &Rc<RefCell<RingingHere>>, call: &
       Some(window) => tauri::show_call_window(&window).await,
       None => false,
     };
-    if !is_window_shown {
-      tauri::show_notification(&notification).await;
+    // The shell brings the main window up when no notification can show either (#962).
+    if !is_window_shown && let Err(failure) = tauri::try_show_notification(&notification).await {
+      tracing::warn!(detail = %failure.detail, "could not show the incoming-call notification");
     }
     // It stopped ringing (or the user came back) while the shell showed it.
     if !here.borrow().surfaced.contains(&conversation) {

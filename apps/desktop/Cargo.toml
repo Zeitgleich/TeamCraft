@@ -142,3 +142,8 @@ teamcraft-media = { path = "../../crates/teamcraft-media", features = ["openh264
 # The media task's tests run a real call against a local SFU (as the SFU's own call tests do).
 teamcraft-sfu = { path = "../../crates/teamcraft-sfu" }
 wtransport = { version = "0.7.2", features = ["self-signed"] }
+
+[target.'cfg(target_os = "linux")'.dev-dependencies]
+# A fake notification service on a peer-to-peer connection, so tests see what a ringing call sends
+# (freedesktop.rs) without a session bus.
+zbus = { version = "5.13", default-features = false, features = ["tokio", "p2p"] }
