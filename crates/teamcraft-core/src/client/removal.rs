@@ -208,6 +208,9 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     };
     self.queue_pending(change)?;
     let result = self.run_revocation(device, RevocationStep::Server).await;
+    // Groups this device waits for may have lost the last device that could add it (the notes,
+    // e2ee.md §4.6): the next sync looks again at once.
+    self.member_join_attempts.clear();
     self.settle_pending(&PendingChange::revocation_key(device), result)
   }
 

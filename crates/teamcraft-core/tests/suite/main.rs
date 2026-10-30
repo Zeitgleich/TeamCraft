@@ -37,6 +37,7 @@ mod member_removal;
 mod messages;
 mod mls_recovery;
 mod mls_storage;
+mod notes_refound;
 mod notetaker;
 mod offline_actions;
 mod org_backgrounds;

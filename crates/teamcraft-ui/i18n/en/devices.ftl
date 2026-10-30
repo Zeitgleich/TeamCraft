@@ -24,6 +24,7 @@ link-alternative = No camera? Sign in here and approve the code on your other de
 link-simulate = Simulate approval
 device-waiting-title = This device isn't fully set up for this conversation yet
 device-waiting-body = You can read what your other devices could. New messages may stay locked until one of your other devices or a member of this conversation is online.
+device-waiting-notes-body = Your notes open here once another of your devices is online. If you no longer have it, remove it under Settings > Devices: this device then sets up your notes again on its own. Earlier notes stay readable.
 left-in-group-unknown = Someone
 group-refused = The server doesn't let this device read the encrypted group of this conversation. New messages may be missing.
 never-set-up = { $name } never set up TeamCraft. { $name } will see this conversation if they sign in on a device later.

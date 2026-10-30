@@ -194,6 +194,20 @@ fn DeviceAccessBanner(conversation: ConversationId) -> impl IntoView {
         })
     })
   });
+  // In the notes only the user's own devices can let this one in; without them, removing them
+  // in the device settings makes this device set the notes up again (e2ee.md §4.6).
+  let body_key = Memo::new(move |_| {
+    let is_notes = state.read(|backend| {
+      backend
+        .conversation(conversation)
+        .is_some_and(|conversation| conversation.is_notes_to_self)
+    });
+    if is_notes {
+      "device-waiting-notes-body"
+    } else {
+      "device-waiting-body"
+    }
+  });
   move || {
     is_waiting.get().then(|| {
       view! {
@@ -201,7 +215,7 @@ fn DeviceAccessBanner(conversation: ConversationId) -> impl IntoView {
           <Icon name=IconName::Lock />
           <div class="key-banner-text">
             <strong>{move || i18n.t("device-waiting-title")}</strong>
-            <span>{move || i18n.t("device-waiting-body")}</span>
+            <span>{move || i18n.t(body_key.get())}</span>
           </div>
         </div>
       }

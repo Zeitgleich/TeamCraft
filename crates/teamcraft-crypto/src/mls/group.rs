@@ -167,6 +167,50 @@ impl ConversationGroup {
     Ok(Self::from_group(conversation_id, group, ChangeHistory::default()))
   }
 
+  /// Founds a conversation's group anew, with this device as the only member, when no device is
+  /// left that could add it to the old one (e2ee.md §4.6, "Re-founding the notes"). The new group
+  /// is advanced on this device alone, with empty commits nobody else sees, to `epoch`, the epoch
+  /// the server's queue for the conversation is in. Its first real commit, returned here and
+  /// pending until the server accepts it ([`Self::confirm_commit`]), then takes the queue over
+  /// like any commit: first commit per epoch wins, so a device of the old group that is still
+  /// alive and commits first makes the server refuse it. Old devices can't read the new group; one
+  /// that comes back falls out and asks to be added back like any device that missed a commit.
+  pub fn refound(
+    provider: &impl OpenMlsProvider,
+    device: &DeviceKeyPair,
+    certificate: &SignedDeviceCertificate,
+    conversation_id: ConversationId,
+    epoch: u64,
+  ) -> Result<(Self, CommitOutput), MlsError> {
+    let mut founded = Self::create(provider, device, certificate, conversation_id)?;
+    while founded.epoch() < epoch {
+      founded
+        .group
+        .commit_builder()
+        .force_self_update(true)
+        .load_psks(provider.storage())
+        .map_err(|error| MlsError::openmls("commit creation", error))?
+        .create_group_info(false)
+        .build(provider.rand(), provider.crypto(), device, |_| true)
+        .map_err(|error| MlsError::openmls("commit creation", error))?
+        .stage_commit(provider)
+        .map_err(|error| MlsError::openmls("commit staging", error))?;
+      founded
+        .group
+        .merge_pending_commit(provider)
+        .map_err(|error| MlsError::openmls("merging own commit", error))?;
+    }
+    founded.history.joined_epoch = epoch;
+    let output = founded.stage_self_update(provider, device)?;
+    founded.maybe_pending = Some(PendingCommit {
+      commit: output.commit.clone(),
+      maybe_change: None,
+      removed: Vec::new(),
+      maybe_rejoin: None,
+    });
+    Ok((founded, output))
+  }
+
   /// Joins a group from a welcome. Every member credential in the group is verified against the
   /// pinned identities before the group is accepted.
   pub fn join(
@@ -877,6 +921,40 @@ impl ConversationGroup {
     Ok(CommitOutput {
       commit,
       maybe_welcome,
+      maybe_group_info,
+    })
+  }
+
+  /// Stages a commit without proposals that renews this device's leaf, with the group information
+  /// for the new epoch.
+  fn stage_self_update(
+    &mut self,
+    provider: &impl OpenMlsProvider,
+    device: &DeviceKeyPair,
+  ) -> Result<CommitOutput, MlsError> {
+    let bundle = self
+      .group
+      .commit_builder()
+      .force_self_update(true)
+      .load_psks(provider.storage())
+      .map_err(|error| MlsError::openmls("commit creation", error))?
+      .build(provider.rand(), provider.crypto(), device, |_| true)
+      .map_err(|error| MlsError::openmls("commit creation", error))?
+      .stage_commit(provider)
+      .map_err(|error| MlsError::openmls("commit staging", error))?;
+    let maybe_group_info = bundle
+      .group_info()
+      .cloned()
+      .map(|info| MlsMessageOut::from(info).to_bytes())
+      .transpose()
+      .map_err(|error| MlsError::openmls("group info encoding", error))?;
+    let commit = bundle
+      .into_commit()
+      .to_bytes()
+      .map_err(|error| MlsError::openmls("commit encoding", error))?;
+    Ok(CommitOutput {
+      commit,
+      maybe_welcome: None,
       maybe_group_info,
     })
   }

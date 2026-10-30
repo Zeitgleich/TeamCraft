@@ -24,6 +24,7 @@ link-alternative = Keine Kamera? Melde dich hier an und gib den Code auf deinem 
 link-simulate = Freigabe simulieren
 device-waiting-title = Dieses Gerät ist für diese Unterhaltung noch nicht vollständig eingerichtet
 device-waiting-body = Du kannst lesen, was deine anderen Geräte lesen konnten. Neue Nachrichten bleiben eventuell gesperrt, bis eines deiner anderen Geräte oder ein Mitglied dieser Unterhaltung online ist.
+device-waiting-notes-body = Deine Notizen öffnen sich hier, sobald eines deiner anderen Geräte online ist. Wenn du es nicht mehr hast, entferne es unter Einstellungen > Geräte: Dieses Gerät richtet deine Notizen dann von selbst neu ein. Frühere Notizen bleiben lesbar.
 left-in-group-unknown = Jemand
 group-refused = Der Server lässt dieses Gerät die verschlüsselte Gruppe dieser Unterhaltung nicht lesen. Neue Nachrichten fehlen eventuell.
 never-set-up = { $name } hat TeamCraft nie eingerichtet. { $name } sieht diese Unterhaltung, falls sich { $name } später auf einem Gerät anmeldet.
