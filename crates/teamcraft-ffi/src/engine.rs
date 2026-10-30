@@ -47,9 +47,10 @@ use tokio::task::{JoinHandle, LocalSet};
 use crate::calls::{CallHub, CallPreparation};
 use crate::error::TeamCraftError;
 use crate::types::{
-  AccountState, AppConfig, ConversationItem, LinkPlatform, LinkRequestItem, MentionSettings, MessageItem,
-  NotificationContent, NotificationContentSettings, Presence, PushDiagnosticsInfo, PushNotification,
-  PushService, SearchHitItem, SegmentPrefetchMode, SegmentPrefetchResult, StoreProblem, TestPushResult,
+  AccountState, AppConfig, ConversationItem, DirectPeer, LinkPlatform, LinkRequestItem, MentionSettings,
+  MessageItem, NotificationContent, NotificationContentSettings, Presence, PushDiagnosticsInfo,
+  PushNotification, PushService, SearchHitItem, SegmentPrefetchMode, SegmentPrefetchResult, StoreProblem,
+  TestPushResult,
 };
 use crate::{EventListener, TokenProvider};
 
@@ -772,11 +773,11 @@ impl Engine {
       conversations
         .into_iter()
         .map(|conversation| {
-          let maybe_peer_presence = peer_presence(backend, &conversation, me.id);
+          let maybe_peer = direct_peer(backend, &conversation, me.id);
           let maybe_space_name = conversation
             .maybe_space
             .and_then(|space| spaces.get(&space).cloned());
-          ConversationItem::from_view(conversation, maybe_space_name, maybe_peer_presence, me.is_guest)
+          ConversationItem::from_view(conversation, maybe_space_name, maybe_peer, me.is_guest)
         })
         .collect(),
     )
@@ -1460,16 +1461,19 @@ fn trim_downloads(directory: &std::path::Path, max_bytes: u64) {
 }
 
 /// The other person's presence in a one-to-one DM; `None` for every other conversation.
-fn peer_presence(
+fn direct_peer(
   backend: &impl ChatBackend,
   conversation: &ConversationView,
   me: UserId,
-) -> Option<Presence> {
+) -> Option<DirectPeer> {
   if conversation.kind != ConversationKindView::Direct {
     return None;
   }
-  let other = conversation.member_ids.iter().find(|member| **member != me)?;
-  backend.user(*other).map(|user| Presence::from(user.presence))
+  let other = *conversation.member_ids.iter().find(|member| **member != me)?;
+  Some(DirectPeer {
+    id: other,
+    maybe_presence: backend.user(other).map(|user| Presence::from(user.presence)),
+  })
 }
 
 #[cfg(test)]

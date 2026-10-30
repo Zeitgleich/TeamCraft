@@ -125,6 +125,7 @@ import de.zeitgleich.teamcraft.ui.MarkupColors
 import de.zeitgleich.teamcraft.ui.MentionNames
 import de.zeitgleich.teamcraft.ui.PictureTarget
 import de.zeitgleich.teamcraft.ui.Pictures
+import de.zeitgleich.teamcraft.ui.UserAvatar
 import de.zeitgleich.teamcraft.ui.THUMBNAIL_DECODE_PX
 import de.zeitgleich.teamcraft.ui.bubbleCorners
 import de.zeitgleich.teamcraft.ui.decideFeedScroll
@@ -897,20 +898,22 @@ private fun nameColor(maybeUser: User?): Color {
   return Color.hsl(hue, NAME_SATURATION, if (isSystemInDarkTheme()) NAME_LIGHTNESS_DARK else NAME_LIGHTNESS_LIGHT)
 }
 
-/** A round avatar with the sender's initial on their hue. */
+/** A round avatar: the sender's picture, or their initial on their hue. */
 @Composable
 private fun SenderAvatar(maybeUser: User?, name: String) {
   val hue = (maybeUser?.avatarHue ?: 0).mod(360).toFloat()
-  Box(
-    Modifier.size(AVATAR_SIZE).background(Color.hsl(hue, AVATAR_SATURATION, AVATAR_LIGHTNESS), CircleShape),
-    contentAlignment = Alignment.Center,
-  ) {
-    Text(
-      name.firstOrNull()?.uppercase() ?: "?",
-      style = MaterialTheme.typography.labelLarge,
-      color = Color.White,
-      modifier = Modifier.clearAndSetSemantics {},
-    )
+  UserAvatar(maybeUser?.id, Modifier.size(AVATAR_SIZE)) {
+    Box(
+      Modifier.size(AVATAR_SIZE).background(Color.hsl(hue, AVATAR_SATURATION, AVATAR_LIGHTNESS), CircleShape),
+      contentAlignment = Alignment.Center,
+    ) {
+      Text(
+        name.firstOrNull()?.uppercase() ?: "?",
+        style = MaterialTheme.typography.labelLarge,
+        color = Color.White,
+        modifier = Modifier.clearAndSetSemantics {},
+      )
+    }
   }
 }
 

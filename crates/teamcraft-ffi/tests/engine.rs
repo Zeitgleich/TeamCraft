@@ -269,6 +269,115 @@ mod device_link {
   }
 }
 
+/// Issue #846: the apps show profile pictures; the engine fetches one through the API's presigned
+/// location and answers `None` for a person without one.
+mod avatar {
+  use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+  use tokio::net::TcpListener;
+
+  use super::*;
+
+  const PICTURE: &[u8] = b"\x89PNG picture bytes";
+  const WITH_PICTURE: &str = "42";
+  const WITHOUT_PICTURE: &str = "43";
+
+  #[tokio::test]
+  async fn a_picture_is_fetched_from_its_presigned_location() {
+    let directory = temp_dir();
+    let teamcraft = engine_at(&directory, &avatar_server().await);
+    let picture = teamcraft.avatar_picture(WITH_PICTURE.into(), 1024).await.unwrap();
+    assert_eq!(picture.as_deref(), Some(PICTURE));
+    std::fs::remove_dir_all(&directory).unwrap();
+  }
+
+  #[tokio::test]
+  async fn a_person_without_a_picture_has_none() {
+    let directory = temp_dir();
+    let teamcraft = engine_at(&directory, &avatar_server().await);
+    let picture = teamcraft
+      .avatar_picture(WITHOUT_PICTURE.into(), 1024)
+      .await
+      .unwrap();
+    assert_eq!(picture, None);
+    std::fs::remove_dir_all(&directory).unwrap();
+  }
+
+  #[tokio::test]
+  async fn a_picture_larger_than_the_cap_is_refused() {
+    let directory = temp_dir();
+    let teamcraft = engine_at(&directory, &avatar_server().await);
+    assert!(teamcraft.avatar_picture(WITH_PICTURE.into(), 4).await.is_err());
+    std::fs::remove_dir_all(&directory).unwrap();
+  }
+
+  #[tokio::test]
+  async fn an_invalid_user_id_is_refused_before_any_request() {
+    let directory = temp_dir();
+    let teamcraft = TeamCraft::new(config(&directory, [7; 32]), tokens(Some("token")), listener()).unwrap();
+    assert!(matches!(
+      teamcraft.avatar_picture("../me".into(), 1024).await,
+      Err(TeamCraftError::InvalidInput(_))
+    ));
+    std::fs::remove_dir_all(&directory).unwrap();
+  }
+
+  fn engine_at(directory: &std::path::Path, server_url: &str) -> Arc<TeamCraft> {
+    TeamCraft::new(
+      config_at(directory, [7; 32], server_url),
+      tokens(Some("token")),
+      listener(),
+    )
+    .unwrap()
+  }
+
+  /// A server with one person who has a picture (served from `/blob`) and one who has none.
+  async fn avatar_server() -> String {
+    let listener = TcpListener::bind("[::1]:0").await.unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    let base = url.clone();
+    tokio::spawn(async move {
+      loop {
+        let (mut stream, _) = listener.accept().await.unwrap();
+        let path = request_path(&mut stream).await;
+        let (status, body) = if path == format!("/api/v1/users/{WITH_PICTURE}/avatar") {
+          let location = format!(
+            r#"{{"download_url":"{base}/blob","content_type":"image/png","size_bytes":{},"expires_at":0}}"#,
+            PICTURE.len()
+          );
+          ("200 OK", location.into_bytes())
+        } else if path == format!("/api/v1/users/{WITHOUT_PICTURE}/avatar") {
+          let missing = r#"{"error_code":"avatar_not_found","message":"no picture"}"#;
+          ("404 Not Found", missing.as_bytes().to_vec())
+        } else if path == "/blob" {
+          ("200 OK", PICTURE.to_vec())
+        } else {
+          ("404 Not Found", Vec::new())
+        };
+        let head = format!(
+          "HTTP/1.1 {status}\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+          body.len()
+        );
+        stream.write_all(head.as_bytes()).await.unwrap();
+        stream.write_all(&body).await.unwrap();
+      }
+    });
+    url
+  }
+
+  /// Reads the request's head; returns the path of its first line.
+  async fn request_path(stream: &mut tokio::net::TcpStream) -> String {
+    let mut head = Vec::new();
+    let mut byte = [0u8; 1];
+    while !head.ends_with(b"\r\n\r\n") {
+      stream.read_exact(&mut byte).await.unwrap();
+      head.push(byte[0]);
+    }
+    let head = String::from_utf8_lossy(&head);
+    let line = head.lines().next().unwrap_or_default();
+    line.split(' ').nth(1).unwrap_or_default().to_owned()
+  }
+}
+
 fn tokens(maybe_token: Option<&str>) -> Arc<dyn TokenProvider> {
   Arc::new(Tokens(maybe_token.map(str::to_string)))
 }

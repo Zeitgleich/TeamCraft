@@ -159,6 +159,7 @@ class StoreScreenshots {
   private fun ChatsSample(tab: ChatTab) {
     MainScaffold(
       brand = MainBrand(stringResource(R.string.app_name), maybeLogo = null),
+      accountUserId = "",
       accountName = ALEX,
       tab = tab,
       onTab = {},

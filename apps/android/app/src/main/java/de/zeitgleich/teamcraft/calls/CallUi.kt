@@ -89,6 +89,7 @@ import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import de.zeitgleich.teamcraft.R
+import de.zeitgleich.teamcraft.ui.UserAvatar
 import kotlin.math.roundToInt
 import kotlinx.coroutines.launch
 import uniffi.teamcraft_ffi.CallEndReason
@@ -255,19 +256,21 @@ private fun PersonAvatar(person: Person, size: Dp) {
     verticalArrangement = Arrangement.spacedBy(8.dp),
   ) {
     Box {
-      Box(
-        Modifier
-          .size(size)
-          .speakingRing(person.isSpeaking)
-          .background(Color.hsl(hue, 0.45f, 0.45f), CircleShape),
-        contentAlignment = Alignment.Center,
-      ) {
-        Text(
-          name.firstOrNull()?.uppercase() ?: "?",
-          color = Color.White,
-          fontSize = (size.value * 0.42f).sp,
-          fontWeight = FontWeight.Medium,
-        )
+      UserAvatar(person.userId, Modifier.size(size).speakingRing(person.isSpeaking)) {
+        Box(
+          Modifier
+            .size(size)
+            .speakingRing(person.isSpeaking)
+            .background(Color.hsl(hue, 0.45f, 0.45f), CircleShape),
+          contentAlignment = Alignment.Center,
+        ) {
+          Text(
+            name.firstOrNull()?.uppercase() ?: "?",
+            color = Color.White,
+            fontSize = (size.value * 0.42f).sp,
+            fontWeight = FontWeight.Medium,
+          )
+        }
       }
       if (person.isMuted) MutedBadge(Modifier.align(Alignment.BottomEnd))
     }

@@ -127,6 +127,7 @@ import de.zeitgleich.teamcraft.ui.badgeTone
 import de.zeitgleich.teamcraft.ui.tabBadge
 import de.zeitgleich.teamcraft.ui.toggled
 import de.zeitgleich.teamcraft.ui.selectionActions
+import de.zeitgleich.teamcraft.ui.UserAvatar
 import de.zeitgleich.teamcraft.ui.theme.LocalTeamCraftColors
 import uniffi.teamcraft_ffi.ConversationItem
 import uniffi.teamcraft_ffi.JoinRequestItem
@@ -145,6 +146,7 @@ private val BRAND_LOGO_HEIGHT = 28.dp
 @Composable
 fun ChatListScreen(
   viewModel: MainViewModel,
+  accountUserId: String,
   accountName: String,
   onOpen: (String) -> Unit,
   onSearch: () -> Unit,
@@ -192,6 +194,7 @@ fun ChatListScreen(
   val snackbars = rememberFailureSnackbars(viewModel)
   MainScaffold(
     brand = MainBrand(maybeBrand?.displayName ?: stringResource(R.string.app_name), maybeLogo),
+    accountUserId = accountUserId,
     accountName = accountName,
     tab = tab,
     onTab = { tab = it },
@@ -244,6 +247,7 @@ internal class MainBrand(val name: String, val maybeLogo: ImageBitmap?)
 @Composable
 internal fun MainScaffold(
   brand: MainBrand,
+  accountUserId: String,
   accountName: String,
   tab: ChatTab,
   onTab: (ChatTab) -> Unit,
@@ -264,7 +268,7 @@ internal fun MainScaffold(
   val hasDirect = maybeConversations.orEmpty().any { it.isDirect }
   Scaffold(
     contentWindowInsets = ScreenInsets,
-    topBar = { maybeSelectionBar?.invoke() ?: BrandTopBar(brand, accountName, onSearch = onSearch, onAccount = onAccount) },
+    topBar = { maybeSelectionBar?.invoke() ?: BrandTopBar(brand, accountUserId, accountName, onSearch = onSearch, onAccount = onAccount) },
     bottomBar = {
       if (maybeSelectionBar == null) MainNavigation(tab, maybeConversations.orEmpty(), joinRequestCount, onSelect = onTab)
     },
@@ -409,7 +413,7 @@ private fun LazyListScope.conversationRows(sections: List<Section>, list: ListSt
 /** The top app bar of the main screen: the server's brand (logo and name) and the user's avatar. */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun BrandTopBar(brand: MainBrand, accountName: String, onSearch: () -> Unit, onAccount: () -> Unit) {
+private fun BrandTopBar(brand: MainBrand, accountUserId: String, accountName: String, onSearch: () -> Unit, onAccount: () -> Unit) {
   TopAppBar(
     title = {
       Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(Spacing.s)) {
@@ -432,7 +436,7 @@ private fun BrandTopBar(brand: MainBrand, accountName: String, onSearch: () -> U
       }
       val description = stringResource(R.string.account_menu, accountName)
       IconButton(onClick = onAccount, modifier = Modifier.semantics { contentDescription = description }) {
-        InitialAvatar(accountName, size = 32.dp)
+        AccountAvatar(accountUserId, accountName, size = 32.dp)
       }
     },
     windowInsets = TopBarInsets,
@@ -911,26 +915,28 @@ private fun listTime(context: Context, sentAt: Long): String {
   return DateUtils.formatDateTime(context, sentAt, flags)
 }
 
-/** A round marker with the conversation's initial (people) or its kind (channels). */
+/** A round marker: the DM peer's picture, or the conversation's initial (people) or its kind (channels). */
 @Composable
 private fun ConversationAvatar(conversation: ConversationItem) {
   val isPerson = conversation.kind == ConversationKind.DIRECT || conversation.kind == ConversationKind.GROUP
   val label = if (isPerson || conversation.kind == ConversationKind.INTEGRATION) conversation.name.firstOrNull()?.uppercase() ?: "?" else prefix(conversation.kind)
   Box {
-    Box(
-      Modifier
-        .size(AVATAR_SIZE)
-        .background(
-          if (isPerson) avatarColor(conversation.name) else MaterialTheme.colorScheme.surfaceVariant,
-          CircleShape,
-        ),
-      contentAlignment = Alignment.Center,
-    ) {
-      Text(
-        label,
-        style = MaterialTheme.typography.titleMedium,
-        color = if (isPerson) Color.White else MaterialTheme.colorScheme.onSurfaceVariant,
-      )
+    UserAvatar(conversation.maybePeerId, Modifier.size(AVATAR_SIZE)) {
+      Box(
+        Modifier
+          .size(AVATAR_SIZE)
+          .background(
+            if (isPerson) avatarColor(conversation.name) else MaterialTheme.colorScheme.surfaceVariant,
+            CircleShape,
+          ),
+        contentAlignment = Alignment.Center,
+      ) {
+        Text(
+          label,
+          style = MaterialTheme.typography.titleMedium,
+          color = if (isPerson) Color.White else MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+      }
     }
     conversation.maybePeerPresence?.let { presence ->
       val description = stringResource(presenceLabel(presence))
@@ -1054,15 +1060,17 @@ private fun CheckedAvatar() {
   }
 }
 
-/** The user's own avatar: the initial on the stable hue of the name, as for other people. */
+/** The user's own avatar: their picture, or the initial on the stable hue of the name, as for other people. */
 @Composable
-private fun InitialAvatar(name: String, size: Dp) {
-  Box(Modifier.size(size).background(avatarColor(name), CircleShape), contentAlignment = Alignment.Center) {
-    Text(
-      name.firstOrNull()?.uppercase() ?: "?",
-      style = MaterialTheme.typography.titleSmall,
-      color = Color.White,
-      modifier = Modifier.clearAndSetSemantics {},
-    )
+private fun AccountAvatar(userId: String, name: String, size: Dp) {
+  UserAvatar(userId, Modifier.size(size)) {
+    Box(Modifier.size(size).background(avatarColor(name), CircleShape), contentAlignment = Alignment.Center) {
+      Text(
+        name.firstOrNull()?.uppercase() ?: "?",
+        style = MaterialTheme.typography.titleSmall,
+        color = Color.White,
+        modifier = Modifier.clearAndSetSemantics {},
+      )
+    }
   }
 }

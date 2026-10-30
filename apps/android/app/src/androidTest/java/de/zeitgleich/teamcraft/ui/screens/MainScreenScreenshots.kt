@@ -63,6 +63,7 @@ class MainScreenScreenshots {
             TeamCraftTheme {
               MainScaffold(
                 brand = MainBrand("Brand A", maybeLogo = null),
+                accountUserId = "",
                 accountName = "Alex Example",
                 tab = tab,
                 onTab = {},

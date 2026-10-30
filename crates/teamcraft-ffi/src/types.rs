@@ -162,6 +162,9 @@ pub struct ConversationItem {
   /// Change the channel itself, such as archiving it (`manage_channel_properties`); never in DMs.
   #[uniffi(default = true)]
   pub can_manage_channel: bool,
+  /// The other person in a one-to-one DM, so the list can show their profile picture.
+  #[uniffi(default = None)]
+  pub maybe_peer_id: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
@@ -448,13 +451,13 @@ pub enum Presence {
 }
 
 impl ConversationItem {
-  /// The list entry of a conversation; the caller looks up the space's name and the DM peer's
-  /// presence. `is_guest` is the user's, for what a conversation offers when an older server
-  /// didn't say (issue #758).
+  /// The list entry of a conversation; the caller looks up the space's name and the DM peer.
+  /// `is_guest` is the user's, for what a conversation offers when an older server didn't say
+  /// (issue #758).
   pub(crate) fn from_view(
     conversation: view::Conversation,
     maybe_space_name: Option<String>,
-    maybe_peer_presence: Option<Presence>,
+    maybe_peer: Option<DirectPeer>,
     is_guest: bool,
   ) -> Self {
     Self {
@@ -472,9 +475,16 @@ impl ConversationItem {
       is_favorite: conversation.is_favorite,
       is_muted: conversation.is_muted,
       can_post: conversation.can_post,
-      maybe_peer_presence,
+      maybe_peer_presence: maybe_peer.as_ref().and_then(|peer| peer.maybe_presence),
+      maybe_peer_id: maybe_peer.map(|peer| peer.id.to_string()),
     }
   }
+}
+
+/// The other person in a one-to-one DM; `maybe_presence` is `None` while they are not known yet.
+pub(crate) struct DirectPeer {
+  pub(crate) id: view::UserId,
+  pub(crate) maybe_presence: Option<Presence>,
 }
 
 impl ConversationKind {
@@ -981,6 +991,40 @@ mod tests {
       rights(&item(ConversationKindView::Direct, None, false)),
       (true, true, true, false)
     );
+  }
+
+  /// Issue #846: the list shows the DM peer's picture, so the item names the peer.
+  #[test]
+  fn a_direct_conversation_item_names_its_peer() {
+    let conversation = view::Conversation {
+      id: view::id_from_raw(5),
+      maybe_space: None,
+      kind: ConversationKindView::Direct,
+      category: view::SidebarCategory::DirectMessages,
+      name: "Alex Example".into(),
+      topic: String::new(),
+      member_ids: vec![view::id_from_raw(1), view::id_from_raw(42)],
+      unread_count: 0,
+      mention_count: 0,
+      is_favorite: false,
+      is_muted: false,
+      can_post: true,
+      bookmarks: Vec::new(),
+      is_catching_up: false,
+      maybe_image_version: None,
+      is_notes_to_self: false,
+      maybe_permissions: None,
+      has_only_deactivated_others: false,
+    };
+    let peer = DirectPeer {
+      id: view::id_from_raw(42),
+      maybe_presence: Some(Presence::Away),
+    };
+    let item = ConversationItem::from_view(conversation.clone(), None, Some(peer), false);
+    assert_eq!(item.maybe_peer_id.as_deref(), Some("42"));
+    assert_eq!(item.maybe_peer_presence, Some(Presence::Away));
+    let unknown = ConversationItem::from_view(conversation, None, None, false);
+    assert_eq!((unknown.maybe_peer_id, unknown.maybe_peer_presence), (None, None));
   }
 
   #[test]
