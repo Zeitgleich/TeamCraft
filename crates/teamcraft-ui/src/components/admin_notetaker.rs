@@ -15,6 +15,7 @@ use crate::components::admin_policy::{
   CheckRow, PolicyBlockerNote, PolicyFooter, SelectRow, use_policy_draft,
 };
 use crate::i18n::use_i18n;
+use crate::integrations::use_bots;
 use crate::state::use_app_state;
 
 /// Languages offered; any ISO 639-1 code is valid policy, these are the common ones.
@@ -33,13 +34,31 @@ pub fn NotetakerSection() -> impl IntoView {
   let key_input = RwSignal::new(String::new());
   let maybe_error = RwSignal::new(None::<&'static str>);
 
+  // The instance's bot list (Administration -> Integrations): a bot made for the notetaker shares no
+  // conversation yet, so the people this device knows don't include it. Known bots stay as a
+  // fallback where the list can't be read.
+  let maybe_hub = use_bots();
+  if let Some(hub) = maybe_hub {
+    hub.refresh();
+  }
   let bots = Memo::new(move |_| {
-    let mut bots: Vec<(UserId, String)> = state
-      .read(|backend| backend.users())
-      .into_iter()
-      .filter(|user| user.is_bot)
-      .map(|user| (user.id, user.display_name))
-      .collect();
+    let mut bots: Vec<(UserId, String)> = maybe_hub
+      .map(|hub| {
+        hub
+          .bots
+          .get()
+          .into_iter()
+          .filter(|bot| !bot.is_revoked)
+          .map(|bot| (bot.id, bot.name))
+          .collect()
+      })
+      .unwrap_or_default();
+    let known = state.read(|backend| backend.users());
+    for user in known.into_iter().filter(|user| user.is_bot) {
+      if !bots.iter().any(|(id, _)| *id == user.id) {
+        bots.push((user.id, user.display_name));
+      }
+    }
     bots.sort_by(|a, b| a.1.cmp(&b.1));
     bots
   });
