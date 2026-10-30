@@ -352,7 +352,8 @@ mod tests {
       head.contains(&format!("content-length: {}\r\n", body.len())),
       "{head}"
     );
-    assert!(!head.contains("999"), "{head}");
+    // The port may contain "999" too: only the header must not carry AppAuth's length.
+    assert!(!head.contains("content-length: 999"), "{head}");
     assert_eq!(sent.body, body);
   }
 
