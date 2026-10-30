@@ -876,7 +876,7 @@ private fun PreviewLine(conversation: ConversationItem, maybeEntry: ChatListEntr
     if (conversation.mentionCount > 0u) {
       val count = conversation.mentionCount.toInt()
       CountPill(
-        "@${count}",
+        "@$count",
         BadgeTone.Mention,
         pluralStringResource(R.plurals.chat_mentions, count, count),
       )

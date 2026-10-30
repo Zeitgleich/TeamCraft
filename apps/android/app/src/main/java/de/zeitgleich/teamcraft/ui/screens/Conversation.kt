@@ -630,9 +630,11 @@ private fun MessageActions(
   ModalBottomSheet(onDismissRequest = onDismiss) {
     Column(Modifier.padding(bottom = 24.dp)) {
       // One row, spread over the width: the reactions are the sheet's most used part.
-      if (rights.canReact) QuickReactions { emoji ->
-        viewModel.act(ChatActions.react(conversationId, message.id, emoji))
-        onDismiss()
+      if (rights.canReact) {
+        QuickReactions { emoji ->
+          viewModel.act(ChatActions.react(conversationId, message.id, emoji))
+          onDismiss()
+        }
       }
       for (action in actions) {
         when (action) {

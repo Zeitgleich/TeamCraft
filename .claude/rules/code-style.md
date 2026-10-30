@@ -121,8 +121,9 @@ Inside an `impl`:
   `set_attribute("style", …)`, no inline `<style>` or `<script>`, also not in popups (they inherit
   the policy). Dynamic styles use CSSOM: Leptos `style:prop=` / `style:--var=` directives or
   `HtmlElement::style().set_property`; everything else is a class in the stylesheet.
-- iOS: Swift + SwiftUI, formatted with `swift-format`. Android: Kotlin + Jetpack Compose, `ktlint`.
-  Mobile shells stay thin: logic belongs in `teamcraft-core` behind UniFFI.
+- iOS: Swift + SwiftUI, formatted with `swift-format`. Android: Kotlin + Jetpack Compose, `ktlint`
+  with the rules in `apps/android/.editorconfig` (the command is in that file). Mobile shells
+  stay thin: logic belongs in `teamcraft-core` behind UniFFI.
 
 ## Markdown
 

@@ -141,12 +141,12 @@ object MarkParts {
 
   /** The left body's darker upper face is the left body clipped to this. */
   val bodyLeftShadeClip = Path().apply {
-      moveTo(150f, 807.15f)
-      lineTo(700f, 1141f)
-      lineTo(700f, 450f)
-      lineTo(150f, 450f)
-      close()
-    }
+    moveTo(150f, 807.15f)
+    lineTo(700f, 1141f)
+    lineTo(700f, 450f)
+    lineTo(150f, 450f)
+    close()
+  }
 
   val dotColor = Color(0xFF0063EE)
   val dotRadius = 36.1f

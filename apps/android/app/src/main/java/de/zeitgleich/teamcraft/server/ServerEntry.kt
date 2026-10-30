@@ -7,7 +7,7 @@ import androidx.annotation.StringRes
 import de.zeitgleich.teamcraft.R
 import uniffi.teamcraft_ffi.ServerEntryException
 
-/**
+/*
  * The decisions of the server entry (docs/operations.md "Server address in the apps") that don't
  * need Android or the Rust library, so unit tests cover them: where the app starts, which server a
  * lock allows, how files are keyed by server, and which text explains a failure.

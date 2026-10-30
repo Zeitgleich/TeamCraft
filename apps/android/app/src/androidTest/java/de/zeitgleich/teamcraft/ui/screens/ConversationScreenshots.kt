@@ -151,12 +151,24 @@ class ConversationScreenshots {
 
   private fun imageFiles(): List<FileInfo> = listOf(
     FileInfo(
-      CONVERSATION, "2", "f-portrait", "IMG_2041.jpg", "image/jpeg", 3_400_000,
-      ImageBytes(samplePhoto(THUMBNAIL_PX * 3 / 4, THUMBNAIL_PX)), FileTransfer("remote"),
+      CONVERSATION,
+      "2",
+      "f-portrait",
+      "IMG_2041.jpg",
+      "image/jpeg",
+      3_400_000,
+      ImageBytes(samplePhoto(THUMBNAIL_PX * 3 / 4, THUMBNAIL_PX)),
+      FileTransfer("remote"),
     ),
     FileInfo(
-      CONVERSATION, "3", "f-landscape", "IMG_2042.jpg", "image/jpeg", 2_900_000,
-      ImageBytes(samplePhoto(THUMBNAIL_PX, THUMBNAIL_PX * 9 / 16)), FileTransfer("remote"),
+      CONVERSATION,
+      "3",
+      "f-landscape",
+      "IMG_2042.jpg",
+      "image/jpeg",
+      2_900_000,
+      ImageBytes(samplePhoto(THUMBNAIL_PX, THUMBNAIL_PX * 9 / 16)),
+      FileTransfer("remote"),
     ),
   )
 

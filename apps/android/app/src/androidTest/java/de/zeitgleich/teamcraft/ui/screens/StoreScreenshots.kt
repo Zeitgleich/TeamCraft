@@ -315,8 +315,14 @@ class StoreScreenshots {
       message = "m2",
       files = listOf(
         FileInfo(
-          CHANNEL, "m2", "f-mockup", "Homepage-v3.jpg", "image/jpeg", 2_400_000,
-          ImageBytes(samplePhoto(640, 400)), FileTransfer("remote"),
+          CHANNEL,
+          "m2",
+          "f-mockup",
+          "Homepage-v3.jpg",
+          "image/jpeg",
+          2_400_000,
+          ImageBytes(samplePhoto(640, 400)),
+          FileTransfer("remote"),
         ),
       ),
     ),
