@@ -1085,11 +1085,12 @@ entry, one round trip after the other. With the issue's 80 ms to the server the 
 | Dead 30 s, then 96 kbit/s with 300 ms      | stays connected           | all there after 224 ms            |
 | Resets for 10 s                            | at once                   | connected after 2.8 s (backoff)   |
 | Dead 8 s                                   | not (shorter than a beat) | 4.8 s (TCP retransmission)        |
-| Dead 120 s, past the resume window         | after 53 s, now ≤ 35 s    | connected after 0.6–0.8 s, all in |
+| Dead 120 s, past the resume window         | after 53 s, now 45 s      | connected after 0.6–0.8 s, all in |
 
 A silently dead link (no signal from the OS) was found only after two heartbeat intervals without a
 frame plus the probe slack, 53 s in which the app showed "connected". Every heartbeat now has to be
-answered within 10 s (`heartbeat_answer_timeout`). The gateway still connects after the catch-up;
+answered within 10 s (`heartbeat_answer_timeout`): at most one interval plus that, 36 s in the unit
+test on a paused clock; the run above found it after 45 s, which is not yet explained. The gateway still connects after the catch-up;
 with the focused conversation caught up first (0.6 s above) that is no longer what users wait for.
 
 ### Android (first numbers)
