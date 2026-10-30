@@ -184,6 +184,27 @@ where
   })
 }
 
+/// Provides `value` as context for as long as what the current owner holds now lives. A plain
+/// `provide_context` outlives it: a part of a view that is rendered anew (a `move ||` in a view)
+/// keeps its owner and only drops what it held, so what it renders next still finds the old
+/// value, whose signals are gone, and reading them panics (#1016: the pre-join screen found the
+/// last call screen's stats). For contexts of a component that holds signals of its own and is
+/// shown once at a time: going, it takes the nearest `T` away, which is its own only while no
+/// sibling under the same owner provided one too.
+pub fn provide_scoped_context<T: Send + Sync + 'static>(value: T) {
+  provide_context(value);
+  let Some(owner) = Owner::current() else {
+    return;
+  };
+  let owner = owner.downgrade();
+  on_cleanup(move || {
+    if let Some(owner) = owner.upgrade() {
+      // Taken off the owner it was put on, before the owner's next contents run.
+      drop(owner.with(take_context::<T>));
+    }
+  });
+}
+
 /// Waits on the page's event loop, without holding up anything else.
 pub async fn pause(duration: std::time::Duration) {
   let (done, wait) = futures_channel::oneshot::channel::<()>();
@@ -231,6 +252,55 @@ mod tests {
       OwnerLiveness::of_current_owner().is_alive(),
       "without an owner: always"
     );
+  }
+
+  /// Issue #1016: a part of a view rendered anew keeps its owner. The call screen's stats hub
+  /// stayed on it, and the pre-join screen rendered next read the hub's disposed signal.
+  mod scoped_context {
+    use super::*;
+
+    #[derive(Clone, Copy)]
+    struct Hub(RwSignal<u32>);
+
+    #[test]
+    fn a_plain_context_outlives_what_its_owner_held() {
+      let owner = Owner::new();
+      owner.with(|| provide_context(Hub(RwSignal::new(1))));
+      owner.cleanup();
+      let maybe_hub = owner.with(use_context::<Hub>);
+      assert!(maybe_hub.is_some_and(|hub| hub.0.try_get_untracked().is_none()));
+    }
+
+    #[test]
+    fn a_scoped_context_goes_with_what_its_owner_held() {
+      let owner = Owner::new();
+      owner.with(|| provide_scoped_context(Hub(RwSignal::new(1))));
+      assert_eq!(
+        owner.with(|| use_context::<Hub>().map(|hub| hub.0.get_untracked())),
+        Some(1)
+      );
+      owner.cleanup();
+      assert!(owner.with(use_context::<Hub>).is_none());
+      // What the owner renders next provides its own.
+      owner.with(|| provide_scoped_context(Hub(RwSignal::new(2))));
+      assert_eq!(
+        owner.with(|| use_context::<Hub>().map(|hub| hub.0.get_untracked())),
+        Some(2)
+      );
+    }
+
+    #[test]
+    fn a_scoped_context_leaves_the_parents_alone() {
+      let parent = Owner::new();
+      parent.with(|| provide_context(Hub(RwSignal::new(1))));
+      let child = parent.with(Owner::new);
+      child.with(|| provide_scoped_context(Hub(RwSignal::new(2))));
+      child.cleanup();
+      assert_eq!(
+        child.with(|| use_context::<Hub>().map(|hub| hub.0.get_untracked())),
+        Some(1)
+      );
+    }
   }
 
   #[test]
