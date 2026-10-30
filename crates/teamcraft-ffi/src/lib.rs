@@ -118,6 +118,7 @@ impl TeamCraft {
     let signals = engine::SyncSignals {
       network: network.clone(),
       connection: connection.clone(),
+      catch_up_focus: Default::default(),
     };
     let start = engine::EngineStart::new(config, tokens, listener, signals)?;
     let (jobs, maybe_recovery) = match engine::spawn(&start) {

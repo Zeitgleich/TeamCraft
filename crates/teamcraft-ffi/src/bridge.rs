@@ -60,9 +60,12 @@ impl Engine {
     start: u32,
     len: u32,
   ) -> Result<String, TeamCraftError> {
+    let conversation = parse_id(conversation_id)?;
+    // The next catch-up starts with the conversation the user opened (issue #972).
+    self.signals.catch_up_focus.set(conversation);
     let window = MessageWindow::read(
       self.backend()?,
-      parse_id(conversation_id)?,
+      conversation,
       usize::try_from(start).unwrap_or(usize::MAX),
       usize::try_from(len).unwrap_or(usize::MAX),
     );

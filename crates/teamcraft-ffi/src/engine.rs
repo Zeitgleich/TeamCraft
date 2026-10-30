@@ -20,7 +20,7 @@ use teamcraft_core::api::{AccessTokenSource, ApiError, HttpRendezvous, HttpServe
 use teamcraft_core::client::NewDeviceLink;
 use teamcraft_core::client::files::sweep_staged_copies;
 use teamcraft_core::client::{
-  LinkAnnouncement, LinkApproval, LinkRequestList, ReceiptCancel, SIGN_OUT_REVOKE_PATIENCE,
+  CatchUpFocus, LinkAnnouncement, LinkApproval, LinkRequestList, ReceiptCancel, SIGN_OUT_REVOKE_PATIENCE,
 };
 use teamcraft_core::clock::{Clock as _, SystemClock};
 use teamcraft_core::connection::{ConnectionStatus, NetworkChanges};
@@ -108,7 +108,7 @@ pub(crate) struct Engine {
   calls: CallHub,
   /// Applied to decrypted push texts (keywords, first name).
   mentions: MentionSettings,
-  signals: SyncSignals,
+  pub(crate) signals: SyncSignals,
 }
 
 /// What the app's handle shares with every sync loop the engine starts.
@@ -116,6 +116,10 @@ pub(crate) struct Engine {
 pub(crate) struct SyncSignals {
   pub(crate) network: NetworkChanges,
   pub(crate) connection: ConnectionStatus,
+  /// The conversation the user looks at: a catch-up reads it ahead of the others (issue #247). Set
+  /// by every read of a conversation's messages, as on the desktop; until it was, a conversation
+  /// opened from a notification after a long absence waited for every other one (issue #972).
+  pub(crate) catch_up_focus: CatchUpFocus,
 }
 
 /// What opening the engine needs, checked once. The handle keeps it while the local store is
@@ -701,6 +705,8 @@ impl Engine {
       },
       ClientSlot::Missing => return Err(TeamCraftError::NotEnrolled),
     };
+    let mut client = client;
+    client.share_catch_up_focus(self.signals.catch_up_focus.clone());
     let listener = self.listener.clone();
     let (mut runner, handle) = SyncRunner::new(
       *client,
@@ -772,6 +778,7 @@ impl Engine {
   ) -> Result<Vec<MessageItem>, TeamCraftError> {
     let backend = self.backend()?;
     let conversation: ConversationId = parse_id(conversation_id)?;
+    self.signals.catch_up_focus.set(conversation);
     let count = backend.message_count(conversation);
     let len = usize::try_from(limit).unwrap_or(usize::MAX).min(count);
     let messages = backend.messages(conversation, count - len, len);
@@ -784,7 +791,9 @@ impl Engine {
     thread_id: &str,
   ) -> Result<Vec<MessageItem>, TeamCraftError> {
     let backend = self.backend()?;
-    let messages = backend.thread(parse_id(conversation_id)?, parse_id(thread_id)?);
+    let conversation = parse_id(conversation_id)?;
+    self.signals.catch_up_focus.set(conversation);
+    let messages = backend.thread(conversation, parse_id(thread_id)?);
     Ok(self.message_items(backend, &messages))
   }
 
