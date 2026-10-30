@@ -47,6 +47,11 @@ extension ConversationItem {
   /// DMs and group DMs live outside spaces and have their own tab.
   var isDirect: Bool { kind == .direct || kind == .group }
 
+  /// The name lists and titles show: the notes to self have none of their own (they are named
+  /// after the other people, and there are none), so they are called "Notes" in the user's
+  /// language, like the web and desktop (`notes-title`, issue #829).
+  var listName: String { isNotesToSelf ? String(localized: "notes_title") : name }
+
   /// Red for a mention and for unread messages in a direct or group conversation (they are addressed
   /// to the user, unless it is muted); quiet for plain unread in channels.
   var badgeTone: BadgeTone {
@@ -55,7 +60,7 @@ extension ConversationItem {
 }
 
 private func byName(_ lhs: ConversationItem, _ rhs: ConversationItem) -> Bool {
-  lhs.name.localizedCaseInsensitiveCompare(rhs.name) == .orderedAscending
+  lhs.listName.localizedCaseInsensitiveCompare(rhs.listName) == .orderedAscending
 }
 
 /// Channels of the spaces: favorite channels first, then each space (spaces and channels by name).
@@ -95,7 +100,9 @@ func directSections(
     return left == right ? byName(lhs, rhs) : left > right
   }
   let direct = conversations
-    .filter { $0.isDirect && chip.matches($0) && (needle.isEmpty || $0.name.localizedCaseInsensitiveContains(needle)) }
+    .filter {
+      $0.isDirect && chip.matches($0) && (needle.isEmpty || $0.listName.localizedCaseInsensitiveContains(needle))
+    }
     .sorted(by: byRecency)
   let favorites = direct.filter(\.isFavorite)
   let rest = direct.filter { !$0.isFavorite }

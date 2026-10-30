@@ -94,7 +94,7 @@ struct ChatPane: View {
       composer
     }
     .background(Theme.background)
-    .navigationTitle(threadId == nil ? conversation.name : String(localized: "thread_title"))
+    .navigationTitle(threadId == nil ? conversation.listName : String(localized: "thread_title"))
     .navigationBarTitleDisplayMode(.inline)
     .toolbar { if threadId == nil { toolbarItems } }
     .fullScreenCover(isPresented: $isTakingPhoto) {
@@ -686,7 +686,7 @@ struct ForwardSheet: View {
   var body: some View {
     NavigationStack {
       List(targets, id: \.id) { target in
-        Button(target.name) {
+        Button(target.listName) {
           Task {
             await model.perform(
               .forward(fromConversationId: fromConversationId, messageId: messageId, toConversationId: target.id))

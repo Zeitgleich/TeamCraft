@@ -4337,6 +4337,22 @@
         }
       }
     },
+    "notes_title": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Notes"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Mein Speicher"
+          }
+        }
+      }
+    },
     "notification_answer_call": {
       "localizations": {
         "en": {

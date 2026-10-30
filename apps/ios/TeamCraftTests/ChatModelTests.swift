@@ -5,11 +5,13 @@ import XCTest
 final class ChatModelTests: XCTestCase {
   private func item(
     _ id: String, _ name: String, kind: ConversationKind = .public, space: String? = nil,
-    favorite: Bool = false, unread: UInt32 = 0, mentions: UInt32 = 0, muted: Bool = false
+    favorite: Bool = false, unread: UInt32 = 0, mentions: UInt32 = 0, muted: Bool = false,
+    notes: Bool = false
   ) -> ConversationItem {
     ConversationItem(
       id: id, maybeSpaceId: space, maybeSpaceName: space, kind: kind, name: name, topic: "",
-      unreadCount: unread, mentionCount: mentions, isFavorite: favorite, isMuted: muted, canPost: true)
+      unreadCount: unread, mentionCount: mentions, isFavorite: favorite, isMuted: muted, canPost: true,
+      isNotesToSelf: notes)
   }
 
   func testRightsTheAppDoesNotSetAreOfferedAndTheServerDecides() {
@@ -65,6 +67,15 @@ final class ChatModelTests: XCTestCase {
     XCTAssertEqual(item("3", "dev", unread: 3, mentions: 1).badgeTone, .mention)
     XCTAssertEqual(item("4", "dev", unread: 3).badgeTone, .unread)
     XCTAssertEqual(item("5", "Amy", kind: .direct, unread: 3, muted: true).badgeTone, .unread)
+  }
+
+  /// Issue #829: the notes have an empty name; lists call them "Notes" and the filter finds them.
+  func testNotesAreNamedAndFoundByThatName() {
+    let notesTitle = String(localized: "notes_title")
+    let list = [item("1", "", kind: .direct, notes: true), item("2", "Sam", kind: .direct)]
+    XCTAssertEqual(list[0].listName, notesTitle)
+    XCTAssertEqual(list[1].listName, "Sam")
+    XCTAssertEqual(directSections(list, filter: notesTitle).flatMap(\.conversations).map(\.id), ["1"])
   }
 
   func testEmptySectionsAreLeftOut() {

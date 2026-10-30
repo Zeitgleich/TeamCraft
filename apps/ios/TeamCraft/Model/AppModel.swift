@@ -958,7 +958,7 @@ final class AppModel {
   }
 
   func conversationName(_ conversationId: String) async -> String {
-    await conversations().first { $0.id == conversationId }?.name ?? "TeamCraft"
+    await conversations().first { $0.id == conversationId }?.listName ?? "TeamCraft"
   }
 
   // MARK: Private

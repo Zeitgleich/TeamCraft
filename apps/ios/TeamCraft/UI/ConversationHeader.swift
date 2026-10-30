@@ -9,7 +9,7 @@ struct ConversationHeader: View {
     HStack(spacing: 8) {
       avatar
       VStack(alignment: .leading, spacing: 0) {
-        Text(conversation.name)
+        Text(conversation.listName)
           .font(.headline)
           .lineLimit(1)
         if let subtitle {
@@ -34,6 +34,8 @@ struct ConversationHeader: View {
   private var avatar: some View {
     Group {
       switch conversation.kind {
+      case .direct where conversation.isNotesToSelf:
+        symbolAvatar
       case .direct, .group:
         Text(AvatarView.initials(of: conversation.name))
           .font(.system(size: Self.size * 0.4, weight: .semibold))
@@ -41,11 +43,7 @@ struct ConversationHeader: View {
           .frame(width: Self.size, height: Self.size)
           .background(PersonColor.avatar(conversation.id), in: Circle())
       case .public, .private, .integration:
-        Image(systemName: symbol)
-          .font(.system(size: Self.size * 0.42, weight: .semibold))
-          .foregroundStyle(Theme.accentStrong)
-          .frame(width: Self.size, height: Self.size)
-          .background(Theme.accentSoft, in: Circle())
+        symbolAvatar
       }
     }
     .overlay(alignment: .bottomTrailing) {
@@ -59,7 +57,17 @@ struct ConversationHeader: View {
     .accessibilityHidden(true)
   }
 
+  /// Channels and the notes to self show a symbol instead of initials.
+  private var symbolAvatar: some View {
+    Image(systemName: symbol)
+      .font(.system(size: Self.size * 0.42, weight: .semibold))
+      .foregroundStyle(Theme.accentStrong)
+      .frame(width: Self.size, height: Self.size)
+      .background(Theme.accentSoft, in: Circle())
+  }
+
   private var symbol: String {
+    if conversation.isNotesToSelf { return "bookmark.fill" }
     switch conversation.kind {
     case .private: return "lock.fill"
     case .integration: return "bolt.fill"
