@@ -314,18 +314,19 @@ pub fn Composer(
     }
   });
 
-  // Drafts sync across devices: restore once the stored one arrives, store while typing.
-  let is_draft_restored = RwSignal::new(false);
+  // Drafts sync across devices: restore once the stored one arrives, store while typing. A draft
+  // that arrives after the user typed, sent or cleared here is older than the editor (#977).
+  let draft_restore = StoredValue::new(DraftRestore::Waiting);
   let draft_generation = RwSignal::new(0_u32);
   Effect::new(move |_| {
     let stored = state.read(|backend| backend.draft(conversation, maybe_thread));
-    if is_draft_restored.get_untracked() {
+    if draft_restore.get_value() == DraftRestore::Settled {
       return;
     }
     let Some(element) = editor.get() else { return };
     composer_editor::prepare();
-    if let Some(text) = stored.filter(|text| !text.is_empty()) {
-      is_draft_restored.set(true);
+    if let Some(text) = draft_restore.get_value().take(stored) {
+      draft_restore.set_value(DraftRestore::Settled);
       if composer_editor::is_blank(&element) {
         composer_editor::set_markdown(&element, &text);
         is_empty.set(composer_editor::is_blank(&element));
@@ -342,6 +343,7 @@ pub fn Composer(
     state.try_write(|backend| backend.set_draft(conversation, maybe_thread, &text));
   };
   let save_draft = move || {
+    draft_restore.set_value(DraftRestore::Settled);
     draft_generation.update(|generation| *generation += 1);
     let generation = draft_generation.get_untracked();
     set_timeout(
@@ -390,6 +392,7 @@ pub fn Composer(
     suggestions.set(Vec::new());
     is_empty.set(true);
     active_formats.set(ActiveFormats::default());
+    draft_restore.set_value(DraftRestore::Settled);
     draft_generation.update(|generation| *generation += 1);
     state.write(|backend| backend.set_draft(conversation, maybe_thread, ""));
   };
@@ -1566,6 +1569,25 @@ pub fn Composer(
   }
 }
 
+/// Whether a stored draft may still fill this composer. The stored draft is restored once, when it
+/// arrives; after that, or once the user typed, sent or cleared here, the editor is newer than any
+/// draft that arrives later (a slow sync echo, another device), so it never refills (#977).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum DraftRestore {
+  Waiting,
+  Settled,
+}
+
+impl DraftRestore {
+  /// The draft to put into the editor, if this composer still waits for one.
+  fn take(self, maybe_stored: Option<String>) -> Option<String> {
+    match self {
+      Self::Waiting => maybe_stored.filter(|text| !text.is_empty()),
+      Self::Settled => None,
+    }
+  }
+}
+
 /// The chip's preview of a picked picture. An SVG shows its drawn thumbnail, never itself: a `blob:`
 /// URL of an SVG would run its scripts if opened in a tab (see `crate::raster`).
 fn chip_preview_url(
@@ -1649,6 +1671,29 @@ mod tests {
       &[suggestion("/settings"), suggestion("/shortcuts")]
     ));
     assert!(!is_same_list(&[], &shown));
+  }
+
+  mod draft_restore {
+    use super::*;
+
+    #[test]
+    fn the_stored_draft_fills_a_fresh_composer_once_it_arrives() {
+      assert_eq!(DraftRestore::Waiting.take(None), None, "not synced yet");
+      assert_eq!(DraftRestore::Waiting.take(Some(String::new())), None);
+      assert_eq!(
+        DraftRestore::Waiting.take(Some("half a thought".into())),
+        Some("half a thought".into())
+      );
+    }
+
+    #[test]
+    fn a_late_draft_never_refills_a_settled_composer() {
+      // #977: the user typed (the draft was stored), then sent or deleted the text, and only then
+      // the slow echo of the stored draft arrives. Typing, clearing and a restore all settle the
+      // composer; a draft from another device does not overwrite the editor either.
+      assert_eq!(DraftRestore::Settled.take(Some("sent already".into())), None);
+      assert_eq!(DraftRestore::Settled.take(None), None);
+    }
   }
 
   fn suggestion(label: &str) -> Suggestion {
