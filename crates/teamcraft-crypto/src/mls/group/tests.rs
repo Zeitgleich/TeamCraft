@@ -1313,6 +1313,7 @@ impl World {
       &self.alice.user.device,
       key_packages,
       removals,
+      false,
     );
     self.alice_group.discard_commit(&self.alice.provider).unwrap();
     output.unwrap().commit

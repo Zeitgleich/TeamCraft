@@ -184,24 +184,15 @@ impl ConversationGroup {
   ) -> Result<(Self, CommitOutput), MlsError> {
     let mut founded = Self::create(provider, device, certificate, conversation_id)?;
     while founded.epoch() < epoch {
-      founded
-        .group
-        .commit_builder()
-        .force_self_update(true)
-        .load_psks(provider.storage())
-        .map_err(|error| MlsError::openmls("commit creation", error))?
-        .create_group_info(false)
-        .build(provider.rand(), provider.crypto(), device, |_| true)
-        .map_err(|error| MlsError::openmls("commit creation", error))?
-        .stage_commit(provider)
-        .map_err(|error| MlsError::openmls("commit staging", error))?;
+      // Through the one commit path, so the web bundle carries no second copy of it.
+      founded.stage_commit(provider, device, Vec::new(), Vec::new(), true)?;
       founded
         .group
         .merge_pending_commit(provider)
         .map_err(|error| MlsError::openmls("merging own commit", error))?;
     }
     founded.history.joined_epoch = epoch;
-    let output = founded.stage_self_update(provider, device)?;
+    let output = founded.stage_commit(provider, device, Vec::new(), Vec::new(), true)?;
     founded.maybe_pending = Some(PendingCommit {
       commit: output.commit.clone(),
       maybe_change: None,
@@ -559,7 +550,7 @@ impl ConversationGroup {
     self.check_not_removed(&proposed)?;
 
     self.group.set_aad(signed_change.to_bytes()?);
-    let result = self.stage_commit(provider, device, validated_key_packages, removed_leaves);
+    let result = self.stage_commit(provider, device, validated_key_packages, removed_leaves, false);
     self.group.set_aad(Vec::new());
     let output = result?;
     self.maybe_pending = Some(PendingCommit {
@@ -607,7 +598,7 @@ impl ConversationGroup {
     }
     self.check_device_additions(&proposed)?;
     self.check_not_removed(&proposed)?;
-    let output = self.stage_commit(provider, device, validated_key_packages, Vec::new())?;
+    let output = self.stage_commit(provider, device, validated_key_packages, Vec::new(), false)?;
     self.maybe_pending = Some(PendingCommit {
       commit: output.commit.clone(),
       maybe_change: None,
@@ -649,7 +640,13 @@ impl ConversationGroup {
     let mut aad = REJOIN_AAD_MAGIC.to_vec();
     aad.extend_from_slice(&signed.to_bytes()?);
     self.group.set_aad(aad);
-    let result = self.stage_commit(provider, device, vec![key_package], vec![(old_leaf, member)]);
+    let result = self.stage_commit(
+      provider,
+      device,
+      vec![key_package],
+      vec![(old_leaf, member)],
+      false,
+    );
     self.group.set_aad(Vec::new());
     let output = result?;
     self.maybe_pending = Some(PendingCommit {
@@ -891,10 +888,12 @@ impl ConversationGroup {
     device: &DeviceKeyPair,
     key_packages: Vec<KeyPackage>,
     removed_leaves: Vec<(LeafNodeIndex, GroupMember)>,
+    is_self_update: bool,
   ) -> Result<CommitOutput, MlsError> {
     let bundle = self
       .group
       .commit_builder()
+      .force_self_update(is_self_update)
       .propose_adds(key_packages)
       .propose_removals(removed_leaves.into_iter().map(|(index, _)| index))
       .load_psks(provider.storage())
@@ -921,40 +920,6 @@ impl ConversationGroup {
     Ok(CommitOutput {
       commit,
       maybe_welcome,
-      maybe_group_info,
-    })
-  }
-
-  /// Stages a commit without proposals that renews this device's leaf, with the group information
-  /// for the new epoch.
-  fn stage_self_update(
-    &mut self,
-    provider: &impl OpenMlsProvider,
-    device: &DeviceKeyPair,
-  ) -> Result<CommitOutput, MlsError> {
-    let bundle = self
-      .group
-      .commit_builder()
-      .force_self_update(true)
-      .load_psks(provider.storage())
-      .map_err(|error| MlsError::openmls("commit creation", error))?
-      .build(provider.rand(), provider.crypto(), device, |_| true)
-      .map_err(|error| MlsError::openmls("commit creation", error))?
-      .stage_commit(provider)
-      .map_err(|error| MlsError::openmls("commit staging", error))?;
-    let maybe_group_info = bundle
-      .group_info()
-      .cloned()
-      .map(|info| MlsMessageOut::from(info).to_bytes())
-      .transpose()
-      .map_err(|error| MlsError::openmls("group info encoding", error))?;
-    let commit = bundle
-      .into_commit()
-      .to_bytes()
-      .map_err(|error| MlsError::openmls("commit encoding", error))?;
-    Ok(CommitOutput {
-      commit,
-      maybe_welcome: None,
       maybe_group_info,
     })
   }
