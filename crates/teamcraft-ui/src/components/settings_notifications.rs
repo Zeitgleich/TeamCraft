@@ -269,8 +269,9 @@ fn ThisDeviceCard() -> impl IntoView {
   let allowing = PendingAction::new();
   let testing = PendingAction::new();
   let has_tested = RwSignal::new(false);
-  // The last click on "Turn on" got no prompt from the browser: say where to look.
-  let has_no_prompt = RwSignal::new(false);
+  // What the last click on "Turn on" came to, where the permission alone doesn't say it: no
+  // prompt shown, or refused without one (a private window).
+  let maybe_outcome = RwSignal::new(None::<notification_prompt::AllowOutcome>);
   let is_granted = move || is_desktop || page_permission.get().as_deref() == Some("granted");
 
   // Read here, inside the reactive owner: the spawned future has no context to find it in.
@@ -283,7 +284,7 @@ fn ThisDeviceCard() -> impl IntoView {
       let result = notification_prompt::allow_notifications(me, maybe_session, request).await;
       page_permission.set_if_alive(tauri::notification_permission());
       let outcome = result?;
-      has_no_prompt.set_if_alive(outcome == notification_prompt::AllowOutcome::NoPrompt);
+      maybe_outcome.set_if_alive(Some(outcome));
       if outcome == notification_prompt::AllowOutcome::On {
         is_push_on.set_if_alive(true);
       }
@@ -320,8 +321,13 @@ fn ThisDeviceCard() -> impl IntoView {
       match page_permission.get().as_deref() {
         Some("granted") if is_push_on.get() => i18n.t("notif-browser-background"),
         Some("granted") => i18n.t("notif-browser-granted"),
+        Some("denied") if maybe_outcome.get() == Some(notification_prompt::AllowOutcome::Refused) => {
+          i18n.t("notif-prompt-refused")
+        },
         Some("denied") => i18n.t("notif-browser-denied"),
-        Some(_) if has_no_prompt.get() => i18n.t("notif-prompt-no-prompt"),
+        Some(_) if maybe_outcome.get() == Some(notification_prompt::AllowOutcome::NoPrompt) => {
+          i18n.t("notif-prompt-no-prompt")
+        },
         Some(_) => i18n.t("notif-browser-hint"),
         None => i18n.t("notif-browser-unsupported"),
       }

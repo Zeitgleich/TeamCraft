@@ -300,6 +300,7 @@ notif-prompt-later = Nicht jetzt
 notif-prompt-on = Benachrichtigungen sind aktiviert.
 notif-prompt-blocked = Benachrichtigungen sind in diesem Browser blockiert. Erlaube sie in den Website-Einstellungen neben der Adressleiste und aktiviere sie dann in den Einstellungen erneut.
 notif-prompt-no-prompt = Dein Browser hat nicht nachgefragt. Suche in der Adressleiste nach einem Glocken- oder Schloss-Symbol, erlaube dort Benachrichtigungen und versuche es erneut.
+notif-prompt-refused = Dein Browser hat abgelehnt, ohne nachzufragen. In privaten Fenstern gibt es keine Benachrichtigungen; öffne TeamCraft in einem normalen Fenster, um sie zu aktivieren.
 notif-prompt-close = Schließen
 
 # Composer: mentions, slash commands, formatting

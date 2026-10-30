@@ -300,6 +300,7 @@ notif-prompt-later = Not now
 notif-prompt-on = Notifications are on.
 notif-prompt-blocked = Notifications are blocked in this browser. Allow them in the site settings next to the address bar, then turn them on again in Settings.
 notif-prompt-no-prompt = Your browser didn't ask. Look for a bell or lock icon in the address bar and allow notifications there, then try again.
+notif-prompt-refused = Your browser declined without asking. Private windows have no notifications; open TeamCraft in a normal window to turn them on.
 notif-prompt-close = Close
 
 # Composer: mentions, slash commands, formatting
