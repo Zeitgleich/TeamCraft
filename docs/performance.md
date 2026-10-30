@@ -1112,9 +1112,13 @@ image does not boot on this AMD host), signed out:
 
 ### Web bundle size
 
-The budget counts the **compressed** wasm a signed-in user's first visit transfers: the app, the
-signed-in app's chunks that `init.js` fetches next to it, and the service worker, which is installed
-on the first visit too. That is what a user waits for: the server sends the wasm
+Two budgets, both on the **compressed** wasm (issue #910's follow-up, 2026-10-31). The strict one
+is a **guest's meeting**: somebody from outside who opens a meeting link, often once and in a
+browser that never saw the app, downloads the lobby (the app and the service worker), then, once
+let in, the meeting's split modules (`guest`, `calls`) with the shared chunks they import, and the
+call module. The looser one is a ceiling on a **signed-in first visit**: the app, the signed-in
+app's chunks that `init.js` fetches next to it, and the service worker, which is installed on the
+first visit too; a member loads it once, then from the service worker's cache. That is what a user waits for: the server sends the wasm
 with gzip or brotli, the browser compiles it while it streams (`instantiateStreaming`), and the
 service worker serves it from its cache on every later visit. The uncompressed size of a Leptos app
 of this scope is not a useful budget on its own; 10 MB uncompressed was reached with the features of
@@ -1125,16 +1129,41 @@ runs `scripts/check-web-size.py`. The script prints uncompressed, gzip -9 and (w
 module is installed) brotli -11 sizes, the gzip delta to `main` and a guest's first visit, and lists
 the chunks that load later. The limit:
 
-| Limit                 | Value       | Above it                         |
-|-----------------------|-------------|----------------------------------|
-| Budget: gzip -9 total | 4,700,000 B | fails; warns from 95 % (4.47 MB) |
+| Limit                                   | Value       | Above it                         |
+|-----------------------------------------|-------------|----------------------------------|
+| A guest in a meeting: gzip -9 total     | 5,600,000 B | fails; warns from 95 % (5.32 MB) |
+| Signed-in first visit: gzip -9 total    | 5,200,000 B | fails; warns from 95 % (4.94 MB) |
+| The call module: gzip -9                | 1,000,000 B | fails                            |
 
-The budget is the gzip total measured on `main` c55b2e58 plus about 10 %. gzip -9 is the measure
+The guest budget is the guest's meeting measured below plus about 4 %, the signed-in ceiling the
+signed-in first visit on `main` 8d653d3c plus about 10 %. The single budget before (4,700,000 B,
+the signed-in first visit on `main` c55b2e58 plus about 10 %) only counted what a guest's lobby and a
+member's first screen load; a guest who was let in then loaded the whole signed-in app, uncounted. gzip -9 is the measure
 because every server and browser supports it and it is reproducible; brotli is printed as
 information. The uncompressed size is printed but not limited: what a user waits for is the
 transfer. The earlier growth ratchet on it (11.85 MB) was dropped with the split (#334): main had
 outgrown it anyway, and the split moves code between files without changing what matters. Raising
 the budget is a decision, not a fix.
+
+#### A guest's meeting (2026-10-31)
+
+A guest's meeting view (`GuestMeeting`, after a host let them in) was a split point of the
+`session` module, the signed-in app's: a guest loaded the whole member app (sidebar, home, sign-in,
+settings entry points) to see one meeting chat and its call. It is a module of its own now,
+`guest`; what it shares with the signed-in app goes into shared chunks, so a guest loads those
+and nothing that only members use. Release `trunk build` in the local CI image (trunk 0.22.0,
+wasm-opt 131), gzip -9, every file once:
+
+| Download                                      | Before (`8d653d3c`) | After       | Delta      |
+|-----------------------------------------------|---------------------|-------------|------------|
+| A guest in a meeting (lobby, meeting, calls)  | 5,911,682 B         | 5,390,863 B | −520,819 B |
+| The lobby (app, service worker)               | 2,877,916 B         | 2,878,421 B | +505 B     |
+| Signed-in first visit                         | 4,700,571 B         | 4,724,318 B | +23,747 B  |
+
+The signed-in first visit grows by the headers of the new shared chunks. Still in a guest's
+meeting and the next candidates: the call screens' module imports a large set of shared chunks
+(1.06 MB with them), and the lobby's app carries the client core a guest without an account uses
+only in part.
 
 #### The split (#334)
 

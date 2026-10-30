@@ -1,8 +1,13 @@
 #!/usr/bin/env python3
-"""Checks the web client's wasm against the download budget and prints its size.
+"""Checks the web client's wasm against the download budgets and prints its size.
 
-The budget (.claude/rules/robustness.md, "Download size") counts the compressed wasm a signed-in
-user's first visit transfers: the app (`teamcraft-ui-*_bg.wasm`), the signed-in app's chunks that
+The strict budget is a guest's (.claude/rules/robustness.md, "Download size"): somebody from
+outside who opens a meeting link, often once and in a browser that never saw the app, waits for
+the lobby (the app, `teamcraft-ui-*_bg.wasm`, and the service worker), then, once let in, the
+split modules of the meeting (`guest`, `calls`) with the shared chunks they import, read from the
+split loader `teamcraft-ui-split-*.js`, and the call module (`teamcraft-web-calls-*_bg.wasm`). `--guest-budget-bytes` limits
+that. The signed-in budget (`--budget-bytes`) is a looser ceiling against big regressions and
+counts the compressed wasm a signed-in user's first visit transfers: the app (`teamcraft-ui-*_bg.wasm`), the signed-in app's chunks that
 `init.js` fetches next to it (#334; a guest's meeting link skips them) and the service worker
 (`teamcraft-web-sw*_bg.wasm`, installed on the first visit too). The server sends them compressed, the browser compiles while it
 streams, and the service worker caches them afterwards, so the transfer size is what a user waits
@@ -11,16 +16,17 @@ printed too when the `brotli` module is installed. CI runs this after the releas
 (`.github/workflows/web-size.yml`) on every change to the web client.
 
 Parts of the app that load when first used (the other split chunks and the call module) are listed
-after the table; they are not part of the first visit and not of the budget. The call module has a
+after the table; they are not part of the signed-in budget (the call module is part of a guest's). The call module has a
 limit of its own (`--call-module-budget-bytes`): a signed release's service worker fetches it in the
 background for every member. The background effects' segmentation (#439) is listed with them; only
 someone who turns an effect on loads it.
 
-`--budget-bytes` is the gzip -9 total. It warns within 5 % of it and fails above it. The
-uncompressed size is printed for information only: what users wait for is the transfer.
+Both budgets are gzip -9 totals; each warns within 5 % of it and fails above it. The uncompressed
+size is printed for information only: what users wait for is the transfer.
 
-        scripts/check-web-size.py crates/teamcraft-ui/dist [--budget-bytes N]
-                [--call-module-budget-bytes N] [--baseline main.json] [--write sizes.json]
+        scripts/check-web-size.py crates/teamcraft-ui/dist [--guest-budget-bytes N]
+                [--budget-bytes N] [--call-module-budget-bytes N] [--baseline main.json]
+                [--write sizes.json]
 
 `--baseline` is the `--write` output of an earlier build (CI keeps main's); the delta to it is
 printed. With `GITHUB_STEP_SUMMARY` set, the table also goes to the job summary.
@@ -39,10 +45,21 @@ try:
 except ImportError:  # Optional: gzip is the budget, brotli is informational.
     brotli = None
 
-# The gzip -9 total of app + service worker, decimal megabytes: 4.25 MB measured on main c55b2e58
-# plus about 10 % (docs/performance.md, "Web bundle size"). Since the split (#334) the app counts
-# only what a first visit loads; the chunks loaded when first used are listed apart.
-DEFAULT_BUDGET_BYTES = 4_700_000
+# A guest's meeting visit (lobby, the meeting's modules, call module), gzip -9, decimal megabytes:
+# measured in docs/performance.md, "Web bundle size", plus about 10 %. The strict one.
+DEFAULT_GUEST_BUDGET_BYTES = 5_600_000
+# The split modules a guest loads once let into a meeting (teamcraft-ui `areas.rs`).
+GUEST_MODULES = ("guest", "calls")
+SPLIT_LOADER = "teamcraft-ui-split-*.js"
+# In the split loader: the shared chunks, and each module's own file with the chunks it imports.
+SPLIT_CHUNK = re.compile(r'const (__chunk_\d+) = makeLoad\(\(\) => \{\s*const src = fetch\(new URL\("\./([^"]+)"')
+SPLIT_MODULE = re.compile(
+    r'export const __wasm_split_load_(\w+) = wrapAsyncCb\(makeLoad\(\(\) => \{\s*'
+    r'const src = fetch\(new URL\("\./([^"]+)".*?\n, \[([^\]]*)\]', re.S)
+# A signed-in first visit (app, the signed-in app's chunks, service worker), gzip -9: 4.70 MB on
+# main 8d653d3c plus about 10 %. A ceiling against big regressions; growth here is a member's, who
+# loads it once and then from the service worker's cache.
+DEFAULT_BUDGET_BYTES = 5_200_000
 # The call module's gzip -9 size, decimal megabytes: 0.86 MB with the effects' compositors (#439),
 # plus about 15 %. The segmentation is a module of its own that only loads when an effect starts.
 DEFAULT_CALL_MODULE_BUDGET_BYTES = 1_000_000
@@ -64,8 +81,10 @@ LABELS = {"app": "app", "session": "signed-in app", "service_worker": "service w
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("dist", type=pathlib.Path, help="the trunk output directory")
+    parser.add_argument("--guest-budget-bytes", type=int, default=DEFAULT_GUEST_BUDGET_BYTES,
+                        help="fail when a guest's meeting visit is above this gzip -9 total")
     parser.add_argument("--budget-bytes", type=int, default=DEFAULT_BUDGET_BYTES,
-                        help="fail above this gzip -9 total, warn close to it")
+                        help="fail when a signed-in first visit is above this gzip -9 total")
     parser.add_argument("--call-module-budget-bytes", type=int, default=DEFAULT_CALL_MODULE_BUDGET_BYTES,
                         help="fail when the call module is above this gzip -9 size")
     parser.add_argument("--baseline", type=pathlib.Path, help="sizes of an earlier build (JSON)")
@@ -79,8 +98,11 @@ def main(argv=None):
     if sizes is None:
         return 2
     maybe_baseline = load_baseline(args.baseline)
-    report = render(sizes, maybe_baseline, args.budget_bytes)
     lazy = measure_lazy(args.dist, session_files(args.dist))
+    guest_bytes = guest_visit_bytes(args.dist)
+    if guest_bytes is None:
+        return 2
+    report = render(sizes, maybe_baseline, args.budget_bytes, guest_bytes, args.guest_budget_bytes)
     report += render_lazy(lazy)
     print(report)
     summary = os.environ.get("GITHUB_STEP_SUMMARY")
@@ -90,7 +112,11 @@ def main(argv=None):
     if args.write:
         args.write.parent.mkdir(parents=True, exist_ok=True)
         args.write.write_text(json.dumps(sizes, indent=2) + "\n", encoding="utf-8")
-    return max(check_limits(sizes, args.budget_bytes), check_call_module(lazy, args.call_module_budget_bytes))
+    return max(
+        check_limit("a guest's meeting visit", guest_bytes, args.guest_budget_bytes),
+        check_limit("the signed-in web wasm", total_bytes(sizes, "gzip_bytes"), args.budget_bytes),
+        check_call_module(lazy, args.call_module_budget_bytes),
+    )
 
 
 def measure(dist):
@@ -159,7 +185,7 @@ def measure_lazy(dist, session):
 def render_lazy(lazy):
     if not lazy:
         return ""
-    lines = ["", "", "Loaded when first used (not part of the first visit or the budget):", "",
+    lines = ["", "", "Loaded when first used (not part of a signed-in first visit):", "",
              "| Chunk                                            | Uncompressed | gzip -9    |",
              "|--------------------------------------------------|--------------|------------|"]
     for name, size, gzip_size in lazy:
@@ -179,16 +205,47 @@ def check_call_module(lazy, budget_bytes):
     return 0
 
 
-def check_limits(sizes, budget_bytes):
+def guest_visit_bytes(dist):
+    """gzip -9 of what a guest's meeting link loads, each file once: the lobby (app, service
+    worker), the meeting's split modules with their shared chunks, the call module. A build without
+    a split loader or call module counts without them; None (with an error) when the loader names a
+    file that isn't there or lacks a meeting module."""
+    files = {matches[0] for pattern in PARTS.values() if (matches := sorted(dist.glob(pattern)))}
+    files |= set(dist.glob(CALL_MODULE))
+    loaders = sorted(dist.glob(SPLIT_LOADER))
+    if loaders:
+        modules = split_modules(loaders[0].read_text(encoding="utf-8"))
+        missing_modules = [module for module in GUEST_MODULES if module not in modules]
+        if missing_modules:
+            print(f"error: the split loader has no module {', '.join(missing_modules)}", file=sys.stderr)
+            return None
+        files |= {dist / name for module in GUEST_MODULES for name in modules[module]}
+    missing = sorted(path.name for path in files if not path.is_file())
+    if missing:
+        print(f"error: a guest's meeting needs files that aren't there: {', '.join(missing)}", file=sys.stderr)
+        return None
+    return sum(len(gzip.compress(path.read_bytes(), compresslevel=9)) for path in files)
+
+
+def split_modules(loader):
+    """{module: [its file, then the shared chunks it imports]} from the split loader's script."""
+    chunks = {match.group(1): match.group(2) for match in SPLIT_CHUNK.finditer(loader)}
+    return {
+        match.group(1): [match.group(2)]
+        + [chunks[name.strip()] for name in match.group(3).split(",") if name.strip() in chunks]
+        for match in SPLIT_MODULE.finditer(loader)
+    }
+
+
+def check_limit(what, gzip_bytes, budget_bytes):
     """The exit code: 1 above the budget, 0 otherwise (with a warning close to it)."""
-    gzip_total = total_bytes(sizes, "gzip_bytes")
-    if gzip_total > budget_bytes:
-        print(f"error: the web wasm is {gzip_total:,} bytes gzip -9, over the budget of "
-              f"{budget_bytes:,}", file=sys.stderr)
+    if gzip_bytes > budget_bytes:
+        print(f"error: {what} is {gzip_bytes:,} bytes gzip -9, over the budget of {budget_bytes:,}",
+              file=sys.stderr)
         return 1
-    if gzip_total > budget_bytes * WARN_SHARE:
+    if gzip_bytes > budget_bytes * WARN_SHARE:
         # A workflow annotation where CI runs it; plain text elsewhere.
-        print(f"::warning::the web wasm is {gzip_total:,} bytes gzip -9, within "
+        print(f"::warning::{what} is {gzip_bytes:,} bytes gzip -9, within "
               f"{100 - WARN_SHARE * 100:.0f} % of the budget of {budget_bytes:,}")
     return 0
 
@@ -207,7 +264,7 @@ def total_bytes(sizes, key):
     return sum(part[key] for part in sizes.values())
 
 
-def render(sizes, maybe_baseline, budget_bytes):
+def render(sizes, maybe_baseline, budget_bytes, guest_bytes, guest_budget_bytes):
     """A Markdown table: each part, the total against the limits, and the gzip delta to the baseline."""
     has_brotli = all("brotli_bytes" in part for part in sizes.values())
     keys = ["bytes", "gzip_bytes"] + (["brotli_bytes"] if has_brotli else [])
@@ -225,10 +282,10 @@ def render(sizes, maybe_baseline, budget_bytes):
         lines.append(f"| {label:<14} | {mb(size['bytes']):>12} | {mb(size['gzip_bytes']):>10} |"
                      f"{brotli_cell} {delta:>18} |")
     lines.append("")
-    lines.append(f"Budget {mb(budget_bytes)} gzip -9; headroom {mb(budget_bytes - total['gzip_bytes'])}.")
-    if "session" in sizes:
-        guest = total["gzip_bytes"] - sizes["session"]["gzip_bytes"]
-        lines.append(f"A guest's first visit (meeting link, no signed-in app): {mb(guest)} gzip -9.")
+    lines.append(f"A guest's meeting visit (lobby, meeting, call module): {mb(guest_bytes)} gzip -9; "
+                 f"budget {mb(guest_budget_bytes)}, headroom {mb(guest_budget_bytes - guest_bytes)}.")
+    lines.append(f"Signed-in first visit (total): budget {mb(budget_bytes)} gzip -9; "
+                 f"headroom {mb(budget_bytes - total['gzip_bytes'])}.")
     return "\n".join(lines)
 
 
