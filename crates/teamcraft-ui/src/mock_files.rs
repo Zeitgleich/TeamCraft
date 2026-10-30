@@ -1,6 +1,6 @@
-//! Demo pictures, a demo video and text files in `#design`, so the files, albums, the lightbox and
-//! the previews can be shown without a server. The bytes are small generated fixtures
-//! (`demo-media/`), and one large log made when first asked for.
+//! Demo pictures, a demo video, audio and text files in `#design`, so the files, albums, the
+//! lightbox, the audio player and the previews can be shown without a server. The bytes are small
+//! generated fixtures (`demo-media/`), and one large log made when first asked for.
 
 use std::fmt::Write as _;
 use std::sync::LazyLock;
@@ -111,8 +111,26 @@ const SETTINGS_JSON: DemoFile = DemoFile {
   maybe_thumbnail: None,
 };
 
+/// A recording that plays in the conversation (#802), with its length as the sender's metadata.
+const STANDUP_NOTES: DemoFile = DemoFile {
+  id: "9000014",
+  name: "standup-notes.mp3",
+  media_type: "audio/mpeg",
+  bytes: include_bytes!("../demo-media/standup-notes.mp3"),
+  maybe_thumbnail: None,
+};
+const STANDUP_NOTES_MS: u64 = 7_000;
+/// Audio this browser can't play: the card says so and offers the download.
+const VOICE_MEMO: DemoFile = DemoFile {
+  id: "9000015",
+  name: "voice-memo.amr",
+  media_type: "audio/amr",
+  bytes: b"not playable in this demo",
+  maybe_thumbnail: None,
+};
+
 /// Which files go with which message, counted from the newest message of the channel.
-const ATTACHED: [(usize, &[DemoFile]); 9] = [
+const ATTACHED: [(usize, &[DemoFile]); 10] = [
   (0, &[REPORT]),
   (1, &[LAKE, DUNES, PEAKS]),
   (2, &[DIAGRAM]),
@@ -122,6 +140,7 @@ const ATTACHED: [(usize, &[DemoFile]); 9] = [
   (5, &[CLIP]),
   (7, &[SERVER_LOG, SETTINGS_JSON]),
   (8, &[DUNES]),
+  (10, &[STANDUP_NOTES, VOICE_MEMO]),
 ];
 
 /// The files of the demo messages, newest first like the real backend.
@@ -148,7 +167,7 @@ pub(super) fn demo_files(conversation: ConversationId, messages: &[Message]) -> 
       maybe_sender: Some(message.author),
       maybe_sent_at: Some(message.sent_at),
       maybe_dimensions: None,
-      maybe_duration_ms: None,
+      maybe_duration_ms: (file.id == STANDUP_NOTES.id).then_some(STANDUP_NOTES_MS),
       maybe_content_sha256: None,
     }));
   }
@@ -193,6 +212,8 @@ pub fn demo_bytes(file_id: &str) -> Option<&'static [u8]> {
     PHOTO,
     SERVER_LOG,
     SETTINGS_JSON,
+    STANDUP_NOTES,
+    VOICE_MEMO,
   ]
   .into_iter()
   .find(|file| file_id.starts_with(file.id))

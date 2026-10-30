@@ -350,8 +350,8 @@ for months must keep fresh ones on the server:
   times use the system clock openmls checks against.
 - **Wiping.** A deleted package's stored bundle (private init and leaf keys) is overwritten in
   memory before it goes, and so is every old copy of the MLS storage in the store's cache. The
-  local database zeroes freed pages (SQLite `secure_delete`), and the native store truncates its
-  write-ahead log after a deletion, and after saves of the MLS storage at most every 30 seconds
+  local database zeroes freed pages (SQLite `secure_delete`), and the native stores (SQLCipher on
+  the desktop, sealed SQLite on mobile, §9.4) truncate their write-ahead log after a deletion, and after saves of the MLS storage at most every 30 seconds
   (a checkpoint costs two or three syncs and the MLS storage is saved for every processed
   message; measured when the storage was one record: about 20 ms per save at 64 KiB, 320 ms at
   1 MiB; since #424 a save writes only the entries that changed, §9.5). What the
@@ -481,8 +481,15 @@ badge. A click plays the video in the row (one at a time, paused when scrolled o
 64 MiB, as the player gets the whole decrypted file as a `blob:` (`MAX_INLINE_VIDEO_BYTES`); bigger videos
 open in the lightbox. The desktop app's CSP allows `media-src 'self' blob:` for this, as the web client's does.
 
-An attachment's file is untrusted content from another member. Only images and videos get a `blob:`
-of their own media type; everything else is opaque bytes. SVG is a document that can carry scripts,
+**Audio** (#802). An audio file (`audio/*`, or by extension when the type is generic) is a card with the app's
+own player. Nothing is downloaded until play is pressed; then the core decrypts the file in memory like a
+video, and the app's one `<audio>` element (not part of the page's layout) plays it from a `blob:` URL. One
+attachment plays at a time; the URL is revoked when another one plays, the conversation is left or no card
+shows the file any more. Files above the user's limit (`AudioLimit`, 16 to 128 MiB, default 64 MiB) are only
+saved. The length the sender's browser read from the file's metadata (`duration_ms`) shows before playing.
+
+An attachment's file is untrusted content from another member. Only images, videos and known audio types get
+a `blob:` of their own media type; everything else is opaque bytes. SVG is a document that can carry scripts,
 and a `blob:` URL has the page's origin, so an SVG is never shown as itself: the page decodes it in an
 `<img>` that is never attached to the document (no scripts, no network), draws it into a canvas and
 shows only the resulting PNG. Thumbnails of SVG are drawn by the sender's browser the same way, or by
@@ -2387,6 +2394,20 @@ saved on this device. Without that, memory and disk would diverge silently and t
 roll the MLS state back. A newer version of the app that upgrades the database (`versionchange`) gets
 it: the old page closes its connection, stops writing and asks for a reload.
 
+**Journal (native).** Both SQLite stores write ahead (`journal_mode = WAL`) with
+`synchronous = NORMAL`: a commit appends its pages to the log (encrypted with the database key by
+SQLCipher, sealed records on mobile) without syncing the disk; the log is synced and written back
+at checkpoints. A commit stays atomic and survives a crash of the app; only a power loss or an OS
+crash can take back the last commits, and then whole groups of writes (§9.5), never half of one.
+The client repairs that like a lost write: the sync reads again what came after its stored cursors,
+the outbox sends again under the same client message ID (the server deduplicates), and an own
+commit the server took but the device lost shows the device an epoch behind, which asks to be
+added back (§4.6). Until 1.0.11 the desktop store used SQLite's rollback journal with full syncs:
+every single write cost about four syncs (create and sync the journal, sync the database, delete
+the journal), and a catch-up after a long absence spent minutes waiting for the disk (#972). The
+log holds old page versions until it is purged (§4.3.1, "Wiping"); a store whose database is set
+aside (§9.5) takes its log with it.
+
 **Eviction (web).** The core asks for persistent storage (`navigator.storage.persist()`) when it
 opens the store; browsers grant it by their own rules (installed or often used sites, or the user
 agrees). Without it the browser may delete the origin's data under storage pressure, and Safari
@@ -2470,7 +2491,7 @@ fields and an `Unknown` catch-all, so newer records are read or skipped, not mis
 only partly open), whose key no longer opens it (the keystore lost or replaced the key), or whose
 layout is newer is not a generic failure: the app says what happened and offers to set the device
 up again (recovery passphrase or linking, §5, §6), after a confirmation. The desktop sets the old
-file aside (`<user>.db.unreadable-<time>`, never deleted), the mobile apps likewise with their
+file and its journal or log aside (`<user>.db.unreadable-<time>`, never deleted), the mobile apps likewise with their
 database and its log (`<account>.teamcraft.db.unreadable-<time>`, issue #414); the browser deletes
 the database, because its key wrapping lives in the same database (if another tab doesn't let go
 of it within seconds, the reset fails with that reason). Data from a newer version is never reset

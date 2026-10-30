@@ -234,6 +234,13 @@ video-unmute = Ton an
 video-volume = Lautstärke
 video-fullscreen = Vollbild
 video-exit-fullscreen = Vollbild beenden
+# Audiodateien, die im Gespräch abgespielt werden (#802)
+audio-play = { $name } abspielen
+audio-pause = { $name } pausieren
+audio-loading = { $name } wird geladen
+audio-too-large = Zu groß zum Abspielen hier
+audio-unplayable = Dieses Audioformat kann hier nicht abgespielt werden.
+audio-unavailable = Die Audiodatei konnte nicht geladen werden.
 
 ## Settings: sections, search and rows (#327)
 # Dateien-Ansicht und Einrichtungs-Checkliste (Issue #301)

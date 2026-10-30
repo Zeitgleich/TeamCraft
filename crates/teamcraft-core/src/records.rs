@@ -698,9 +698,8 @@ pub fn list_json_with_prefix<T: DeserializeOwned>(
   prefix: &str,
 ) -> Result<Vec<(String, T)>, CoreError> {
   store
-    .list(table)?
+    .list_prefix(table, prefix)?
     .into_iter()
-    .filter(|(key, _)| key.starts_with(prefix))
     .map(|(key, value)| decode(&value).map(|decoded| (key, decoded)))
     .collect()
 }

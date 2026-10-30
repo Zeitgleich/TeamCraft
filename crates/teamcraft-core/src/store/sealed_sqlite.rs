@@ -7,7 +7,7 @@
 
 use std::path::Path;
 use std::sync::{Mutex, MutexGuard};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use rusqlite::{Connection, params};
 use teamcraft_crypto::local_store::{LOOKUP_ID_LEN, LookupId};
@@ -16,6 +16,7 @@ use super::sealed::{RecordBackend, SealedStore};
 use super::sql_group::{
   Migration, MigrationKind, WriteGroup, run_migrations, sqlite_error as database_error,
 };
+use super::sqlite_log::{LOG_PRAGMAS, PurgeState};
 use super::sqlite_wipe::wipe_free_pages;
 use super::{DatabaseKeySource, StoreError, WriteTally};
 
@@ -38,10 +39,6 @@ pub(crate) const MIGRATIONS: &[Migration] = &[
 ];
 /// How long a write waits for another connection's lock (a checkpoint of the log runs into one).
 const BUSY_TIMEOUT: Duration = Duration::from_secs(1);
-/// The most often a debounced purge ([`LocalStore::purge_freed_soon`]) truncates the log: a
-/// checkpoint costs two or three syncs, and the MLS storage is saved for every processed message.
-/// Old snapshots can stay in the log this long while the app runs (docs/e2ee.md §4.3.1).
-const PURGE_INTERVAL: Duration = Duration::from_secs(30);
 const SCHEMA_V1: &str = "
   CREATE TABLE IF NOT EXISTS sealed_records (
     id BLOB PRIMARY KEY,
@@ -64,35 +61,6 @@ struct Inner {
   purge: PurgeState,
 }
 
-/// What the write-ahead log still owes a purge.
-struct PurgeState {
-  /// Something was written since the log was last truncated, and a purge was asked for.
-  is_due: bool,
-  /// The caller wants it now (key deletion), not when the interval has passed.
-  is_forced: bool,
-  maybe_last_attempt: Option<Instant>,
-  min_interval: Duration,
-}
-
-impl PurgeState {
-  fn new() -> Self {
-    Self {
-      is_due: false,
-      is_forced: false,
-      maybe_last_attempt: None,
-      min_interval: PURGE_INTERVAL,
-    }
-  }
-
-  fn should_run(&self, now: Instant) -> bool {
-    self.is_due
-      && (self.is_forced
-        || self
-          .maybe_last_attempt
-          .is_none_or(|last| now.saturating_duration_since(last) >= self.min_interval))
-  }
-}
-
 impl SealedStore<SqliteRecords> {
   /// Opens (or creates) the database at `path` and decrypts it into memory.
   pub fn open(path: &Path, key_source: &impl DatabaseKeySource) -> Result<Self, StoreError> {
@@ -111,7 +79,7 @@ impl SealedStore<SqliteRecords> {
     // secure_delete: freed pages are zeroed, so a deleted record's ciphertext doesn't linger in
     // them (issue #391); the write-ahead log is cleared by `purge_freed`.
     connection
-      .execute_batch("PRAGMA journal_mode = WAL; PRAGMA secure_delete = ON;")
+      .execute_batch(&format!("{LOG_PRAGMAS} PRAGMA secure_delete = ON;"))
       .map_err(database_error)?;
     connection.busy_timeout(BUSY_TIMEOUT).map_err(database_error)?;
     run_migrations(&connection, MIGRATIONS)?;
@@ -169,7 +137,7 @@ impl RecordBackend for SqliteRecords {
     // The group is committed whatever happens to the purge: a failed one stays due and must not
     // make the committed writes look failed.
     if !group.is_open() {
-      run_purge_if_due(connection, purge);
+      purge.run_if_due(connection);
     }
     Ok(())
   }
@@ -184,10 +152,9 @@ impl RecordBackend for SqliteRecords {
       group,
       purge,
     } = &mut *inner;
-    purge.is_due = true;
-    purge.is_forced = true;
+    purge.force();
     if !group.is_open() {
-      run_purge_if_due(connection, purge);
+      purge.run_if_due(connection);
     }
     Ok(())
   }
@@ -201,7 +168,7 @@ impl RecordBackend for SqliteRecords {
     } = &mut *inner;
     purge.is_due = true;
     if !group.is_open() {
-      run_purge_if_due(connection, purge);
+      purge.run_if_due(connection);
     }
   }
 
@@ -223,40 +190,9 @@ impl Drop for SqliteRecords {
     } = &mut *inner;
     if purge.is_due {
       purge.is_forced = true;
-      run_purge_if_due(connection, purge);
+      purge.run_if_due(connection);
     }
   }
-}
-
-/// Truncates the log if a purge is due and its time has come. A checkpoint that did not complete
-/// (another connection holds the log, the disk failed) leaves the purge due; it is retried by the
-/// next write, purge or drop, never reported as a failure of the write that asked for it.
-fn run_purge_if_due(connection: &Connection, purge: &mut PurgeState) {
-  let now = Instant::now();
-  if !purge.should_run(now) {
-    return;
-  }
-  purge.maybe_last_attempt = Some(now);
-  match checkpoint_truncate(connection) {
-    Ok(true) => {
-      purge.is_due = false;
-      purge.is_forced = false;
-    },
-    Ok(false) => tracing::warn!("the write-ahead log could not be truncated yet; trying again later"),
-    Err(error) => tracing::warn!(%error, "could not truncate the write-ahead log; trying again later"),
-  }
-}
-
-/// `PRAGMA wal_checkpoint(TRUNCATE)`; `true` only if it ran to the end: not blocked by a reader
-/// or writer (`busy`) and every frame of the log written back.
-fn checkpoint_truncate(connection: &Connection) -> Result<bool, StoreError> {
-  let (busy, log_frames, checkpointed_frames): (i64, i64, i64) = connection
-    .query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |row| {
-      Ok((row.get(0)?, row.get(1)?, row.get(2)?))
-    })
-    .map_err(database_error)?;
-  // Without a log (a database that is not in WAL mode) SQLite answers -1 for both counts.
-  Ok(busy == 0 && log_frames == checkpointed_frames)
 }
 
 impl SqliteRecords {

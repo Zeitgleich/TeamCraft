@@ -46,7 +46,11 @@ impl<S: LocalStore> CoreChatBackend<S> {
       .into_iter()
       .map(|response| (response.id, response))
       .collect();
-    let conversations = self.conversation_ids().into_iter().map(|conversation| {
+    let ids = self.conversation_ids();
+    let mut cache = self.activity.borrow_mut();
+    cache.retain(|conversation, _| ids.contains(conversation));
+    let mut items = Vec::new();
+    for conversation in ids {
       let reads = ConversationReads {
         maybe_last_read: responses
           .get(&conversation)
@@ -60,9 +64,34 @@ impl<S: LocalStore> CoreChatBackend<S> {
         }),
         thread_unread: threads.remove(&conversation).unwrap_or_default(),
       };
-      (conversation, reads, self.stored(conversation))
-    });
-    build_feed(self.me_id(), conversations).with_join_requests(self.ui_join_requests())
+      // The entries follow from the messages and the read state alone: a conversation neither
+      // changed is not read again (issue #1000: this read every message of every conversation).
+      let maybe_revision = self.store_ref().message_revision(conversation);
+      if let (Some(revision), Some(kept)) = (maybe_revision, cache.get(&conversation))
+        && kept.revision == revision
+        && kept.reads == reads
+      {
+        items.extend(kept.items.iter().cloned());
+        continue;
+      }
+      let mut fresh = Vec::new();
+      self.with_all_messages(conversation, &mut |messages| {
+        fresh = conversation_items(self.me_id(), &reads, conversation, messages);
+      });
+      if let Some(revision) = maybe_revision {
+        cache.insert(
+          conversation,
+          KeptActivity {
+            revision,
+            reads,
+            items: fresh.clone(),
+          },
+        );
+      }
+      items.extend(fresh);
+    }
+    drop(cache);
+    feed_of(items).with_join_requests(self.ui_join_requests())
   }
 
   /// Reads every entry by moving the read positions of their targets: the conversation's for
@@ -119,6 +148,11 @@ pub fn build_feed(
   for (conversation, reads, messages) in conversations {
     items.extend(conversation_items(me, &reads, conversation, &messages));
   }
+  feed_of(items)
+}
+
+/// The newest [`MAX_ITEMS`] of `items`, newest first.
+fn feed_of(mut items: Vec<ActivityItem>) -> ActivityFeed {
   items.sort_by_key(|item| std::cmp::Reverse(item.at));
   items.truncate(MAX_ITEMS);
   ActivityFeed::from_items(items)
@@ -220,6 +254,14 @@ fn item(
     maybe_read_through: stored.maybe_server_id,
     is_unread: !read.is_read(stored, stored.maybe_thread_id),
   }
+}
+
+/// One conversation's entries, kept until its messages or read state change.
+#[derive(Debug)]
+pub(crate) struct KeptActivity {
+  revision: u64,
+  reads: ConversationReads,
+  items: Vec<ActivityItem>,
 }
 
 /// Decides from the read positions whether an entry was seen. The one rule: an entry is read when

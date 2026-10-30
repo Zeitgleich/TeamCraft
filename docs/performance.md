@@ -1004,6 +1004,56 @@ WebKit's: its native allocations ("other" in the inspector) level off at about 2
 fell from 78 to 14 MiB over the run, so it levels off rather than leaks, but it ends near the
 desktop budget. Idle CPU was unchanged; no animation runs while the app is idle.
 
+### Desktop core: CPU with a large channel and after a long absence (issues #1000, #972)
+
+The 1.0.11 desktop app on Linux kept its core thread busy for long stretches while minimized and
+idle (on average 12 % of a core over 1.6 days, 4 % in the system monitor), and after 12 hours of
+standby it showed the connecting spinner for minutes. Measured on a real workspace (38
+conversations, a 32 MB SQLCipher database, the open channel holding 26,829 messages) with a
+symbolized release build, `perf` and `strace` on the `teamcraft-core` thread, and the time each UI
+read took on the core.
+
+Where the time went: SQLCipher decrypts and authenticates (HMAC-SHA512) every page it reads, and the
+UI's reads of the open conversation each read and decoded all of it, several times per change:
+
+| Read of the 26,829-message channel  | 1.0.11 per read  | Fixed per read  |
+|-------------------------------------|------------------|-----------------|
+| Feed window (count and 50 rows)     | 75–79 ms         | under 6 ms      |
+| Extras of one row (asked per row)   | 4.5 ms, ≤ 78 ms  | 0.2 ms          |
+| Activity feed (all conversations)   | 95–99 ms         | under 9 ms      |
+| Snapshot entry of the conversation  | 86–89 ms         | under 0.2 ms    |
+
+Every message, reaction or receipt in the channel set off this chain once more, and it grew with the
+channel. The core thread spent 7.8 s of CPU on the reads after a start; now 0.3 s. Minimized for
+5 minutes on a working morning, with the log channel receiving messages, the whole process now uses
+0.22 % of a core (core thread 0.13 %), within the 0.5 % budget. What changed:
+
+- The UI's reads of a conversation come from a cache of decoded messages (`TrackedStore` message
+  cache, up to 60,000 messages on the desktop, about 20 MiB here): it is filled on the first read
+  and updated with every write the core makes, so a new message no longer means reading the
+  conversation again. A revision per conversation lets the activity feed keep each conversation's
+  entries until its messages or read state change.
+- Row extras look their message up by its place in the order index; the catch-up cursor, older
+  history and the read position ask the index for the oldest or newest server message instead of
+  reading the conversation; parked messages and read receipts are listed by key range.
+- A feed window, a thread and the activity feed borrow the cached conversation instead of copying
+  it, read it once for count and rows, and gather reactions and replies in one pass instead of once
+  per row. The sidebar entry counts in one pass by reference, and whether a message mentions the
+  user is decided once per message and edit while the mention rules stay the same: a log channel
+  with thousands of unread messages had its every text lowercased and split again on each change.
+
+The catch-up after a long absence (#972) waited on the disk: the store used SQLite's rollback journal
+with full syncs, about four syncs per write, and every received message was several writes. In 20
+seconds of a catch-up the core made 1,335 `fsync` calls (12.8 ms each, 91 % of its time); 12
+conversations took 58.7 s. Now a page of received messages is one group of writes, a parked message
+that still can't be read is not written again on every retry, and both SQLite stores write ahead
+(`journal_mode = WAL`, `synchronous = NORMAL`, e2ee.md §9.4). A single commit on the same disk
+(btrfs on NVMe, 1.5 KB record): 17.6 ms with the rollback journal, 6.0 ms with WAL and full syncs,
+0.04 ms with WAL and `NORMAL`.
+
+Still open from #972: the gateway connects only after the catch-up, so live events wait for it; that
+part is tracked separately.
+
 ### Android (first numbers)
 
 Release Rust core, debug Kotlin build (`assembleLibreDebug`), API 35 emulator (the Pixel 10 / API 37

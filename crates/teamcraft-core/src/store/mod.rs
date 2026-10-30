@@ -17,6 +17,7 @@ mod key_source;
 #[cfg(not(target_arch = "wasm32"))]
 mod lock;
 mod memory;
+mod message_cache;
 pub mod sealed;
 #[cfg(all(feature = "sealed-sqlite", not(target_arch = "wasm32")))]
 mod sealed_sqlite;
@@ -27,6 +28,11 @@ mod sealed_sqlite;
 mod sql_group;
 #[cfg(all(feature = "sqlcipher", not(target_arch = "wasm32")))]
 mod sqlite;
+#[cfg(all(
+  any(feature = "sqlcipher", feature = "sealed-sqlite"),
+  not(target_arch = "wasm32")
+))]
+mod sqlite_log;
 #[cfg(all(
   any(feature = "sqlcipher", feature = "sealed-sqlite"),
   not(target_arch = "wasm32")
@@ -491,6 +497,32 @@ pub enum MessageFilter {
   All,
 }
 
+/// A place in a conversation's display order ([`LocalStore::messages_at`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MessageSlot {
+  /// Server messages and derived lines at this ID.
+  At(MessageId),
+  /// The messages not sent yet, which sort after all of them.
+  Pending,
+}
+
+impl MessageSlot {
+  pub(crate) fn holds(self, message: &StoredMessage) -> bool {
+    match (self, message.sort_key()) {
+      (Self::At(position), (0, value)) => value == teamcraft_proto::Id::snowflake(position).get(),
+      (Self::Pending, (1, _)) => true,
+      _ => false,
+    }
+  }
+}
+
+/// Which end of a conversation's server messages [`LocalStore::edge_server_id`] answers for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MessageEdge {
+  Oldest,
+  Newest,
+}
+
 /// Which messages with a picture or video [`LocalStore::media_messages`] lists, from a message
 /// outwards (the image viewer pages through them).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -548,6 +580,14 @@ pub trait LocalStore {
   fn delete(&self, table: Table, key: &str) -> Result<(), StoreError>;
   /// All entries of a table, ordered by key.
   fn list(&self, table: Table) -> Result<Vec<(String, Vec<u8>)>, StoreError>;
+  /// The entries of a table whose key starts with `prefix` (one conversation's records, keyed
+  /// `<conversation>/…`), ordered by key. The default reads the whole table; a store with an index
+  /// on the key reads only the range.
+  fn list_prefix(&self, table: Table, prefix: &str) -> Result<Vec<(String, Vec<u8>)>, StoreError> {
+    let mut entries = self.list(table)?;
+    entries.retain(|(key, _)| key.starts_with(prefix));
+    Ok(entries)
+  }
 
   /// Inserts or replaces a message, identified by conversation and client message ID.
   fn upsert_message(&self, message: &StoredMessage) -> Result<(), StoreError>;
@@ -575,6 +615,68 @@ pub trait LocalStore {
         .into_iter()
         .find(|message| message.maybe_server_id == Some(server_id)),
     )
+  }
+  /// Hands each message of [`Self::messages`] to `visit` by reference, for a reader that sums them
+  /// up (counts, the newest, the unread ones) and keeps few: a store that holds them in memory
+  /// copies none. The default reads them as [`Self::messages`] does.
+  fn visit_messages(
+    &self,
+    conversation: ConversationId,
+    filter: MessageFilter,
+    visit: &mut dyn FnMut(&StoredMessage),
+  ) -> Result<(), StoreError> {
+    for message in self.messages(conversation, filter)? {
+      visit(&message);
+    }
+    Ok(())
+  }
+  /// Hands all of `conversation`'s messages, in display order, to `read` as one slice: for a reader
+  /// that looks at all of them to keep a few (a page of the feed with its reactions and replies).
+  /// A store that holds them in memory copies none. The default reads them as [`Self::messages`].
+  fn with_all_messages(
+    &self,
+    conversation: ConversationId,
+    read: &mut dyn FnMut(&[StoredMessage]),
+  ) -> Result<(), StoreError> {
+    read(&self.messages(conversation, MessageFilter::All)?);
+    Ok(())
+  }
+  /// The messages at one place of the display order: the server message and the lines this device
+  /// derived at `position` (lines sit at the ID of what they tell of), or every pending message.
+  /// A row of the UI is looked up by its ID with it. The default scans; stores with an index on the
+  /// order read only that place.
+  fn messages_at(
+    &self,
+    conversation: ConversationId,
+    slot: MessageSlot,
+  ) -> Result<Vec<StoredMessage>, StoreError> {
+    let mut messages = self.messages(conversation, MessageFilter::All)?;
+    messages.retain(|message| slot.holds(message));
+    Ok(messages)
+  }
+  /// A number that changes with every write to `conversation`'s messages, for a reader that keeps
+  /// what it derived from them (the activity feed) until they change. `None`: the store doesn't
+  /// count, read them again.
+  fn message_revision(&self, conversation: ConversationId) -> Option<u64> {
+    let _ = conversation;
+    None
+  }
+  /// The oldest or newest server message ID stored in `conversation`: the cursor of a catch-up, of
+  /// older history and of the read position. Asked on every catch-up of every conversation, so a
+  /// store with an index reads only the message at that end; the default scans.
+  fn edge_server_id(
+    &self,
+    conversation: ConversationId,
+    edge: MessageEdge,
+  ) -> Result<Option<MessageId>, StoreError> {
+    let server_ids = self
+      .messages(conversation, MessageFilter::All)?
+      .into_iter()
+      .filter_map(|message| message.maybe_server_id);
+    Ok(match edge {
+      MessageEdge::Oldest => server_ids.min(),
+      MessageEdge::Newest => server_ids.max(),
+    })
   }
   /// Up to `limit` listed server messages with a picture or video attachment, in the `range`,
   /// nearest to its start first. The image viewer pages through a conversation's media with it,
@@ -705,6 +807,10 @@ macro_rules! forward_local_store {
         (**self).list(table)
       }
 
+      fn list_prefix(&self, table: Table, prefix: &str) -> Result<Vec<(String, Vec<u8>)>, StoreError> {
+        (**self).list_prefix(table, prefix)
+      }
+
       fn upsert_message(&self, message: &StoredMessage) -> Result<(), StoreError> {
         (**self).upsert_message(message)
       }
@@ -723,6 +829,43 @@ macro_rules! forward_local_store {
         server_id: MessageId,
       ) -> Result<Option<StoredMessage>, StoreError> {
         (**self).message_by_server_id(conversation, server_id)
+      }
+
+      fn message_revision(&self, conversation: ConversationId) -> Option<u64> {
+        (**self).message_revision(conversation)
+      }
+
+      fn messages_at(
+        &self,
+        conversation: ConversationId,
+        slot: MessageSlot,
+      ) -> Result<Vec<StoredMessage>, StoreError> {
+        (**self).messages_at(conversation, slot)
+      }
+
+      fn visit_messages(
+        &self,
+        conversation: ConversationId,
+        filter: MessageFilter,
+        visit: &mut dyn FnMut(&StoredMessage),
+      ) -> Result<(), StoreError> {
+        (**self).visit_messages(conversation, filter, visit)
+      }
+
+      fn with_all_messages(
+        &self,
+        conversation: ConversationId,
+        read: &mut dyn FnMut(&[StoredMessage]),
+      ) -> Result<(), StoreError> {
+        (**self).with_all_messages(conversation, read)
+      }
+
+      fn edge_server_id(
+        &self,
+        conversation: ConversationId,
+        edge: MessageEdge,
+      ) -> Result<Option<MessageId>, StoreError> {
+        (**self).edge_server_id(conversation, edge)
       }
 
       fn messages(
@@ -1064,10 +1207,113 @@ pub(crate) mod tests {
     media_messages_are_paged_from_a_message_outwards(store);
     admin_joins_show_only_as_lines_from_commits(store);
     server_changes_show_only_as_lines(store);
+    edge_server_ids_skip_lines_and_pending_messages(store);
+    prefixes_list_only_their_keys(store);
+    a_place_holds_its_message_and_lines_and_pending_ones_their_own(store);
   }
 
   /// Issue #818: a line about a change the server reports sits where it was put (or moved to) and
   /// is listed; a member's message saying the same is kept but never listed.
+  fn a_place_holds_its_message_and_lines_and_pending_ones_their_own(store: &impl LocalStore) {
+    let conversation = id(43);
+    let mut line = message(conversation, 1, None, None, 0);
+    line.content = MessageContent::Event {
+      event: ConversationEvent::Archived,
+    };
+    line.maybe_server_change = Some(ServerChange {
+      at: id(200),
+      seen_after: id(200),
+      seen_until: id(200),
+      actor: ChangeActor::Nobody,
+    });
+    for stored in [
+      &line,
+      &message(conversation, 2, Some(200), None, 2_000),
+      &message(conversation, 3, Some(300), None, 3_000),
+      &message(conversation, 4, None, None, 9_000),
+    ] {
+      store.upsert_message(stored).unwrap();
+    }
+    let clients = |slot| -> Vec<u8> {
+      let mut found: Vec<u8> = store
+        .messages_at(conversation, slot)
+        .unwrap()
+        .iter()
+        .map(|message| message.client_message_id.as_bytes()[0])
+        .collect();
+      found.sort_unstable();
+      found
+    };
+
+    assert_eq!(clients(MessageSlot::At(id(200))), [1, 2]);
+    assert_eq!(clients(MessageSlot::At(id(300))), [3]);
+    assert_eq!(clients(MessageSlot::At(id(400))), Vec::<u8>::new());
+    assert_eq!(clients(MessageSlot::Pending), [4]);
+    store.delete_messages(conversation).unwrap();
+  }
+
+  fn prefixes_list_only_their_keys(store: &impl LocalStore) {
+    for key in ["7/a", "7/b", "70/a", "7", "8/a"] {
+      store.put(Table::Undecrypted, key, key.as_bytes()).unwrap();
+    }
+    store.put(Table::ReadReceipts, "7/c", b"other table").unwrap();
+
+    let listed: Vec<String> = store
+      .list_prefix(Table::Undecrypted, "7/")
+      .unwrap()
+      .into_iter()
+      .map(|(key, _)| key)
+      .collect();
+    assert_eq!(listed, ["7/a", "7/b"]);
+    assert!(store.list_prefix(Table::Undecrypted, "9/").unwrap().is_empty());
+    for key in ["7/a", "7/b", "70/a", "7", "8/a"] {
+      store.delete(Table::Undecrypted, key).unwrap();
+    }
+    store.delete(Table::ReadReceipts, "7/c").unwrap();
+  }
+
+  fn edge_server_ids_skip_lines_and_pending_messages(store: &impl LocalStore) {
+    let conversation = id(41);
+    assert_eq!(
+      store.edge_server_id(conversation, MessageEdge::Newest).unwrap(),
+      None
+    );
+    let line_at = |client: u8, at: i64| {
+      let mut line = message(conversation, client, None, None, 0);
+      line.content = MessageContent::Event {
+        event: ConversationEvent::Archived,
+      };
+      line.maybe_server_change = Some(ServerChange {
+        at: id(at),
+        seen_after: id(at),
+        seen_until: id(at),
+        actor: ChangeActor::Nobody,
+      });
+      line
+    };
+    let pending = message(conversation, 5, None, None, 9_000);
+    for stored in [
+      &line_at(1, 50),
+      &message(conversation, 2, Some(100), None, 1_000),
+      &message(conversation, 3, Some(300), None, 3_000),
+      &line_at(4, 500),
+      &pending,
+    ] {
+      store.upsert_message(stored).unwrap();
+    }
+
+    assert_eq!(
+      store.edge_server_id(conversation, MessageEdge::Oldest).unwrap(),
+      Some(id(100))
+    );
+    assert_eq!(
+      store.edge_server_id(conversation, MessageEdge::Newest).unwrap(),
+      Some(id(300))
+    );
+    assert_eq!(store.edge_server_id(id(42), MessageEdge::Oldest).unwrap(), None);
+    store.delete_messages(conversation).unwrap();
+  }
+
   fn server_changes_show_only_as_lines(store: &impl LocalStore) {
     let conversation = id(40);
     let archived = MessageContent::Event {
