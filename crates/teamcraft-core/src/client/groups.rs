@@ -1147,6 +1147,17 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
   async fn catch_up_mls(
     &mut self,
     conversation: ConversationId,
+    maybe_first: Option<Result<ListMlsMessagesResponse, ApiError>>,
+  ) -> Result<CatchUp, CoreError> {
+    self.maybe_backlog_reads = Some(BacklogReads::new(conversation));
+    let outcome = self.catch_up_mls_pages(conversation, maybe_first).await;
+    self.maybe_backlog_reads = None;
+    outcome
+  }
+
+  async fn catch_up_mls_pages(
+    &mut self,
+    conversation: ConversationId,
     mut maybe_first: Option<Result<ListMlsMessagesResponse, ApiError>>,
   ) -> Result<CatchUp, CoreError> {
     loop {
@@ -1179,6 +1190,63 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
         });
       }
     }
+  }
+
+  /// The conversation's members as the server lists them now: read once per pass over its MLS
+  /// queue, which is the same answer for every entry of the pass.
+  async fn backlog_members(&mut self, conversation: ConversationId) -> Result<Vec<UserId>, ApiError> {
+    if let Some(reads) = self.backlog_reads_of(conversation)
+      && let Some(members) = &reads.maybe_members
+    {
+      return Ok(members.clone());
+    }
+    let members: Vec<UserId> = self
+      .api
+      .list_members(conversation)
+      .await?
+      .members
+      .into_iter()
+      .map(|member| member.user.id)
+      .collect();
+    if let Some(reads) = self.backlog_reads_of(conversation) {
+      reads.maybe_members = Some(members.clone());
+    }
+    Ok(members)
+  }
+
+  /// [`Self::trusted_directory`], with each user's device list read once per pass over the queue:
+  /// a backlog of commits read it again for every member and entry, one round trip after the
+  /// other (issue #972).
+  async fn backlog_trusted_directory(
+    &mut self,
+    conversation: ConversationId,
+    users: Vec<UserId>,
+  ) -> Result<PinnedDirectory, CoreError> {
+    let Some(read) = self
+      .backlog_reads_of(conversation)
+      .map(|reads| reads.device_lists_read.clone())
+    else {
+      return self.trusted_directory(users).await;
+    };
+    let unread: Vec<UserId> = users
+      .iter()
+      .copied()
+      .filter(|user| !read.contains(user))
+      .collect();
+    if !unread.is_empty() {
+      self.trusted_directory(unread.iter().copied()).await?;
+    }
+    if let Some(reads) = self.backlog_reads_of(conversation) {
+      reads.device_lists_read.extend(unread);
+    }
+    self.pin_identities(users).await
+  }
+
+  fn backlog_reads_of(&mut self, conversation: ConversationId) -> Option<&mut BacklogReads> {
+    self
+      .maybe_backlog_reads
+      .as_mut()
+      .filter(|reads| reads.conversation == conversation)
   }
 
   /// Handles one MLS queue entry of a group (commit, proposal or application message; welcomes go
@@ -1239,8 +1307,8 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       return Ok(MlsProgress::NeedsBacklog);
     }
 
-    let users: Vec<UserId> = match self.api.list_members(conversation).await {
-      Ok(members) => members.members.into_iter().map(|member| member.user.id).collect(),
+    let mut users: Vec<UserId> = match self.backlog_members(conversation).await {
+      Ok(members) => members,
       // The server dropped this user's membership already: the removal commit goes first and the
       // server's membership after it (e2ee.md §4.6), so this is likely that commit. Who is in the
       // group is all it needs to verify. Anything else is a server refusing a member: logged, and
@@ -1253,9 +1321,20 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       },
       Err(error) => return Err(error.into()),
     };
-    // A commit may add devices: check them against the newest device lists.
+    // Who the entry's signed change adds or removes, and who signed it: a commit read long after
+    // (a device that slept) may add somebody who has left again since, whom today's member list
+    // no longer names, and without their pinned key the commit is refused and the device falls
+    // out of the group (issue #972). Only read here; processing verifies the change as always.
+    for named in teamcraft_crypto::mls::users_named_in_change(message.payload.as_slice()) {
+      let user = convert::user_from_crypto(named)?;
+      if !users.contains(&user) {
+        users.push(user);
+      }
+    }
+    // A commit may add devices: check them against the newest device lists, read once per pass
+    // over the queue.
     let directory = if message.kind == MlsMessageKind::Commit {
-      self.trusted_directory(users).await?
+      self.backlog_trusted_directory(conversation, users).await?
     } else {
       self.pin_identities(users).await?
     };
@@ -3222,6 +3301,25 @@ pub(crate) fn rejoin_key(conversation: ConversationId) -> String {
 /// Where a member notes when another device was last added back to the conversation's group.
 fn readded_key(conversation: ConversationId, device: DeviceId) -> String {
   format!("{READDED_PREFIX}{conversation}/{device}")
+}
+
+/// What a pass over one conversation's MLS queue read once for all its entries: the member list
+/// the server gives now, and whose device lists were read during the pass.
+#[derive(Debug)]
+pub(crate) struct BacklogReads {
+  conversation: ConversationId,
+  maybe_members: Option<Vec<UserId>>,
+  device_lists_read: std::collections::HashSet<UserId>,
+}
+
+impl BacklogReads {
+  fn new(conversation: ConversationId) -> Self {
+    Self {
+      conversation,
+      maybe_members: None,
+      device_lists_read: std::collections::HashSet::new(),
+    }
+  }
 }
 
 #[cfg(test)]

@@ -223,9 +223,19 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       );
       let pages = self.read_first_pages(&batch).await?;
       for (conversation, first) in batch.into_iter().zip(pages) {
+        let started_ms = self.now_ms();
+        let mls_written_before = self.saved_mls.written_bytes();
         // One conversation's failure (a 403 right after a removal) marks it for another try and
         // the catch-up goes on with the others (issue #159).
         let result = self.catch_up_content_from(conversation, first).await;
+        // One line each, so a slow conversation shows (issue #972).
+        tracing::info!(
+          conversation_id = %conversation,
+          ms = self.now_ms().saturating_sub(started_ms),
+          mls_written_bytes = self.saved_mls.written_bytes().saturating_sub(mls_written_before),
+          is_ok = result.is_ok(),
+          "catch-up: conversation done"
+        );
         if self.isolate(conversation, ResyncPart::Content, result)? {
           self.unmark_resync(conversation, ResyncPart::Content)?;
         }

@@ -17,7 +17,8 @@ mod stored_key_packages;
 use std::fmt;
 
 use openmls::prelude::{
-  Capabilities, Ciphersuite, ExtensionType, KeyPackage, KeyPackageIn, Lifetime, ProtocolVersion,
+  Capabilities, Ciphersuite, ExtensionType, KeyPackage, KeyPackageIn, Lifetime, MlsMessageIn,
+  ProtocolMessage, ProtocolVersion,
 };
 use openmls_traits::OpenMlsProvider;
 use tls_codec::{Deserialize as _, Serialize as _};
@@ -32,7 +33,9 @@ pub use stored_key_packages::{StoredKeyPackage, delete_key_package, key_package_
 
 use crate::identity::{DeviceKeyPair, IdentityError, SignedDeviceCertificate, VerifiedDevice};
 use crate::ids::{ConversationId, DeviceId, UserId};
-use crate::membership::{ChangeId, IdentityDirectory, MembershipError};
+use crate::membership::{
+  ChangeId, IdentityDirectory, MembershipAction, MembershipError, SignedMembershipChange,
+};
 
 /// The only ciphersuite: X25519, ChaCha20-Poly1305, SHA-256, Ed25519 (matches the device keys).
 pub const CIPHERSUITE: Ciphersuite = Ciphersuite::MLS_128_DHKEMX25519_CHACHA20POLY1305_SHA256_Ed25519;
@@ -192,6 +195,32 @@ pub fn inspect_key_package(bytes: &[u8]) -> Result<KeyPackageInfo, MlsError> {
     not_after_unix_secs: key_package.life_time().not_after(),
     is_last_resort: key_package.last_resort(),
   })
+}
+
+/// The users the signed membership change of a group message names: the user it adds or removes,
+/// and its signer. Read from the message's authenticated data, which MLS sends unencrypted, and
+/// verified by nothing here: a member pins their identity keys before it processes the message,
+/// which verifies the change as always. A commit read hours later can add somebody who has left
+/// again since, whom the conversation's current member list no longer names (issue #972). Empty
+/// for a message without a signed change.
+pub fn users_named_in_change(message: &[u8]) -> Vec<UserId> {
+  let Ok(protocol) =
+    MlsMessageIn::tls_deserialize_exact(message).map(MlsMessageIn::try_into_protocol_message)
+  else {
+    return Vec::new();
+  };
+  let Ok(ProtocolMessage::PrivateMessage(private)) = protocol else {
+    return Vec::new();
+  };
+  let Ok(signed) = SignedMembershipChange::from_bytes(private.aad()) else {
+    return Vec::new();
+  };
+  let target = match signed.unverified().action() {
+    MembershipAction::AddUser { user_id, .. }
+    | MembershipAction::RemoveUser { user_id }
+    | MembershipAction::RemoveDevice { user_id, .. } => *user_id,
+  };
+  vec![target, signed.signer_user()]
 }
 
 fn lifetime_from(now_unix_secs: u64) -> Lifetime {
