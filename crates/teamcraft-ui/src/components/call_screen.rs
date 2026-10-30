@@ -210,6 +210,8 @@ pub fn CallScreen(request: CallRequest) -> impl IntoView {
   // A phone flips between front and back with one tap; elsewhere the camera button has a menu of
   // the cameras (#819).
   let has_camera_menu = Memo::new(move |_| !state.is_compact() && cameras.with(|cameras| cameras.len() > 1));
+  // The microphone's menu of microphones and speakers (#986) likewise stays off a phone's bar.
+  let has_audio_menu = Memo::new(move |_| !state.is_compact());
   let has_camera_flip = Memo::new(move |_| state.is_compact() && cameras.with(|cameras| cameras.len() > 1));
   // The list may be old: a camera plugged in, an iPhone that came near.
   Effect::new(move |_| {
@@ -587,7 +589,7 @@ pub fn CallScreen(request: CallRequest) -> impl IntoView {
         </div>
       </Show>
       {move || call.maybe_quality_menu.get().map(|stream_id| view! { <VideoQualityMenu stream_id=stream_id /> })}
-      <Show when=move || call.is_audio_menu_open.get() fallback=|| ()>
+      <Show when=move || has_audio_menu.get() && call.is_audio_menu_open.get() fallback=|| ()>
         <AudioMenu />
       </Show>
       <Show when=move || call.is_camera_menu_open.get() fallback=|| ()>
@@ -618,17 +620,19 @@ pub fn CallScreen(request: CallRequest) -> impl IntoView {
             label=Signal::derive(move || if call.is_mic_on.get() { i18n.t("control-mic-mute") } else { i18n.t("control-mic-unmute") })
             on_press=move || call.set_muted(call.is_mic_on.get_untracked())
           />
-          <button
-            class="control-btn control-menu-btn"
-            class:active=move || call.is_audio_menu_open.get()
-            aria-label=move || i18n.t("control-audio-choose")
-            title=move || i18n.t("control-audio-choose")
-            aria-haspopup="dialog"
-            aria-expanded=move || call.is_audio_menu_open.get().to_string()
-            on:click=move |_| call.is_audio_menu_open.update(|open| *open = !*open)
-          >
-            <Icon name=IconName::ChevronDown class="is-flipped" />
-          </button>
+          <Show when=move || has_audio_menu.get() fallback=|| ()>
+            <button
+              class="control-btn control-menu-btn"
+              class:active=move || call.is_audio_menu_open.get()
+              aria-label=move || i18n.t("control-audio-choose")
+              title=move || i18n.t("control-audio-choose")
+              aria-haspopup="dialog"
+              aria-expanded=move || call.is_audio_menu_open.get().to_string()
+              on:click=move |_| call.is_audio_menu_open.update(|open| *open = !*open)
+            >
+              <Icon name=IconName::ChevronDown class="is-flipped" />
+            </button>
+          </Show>
         </div>
         <Show when=move || is_real fallback=|| ()>
           <ControlButton
