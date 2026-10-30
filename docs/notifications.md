@@ -496,7 +496,10 @@ others in the corner where the system's notifications appear (top right; bottom 
 with the in-app card's caller, Decline and Accept; or, with the setting off or where the window can't
 open, as a notification with Accept and Decline (Accept with video only where the in-app card offers
 it; Linux: urgency critical, category `call.incoming`; Windows: toast scenario `incomingCall`; macOS:
-time-sensitive). Coming back to the window takes both away again (the in-app card is on screen).
+time-sensitive). The window counts as open only once its page reported it on screen (within 3 s);
+in a Wayland session it is never used, as the compositor alone places windows there and keeps an
+unfocused new one behind the active window (KWin), so the notification shows (#962). Should no
+notification show either, the main window comes up with the in-app card. Coming back to the window takes both away again (the in-app card is on screen).
 Answering or declining from the window, the notification or the card is one path: the window's and
 the notification's buttons reach the page as the same notification action. All of it stops the moment the call stops
 ringing on this device: answered here or on another device (the user is in the roster), declined

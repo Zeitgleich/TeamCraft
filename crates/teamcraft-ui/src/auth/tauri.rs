@@ -454,15 +454,15 @@ pub async fn set_ringtone(is_ringing: bool) {
   }
 }
 
-/// Desktop: shows the incoming-call window (#650); `false` if the shell couldn't, so the caller
-/// shows the notification instead.
+/// Desktop: shows the incoming-call window (#650); `false` if the shell couldn't or the window
+/// can't be relied on there (Wayland, #962), so the caller shows the notification instead.
 pub async fn show_call_window(window: &CallWindow) -> bool {
   if !is_available() {
     return false;
   }
   let args = serde_json::json!({ "window": window });
-  match call::<()>("call_window_show", &args).await {
-    Ok(()) => true,
+  match call::<bool>("call_window_show", &args).await {
+    Ok(is_shown) => is_shown,
     Err(error) => {
       tracing::warn!(%error, "could not show the incoming-call window");
       false

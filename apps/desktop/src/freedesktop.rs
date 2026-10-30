@@ -122,6 +122,15 @@ pub struct ServerAction {
 }
 
 impl Buses {
+  /// Buses on a session connection made elsewhere (a fake notification service).
+  #[cfg(test)]
+  fn on_session(session: Connection) -> Self {
+    Self {
+      session: OnceCell::new_with(Some(Some(session))),
+      ..Self::default()
+    }
+  }
+
   /// Idle time from GNOME's idle monitor or the freedesktop screen saver; locked when logind, the
   /// freedesktop or the GNOME screen saver says so.
   pub async fn desktop_state(&self) -> DesktopState {
@@ -740,6 +749,131 @@ mod tests {
     assert_eq!(shown["count"], Value::from(3_i64));
     assert_eq!(shown["count-visible"], Value::from(true));
     assert_eq!(launcher_properties(0)["count-visible"], Value::from(false));
+  }
+
+  mod fake_service {
+    use std::sync::{Arc, Mutex};
+
+    use zbus::connection::Builder;
+    use zbus::zvariant::OwnedValue;
+
+    use super::*;
+
+    const RING_ID: u32 = 41;
+
+    #[tokio::test]
+    async fn a_ring_sends_one_critical_notification_with_accept_and_decline() {
+      let (buses, seen) = connected().await;
+      let buttons = [("accept-audio", "Accept"), ("decline", "Decline")];
+      let mut ring = notification(&buttons, None);
+      ring.category = "call.incoming";
+      ring.is_ringing = true;
+      ring.is_quiet = true;
+      assert_eq!(buses.notify(&ring).await, Some(RING_ID));
+      let sent = seen.lock().unwrap().notified.clone();
+      assert_eq!(sent.len(), 1, "one notification per ring");
+      let sent = &sent[0];
+      assert_eq!(
+        sent.actions,
+        ["default", "", "accept-audio", "Accept", "decline", "Decline"]
+      );
+      assert_eq!(sent.expire_timeout, 0, "stays until withdrawn");
+      assert_eq!(sent.hints["urgency"], OwnedValue::from(URGENCY_CRITICAL));
+      assert_eq!(
+        sent.hints["category"],
+        OwnedValue::try_from(Value::from("call.incoming")).unwrap()
+      );
+      assert_eq!(
+        sent.hints["suppress-sound"],
+        OwnedValue::from(true),
+        "the app rings"
+      );
+    }
+
+    #[tokio::test]
+    async fn a_ring_that_stops_is_withdrawn() {
+      let (buses, seen) = connected().await;
+      buses.close(RING_ID).await;
+      assert_eq!(seen.lock().unwrap().closed, [RING_ID]);
+    }
+
+    #[tokio::test]
+    async fn without_a_service_nothing_counts_as_shown() {
+      let (buses, seen) = connected().await;
+      seen.lock().unwrap().is_broken = true;
+      assert_eq!(buses.notify(&notification(&[], None)).await, None);
+    }
+
+    /// What the fake service was asked.
+    #[derive(Default)]
+    struct Seen {
+      notified: Vec<Notified>,
+      closed: Vec<u32>,
+      is_broken: bool,
+    }
+
+    #[derive(Clone)]
+    struct Notified {
+      actions: Vec<String>,
+      hints: HashMap<String, OwnedValue>,
+      expire_timeout: i32,
+    }
+
+    struct FakeService(Arc<Mutex<Seen>>);
+
+    #[zbus::interface(name = "org.freedesktop.Notifications")]
+    impl FakeService {
+      #[allow(clippy::too_many_arguments)]
+      fn notify(
+        &self,
+        _app_name: String,
+        _replaces_id: u32,
+        _app_icon: String,
+        _summary: String,
+        _body: String,
+        actions: Vec<String>,
+        hints: HashMap<String, OwnedValue>,
+        expire_timeout: i32,
+      ) -> zbus::fdo::Result<u32> {
+        let mut seen = self.0.lock().unwrap();
+        if seen.is_broken {
+          return Err(zbus::fdo::Error::Failed("broken".to_owned()));
+        }
+        seen.notified.push(Notified {
+          actions,
+          hints,
+          expire_timeout,
+        });
+        Ok(RING_ID)
+      }
+
+      fn close_notification(&self, id: u32) {
+        self.0.lock().unwrap().closed.push(id);
+      }
+
+      fn get_capabilities(&self) -> Vec<String> {
+        vec!["actions".to_owned(), "body".to_owned()]
+      }
+    }
+
+    /// Buses whose session is a direct connection to a fake notification service.
+    async fn connected() -> (Buses, Arc<Mutex<Seen>>) {
+      let seen = Arc::new(Mutex::new(Seen::default()));
+      let (server_end, client_end) = tokio::net::UnixStream::pair().unwrap();
+      let guid = zbus::Guid::generate();
+      let server = Builder::unix_stream(server_end)
+        .server(guid)
+        .unwrap()
+        .p2p()
+        .serve_at(NOTIFICATIONS_PATH, FakeService(seen.clone()))
+        .unwrap()
+        .build();
+      let client = Builder::unix_stream(client_end).p2p().build();
+      let (server, client) = tokio::join!(server, client);
+      // The service lives as long as the test runs.
+      std::mem::forget(server.unwrap());
+      (Buses::on_session(client.unwrap()), seen)
+    }
   }
 
   /// Against the session's real notification server: `dbus-run-session` with a server running (CI
