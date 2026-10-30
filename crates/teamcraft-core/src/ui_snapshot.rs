@@ -28,7 +28,7 @@ use crate::notify_rules::MentionPreferences;
 use crate::read_state::PresenceIndex;
 use crate::records;
 use crate::store::{LocalStore, StoreChanges, Table};
-use crate::ui_backend::{CoreChatBackend, is_deleted};
+use crate::ui_backend::CoreChatBackend;
 
 /// The parts of the snapshot as last built, each with the revision it last changed at.
 pub struct SnapshotCache {
@@ -465,24 +465,16 @@ fn part_of<S: LocalStore>(
   shared: &Shared,
 ) -> ConversationChange {
   let maybe_mark: Option<MessageId> = shared.account.unread_mark(response.id);
-  let is_unread = backend.unread_check(response, maybe_mark);
-  let mut message_count = 0;
-  let mut maybe_last_activity = None;
-  let mut unread = Vec::new();
-  // By reference: a large channel's messages are not copied for a count (issue #1000).
-  backend.visit_top_level(response.id, &mut |message| {
-    if !is_deleted(message) {
-      message_count += 1;
-      maybe_last_activity = maybe_last_activity.max(Some(message.sent_at_ms));
-    }
-    if is_unread(message) {
-      unread.push(message.clone());
-    }
-  });
+  let counts = backend.entry_counts(
+    response,
+    maybe_mark,
+    shared.users.get(&backend.me_id()),
+    &shared.preferences,
+  );
   ConversationChange {
-    conversation: backend.conversation_view(response, &shared.users, &shared.preferences, &unread),
-    message_count,
-    maybe_last_activity,
+    conversation: backend.conversation_view(response, &shared.users, counts.unread),
+    message_count: counts.messages,
+    maybe_last_activity: counts.maybe_last_activity,
   }
 }
 

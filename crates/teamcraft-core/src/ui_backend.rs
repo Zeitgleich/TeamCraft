@@ -424,6 +424,8 @@ pub struct CoreChatBackend<S> {
   transfers: crate::transfers::Transfers,
   /// When reads last asked the server for something, so the UI's repeated reads don't flood it.
   pub(crate) requests: RefCell<crate::ui_people::RequestLog>,
+  /// Whether a message mentions the user, per message and edit, under the rules it was decided by.
+  pub(crate) mentions: RefCell<MentionMemo>,
   /// The activity feed's entries per conversation, kept while it doesn't change.
   pub(crate) activity: RefCell<HashMap<ConversationId, crate::ui_activity::KeptActivity>>,
   #[cfg(not(target_arch = "wasm32"))]
@@ -441,6 +443,7 @@ impl<S: LocalStore> CoreChatBackend<S> {
       typing: crate::TypingState::default(),
       transfers: crate::transfers::Transfers::new(),
       requests: RefCell::default(),
+      mentions: RefCell::default(),
       activity: RefCell::default(),
       #[cfg(not(target_arch = "wasm32"))]
       search: RefCell::new(Default::default()),
@@ -600,8 +603,49 @@ impl<S: LocalStore> CoreChatBackend<S> {
     users: &BTreeMap<UserId, UserSummary>,
     preferences: &MentionPreferences,
   ) -> Conversation {
-    let unread = self.unread_messages(response);
-    self.conversation_view(response, users, preferences, &unread)
+    let maybe_mark = self
+      .read(crate::client::stored_account_data(&self.store))
+      .unread_mark(response.id);
+    let counts = self.entry_counts(response, maybe_mark, users.get(&self.me), preferences);
+    self.conversation_view(response, users, counts.unread)
+  }
+
+  /// One pass over a conversation's top-level messages, by reference: what its sidebar entry
+  /// counts. Run on every change of the conversation, so it neither copies the messages nor decides
+  /// a message's mention twice (a log channel can hold thousands unread, issue #1000).
+  pub(crate) fn entry_counts(
+    &self,
+    response: &ConversationResponse,
+    maybe_mark: Option<MessageId>,
+    maybe_me: Option<&UserSummary>,
+    preferences: &MentionPreferences,
+  ) -> EntryCounts {
+    let is_unread = self.unread_check(response, maybe_mark);
+    let rules = MentionRules {
+      username: maybe_me
+        .and_then(|me| me.maybe_username.as_deref())
+        .unwrap_or_default(),
+      display_name: maybe_me.map_or("", |me| me.display_name.as_str()),
+      first_name_is_mention: preferences.first_name_is_mention,
+      channel_mentions_notify: preferences.channel_mentions_notify,
+      keywords: &preferences.keywords,
+    };
+    let mut memo = self.mentions.borrow_mut();
+    memo.follow(&rules);
+    let mut counts = EntryCounts::default();
+    self.visit_top_level(response.id, &mut |message| {
+      if !is_deleted(message) {
+        counts.messages += 1;
+        counts.maybe_last_activity = counts.maybe_last_activity.max(Some(message.sent_at_ms));
+      }
+      if is_unread(message) {
+        counts.unread.messages = counts.unread.messages.saturating_add(1);
+        if memo.is_mention(message, self.me, &rules) {
+          counts.unread.mentions = counts.unread.mentions.saturating_add(1);
+        }
+      }
+    });
+    counts
   }
 
   /// A conversation's entry with its unread messages already picked.
@@ -609,8 +653,7 @@ impl<S: LocalStore> CoreChatBackend<S> {
     &self,
     response: &ConversationResponse,
     users: &BTreeMap<UserId, UserSummary>,
-    preferences: &MentionPreferences,
-    unread: &[StoredMessage],
+    unread: UnreadCounts,
   ) -> Conversation {
     let mut member_ids = self.members(response.id);
     let is_notes_to_self = response.is_notes_to_self(self.me);
@@ -658,8 +701,8 @@ impl<S: LocalStore> CoreChatBackend<S> {
       name,
       topic: response.maybe_topic.clone().unwrap_or_default(),
       member_ids,
-      unread_count: u32::try_from(unread.len()).unwrap_or(u32::MAX),
-      mention_count: self.mention_count(unread, users.get(&self.me), preferences),
+      unread_count: unread.messages,
+      mention_count: unread.mentions,
       is_favorite,
       is_muted: self.is_muted(response),
       can_post: response.may_post(),
@@ -745,38 +788,6 @@ impl<S: LocalStore> CoreChatBackend<S> {
         }
       })
       .collect()
-  }
-
-  /// How many of the unread messages mention the user: an explicit mention, or, decided on the
-  /// decrypted text, `@username`, `@channel`/`@here`/`@all`, the first name or a keyword
-  /// (docs/notifications.md). Derived from the unread set, so a read marker resets it and a replayed
-  /// event can't raise it twice. Muted conversations count too.
-  fn mention_count(
-    &self,
-    unread: &[StoredMessage],
-    maybe_me: Option<&UserSummary>,
-    preferences: &MentionPreferences,
-  ) -> u32 {
-    let rules = MentionRules {
-      username: maybe_me
-        .and_then(|me| me.maybe_username.as_deref())
-        .unwrap_or_default(),
-      display_name: maybe_me.map_or("", |me| me.display_name.as_str()),
-      first_name_is_mention: preferences.first_name_is_mention,
-      channel_mentions_notify: preferences.channel_mentions_notify,
-      keywords: &preferences.keywords,
-    };
-    let count = unread
-      .iter()
-      .filter(|message| message.sender_user_id != self.me)
-      .filter(|message| match &message.content {
-        MessageContent::Text { body, mentions, .. } => {
-          mentions.contains(&self.me) || is_mentioned(body, &rules)
-        },
-        _ => false,
-      })
-      .count();
-    u32::try_from(count).unwrap_or(u32::MAX)
   }
 
   /// The saved mention preferences, read once per list of conversations.
@@ -2101,7 +2112,70 @@ pub(crate) fn is_deleted(message: &StoredMessage) -> bool {
   matches!(message.content, MessageContent::Deleted)
 }
 
-/// Aggregates reaction messages: the latest add/remove per (user, emoji) wins.
+/// What a sidebar entry counts of a conversation ([`CoreChatBackend::entry_counts`]).
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct EntryCounts {
+  /// Top-level messages, deleted ones not counted.
+  pub(crate) messages: usize,
+  pub(crate) maybe_last_activity: Option<TimestampMs>,
+  pub(crate) unread: UnreadCounts,
+}
+
+/// The unread top-level messages of a conversation, and how many of them mention the user: an
+/// explicit mention, or, decided on the decrypted text, `@username`, `@channel`/`@here`/`@all`,
+/// the first name or a keyword (docs/notifications.md). Derived from the unread set, so a read
+/// marker resets it and a replayed event can't raise it twice. Muted conversations count too.
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct UnreadCounts {
+  pub(crate) messages: u32,
+  pub(crate) mentions: u32,
+}
+
+/// Mention decisions kept per message (and its number of edits, which change the text) while the
+/// rules stay the same: reading the text of every unread message again on each change of a busy
+/// conversation was most of what the core did there.
+#[derive(Debug, Default)]
+pub(crate) struct MentionMemo {
+  maybe_rules: Option<(String, String, bool, bool, Vec<String>)>,
+  decided: HashMap<(ClientMessageId, usize), bool>,
+}
+
+impl MentionMemo {
+  /// Decisions kept at most; past it they are made again (a bound, not a working size).
+  const MAX_DECIDED: usize = 200_000;
+
+  /// Forgets every decision if `rules` differ from the ones they were made by.
+  fn follow(&mut self, rules: &MentionRules<'_>) {
+    let key = (
+      rules.username.to_owned(),
+      rules.display_name.to_owned(),
+      rules.first_name_is_mention,
+      rules.channel_mentions_notify,
+      rules.keywords.to_vec(),
+    );
+    if self.maybe_rules.as_ref() != Some(&key) || self.decided.len() > Self::MAX_DECIDED {
+      self.decided.clear();
+      self.maybe_rules = Some(key);
+    }
+  }
+
+  fn is_mention(&mut self, message: &StoredMessage, me: UserId, rules: &MentionRules<'_>) -> bool {
+    if message.sender_user_id == me {
+      return false;
+    }
+    let MessageContent::Text { body, mentions, .. } = &message.content else {
+      return false;
+    };
+    if mentions.contains(&me) {
+      return true;
+    }
+    *self
+      .decided
+      .entry((message.client_message_id, message.edits.len()))
+      .or_insert_with(|| is_mentioned(body, rules))
+  }
+}
+
 /// What the messages of a conversation say about each other, gathered in one pass: a page of rows
 /// would otherwise scan the whole conversation once per row for its reactions and replies.
 struct Relations<'a> {
@@ -2138,6 +2212,7 @@ impl<'a> Relations<'a> {
   }
 }
 
+/// Aggregates reaction messages: the latest add/remove per (user, emoji) wins.
 fn reactions_of<'a>(
   target: ClientMessageId,
   messages: impl IntoIterator<Item = &'a StoredMessage>,
@@ -2750,6 +2825,41 @@ mod tests {
           .mention_count,
         0
       );
+    }
+
+    /// Decisions are kept per message (issue #1000), but new rules and an edited text decide again.
+    #[test]
+    fn new_rules_and_an_edit_decide_again() {
+      let (backend, conversation, users) = mention_fixture(&[(2, "deploy failed", &[])]);
+      let count = || {
+        backend
+          .to_conversation(&conversation, &users, &backend.mention_preferences())
+          .mention_count
+      };
+      assert_eq!(count(), 0);
+      let preferences = MentionPreferences {
+        keywords: vec!["deploy".into()],
+        ..MentionPreferences::default()
+      };
+      crate::notify_rules::save_mention_preferences(&backend.store, &preferences).unwrap();
+      assert_eq!(count(), 1, "a new keyword");
+
+      let mut edited = backend
+        .store
+        .message(conversation.id, ClientMessageId::from_bytes([1; 16]))
+        .unwrap()
+        .unwrap();
+      edited.edits.push(crate::store::EditRecord {
+        body: "deploy failed".into(),
+        replaced_at_ms: 5_000,
+      });
+      edited.content = MessageContent::Text {
+        body: "all green".into(),
+        mentions: Vec::new(),
+        meta: Default::default(),
+      };
+      backend.store.upsert_message(&edited).unwrap();
+      assert_eq!(count(), 0, "the edited text");
     }
 
     #[test]
