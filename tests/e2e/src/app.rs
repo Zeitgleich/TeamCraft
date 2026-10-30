@@ -11,6 +11,7 @@ use std::rc::Rc;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use teamcraft_client_api::remote::{ChatSnapshot, SecuritySnapshot};
 use teamcraft_core::api::HttpServerApi;
 use teamcraft_core::clock::SystemClock;
 use teamcraft_core::connection::{ConnectionState, ConnectionStatus, NetworkChanges};
@@ -18,9 +19,10 @@ use teamcraft_core::runner::{RunnerCommand, RunnerHandle, RunnerSettings, SyncRu
 use teamcraft_core::store::{
   LocalStore, MessageContent, MessageFilter, SealedSqliteStore, SqlCipherStore, StaticKeySource, TrackedStore,
 };
+use teamcraft_core::ui_backend::CoreChatBackend;
 use teamcraft_core::{Client, ClientSettings};
 use teamcraft_crypto::secret::SymmetricKey;
-use teamcraft_proto::ConversationId;
+use teamcraft_proto::{ConversationId, UserId};
 
 use crate::process::binary_dir;
 use crate::tokens::UserTokens;
@@ -44,6 +46,17 @@ pub struct App<S = DiskStore> {
   status: ConnectionStatus,
   handle: RunnerHandle,
   task: tokio::task::JoinHandle<()>,
+}
+
+/// What [`App::read_like_mobile`] saw.
+#[derive(Clone, Debug, Default)]
+pub struct UiReads {
+  pub reads: usize,
+  /// Longest a read waited for its turn on the thread.
+  pub max_wait: Duration,
+  pub max_read: Duration,
+  pub max_unnamed_conversations: usize,
+  pub max_unnamed_people: usize,
 }
 
 /// The connection states an app went through, with when each began ([`App::record_states`]).
@@ -187,6 +200,45 @@ impl<S: LocalStore + Clone + 'static> App<S> {
       }
     });
     log
+  }
+
+  /// Reads the whole snapshot every 100 ms as the mobile apps do, on the thread the sync runs on,
+  /// for as long as the returned report is held: how long a read waited for the sync to let it
+  /// run, how long it took, and whether people or conversations came without a name (the apps
+  /// then show "?" for the initials).
+  pub fn read_like_mobile(&self, me: UserId) -> Rc<RefCell<UiReads>> {
+    let report = Rc::new(RefCell::new(UiReads::default()));
+    let (store, weak) = (self.store.clone(), Rc::downgrade(&report));
+    tokio::task::spawn_local(async move {
+      loop {
+        let due = Instant::now() + Duration::from_millis(100);
+        tokio::time::sleep_until(due.into()).await;
+        let Some(report) = weak.upgrade() else {
+          return;
+        };
+        let waited = due.elapsed();
+        let started = Instant::now();
+        let backend = CoreChatBackend::new(store.clone(), me, Box::new(SystemClock));
+        let snapshot = ChatSnapshot::read(&backend, SecuritySnapshot::default());
+        let mut report = report.borrow_mut();
+        report.reads += 1;
+        report.max_wait = report.max_wait.max(waited);
+        report.max_read = report.max_read.max(started.elapsed());
+        let unnamed = snapshot
+          .conversations
+          .iter()
+          .filter(|conversation| conversation.name.trim().is_empty())
+          .count();
+        report.max_unnamed_conversations = report.max_unnamed_conversations.max(unnamed);
+        let unnamed = snapshot
+          .users
+          .iter()
+          .filter(|user| user.display_name.trim().is_empty())
+          .count();
+        report.max_unnamed_people = report.max_unnamed_people.max(unnamed);
+      }
+    });
+    report
   }
 
   /// Every expected message is there, and no text twice.

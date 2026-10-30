@@ -26,14 +26,14 @@ use tokio::time::Instant;
 const POLL: Duration = Duration::from_millis(100);
 
 #[tokio::test(start_paused = true)]
-async fn a_silently_dead_connection_is_replaced_within_a_minute() {
+async fn a_silently_dead_connection_is_replaced_within_a_heartbeat_and_its_answer_time() {
   let rig = Rig::start("Alice").await;
   rig
     .drive(|rig| async move {
       rig.wait_for(is_connected, Duration::from_secs(5)).await;
       rig.server.freeze_gateways(rig.user);
-      // Two missed heartbeat answers (25 s each) and the probe slack.
-      rig.wait_for(is_offline, Duration::from_secs(60)).await;
+      // The next heartbeat (at most 25 s away) and its 10 s to be answered.
+      rig.wait_for(is_offline, Duration::from_secs(36)).await;
       rig.wait_for(is_connected, Duration::from_secs(5)).await;
       assert_eq!(rig.server.gateway_connect_count(), 2);
     })

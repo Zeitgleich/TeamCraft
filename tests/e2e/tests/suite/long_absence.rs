@@ -9,7 +9,8 @@ use std::cell::Cell;
 use std::rc::Rc;
 use std::time::{Duration, Instant};
 
-use teamcraft_e2e::app::{App, DiskDir, disk_store};
+use teamcraft_core::store::LocalStore;
+use teamcraft_e2e::app::{App, DiskDir, disk_store, mobile_store};
 use teamcraft_e2e::peer::settle;
 use teamcraft_e2e::relay::TcpRelay;
 use teamcraft_e2e::scenario::space_with;
@@ -35,10 +36,16 @@ const ARRIVAL_TIMEOUT: Duration = Duration::from_secs(180);
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "benchmark of a few minutes: scripts/e2e-network.sh -- long_absence"]
 async fn coming_back_after_a_long_absence() {
-  LocalSet::new().run_until(come_back()).await;
+  let is_mobile = std::env::var("E2E_STORE").is_ok_and(|store| store == "mobile");
+  let local = LocalSet::new();
+  if is_mobile {
+    local.run_until(come_back("mobile", mobile_store)).await;
+  } else {
+    local.run_until(come_back("desktop", disk_store)).await;
+  }
 }
 
-async fn come_back() {
+async fn come_back<S: LocalStore + Clone + 'static>(store_name: &str, open_store: fn(&std::path::Path) -> S) {
   // Seeding writes faster than a person; the limits are not what is measured here.
   let Some(stack) = Stack::builder()
     .with_env("TEAMCRAFT_SECURITY__RATE_LIMITS__IS_ENABLED", "false")
@@ -57,7 +64,7 @@ async fn come_back() {
   let mut bob = Peer::enroll(&stack, "bob").await;
   let mut dave = Peer::enroll(&stack, "dave").await;
   let mut carol =
-    Peer::enroll_with_store(&stack, "carol", "carol desktop", disk_store(directory.path())).await;
+    Peer::enroll_with_store(&stack, "carol", "carol desktop", open_store(directory.path())).await;
   let space = space_with(
     &stack,
     &alice,
@@ -88,6 +95,7 @@ async fn come_back() {
     seeding.elapsed().as_secs_f64()
   );
   // Carol's device goes to sleep: its connection ends, the server's session for it expires.
+  let me = carol.user_id();
   let tokens = carol.tokens.clone();
   let store = carol.store.clone();
   drop(carol);
@@ -121,6 +129,7 @@ async fn come_back() {
     Some(focused),
   ));
   let connected_at = watch_connected(&app, started);
+  let reads = app.read_like_mobile(me);
   let live_text = "sent right after carol came back";
   alice.client.send_text(focused, None, live_text).await.unwrap();
   app.wait_for(&focused, live_text, ARRIVAL_TIMEOUT).await;
@@ -132,13 +141,20 @@ async fn come_back() {
   let all_at = started.elapsed();
   app.wait_connected(ARRIVAL_TIMEOUT).await;
   app.assert_each_once(&conversations, &expected);
+  let reads = reads.borrow().clone();
   eprintln!(
-    "long_absence: after coming back: connected after {} ms, the live message showed after {} ms, \
-     the whole backlog ({} messages) after {} ms",
+    "long_absence ({store_name}): after coming back: connected after {} ms, the live message showed after {} ms, \
+     the whole backlog ({} messages) after {} ms; UI reads meanwhile: {}, waited up to {} ms, took up to {} ms, \
+     up to {} conversations and {} people without a name",
     connected_at.get().map_or(0, |at| at.as_millis()),
     live_at.as_millis(),
     expected.len(),
-    all_at.as_millis()
+    all_at.as_millis(),
+    reads.reads,
+    reads.max_wait.as_millis(),
+    reads.max_read.as_millis(),
+    reads.max_unnamed_conversations,
+    reads.max_unnamed_people
   );
   if let Ok(app) = Rc::try_unwrap(app) {
     app.stop().await;
@@ -148,7 +164,10 @@ async fn come_back() {
 }
 
 /// When the app's connection was first up, counted from `started`, noted by a task beside the test.
-fn watch_connected(app: &Rc<App>, started: Instant) -> Rc<Cell<Option<Duration>>> {
+fn watch_connected<S: LocalStore + Clone + 'static>(
+  app: &Rc<App<S>>,
+  started: Instant,
+) -> Rc<Cell<Option<Duration>>> {
   let at = Rc::new(Cell::new(None));
   let (app, noted) = (Rc::downgrade(app), at.clone());
   tokio::task::spawn_local(async move {

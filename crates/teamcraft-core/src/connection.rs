@@ -68,6 +68,11 @@ pub struct ConnectionSettings {
   /// After a network change or a wake-up, an open connection must answer a heartbeat within this
   /// long or it is replaced.
   pub probe_timeout: Duration,
+  /// Any heartbeat must be answered within this long (any frame counts) or the connection is
+  /// replaced: a link that went dead silently (a dropped NAT entry, a dead Wi-Fi) is found one
+  /// heartbeat interval plus this after it died, instead of after two silent intervals. Long
+  /// enough for a lossy link's retransmissions.
+  pub heartbeat_answer_timeout: Duration,
   /// A gap this long between two ticks means the device slept or the tab was frozen.
   pub wake_gap: Duration,
   /// What is kept while a long sync or command runs ([`ConnectionSupervisor::keep_alive`]); beyond
@@ -103,6 +108,8 @@ pub struct ConnectionSupervisor<G> {
   last_heartbeat_ms: i64,
   /// Set after a network change: the open connection must answer by then.
   maybe_probe_deadline_ms: Option<i64>,
+  /// When the oldest heartbeat nothing has answered yet went out.
+  maybe_unanswered_since_ms: Option<i64>,
   maybe_last_tick_ms: Option<i64>,
   /// A fingerprint of the token the server refused, so it isn't offered again and again (each
   /// refusal counts against the address on the server).
@@ -121,6 +128,7 @@ impl Default for ConnectionSettings {
       reconnect_max: Duration::from_secs(30),
       stable_after: Duration::from_secs(30),
       probe_timeout: Duration::from_secs(3),
+      heartbeat_answer_timeout: Duration::from_secs(10),
       wake_gap: Duration::from_secs(30),
       held_limits: HeldLimits::default(),
     }
@@ -188,6 +196,7 @@ impl<G: GatewayConnection> ConnectionSupervisor<G> {
       last_heard_ms: i64::MIN,
       last_heartbeat_ms: i64::MIN,
       maybe_probe_deadline_ms: None,
+      maybe_unanswered_since_ms: None,
       maybe_last_tick_ms: None,
       maybe_refused_token: None,
       held: HeldFrames::default(),
@@ -240,6 +249,9 @@ impl<G: GatewayConnection> ConnectionSupervisor<G> {
     if let Some(probe) = self.maybe_probe_deadline_ms {
       deadline = deadline.min(probe);
     }
+    if let Some(sent) = self.maybe_unanswered_since_ms {
+      deadline = deadline.min(sent.saturating_add(millis(self.settings.heartbeat_answer_timeout)));
+    }
     Some(deadline)
   }
 
@@ -274,6 +286,7 @@ impl<G: GatewayConnection> ConnectionSupervisor<G> {
         self.last_heartbeat_ms = now;
         self.maybe_last_tick_ms = Some(now);
         self.maybe_probe_deadline_ms = None;
+        self.maybe_unanswered_since_ms = None;
         self.maybe_refused_token = None;
         self.set_state(ConnectionState::Connected);
         Some(start.outcome)
@@ -335,6 +348,7 @@ impl<G: GatewayConnection> ConnectionSupervisor<G> {
       Some(Ok(frame)) => {
         self.last_heard_ms = now;
         self.maybe_probe_deadline_ms = None;
+        self.maybe_unanswered_since_ms = None;
         let is_heartbeat_ack = matches!(frame, GatewayServerMessage::HeartbeatAck);
         // An event can start a long catch-up (a welcome, a membership change).
         let handled = self.keep_alive(now, client.handle_frame(frame)).await;
@@ -393,6 +407,18 @@ impl<G: GatewayConnection> ConnectionSupervisor<G> {
         retry_at_ms: now_ms,
         maybe_interception: None,
       });
+      return;
+    }
+    if let Some(sent) = self.maybe_unanswered_since_ms
+      && now_ms.saturating_sub(sent) >= millis(self.settings.heartbeat_answer_timeout)
+    {
+      self.lose(
+        now_ms,
+        &format!(
+          "no answer to a heartbeat for {} s",
+          now_ms.saturating_sub(sent) / 1000
+        ),
+      );
       return;
     }
     let silent_ms = now_ms.saturating_sub(self.last_heard_ms);
@@ -471,10 +497,12 @@ impl<G: GatewayConnection> ConnectionSupervisor<G> {
     if kept.heartbeats_sent > 0 {
       self.last_heartbeat_ms = now_ms;
       self.maybe_last_tick_ms = Some(now_ms);
+      self.maybe_unanswered_since_ms.get_or_insert(now_ms);
     }
     if kept.was_heard {
       self.last_heard_ms = now_ms;
       self.maybe_probe_deadline_ms = None;
+      self.maybe_unanswered_since_ms = None;
     }
   }
 
@@ -488,6 +516,7 @@ impl<G: GatewayConnection> ConnectionSupervisor<G> {
 
   async fn heartbeat_now(&mut self, now_ms: i64) {
     self.last_heartbeat_ms = now_ms;
+    self.maybe_unanswered_since_ms.get_or_insert(now_ms);
     if !self.send(now_ms, &GatewayClientMessage::Heartbeat).await {
       tracing::debug!("heartbeat not sent");
     }
@@ -500,6 +529,7 @@ impl<G: GatewayConnection> ConnectionSupervisor<G> {
     // Frames of the old connection: a resume replays them, a fresh session syncs.
     self.held = HeldFrames::default();
     self.maybe_probe_deadline_ms = None;
+    self.maybe_unanswered_since_ms = None;
     if now_ms.saturating_sub(self.connected_at_ms) >= millis(self.settings.stable_after) {
       self.failures = 0;
     }
