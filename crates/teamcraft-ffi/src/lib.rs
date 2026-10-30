@@ -416,7 +416,9 @@ impl TeamCraft {
       .await
   }
 
-  /// Registers the device's push channel with a fresh push key (e2ee.md §7).
+  /// Registers the device's push channel (e2ee.md §7): with a fresh push key the first time, under
+  /// the key the device already holds when the same service delivers its token again (every app
+  /// start, a UnifiedPush endpoint re-sent by the distributor). Safe to call repeatedly.
   pub async fn register_push(&self, service: PushService, token: String) -> Result<(), TeamCraftError> {
     self
       .call(move |engine| Box::pin(engine.register_push(service, token)))

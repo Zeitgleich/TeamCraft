@@ -1,6 +1,8 @@
 package de.zeitgleich.teamcraft.push
 
 import android.content.Context
+import android.net.Uri
+import android.util.Log
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -20,12 +22,15 @@ class UnifiedPushReceiver : MessagingReceiver() {
     // A temporary fallback endpoint is registered too: it is better than no notifications.
     val keys = endpoint.pubKeySet
     val token = PushSubscription.json(endpoint.url, keys?.pubKey, keys?.auth)
+    // The host only: the path names the device's topic.
+    Log.i(TAG, "UnifiedPush endpoint on ${Uri.parse(endpoint.url).host}, temporary=${endpoint.temporary}")
     UnifiedPushStatus(context).record(UnifiedPushStatus.State.REGISTERED)
     UnifiedPushRecovery.onRegistered(context)
     TeamCraftApplication.graph(context).push.onToken(PushService.UNIFIED_PUSH, token)
   }
 
   override fun onMessage(context: Context, message: PushMessage, instance: String) {
+    Log.i(TAG, "UnifiedPush message received")
     val pending = goAsync()
     CoroutineScope(Dispatchers.Default).launch {
       try {
@@ -52,5 +57,9 @@ class UnifiedPushReceiver : MessagingReceiver() {
   override fun onTempUnavailable(context: Context, instance: String) {
     UnifiedPushStatus(context).record(UnifiedPushStatus.State.TEMPORARILY_UNAVAILABLE)
     UnifiedPushRecovery.onTemporarilyUnavailable(context)
+  }
+
+  private companion object {
+    const val TAG = "TeamCraftPush"
   }
 }

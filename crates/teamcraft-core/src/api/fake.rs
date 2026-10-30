@@ -1402,6 +1402,11 @@ impl FakeServer {
     self.lock().push_registrations.get(&device).cloned()
   }
 
+  /// Forgets a device's push registration, as the server does when a push service calls it gone.
+  pub fn forget_push_registration(&self, device: DeviceId) {
+    self.lock().push_registrations.remove(&device);
+  }
+
   /// Makes the server send through a push gateway (apps then seal their device tokens).
   pub fn set_push_gateway(&self, maybe_binding: Option<PushGatewayBinding>) {
     self.lock().push_gateway = maybe_binding;

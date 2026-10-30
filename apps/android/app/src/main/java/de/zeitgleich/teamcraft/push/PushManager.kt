@@ -16,10 +16,11 @@ import de.zeitgleich.teamcraft.notifications.PushHandler
 import de.zeitgleich.teamcraft.notifications.PushRetry
 import uniffi.teamcraft_ffi.PushNotification
 import uniffi.teamcraft_ffi.PushService
+import uniffi.teamcraft_ffi.TeamCraftException
 
 /**
- * Chooses a push backend, registers its token with the server (with a fresh push key, e2ee.md §7)
- * and turns wake-ups into notifications.
+ * Chooses a push backend, registers its token with the server (the push key stays the same while
+ * the service does, e2ee.md §7) and turns wake-ups into notifications.
  */
 class PushManager(
   private val context: Context,
@@ -34,7 +35,10 @@ class PushManager(
   /** Wake-ups being opened, by payload: a hand-over to [WakeUpWork] waits for the same run. */
   private val running = ConcurrentHashMap<String, Deferred<Unit>>()
 
-  /** A token whose registration failed (server unreachable): retried on the next foreground. */
+  /**
+   * A token whose registration failed (server unreachable): retried in the background once a network
+   * is there ([PushRegistrationRetry]) and on the next foreground.
+   */
   @Volatile private var maybePendingToken: Pair<PushService, String>? = null
 
   /** Set while (and after) signing out: wake-ups arriving then show nothing. */
@@ -83,12 +87,32 @@ class PushManager(
       .onFailure { Log.w(TAG, "push refresh failed: ${it.javaClass.simpleName}") }
   }
 
+  /**
+   * A background attempt of [PushRegistrationRetry]: the pending token if this process still has
+   * it, otherwise the push service is asked for its token again (it arrives at [onToken]).
+   */
+  suspend fun retryRegistration() {
+    if (isSigningOut) return
+    val pending = maybePendingToken
+    if (pending != null) {
+      registerToken(pending.first, pending.second)
+    } else {
+      backends.firstOrNull { it.isAvailable(context) }?.register(context)
+    }
+  }
+
   private suspend fun registerToken(service: PushService, token: String) {
     runCatching { core.core().registerPush(service, token) }
-      .onSuccess { maybePendingToken = null }
+      .onSuccess {
+        maybePendingToken = null
+        PushRegistrationRetry.onRegistered(context)
+        Log.i(TAG, "push token registered: $service")
+      }
       .onFailure {
         maybePendingToken = service to token
-        Log.w(TAG, "push registration failed: ${it.javaClass.simpleName}")
+        Log.w(TAG, "push registration failed: $service ${it.javaClass.simpleName}")
+        // Only a network failure passes by itself; anything else waits for the next foreground.
+        if (it is TeamCraftException.Network && !isSigningOut) PushRegistrationRetry.schedule(context)
       }
   }
 

@@ -1874,6 +1874,13 @@ Details:
     wake them; `everywhere` widens it. People on the allow list break through anyway.
 - A forged `dismiss` (the server knows the push key) can only remove notifications and set the badge;
   it never shows anything.
+- The push key is chosen when the device first registers with a push service and kept while it
+  stays with that service: the apps register their token again on every start and whenever the
+  service hands it out again (a UnifiedPush distributor re-sends its endpoint after reconnecting),
+  under the same key (`register_push_keeping_key`). A fresh key each time made wake-ups sealed in the
+  meantime unreadable, and a registration whose answer was lost left server and device with
+  different keys, so nothing could be opened until the next start (issue #826). Sign-out deletes the
+  key; the next registration chooses a new one.
 - Wake-up kinds: `message`, `mention`, `call`, `dismiss` (a notification was read on another device, or
   a ring ended: remove it; silent, APNs background push / FCM normal priority, never to Web Push) and
   `test` (diagnostics). Besides conversation, message, sender, thread and call IDs the sealed wake-up

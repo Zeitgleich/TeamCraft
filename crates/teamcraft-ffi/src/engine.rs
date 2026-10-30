@@ -868,7 +868,7 @@ impl Engine {
   ) -> Result<(), TeamCraftError> {
     let was_running = matches!(self.client, ClientSlot::Running { .. });
     let mut client = self.take_client().await?;
-    let result = client.register_push(service.into(), &token).await;
+    let result = client.register_push_keeping_key(service.into(), &token).await;
     self.client = ClientSlot::Idle(client);
     if was_running {
       self.start().await?;

@@ -157,6 +157,36 @@ async fn a_rotated_subscription_is_registered_under_the_same_push_key() {
   );
 }
 
+/// The apps hand the platform's token over again on every start and whenever a UnifiedPush
+/// distributor re-sends its endpoint (issue #826): the push key stays, so wake-ups sealed before
+/// still open, and the registration reaches the server again even when it had forgotten it.
+#[tokio::test]
+async fn a_token_delivered_again_keeps_the_push_key_and_is_sent_again() {
+  let (server, _alice, mut bob, _channel) = channel_with_two().await;
+  let device = bob.client.device_id();
+  let before = server.push_registration(device).unwrap();
+
+  server.forget_push_registration(device);
+  let moved = r#"{"endpoint":"https://push.example.com/moved"}"#;
+  bob
+    .client
+    .register_push_keeping_key(PushProvider::WebPush, moved)
+    .await
+    .unwrap();
+  let after = server.push_registration(device).unwrap();
+  assert_eq!(after.token, moved);
+  assert_eq!(after.push_key.as_slice(), before.push_key.as_slice());
+
+  // Another service starts with a key of its own.
+  bob
+    .client
+    .register_push_keeping_key(PushProvider::Fcm, "fcm-token")
+    .await
+    .unwrap();
+  let other = server.push_registration(device).unwrap();
+  assert_ne!(other.push_key.as_slice(), before.push_key.as_slice());
+}
+
 #[tokio::test]
 async fn without_a_session_only_names_are_shown_unless_the_store_has_the_message() {
   let (server, mut alice, mut bob, channel) = channel_with_two().await;
