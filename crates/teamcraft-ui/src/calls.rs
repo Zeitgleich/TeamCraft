@@ -559,7 +559,7 @@ impl CallState {
     let call = *self;
     set_timeout(
       move || {
-        if call.has_ended.get_untracked() {
+        if call.has_ended.try_get_untracked().unwrap_or(false) {
           call.leave();
         }
       },
