@@ -16,7 +16,7 @@ result-gaps = { $count ->
 result-no-speech = Der Notetaker hat in diesem Anruf niemanden sprechen hören; es gibt nichts zusammenzufassen.
 result-summary-failed = Die Zusammenfassung konnte nicht geschrieben werden ({ $reason }). Das Transkript ist angehängt.
 result-partial = Der Notetaker hat den Anruf vorzeitig verlassen ({ $reason }); die Notizen reichen bis dahin.
-join-failed = Der Notetaker konnte diesem Anruf nicht beitreten: Die Apps im Anruf haben seine Schlüssel nicht angenommen. Er muss Mitglied dieser Unterhaltung sein, bevor der Anruf beginnt; wer schon vor seinem Hinzufügen im Anruf war, muss neu beitreten.
+join-failed = Der Notetaker konnte diesem Anruf nicht beitreten: Die Apps im Anruf haben seine Schlüssel nicht angenommen. Wer mit einer älteren App im Anruf ist, muss dem Anruf neu beitreten oder die App aktualisieren.
 
 ## Warum er früher gegangen ist
 reason-requested = er wurde entfernt

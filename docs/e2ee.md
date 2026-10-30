@@ -2033,7 +2033,9 @@ device key: the page prepares the join with its client core and keeps a `DeviceC
 JavaScript callbacks to sign its fresh DAVE key (step 2) and to verify the others' bindings (step 3),
 and gets back only the signed binding or the verified DAVE key. Both run in the same page and origin,
 so this adds no party: whoever can run script in the page could use the core's signer anyway (§9.3).
-A rejoin prepares again, so the trusted roster follows membership changes.
+A rejoin prepares again, so the trusted roster follows membership changes; so does a device added
+to the conversation during the call (§8.2, "Membership"): the module asks the page's `roster`
+callback, and the page refreshes its authenticator with the core's devices.
 
 **The SFU's certificate.** Clients reach the SFU over TLS (QUIC). Normally its certificate chains to
 a trusted root. For test and development setups with a short-lived self-signed certificate, the
@@ -2160,12 +2162,29 @@ allowed to ask it in, an admin of the verified roster or, with `can_anyone_stop`
 conversation. A meeting host's "Remove" (meetings.md, host controls) stops it as well. It also leaves a
 call where nobody else has been for a minute, and after `max_call_minutes` (default 240).
 
-Members only accept DAVE keys of devices that were in the conversation's group when they prepared
-their join (§8, step 4). So the notetaker must be a member of the conversation **before** the call:
-invited with the meeting, or added to a channel like an integration bot. The button in the call then
-only sends the `join`, and is offered only where the notetaker is a member. (Adding a device to a
-running call's trusted roster is a follow-up; it would also let a new channel member join a running
-call whose participants prepared before the member was added.)
+**Membership.** The notetaker hears only calls of conversations it is a member of: invited with the
+meeting ("Notetaker joins the calls", the first entry of the people to invite), added to a channel
+like an integration bot, or added **during the call**. "Add notetaker" in a running call is offered
+to whoever the policy lets ask it in, where it is a member or where that user can add it: a channel
+of a space where the user manages members (the bot goes in from its join on, into the space as a
+guest first where needed, as from the channel's integrations), or a meeting the user organizes (the
+bot becomes an invitee, which puts it into the meeting chat's group). A DM takes nobody more, so
+there it is offered only where the notetaker is a member. The button first adds the bot through
+that normal member-add path, and sends the `join` only once the addition is through: the request
+then goes out after the commit that put the bot into the group, in an epoch it can read.
+
+Members only accept DAVE keys of devices that are on their trusted roster (§8, step 4), which they
+took from the conversation's group when they prepared their join. A device added since (the
+notetaker added during the call, a new channel member) brings a key binding the roster doesn't
+know: the call engine then holds that DAVE change, asks the client core for the conversation's
+verified devices after catching up its group (`Client::refresh_call_devices`, which processes the
+commit that added the device), takes them as the new roster and authenticator, and goes on with
+what it held. A device that is still unknown then is rejected as before, so the server can't get a
+device of its own choosing in this way: only a member-add commit of the group, which members
+verify, puts one on the roster. Desktop, web (through the page's `roster` callback,
+`teamcraft_client_api::page_calls`) and the mobile apps' core do this; an app from before this
+change ends the call when such a device joins, and the notetaker's join notice asks its people to
+join again.
 
 **Everybody sees it.**
 

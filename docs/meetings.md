@@ -33,10 +33,12 @@ the change, and people taken off the list are removed from the group.
 1. **Schedule** (`POST /meetings`): chat and invitees are stored, the iCalendar event with the join
    link is written to the configured CalDAV calendar (the meeting is rolled back if the calendar
    rejects it) and every invitee with an address gets an iMIP e-mail (REQUEST). External invitees get
-   a personal join link in it. With "Notetaker joins the calls" (when the signed policy has the
-   notetaker on, e2ee.md §8.2) the notetaker's bot account is invited like a member, so it is in the
-   chat's group before any call, and the organizer's device puts a standing `join` request into the
-   chat after setting it up; unticking it in the edit dialog sends a `stop` first.
+   a personal join link in it. With "Notetaker joins the calls" (the first entry of the people to
+   invite, when the signed policy has the notetaker on and lets the organizer ask it in, e2ee.md
+   §8.2) the notetaker's bot account is invited like a member, so it is in the chat's group before
+   any call, and the organizer's device puts a standing `join` request into the chat after setting
+   it up; unticking it in the edit dialog sends a `stop` first. During a call, "Add notetaker" lets
+   the organizer add it as an invitee then (one call's `join`).
 2. **Change / cancel** (`PATCH` / `DELETE /meetings/{id}`, organizer only): SEQUENCE increases,
    the event is replaced or deleted, staying invitees get an update, new ones an invitation,
    removed ones and everybody on cancellation a CANCEL. The chat of a cancelled meeting is archived

@@ -16,7 +16,7 @@ result-gaps = { $count ->
 result-no-speech = The notetaker heard no speech in this call, so there is nothing to summarize.
 result-summary-failed = The summary could not be written ({ $reason }). The transcript is attached.
 result-partial = The notetaker left the call early ({ $reason }); these notes cover the call up to then.
-join-failed = The notetaker could not join this call: the apps in the call did not take its keys. It has to be a member of this conversation before the call starts; whoever was in the call before it was added needs to join again.
+join-failed = The notetaker could not join this call: the apps in the call did not take its keys. Whoever is in the call with an older app needs to join it again or update the app.
 
 ## Why it left early
 reason-requested = it was removed

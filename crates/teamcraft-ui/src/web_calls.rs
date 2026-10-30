@@ -73,6 +73,10 @@ pub struct WebCallHost {
 }
 
 struct PreparedKeys {
+  /// The call's conversation: a refreshed roster ([`WebCallHost::roster`]) is for this call only.
+  conversation: ConversationId,
+  own_device: DeviceId,
+  signer: Arc<dyn CallBindingSigner>,
   authenticator: DeviceCallKeyAuthenticator,
 }
 
@@ -89,6 +93,7 @@ struct Callbacks {
   _prepare: Closure<dyn Fn(String) -> Promise>,
   _sign: Closure<dyn Fn(String, Uint8Array) -> Result<Uint8Array, JsValue>>,
   _verify: Closure<dyn Fn(String, String, Uint8Array) -> Result<Uint8Array, JsValue>>,
+  _roster: Closure<dyn Fn(String) -> Promise>,
   _failed: Closure<dyn Fn(String)>,
   _background_rule: Closure<dyn Fn() -> Promise>,
   _background_picture: Closure<dyn Fn(String) -> Promise>,
@@ -392,16 +397,16 @@ impl WebCallHost {
       .await
       .map_err(|text| ActionFailure::from_wire(&text))?;
     let own_device = preparation.device_id;
-    let authenticator = DeviceCallKeyAuthenticator::from_verified(
-      Arc::new(CoreSigner(preparation.signer)),
-      preparation.devices,
-    )
-    .map_err(|error| ActionFailure::other(error.to_string()))?;
-    let trusted_devices: Vec<DeviceId> = authenticator
-      .device_ids()
-      .filter(|device| *device != own_device)
-      .collect();
-    *self.maybe_call.borrow_mut() = Some(PreparedKeys { authenticator });
+    let signer: Arc<dyn CallBindingSigner> = Arc::new(CoreSigner(preparation.signer));
+    let authenticator = DeviceCallKeyAuthenticator::from_verified(Arc::clone(&signer), preparation.devices)
+      .map_err(|error| ActionFailure::other(error.to_string()))?;
+    let trusted_devices = others(&authenticator, own_device);
+    *self.maybe_call.borrow_mut() = Some(PreparedKeys {
+      conversation,
+      own_device,
+      signer,
+      authenticator,
+    });
     Ok(PreparedCall {
       sfu_url: preparation.join.sfu_url,
       token: preparation.join.token,
@@ -412,6 +417,21 @@ impl WebCallHost {
       certificate_sha256: preparation.join.sfu_certificate_sha256,
       ends_when_one_side_leaves: preparation.join.ends_when_one_side_leaves,
     })
+  }
+
+  /// The call's verified devices afresh from the core (a device added to the conversation during
+  /// the call joins it, e2ee.md §8.2): verifies with them from now on and answers the other ones,
+  /// the module's new trusted roster.
+  async fn roster(&self, conversation: ConversationId) -> Result<Vec<DeviceId>, String> {
+    let devices = crate::web_core::call_devices(conversation).await?;
+    let mut call = self.maybe_call.borrow_mut();
+    let call = call
+      .as_mut()
+      .filter(|call| call.conversation == conversation)
+      .ok_or("no such call")?;
+    call.authenticator = DeviceCallKeyAuthenticator::from_verified(Arc::clone(&call.signer), devices)
+      .map_err(|error| error.to_string())?;
+    Ok(others(&call.authenticator, call.own_device))
   }
 
   fn sign(&self, call_id: &str, dave_public_key: &[u8]) -> Result<Vec<u8>, String> {
@@ -550,6 +570,24 @@ impl Callbacks {
         })
       })
     };
+    let roster = {
+      let host = host.clone();
+      Closure::<dyn Fn(String) -> Promise>::new(move |conversation: String| {
+        let host = host.clone();
+        future_to_promise(async move {
+          let conversation: ConversationId =
+            serde_json::from_str(&conversation).map_err(|error| JsValue::from_str(&error.to_string()))?;
+          let host = host.upgrade().ok_or_else(|| JsValue::from_str("signed out"))?;
+          let roster = host
+            .roster(conversation)
+            .await
+            .map_err(|error| JsValue::from_str(&error))?;
+          serde_json::to_string(&roster)
+            .map(|json| JsValue::from_str(&json))
+            .map_err(|error| JsValue::from_str(&error.to_string()))
+        })
+      })
+    };
     let sign = {
       let host = host.clone();
       Closure::<dyn Fn(String, Uint8Array) -> Result<Uint8Array, JsValue>>::new(
@@ -609,6 +647,7 @@ impl Callbacks {
       ("prepare", prepare.as_ref()),
       ("sign", sign.as_ref()),
       ("verify", verify.as_ref()),
+      ("roster", roster.as_ref()),
       ("failed", failed.as_ref()),
       ("background_rule", background_rule.as_ref()),
       ("background_picture", background_picture.as_ref()),
@@ -621,6 +660,7 @@ impl Callbacks {
       _prepare: prepare,
       _sign: sign,
       _verify: verify,
+      _roster: roster,
       _failed: failed,
       _background_rule: background_rule,
       _background_picture: background_picture,
@@ -651,4 +691,12 @@ pub(crate) fn js_text(error: &JsValue) -> String {
         .and_then(|message| message.as_string())
     })
     .unwrap_or_else(|| format!("{error:?}"))
+}
+
+/// The devices of `authenticator` besides this one: the call's trusted roster.
+fn others(authenticator: &DeviceCallKeyAuthenticator, own_device: DeviceId) -> Vec<DeviceId> {
+  authenticator
+    .device_ids()
+    .filter(|device| *device != own_device)
+    .collect()
 }

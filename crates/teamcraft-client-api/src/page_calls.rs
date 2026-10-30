@@ -16,10 +16,15 @@
 //! | `prepare`            | conversation id (JSON)                     | promise of a [`PreparedCall`] (JSON)  |
 //! | `sign`               | call id (JSON), DAVE public key (bytes)    | signed binding (bytes), or throws     |
 //! | `verify`             | call id, device id (JSON), binding (bytes) | the bound DAVE key (bytes), or throws |
+//! | `roster`             | conversation id (JSON)                     | promise of the other devices (JSON)   |
 //! | `background_rule`    | –                                          | promise of `OrgBackgrounds` (JSON)    |
 //! | `background_picture` | a `BackgroundEffect` (JSON)                | promise of the picture file (bytes)   |
 //!
-//! A rejoin after a lost connection prepares again (fresh token, current devices).
+//! A rejoin after a lost connection prepares again (fresh token, current devices). A device that
+//! joins the running call without being in the prepared devices (added to the conversation during
+//! the call, e2ee.md §8.2) makes the module ask `roster`: the page catches up the conversation's
+//! group, verifies with its devices from then on and answers the other devices, the new trusted
+//! roster. A page without `roster` keeps the prepared devices.
 //!
 //! Background effects (#439): before the camera starts, and when the user picks another effect,
 //! the module asks `background_rule` for the organization's rule ([`crate::calls::OrgBackgrounds`])

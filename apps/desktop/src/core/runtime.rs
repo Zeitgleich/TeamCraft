@@ -328,6 +328,10 @@ enum Request {
   Action(Box<ChatAction>, oneshot::Sender<Result<(), String>>),
   Query(ChatQuery, oneshot::Sender<Result<ChatAnswer, String>>),
   PrepareCall(ConversationId, oneshot::Sender<Result<CallPreparation, String>>),
+  CallDevices(
+    ConversationId,
+    oneshot::Sender<Result<Vec<teamcraft_crypto::identity::VerifiedDevice>, String>>,
+  ),
   CallJoinToken(
     ConversationId,
     oneshot::Sender<Result<CallJoinTokenResponse, String>>,
@@ -668,6 +672,18 @@ impl CoreRuntime {
   pub async fn prepare_call(&self, conversation: ConversationId) -> Result<CallPreparation, String> {
     self
       .ask(|reply| Request::PrepareCall(conversation, reply))
+      .await
+      .unwrap_or_else(|| Err(stopped()))
+  }
+
+  /// The running call's verified devices afresh: a device added to the conversation during the
+  /// call joins it (e2ee.md §8.2).
+  pub async fn call_devices(
+    &self,
+    conversation: ConversationId,
+  ) -> Result<Vec<teamcraft_crypto::identity::VerifiedDevice>, String> {
+    self
+      .ask(|reply| Request::CallDevices(conversation, reply))
       .await
       .unwrap_or_else(|| Err(stopped()))
   }
@@ -1447,6 +1463,7 @@ impl Core {
         }
       },
       Request::PrepareCall(conversation, reply) => drop(reply.send(self.prepare_call(conversation).await)),
+      Request::CallDevices(conversation, reply) => drop(reply.send(self.call_devices(conversation).await)),
       Request::CallJoinToken(conversation, reply) => {
         drop(reply.send(self.call_join_token(conversation).await))
       },
@@ -1539,6 +1556,14 @@ impl Core {
   async fn call_join_token(&mut self, conversation: ConversationId) -> Result<CallJoinTokenResponse, String> {
     let client = self.client.as_mut().ok_or("this device is not set up yet")?;
     client.call_join_token(conversation).await.map_err(describe)
+  }
+
+  async fn call_devices(
+    &mut self,
+    conversation: ConversationId,
+  ) -> Result<Vec<teamcraft_crypto::identity::VerifiedDevice>, String> {
+    let client = self.client.as_mut().ok_or("this device is not set up yet")?;
+    client.refresh_call_devices(conversation).await.map_err(describe)
   }
 
   async fn prepare_call(&mut self, conversation: ConversationId) -> Result<CallPreparation, String> {

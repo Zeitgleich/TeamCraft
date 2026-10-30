@@ -95,6 +95,7 @@ pub async fn join_dev_call(
     resilience: ResilienceConfig::browser(),
     // The test page has one dev token; it is reused for a rejoin while still valid.
     maybe_ticket_source: None,
+    maybe_trust_source: None,
     status_cues: StatusCues::default(),
     is_muted_at_start: false,
     // The development page has no Content-Security-Policy.

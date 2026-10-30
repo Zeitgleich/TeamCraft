@@ -179,6 +179,10 @@ pub struct WebCallConfig {
   /// Fresh join tickets for rejoining; without one the first ticket is used again, which works
   /// only while it is valid (development pages).
   pub maybe_ticket_source: Option<Rc<dyn WebJoinTicketSource>>,
+  /// The call's trusted devices afresh, when a device joins that the roster doesn't have yet (one
+  /// added to the conversation during the call, e2ee.md §8.2). The page verifies with the core's
+  /// devices itself; the module only needs the roster. Without one such a device ends the call.
+  pub maybe_trust_source: Option<Rc<dyn WebTrustSource>>,
   /// Which call status sounds (reconnecting, reconnected, connection lost) play.
   pub status_cues: StatusCues,
   /// The microphone is muted from the first frame: nothing of it is sent before a later unmute.
@@ -200,6 +204,20 @@ pub type LocalTicketFuture = Pin<Box<dyn Future<Output = Result<JoinTicket, Join
 impl std::fmt::Debug for dyn WebJoinTicketSource {
   fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
     f.write_str("WebJoinTicketSource")
+  }
+}
+
+/// Gets the call's trusted devices (the other devices) afresh from the page's client core.
+pub trait WebTrustSource {
+  fn fetch(&self) -> LocalTrustFuture;
+}
+
+/// A refreshed roster on its way (on the page's event loop); the error says why there is none.
+pub type LocalTrustFuture = Pin<Box<dyn Future<Output = Result<Vec<DeviceId>, String>>>>;
+
+impl std::fmt::Debug for dyn WebTrustSource {
+  fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    f.write_str("WebTrustSource")
   }
 }
 
@@ -312,6 +330,8 @@ enum Input {
   },
   /// Rejoining took longer than the SFU keeps the slot.
   ReconnectExpired,
+  /// The trusted roster as the page's core knows it now ([`WebTrustSource`]).
+  Trust(Result<Vec<DeviceId>, String>),
   /// A datagram of the session with this generation.
   Datagram {
     generation: u64,
@@ -969,6 +989,9 @@ async fn run_call(
   if let Some(authenticator) = &config.maybe_authenticator {
     engine.set_authenticator(Arc::clone(authenticator));
   }
+  if config.maybe_trust_source.is_some() {
+    engine.enable_roster_refresh();
+  }
   if config.is_muted_at_start {
     engine.set_muted(true);
   }
@@ -1039,6 +1062,16 @@ async fn run_call(
     }
     if let Err(error) = state.flush(&mut engine) {
       break Err(error);
+    }
+    if engine.take_roster_request()
+      && let Some(source) = &config.maybe_trust_source
+    {
+      info!("a device the call's roster doesn't have yet: asking the page");
+      let (fetch, inputs) = (source.fetch(), inputs.clone());
+      spawn_local(async move {
+        // The call may have ended meanwhile.
+        let _ = inputs.unbounded_send(Input::Trust(fetch.await));
+      });
     }
     // Refused, ended by the host or replaced by another connection: nothing to rejoin.
     if engine.is_over() {
@@ -1186,6 +1219,13 @@ impl CallState<'_> {
         self.maybe_hurry = None;
         engine.rejoin(ticket.token.clone(), now);
         self.ticket = ticket;
+      },
+      Input::Trust(fetched) => {
+        match fetched {
+          Ok(roster) => engine.set_trusted_roster(roster),
+          Err(reason) => warn!(%reason, "the call's devices could not be refreshed"),
+        }
+        engine.resume_after_roster()?;
       },
       Input::ReconnectExpired => {
         self.is_ending_lost = true;

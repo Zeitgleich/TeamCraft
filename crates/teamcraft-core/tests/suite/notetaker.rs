@@ -13,7 +13,8 @@ use teamcraft_core::api::fake::FakeServer;
 use teamcraft_core::notetaker::{NotetakerLedger, notetaker_policy};
 use teamcraft_core::workspace::RosterRole;
 use teamcraft_proto::{
-  ConversationId, NotetakerInviters, NotetakerPolicy, NotetakerRequest, NotetakerScope, WorkspacePolicy,
+  ConversationId, HistoryPolicy, NotetakerInviters, NotetakerPolicy, NotetakerRequest, NotetakerScope,
+  WorkspacePolicy,
 };
 
 const KEY_SHA256: &str = "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08";
@@ -73,9 +74,62 @@ async fn the_ui_reads_the_verified_policy() {
   assert_eq!(notetaker_policy(notetaker.store.as_ref()), Some(policy));
 }
 
+/// "Add notetaker" in a call where it is no member yet (issue #1018): the addition and the request
+/// queued together, the request goes out after the commit that put the notetaker into the group,
+/// so it can read it.
+#[tokio::test]
+async fn added_during_a_call_it_reads_the_join_sent_with_its_addition() {
+  let (_server, mut alice, mut bob, mut notetaker, channel) =
+    setup_with(NotetakerInviters::Members, false).await;
+  let bot = notetaker.client.user_id();
+  let alice_ui = backend_of(&alice);
+  alice_ui.add_people_to_channel(channel, vec![(bot, true)], HistoryPolicy::FromJoin, false);
+  alice_ui.request_notetaker(
+    channel,
+    NotetakerRequest::Join {
+      scope: NotetakerScope::ThisCall,
+    },
+  );
+  run_commands(&mut alice, &alice_ui).await;
+  settle(&mut [&mut alice, &mut bob, &mut notetaker]).await;
+
+  let ledger = NotetakerLedger::load(notetaker.store.as_ref(), channel).unwrap();
+  let [request] = ledger.requests() else {
+    panic!("one request: {ledger:?}");
+  };
+  assert_eq!(request.by, alice.client.user_id());
+  // A `this_call` join is in force for a while after it was sent.
+  let join = ledger.join_in_force(request.at_ms + 1, None).unwrap();
+  assert_eq!(join.scope, NotetakerScope::ThisCall);
+}
+
+/// A device added during a call joins it: the call asks for the conversation's devices again, and
+/// they include the new member's before this device has seen its addition otherwise.
+#[tokio::test]
+async fn the_refreshed_call_devices_include_a_member_added_since() {
+  let (_server, mut alice, mut bob, notetaker, channel) = setup_with(NotetakerInviters::Members, false).await;
+  let prepared = bob.client.verified_call_devices(channel).await.unwrap();
+  assert_eq!(prepared.len(), 2);
+  alice
+    .client
+    .add_member(channel, notetaker.client.user_id())
+    .await
+    .unwrap();
+  let refreshed = bob.client.refresh_call_devices(channel).await.unwrap();
+  assert_eq!(refreshed.len(), 3, "the notetaker's device as well");
+}
+
 /// Alice (owner) signs a policy with Notetaker's account as the notetaker; all three are in a
 /// channel.
 async fn setup(inviters: NotetakerInviters) -> (FakeServer, Peer, Peer, Peer, ConversationId) {
+  setup_with(inviters, true).await
+}
+
+/// [`setup`], with the notetaker in the channel only when `is_member`.
+async fn setup_with(
+  inviters: NotetakerInviters,
+  is_member: bool,
+) -> (FakeServer, Peer, Peer, Peer, ConversationId) {
   let server = FakeServer::new();
   let mut alice = Peer::enroll(&server, "Alice").await;
   let mut bob = Peer::enroll(&server, "Bob").await;
@@ -105,8 +159,17 @@ async fn setup(inviters: NotetakerInviters) -> (FakeServer, Peer, Peer, Peer, Co
     .create_channel(alice.space().await, "meetings")
     .await
     .unwrap();
-  for user in [bob.client.user_id(), notetaker.client.user_id()] {
-    alice.client.add_member(channel, user).await.unwrap();
+  alice
+    .client
+    .add_member(channel, bob.client.user_id())
+    .await
+    .unwrap();
+  if is_member {
+    alice
+      .client
+      .add_member(channel, notetaker.client.user_id())
+      .await
+      .unwrap();
   }
   settle(&mut [&mut alice, &mut bob, &mut notetaker]).await;
   for peer in [&mut alice, &mut bob, &mut notetaker] {

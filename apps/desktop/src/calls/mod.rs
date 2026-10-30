@@ -43,7 +43,7 @@ use teamcraft_media::bwe::BweConfig;
 use teamcraft_media::call_auth::{CallBindingSigner, DeviceCallKeyAuthenticator};
 use teamcraft_media::call_engine::{CallEngineConfig, CallEngineEvent, OwnVideoEnd};
 use teamcraft_media::call_native::{
-  JoinTicketSource, NativeCall, NativeCallConfig, NativeCallError, TicketFuture,
+  JoinTicketSource, NativeCall, NativeCallConfig, NativeCallError, TicketFuture, TrustFuture, TrustSource,
 };
 use teamcraft_media::call_resilience::{JoinTicket, JoinTicketError, certificate_hash_from_hex};
 use teamcraft_media::call_video::ReceivedVideoFrame;
@@ -229,6 +229,14 @@ pub struct CoreJoinTickets {
   conversation: ConversationId,
 }
 
+/// The call's verified devices afresh from the core, when a device added to the conversation
+/// during the call joins it (e2ee.md §8.2); this device keeps signing with its key.
+struct CoreTrust {
+  runtime: Arc<CoreRuntime>,
+  conversation: ConversationId,
+  signer: Arc<dyn CallBindingSigner>,
+}
+
 impl CallHost {
   /// `notify` tells the UI that the call state changed; `report_failure` shows a failure that
   /// comes after the action that caused it returned (a camera that never sends a picture).
@@ -336,7 +344,7 @@ impl CallHost {
     is_muted: bool,
     page_decoders: &[VideoCodec],
     preparation: CallPreparation,
-    tickets: Arc<dyn JoinTicketSource>,
+    tickets: Arc<CoreJoinTickets>,
   ) -> Result<(), String> {
     let mut media = self.media.lock().await;
     // The call opens the camera and microphone itself.
@@ -354,7 +362,7 @@ impl CallHost {
       device_id: own_device,
     };
     let ends_when_one_side_leaves = preparation.join.ends_when_one_side_leaves;
-    let mut config = native_config(preparation, microphone, speakers, page_decoders)?;
+    let mut config = native_config(preparation, microphone, speakers, page_decoders, &tickets)?;
     config.maybe_ticket_source = Some(tickets);
     config.status_cues = status_cues(lock(&self.state).status_sounds);
     // Push-to-talk: the microphone opens only while the key is held.
@@ -1174,6 +1182,17 @@ impl JoinTicketSource for CoreJoinTickets {
   }
 }
 
+impl TrustSource for CoreTrust {
+  fn fetch(&self) -> TrustFuture {
+    let (runtime, conversation) = (Arc::clone(&self.runtime), self.conversation);
+    let signer = Arc::clone(&self.signer);
+    Box::pin(async move {
+      let devices = runtime.call_devices(conversation).await?;
+      DeviceCallKeyAuthenticator::from_verified(signer, devices).map_err(|error| error.to_string())
+    })
+  }
+}
+
 impl CallBindingSigner for CoreSigner {
   fn sign_call_key_binding(
     &self,
@@ -1470,12 +1489,14 @@ fn set_video_flag(state: &Mutex<CallState>, kind: &VideoTrackKind, is_on: bool) 
 }
 
 /// The native call for a prepared join: device-bound DAVE keys, and only the conversation's
-/// verified devices as the trusted roster.
+/// verified devices as the trusted roster, refreshed from the core of `tickets` when a device
+/// added during the call joins.
 fn native_config(
   preparation: CallPreparation,
   microphone: AudioDeviceChoice,
   speakers: AudioDeviceChoice,
   page_decoders: &[VideoCodec],
+  tickets: &CoreJoinTickets,
 ) -> Result<NativeCallConfig, String> {
   let engine = CallEngineConfig {
     user_id: preparation.user_id,
@@ -1491,11 +1512,16 @@ fn native_config(
     },
     bwe: BweConfig::default(),
   };
-  let authenticator =
-    DeviceCallKeyAuthenticator::from_verified(Arc::new(CoreSigner(preparation.signer)), preparation.devices)
-      .map_err(|error| error.to_string())?;
+  let signer: Arc<dyn CallBindingSigner> = Arc::new(CoreSigner(preparation.signer));
+  let authenticator = DeviceCallKeyAuthenticator::from_verified(Arc::clone(&signer), preparation.devices)
+    .map_err(|error| error.to_string())?;
   let ticket = JoinTicket::from(preparation.join);
   let mut config = NativeCallConfig::device_bound(ticket.sfu_url, ticket.token, engine, authenticator);
+  config.maybe_trust_source = Some(Arc::new(CoreTrust {
+    runtime: Arc::clone(&tickets.runtime),
+    conversation: tickets.conversation,
+    signer,
+  }));
   // A development SFU's certificate: announced by the server with each token (rejoins use the
   // fresh token's), and one pinned here for every connection.
   config.certificate_hashes = ticket.certificate_hashes;

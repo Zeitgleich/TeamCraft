@@ -120,6 +120,10 @@ pub struct NativeCallConfig {
   /// Fresh join tickets for rejoining after a lost connection. Without one the first ticket is
   /// used again, which works only while it is valid (development tools).
   pub maybe_ticket_source: Option<Arc<dyn JoinTicketSource>>,
+  /// The conversation's verified devices as the client core knows them now, when a device joins
+  /// that the trusted roster doesn't have yet (one added to the conversation during the call,
+  /// e2ee.md §8.2). Without one such a device ends the call as an untrusted member.
+  pub maybe_trust_source: Option<Arc<dyn TrustSource>>,
   /// Which call status sounds (reconnecting, reconnected, connection lost) play.
   pub status_cues: StatusCues,
   /// The microphone is muted from the first frame (the user's choice before joining, or a call
@@ -138,6 +142,21 @@ pub type TicketFuture = Pin<Box<dyn Future<Output = Result<JoinTicket, JoinTicke
 impl std::fmt::Debug for dyn JoinTicketSource {
   fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
     f.write_str("JoinTicketSource")
+  }
+}
+
+/// Gets the call's trusted devices afresh from the client core: the authenticator over the
+/// conversation's verified devices now (this one's signer kept), whose devices become the roster.
+pub trait TrustSource: Send + Sync {
+  fn fetch(&self) -> TrustFuture;
+}
+
+/// A refreshed authenticator on its way; the error says why there is none.
+pub type TrustFuture = Pin<Box<dyn Future<Output = Result<DeviceCallKeyAuthenticator, String>> + Send>>;
+
+impl std::fmt::Debug for dyn TrustSource {
+  fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    f.write_str("TrustSource")
   }
 }
 
@@ -341,6 +360,7 @@ impl NativeCallConfig {
       maybe_processing: None,
       resilience: ResilienceConfig::default(),
       maybe_ticket_source: None,
+      maybe_trust_source: None,
       status_cues: StatusCues::default(),
       is_muted_at_start: false,
     }
@@ -646,6 +666,10 @@ async fn run_call(
   if let Some(authenticator) = &config.maybe_authenticator {
     engine.set_authenticator(Arc::clone(authenticator));
   }
+  if config.maybe_trust_source.is_some() {
+    engine.enable_roster_refresh();
+  }
+  let mut maybe_trust_fetch: Option<TrustFuture> = None;
   let maybe_processor = config
     .maybe_processing
     .map(crate::audio_processing::AudioProcessor::new)
@@ -773,6 +797,12 @@ async fn run_call(
         sinks.video.log_counts(now);
       },
       Some((kind, frame)) = encoded_rx.recv() => sinks.video.send(&mut engine, &kind, &frame, Instant::now()),
+      fetched = fetched_trust(&mut maybe_trust_fetch) => {
+        maybe_trust_fetch = None;
+        if let Err(error) = apply_trust(&mut engine, fetched) {
+          break Err(error.into());
+        }
+      },
       started = started_video(&mut sinks.video.maybe_starting) => {
         if let Some(starting) = sinks.video.maybe_starting.take() {
           sinks.video.on_started(&mut engine, &encoded_tx, starting, started);
@@ -843,6 +873,12 @@ async fn run_call(
     }
     if let Err(error) = sinks.flush(&mut engine, &mut capture, connection.maybe_link.as_ref()) {
       break Err(error);
+    }
+    if engine.take_roster_request()
+      && let Some(source) = &config.maybe_trust_source
+    {
+      info!("a device the call's roster doesn't have yet: asking the client core");
+      maybe_trust_fetch = Some(source.fetch());
     }
     // Refused (locked call, removed user), ended by the host, or taken over by another
     // connection of this device: nothing to rejoin.
@@ -1397,6 +1433,31 @@ fn handle_video(
 }
 
 /// The result of the own track that is starting, once its start is done; never while none is.
+/// The refreshed authenticator, once its fetch is done; pending without one.
+async fn fetched_trust(maybe_fetch: &mut Option<TrustFuture>) -> Result<DeviceCallKeyAuthenticator, String> {
+  match maybe_fetch {
+    Some(fetch) => fetch.as_mut().await,
+    None => std::future::pending().await,
+  }
+}
+
+/// Takes the refreshed devices as the roster and goes on with the DAVE changes that waited for
+/// them; without them the old roster decides.
+fn apply_trust(
+  engine: &mut CallEngine,
+  fetched: Result<DeviceCallKeyAuthenticator, String>,
+) -> Result<(), CallEngineError> {
+  match fetched {
+    Ok(authenticator) => {
+      let own_device = engine.device_id();
+      engine.set_trusted_roster(authenticator.device_ids().filter(|device| *device != own_device));
+      engine.set_authenticator(Arc::new(authenticator));
+    },
+    Err(reason) => warn!(%reason, "the call's devices could not be refreshed"),
+  }
+  engine.resume_after_roster()
+}
+
 async fn started_video(
   maybe_starting: &mut Option<StartingVideo>,
 ) -> Result<StartResult, tokio::task::JoinError> {
