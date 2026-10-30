@@ -39,6 +39,9 @@ const FRAMERATE: u8 = 30;
 /// Decoded pictures the viewer has to see.
 const WANTED_PICTURES: usize = 15;
 const DEADLINE: Duration = Duration::from_secs(10);
+/// What `DEADLINE` is for a real capture: the portal, a camera starting up, a dark room's 10 fps.
+#[cfg(all(feature = "portal-e2e", target_os = "linux"))]
+const PORTAL_DEADLINE: Duration = Duration::from_secs(30);
 /// Luma PSNR a decoded picture keeps at least against what was captured (lossy, not black: a
 /// black picture against these scenes is below 10 dB).
 const MIN_PSNR_DB: f64 = 25.0;
@@ -52,30 +55,114 @@ async fn a_shared_screen_reaches_the_viewer_with_its_content() {
     ScreenContentMode::Detail,
     &ScreenShareResolution::Standard,
   );
-  check_content_arrives(VideoTrackKind::Screen, capture, layers).await;
+  let captured = Arc::clone(&capture.captured);
+  check_content_arrives(
+    VideoTrackKind::Screen,
+    Box::new(capture),
+    Some(captured),
+    layers,
+    DEADLINE,
+  )
+  .await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_camera_reaches_the_viewer_with_its_content() {
   let capture = SyntheticCapture::new(PixelFormat::Yuyv);
   let layers = simulcast_layers(SIZE, FRAMERATE, 1_000_000, 3);
-  check_content_arrives(VideoTrackKind::Camera, capture, layers).await;
+  let captured = Arc::clone(&capture.captured);
+  check_content_arrives(
+    VideoTrackKind::Camera,
+    Box::new(capture),
+    Some(captured),
+    layers,
+    DEADLINE,
+  )
+  .await;
 }
 
+/// The desktop app's real Linux capture (xdg-desktop-portal + PipeWire) through the call and the
+/// SFU to a viewer (issue #683: a PipeWire camera that hands out DMA-BUFs never linked, and the
+/// others saw black). Needs a desktop session with the portals and a camera, or the headless one
+/// of `apps/desktop/packaging/linux/portal-test/run.sh`, which runs these:
+///
+/// ```sh
+/// cargo test -p teamcraft-sfu --features portal-e2e --test suite -- --ignored portal_
+/// ```
+#[cfg(all(feature = "portal-e2e", target_os = "linux"))]
+mod portal {
+  use teamcraft_media::capture_portal::PortalCapture;
+
+  use super::*;
+
+  const WANTED: CaptureFormat = CaptureFormat {
+    resolution: VideoResolution {
+      width: 1280,
+      height: 720,
+    },
+    framerate: FRAMERATE,
+  };
+
+  #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+  #[ignore = "needs the desktop portals and a camera (portal-test/run.sh)"]
+  async fn portal_camera_reaches_the_viewer_with_its_content() {
+    let capture = tokio::task::spawn_blocking(|| PortalCapture::camera(WANTED))
+      .await
+      .unwrap()
+      .expect("camera portal");
+    let layers = simulcast_layers(capture.format().resolution, FRAMERATE, 1_500_000, 3);
+    check_content_arrives(
+      VideoTrackKind::Camera,
+      Box::new(capture),
+      None,
+      layers,
+      PORTAL_DEADLINE,
+    )
+    .await;
+  }
+
+  #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+  #[ignore = "needs the desktop portals and a screen to pick (portal-test/run.sh)"]
+  async fn portal_screen_reaches_the_viewer_with_its_content() {
+    let (capture, _) = tokio::task::spawn_blocking(|| PortalCapture::screen(WANTED, None))
+      .await
+      .unwrap()
+      .expect("screencast portal");
+    let layers = screen_layers(
+      capture.format().resolution,
+      FRAMERATE,
+      ScreenContentMode::Detail,
+      &ScreenShareResolution::Standard,
+    );
+    check_content_arrives(
+      VideoTrackKind::Screen,
+      Box::new(capture),
+      None,
+      layers,
+      PORTAL_DEADLINE,
+    )
+    .await;
+  }
+}
+
+/// Sends `capture` from one participant and checks that the other decodes at least
+/// [`WANTED_PICTURES`] pictures with content within `deadline`; with `maybe_captured` (what a
+/// synthetic capture sent, by timestamp) each one also has to show its frame.
 async fn check_content_arrives(
   kind: VideoTrackKind,
-  capture: SyntheticCapture,
+  capture: Box<dyn VideoCapture>,
+  maybe_captured: Option<Arc<Mutex<BTreeMap<u64, VideoFrame>>>>,
   layers: Vec<teamcraft_proto::VideoLayerInfo>,
+  deadline: Duration,
 ) {
   let (port, certificate_hash) = start_sfu().await;
   let mut presenter = join(port, certificate_hash, 1, 2).await;
   let mut viewer = join(port, certificate_hash, 2, 1).await;
-  let captured = Arc::clone(&capture.captured);
   let config = VideoSendConfig {
     maybe_layer_plan: None,
     kind: kind.clone(),
     maybe_idle_refresh: VideoSendConfig::default_idle_refresh(&kind),
-    capture: Box::new(capture),
+    capture,
     layers,
     encoders: software_encoders(),
     maybe_filter: None,
@@ -83,7 +170,7 @@ async fn check_content_arrives(
   presenter.start_video(config).await.unwrap();
 
   let decoded: Arc<Mutex<Vec<VideoFrame>>> = Arc::default();
-  let deadline = tokio::time::Instant::now() + DEADLINE;
+  let deadline = tokio::time::Instant::now() + deadline;
   while tokio::time::Instant::now() < deadline && decoded.lock().unwrap().len() < WANTED_PICTURES {
     // The presenter's events must be read for its call to go on.
     let _ = tokio::time::timeout(Duration::from_millis(5), presenter.next_event()).await;
@@ -109,10 +196,15 @@ async fn check_content_arrives(
     "{kind:?}: {} pictures decoded",
     decoded.len()
   );
-  let captured = captured.lock().unwrap();
   for picture in decoded.iter() {
     let stats = PictureStats::of(picture);
     assert_eq!(stats.content(), PictureContent::Detailed, "{kind:?}: {stats:?}");
+  }
+  let Some(captured) = maybe_captured else {
+    return;
+  };
+  let captured = captured.lock().unwrap();
+  for picture in decoded.iter() {
     let source = captured_at(&captured, picture.timestamp_us())
       .scaled(picture.resolution())
       .unwrap();
