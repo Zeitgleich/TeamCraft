@@ -33,9 +33,13 @@ use crate::video_controls::{PlayerCommand, seek_target, volume_target};
 /// The volume unmuting goes back to when the volume was turned all the way down.
 const UNMUTED_VOLUME: f64 = 0.5;
 
-/// The player and what it holds. Signals, so every card showing the playing attachment follows it.
+/// The player. One handle: `AppState` is copied into a great many closures, so it stays small.
 #[derive(Clone, Copy)]
-pub struct AudioPlayer {
+pub struct AudioPlayer(StoredValue<Parts>);
+
+/// What the player holds, as signals, so every card showing the playing attachment follows it.
+#[derive(Clone, Copy)]
+struct Parts {
   /// The attachment the player holds (loading, loaded or failed), if any.
   track: RwSignal<Option<MediaKey>>,
   phase: RwSignal<AudioPhase>,
@@ -70,7 +74,7 @@ struct Element {
   _listeners: Vec<Closure<dyn Fn()>>,
 }
 
-impl AudioPlayer {
+impl Parts {
   pub fn new() -> Self {
     Self {
       track: RwSignal::new(None),
@@ -330,6 +334,87 @@ impl AudioPlayer {
   }
 }
 
+impl AudioPlayer {
+  pub fn new() -> Self {
+    Self(StoredValue::new(Parts::new()))
+  }
+
+  /// Where the player stands with `key`; `None` while it holds another attachment or none.
+  pub fn phase_of(self, key: MediaKey) -> Option<AudioPhase> {
+    self.parts()?.phase_of(key)
+  }
+
+  /// Seconds played.
+  pub fn position(self) -> f64 {
+    self.parts().map_or(0.0, Parts::position)
+  }
+
+  /// Seconds; NaN while unknown.
+  pub fn duration(self) -> f64 {
+    self.parts().map_or(f64::NAN, Parts::duration)
+  }
+
+  pub fn volume(self) -> f64 {
+    self.parts().map_or(1.0, Parts::volume)
+  }
+
+  pub fn is_muted(self) -> bool {
+    self.parts().is_some_and(Parts::is_muted)
+  }
+
+  /// Play, or pause, the attachment of a card. A new attachment stops the one before and loads;
+  /// a failed download is tried again.
+  pub fn press(self, request: AudioRequest) {
+    if let Some(parts) = self.parts() {
+      parts.press(request);
+    }
+  }
+
+  pub fn pause(self) {
+    if let Some(parts) = self.parts() {
+      parts.pause();
+    }
+  }
+
+  /// Lets go of the attachment: playback ends, the URL is revoked, a load under way is dropped.
+  pub fn stop(self) {
+    if let Some(parts) = self.parts() {
+      parts.stop();
+    }
+  }
+
+  /// A key pressed on a card's player, or one of its buttons.
+  pub fn run(self, command: PlayerCommand) {
+    if let Some(parts) = self.parts() {
+      parts.run(command);
+    }
+  }
+
+  pub fn seek_to(self, seconds: f64) {
+    if let Some(parts) = self.parts() {
+      parts.seek_to(seconds);
+    }
+  }
+
+  /// Sets the volume; turning it up unmutes.
+  pub fn set_volume(self, level: f64) {
+    if let Some(parts) = self.parts() {
+      parts.set_volume(level);
+    }
+  }
+
+  /// A card of `key` is on screen until the current scope ends; see [`Parts::show`].
+  pub fn show(self, key: MediaKey) {
+    if let Some(parts) = self.parts() {
+      parts.show(key);
+    }
+  }
+
+  fn parts(self) -> Option<Parts> {
+    self.0.try_get_value()
+  }
+}
+
 impl Default for AudioPlayer {
   fn default() -> Self {
     Self::new()
@@ -338,7 +423,7 @@ impl Default for AudioPlayer {
 
 impl Element {
   /// The `<audio>` element, not in the page; `None` where the browser refuses.
-  fn new(player: AudioPlayer) -> Option<Self> {
+  fn new(player: Parts) -> Option<Self> {
     let document = web_sys::window()?.document()?;
     let audio = document
       .create_element("audio")
