@@ -284,6 +284,15 @@ impl DatabaseKeySource for KeyChoice {
   }
 }
 
+/// Where the user picked to save a file.
+#[derive(Debug)]
+pub enum SaveTo {
+  /// The exact file picked in a save dialog ("Save…", #719).
+  File(PathBuf),
+  /// A folder picked for several files ("Download all", #1014): each under its own name.
+  Folder(PathBuf),
+}
+
 /// Receives the gateway's call events (start, update, end, ring) on the core thread.
 pub type CallEventHandler = Arc<dyn Fn(GatewayEvent) + Send + Sync>;
 
@@ -345,12 +354,13 @@ enum Request {
     reply: oneshot::Sender<Result<SecretBytes, String>>,
   },
   OrgBackgroundPicture(OrgBackgroundId, oneshot::Sender<Result<Vec<u8>, String>>),
-  /// "Save…" (#719): the file goes to the path the user picked in the save dialog.
+  /// "Save…" (#719): the file goes to the path the user picked in the save dialog; "Download all"
+  /// (#1014): into the folder the user picked.
   SaveAttachment {
     conversation: ConversationId,
     message: MessageId,
     file_id: String,
-    path: PathBuf,
+    target: SaveTo,
     reply: oneshot::Sender<Result<(), String>>,
   },
   LinkStart {
@@ -716,21 +726,21 @@ impl CoreRuntime {
       .unwrap_or_else(|| Err(stopped()))
   }
 
-  /// Saves one file of a message to `path`, which the user picked in a save dialog. It downloads
-  /// beside the loop; the file's transfer state shows the progress and where it went.
+  /// Saves one file of a message to `target`, which the user picked in a save or folder dialog. It
+  /// downloads beside the loop; the file's transfer state shows the progress and where it went.
   pub async fn save_attachment(
     &self,
     conversation: ConversationId,
     message: MessageId,
     file_id: String,
-    path: PathBuf,
+    target: SaveTo,
   ) -> Result<(), String> {
     self
       .ask(|reply| Request::SaveAttachment {
         conversation,
         message,
         file_id,
-        path,
+        target,
         reply,
       })
       .await
@@ -1480,28 +1490,33 @@ impl Core {
         conversation,
         message,
         file_id,
-        path,
+        target,
         reply,
-      } => drop(reply.send(self.queue_save(conversation, message, &file_id, path))),
+      } => drop(reply.send(self.queue_save(conversation, message, &file_id, target))),
     }
   }
 
-  /// Queues saving one file to the path the user picked; it downloads beside the loop.
+  /// Queues saving one file to the place the user picked; it downloads beside the loop.
   fn queue_save(
     &mut self,
     conversation: ConversationId,
     message: MessageId,
     file_id: &str,
-    path: PathBuf,
+    target: SaveTo,
   ) -> Result<(), String> {
     let reference = self
       .backend
       .as_ref()
       .and_then(|backend| backend.attachment_ref(conversation, message, file_id))
       .ok_or_else(|| "no such file in this conversation".to_owned())?;
-    self
-      .downloads
-      .save_to(conversation, reference.attachment_id, path);
+    match target {
+      SaveTo::File(path) => self
+        .downloads
+        .save_to(conversation, reference.attachment_id, path),
+      SaveTo::Folder(folder) => self
+        .downloads
+        .save_into(conversation, reference.attachment_id, folder),
+    }
     Ok(())
   }
 

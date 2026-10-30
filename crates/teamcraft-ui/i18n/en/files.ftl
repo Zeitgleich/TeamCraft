@@ -7,6 +7,11 @@ files-count = { $count ->
    *[other] { $count } files
   }
 files-download-all = Download all
+files-saving = { $count ->
+    [one] Saving { $count } file…
+   *[other] Saving { $count } files…
+  }
+files-save-failed = The files couldn’t be saved.
 
 ## First-run key setup
 # ---- Meetings ----

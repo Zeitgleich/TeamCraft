@@ -74,9 +74,18 @@ enum Job {
   Save {
     conversation: ConversationId,
     attachment: AttachmentId,
-    /// The file the user picked; `None`: a new name in the download directory.
-    maybe_target: Option<PathBuf>,
+    target: SaveTarget,
   },
+}
+
+/// Where a saved file goes.
+enum SaveTarget {
+  /// A new name in the download directory.
+  DownloadDirectory,
+  /// The exact file the user picked in a save dialog.
+  File(PathBuf),
+  /// A new name in the folder the user picked for several files ("Download all", #1014).
+  Folder(PathBuf),
 }
 
 impl Downloads {
@@ -144,7 +153,7 @@ impl Downloads {
     self.waiting.push_back(Job::Save {
       conversation,
       attachment,
-      maybe_target: None,
+      target: SaveTarget::DownloadDirectory,
     });
   }
 
@@ -153,7 +162,17 @@ impl Downloads {
     self.waiting.push_back(Job::Save {
       conversation,
       attachment,
-      maybe_target: Some(path),
+      target: SaveTarget::File(path),
+    });
+  }
+
+  /// Queues saving a file under its own name into `folder`, which the user picked for several files
+  /// at once; a name that is taken there gets a number (`name (2).jpg`).
+  pub fn save_into(&mut self, conversation: ConversationId, attachment: AttachmentId, folder: PathBuf) {
+    self.waiting.push_back(Job::Save {
+      conversation,
+      attachment,
+      target: SaveTarget::Folder(folder),
     });
   }
 
@@ -192,13 +211,14 @@ impl Downloads {
         Job::Save {
           conversation,
           attachment,
-          maybe_target,
+          target,
         } => {
           is_changed = true;
           let started = client.start_download_to_disk(conversation, attachment).await;
-          match started.map(|download| match maybe_target {
-            Some(path) => download.to_path(path),
-            None => download,
+          match started.map(|download| match target {
+            SaveTarget::DownloadDirectory => download,
+            SaveTarget::File(path) => download.to_path(path),
+            SaveTarget::Folder(folder) => download.into_folder(folder),
           }) {
             Ok(download) => self.running.push(Box::pin(async move {
               Finished::Saved {
