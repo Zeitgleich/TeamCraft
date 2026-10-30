@@ -171,8 +171,12 @@ fn watch_connected<S: LocalStore + Clone + 'static>(
   let at = Rc::new(Cell::new(None));
   let (app, noted) = (Rc::downgrade(app), at.clone());
   tokio::task::spawn_local(async move {
+    // The status starts out as "connected" before the first attempt: only a connection after an
+    // attempt counts.
+    let mut has_tried = false;
     while let Some(app) = app.upgrade() {
-      if app.is_connected() {
+      has_tried |= !app.is_connected();
+      if has_tried && app.is_connected() {
         noted.set(Some(started.elapsed()));
         return;
       }
