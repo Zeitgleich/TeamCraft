@@ -36,6 +36,11 @@ struct ChatPane: View {
   @State private var maybeViewing: PictureTarget?
   @State private var maybeShowingEdits: MessageTarget?
   @State private var maybeLastTypingNotified: Date?
+  @State private var maybeFeed: (conversationId: String, feed: PagedFeed)?
+  @State private var hasOlder = false
+  @State private var isLoadingOlder = false
+  /// The row at the top of the screen: SwiftUI keeps it in place when older rows are added above.
+  @State private var maybeTopRowId: String?
   @AppStorage("share_typing") private var isSharingTyping = true
   @FocusState private var isComposerFocused: Bool
 
@@ -160,10 +165,20 @@ struct ChatPane: View {
         ScrollView {
           // One section per day: its date pill stays at the top while the day scrolls by.
           LazyVStack(alignment: .leading, spacing: 0, pinnedViews: [.sectionHeaders]) {
+            // Above the oldest row: seen only when the reader is faster than the core.
+            if hasOlder && isLoadingOlder {
+              ProgressView()
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 12)
+                .accessibilityLabel(Text("loading_older_messages"))
+            }
             ForEach(feedSections(messages)) { section in
               Section {
                 ForEach(section.entries) { entry in
                   entryRow(entry, look: look, listWidth: listWidth)
+                    .onAppear {
+                      if entry.id == pageBackTriggerId { Task { await loadOlder() } }
+                    }
                 }
               } header: {
                 DayPill(date: section.day)
@@ -177,9 +192,11 @@ struct ChatPane: View {
               }
               .onDisappear { isAtBottom = false }
           }
+          .scrollTargetLayout()
           .padding(.horizontal, Self.listPadding)
           .padding(.bottom, 8)
         }
+        .scrollPosition(id: $maybeTopRowId, anchor: .top)
         // Opens at the newest message, offline too (the messages come from the local store).
         .defaultScrollAnchor(.bottom)
         .scrollDismissesKeyboard(.interactively)
@@ -208,6 +225,15 @@ struct ChatPane: View {
   }
 
   private static let listPadding: CGFloat = 8
+  /// Rows below the oldest loaded one whose appearance loads the next older page: a few screens
+  /// ahead, so a reader scrolling back doesn't meet the end of what is loaded (issue #1058).
+  private static let olderAheadRows = 40
+
+  /// The row that pages back when it scrolls into view.
+  private var pageBackTriggerId: String? {
+    guard threadId == nil, hasOlder, !messages.isEmpty else { return nil }
+    return messages[min(Self.olderAheadRows, messages.count - 1)].id
+  }
 
   private var names: MentionNames {
     MentionNames(usernames: mentionNames.usernames, myUsername: mentionNames.me)
@@ -620,9 +646,35 @@ struct ChatPane: View {
     if let threadId {
       messages = await model.thread(conversationId: conversation.id, threadId: threadId)
     } else {
-      messages = await model.messages(conversationId: conversation.id)
+      // A failed read keeps what is shown; the next change reads again.
+      guard let page = await pagedFeed().reread() else { return }
+      messages = page.messages
+      hasOlder = page.hasOlder
     }
     if conversation.unreadCount > 0 { await model.markRead(conversationId: conversation.id) }
+    await reloadExtras()
+  }
+
+  /// The window of this conversation the feed shows, read again when the pane shows another one.
+  private func pagedFeed() -> PagedFeed {
+    if let maybeFeed, maybeFeed.conversationId == conversation.id { return maybeFeed.feed }
+    let conversationId = conversation.id
+    let feed = PagedFeed { [model] maybeOldest, older in
+      await model.messages(conversationId: conversationId, from: maybeOldest, older: older)
+    }
+    maybeFeed = (conversationId, feed)
+    hasOlder = false
+    return feed
+  }
+
+  private func loadOlder() async {
+    guard threadId == nil, hasOlder, !isLoadingOlder else { return }
+    isLoadingOlder = true
+    defer { isLoadingOlder = false }
+    // A failed read keeps what is shown; the trigger row asks again when it scrolls back in.
+    guard let page = await pagedFeed().older() else { return }
+    messages = page.messages
+    hasOlder = page.hasOlder
     await reloadExtras()
   }
 

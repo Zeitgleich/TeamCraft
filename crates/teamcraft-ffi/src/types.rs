@@ -202,6 +202,16 @@ pub struct MessageItem {
   pub maybe_system_event: Option<SystemEventItem>,
 }
 
+/// The newest messages of a conversation down to the oldest one a list holds, plus the next older
+/// page ([`crate::TeamCraft::messages_from`], issue #1058).
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
+pub struct MessagePage {
+  /// Oldest first.
+  pub messages: Vec<MessageItem>,
+  /// Older messages exist: the list can page further back.
+  pub has_older: bool,
+}
+
 /// The system events of [`MessageItem::maybe_system_event`]; the message's author is who joined,
 /// left, renamed or changed the topic (issue #769).
 #[derive(Clone, Debug, PartialEq, Eq, uniffi::Enum)]

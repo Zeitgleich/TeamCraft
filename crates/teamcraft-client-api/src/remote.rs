@@ -426,6 +426,19 @@ pub struct MessageWindow {
   pub undecrypted: usize,
 }
 
+/// The newest messages of one conversation's feed down to the oldest one a paging list holds,
+/// and the page before it, oldest first (issue #1058).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct MessageTail {
+  pub conversation: ConversationId,
+  pub messages: Vec<Message>,
+  /// Older messages exist: the list can page further back.
+  pub has_older: bool,
+  /// As [`MessageWindow::undecrypted`].
+  #[serde(default)]
+  pub undecrypted: usize,
+}
+
 /// Where the local client stands.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "state", rename_all = "snake_case")]

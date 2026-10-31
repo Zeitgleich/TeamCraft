@@ -66,6 +66,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.saveable.listSaver
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
@@ -106,6 +107,7 @@ import java.time.ZoneId
 import kotlin.math.roundToInt
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.flow.first
 import de.zeitgleich.teamcraft.R
 import de.zeitgleich.teamcraft.core.ChatActions
 import de.zeitgleich.teamcraft.core.ChatSnapshot
@@ -182,6 +184,12 @@ private val AVATAR_GAP = 6.dp
 private val MEDIA_CORNER = 14.dp
 
 /**
+ * Rows above the oldest one on screen at which the feed asks for older messages: a few screens
+ * ahead, so a reader scrolling back doesn't meet the end of what is loaded (issue #1058).
+ */
+private const val OLDER_AHEAD_ROWS = 40
+
+/**
  * A conversation's messages as chat bubbles (issue #704): own messages on the end side in the
  * accent colour, others on the start side in a neutral bubble with name and avatar once per group
  * (channels and groups). Date pills, the unread line, a floating date while scrolling. It follows
@@ -205,6 +213,7 @@ fun MessageFeed(
   onOpenPermalink: (String) -> Unit = {},
   /** Whether the user may react here; without it the reactions stay readable but don't toggle. */
   canReact: Boolean = true,
+  older: OlderMessages = OlderMessages.None,
 ) {
   // Newest first in a reversed list: the bottom stays anchored when the keyboard opens or a picture
   // above grows, and the rows keep their place by key (the message ID) when new ones arrive.
@@ -261,6 +270,7 @@ fun MessageFeed(
       if (isNewestVisible) decide(FeedScrollEvent.ReachedBottom, isNearBottom = true)
     }
   }
+  PageBack(listState, items.size, older)
   val context = LocalContext.current
   val onOpenFile: (FileInfo) -> Unit = remember(viewModel, context) {
     { file ->
@@ -301,6 +311,8 @@ fun MessageFeed(
           }
         }
       }
+      // Above the oldest row: seen only when the reader is faster than the core.
+      if (older.hasOlder && older.isLoading) item(key = OLDER_LOADING_KEY) { OlderLoadingRow() }
     }
     FloatingDay(listState, items, Modifier.align(Alignment.TopCenter).padding(top = 8.dp))
     AnimatedVisibility(
@@ -317,6 +329,39 @@ fun MessageFeed(
   }
   maybeViewing?.let(PictureTarget::fromList)?.let { target ->
     ImageViewer(viewModel, snapshot, target, onDismiss = { maybeViewing = null })
+  }
+}
+
+/** Whether a feed can page further back (issue #1058); threads and searches show all they have. */
+class OlderMessages(val hasOlder: Boolean, val isLoading: Boolean, val onNearOldest: () -> Unit) {
+  companion object {
+    val None = OlderMessages(hasOlder = false, isLoading = false) {}
+  }
+}
+
+private const val OLDER_LOADING_KEY = "older-loading"
+
+/** Asks for older messages once the oldest loaded row comes within [OLDER_AHEAD_ROWS] of the screen. */
+@Composable
+private fun PageBack(listState: LazyListState, rowCount: Int, older: OlderMessages) {
+  val onNearOldest by rememberUpdatedState(older.onNearOldest)
+  // Restarted when rows arrive or a load ends: a reader still near the top asks for the next page.
+  LaunchedEffect(listState, rowCount, older.hasOlder, older.isLoading) {
+    if (!older.hasOlder || older.isLoading) return@LaunchedEffect
+    snapshotFlow {
+      // Reversed list: the topmost visible row has the highest index.
+      val topmost = listState.layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: return@snapshotFlow false
+      topmost >= rowCount - 1 - OLDER_AHEAD_ROWS
+    }.first { it }
+    onNearOldest()
+  }
+}
+
+@Composable
+private fun OlderLoadingRow() {
+  val label = stringResource(R.string.loading_older_messages)
+  Box(Modifier.fillMaxWidth().padding(vertical = 12.dp).semantics { contentDescription = label }, contentAlignment = Alignment.Center) {
+    CircularProgressIndicator(Modifier.size(20.dp), strokeWidth = 2.dp)
   }
 }
 

@@ -3,9 +3,10 @@
 //! mobile apps reuse the core's chat logic instead of growing their own. The app mirrors the view
 //! models as plain data classes.
 
+use teamcraft_client_api::backend::ChatBackend as _;
 use teamcraft_client_api::model::User;
 use teamcraft_client_api::remote::{
-  ChatAction, ChatQuery, ChatSnapshot, ContactKeys, MessageWindow, SecuritySnapshot,
+  ChatAction, ChatQuery, ChatSnapshot, ContactKeys, MessageTail, MessageWindow, SecuritySnapshot,
 };
 use teamcraft_core::api::ServerApi as _;
 use teamcraft_core::records;
@@ -18,7 +19,7 @@ use teamcraft_proto::{
   RecoveryRequestId, RecoveryRequestResponse, RecoveryResultPayload,
 };
 
-use crate::engine::{ClientSlot, Engine, parse_id};
+use crate::engine::{ClientSlot, Engine, feed_anchor, older_len, parse_id};
 use crate::error::TeamCraftError;
 use crate::types::{AccountState, OrgRecoveryStart};
 
@@ -70,6 +71,29 @@ impl Engine {
       usize::try_from(len).unwrap_or(usize::MAX),
     );
     to_json(&window)
+  }
+
+  pub(crate) fn tail_json(
+    &self,
+    conversation_id: &str,
+    maybe_oldest_id: Option<&str>,
+    oldest_sent_at_ms: i64,
+    older: u32,
+  ) -> Result<String, TeamCraftError> {
+    let conversation = parse_id(conversation_id)?;
+    self.signals.catch_up_focus.set(conversation);
+    let backend = self.backend()?;
+    let tail = backend.feed_tail(
+      conversation,
+      feed_anchor(maybe_oldest_id, oldest_sent_at_ms)?,
+      older_len(older),
+    );
+    to_json(&MessageTail {
+      conversation,
+      messages: tail.messages,
+      has_older: tail.has_older,
+      undecrypted: backend.undecrypted_count(conversation),
+    })
   }
 
   pub(crate) fn query_json(&self, query: &str) -> Result<String, TeamCraftError> {

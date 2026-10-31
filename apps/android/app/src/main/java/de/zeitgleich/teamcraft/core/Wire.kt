@@ -196,6 +196,17 @@ data class MessageWindow(
   val undecrypted: Int = 0,
 )
 
+/** The newest messages of a conversation down to the oldest one a feed shows, and the page before it. */
+@Serializable
+data class MessageTail(
+  val conversation: String,
+  val messages: List<Message>,
+  /** Older messages exist: the feed can page further back. */
+  @SerialName("has_older") val hasOlder: Boolean,
+  /** Received but not readable on this device yet (keys not arrived); not in [messages]. */
+  val undecrypted: Int = 0,
+)
+
 @Serializable
 data class ReplyPreview(
   @SerialName("maybe_message") val maybeMessage: String? = null,

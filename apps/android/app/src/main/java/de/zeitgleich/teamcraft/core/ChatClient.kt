@@ -30,6 +30,16 @@ class ChatClient(
       core().messageWindow(conversation, start.toUInt(), len.toUInt()),
     )
 
+  /**
+   * The messages of a conversation from [maybeOldest] (the oldest one a feed shows) to the newest,
+   * and [older] messages before it; without [maybeOldest] the newest [older] (issue #1058).
+   */
+  suspend fun tail(conversation: String, maybeOldest: Message?, older: Int): MessageTail =
+    WireJson.decodeFromString(
+      MessageTail.serializer(),
+      core().messageTail(conversation, maybeOldest?.id, maybeOldest?.sentAt ?: 0, older.toUInt()),
+    )
+
   suspend fun query(query: String): ChatAnswer = decodeAnswer(core().query(query))
 
   /** A query whose answer goes back to the core undecoded (the image viewer's pages). */
