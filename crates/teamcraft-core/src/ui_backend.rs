@@ -3200,7 +3200,18 @@ mod tests {
         ..stored
       };
       assert!(backend.unread_check(&conversation, None)(&live));
-      // The import account adding somebody: a line, part of the import.
+      // The import account adding somebody, as an event and as a line: part of the import.
+      let import_event = StoredMessage {
+        sender_user_id: id(IMPORTER),
+        content: MessageContent::Event {
+          event: ConversationEvent::MemberAdded {
+            user: id(3),
+            history: teamcraft_proto::HistoryPolicy::Full,
+          },
+        },
+        ..live.clone()
+      };
+      assert!(!backend.unread_check(&conversation, None)(&import_event));
       let import_line = StoredMessage {
         sender_user_id: id(IMPORTER),
         maybe_verified_commit: Some(id(9)),

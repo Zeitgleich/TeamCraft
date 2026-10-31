@@ -2516,7 +2516,10 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       // The newest device lists of everybody the DM's group may hold, before the welcome is
       // opened: a revoked device must not be the one that replaces this device's group.
       let me = self.user_id();
-      self.trusted_directory(others.iter().copied().chain([me])).await?;
+      let maybe_importer = crate::imported::importer(&self.store);
+      self
+        .trusted_directory(others.iter().copied().chain([me]).chain(maybe_importer))
+        .await?;
     }
     let stage = match maybe_founded_for {
       Some(_) => ConversationGroup::stage_join_replacing,
@@ -2560,9 +2563,10 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     };
     if let Some(others) = maybe_founded_for {
       let me = self.own_member();
+      let maybe_importer = crate::imported::importer(&self.store);
       let checked = staged
         .verify(&directory)
-        .and_then(|verified| check_dm_welcome(&verified, me, others));
+        .and_then(|verified| check_dm_welcome(&verified, me, others, maybe_importer));
       if let Err(error) = checked {
         return Ok(WelcomeJoin::Rejected(error));
       }
@@ -3242,15 +3246,35 @@ fn conversation_members(users: &[UserId], me: UserId) -> Vec<UserId> {
 
 /// Whether a verified welcome is of the DM this device founded a group of one for: its tree holds
 /// exactly this user and the DM's other participants (this device among them), and one of those
-/// participants, or another device of this user, made it.
-fn check_dm_welcome(verified: &VerifiedWelcome, me: GroupMember, others: &[UserId]) -> Result<(), MlsError> {
-  let in_tree: BTreeSet<_> = verified.members.iter().map(|member| member.user_id).collect();
+/// participants, or another device of this user, made it. The import account of the signed
+/// workspace policy (`maybe_importer`) may also have made it and be in it: it founds the groups of
+/// the DMs it imports (e2ee.md §4.10), adds the people without a device later, and leaves once
+/// both people are in.
+fn check_dm_welcome(
+  verified: &VerifiedWelcome,
+  me: GroupMember,
+  others: &[UserId],
+  maybe_importer: Option<UserId>,
+) -> Result<(), MlsError> {
+  let maybe_importer = maybe_importer
+    .map(convert::user)
+    .filter(|importer| *importer != me.user_id);
+  let mut in_tree: BTreeSet<_> = verified.members.iter().map(|member| member.user_id).collect();
+  let is_importers =
+    maybe_importer.is_some_and(|importer| verified.sender.user_id == importer && in_tree.remove(&importer));
   let expected: BTreeSet<_> = others
     .iter()
     .map(|user| convert::user(*user))
     .chain([me.user_id])
     .collect();
-  if in_tree != expected {
+  // The import account adds a participant without a device yet once they set one up, as this
+  // device would have: such a participant isn't in its tree yet.
+  let is_the_dms = if is_importers {
+    in_tree.is_subset(&expected)
+  } else {
+    in_tree == expected
+  };
+  if !is_the_dms {
     return Err(MlsError::UnexpectedMessage(
       "the welcome's group isn't the DM's participants",
     ));
@@ -3263,7 +3287,7 @@ fn check_dm_welcome(verified: &VerifiedWelcome, me: GroupMember, others: &[UserI
   let sender = verified.sender;
   let is_participant = sender.user_id != me.user_id && expected.contains(&sender.user_id);
   let is_own_other_device = sender.user_id == me.user_id && sender.device_id != me.device_id;
-  if !is_participant && !is_own_other_device {
+  if !is_participant && !is_own_other_device && !is_importers {
     return Err(MlsError::UnexpectedMessage(
       "the welcome wasn't made by another participant",
     ));
@@ -3332,10 +3356,12 @@ mod tests {
   const ME: i64 = 10;
   const BOB: i64 = 20;
   const CAROL: i64 = 30;
+  const IMPORTER: i64 = 40;
   const MY_PHONE: i64 = 1;
   const MY_LAPTOP: i64 = 2;
   const BOB_PHONE: i64 = 3;
   const CAROL_PHONE: i64 = 4;
+  const IMPORTER_DEVICE: i64 = 5;
 
   mod missed_keys {
     use teamcraft_crypto::content_key::ContentKeyRing;
@@ -3398,7 +3424,7 @@ mod tests {
         &[member(ME, MY_PHONE), member(BOB, BOB_PHONE)],
         member(BOB, BOB_PHONE),
       );
-      assert!(check_dm_welcome(&welcome, member(ME, MY_PHONE), &[user(BOB)]).is_ok());
+      assert!(check_dm_welcome(&welcome, member(ME, MY_PHONE), &[user(BOB)], None).is_ok());
     }
 
     #[test]
@@ -3411,7 +3437,7 @@ mod tests {
         ],
         member(ME, MY_LAPTOP),
       );
-      assert!(check_dm_welcome(&welcome, member(ME, MY_PHONE), &[user(BOB)]).is_ok());
+      assert!(check_dm_welcome(&welcome, member(ME, MY_PHONE), &[user(BOB)], None).is_ok());
     }
 
     #[test]
@@ -3424,7 +3450,7 @@ mod tests {
         ],
         member(BOB, BOB_PHONE),
       );
-      assert!(check_dm_welcome(&welcome, member(ME, MY_PHONE), &[user(BOB)]).is_err());
+      assert!(check_dm_welcome(&welcome, member(ME, MY_PHONE), &[user(BOB)], None).is_err());
     }
 
     #[test]
@@ -3433,12 +3459,12 @@ mod tests {
         &[member(ME, MY_PHONE), member(CAROL, CAROL_PHONE)],
         member(CAROL, CAROL_PHONE),
       );
-      assert!(check_dm_welcome(&welcome, member(ME, MY_PHONE), &[user(BOB)]).is_err());
+      assert!(check_dm_welcome(&welcome, member(ME, MY_PHONE), &[user(BOB)], None).is_err());
       let group_dm = welcome_of(
         &[member(ME, MY_PHONE), member(BOB, BOB_PHONE)],
         member(BOB, BOB_PHONE),
       );
-      assert!(check_dm_welcome(&group_dm, member(ME, MY_PHONE), &[user(BOB), user(CAROL)]).is_err());
+      assert!(check_dm_welcome(&group_dm, member(ME, MY_PHONE), &[user(BOB), user(CAROL)], None).is_err());
     }
 
     #[test]
@@ -3447,7 +3473,45 @@ mod tests {
         &[member(ME, MY_LAPTOP), member(BOB, BOB_PHONE)],
         member(BOB, BOB_PHONE),
       );
-      assert!(check_dm_welcome(&welcome, member(ME, MY_PHONE), &[user(BOB)]).is_err());
+      assert!(check_dm_welcome(&welcome, member(ME, MY_PHONE), &[user(BOB)], None).is_err());
+    }
+
+    #[test]
+    fn the_import_account_of_the_policy_may_have_made_it() {
+      let welcome = welcome_of(
+        &[
+          member(ME, MY_PHONE),
+          member(BOB, BOB_PHONE),
+          member(IMPORTER, IMPORTER_DEVICE),
+        ],
+        member(IMPORTER, IMPORTER_DEVICE),
+      );
+      let me = member(ME, MY_PHONE);
+      assert!(check_dm_welcome(&welcome, me, &[user(BOB)], Some(user(IMPORTER))).is_ok());
+      // Anybody else is somebody the DM isn't for.
+      assert!(check_dm_welcome(&welcome, me, &[user(BOB)], None).is_err());
+      assert!(check_dm_welcome(&welcome, me, &[user(BOB)], Some(user(CAROL))).is_err());
+      // Bob has no device yet: the import account adds him later.
+      let without_bob = welcome_of(
+        &[member(ME, MY_PHONE), member(IMPORTER, IMPORTER_DEVICE)],
+        member(IMPORTER, IMPORTER_DEVICE),
+      );
+      assert!(check_dm_welcome(&without_bob, me, &[user(BOB)], Some(user(IMPORTER))).is_ok());
+      // Nobody else comes in with it, and only a welcome the import account made may lack him.
+      let with_carol = welcome_of(
+        &[
+          member(ME, MY_PHONE),
+          member(CAROL, CAROL_PHONE),
+          member(IMPORTER, IMPORTER_DEVICE),
+        ],
+        member(IMPORTER, IMPORTER_DEVICE),
+      );
+      assert!(check_dm_welcome(&with_carol, me, &[user(BOB)], Some(user(IMPORTER))).is_err());
+      let bobs_without_bob = welcome_of(
+        &[member(ME, MY_PHONE), member(IMPORTER, IMPORTER_DEVICE)],
+        member(ME, MY_LAPTOP),
+      );
+      assert!(check_dm_welcome(&bobs_without_bob, me, &[user(BOB)], Some(user(IMPORTER))).is_err());
     }
 
     #[test]
@@ -3456,7 +3520,7 @@ mod tests {
         &[member(ME, MY_PHONE), member(BOB, BOB_PHONE)],
         member(ME, MY_PHONE),
       );
-      assert!(check_dm_welcome(&welcome, member(ME, MY_PHONE), &[user(BOB)]).is_err());
+      assert!(check_dm_welcome(&welcome, member(ME, MY_PHONE), &[user(BOB)], None).is_err());
     }
   }
 

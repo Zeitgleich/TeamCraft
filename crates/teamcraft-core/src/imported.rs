@@ -102,10 +102,11 @@ pub fn trusted_origin(message: &StoredMessage, maybe_importer: Option<UserId>) -
   }
 }
 
-/// Whether `message` is a line about a change the import account `maybe_importer` made (adding
-/// people to what it imported).
+/// Whether `message` is the import account `maybe_importer` telling of a change it made, like
+/// adding people to what it imported: an event message or a line derived from its commit.
 pub fn is_import_line(message: &StoredMessage, maybe_importer: Option<UserId>) -> bool {
-  message.line_position().is_some() && maybe_importer == Some(message.sender_user_id)
+  maybe_importer == Some(message.sender_user_id)
+    && (message.line_position().is_some() || matches!(message.content, MessageContent::Event { .. }))
 }
 
 /// The client message ID of an imported message (e2ee.md §4.10): the same for every run of the

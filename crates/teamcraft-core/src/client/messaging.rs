@@ -292,11 +292,11 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     }
   }
 
-  /// Loads the history of an import that just finished into a conversation whose history this
-  /// device holds; one it hasn't loaded yet gets it with its first page.
+  /// Loads the history of an import that just finished, which came without message events: the
+  /// conversation's first page if this device hasn't read it yet, else a page of the import.
   pub(super) async fn load_finished_import(&mut self, conversation: ConversationId) -> Result<(), CoreError> {
-    if self.is_history_loaded(conversation)? {
-      self.load_imported_history(conversation).await?;
+    if self.unloaded_import(conversation)?.is_some() {
+      self.catch_up_messages(conversation).await?;
     }
     Ok(())
   }

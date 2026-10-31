@@ -1455,6 +1455,11 @@ its group, and leaves once it is done:
   member that isn't a participant (admin.md §3.8). Without a group yet the importer founds it and
   adds the participants with the full history; a participant's device joins from that welcome like
   any DM's (the server lists the import account, so its identity is pinned and its leaf verified).
+  A participant who wrote in the DM before, while the other had no device yet, holds a group of one
+  that was never committed; their device takes the importer's welcome in its place when it comes
+  from the import account of the signed policy and the tree holds nobody but that account and the
+  DM's participants (a participant without a device yet is added later, by the importer's pending
+  addition). Any other welcome still has to hold exactly the participants.
   Into an existing group the importer posts its signed self-addition as a workspace admin (admin.md
   §2.4: from the join on, only under `admin_self_join = visible`), which a participant's device
   commits. Once every participant is in the group, the importer posts its signed leave, a
