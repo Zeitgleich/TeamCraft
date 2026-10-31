@@ -239,6 +239,11 @@ video-unmute = Unmute
 video-volume = Volume
 video-fullscreen = Full screen
 video-exit-fullscreen = Exit full screen
+# A video the app's player can't play (#804); $packages are Linux package names
+video-unplayable = This video can't be played here.
+video-unplayable-install = This system lacks a video decoder. Install { $packages }, then restart TeamCraft.
+video-unplayable-codecs = This system lacks a video decoder. Install your distribution's GStreamer plugins for H.264 and HEVC, then restart TeamCraft.
+video-open-externally = Open in video player
 # Audio attachments playing in the conversation (#802)
 audio-play = Play { $name }
 audio-pause = Pause { $name }

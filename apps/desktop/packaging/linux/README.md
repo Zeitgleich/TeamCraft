@@ -37,16 +37,64 @@ architecture).
 
 ## What each package needs from the system
 
-| Package  | Brings along                                       | Needs from the system                                                                                   |
-|----------|----------------------------------------------------|---------------------------------------------------------------------------------------------------------|
-| Flatpak  | GNOME 51 runtime (WebKitGTK, GStreamer, PipeWire client libs); Mesa through the GL extension | Flatpak ≥ 1.14, `xdg-desktop-portal` with a desktop backend (GNOME, KDE, wlr), PipeWire, a Secret Service (GNOME Keyring, KWallet/ksecretd) |
-| `.deb`   | –                                                  | WebKitGTK 4.1, GTK 3, GStreamer 1.x (+ `gstreamer1.0-plugins-bad` for VA-API), PipeWire, ALSA            |
-| `.rpm`   | –                                                  | The same, with Fedora package names                                                                       |
-| AppImage | WebKitGTK and GTK                                  | GStreamer (not bundled: `bundleMediaFramework` is off), glibc ≥ 2.41, PipeWire, a Secret Service          |
+| Package  | Brings along                                                                                                                             | Needs from the system                                                                                                                                           |
+|----------|------------------------------------------------------------------------------------------------------------------------------------------|-----------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| Flatpak  | GNOME 51 runtime (WebKitGTK, GStreamer, PipeWire client libs); Mesa through the GL extension; H.264/HEVC decoding through `codecs-extra` | Flatpak ≥ 1.14, `xdg-desktop-portal` with a desktop backend (GNOME, KDE, wlr), PipeWire, a Secret Service (GNOME Keyring, KWallet/ksecretd)                     |
+| `.deb`   | –                                                                                                                                        | WebKitGTK 4.1, GTK 3, GStreamer 1.x with gst-plugins-good (+ `gstreamer1.0-libav` for video attachments, `gstreamer1.0-plugins-bad` for VA-API), PipeWire, ALSA |
+| `.rpm`   | –                                                                                                                                        | The same, with Fedora package names (HEVC videos: RPM Fusion, see "Video attachments")                                                                          |
+| AppImage | WebKitGTK and GTK                                                                                                                        | GStreamer with gst-plugins-good and an H.264/HEVC decoder (not bundled: `bundleMediaFramework` is off), glibc ≥ 2.41, PipeWire, a Secret Service                |
 
-All of them download Cisco's OpenH264 on first video use (see `crates/teamcraft-media/README.md`)
-and use the desktop's portals for screen sharing, the camera, push-to-talk on Wayland, file dialogs
+All of them download Cisco's OpenH264 on first video use in a call (see
+`crates/teamcraft-media/README.md`) and use the desktop's portals for screen sharing, the camera, push-to-talk on Wayland, file dialogs
 and opening the login page.
+
+## Video attachments
+
+The webview (WebKitGTK) plays a video attachment through the system's GStreamer, not through the
+app's own codecs: the OpenH264 the app downloads is for calls, and GStreamer doesn't see it. Phone
+videos are MP4 or MOV with H.264 or HEVC (the iPhone's default) and need two things:
+
+- `qtdemux` from gst-plugins-good to unpack MP4/MOV;
+- an H.264 and an HEVC decoder: `avdec_h264`/`avdec_h265` (gst-libav), `openh264dec` (H.264 only),
+  or the GPU's VA-API decoders (`vah264dec`/`vah265dec` from gst-plugins-bad, where the driver
+  offers them).
+
+| Package  | MP4/MOV                                  | H.264                                                                                | HEVC                                                                                                          |
+|----------|------------------------------------------|--------------------------------------------------------------------------------------|---------------------------------------------------------------------------------------------------------------|
+| Flatpak  | runtime                                  | `org.freedesktop.Platform.codecs-extra` (`avdec_h264`)                               | `codecs-extra` (`avdec_h265`)                                                                                 |
+| `.deb`   | `gstreamer1.0-plugins-good` (dependency) | `gstreamer1.0-libav` (recommended)                                                   | `gstreamer1.0-libav` (recommended)                                                                            |
+| `.rpm`   | `gstreamer1-plugins-good` (dependency)   | `gstreamer1-plugin-openh264` (recommended; Fedora's Cisco repository, on by default) | RPM Fusion: `gstreamer1-plugin-libav` with `libavcodec-freeworld`; or VA-API with `mesa-va-drivers-freeworld` |
+| AppImage | the host's gst-plugins-good              | the host's gst-libav or OpenH264 plugin                                              | the host's gst-libav                                                                                          |
+
+- **Flatpak:** the GNOME runtime declares `codecs-extra` as an extension that Flatpak installs with
+  it, and puts its GStreamer directory on `GST_PLUGIN_SYSTEM_PATH`; nothing in the manifest is
+  needed. The runtime's `org.freedesktop.Platform.openh264` extension is not needed for playback
+  either (it would add `openh264dec`, H.264 only). Should `codecs-extra` be missing:
+  `flatpak install flathub org.freedesktop.Platform.codecs-extra//26.08-extra`.
+- **Fedora:** Fedora's own libavcodec (`ffmpeg-free`) leaves out the H.264 and HEVC decoders; OpenH264 covers H.264. For HEVC enable
+  [RPM Fusion](https://rpmfusion.org/Configuration) (free) and
+  `dnf install gstreamer1-plugin-libav libavcodec-freeworld` (or `dnf swap ffmpeg-free ffmpeg
+  --allowerasing`). AMD and Intel GPUs decode HEVC with `mesa-va-drivers-freeworld` (AMD) or
+  `intel-media-driver` (RPM Fusion nonfree) as well.
+- **openSUSE:** `gstreamer-plugins-libav` from Packman. **Arch:** `gst-libav`.
+
+`apt` installs recommended packages by default; `dnf` installs weak dependencies that a repository
+offers. After installing a decoder, restart TeamCraft: GStreamer reads its plugins at start.
+
+**In the app:** the shell looks the elements up in GStreamer's registry at start
+(`apps/desktop/src/video_playback.rs`, `teamcraft-media` `playback_gstreamer.rs`) and logs what is
+missing. A video that reports an error, gives no length within 8 seconds of its file being there,
+or plays without a frame or a moving clock for 8 seconds is shown as "This video can't be played
+here", with the packages to install, "Download" and "Open in video player" (the decrypted file goes
+to a private folder under `$XDG_RUNTIME_DIR`, emptied at the next start, and opens in the system's
+default player).
+
+To try it without uninstalling anything, hide the decoders from GStreamer:
+
+```sh
+GST_PLUGIN_FEATURE_RANK=avdec_h264:NONE,avdec_h265:NONE,openh264dec:NONE,vah264dec:NONE,vah265dec:NONE,libde265dec:NONE \
+  teamcraft-desktop
+```
 
 ## Start-up environment
 
@@ -192,8 +240,10 @@ cd apps/desktop
 cargo tauri build --config tauri.models.conf.json --bundles deb,rpm,appimage
 ```
 
-`tauri.conf.json` declares GStreamer as a dependency of the `.deb` and `.rpm` and recommends the
-VA-API plugin (`gstreamer1.0-plugins-bad` / `gstreamer1-plugins-bad-free`) and the tray library
+`tauri.conf.json` declares GStreamer and gst-plugins-good (MP4/MOV) as dependencies of the `.deb`
+and `.rpm` and recommends the video decoders (`gstreamer1.0-libav` / `gstreamer1-plugin-openh264`
+and `gstreamer1-plugin-libav`, see "Video attachments"), the VA-API plugin
+(`gstreamer1.0-plugins-bad` / `gstreamer1-plugins-bad-free`) and the tray library
 (`libayatana-appindicator3-1` / `libayatana-appindicator-gtk3`). The tray library is only
 recommended because the app runs without it, just without a tray icon (as in the Flatpak, whose
 runtime doesn't ship it). The release workflow builds them in a Debian 13 container (see the

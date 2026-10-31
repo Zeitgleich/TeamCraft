@@ -658,8 +658,12 @@ fn InlineVideo(playback: InlinePlayback, label: String, on_expand: Callback<()>)
   let i18n = use_i18n();
   let video = NodeRef::<html::Video>::new();
   pause_when_hidden(video);
-  // The browser can't play it (a codec it lacks): the lightbox explains.
-  let on_error = Callback::new(move |()| on_expand.run(()));
+  // The webview can't play it (a codec it lacks, #804): the lightbox explains at once, without
+  // trying again.
+  let on_unplayable = Callback::new(move |()| {
+    media_cache::mark_unplayable(playback.key);
+    on_expand.run(());
+  });
   view! {
     <div class="media-video">
       {move || match playback.url.get() {
@@ -667,7 +671,7 @@ fn InlineVideo(playback: InlinePlayback, label: String, on_expand: Callback<()>)
           // The player's code loads with its first use (areas.rs).
           let src = url.as_str().to_owned();
           let label = label.clone();
-          lazy_area(Place::Pane, move || areas::inline_video_player(src.clone(), video, label.clone(), on_error))
+          lazy_area(Place::Pane, move || areas::inline_video_player(src.clone(), video, label.clone(), on_unplayable))
         },
         None => view! { <span class="spinner" role="status" aria-label=move || i18n.t("loader-loading")></span> }.into_any(),
       }}

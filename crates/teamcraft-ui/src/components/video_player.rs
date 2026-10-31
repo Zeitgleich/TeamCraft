@@ -2,10 +2,12 @@
 //! play and pause, a scrubber that shows what is buffered, the time, mute and volume, and full
 //! screen, drawn with the app's icons on every platform instead of each webview's native controls
 //! (WebKitGTK's GStreamer bar, WKWebView's, WebView2's). Keys work while the player has focus; the
-//! logic behind them is in [`crate::video_controls`].
+//! logic behind them is in [`crate::video_controls`]. A video that gives no sign of playing counts
+//! as unplayable, like one the webview reports an error for (#804).
 
 use leptos::ev;
 use leptos::html;
+use leptos::leptos_dom::helpers::{TimeoutHandle, set_timeout_with_handle};
 use leptos::prelude::*;
 use wasm_bindgen::JsCast;
 
@@ -13,11 +15,15 @@ use crate::components::icons::{Icon, IconName};
 use crate::i18n::use_i18n;
 use crate::reactive::SetIfAlive;
 use crate::video_controls::{
-  PlayerCommand, buffered_until, format_seconds, percent_of, seek_target, volume_target,
+  PlaybackState, PlayerCommand, STALL_TIMEOUT, StallCheck, buffered_until, format_seconds, percent_of,
+  seek_target, volume_target,
 };
 
 /// The volume unmuting goes back to when the volume was turned all the way down.
 const UNMUTED_VOLUME: f64 = 0.5;
+/// `HTMLMediaElement.readyState` values.
+const HAVE_METADATA: u16 = 1;
+const HAVE_CURRENT_DATA: u16 = 2;
 
 /// A `<video>` without the platform's controls and with the app's own over it. The player fills its
 /// box; the video is letterboxed inside it.
@@ -38,8 +44,9 @@ pub fn VideoPlayer(
   /// The first frame's size is known.
   #[prop(optional)]
   maybe_on_loaded: Option<Callback<()>>,
-  /// The browser can't play the file.
-  on_error: Callback<()>,
+  /// The video can't be played here: the webview reported an error, or the video gave no sign of
+  /// playing within [`STALL_TIMEOUT`]. Runs at most once.
+  on_unplayable: Callback<()>,
 ) -> impl IntoView {
   let i18n = use_i18n();
   let player = NodeRef::<html::Div>::new();
@@ -54,6 +61,10 @@ pub fn VideoPlayer(
     player,
     is_fullscreen,
   };
+  // Counted from here, when the file's `blob:` URL is set: never while it still downloads.
+  let stalls = StallWatch::new(video, on_unplayable);
+  stalls.watch(StallCheck::Metadata);
+  on_cleanup(move || stalls.stop());
 
   let on_keydown = move |ev: web_sys::KeyboardEvent| {
     // Space and Enter on a button press it; the player doesn't press it twice.
@@ -116,7 +127,13 @@ pub fn VideoPlayer(
         prop:autoplay=is_autoplay
         node_ref=video
         on:loadedmetadata=move |ev| {
-          timeline.update(&event_target::<web_sys::HtmlVideoElement>(&ev));
+          let element = event_target::<web_sys::HtmlVideoElement>(&ev);
+          timeline.update(&element);
+          if playback_state(&element).lacks_picture() {
+            tracing::info!("a video has no picture size: the webview can't decode it");
+            stalls.report();
+            return;
+          }
           if let Some(on_loaded) = maybe_on_loaded {
             on_loaded.run(());
           }
@@ -124,7 +141,11 @@ pub fn VideoPlayer(
         on:durationchange=move |ev| timeline.update(&event_target::<web_sys::HtmlVideoElement>(&ev))
         on:timeupdate=move |ev| timeline.update(&event_target::<web_sys::HtmlVideoElement>(&ev))
         on:progress=move |ev| timeline.update(&event_target::<web_sys::HtmlVideoElement>(&ev))
-        on:play=move |_| is_paused.set_if_alive(false)
+        on:play=move |ev| {
+          is_paused.set_if_alive(false);
+          let from_seconds = event_target::<web_sys::HtmlVideoElement>(&ev).current_time();
+          stalls.watch(StallCheck::Start { from_seconds });
+        }
         on:pause=move |_| is_paused.set_if_alive(true)
         on:ended=move |_| is_paused.set_if_alive(true)
         on:volumechange=move |ev| {
@@ -138,7 +159,7 @@ pub fn VideoPlayer(
             controls.run(PlayerCommand::ToggleFullscreen);
           }
         }
-        on:error=move |_| on_error.run(())
+        on:error=move |_| stalls.report()
       ></video>
       // The large button over a paused video; the bar's own button is the one for the keyboard.
       <button
@@ -214,6 +235,16 @@ struct Timeline {
   buffered: RwSignal<f64>,
 }
 
+/// Timers that tell an unplayable video from one that plays (#804).
+#[derive(Clone, Copy)]
+struct StallWatch {
+  video: NodeRef<html::Video>,
+  on_unplayable: Callback<()>,
+  maybe_metadata_timer: StoredValue<Option<TimeoutHandle>>,
+  maybe_start_timer: StoredValue<Option<TimeoutHandle>>,
+  is_reported: StoredValue<bool>,
+}
+
 /// What the buttons and keys act on.
 #[derive(Clone, Copy)]
 struct Controls {
@@ -251,6 +282,78 @@ impl Timeline {
   fn max(self) -> f64 {
     let duration = self.duration.get();
     if duration.is_finite() { duration } else { 0.0 }
+  }
+}
+
+impl StallWatch {
+  fn new(video: NodeRef<html::Video>, on_unplayable: Callback<()>) -> Self {
+    Self {
+      video,
+      on_unplayable,
+      maybe_metadata_timer: StoredValue::new(None),
+      maybe_start_timer: StoredValue::new(None),
+      is_reported: StoredValue::new(false),
+    }
+  }
+
+  /// Checks `check` after [`STALL_TIMEOUT`], replacing an earlier check of the same kind.
+  fn watch(self, check: StallCheck) {
+    let slot = match check {
+      StallCheck::Metadata => self.maybe_metadata_timer,
+      StallCheck::Start { .. } => self.maybe_start_timer,
+    };
+    let fire = move || {
+      // The player may be gone by now; then nothing is left to report on.
+      let Some(Some(video)) = self.video.try_get_untracked() else {
+        return;
+      };
+      if check.is_stalled(playback_state(&video)) {
+        tracing::info!(?check, "a video gave no sign of playing; it can't be played here");
+        self.report();
+      }
+    };
+    match set_timeout_with_handle(fire, STALL_TIMEOUT) {
+      Ok(handle) => {
+        if let Some(Some(earlier)) = slot.try_get_value() {
+          earlier.clear();
+        }
+        slot.try_set_value(Some(handle));
+      },
+      Err(error) => tracing::debug!(?error, "no timer for the video's stall check"),
+    }
+  }
+
+  /// Tells the caller once; the timers stop.
+  fn report(self) {
+    if self.is_reported.try_get_value() != Some(false) {
+      return;
+    }
+    self.is_reported.try_set_value(true);
+    self.stop();
+    self.on_unplayable.run(());
+  }
+
+  fn stop(self) {
+    for slot in [self.maybe_metadata_timer, self.maybe_start_timer] {
+      if let Some(Some(handle)) = slot.try_get_value() {
+        handle.clear();
+      }
+      slot.try_set_value(None);
+    }
+  }
+}
+
+/// What the stall checks look at.
+fn playback_state(video: &web_sys::HtmlVideoElement) -> PlaybackState {
+  let ready_state = video.ready_state();
+  PlaybackState {
+    has_metadata: ready_state >= HAVE_METADATA,
+    has_frame: ready_state >= HAVE_CURRENT_DATA,
+    has_picture: video.video_width() > 0,
+    is_paused: video.paused(),
+    is_ended: video.ended(),
+    is_seeking: video.seeking(),
+    current_seconds: video.current_time(),
   }
 }
 

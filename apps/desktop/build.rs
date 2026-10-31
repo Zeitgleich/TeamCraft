@@ -103,6 +103,8 @@ const COMMANDS: &[&str] = &[
   "update_restart",
   "update_with_package_manager",
   "update_dismiss",
+  "video_playback",
+  "open_video_externally",
   "window_chrome",
   "window_action",
 ];

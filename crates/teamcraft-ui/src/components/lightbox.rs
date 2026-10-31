@@ -43,8 +43,10 @@ use crate::components::lightbox_controls::{
 };
 use crate::components::lightbox_motion::{MotionHooks, MotionNodes, StageMotion};
 use crate::components::modal::Modal;
+use crate::components::pending_button::PendingButton;
 use crate::components::thread_panel::ThreadPanel;
 use crate::components::video_player::VideoPlayer;
+use crate::feedback::{ActionFailure, FailureKind, PendingAction};
 use crate::i18n::use_i18n;
 use crate::lightbox::{
   Arrival, Command, Direction, Gesture, LightboxScope, MediaKey, MediaKind, MediaPages, ModifierStyle, Point,
@@ -53,6 +55,7 @@ use crate::lightbox::{
 use crate::media_cache::{self, Rendition};
 use crate::model::{ConversationId, ConversationKind, thread_id_of};
 use crate::object_url::ObjectUrl;
+use crate::reactive::SetIfAlive;
 use crate::state::use_app_state;
 
 /// Pixels per line of a wheel event that scrolls by lines (Firefox with a mouse wheel).
@@ -72,6 +75,8 @@ pub enum FullMedia {
   Loading,
   Ready(Rc<ObjectUrl>),
   Failed,
+  /// A video this webview can't play (#804): it can still be saved or opened in the system's player.
+  Unplayable,
   /// Bigger than the in-memory viewer opens; it can still be downloaded.
   TooLarge,
   /// The file's message was deleted (or the file list no longer has it).
@@ -539,9 +544,10 @@ fn load_current(inputs: LoadInputs) {
       full.set(FullMedia::TooLarge);
       return;
     }
+    let is_video = kind.get_untracked() == Some(MediaKind::Video);
     // Seen before in this session (inline or in the lightbox): shown at once.
     if let Some(url) = media_cache::cached(key, Rendition::Full) {
-      full.set(FullMedia::Ready(url));
+      full.set(loaded(key, is_video, url));
       return;
     }
     full.set(FullMedia::Loading);
@@ -552,7 +558,7 @@ fn load_current(inputs: LoadInputs) {
         return;
       }
       let shown = match result {
-        Ok(Some(url)) => FullMedia::Ready(url),
+        Ok(Some(url)) => loaded(key, is_video, url),
         Ok(None) => FullMedia::Failed,
         Err(error) => {
           tracing::warn!(%error, conversation_id = %conversation, "could not open a file");
@@ -567,6 +573,15 @@ fn load_current(inputs: LoadInputs) {
     drop(full.try_set(FullMedia::Loading));
     drop(thumbnail.try_set(None));
   });
+}
+
+/// A loaded file, or that it can't be played: a video that already failed to play in this session
+/// (in its message row, say) isn't tried again (#804).
+fn loaded(key: MediaKey, is_video: bool, url: Rc<ObjectUrl>) -> FullMedia {
+  match is_video && media_cache::is_unplayable(key) {
+    true => FullMedia::Unplayable,
+    false => FullMedia::Ready(url),
+  }
 }
 
 /// Where the file is shown and the pointer and wheel gestures happen. A tap beside the picture
@@ -764,7 +779,12 @@ fn Stage(
                     mark_shown(arrival, key);
                     motion.shown();
                   })
-                  on_error=Callback::new(move |()| drop(full.try_set(FullMedia::Failed)))
+                  on_unplayable=Callback::new(move |()| {
+                    if let Some(key) = key {
+                      media_cache::mark_unplayable(key);
+                    }
+                    drop(full.try_set(FullMedia::Unplayable));
+                  })
                 />
               }
               .into_any()
@@ -970,6 +990,7 @@ fn Status(
       </div>
     }
     .into_any(),
+    FullMedia::Unplayable => view! { <Unplayable actions=actions /> }.into_any(),
     FullMedia::TooLarge => view! {
       <div class="lightbox-status" role="status">
         <span>{move || i18n.t("lightbox-too-large")}</span>
@@ -986,6 +1007,55 @@ fn Status(
     }
     .into_any(),
     FullMedia::Ready(_) => ().into_any(),
+  }
+}
+
+/// A video this webview can't play (#804): what to do instead, and on Linux the packages that bring
+/// the missing decoder. "Open in video player" only in the desktop app, which can hand the file over.
+#[component]
+fn Unplayable(actions: MediaActions) -> impl IntoView {
+  let i18n = use_i18n();
+  let maybe_hint = RwSignal::new(None::<String>);
+  spawn_local(async move {
+    let Some(playback) = crate::auth::tauri::video_playback().await else {
+      return;
+    };
+    let packages = playback.packages_to_install();
+    let hint = if !packages.is_empty() {
+      i18n.t_with("video-unplayable-install", &[("packages", &packages.join(", "))])
+    } else if !playback.missing().is_empty() {
+      i18n.t("video-unplayable-codecs")
+    } else {
+      return;
+    };
+    maybe_hint.set_if_alive(Some(hint));
+  });
+  let opening = PendingAction::new();
+  let open_externally = move |_| {
+    let Some(file) = actions.current_file.get_untracked() else {
+      return;
+    };
+    opening.spawn(async move {
+      crate::auth::tauri::open_video_externally(&file)
+        .await
+        .map_err(|error| ActionFailure::new(FailureKind::Other, error))
+    });
+  };
+  view! {
+    <div class="lightbox-unplayable" role="alert">
+      <p class="lightbox-unplayable-title">{move || i18n.t("video-unplayable")}</p>
+      {move || maybe_hint.get().map(|hint| view! { <p class="lightbox-unplayable-hint">{hint}</p> })}
+      <div class="lightbox-unplayable-actions">
+        <button class="btn btn-small" on:click=move |_| actions.run(Command::Download)>
+          {move || i18n.t("lightbox-save")}
+        </button>
+        {crate::auth::tauri::is_available().then(|| view! {
+          <PendingButton pending=opening class="btn btn-small btn-primary" on_click=open_externally>
+            {move || i18n.t("video-open-externally")}
+          </PendingButton>
+        })}
+      </div>
+    </div>
   }
 }
 

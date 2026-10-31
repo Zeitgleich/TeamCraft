@@ -76,10 +76,12 @@
         "priority": "optional",
         "depends": [
           "libgstreamer1.0-0",
-          "libgstreamer-plugins-base1.0-0"
+          "libgstreamer-plugins-base1.0-0",
+          "gstreamer1.0-plugins-good"
         ],
         "recommends": [
           "gnome-keyring",
+          "gstreamer1.0-libav",
           "gstreamer1.0-plugins-bad",
           "libayatana-appindicator3-1"
         ]
@@ -89,10 +91,13 @@
         "postInstallScript": "packaging/linux/rpm-post-install.sh",
         "depends": [
           "gstreamer1",
-          "gstreamer1-plugins-base"
+          "gstreamer1-plugins-base",
+          "gstreamer1-plugins-good"
         ],
         "recommends": [
           "gnome-keyring",
+          "gstreamer1-plugin-openh264",
+          "gstreamer1-plugin-libav",
           "gstreamer1-plugins-bad-free",
           "libayatana-appindicator-gtk3"
         ]
