@@ -58,6 +58,10 @@ on; `ssh -L <port>:127.0.0.1:<port> <host>` and open the printed address in your
 - A TeamCraft server of this version or later, with the identity provider sync configured
   (`[oidc.sync]`, docs/operations.md): it pre-provisions the mapped accounts, so people who never
   signed in still get their channels and DMs.
+- **Every app on this version or later** (desktop, web, Android, iOS) before the import starts. An
+  older app shows imported messages under the import account's name, and it turns down the import
+  account's group of a DM its user wrote in before the other person had the app: that user then
+  can't read the DM's imported history.
 - An **import account** at the identity provider (for example `import`), with the TeamCraft `admin`
   client role. Don't set it up in an app: the tool's device is its first and only device.
 - **Sign in with the tool** (it makes the import account's keys and device):
