@@ -5,6 +5,7 @@
 #![allow(clippy::unwrap_used)]
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use crate::common::{PASSPHRASE, Peer, clock, options, settings};
 use teamcraft_client_api::backend::ChatBackend;
@@ -12,16 +13,18 @@ use teamcraft_client_api::model::{ThreadId, thread_id_of};
 use teamcraft_client_api::remote::{ChatSnapshot, SecuritySnapshot};
 use teamcraft_client_api::snapshot_changes::SnapshotCursor;
 use teamcraft_core::api::fake::{FakeGateway, FakeServer, FakeServerApi};
+use teamcraft_core::client::{LinkAnnouncement, NewDeviceLink};
 use teamcraft_core::store::{MemoryStore, TrackedStore};
 use teamcraft_core::ui_backend::CoreChatBackend;
 use teamcraft_core::ui_snapshot::SnapshotCache;
-use teamcraft_core::{Client, PendingEnrollment};
-use teamcraft_proto::{ClientMessageId, ConversationId};
+use teamcraft_core::{Client, LinkOffer, PendingEnrollment};
+use teamcraft_proto::{ClientMessageId, ConversationId, DeviceLinkPlatform};
 
 type Store = TrackedStore<Arc<MemoryStore>>;
 
 /// Carol's client as the desktop and web shells run it: a tracked store, a cache and the UI's copy.
 struct Reader {
+  api: FakeServerApi,
   client: Client<FakeServerApi, Store>,
   gateway: FakeGateway,
   store: Store,
@@ -195,6 +198,52 @@ async fn another_cache_answers_with_everything() {
   carol.assert_up_to_date();
 }
 
+/// A new device of Carol's asks to be linked: the mark the approve prompt watches moves in the
+/// changes the UI reads, and moves again once this device took the request up.
+#[tokio::test]
+async fn a_link_request_moves_the_mark_the_ui_reads() {
+  let (_alice, mut carol, _) = workspace().await;
+  let before = link_request_mark(&carol.held);
+  let api = carol.api.clone();
+  let offer = LinkOffer::generate();
+  let announcement = LinkAnnouncement {
+    device_name: "Tablet".into(),
+    platform: DeviceLinkPlatform::Android,
+  };
+  let waiting = tokio::time::timeout(Duration::from_millis(200), async {
+    let (link, announced) = tokio::join!(
+      NewDeviceLink::connect(&api, &offer),
+      offer.announce(&api, &announcement)
+    );
+    announced.unwrap();
+    link
+  });
+
+  let (_, ()) = tokio::join!(waiting, async {
+    while carol.client.link_requests().is_empty() {
+      carol.client.pump(&mut carol.gateway).await.unwrap();
+      tokio::task::yield_now().await;
+    }
+    let changes = carol.changes();
+    carol.held.apply(changes);
+    let announced = link_request_mark(&carol.held);
+    assert!(announced > before, "the UI never hears of the request");
+
+    let id = carol.client.link_requests()[0].id.clone();
+    carol.client.reject_link_request(&id).await.unwrap();
+    let changes = carol.changes();
+    carol.held.apply(changes);
+    assert!(link_request_mark(&carol.held) > announced);
+  });
+}
+
+fn link_request_mark(snapshot: &ChatSnapshot) -> u64 {
+  snapshot
+    .maybe_live
+    .as_ref()
+    .map_or(0, |live| live.marks.link_requests)
+}
+
 /// Alice's space with two channels Carol is in; Carol has read her first snapshot.
 async fn workspace() -> (Peer, Reader, [ConversationId; 2]) {
   let server = FakeServer::new();
@@ -224,9 +273,10 @@ async fn workspace() -> (Peer, Reader, [ConversationId; 2]) {
 impl Reader {
   async fn enroll(server: &FakeServer) -> Self {
     let store = TrackedStore::new(Arc::new(MemoryStore::new()));
+    let api = server.add_user("Carol");
     let mut client = PendingEnrollment::new()
       .complete(
-        server.add_user("Carol"),
+        api.clone(),
         store.clone(),
         clock(),
         settings(),
@@ -238,6 +288,7 @@ impl Reader {
     let backend = CoreChatBackend::new(store.clone(), client.user_id(), clock());
     let held = ChatSnapshot::read(&backend, SecuritySnapshot::default());
     Self {
+      api,
       client,
       gateway,
       store,
