@@ -76,7 +76,7 @@ ashpd = { version = "0.13.13", features = ["global_shortcuts", "background"] }
 futures-util = "0.3"
 # Idle time, screen lock and replaceable, withdrawable notifications over D-Bus (MIT; already in the
 # tree through ashpd, same version and runtime).
-zbus = { version = "5.13", default-features = false, features = ["tokio"] }
+zbus = { version = "6.1", default-features = false, features = ["tokio"] }
 # The desktop's window button layout (gtk-decoration-layout) for the custom title bar (MIT; the
 # same version Tauri uses on Linux, so already in the tree).
 gtk = "0.18"
@@ -146,4 +146,4 @@ wtransport = { version = "0.7.2", features = ["self-signed"] }
 [target.'cfg(target_os = "linux")'.dev-dependencies]
 # A fake notification service on a peer-to-peer connection, so tests see what a ringing call sends
 # (freedesktop.rs) without a session bus.
-zbus = { version = "5.13", default-features = false, features = ["tokio", "p2p"] }
+zbus = { version = "6.1", default-features = false, features = ["tokio", "p2p"] }
