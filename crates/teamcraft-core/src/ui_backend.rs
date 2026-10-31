@@ -1059,7 +1059,11 @@ impl<S: LocalStore> CoreChatBackend<S> {
   ) -> FeedTail {
     let mut tail = FeedTail::default();
     self.with_all_messages(conversation, &mut |all| {
-      let feed: Vec<&StoredMessage> = all.iter().filter(|message| is_feed_row(message)).collect();
+      let maybe_importer = self.importer();
+      let feed: Vec<&StoredMessage> = all
+        .iter()
+        .filter(|message| is_feed_row(message, maybe_importer))
+        .collect();
       let anchor_at = maybe_oldest
         .and_then(|anchor| anchor.position_in(&feed))
         .unwrap_or(feed.len());
@@ -1305,7 +1309,11 @@ impl<S: LocalStore> ChatBackend for CoreChatBackend<S> {
   fn message_page(&self, conversation: ConversationId, start: usize, len: usize) -> (usize, Vec<Message>) {
     let mut answer = (0, Vec::new());
     self.with_all_messages(conversation, &mut |all| {
-      let top_level: Vec<&StoredMessage> = all.iter().filter(|message| is_feed_row(message)).collect();
+      let maybe_importer = self.importer();
+      let top_level: Vec<&StoredMessage> = all
+        .iter()
+        .filter(|message| is_feed_row(message, maybe_importer))
+        .collect();
       let end = start.saturating_add(len).min(top_level.len());
       let start = start.min(end);
       let relations = Relations::of(all, self.importer());
@@ -2520,11 +2528,13 @@ fn unread_position(message: &StoredMessage) -> Option<MessageId> {
 /// where a line about a change the server reports sits; time-ordered like the messages', and no
 /// outbox message's), or a stable stand-in for outbox messages.
 /// Whether a stored message is a row of the conversation's feed: top level (or a reply also sent
-/// to the channel), not hidden, not deleted.
-fn is_feed_row(message: &StoredMessage) -> bool {
+/// to the channel), not hidden, not deleted, and not the import account `maybe_importer` adding
+/// somebody (a line per member of every imported conversation, e2ee.md §4.10).
+fn is_feed_row(message: &StoredMessage, maybe_importer: Option<UserId>) -> bool {
   (message.maybe_thread_id.is_none() || message.is_also_in_channel())
     && !message.is_hidden()
     && !is_deleted(message)
+    && !crate::imported::is_import_addition(message, maybe_importer)
 }
 
 pub(crate) fn ui_message_id(message: &StoredMessage) -> MessageId {

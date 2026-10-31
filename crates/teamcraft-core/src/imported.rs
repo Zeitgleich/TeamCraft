@@ -13,7 +13,7 @@ use teamcraft_proto::{ClientMessageId, ConversationId, ImportPolicy, UserId};
 
 use crate::convert;
 use crate::records;
-use crate::store::{LocalStore, MessageContent, StoredMessage, Table};
+use crate::store::{ConversationEvent, LocalStore, MessageContent, StoredMessage, Table};
 use crate::workspace::WorkspaceState;
 
 /// Where an imported message came from and whom it is by.
@@ -109,6 +109,18 @@ pub fn is_import_line(message: &StoredMessage, maybe_importer: Option<UserId>) -
     && (message.line_position().is_some() || matches!(message.content, MessageContent::Event { .. }))
 }
 
+/// Whether `message` is the import account `maybe_importer` adding somebody else: not shown, the
+/// people of an imported conversation were in it in the old system.
+pub fn is_import_addition(message: &StoredMessage, maybe_importer: Option<UserId>) -> bool {
+  maybe_importer == Some(message.sender_user_id)
+    && matches!(
+      message.content,
+      MessageContent::Event {
+        event: ConversationEvent::MemberAdded { user, .. },
+      } if Some(user) != maybe_importer
+    )
+}
+
 /// The client message ID of an imported message (e2ee.md §4.10): the same for every run of the
 /// import, so the server keeps the first.
 pub fn imported_message_id(
@@ -139,6 +151,27 @@ mod tests {
     assert!(trusted_origin(&message, None).is_none());
     let forged = imported_by("8".parse().unwrap());
     assert!(trusted_origin(&forged, Some(importer)).is_none());
+  }
+
+  #[test]
+  fn only_the_import_account_adding_somebody_else_is_left_out() {
+    let importer: UserId = IMPORTER.parse().unwrap();
+    let other: UserId = "8".parse().unwrap();
+    let adding = |sender: UserId, user: UserId| StoredMessage {
+      sender_user_id: sender,
+      content: MessageContent::Event {
+        event: ConversationEvent::MemberAdded {
+          user,
+          history: teamcraft_proto::HistoryPolicy::Full,
+        },
+      },
+      ..imported_by(sender)
+    };
+    assert!(is_import_addition(&adding(importer, other), Some(importer)));
+    assert!(!is_import_addition(&adding(other, importer), Some(importer)));
+    assert!(!is_import_addition(&adding(importer, importer), Some(importer)));
+    assert!(!is_import_addition(&adding(importer, other), None));
+    assert!(!is_import_addition(&imported_by(importer), Some(importer)));
   }
 
   #[test]
