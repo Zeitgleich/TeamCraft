@@ -10,8 +10,8 @@ use std::time::Duration;
 use secrecy::ExposeSecret;
 use serde::Deserialize;
 use serde_json::json;
-use teamcraft_db::{GroupCreateOutcome, NewUserGroup, OidcUserRow};
-use teamcraft_proto::{DeactivationReason, UserGroupId, UserKind};
+use teamcraft_db::{GroupCreateOutcome, NewUserGroup, OidcIdentity, OidcUserRow};
+use teamcraft_proto::{DeactivationReason, ProvisionStatus, ProvisionedUser, UserGroupId, UserId, UserKind};
 use tracing::{debug, info, warn};
 
 use super::admin::{AfterDeactivation, announce_reactivation, deactivate_user};
@@ -163,6 +163,95 @@ pub async fn sync_once(state: &AppState) -> Result<SyncReport, ApiError> {
   Ok(report)
 }
 
+/// Creates the accounts of `usernames` from the provider before their first sign-in (admin.md §3.8),
+/// so an import can make them members. A sign-in later finds the account by issuer and subject and
+/// refreshes it from the token. Fails when the sync isn't configured or the provider can't be read.
+pub async fn provision_users(
+  state: &AppState,
+  usernames: &[String],
+) -> Result<Vec<ProvisionedUser>, ApiError> {
+  let Some(settings) = &state.settings.get().maybe_oidc_sync else {
+    return Err(ApiError::Unavailable("identity provider sync (oidc.sync)".into()));
+  };
+  let provider = Provider::new(settings).await.map_err(unavailable)?;
+  let client_uuid = provider.client_uuid().await.map_err(unavailable)?;
+  let mapping = RoleMapping::new(settings.roles.clone());
+  let mut provisioned = Vec::with_capacity(usernames.len());
+  for username in usernames {
+    let maybe_remote = provider.find_user(username).await.map_err(unavailable)?;
+    let entry = match maybe_remote {
+      Some(remote) if remote.enabled => {
+        let roles = provider
+          .client_roles(&remote.id, &client_uuid)
+          .await
+          .map_err(unavailable)?;
+        match mapping.resolve(roles.iter().map(String::as_str)) {
+          Some(role) => provision_one(state, settings, &remote, role).await?,
+          None => (None, ProvisionStatus::NotFound),
+        }
+      },
+      _ => (None, ProvisionStatus::NotFound),
+    };
+    provisioned.push(ProvisionedUser {
+      username: username.clone(),
+      maybe_user_id: entry.0,
+      status: entry.1,
+    });
+  }
+  Ok(provisioned)
+}
+
+async fn provision_one(
+  state: &AppState,
+  settings: &OidcSyncSettings,
+  remote: &RemoteUser,
+  role: teamcraft_proto::Role,
+) -> Result<(Option<UserId>, ProvisionStatus), ApiError> {
+  if let Some(existing) = state
+    .database
+    .find_user_by_oidc_subject(&settings.issuer, &remote.id)
+    .await?
+  {
+    let is_available = state
+      .database
+      .get_users(&[existing])
+      .await?
+      .iter()
+      .any(|user| !user.is_deactivated);
+    let status = if is_available {
+      ProvisionStatus::Existing
+    } else {
+      ProvisionStatus::Unavailable
+    };
+    return Ok((Some(existing), status));
+  }
+  let kind = if role == teamcraft_proto::Role::Guest {
+    UserKind::Guest
+  } else {
+    UserKind::Member
+  };
+  let display_name = remote.display_name();
+  let user = state
+    .database
+    .upsert_oidc_user(
+      &OidcIdentity {
+        issuer: &settings.issuer,
+        subject: &remote.id,
+        maybe_username: remote.maybe_username.as_deref(),
+        maybe_email: remote.maybe_email.as_deref(),
+        display_name: &display_name,
+        kind,
+        maybe_oidc_role: Some(role.as_str()),
+        maybe_organization: None,
+        should_sync_organization: false,
+      },
+      state.next_id()?,
+    )
+    .await?;
+  info!(user_id = %user.id, "provisioned an account from the identity provider");
+  Ok((Some(user.id), ProvisionStatus::Created))
+}
+
 /// Mirrors the provider's top-level groups as user groups. The provider is the source of truth for
 /// their name and members; a group that vanished there is deleted here.
 async fn sync_groups(
@@ -271,6 +360,32 @@ struct RemoteUser {
   id: String,
   #[serde(default)]
   enabled: bool,
+  #[serde(rename = "username", default)]
+  maybe_username: Option<String>,
+  #[serde(rename = "email", default)]
+  maybe_email: Option<String>,
+  #[serde(rename = "firstName", default)]
+  maybe_first_name: Option<String>,
+  #[serde(rename = "lastName", default)]
+  maybe_last_name: Option<String>,
+}
+
+impl RemoteUser {
+  /// The name a token's `name` claim would carry (Keycloak: first and last name), else the user
+  /// name, else the subject, as the token validator does.
+  fn display_name(&self) -> String {
+    let full = [self.maybe_first_name.as_deref(), self.maybe_last_name.as_deref()]
+      .into_iter()
+      .flatten()
+      .map(str::trim)
+      .filter(|part| !part.is_empty())
+      .collect::<Vec<_>>()
+      .join(" ");
+    if !full.is_empty() {
+      return full;
+    }
+    self.maybe_username.clone().unwrap_or_else(|| self.id.clone())
+  }
 }
 
 #[derive(Deserialize)]
@@ -394,6 +509,18 @@ impl<'a> Provider<'a> {
         return Ok(ids);
       }
     }
+  }
+
+  /// The user with exactly this user name.
+  async fn find_user(&self, username: &str) -> Result<Option<RemoteUser>, ProviderError> {
+    let encoded: String = url::form_urlencoded::byte_serialize(username.as_bytes()).collect();
+    let users: Vec<RemoteUser> = self.get(&format!("/users?username={encoded}&exact=true")).await?;
+    Ok(users.into_iter().find(|user| {
+      user
+        .maybe_username
+        .as_deref()
+        .is_some_and(|name| name.eq_ignore_ascii_case(username))
+    }))
   }
 
   async fn client_uuid(&self) -> Result<String, ProviderError> {

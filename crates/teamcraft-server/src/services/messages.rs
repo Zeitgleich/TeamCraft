@@ -2,8 +2,8 @@ use std::collections::HashSet;
 
 use teamcraft_db::{HistoryQuery, NewMessage};
 use teamcraft_proto::{
-  ConversationId, GatewayEvent, HistoryPolicy, Id, ListMessagesQuery, ListMessagesResponse, MessageId,
-  MessageResponse, Permission, SendMessageRequest,
+  ConversationId, ConversationKind, GatewayEvent, HistoryPolicy, Id, ListMessagesQuery, ListMessagesResponse,
+  MessageId, MessageResponse, Permission, SendMessageRequest,
 };
 use tracing::warn;
 
@@ -189,6 +189,11 @@ pub async fn list_messages(
       } else {
         Some(membership.joined_floor)
       },
+      // A DM's participants get its imported history, which predates their joining (e2ee.md §4.10).
+      sees_imported: matches!(
+        access.view.conversation.kind,
+        ConversationKind::Dm | ConversationKind::Group
+      ),
       limit: i64::from(limit),
     })
     .await?;

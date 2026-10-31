@@ -203,9 +203,9 @@ impl Database {
       r#"SELECT tf.conversation_id, tf.thread_id, tf.reason,
                 COUNT(m.id) AS "reply_count!",
                 MAX(m.id) AS "last_reply!",
-                COUNT(m.id) FILTER (WHERE m.id > COALESCE(tf.last_read_message_id, 0)
+                COUNT(m.id) FILTER (WHERE m.id > COALESCE(tf.last_read_message_id, 0) AND NOT m.is_imported
                                       AND m.sender_user_id <> tf.user_id) AS "unread!",
-                COUNT(m.id) FILTER (WHERE m.id > COALESCE(tf.last_read_message_id, 0)
+                COUNT(m.id) FILTER (WHERE m.id > COALESCE(tf.last_read_message_id, 0) AND NOT m.is_imported
                                       AND m.sender_user_id <> tf.user_id
                                       AND tf.user_id = ANY(m.mentioned_user_ids)) AS "mentions!"
          FROM threads_followed tf
@@ -214,7 +214,7 @@ impl Database {
          WHERE tf.user_id = $1 AND tf.state = 'following'
          GROUP BY tf.conversation_id, tf.thread_id, tf.reason
          HAVING ($2::bigint IS NULL OR MAX(m.id) < $2)
-            AND (NOT $3 OR COUNT(m.id) FILTER (WHERE m.id > COALESCE(tf.last_read_message_id, 0)
+            AND (NOT $3 OR COUNT(m.id) FILTER (WHERE m.id > COALESCE(tf.last_read_message_id, 0) AND NOT m.is_imported
                                                  AND m.sender_user_id <> tf.user_id) > 0)
          ORDER BY MAX(m.id) DESC
          LIMIT $4"#,
@@ -264,7 +264,7 @@ impl Database {
              FROM messages m
              WHERE m.conversation_id = ms.conversation_id AND m.thread_id IS NULL
                AND m.sender_user_id <> ms.user_id
-               AND m.id > COALESCE(ms.last_read_message_id, 0)
+               AND m.id > COALESCE(ms.last_read_message_id, 0) AND NOT m.is_imported
                AND m.id >= tc_snowflake_floor(ms.joined_at)
              ORDER BY m.id DESC
              LIMIT $2
@@ -310,7 +310,7 @@ impl Database {
              FROM messages m
              WHERE m.conversation_id = ms.conversation_id AND m.thread_id IS NULL
                AND m.sender_user_id <> ms.user_id
-               AND m.id > COALESCE(ms.last_read_message_id, 0)
+               AND m.id > COALESCE(ms.last_read_message_id, 0) AND NOT m.is_imported
                AND m.id >= tc_snowflake_floor(ms.joined_at)
              ORDER BY m.id DESC
              LIMIT $3
@@ -340,7 +340,7 @@ impl Database {
            JOIN memberships ms ON ms.conversation_id = tf.conversation_id AND ms.user_id = tf.user_id
            JOIN messages m ON m.conversation_id = tf.conversation_id AND m.thread_id = tf.thread_id
            WHERE tf.user_id = $1 AND tf.state = 'following'
-             AND m.id > COALESCE(tf.last_read_message_id, 0) AND m.sender_user_id <> tf.user_id
+             AND m.id > COALESCE(tf.last_read_message_id, 0) AND NOT m.is_imported AND m.sender_user_id <> tf.user_id
            GROUP BY tf.conversation_id, tf.thread_id
          ) t"#,
       to_db(user),

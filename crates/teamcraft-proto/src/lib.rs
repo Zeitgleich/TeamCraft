@@ -11,6 +11,7 @@ mod conversation;
 mod error;
 mod gateway;
 mod id;
+mod import;
 mod integration;
 pub mod live;
 mod notetaker;
@@ -39,6 +40,11 @@ pub use id::{
   IdError, InviteId, MeetingAttendeeId, MeetingId, MeetingInviteId, MessageId, MlsMessageId, OrgBackgroundId,
   PushRetryId, RecoveryRequestId, SNOWFLAKE_EPOCH_MS, SNOWFLAKE_SEQUENCE_BITS, SNOWFLAKE_WORKER_BITS,
   Snowflake, SpaceId, SystemEventId, ThreadId, UserGroupId, UserId,
+};
+pub use import::{
+  IMPORT_WORKER, ImportDmRequest, ImportMemberStateRequest, ImportMessagesRequest, ImportMessagesResponse,
+  ImportPolicy, ImportedMessage, ImportedMessageId, MAX_IMPORT_BATCH, MAX_PROVISION_BATCH, ProvisionStatus,
+  ProvisionUsersRequest, ProvisionUsersResponse, ProvisionedUser, next_import_id,
 };
 pub use integration::{
   DEFAULT_SOURCE_ALERT_LEVELS, DEFAULT_SOURCE_RATE_LIMIT_PER_MINUTE, MAX_SOURCE_ALERT_LEVEL_CHARS,

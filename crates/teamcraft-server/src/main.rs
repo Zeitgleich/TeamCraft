@@ -155,6 +155,11 @@ async fn run() -> anyhow::Result<()> {
   })
   .await?;
 
+  anyhow::ensure!(
+    config.server.worker_id != teamcraft_proto::IMPORT_WORKER,
+    "server.worker_id {} is reserved for imported messages",
+    teamcraft_proto::IMPORT_WORKER
+  );
   // Filled from the admin console's settings or the configuration once the database is read.
   let mailer: Arc<Slot<dyn Mailer>> = Arc::default();
   let state = AppState {

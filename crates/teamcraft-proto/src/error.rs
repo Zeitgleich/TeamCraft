@@ -90,6 +90,11 @@ wire_enum! {
     UnknownHost => "unknown_host",
     BrandAssetNotFound => "brand_asset_not_found",
     BrandNotFound => "brand_not_found",
+    /// The signed workspace policy doesn't name the caller as the import account, or its import
+    /// period is over (admin.md §3.8).
+    ImportNotAllowed => "import_not_allowed",
+    /// Imported messages must go before the conversation's first live message; no ID is left there.
+    ImportWindowFull => "import_window_full",
     Internal => "internal",
     Unavailable => "unavailable",
   }

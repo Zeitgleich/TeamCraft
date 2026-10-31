@@ -5317,6 +5317,8 @@ impl State {
       contains_guests: false,
       maybe_organizer_user_id: None,
       maybe_my_permissions: None,
+      maybe_importer_user_id: None,
+      maybe_imported_through: None,
       maybe_my_membership: None,
       participants: Vec::new(),
       maybe_image: None,

@@ -8,6 +8,7 @@ use super::error::AuthError;
 use crate::error::ApiError;
 use crate::meetings::guest::GUEST_ISSUER;
 use crate::meetings::guest_scope;
+use crate::security::ClientIp;
 use crate::services::accounts;
 use crate::state::AppState;
 
@@ -37,7 +38,15 @@ impl FromRequestParts<AppState> for AuthenticatedUser {
       }
     }
     let caller = accounts::authenticate(state, identity).await?;
-    if is_write(&parts.method) {
+    // The import account sends a whole team's history: no rate limits for it while it imports
+    // (admin.md §3.8).
+    if crate::services::import::is_importing(state, caller.user.id) {
+      if let Some(ClientIp(ip)) = parts.extensions.get::<ClientIp>() {
+        state
+          .rate_limits
+          .note_import_address(ip, std::time::Instant::now());
+      }
+    } else if is_write(&parts.method) {
       state.rate_limits.check_user_write(caller.user.id)?;
     }
     Ok(caller)

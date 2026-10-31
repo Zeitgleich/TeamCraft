@@ -17,6 +17,7 @@ mod devices;
 mod directory;
 mod e2ee;
 mod health;
+mod import;
 mod meetings;
 mod messages;
 mod notifications;
@@ -75,6 +76,7 @@ pub(crate) fn routes() -> OpenApiRouter<AppState> {
     .merge(directory::routes())
     .merge(e2ee::routes())
     .merge(health::routes())
+    .merge(import::routes())
     .merge(meetings::routes())
     .merge(messages::routes())
     .merge(notifications::routes())

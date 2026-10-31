@@ -30,6 +30,10 @@ pub struct Conversation {
   pub is_integration: bool,
   /// The channel's picture (channels in spaces only use it).
   pub maybe_image: Option<StoredSpaceImage>,
+  /// The import account while it is a member of this DM or notes without being a participant.
+  pub maybe_importer: Option<UserId>,
+  /// The newest imported message once an import finished.
+  pub maybe_imported_through: Option<MessageId>,
 }
 
 /// What [`Database::set_conversation_image`] did.
@@ -224,7 +228,7 @@ impl Database {
     let rows = sqlx::query!(
       r#"SELECT c.id, c.space_id, c.kind, c.name, c.topic, c.description, c.visibility, c.history_policy,
                 c.category_id, c.archived_at IS NOT NULL AS "is_archived!", c.is_integration, c.member_denied, c.guest_denied,
-                c.image_key, c.image_version, c.image_size_bytes,
+                c.image_key, c.image_version, c.image_size_bytes, c.importer_user_id, c.imported_through_message_id,
                 m.role AS "role?", m.notification_level AS "notification_level?",
                 m.is_favorite AS "is_favorite?", m.last_read_message_id, m.muted_until,
                 NOT m.notification_overridden AS "is_inherited?",
@@ -281,6 +285,8 @@ impl Database {
             is_archived: row.is_archived,
             is_integration: row.is_integration,
             maybe_image: stored_image(row.image_key, row.image_version, row.image_size_bytes)?,
+            maybe_importer: from_db_opt(row.importer_user_id)?,
+            maybe_imported_through: from_db_opt(row.imported_through_message_id)?,
             moderation: ChannelModeration {
               member_denied: permissions(row.member_denied),
               guest_denied: permissions(row.guest_denied),

@@ -1,0 +1,28 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE conversations SET imported_through_message_id = import_last_message_id\n         WHERE id = $1 RETURNING imported_through_message_id",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "imported_through_message_id",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "conversations",
+            "name": "imported_through_message_id"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8"
+      ]
+    },
+    "nullable": [
+      true
+    ]
+  },
+  "hash": "ebbfbfce369a19e796c878f290acaa700aa0db5bd17cbc3bef7c5fc34a8fa1ca"
+}

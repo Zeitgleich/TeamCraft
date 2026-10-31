@@ -669,7 +669,9 @@ original order and keeps imports quiet.
 | `DELETE /admin/import/conversations/{id}/importer`    | Drops the import account's membership of a DM or notes once its devices left the group (e2ee.md §4.10).                                                                                                                                                                                           |
 
 Channels are created, joined, archived and left with the ordinary endpoints; the import account is a
-workspace admin.
+workspace admin. While it may import, it passes the rate limits (per user, and per address once it
+authenticated from there, for ten minutes after its last request) and the upload limits (per file
+and per user): it brings a whole team's history and files at once.
 
 **Imported messages on the server.** Each gets an ID from the reserved import worker (the highest
 worker number, which `server.worker_id` may not use), at its original millisecond when that is from
