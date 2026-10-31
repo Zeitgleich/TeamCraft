@@ -1411,8 +1411,7 @@ ciphertext, in `MessageMeta::imported` (`ImportedOrigin`):
 - **Whose word it is.** The signature proves the importer's device wrote the message; author and time
   are the importer's statement. Clients show them only when the sender is the policy's import
   account: the author's name and picture (or "Deleted user", or the bot's name with a "bot" mark),
-  the original time; the time's tooltip says "Imported from Synology Chat by <import account>", and one
-  line marks where the imported history ends and the conversation's own messages begin.
+  the original time; the time's tooltip says "Imported from Synology Chat", and one line marks where the imported history ends and the conversation's own messages begin.
   From any other sender `imported` is ignored, so a member can't post in somebody else's name.
   Clients before this version show the message from the import account.
 - **Fixed.** The original authors can't edit or delete an imported message, and its reactions can't
@@ -1430,8 +1429,10 @@ ciphertext, in `MessageMeta::imported` (`ImportedOrigin`):
 - **No unread, no pushes.** The server counts no imported message as unread and sends no push and no
   `message_create` for it; when a conversation's import is finished it announces a
   `conversation_update` (with `imported_through`). Imported messages lie before everything a client
-  holds of the conversation, so paging back loads them like older history. Read positions come from
-  the old system (admin.md §3.8).
+  holds of the conversation, so paging back loads them like older history; a client that holds the
+  conversation loads one page of them on that update, or on its next sync when it missed the update.
+  Clients count neither imported messages nor the import account's lines about adding people as
+  unread. Read positions come from the old system (admin.md §3.8).
 - **Files** are attachments of the importer's message (§4.5), encrypted with a fresh key each and
   uploaded from the export as a stream (multipart above 8 MiB), with thumbnails for pictures.
   Stickers of the old system are pictures.

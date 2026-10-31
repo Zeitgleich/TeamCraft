@@ -1144,19 +1144,11 @@ fn date_divider(message: &Message, maybe_prev: Option<&Message>) -> Option<i64> 
   }
 }
 
-/// "Imported from Synology Chat by …": whose word an imported message's author and time are.
+/// "Imported from Synology Chat": where an imported message's author and time come from.
 fn imported_origin_text(mark: &ImportedMark) -> String {
-  let i18n = use_i18n();
-  let importer = use_app_state()
-    .read(|backend| backend.user(mark.importer))
-    .map(|user| user.display_name)
-    .unwrap_or_default();
-  i18n.t_with(
+  use_i18n().t_with(
     "imported-title",
-    &[
-      ("source", &imported_source_text(mark.source)),
-      ("importer", &importer),
-    ],
+    &[("source", &imported_source_text(mark.source))],
   )
 }
 

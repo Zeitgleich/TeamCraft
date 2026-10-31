@@ -184,6 +184,34 @@ async fn a_dm_is_founded_by_the_import_account_which_leaves_once_both_are_in() {
   assert_eq!(bob.texts(dm), vec!["hi from the old chat", "still here"]);
 }
 
+#[tokio::test]
+async fn a_device_that_held_the_channel_gets_the_history_merged_into_it() {
+  let server = FakeServer::new();
+  let mut importer = Peer::enroll(&server, "Import").await;
+  let mut alice = Peer::enroll(&server, "Alice").await;
+  let space = alice.space().await;
+  let channel = alice.client.create_channel(space, "Daily").await.unwrap();
+  alice.client.send_text(channel, None, "live").await.unwrap();
+  alice
+    .client
+    .add_member_with_history(channel, importer.client.user_id(), Some(HistoryPolicy::Full))
+    .await
+    .unwrap();
+  settle(&mut [&mut importer, &mut alice]).await;
+  alice.client.catch_up_messages(channel).await.unwrap();
+  assert_eq!(alice.texts(channel), vec!["live"]);
+
+  importer
+    .client
+    .send_imported(channel, &[draft("1", "old", ImportedAuthor::Deleted, OLD_MS)])
+    .await
+    .unwrap();
+  importer.client.finish_import(channel).await.unwrap();
+  // The import sends no message events; the update that it finished brings the history.
+  settle(&mut [&mut importer, &mut alice]).await;
+  assert_eq!(alice.texts(channel), vec!["old", "live"]);
+}
+
 fn draft(source_id: &str, body: &str, author: ImportedAuthor, sent_at_ms: i64) -> ImportDraft {
   ImportDraft {
     content: MessageContent::Text {

@@ -21,7 +21,7 @@ badge-bot = BOT
 imported-from-synology = Synology Chat
 imported-from-other = einem anderen Chat
 imported-until = Bis hier aus { $source } importiert
-imported-title = Importiert aus { $source } von { $importer }
+imported-title = Importiert aus { $source }
 badge-guest = GAST
 badge-organization = Organisation
 

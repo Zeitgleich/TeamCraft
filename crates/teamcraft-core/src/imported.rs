@@ -102,6 +102,12 @@ pub fn trusted_origin(message: &StoredMessage, maybe_importer: Option<UserId>) -
   }
 }
 
+/// Whether `message` is a line about a change the import account `maybe_importer` made (adding
+/// people to what it imported).
+pub fn is_import_line(message: &StoredMessage, maybe_importer: Option<UserId>) -> bool {
+  message.line_position().is_some() && maybe_importer == Some(message.sender_user_id)
+}
+
 /// The client message ID of an imported message (e2ee.md §4.10): the same for every run of the
 /// import, so the server keeps the first.
 pub fn imported_message_id(

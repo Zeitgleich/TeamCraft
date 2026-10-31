@@ -944,10 +944,13 @@ impl<S: LocalStore> CoreChatBackend<S> {
     // message was read; one newer than all of them is read once this device marked the
     // conversation read after it arrived.
     let maybe_lines_read = self.read(lines_read_through(&self.store, response.id));
-    // Imported history counts as read (e2ee.md §4.10), like on the server.
+    // Imported history counts as read (e2ee.md §4.10), like on the server, and so do the lines of
+    // the import account adding people: they are part of the import.
     let maybe_importer = self.importer();
     move |message: &StoredMessage| {
-      if crate::imported::trusted_origin(message, maybe_importer).is_some() {
+      if crate::imported::trusted_origin(message, maybe_importer).is_some()
+        || crate::imported::is_import_line(message, maybe_importer)
+      {
         return false;
       }
       let is_read_line = message
@@ -3197,6 +3200,13 @@ mod tests {
         ..stored
       };
       assert!(backend.unread_check(&conversation, None)(&live));
+      // The import account adding somebody: a line, part of the import.
+      let import_line = StoredMessage {
+        sender_user_id: id(IMPORTER),
+        maybe_verified_commit: Some(id(9)),
+        ..live
+      };
+      assert!(!backend.unread_check(&conversation, None)(&import_line));
     }
 
     fn backend_with_importer(maybe_importer: Option<i64>) -> CoreChatBackend<MemoryStore> {

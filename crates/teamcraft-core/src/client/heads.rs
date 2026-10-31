@@ -154,7 +154,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
   /// Whether this sync must read the conversation's MLS queue and history: their heads moved, or
   /// there is local work only a read finishes (no group yet, a commit of this device not landed, a
   /// request to be added back, messages waiting for keys, the first page of history, an earlier
-  /// failure). A conversation that needs nothing counts as caught up for the outbox (its queue
+  /// failure, an import not loaded yet). A conversation that needs nothing counts as caught up for the outbox (its queue
   /// holds nothing newer, and what comes now arrives as gateway events).
   pub(super) fn is_content_due(
     &mut self,
@@ -180,6 +180,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       || self.has_pending_commit(conversation)?
       || self.has_requested_rejoin(conversation)?
       || self.is_marked_for_resync(conversation, ResyncPart::Content)?
+      || self.unloaded_import(conversation)?.is_some()
     {
       return Ok(true);
     }
