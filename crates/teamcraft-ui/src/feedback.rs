@@ -91,7 +91,14 @@ pub fn set_failure_sink(sink: impl Fn(ActionFailure) + 'static) {
 
 /// The localized message for a failure: what happened and what to do next.
 pub fn failure_message(i18n: I18n, failure: &ActionFailure) -> String {
-  i18n.t(failure_message_key(failure))
+  match failure.kind {
+    // Names the device that didn't start (#1072): the detail's first line.
+    FailureKind::Call(CallFailure::MicrophoneUnavailable) => {
+      let device = failure.detail.lines().next().unwrap_or_default();
+      i18n.t_with(failure_message_key(failure), &[("device", device)])
+    },
+    _ => i18n.t(failure_message_key(failure)),
+  }
 }
 
 /// The next step a failure's toast offers, if one helps: another camera for a camera that didn't
@@ -132,6 +139,7 @@ pub fn failure_message_key(failure: &ActionFailure) -> &'static str {
       CallFailure::MicrophoneDenied => "error-call-microphone-denied",
       CallFailure::MicrophoneMissing => "error-call-microphone-missing",
       CallFailure::MicrophoneInUse => "error-call-microphone-in-use",
+      CallFailure::MicrophoneUnavailable => "error-call-microphone-unavailable",
       CallFailure::CameraDenied => "error-call-camera-denied",
       CallFailure::CameraMissing => "error-call-camera-missing",
       CallFailure::CameraInUse => "error-call-camera-in-use",

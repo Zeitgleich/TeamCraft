@@ -5,11 +5,12 @@
 //! teamcraft-call --sfu https://127.0.0.1:4433/call --token dev:1:1:1 --user 1 --device 1 \
 //!   [--cert-hash <64 hex chars>] [--source tone:440 | mic[:<id>] | silence] \
 //!   [--sink discard | speakers[:<id>]] [--seconds 10] [--roster 2,3] [--muted] [--watch-video]
-//!   [--send-video]
+//!   [--send-video] [--then-source <source>]
 //! teamcraft-call --list-devices
 //! ```
 //!
-//! Ends after `--seconds` or on Ctrl-C and logs the call statistics.
+//! Ends after `--seconds` or on Ctrl-C and logs the call statistics. `--then-source` switches the
+//! audio source halfway through `--seconds` (a device switch mid-call).
 
 use std::time::Duration;
 
@@ -37,6 +38,7 @@ async fn main() -> anyhow::Result<()> {
     return Ok(());
   }
   let options = Options::parse(std::env::args().skip(1))?;
+  let sink = options.config.sink.clone();
   let mut call = NativeCall::join(options.config)
     .await
     .context("joining the call")?;
@@ -55,9 +57,23 @@ async fn main() -> anyhow::Result<()> {
     }
   };
   tokio::pin!(deadline);
+  let switch_at = async {
+    match (&options.maybe_then_source, options.maybe_duration) {
+      (Some(_), Some(duration)) => tokio::time::sleep(duration / 2).await,
+      _ => std::future::pending().await,
+    }
+  };
+  tokio::pin!(switch_at);
+  let mut maybe_then_source = options.maybe_then_source.clone();
   loop {
     tokio::select! {
       () = &mut deadline => break,
+      () = &mut switch_at, if maybe_then_source.is_some() => {
+        if let Some(source) = maybe_then_source.take() {
+          info!(?source, "switching the audio source");
+          call.set_audio(source, sink.clone()).await.context("switching the audio source")?;
+        }
+      },
       maybe_event = call.next_event() => match maybe_event {
         Some(event) => {
           log_event(&event);
@@ -129,6 +145,8 @@ struct Options {
   /// Publish a test pattern as camera once the call is secured.
   is_sending_video: bool,
   device_id: DeviceId,
+  /// What the call sends from halfway through.
+  maybe_then_source: Option<AudioSource>,
 }
 
 impl Options {
@@ -145,6 +163,7 @@ impl Options {
     let mut is_muted = false;
     let mut is_watching_video = false;
     let mut is_sending_video = false;
+    let mut maybe_then_source = None;
     while let Some(flag) = args.next() {
       if flag == "--muted" {
         is_muted = true;
@@ -167,6 +186,7 @@ impl Options {
         "--cert-hash" => maybe_certificate_hash = Some(parse_hash(&value)?),
         "--source" => source = parse_source(&value)?,
         "--sink" => sink = parse_sink(&value)?,
+        "--then-source" => maybe_then_source = Some(parse_source(&value)?),
         "--seconds" => maybe_duration = Some(Duration::from_secs(value.parse().context("--seconds")?)),
         "--roster" => {
           let devices = value
@@ -211,6 +231,7 @@ impl Options {
       is_watching_video,
       is_sending_video,
       device_id,
+      maybe_then_source,
     })
   }
 }

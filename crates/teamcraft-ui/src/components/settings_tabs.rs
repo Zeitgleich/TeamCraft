@@ -543,6 +543,7 @@ fn tray_icon_from_slug(slug: &str) -> TrayIconStyle {
 #[component]
 pub fn AudioVideoSection() -> impl IntoView {
   let state = use_app_state();
+  let i18n = use_i18n();
   let prefs = state.settings.prefs;
   let calls = Memo::new(move |_| prefs.get().calls);
   let devices = Memo::new(move |_| state.read(|backend| backend.media_devices()));
@@ -591,6 +592,10 @@ pub fn AudioVideoSection() -> impl IntoView {
               value=Signal::derive(move || calls.get().speaker_id)
               on_change=Callback::new(move |id: String| prefs.update(|all| all.calls.speaker_id = id))
             />
+          })}
+          // Which sound system the desktop app uses (#1072), for when a device is missing.
+          {devices.audio_system.name().map(|system| view! {
+            <p class="set-note">{move || i18n.t_with("calls-audio-system", &[("system", system)])}</p>
           })}
         }
       }}

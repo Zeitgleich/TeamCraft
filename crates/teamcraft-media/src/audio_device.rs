@@ -1,8 +1,13 @@
 //! Microphone capture and speaker playback with cpal, as mono 48 kHz f32.
 //!
-//! Devices are opened at 48 kHz (PipeWire, PulseAudio, CoreAudio and WASAPI resample when needed);
-//! multi-channel devices are downmixed on capture and get the mono signal on every channel on
-//! playback. The capture callback hands samples to the caller; playback pulls from a shared
+//! The backend is chosen once per process ([`audio_backend`]): on Linux PipeWire, else
+//! PulseAudio (its native protocol), else raw ALSA (#1072); CoreAudio on macOS, WASAPI on Windows.
+//! With PipeWire the device lists come from its registry (`audio_devices_pipewire`), named as in
+//! the desktop's sound settings and identified by node name.
+//!
+//! Devices are opened at their own rate and format, nearest to 48 kHz, and converted here: any
+//! rate is resampled, multi-channel devices are downmixed on capture and get the mono signal on
+//! every channel on playback. The capture callback hands samples to the caller; playback pulls from a shared
 //! [`PlaybackBuffer`] and plays silence when it runs dry.
 //!
 //! Devices are chosen by [`AudioDeviceId`] (from [`list_input_devices`] / [`list_output_devices`]),
@@ -12,27 +17,50 @@
 //! thread that opened them and drop them to stop.
 
 use std::collections::VecDeque;
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{
   Device, FromSample, Host, Sample, SampleFormat, SizedSample, StreamConfig, SupportedStreamConfigRange,
 };
 use thiserror::Error;
-use tracing::warn;
+use tracing::{debug, info, warn};
 
 use crate::audio_frame::SAMPLE_RATE_HZ;
 use crate::audio_io::{AudioDeviceChoice, AudioDeviceId, AudioDeviceInfo};
 use crate::system_audio::MonoResampler;
 
+/// How PulseAudio names a sink's monitor source.
+const PULSE_MONITOR_SUFFIX: &str = ".monitor";
+
+/// Which sound system call audio goes through.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AudioBackend {
+  PipeWire,
+  PulseAudio,
+  Alsa,
+  CoreAudio,
+  Wasapi,
+  /// Another cpal host (JACK, Android's AAudio).
+  Other,
+}
+
 /// A running capture stream.
 pub struct AudioInput {
-  _stream: cpal::Stream,
+  _stream: OpenStream,
 }
 
 /// A running playback stream.
 pub struct AudioOutput {
+  _stream: OpenStream,
+}
+
+/// A cpal stream and whether we are stopping it: cpal's PipeWire host reports its own stop as
+/// "Device disconnected", which is no failure worth a warning.
+struct OpenStream {
   _stream: cpal::Stream,
+  is_closing: Arc<AtomicBool>,
 }
 
 /// Samples waiting for the speakers, filled by the call engine and drained by the output callback.
@@ -56,17 +84,52 @@ pub enum AudioDeviceError {
   DeviceGone(&'static str),
   #[error("the {0} device supports no usable sample format")]
   UnsupportedFormat(&'static str),
+  /// The device is there but didn't start (busy, refused by the sound server, a format it
+  /// rejected); `device` is its name as listed.
+  #[error("the {direction} device \"{device}\" could not be opened: {reason}")]
+  Open {
+    direction: &'static str,
+    device: String,
+    reason: String,
+  },
   #[error("the audio thread stopped while opening devices")]
   AudioThread,
   #[error("audio device: {0}")]
   Device(#[from] cpal::Error),
 }
 
+/// The sound system of this process, chosen on first use and logged once.
+pub fn audio_backend() -> AudioBackend {
+  backend_host_id().1
+}
+
+/// Ticks whenever a microphone or speaker comes, goes or becomes the default, where the backend
+/// tells (PipeWire); `None` elsewhere: callers list the devices again from time to time.
+pub fn device_changes() -> Option<tokio::sync::watch::Receiver<u64>> {
+  #[cfg(all(feature = "pipewire", target_os = "linux"))]
+  if audio_backend() == AudioBackend::PipeWire {
+    return crate::audio_devices_pipewire::PipeWireDevices::shared().map(|devices| devices.subscribe());
+  }
+  None
+}
+
 /// Microphones, the default first.
 pub fn list_input_devices() -> Result<Vec<AudioDeviceInfo>, AudioDeviceError> {
-  let host = cpal::default_host();
+  #[cfg(all(feature = "pipewire", target_os = "linux"))]
+  if let Some(devices) = pipewire_devices() {
+    return Ok(devices.inputs());
+  }
+  let host = backend_host();
   let maybe_default = host.default_input_device();
-  list_devices(host.input_devices()?, maybe_default, |device| {
+  // PulseAudio lists every sink's monitor as a source: what the speakers play, no microphone.
+  let is_pulse = audio_backend() == AudioBackend::PulseAudio;
+  let devices = host.input_devices()?.filter(|device| {
+    !(is_pulse
+      && device
+        .id()
+        .is_ok_and(|id| id.id().ends_with(PULSE_MONITOR_SUFFIX)))
+  });
+  list_devices(devices, maybe_default, |device| {
     device
       .supported_input_configs()
       .is_ok_and(|ranges| pick_config(ranges, "input").is_ok())
@@ -75,7 +138,11 @@ pub fn list_input_devices() -> Result<Vec<AudioDeviceInfo>, AudioDeviceError> {
 
 /// Speakers and headsets, the default first.
 pub fn list_output_devices() -> Result<Vec<AudioDeviceInfo>, AudioDeviceError> {
-  let host = cpal::default_host();
+  #[cfg(all(feature = "pipewire", target_os = "linux"))]
+  if let Some(devices) = pipewire_devices() {
+    return Ok(devices.outputs());
+  }
+  let host = backend_host();
   let maybe_default = host.default_output_device();
   list_devices(host.output_devices()?, maybe_default, |device| {
     device
@@ -109,44 +176,67 @@ impl AudioInput {
     choice: &AudioDeviceChoice,
     on_samples: impl FnMut(&[f32]) + Send + 'static,
   ) -> Result<Self, AudioDeviceError> {
-    let host = cpal::default_host();
+    let host = backend_host();
     let device = match choice {
       AudioDeviceChoice::Default => host.default_input_device(),
       AudioDeviceChoice::Device(id) => find_device(&host, id),
     }
     .ok_or(no_device(choice, "input"))?;
-    let (config, format) = pick_config(device.supported_input_configs()?, "input")?;
+    let failed = |error: cpal::Error| open_failure(&device, "input", &error);
+    let is_closing = Arc::new(AtomicBool::new(false));
+    let (config, format) = pick_config(device.supported_input_configs().map_err(failed)?, "input")?;
+    info!(
+      device = %device_name(&device),
+      channels = config.channels,
+      rate_hz = config.sample_rate,
+      ?format,
+      "opening the microphone"
+    );
     let stream = match format {
-      SampleFormat::I16 => build_input::<i16>(&device, config, on_samples)?,
-      SampleFormat::I32 => build_input::<i32>(&device, config, on_samples)?,
-      SampleFormat::U16 => build_input::<u16>(&device, config, on_samples)?,
-      SampleFormat::F64 => build_input::<f64>(&device, config, on_samples)?,
-      _ => build_input::<f32>(&device, config, on_samples)?,
-    };
-    stream.play()?;
-    Ok(Self { _stream: stream })
+      SampleFormat::I16 => build_input::<i16>(&device, config, on_samples, Arc::clone(&is_closing)),
+      SampleFormat::I32 => build_input::<i32>(&device, config, on_samples, Arc::clone(&is_closing)),
+      SampleFormat::U16 => build_input::<u16>(&device, config, on_samples, Arc::clone(&is_closing)),
+      SampleFormat::F64 => build_input::<f64>(&device, config, on_samples, Arc::clone(&is_closing)),
+      _ => build_input::<f32>(&device, config, on_samples, Arc::clone(&is_closing)),
+    }
+    .map_err(failed)?;
+    stream.play().map_err(failed)?;
+    Ok(Self {
+      _stream: OpenStream {
+        _stream: stream,
+        is_closing,
+      },
+    })
   }
 }
 
 impl AudioOutput {
   /// Opens speakers, playing what is pushed into `buffer`.
   pub fn open(choice: &AudioDeviceChoice, buffer: Arc<PlaybackBuffer>) -> Result<Self, AudioDeviceError> {
-    let host = cpal::default_host();
+    let host = backend_host();
     let device = match choice {
       AudioDeviceChoice::Default => host.default_output_device(),
       AudioDeviceChoice::Device(id) => find_device(&host, id),
     }
     .ok_or(no_device(choice, "output"))?;
-    let (config, format) = pick_config(device.supported_output_configs()?, "output")?;
+    let failed = |error: cpal::Error| open_failure(&device, "output", &error);
+    let is_closing = Arc::new(AtomicBool::new(false));
+    let (config, format) = pick_config(device.supported_output_configs().map_err(failed)?, "output")?;
     let stream = match format {
-      SampleFormat::I16 => build_output::<i16>(&device, config, buffer)?,
-      SampleFormat::I32 => build_output::<i32>(&device, config, buffer)?,
-      SampleFormat::U16 => build_output::<u16>(&device, config, buffer)?,
-      SampleFormat::F64 => build_output::<f64>(&device, config, buffer)?,
-      _ => build_output::<f32>(&device, config, buffer)?,
-    };
-    stream.play()?;
-    Ok(Self { _stream: stream })
+      SampleFormat::I16 => build_output::<i16>(&device, config, buffer, Arc::clone(&is_closing)),
+      SampleFormat::I32 => build_output::<i32>(&device, config, buffer, Arc::clone(&is_closing)),
+      SampleFormat::U16 => build_output::<u16>(&device, config, buffer, Arc::clone(&is_closing)),
+      SampleFormat::F64 => build_output::<f64>(&device, config, buffer, Arc::clone(&is_closing)),
+      _ => build_output::<f32>(&device, config, buffer, Arc::clone(&is_closing)),
+    }
+    .map_err(failed)?;
+    stream.play().map_err(failed)?;
+    Ok(Self {
+      _stream: OpenStream {
+        _stream: stream,
+        is_closing,
+      },
+    })
   }
 }
 
@@ -215,10 +305,7 @@ fn list_devices(
       if !is_default && !is_usable(&device) {
         return None;
       }
-      let name = device
-        .description()
-        .map(|description| description.name().to_owned())
-        .unwrap_or_else(|_| device.to_string());
+      let name = device_name(&device);
       Some(AudioDeviceInfo {
         is_default,
         id: AudioDeviceId::new(id.to_string()),
@@ -228,6 +315,65 @@ fn list_devices(
     .collect();
   infos.sort_by_key(|info| !info.is_default);
   Ok(dedup_by_name(infos))
+}
+
+/// The host of [`audio_backend`]; a host that can't be created any more (the daemon went away
+/// since) gives way to whatever cpal finds now.
+fn backend_host() -> Host {
+  cpal::host_from_id(backend_host_id().0).unwrap_or_else(|error| {
+    warn!(%error, "the audio backend is gone; using another one");
+    cpal::default_host()
+  })
+}
+
+/// cpal's choice, in its order on Linux: PipeWire, PulseAudio, ALSA.
+fn backend_host_id() -> (cpal::HostId, AudioBackend) {
+  static BACKEND: OnceLock<(cpal::HostId, AudioBackend)> = OnceLock::new();
+  *BACKEND.get_or_init(|| {
+    let id = cpal::default_host().id();
+    let backend = backend_of(id);
+    info!(?backend, "audio backend");
+    (id, backend)
+  })
+}
+
+/// By cpal's id string (`pipewire`, `alsa`, ...): its variants depend on cpal's features, which
+/// other crates in the build may turn on as well.
+fn backend_of(id: cpal::HostId) -> AudioBackend {
+  match id.to_string().as_str() {
+    "pipewire" => AudioBackend::PipeWire,
+    "pulseaudio" => AudioBackend::PulseAudio,
+    "alsa" => AudioBackend::Alsa,
+    "coreaudio" => AudioBackend::CoreAudio,
+    "wasapi" => AudioBackend::Wasapi,
+    _ => AudioBackend::Other,
+  }
+}
+
+/// PipeWire's registry watcher when PipeWire is the backend.
+#[cfg(all(feature = "pipewire", target_os = "linux"))]
+fn pipewire_devices() -> Option<&'static crate::audio_devices_pipewire::PipeWireDevices> {
+  (audio_backend() == AudioBackend::PipeWire)
+    .then(crate::audio_devices_pipewire::PipeWireDevices::shared)
+    .flatten()
+}
+
+/// A device that is there but didn't start, logged with why.
+fn open_failure(device: &Device, direction: &'static str, error: &cpal::Error) -> AudioDeviceError {
+  let device = device_name(device);
+  warn!(direction, %device, %error, "the audio device could not be opened");
+  AudioDeviceError::Open {
+    direction,
+    device,
+    reason: error.to_string(),
+  }
+}
+
+fn device_name(device: &Device) -> String {
+  device
+    .description()
+    .map(|description| description.name().to_owned())
+    .unwrap_or_else(|_| device.to_string())
 }
 
 /// `None` for ids of devices that are gone or come from another platform.
@@ -301,7 +447,8 @@ fn build_input<T>(
   device: &Device,
   config: StreamConfig,
   mut on_samples: impl FnMut(&[f32]) + Send + 'static,
-) -> Result<cpal::Stream, AudioDeviceError>
+  is_closing: Arc<AtomicBool>,
+) -> Result<cpal::Stream, cpal::Error>
 where
   T: SizedSample,
   f32: FromSample<T>,
@@ -315,7 +462,7 @@ where
       interleaved.extend(data.iter().map(|sample| sample.to_sample::<f32>()));
       on_samples(&resampler.process(&interleaved));
     },
-    |error| warn!(%error, "capture stream error"),
+    move |error| stream_error("capture", &is_closing, &error),
     None,
   )?;
   Ok(stream)
@@ -326,7 +473,8 @@ fn build_output<T>(
   device: &Device,
   config: StreamConfig,
   buffer: Arc<PlaybackBuffer>,
-) -> Result<cpal::Stream, AudioDeviceError>
+  is_closing: Arc<AtomicBool>,
+) -> Result<cpal::Stream, cpal::Error>
 where
   T: SizedSample + FromSample<f32>,
 {
@@ -342,10 +490,27 @@ where
         frame.fill(sample.to_sample::<T>());
       }
     },
-    |error| warn!(%error, "playback stream error"),
+    move |error| stream_error("playback", &is_closing, &error),
     None,
   )?;
   Ok(stream)
+}
+
+impl Drop for OpenStream {
+  fn drop(&mut self) {
+    // Before the stream itself is dropped (fields drop after this).
+    self.is_closing.store(true, Ordering::Relaxed);
+  }
+}
+
+/// A stream error cpal reported; a device that went away mid-call reaches the user through the
+/// device lists (the call falls back to the default), so this only logs.
+fn stream_error(kind: &'static str, is_closing: &AtomicBool, error: &cpal::Error) {
+  if is_closing.load(Ordering::Relaxed) {
+    debug!(kind, %error, "audio stream error while stopping");
+  } else {
+    warn!(kind, %error, "audio stream error");
+  }
 }
 
 /// The playback buffer's 48 kHz samples at the device's rate.

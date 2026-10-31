@@ -27,7 +27,7 @@ use std::time::Duration;
 
 use teamcraft_client_api::call_view::{CallSignal, CallView};
 use teamcraft_client_api::calls::{
-  ActiveCall, BackgroundEffect as UiBackgroundEffect, CallEndReason, CallPreview, CallRequest,
+  ActiveCall, AudioSystem, BackgroundEffect as UiBackgroundEffect, CallEndReason, CallPreview, CallRequest,
   CallStatusSounds, CameraFallback, DevicePresence, MediaDevice, MediaDevices, PreviewCamera, PushToTalk,
   ScreenShareSound, VideoQuality,
 };
@@ -36,7 +36,9 @@ use teamcraft_client_api::remote::CallSnapshot;
 use teamcraft_client_api::video_stats::VideoStatsReport;
 use teamcraft_core::CallKeySigner;
 use teamcraft_crypto::call_binding::{CallBindingError, CallId as CryptoCallId, SignedCallKeyBinding};
-use teamcraft_media::audio_device::{AudioDeviceError, list_input_devices, list_output_devices};
+use teamcraft_media::audio_device::{
+  AudioBackend, AudioDeviceError, audio_backend, device_changes, list_input_devices, list_output_devices,
+};
 use teamcraft_media::audio_io::{AudioDeviceChoice, AudioDeviceId, AudioDeviceInfo, AudioSink, AudioSource};
 use teamcraft_media::audio_processing::AudioProcessingConfig;
 use teamcraft_media::bwe::BweConfig;
@@ -73,8 +75,9 @@ pub use teamcraft_client_api::remote::CALL_CHANGED_EVENT;
 /// Development SFUs use self-signed certificates; this variable pins one by its SHA-256 hash (hex,
 /// colons allowed). Production SFUs have certificates the system trusts.
 const CERT_HASH_VARIABLE: &str = "TEAMCRAFT_SFU_CERT_HASH";
-/// How often a running call lists the microphones and speakers again (#986): the desktop has no
-/// event for a headset plugged in or out, and the UI reacts to the lists.
+/// How often a running call lists the microphones and speakers again (#986) where the audio
+/// backend has no event for a headset plugged in or out (all but PipeWire), and the UI reacts to
+/// the lists.
 const AUDIO_DEVICE_POLL: Duration = Duration::from_secs(2);
 /// How often the call's microphone level goes to the device menu's meter, while it watches.
 const CALL_LEVEL_INTERVAL: Duration = Duration::from_millis(100);
@@ -319,6 +322,7 @@ impl CallHost {
     if cfg!(target_os = "linux") && devices.cameras.is_empty() {
       devices.camera_presence = DevicePresence::Unknown;
     }
+    devices.audio_system = audio_system();
     lock(&self.state).devices = devices.clone();
     self.changed();
     Ok(devices)
@@ -370,7 +374,7 @@ impl CallHost {
     config.is_muted_at_start = is_muted_at_start;
     let call = NativeCall::join(config)
       .await
-      .map_err(|error| error.to_string())?;
+      .map_err(|error| call_failure_wire(&error))?;
     {
       let mut state = lock(&self.state);
       let background = state.background;
@@ -1244,7 +1248,7 @@ async fn run_media(
         Some(Control::Deafen(is_deafened)) => call.set_deafened(is_deafened),
         Some(Control::MoveHere) => call.move_here(),
         Some(Control::Audio { source, sink, done }) => {
-          let result = call.set_audio(source, sink).await.map_err(|error| error.to_string());
+          let result = call.set_audio(source, sink).await.map_err(|error| call_failure_wire(&error));
           let _ = done.send(result);
         },
         Some(Control::StartVideo(config, done)) => {
@@ -1541,16 +1545,16 @@ fn certificate_hash_from_env() -> Result<Option<[u8; 32]>, String> {
     .ok_or_else(|| format!("{CERT_HASH_VARIABLE} needs 32 bytes as hex"))
 }
 
-/// Lists the microphones and speakers every [`AUDIO_DEVICE_POLL`] while the call runs; a change
-/// reaches the UI, which reacts to it (#986): a headset plugged in is offered or followed as the
-/// system default, the device in use unplugged gives way to the default.
+/// Lists the microphones and speakers again whenever they may have changed while the call runs; a
+/// change reaches the UI, which reacts to it (#986): a headset plugged in is offered or followed
+/// as the system default, the device in use unplugged gives way to the default. PipeWire says
+/// when (#1072); other backends are asked every [`AUDIO_DEVICE_POLL`].
 async fn watch_audio_devices(state: Arc<Mutex<CallState>>, notify: Arc<dyn Fn() + Send + Sync>) {
-  let mut tick = tokio::time::interval(AUDIO_DEVICE_POLL);
-  tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-  // The first tick is immediate: the lists of the join are fresh enough.
-  tick.tick().await;
+  let mut changes = AudioDeviceChanges::new();
   loop {
-    tick.tick().await;
+    if !changes.next().await {
+      return;
+    }
     let listed = tokio::task::spawn_blocking(|| {
       Ok::<_, AudioDeviceError>((list_input_devices()?, list_output_devices()?))
     })
@@ -1575,6 +1579,38 @@ async fn watch_audio_devices(state: Arc<Mutex<CallState>>, notify: Arc<dyn Fn() 
   }
 }
 
+/// When the audio devices may have changed: on the backend's word, or on a timer.
+enum AudioDeviceChanges {
+  Told(tokio::sync::watch::Receiver<u64>),
+  Polled(tokio::time::Interval),
+}
+
+impl AudioDeviceChanges {
+  fn new() -> Self {
+    if let Some(mut changes) = device_changes() {
+      // What is known now is what the join listed.
+      changes.mark_unchanged();
+      return Self::Told(changes);
+    }
+    let mut tick = tokio::time::interval(AUDIO_DEVICE_POLL);
+    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    // The first tick would be immediate: the lists of the join are fresh enough.
+    tick.reset();
+    Self::Polled(tick)
+  }
+
+  /// Waits for the next possible change; `false` once none can come.
+  async fn next(&mut self) -> bool {
+    match self {
+      Self::Told(changes) => changes.changed().await.is_ok(),
+      Self::Polled(tick) => {
+        tick.tick().await;
+        true
+      },
+    }
+  }
+}
+
 /// Puts newly listed microphones and speakers into `devices`, keeping the cameras; whether
 /// anything changed.
 fn update_audio_devices(
@@ -1585,12 +1621,32 @@ fn update_audio_devices(
   if devices.microphones == microphones && devices.speakers == speakers {
     return false;
   }
-  let camera_presence = devices.camera_presence;
+  let (camera_presence, audio_system) = (devices.camera_presence, devices.audio_system);
   *devices = MediaDevices {
     camera_presence,
+    audio_system,
     ..MediaDevices::listed(std::mem::take(&mut devices.cameras), microphones, speakers)
   };
   true
+}
+
+/// A call that didn't start or switch devices, as the UI reads it.
+fn call_failure_wire(error: &NativeCallError) -> String {
+  match error {
+    NativeCallError::Device(device) => preview::microphone_failure_wire(device),
+    other => other.to_string(),
+  }
+}
+
+fn audio_system() -> AudioSystem {
+  match audio_backend() {
+    AudioBackend::PipeWire => AudioSystem::PipeWire,
+    AudioBackend::PulseAudio => AudioSystem::PulseAudio,
+    AudioBackend::Alsa => AudioSystem::Alsa,
+    AudioBackend::CoreAudio => AudioSystem::CoreAudio,
+    AudioBackend::Wasapi => AudioSystem::Wasapi,
+    AudioBackend::Other => AudioSystem::Unknown,
+  }
 }
 
 fn media_device(info: &AudioDeviceInfo) -> MediaDevice {

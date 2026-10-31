@@ -314,7 +314,8 @@ The same approach Fluxer announced for its new voice system (see https://fluxer.
   download; the page keeps the client core and the device key, forwards the gateway's call events,
   and signs and verifies the call key bindings for it (`teamcraft_client_api::page_calls`). Calls run in the
   tab that runs the client core (e2ee.md §9.4); background effects are desktop-only for now.
-- Desktop: `cpal` for audio I/O, `opus`, **`webrtc-audio-processing`** (AEC, noise suppression, AGC) – the only WebRTC component used.
+- Desktop: `cpal` for audio I/O (on Linux through PipeWire, else PulseAudio, else ALSA; devices,
+  defaults and hotplug from PipeWire's registry, #1072), `opus`, **`webrtc-audio-processing`** (AEC, noise suppression, AGC) – the only WebRTC component used.
   The media runs in the shell; for each tile on screen the shell sends the decrypted track to the
   webview over a Tauri channel (`call_watch_video`: H.264 that WebCodecs decodes, or JPEG images
   where the webview can't decode H.264), and the own camera as sent (with effects) as small JPEG

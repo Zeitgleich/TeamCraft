@@ -55,7 +55,9 @@ message-sounds = ["dep:teamcraft-client-api"]
 # A user's own message sound file decoded on the desktop (`sound_file`: MP3, Ogg Vorbis, WAV, FLAC).
 sound-files = ["native", "message-sounds", "dep:symphonia"]
 
-pipewire = ["native", "dep:pipewire", "dep:ashpd"]
+# Microphones and speakers through PipeWire as well (#1072): cpal's PipeWire host for the streams,
+# its PulseAudio host (native protocol, pure Rust) where no PipeWire daemon runs, ALSA last.
+pipewire = ["native", "dep:pipewire", "dep:ashpd", "cpal/pipewire", "cpal/pulseaudio"]
 # Cameras on macOS through AVFoundation (via nokhwa).
 avfoundation = ["native", "dep:nokhwa", "dep:nokhwa-bindings-macos", "dep:flume"]
 # Cameras on Windows through Media Foundation (via nokhwa). Compile-checked only so far.
@@ -261,6 +263,11 @@ required-features = ["openh264-source"]
 [[example]]
 name = "macos_capture"
 required-features = ["avfoundation", "screencapturekit", "openh264-source"]
+
+# Captures every microphone and loops a tone through every speaker (issue #1072).
+[[example]]
+name = "audio_device_check"
+required-features = ["pipewire"]
 
 # Captures the computer's sound through PipeWire and checks that our own playback is left out.
 [[example]]

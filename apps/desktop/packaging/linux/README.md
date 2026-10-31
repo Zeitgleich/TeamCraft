@@ -48,6 +48,16 @@ All of them download Cisco's OpenH264 on first video use in a call (see
 `crates/teamcraft-media/README.md`) and use the desktop's portals for screen sharing, the camera, push-to-talk on Wayland, file dialogs
 and opening the login page.
 
+## Sound in calls
+
+Calls play and record through PipeWire where it runs (every current desktop), else through the
+PulseAudio protocol, else raw ALSA; the audio settings say which ("Sound goes through PipeWire").
+With PipeWire the microphones and speakers are the ones the desktop's sound settings show, named
+the same, and a device plugged in or out or a new system default reaches a running call at once.
+A chosen device is remembered by its PipeWire node name, so it survives restarts and replugging.
+The Flatpak needs `--filesystem=xdg-run/pipewire-0` for this (set in the manifest); without it
+calls fall back to the PulseAudio socket.
+
 ## Video attachments
 
 The webview (WebKitGTK) plays a video attachment through the system's GStreamer, not through the
