@@ -35,6 +35,11 @@
     <display_length compare="ge">720</display_length>
   </requires>
   <releases>
+    <release version="1.0.14" date="2026-10-31" type="stable">
+      <description>
+        <p>Regular update; see the release notes on GitHub for the changes.</p>
+      </description>
+    </release>
     <release version="1.0.13" date="2026-10-31" type="stable">
       <description>
         <p>Regular update; see the release notes on GitHub for the changes.</p>
