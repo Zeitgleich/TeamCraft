@@ -157,6 +157,8 @@ pub enum CallFailure {
   /// The browser opens the screen picker only straight from a click, and the click no longer
   /// counted (Safari, issue #930). Choosing to share again usually works.
   ScreenNeedsClick,
+  /// Linux on X11: screens are shared only on Wayland (through the desktop portal).
+  ScreenNeedsWayland,
   /// The camera started, but no picture of it could be sent (it delivered nothing, or nothing
   /// could be encoded).
   CameraNoPicture,
@@ -198,7 +200,7 @@ pub enum CallFailure {
 }
 
 impl CallFailure {
-  const ALL: [Self; 26] = [
+  const ALL: [Self; 27] = [
     Self::MicrophoneDenied,
     Self::MicrophoneMissing,
     Self::MicrophoneInUse,
@@ -211,6 +213,7 @@ impl CallFailure {
     Self::ScreenUnavailable,
     Self::ScreenDenied,
     Self::ScreenNeedsClick,
+    Self::ScreenNeedsWayland,
     Self::CameraNoPicture,
     Self::CameraStopped,
     Self::ScreenNoPicture,
@@ -242,6 +245,7 @@ impl CallFailure {
       Self::ScreenUnavailable => "screen_unavailable",
       Self::ScreenDenied => "screen_denied",
       Self::ScreenNeedsClick => "screen_needs_click",
+      Self::ScreenNeedsWayland => "screen_needs_wayland",
       Self::CameraNoPicture => "camera_no_picture",
       Self::CameraStopped => "camera_stopped",
       Self::ScreenNoPicture => "screen_no_picture",

@@ -139,6 +139,7 @@ pub fn failure_message_key(failure: &ActionFailure) -> &'static str {
       CallFailure::ScreenUnavailable => "error-call-screen-unavailable",
       CallFailure::ScreenDenied => "error-call-screen-denied",
       CallFailure::ScreenNeedsClick => "error-call-screen-needs-click",
+      CallFailure::ScreenNeedsWayland => "error-call-screen-needs-wayland",
       CallFailure::CameraNoPicture => "error-call-camera-no-picture",
       CallFailure::CameraStopped => "error-call-camera-stopped",
       CallFailure::ScreenNoPicture => "error-call-screen-no-picture",
@@ -482,6 +483,7 @@ mod tests {
         FailureKind::Call(CallFailure::CameraNotConnected),
         FailureKind::Call(CallFailure::CameraUnavailable),
         FailureKind::Call(CallFailure::ScreenNeedsClick),
+        FailureKind::Call(CallFailure::ScreenNeedsWayland),
         FailureKind::Call(CallFailure::ScreenDenied),
       ];
       for kind in kinds {

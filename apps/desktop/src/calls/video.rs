@@ -84,7 +84,8 @@ fn camera_failure(error: &CaptureError) -> Option<CallFailure> {
     CaptureError::NoUsableMode(_) | CaptureError::UnsupportedFormat(_) => {
       Some(CallFailure::CameraUnsupported)
     },
-    CaptureError::Device(_) => Some(CallFailure::CameraUnavailable),
+    // Only screens need Wayland; a camera never fails this way.
+    CaptureError::Device(_) | CaptureError::NeedsWayland => Some(CallFailure::CameraUnavailable),
     CaptureError::Cancelled(_) | CaptureError::Frame(_) => None,
   }
 }
@@ -136,6 +137,7 @@ pub(super) fn black_pictures_wire(kind: &VideoTrackKind, report: BlackReport) ->
 pub(super) fn screen_failure_wire(error: &CaptureError) -> String {
   let failure = match error {
     CaptureError::Denied(_) => CallFailure::ScreenDenied,
+    CaptureError::NeedsWayland => CallFailure::ScreenNeedsWayland,
     _ => CallFailure::ScreenUnavailable,
   };
   let mut detail = error.to_string();
@@ -712,6 +714,9 @@ mod tests {
         .detail
         .starts_with("the user or the system denied access to the screen")
     );
+    // Linux on X11: the share says to use a Wayland session.
+    let x11 = NativeCallError::Capture(CaptureError::NeedsWayland);
+    assert!(start_failure_wire(&VideoTrackKind::Screen, &x11).starts_with("call_screen_needs_wayland: "));
     assert_eq!(
       start_failure_wire(&VideoTrackKind::Camera, &NativeCallError::TaskEnded),
       NativeCallError::TaskEnded.to_string()
