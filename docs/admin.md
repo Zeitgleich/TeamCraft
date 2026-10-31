@@ -666,10 +666,11 @@ original order and keeps imports quiet.
 | `POST /admin/import/conversations/{id}/messages`      | Up to 100 encrypted messages in their original order, each with `sent_at_ms`; see below.                                                                                                                                                                                                          |
 | `PUT /admin/import/conversations/{id}/members/{user}` | That member's read position (never moved back), favourite and mute, from the old system.                                                                                                                                                                                                          |
 | `POST /admin/import/conversations/{id}/finish`        | Marks the conversation's import done (`imported_through`), announced as `conversation_update`.                                                                                                                                                                                                    |
-| `DELETE /admin/import/conversations/{id}/importer`    | Drops the import account's membership of a DM or notes once its devices left the group (e2ee.md §4.10).                                                                                                                                                                                           |
 
 Channels are created, joined, archived and left with the ordinary endpoints; the import account is a
-workspace admin. While it may import, it passes the rate limits (per user, and per address once it
+workspace admin. It leaves a DM or notes it imported into with the ordinary
+`DELETE /conversations/{id}/members/{its own ID}` once its devices left the group, without a line in
+the conversation. While it may import, it passes the rate limits (per user, and per address once it
 authenticated from there, for ten minutes after its last request) and the upload limits (per file
 and per user): it brings a whole team's history and files at once.
 

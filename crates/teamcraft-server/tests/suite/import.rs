@@ -260,7 +260,7 @@ mod dms {
     let left = app
       .delete(
         &importer,
-        &format!("/admin/import/conversations/{dm_id}/importer"),
+        &format!("/conversations/{dm_id}/members/{importer_id}"),
       )
       .await;
     assert_eq!(left.status, StatusCode::NO_CONTENT, "{}", left.body);

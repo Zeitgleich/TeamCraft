@@ -269,41 +269,6 @@ pub async fn finish(
   Ok(())
 }
 
-/// Drops the importer's membership of a DM or notes once its devices left the group. Allowed also
-/// after the import period, so the importer can always leave. Idempotent.
-pub async fn remove_importer(
-  state: &AppState,
-  caller: &AuthenticatedUser,
-  conversation: ConversationId,
-) -> Result<(), ApiError> {
-  if !state.policy.get().import.is_importer(caller.user.id) {
-    return Err(ApiError::ImportNotAllowed);
-  }
-  if state
-    .database
-    .remove_importer(conversation, caller.user.id)
-    .await?
-  {
-    let mut told = state.database.conversation_member_ids(conversation).await?;
-    told.push(caller.user.id);
-    state.hub.publish(
-      told,
-      &GatewayEvent::ConversationUpdate {
-        conversation_id: conversation,
-      },
-    );
-    audit::record(
-      state,
-      Some(caller.user.id),
-      "import_left",
-      Some(AuditTarget::new("conversation", conversation)),
-      &json!({}),
-    )
-    .await?;
-  }
-  Ok(())
-}
-
 fn require_importer(state: &AppState, caller: &AuthenticatedUser) -> Result<(), ApiError> {
   if is_importing(state, caller.user.id) {
     Ok(())

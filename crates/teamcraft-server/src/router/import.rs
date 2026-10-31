@@ -13,5 +13,4 @@ pub(super) fn routes() -> OpenApiRouter<AppState> {
     .routes(routes!(handlers::admin_import_messages_handler))
     .routes(routes!(handlers::admin_import_member_state_handler))
     .routes(routes!(handlers::admin_finish_import_handler))
-    .routes(routes!(handlers::admin_remove_importer_handler))
 }

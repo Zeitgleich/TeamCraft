@@ -1451,19 +1451,22 @@ its group, and leaves once it is done:
 - **A DM, or somebody's notes** (participants: the two people, or the user alone; §4.6, "Notes to
   self"): the server makes the conversation for the participants and lists the import account as a
   member that isn't a participant (admin.md §3.8). Without a group yet the importer founds it and
-  adds the participants with the full history. A participant's device accepts that welcome as the
-  DM's founding (§4.6, "Founding a DM") when the founder is the policy's import account, the commit's
-  server time is before `joins_until_ms`, and the tree holds the participants and the import account
-  only. Into an existing group the importer posts a signed addition of itself (from the join on),
-  which a participant's device commits under the same conditions; nobody else's addition is accepted
-  in a DM. Once every participant is in the group, the importer posts its signed leave, a
-  participant's device commits it (the keys rotate, §4.2), and the server drops its membership.
-  Group DMs of the old system would be handled the same way.
-- **The import account in a DM is no person of it.** Clients leave it out of the DM's name and member
-  list. While it is in the group they show a banner instead: "History is being imported. The import
-  account can read this conversation until the import is finished." It writes no "joined" or "left"
-  line in a DM or the notes. That is the trade-off: until everybody is in, an admin's device can read
-  what the participants write there, which the banner says and the signed policy bounds in time.
+  adds the participants with the full history; a participant's device joins from that welcome like
+  any DM's (the server lists the import account, so its identity is pinned and its leaf verified).
+  Into an existing group the importer posts its signed self-addition as a workspace admin (admin.md
+  §2.4: from the join on, only under `admin_self_join = visible`), which a participant's device
+  commits. Once every participant is in the group, the importer posts its signed leave, a
+  participant's device commits it (the keys rotate, §4.2), and the import account leaves the
+  conversation on the server without a line. Group DMs of the old system would be handled the same
+  way.
+- **The import account in a DM is no person of it.** Clients leave the policy's import account out of
+  a DM's name and member list, and show no "joined" or "left" line for it there. Whoever is in a DM's
+  or the notes' group without being a participant is shown, from the group itself rather than the
+  server's word: for the import account the banner "History is being imported. The import account
+  can read this conversation until the import is finished.", for anybody else a warning that
+  somebody who isn't a participant can read it. That is the trade-off: until everybody is in, an
+  admin's device can read what the participants write there, which the banner says and the signed
+  policy bounds in time.
 
 **Waiting for people.** A person who never signed in has no device: they are listed by the server
 (pre-provisioned from the identity provider, admin.md §3.8) and their additions wait on the import
