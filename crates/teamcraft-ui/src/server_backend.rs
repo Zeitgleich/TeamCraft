@@ -415,6 +415,7 @@ impl ChatBackend for RestChat {
       reactions: Vec::new(),
       reply_count: 0,
       maybe_thread: None,
+      maybe_imported: None,
     };
     self
       .local_messages

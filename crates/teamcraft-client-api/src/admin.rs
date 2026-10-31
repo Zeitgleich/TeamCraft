@@ -690,11 +690,13 @@ pub enum AdminSection {
   Integrations,
   /// The AI notetaker of calls (e2ee.md §8.2): signed policy and the API key.
   Notetaker,
+  /// History from another chat (admin.md §3.8): the signed import account and period.
+  Import,
   Audit,
 }
 
 impl AdminSection {
-  pub const ALL: [AdminSection; 17] = [
+  pub const ALL: [AdminSection; 18] = [
     Self::Channels,
     Self::Users,
     Self::Permissions,
@@ -711,6 +713,7 @@ impl AdminSection {
     Self::Instance,
     Self::Integrations,
     Self::Notetaker,
+    Self::Import,
     Self::Audit,
   ];
 
@@ -732,6 +735,7 @@ impl AdminSection {
       Self::Instance => "instance",
       Self::Integrations => "integrations",
       Self::Notetaker => "notetaker",
+      Self::Import => "import",
       Self::Audit => "audit",
     }
   }

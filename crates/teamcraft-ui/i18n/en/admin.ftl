@@ -748,6 +748,17 @@ admin-integrations-next-steps = Next: add the bot to the channels it serves (cha
 admin-integrations-copy = Copy
 
 ## Notetaker (admin.md §3.7)
+admin-nav-import = Import
+admin-import-title = Import
+admin-import-subtitle = History from another chat: the account the import tool signs in as, and until when it may import and join conversations.
+import-e2ee-warning = While the import runs, the import account is a member of the conversations it imports into, direct messages and notes included, and can read what is written there until everybody is in and it leaves. People see a notice in those direct messages.
+import-account = Import account
+import-account-none = No import
+import-account-hint = An account of the identity provider with the admin role, used only for the import. Messages it imported show their original author only while it is named here.
+import-until = May import until
+import-open = The import is open.
+import-closed = The import is closed: imported messages keep their origin, nothing new is imported.
+import-end = End import
 admin-nav-notetaker = Notetaker
 admin-notetaker-title = Notetaker
 admin-notetaker-subtitle = An AI participant that can be added to calls: it makes a transcript of the call and posts a summary and the transcript in the call's conversation.

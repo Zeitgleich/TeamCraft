@@ -19,6 +19,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
   /// many were published. If two members publish the same month, readers use the first one.
   pub async fn publish_index_segments(&mut self) -> Result<usize, CoreError> {
     let current_month = month_of(self.now_ms());
+    let maybe_importer = crate::imported::importer(&self.store);
     let mut published = 0;
     for conversation in self.cached_conversations()?.into_keys() {
       let messages = self.store.messages(conversation, MessageFilter::All)?;
@@ -28,10 +29,10 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
         .iter()
         .filter(|message| is_searchable(message) && message.maybe_server_id.is_some())
       {
-        by_month
-          .entry(month_of(message.sent_at_ms))
-          .or_default()
-          .push(message);
+        // Imported history goes under its original month (e2ee.md §4.10).
+        let sent_at_ms = crate::imported::trusted_origin(message, maybe_importer)
+          .map_or(message.sent_at_ms, |origin| origin.sent_at_ms);
+        by_month.entry(month_of(sent_at_ms)).or_default().push(message);
       }
       for (month, month_messages) in by_month {
         if month >= current_month || announced.contains(&month) {

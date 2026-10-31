@@ -7,6 +7,7 @@
 use std::fmt;
 
 use rand_core::CryptoRngCore;
+use sha2::{Digest, Sha256};
 use tls_codec::{TlsDeserializeBytes, TlsSerialize, TlsSize};
 
 macro_rules! snowflake_id {
@@ -64,6 +65,22 @@ impl ClientMessageId {
     Self(bytes)
   }
 
+  /// The ID of a message imported from another system (e2ee.md §4.10): the first 16 bytes of
+  /// SHA-256 over the conversation, the source system and the message's ID there, each
+  /// length-prefixed, so a second import of the same message sends the same ID and the server keeps
+  /// the first.
+  pub fn imported(conversation: ConversationId, source: &str, source_id: &str) -> Self {
+    let mut body = conversation.get().to_be_bytes().to_vec();
+    for part in [source, source_id] {
+      body.extend_from_slice(&u32::try_from(part.len()).unwrap_or(u32::MAX).to_be_bytes());
+      body.extend_from_slice(part.as_bytes());
+    }
+    let digest = Sha256::digest(crate::domain::labeled(crate::domain::IMPORTED_MESSAGE_ID, &body));
+    let mut bytes = [0u8; 16];
+    bytes.copy_from_slice(&digest[..16]);
+    Self(bytes)
+  }
+
   pub const fn as_bytes(&self) -> &[u8; 16] {
     &self.0
   }
@@ -76,5 +93,28 @@ impl fmt::Debug for ClientMessageId {
       write!(f, "{byte:02x}")?;
     }
     f.write_str(")")
+  }
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  #[test]
+  fn an_imported_message_keeps_its_id_and_nothing_else_shares_it() {
+    let conversation = ConversationId::new(7);
+    let id = ClientMessageId::imported(conversation, "synology", "42");
+    assert_eq!(id, ClientMessageId::imported(conversation, "synology", "42"));
+    assert_ne!(
+      id,
+      ClientMessageId::imported(ConversationId::new(8), "synology", "42")
+    );
+    assert_ne!(id, ClientMessageId::imported(conversation, "synology", "43"));
+    assert_ne!(id, ClientMessageId::imported(conversation, "slack", "42"));
+    // Length prefixes keep the parts apart.
+    assert_ne!(
+      ClientMessageId::imported(conversation, "ab", "c"),
+      ClientMessageId::imported(conversation, "a", "bc")
+    );
   }
 }

@@ -23,9 +23,9 @@ use teamcraft_client_api::calls::{
 use teamcraft_client_api::live::LiveSnapshot;
 use teamcraft_client_api::model::{
   Bookmark, BookmarkKind, Conversation, ConversationId, ConversationKind, CustomStatus, DeviceSetup,
-  JoinableSpace, MembershipIssue, Message, MessageKind, PENDING_ID_BIT, PendingInvite, PresenceStatus,
-  Reaction, SidebarCategory, Space, SpaceId, SpaceMember, SpaceRoster, SystemEvent, ThreadId, ThreadSummary,
-  TimestampMs, TypingNow, User, UserId, hue_from_hex,
+  ImportedAuthorView, ImportedFrom, ImportedMark, JoinableSpace, MembershipIssue, Message, MessageKind,
+  PENDING_ID_BIT, PendingInvite, PresenceStatus, Reaction, SidebarCategory, Space, SpaceId, SpaceMember,
+  SpaceRoster, SystemEvent, ThreadId, ThreadSummary, TimestampMs, TypingNow, User, UserId, hue_from_hex,
 };
 use teamcraft_proto::{
   AttachmentId, ClientMessageId, ConversationKind as ConversationKindProto, ConversationResponse,
@@ -45,6 +45,7 @@ use crate::client::bookmarks_key;
 use crate::client::workspace_admin::{ChannelOptions, StoredRoster};
 use crate::clock::Clock;
 use crate::error::CoreError;
+use crate::imported::{ImportSource, ImportedAuthor, ImportedOrigin};
 use crate::notify_rules::{MentionPreferences, load_mention_preferences};
 use crate::records::{self, Draft};
 use crate::store::{
@@ -509,6 +510,11 @@ impl<S: LocalStore> CoreChatBackend<S> {
     self.clock.now_ms()
   }
 
+  /// The import account of the verified workspace policy (e2ee.md §4.10).
+  pub(crate) fn importer(&self) -> Option<UserId> {
+    crate::imported::importer(self.store_ref())
+  }
+
   pub(crate) fn store_ref(&self) -> &S {
     &self.store
   }
@@ -673,6 +679,11 @@ impl<S: LocalStore> CoreChatBackend<S> {
   ) -> Conversation {
     let mut member_ids = self.members(response.id);
     let is_notes_to_self = response.is_notes_to_self(self.me);
+    // The import account is no person of a DM or the notes: the banner tells about it instead
+    // (e2ee.md §4.10).
+    if let Some(importer) = self.dm_importer(response) {
+      member_ids.retain(|user| *user != importer);
+    }
     // Notes to self (a DM of one): known from the conversation itself before any member list.
     if member_ids.is_empty() && is_notes_to_self {
       member_ids = vec![self.me];
@@ -733,6 +744,65 @@ impl<S: LocalStore> CoreChatBackend<S> {
       }),
       maybe_image_version: response.maybe_image.as_ref().map(|image| image.version.clone()),
     }
+  }
+
+  /// The policy's import account when it is a member of this DM, group DM or notes without being a
+  /// participant (e2ee.md §4.10).
+  fn dm_importer(&self, response: &ConversationResponse) -> Option<UserId> {
+    if !matches!(
+      response.kind,
+      ConversationKindProto::Dm | ConversationKindProto::Group
+    ) {
+      return None;
+    }
+    let importer = self.importer()?;
+    let is_participant = response.participants.iter().any(|user| user.id == importer);
+    let is_member =
+      response.maybe_importer_user_id == Some(importer) || self.members(response.id).contains(&importer);
+    (is_member && !is_participant).then_some(importer)
+  }
+
+  /// Members of a DM, group DM or the notes who are no participants: the import account while it
+  /// imports, anybody else as a warning (e2ee.md §4.10).
+  fn outsider_issues(&self, conversation: ConversationId) -> Vec<MembershipIssue> {
+    let maybe_response: Option<ConversationResponse> = self.read(records::get_json(
+      &self.store,
+      Table::Conversations,
+      &conversation.to_string(),
+    ));
+    let Some(response) = maybe_response else {
+      return Vec::new();
+    };
+    if !matches!(
+      response.kind,
+      ConversationKindProto::Dm | ConversationKindProto::Group
+    ) || response.participants.is_empty()
+    {
+      return Vec::new();
+    }
+    let maybe_importer = self.importer();
+    let mut outsiders: Vec<UserId> = self.members(conversation);
+    if let Some(importer) = response.maybe_importer_user_id
+      && !outsiders.contains(&importer)
+    {
+      outsiders.push(importer);
+    }
+    outsiders
+      .into_iter()
+      .filter(|user| {
+        !response
+          .participants
+          .iter()
+          .any(|participant| participant.id == *user)
+      })
+      .map(|user| {
+        if Some(user) == maybe_importer {
+          MembershipIssue::ImportInProgress { importer: user }
+        } else {
+          MembershipIssue::ReadByOutsider { user }
+        }
+      })
+      .collect()
   }
 
   /// Whether notifications of the conversation are off now: its level is none or a mute time has
@@ -888,7 +958,7 @@ impl<S: LocalStore> CoreChatBackend<S> {
   }
 
   pub(crate) fn to_message(&self, stored: &StoredMessage, all: &[StoredMessage]) -> Message {
-    self.to_message_among(stored, &Relations::of(all))
+    self.to_message_among(stored, &Relations::of(all, self.importer()))
   }
 
   /// [`Self::to_message`] for one of many rows of the same conversation, with its reactions and
@@ -918,10 +988,30 @@ impl<S: LocalStore> CoreChatBackend<S> {
       | MessageContent::Notetaker { .. }
       | MessageContent::Unknown => String::new(),
     };
-    let (kind, author) = match &stored.content {
+    let (kind, mut author) = match &stored.content {
       MessageContent::Event { event } => system_view(event, stored.sender_user_id),
       _ => (MessageKind::User, stored.sender_user_id),
     };
+    // Shown with its original author and time only from the import account (e2ee.md §4.10).
+    let maybe_origin = crate::imported::trusted_origin(stored, relations.maybe_importer);
+    let maybe_imported = maybe_origin.map(|origin| {
+      let view = match &origin.author {
+        ImportedAuthor::User { user_id } => {
+          author = *user_id;
+          ImportedAuthorView::Person
+        },
+        ImportedAuthor::Named { name } => ImportedAuthorView::Named { name: name.clone() },
+        ImportedAuthor::Deleted | ImportedAuthor::Unknown => ImportedAuthorView::Deleted,
+      };
+      ImportedMark {
+        source: match origin.source {
+          ImportSource::Synology => ImportedFrom::SynologyChat,
+          ImportSource::Unknown => ImportedFrom::Other,
+        },
+        author: view,
+        importer: stored.sender_user_id,
+      }
+    });
     let reply_count = stored.maybe_server_id.map_or(0, |server_id| {
       relations.reply_count(ThreadId::from_snowflake(server_id.snowflake()))
     });
@@ -930,16 +1020,21 @@ impl<S: LocalStore> CoreChatBackend<S> {
       conversation: stored.conversation_id,
       author,
       kind,
-      sent_at: stored.sent_at_ms,
+      sent_at: maybe_origin.map_or(stored.sent_at_ms, |origin| origin.sent_at_ms),
       body,
-      is_edited: stored.is_edited,
-      reactions: reactions_of(
-        stored.client_message_id,
-        relations.reactions_to(stored.client_message_id),
+      is_edited: stored.is_edited || maybe_origin.is_some_and(|origin| origin.maybe_edited_at_ms.is_some()),
+      reactions: with_imported_reactions(
+        reactions_of(
+          stored.client_message_id,
+          relations.reactions_to(stored.client_message_id),
+          self.me,
+        ),
+        maybe_origin,
         self.me,
       ),
       reply_count: u32::try_from(reply_count).unwrap_or(u32::MAX),
       maybe_thread: stored.maybe_thread_id,
+      maybe_imported,
     }
   }
 
@@ -961,7 +1056,7 @@ impl<S: LocalStore> CoreChatBackend<S> {
         .and_then(|anchor| anchor.position_in(&feed))
         .unwrap_or(feed.len());
       let start = anchor_at.saturating_sub(older);
-      let relations = Relations::of(all);
+      let relations = Relations::of(all, self.importer());
       tail = FeedTail {
         messages: feed[start..]
           .iter()
@@ -1205,7 +1300,7 @@ impl<S: LocalStore> ChatBackend for CoreChatBackend<S> {
       let top_level: Vec<&StoredMessage> = all.iter().filter(|message| is_feed_row(message)).collect();
       let end = start.saturating_add(len).min(top_level.len());
       let start = start.min(end);
-      let relations = Relations::of(all);
+      let relations = Relations::of(all, self.importer());
       let page = top_level[start..end]
         .iter()
         .map(|message| self.to_message_among(message, &relations))
@@ -1225,7 +1320,7 @@ impl<S: LocalStore> ChatBackend for CoreChatBackend<S> {
       let replies = all.iter().filter(|message| {
         message.maybe_thread_id == Some(thread) && !message.is_hidden() && !is_deleted(message)
       });
-      let relations = Relations::of(all);
+      let relations = Relations::of(all, self.importer());
       rows = root
         .chain(replies)
         .map(|message| self.to_message_among(message, &relations))
@@ -1559,6 +1654,7 @@ impl<S: LocalStore> ChatBackend for CoreChatBackend<S> {
     if self.read(crate::client::is_waiting_for_admission(&self.store, conversation)) {
       issues.push(MembershipIssue::WaitingForAdmission);
     }
+    issues.extend(self.outsider_issues(conversation));
     issues.extend(
       self
         .read(crate::client::pending_user_additions(&self.store, conversation))
@@ -2261,10 +2357,12 @@ struct Relations<'a> {
   reactions: HashMap<ClientMessageId, Vec<&'a StoredMessage>>,
   /// Shown replies per thread.
   replies: HashMap<ThreadId, usize>,
+  /// The import account of the verified policy, whose imported messages show their origin.
+  maybe_importer: Option<UserId>,
 }
 
 impl<'a> Relations<'a> {
-  fn of(all: &'a [StoredMessage]) -> Self {
+  fn of(all: &'a [StoredMessage], maybe_importer: Option<UserId>) -> Self {
     let mut reactions: HashMap<ClientMessageId, Vec<&'a StoredMessage>> = HashMap::new();
     let mut replies: HashMap<ThreadId, usize> = HashMap::new();
     for message in all {
@@ -2278,7 +2376,11 @@ impl<'a> Relations<'a> {
         *replies.entry(thread).or_default() += 1;
       }
     }
-    Self { reactions, replies }
+    Self {
+      reactions,
+      replies,
+      maybe_importer,
+    }
   }
 
   fn reactions_to(&self, target: ClientMessageId) -> impl Iterator<Item = &'a StoredMessage> + '_ {
@@ -2322,6 +2424,42 @@ fn reactions_of<'a>(
     entry.reacted_by_me |= user == me;
   }
   by_emoji.into_values().collect()
+}
+
+/// Adds the reactions an imported message brought (e2ee.md §4.10) to the live ones: each author
+/// counts once per emoji, also one who reacted again here.
+fn with_imported_reactions(
+  mut reactions: Vec<Reaction>,
+  maybe_origin: Option<&ImportedOrigin>,
+  me: UserId,
+) -> Vec<Reaction> {
+  let Some(origin) = maybe_origin else {
+    return reactions;
+  };
+  for imported in &origin.reactions {
+    let mine = ImportedAuthor::User { user_id: me };
+    let has_mine = imported.authors.contains(&mine);
+    let count = u32::try_from(imported.authors.len()).unwrap_or(u32::MAX);
+    match reactions
+      .iter_mut()
+      .find(|reaction| reaction.emoji == imported.emoji)
+    {
+      Some(live) => {
+        // My live reaction and my imported one are the same person.
+        let overlap = u32::from(has_mine && live.reacted_by_me);
+        live.count = live.count.saturating_add(count).saturating_sub(overlap);
+        live.reacted_by_me |= has_mine;
+      },
+      None if count > 0 => reactions.push(Reaction {
+        emoji: imported.emoji.clone(),
+        count,
+        reacted_by_me: has_mine,
+      }),
+      None => {},
+    }
+  }
+  reactions.sort_by(|left, right| left.emoji.cmp(&right.emoji));
+  reactions
 }
 
 /// The newest of `messages` the server stored (outbox messages have no server ID yet): the read
@@ -2915,6 +3053,158 @@ mod tests {
   fn out_of_range_pages_are_clipped() {
     let backend = CoreChatBackend::new(MemoryStore::new(), id(1), Box::new(ManualClock::new(0)));
     assert!(backend.messages(id(10), 5, 10).is_empty());
+  }
+
+  mod imported {
+    use super::*;
+    use crate::imported::{ImportSource, ImportedReaction};
+    use crate::store::MessageMeta;
+    use crate::workspace::WorkspaceState;
+
+    const IMPORTER: i64 = 9;
+
+    #[test]
+    fn the_import_accounts_message_shows_its_original_author_and_time() {
+      let backend = backend_with_importer(Some(IMPORTER));
+      let stored = imported_message(IMPORTER, ImportedAuthor::User { user_id: id(2) }, Vec::new());
+      let row = backend.to_message(&stored, std::slice::from_ref(&stored));
+      assert_eq!(row.author, id(2));
+      assert_eq!(row.sent_at, 1_600_000_000_000);
+      let mark = row.maybe_imported.unwrap();
+      assert_eq!(mark.author, ImportedAuthorView::Person);
+      assert_eq!(mark.importer, id(IMPORTER));
+      assert_eq!(mark.source, ImportedFrom::SynologyChat);
+    }
+
+    #[test]
+    fn anybody_elses_claimed_origin_is_ignored() {
+      let backend = backend_with_importer(Some(IMPORTER));
+      let forged = imported_message(3, ImportedAuthor::User { user_id: id(2) }, Vec::new());
+      let row = backend.to_message(&forged, std::slice::from_ref(&forged));
+      assert_eq!(row.author, id(3));
+      assert!(row.maybe_imported.is_none());
+      let without_policy = backend_with_importer(None);
+      let stored = imported_message(IMPORTER, ImportedAuthor::Deleted, Vec::new());
+      assert!(
+        without_policy
+          .to_message(&stored, std::slice::from_ref(&stored))
+          .maybe_imported
+          .is_none()
+      );
+    }
+
+    #[test]
+    fn people_without_an_account_and_bots_keep_their_kind() {
+      let backend = backend_with_importer(Some(IMPORTER));
+      let deleted = imported_message(IMPORTER, ImportedAuthor::Deleted, Vec::new());
+      let row = backend.to_message(&deleted, std::slice::from_ref(&deleted));
+      assert_eq!(row.maybe_imported.unwrap().author, ImportedAuthorView::Deleted);
+      let bot = imported_message(
+        IMPORTER,
+        ImportedAuthor::Named {
+          name: "Monitor".into(),
+        },
+        Vec::new(),
+      );
+      let row = backend.to_message(&bot, std::slice::from_ref(&bot));
+      assert_eq!(
+        row.maybe_imported.unwrap().author,
+        ImportedAuthorView::Named {
+          name: "Monitor".into()
+        }
+      );
+    }
+
+    #[test]
+    fn imported_reactions_join_the_live_ones_once_per_person() {
+      let backend = backend_with_importer(Some(IMPORTER));
+      let stored = imported_message(
+        IMPORTER,
+        ImportedAuthor::Deleted,
+        vec![
+          ImportedReaction {
+            emoji: "\u{1f44d}".into(),
+            authors: vec![ImportedAuthor::User { user_id: id(1) }, ImportedAuthor::Deleted],
+          },
+          ImportedReaction {
+            emoji: "\u{1f389}".into(),
+            authors: vec![ImportedAuthor::Named {
+              name: "Monitor".into(),
+            }],
+          },
+        ],
+      );
+      // Alice (the user) also reacted with the thumb here.
+      let live = StoredMessage {
+        client_message_id: ClientMessageId::from_bytes([2; 16]),
+        sender_user_id: id(1),
+        content: MessageContent::Reaction {
+          target: stored.client_message_id,
+          emoji: "\u{1f44d}".into(),
+          is_added: true,
+        },
+        ..stored.clone()
+      };
+      let all = [stored.clone(), live];
+      let row = backend.to_message(&stored, &all);
+      let thumb = row.reactions.iter().find(|r| r.emoji == "\u{1f44d}").unwrap();
+      assert_eq!(thumb.count, 2);
+      assert!(thumb.reacted_by_me);
+      let party = row.reactions.iter().find(|r| r.emoji == "\u{1f389}").unwrap();
+      assert_eq!(party.count, 1);
+      assert!(!party.reacted_by_me);
+    }
+
+    fn backend_with_importer(maybe_importer: Option<i64>) -> CoreChatBackend<MemoryStore> {
+      let backend = CoreChatBackend::new(MemoryStore::new(), id(1), Box::new(ManualClock::new(0)));
+      let mut state = WorkspaceState::default();
+      state.policy.import.maybe_importer = maybe_importer.map(id);
+      records::put_json(
+        &backend.store,
+        Table::Workspace,
+        crate::client::WORKSPACE_KEY,
+        &state,
+      )
+      .unwrap();
+      backend
+    }
+
+    fn imported_message(
+      sender: i64,
+      author: ImportedAuthor,
+      reactions: Vec<ImportedReaction>,
+    ) -> StoredMessage {
+      StoredMessage {
+        conversation_id: id(10),
+        client_message_id: ClientMessageId::from_bytes([1; 16]),
+        maybe_server_id: Some(id(101)),
+        sender_user_id: id(sender),
+        maybe_thread_id: None,
+        sent_at_ms: 5_000,
+        content: MessageContent::Text {
+          body: "old news".into(),
+          mentions: Vec::new(),
+          meta: MessageMeta {
+            maybe_imported: Some(Box::new(ImportedOrigin {
+              source: ImportSource::Synology,
+              source_id: "1".into(),
+              author,
+              sent_at_ms: 1_600_000_000_000,
+              maybe_edited_at_ms: None,
+              reactions,
+              missing_files: Vec::new(),
+            })),
+            ..MessageMeta::default()
+          },
+        },
+        is_edited: false,
+        edits: Vec::new(),
+        maybe_edit_id: None,
+        is_pinned: false,
+        maybe_verified_commit: None,
+        maybe_server_change: None,
+      }
+    }
   }
 
   mod mention_counts {

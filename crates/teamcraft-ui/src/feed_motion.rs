@@ -370,6 +370,7 @@ mod tests {
       is_edited: false,
       reply_count: 0,
       maybe_thread: None,
+      maybe_imported: None,
     }
   }
 }

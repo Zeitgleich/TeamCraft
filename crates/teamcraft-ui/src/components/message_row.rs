@@ -22,7 +22,10 @@ use crate::feed_motion::{Entrance, RowMotion};
 use crate::i18n::use_i18n;
 use crate::markdown;
 use crate::message_links::{as_permalink, own_hosts};
-use crate::model::{LogLevel, Message, MessageKind, SystemEvent, User, UserId, is_pending, thread_id_of};
+use crate::model::{
+  DeviceSetup, Id, ImportedAuthorView, ImportedFrom, LogLevel, Message, MessageKind, PresenceStatus,
+  SystemEvent, User, UserId, is_pending, thread_id_of,
+};
 use crate::reactive::{SetIfAlive, use_interval};
 use crate::state::{Overlay, use_app_state};
 use crate::viewport::is_touch_primary;
@@ -244,7 +247,18 @@ fn user_message(message: Message, is_grouped: bool, in_thread: bool, motion: Row
   let i18n = use_i18n();
   let state = use_app_state();
   let locale = i18n.locale().tag();
-  let author = state.read(|backend| backend.user(message.author));
+  // An imported message by somebody without an account here (or a bot of the old system) has a
+  // stand-in author: their old name, or "Deleted user" (e2ee.md §4.10).
+  let maybe_imported = message.maybe_imported.clone();
+  let author = match maybe_imported.as_ref().map(|mark| &mark.author) {
+    Some(ImportedAuthorView::Deleted) => Some(imported_stand_in(i18n.t("user-deleted-name"), false)),
+    Some(ImportedAuthorView::Named { name }) => Some(imported_stand_in(name.clone(), true)),
+    _ => state.read(|backend| backend.user(message.author)),
+  };
+  let has_profile = !matches!(
+    maybe_imported.as_ref().map(|mark| &mark.author),
+    Some(ImportedAuthorView::Deleted | ImportedAuthorView::Named { .. })
+  );
   let me = state.me();
   let time = format_time(message.sent_at, locale);
   let thread_root = message.maybe_thread.unwrap_or_else(|| thread_id_of(message.id));
@@ -252,7 +266,8 @@ fn user_message(message: Message, is_grouped: bool, in_thread: bool, motion: Row
   let message_id = message.id;
   let reply_count = message.reply_count;
   let reactions = message.reactions.clone();
-  let is_mine = message.author == me.id;
+  // Imported messages are the import account's: nobody edits them as their own.
+  let is_mine = message.author == me.id && maybe_imported.is_none();
   let author_id = message.author;
   let author_name = author
     .as_ref()
@@ -341,6 +356,18 @@ fn user_message(message: Message, is_grouped: bool, in_thread: bool, motion: Row
     hover_card.set(None);
   };
 
+  let imported_badge = maybe_imported.as_ref().map(|mark| {
+    let importer = state
+      .read(|backend| backend.user(mark.importer))
+      .map(|user| user.display_name)
+      .unwrap_or_default();
+    let source = match mark.source {
+      ImportedFrom::SynologyChat => i18n.t("imported-from-synology"),
+      ImportedFrom::Other => i18n.t("imported-from-other"),
+    };
+    let title = i18n.t_with("imported-title", &[("source", &source), ("importer", &importer)]);
+    view! { <span class="badge badge-imported" title=title.clone() aria-label=title>{move || i18n.t("badge-imported")}</span> }
+  });
   let header = (!is_grouped).then(|| {
     let status = author.as_ref().and_then(|user| user.maybe_custom_status.clone());
     let badge_bot = author.as_ref().is_some_and(|user| user.is_bot);
@@ -352,11 +379,16 @@ fn user_message(message: Message, is_grouped: bool, in_thread: bool, motion: Row
           class="msg-author"
           translate="no"
           aria-haspopup="dialog"
+          disabled=!has_profile
           on:click=move |_| {
             hide_card_now();
             state.overlay.set(Overlay::UserProfile(author_id));
           }
-          on:mouseenter=move |ev| show_card_soon(event_target::<web_sys::Element>(&ev))
+          on:mouseenter=move |ev| {
+            if has_profile {
+              show_card_soon(event_target::<web_sys::Element>(&ev));
+            }
+          }
           on:mouseleave=move |_| hide_card_soon()
         >
           {author_name.clone()}
@@ -371,6 +403,7 @@ fn user_message(message: Message, is_grouped: bool, in_thread: bool, motion: Row
           />
         })}
         {badge_bot.then(|| view! { <span class="badge">{move || i18n.t("badge-bot")}</span> })}
+        {imported_badge.clone()}
         {badge_guest.then(|| view! { <span class="badge badge-guest">{move || i18n.t("badge-guest")}</span> })}
         {status.filter(|_| state.settings.prefs.get_untracked().display.show_status_in_messages).map(|status| view! { <span class="msg-status" title=status.text>{status.emoji}</span> })}
         <time class="msg-time" datetime=message.sent_at.to_string()>
@@ -1092,6 +1125,8 @@ fn is_grouped(message: &Message, maybe_prev: Option<&Message>) -> bool {
   let Some(prev) = maybe_prev else { return false };
   matches!(prev.kind, MessageKind::User)
     && prev.author == message.author
+    // Imported messages of different people without an account share the import account's ID.
+    && prev.maybe_imported.as_ref().map(|mark| &mark.author) == message.maybe_imported.as_ref().map(|mark| &mark.author)
     && message.sent_at - prev.sent_at < GROUP_WINDOW_MS
     && local_day(prev.sent_at) == local_day(message.sent_at)
 }
@@ -1101,6 +1136,29 @@ fn date_divider(message: &Message, maybe_prev: Option<&Message>) -> Option<i64> 
   match maybe_prev {
     Some(prev) if local_day(prev.sent_at) == local_day(message.sent_at) => None,
     _ => Some(message.sent_at),
+  }
+}
+
+/// The author shown for an imported message by somebody without an account here: no picture, no
+/// profile (e2ee.md §4.10).
+fn imported_stand_in(display_name: String, is_bot: bool) -> User {
+  let avatar_hue = display_name.bytes().fold(0_u16, |hue, byte| {
+    (hue.wrapping_mul(31).wrapping_add(u16::from(byte))) % 360
+  });
+  User {
+    id: UserId::from_snowflake(teamcraft_proto::Snowflake::ZERO),
+    username: String::new(),
+    display_name,
+    presence: PresenceStatus::Offline,
+    maybe_custom_status: None,
+    avatar_hue,
+    is_guest: false,
+    is_bot,
+    maybe_organization: None,
+    device_setup: DeviceSetup::Unknown,
+    is_deactivated: true,
+    is_deleted: !is_bot,
+    maybe_email: None,
   }
 }
 
@@ -1323,6 +1381,7 @@ mod tests {
       reactions: Vec::new(),
       reply_count: 0,
       maybe_thread: None,
+      maybe_imported: None,
     }
   }
 }

@@ -544,9 +544,13 @@ impl MessageItem {
       id: message.id.to_string(),
       conversation_id: message.conversation.to_string(),
       author_id: message.author.to_string(),
-      author_name: maybe_author
-        .map(|author| author.display_name.clone())
-        .unwrap_or_default(),
+      author_name: match message.maybe_imported.as_ref().map(|mark| &mark.author) {
+        // An imported bot's or webhook's name; the apps don't know imported messages yet.
+        Some(view::ImportedAuthorView::Named { name }) => name.clone(),
+        _ => maybe_author
+          .map(|author| author.display_name.clone())
+          .unwrap_or_default(),
+      },
       sent_at_ms: message.sent_at,
       body: message.body.clone(),
       is_edited: message.is_edited,
@@ -563,7 +567,12 @@ impl MessageItem {
           reacted_by_me: reaction.reacted_by_me,
         })
         .collect(),
-      is_author_deleted: maybe_author.is_some_and(|author| author.is_deleted),
+      // Somebody without an account here is shown like a deleted account (e2ee.md §4.10).
+      is_author_deleted: maybe_author.is_some_and(|author| author.is_deleted)
+        || matches!(
+          message.maybe_imported.as_ref().map(|mark| &mark.author),
+          Some(view::ImportedAuthorView::Deleted)
+        ),
     }
   }
 }
@@ -963,6 +972,7 @@ mod tests {
         reactions: Vec::new(),
         reply_count: 0,
         maybe_thread: None,
+        maybe_imported: None,
       }
     }
   }
@@ -1150,6 +1160,7 @@ mod tests {
       reactions: Vec::new(),
       reply_count: 0,
       maybe_thread: None,
+      maybe_imported: None,
     }
   }
 

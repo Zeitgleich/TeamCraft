@@ -748,6 +748,17 @@ admin-integrations-next-steps = Danach: den Bot zu den Kanälen hinzufügen, die
 admin-integrations-copy = Kopieren
 
 ## Notetaker (admin.md §3.7)
+admin-nav-import = Import
+admin-import-title = Import
+admin-import-subtitle = Verlauf aus einem anderen Chat: das Konto, mit dem sich das Import-Werkzeug anmeldet, und bis wann es importieren und Gesprächen beitreten darf.
+import-e2ee-warning = Solange der Import läuft, ist das Import-Konto Mitglied der Gespräche, in die es importiert, auch von Direktnachrichten und Notizen, und kann lesen, was dort geschrieben wird, bis alle dabei sind und es geht. In diesen Direktnachrichten sehen die Beteiligten einen Hinweis.
+import-account = Import-Konto
+import-account-none = Kein Import
+import-account-hint = Ein Konto des Identitätsanbieters mit der Admin-Rolle, nur für den Import. Von ihm importierte Nachrichten zeigen ihren ursprünglichen Verfasser nur, solange es hier eingetragen ist.
+import-until = Darf importieren bis
+import-open = Der Import ist offen.
+import-closed = Der Import ist geschlossen: Importierte Nachrichten behalten ihre Herkunft, Neues wird nicht importiert.
+import-end = Import beenden
 admin-nav-notetaker = Notetaker
 admin-notetaker-title = Notetaker
 admin-notetaker-subtitle = Ein KI-Teilnehmer, der zu Anrufen hinzugefügt werden kann: Er erstellt ein Transkript des Anrufs und schreibt Zusammenfassung und Transkript in die Unterhaltung des Anrufs.

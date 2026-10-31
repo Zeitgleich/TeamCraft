@@ -2876,6 +2876,180 @@ impl ServerApi for FakeServerApi {
     })
   }
 
+  async fn provision_users(
+    &self,
+    request: &teamcraft_proto::ProvisionUsersRequest,
+  ) -> Result<teamcraft_proto::ProvisionUsersResponse, ApiError> {
+    self.with(|state, _| {
+      let users = request
+        .usernames
+        .iter()
+        .map(|username| {
+          let maybe_id = state
+            .users
+            .values()
+            .find(|user| user.maybe_username.as_deref() == Some(username.as_str()))
+            .map(|user| user.id);
+          teamcraft_proto::ProvisionedUser {
+            username: username.clone(),
+            maybe_user_id: maybe_id,
+            status: if maybe_id.is_some() {
+              teamcraft_proto::ProvisionStatus::Existing
+            } else {
+              teamcraft_proto::ProvisionStatus::NotFound
+            },
+          }
+        })
+        .collect();
+      Ok(teamcraft_proto::ProvisionUsersResponse { users })
+    })
+  }
+
+  async fn import_dm(
+    &self,
+    request: &teamcraft_proto::ImportDmRequest,
+  ) -> Result<ConversationResponse, ApiError> {
+    self.with(|state, me| {
+      let participants: BTreeSet<UserId> = request.participants.iter().copied().collect();
+      for user in &participants {
+        state.user(*user)?;
+      }
+      let maybe_existing = state
+        .conversations
+        .iter()
+        .find(|(_, conversation)| {
+          conversation.response.kind == ConversationKind::Dm
+            && conversation
+              .response
+              .participants
+              .iter()
+              .map(|user| user.id)
+              .collect::<BTreeSet<_>>()
+              == participants
+        })
+        .map(|(id, _)| *id);
+      let id = match maybe_existing {
+        Some(id) => id,
+        None => {
+          let members: Vec<UserId> = participants.iter().copied().collect();
+          let id = state.create_conversation(ConversationKind::Dm, None, None, HistoryPolicy::Full, &members);
+          let summaries = members
+            .iter()
+            .map(|user| state.user(*user).cloned())
+            .collect::<Result<Vec<_>, _>>()?;
+          if let Some(conversation) = state.conversations.get_mut(&id) {
+            conversation.response.participants = summaries;
+          }
+          id
+        },
+      };
+      let floor = state.peek_id();
+      let conversation = state
+        .conversations
+        .get_mut(&id)
+        .ok_or_else(|| ApiError::status(404, ErrorCode::ChannelNotFound, "unknown conversation"))?;
+      conversation
+        .members
+        .entry(me)
+        .or_insert((ChannelRole::Member, floor));
+      conversation.response.maybe_importer_user_id = Some(me);
+      let told: Vec<UserId> = conversation.members.keys().copied().collect();
+      state.publish(told, &GatewayEvent::ConversationUpdate { conversation_id: id });
+      Ok(state.conversation(id)?.view(me))
+    })
+  }
+
+  async fn import_messages(
+    &self,
+    conversation: ConversationId,
+    request: &teamcraft_proto::ImportMessagesRequest,
+  ) -> Result<teamcraft_proto::ImportMessagesResponse, ApiError> {
+    self.with(|state, me| {
+      state.ensure_own_device(me, request.device_id)?;
+      let entry = state.member_conversation_mut(conversation, me)?;
+      let mut stored = Vec::new();
+      for message in &request.messages {
+        if let Some(existing) = entry
+          .messages
+          .iter()
+          .find(|stored| stored.client_message_id == message.client_message_id)
+        {
+          stored.push(teamcraft_proto::ImportedMessageId {
+            client_message_id: message.client_message_id,
+            id: existing.id,
+          });
+          continue;
+        }
+        let maybe_last = entry
+          .messages
+          .iter()
+          .filter(|stored| stored.id.snowflake().worker() == teamcraft_proto::IMPORT_WORKER)
+          .map(|stored| stored.id)
+          .max();
+        let id = teamcraft_proto::next_import_id(maybe_last, message.sent_at_ms)
+          .ok_or_else(|| ApiError::status(409, ErrorCode::ImportWindowFull, "no room"))?;
+        let response = MessageResponse {
+          id,
+          client_message_id: message.client_message_id,
+          conversation_id: conversation,
+          sender_user_id: me,
+          sender_device_id: request.device_id,
+          maybe_thread_id: message.maybe_thread_id,
+          mentioned_user_ids: Vec::new(),
+          is_urgent: false,
+          content_key_id: message.content_key_id.clone(),
+          ciphertext: message.ciphertext.clone(),
+        };
+        let at = entry.messages.partition_point(|stored| stored.id < id);
+        entry.messages.insert(at, response);
+        stored.push(teamcraft_proto::ImportedMessageId {
+          client_message_id: message.client_message_id,
+          id,
+        });
+      }
+      Ok(teamcraft_proto::ImportMessagesResponse { messages: stored })
+    })
+  }
+
+  async fn set_import_member_state(
+    &self,
+    conversation: ConversationId,
+    user: UserId,
+    request: &teamcraft_proto::ImportMemberStateRequest,
+  ) -> Result<(), ApiError> {
+    self.with(|state, me| {
+      let entry = state.member_conversation_mut(conversation, me)?;
+      if let Some(read) = request.maybe_read_through {
+        let position = entry.read_positions.entry(user).or_insert(read);
+        *position = (*position).max(read);
+      }
+      if request.is_favorite {
+        entry.favorites.insert(user, true);
+      }
+      Ok(())
+    })
+  }
+
+  async fn finish_import(&self, conversation: ConversationId) -> Result<(), ApiError> {
+    self.with(|state, me| {
+      let entry = state.member_conversation_mut(conversation, me)?;
+      entry.response.maybe_imported_through = entry
+        .messages
+        .iter()
+        .filter(|stored| stored.id.snowflake().worker() == teamcraft_proto::IMPORT_WORKER)
+        .map(|stored| stored.id)
+        .max();
+      let told: Vec<UserId> = entry.members.keys().copied().collect();
+      state.publish(
+        told,
+        &GatewayEvent::ConversationUpdate {
+          conversation_id: conversation,
+        },
+      );
+      Ok(())
+    })
+  }
+
   async fn send_message(
     &self,
     conversation: ConversationId,
