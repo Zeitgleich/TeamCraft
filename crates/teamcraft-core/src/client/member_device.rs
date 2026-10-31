@@ -143,8 +143,12 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       .chain([me])
       .collect();
     let directory = self.trusted_directory(users.iter().copied()).await?;
-    // A single device is a user joining, not a further device.
+    // A single device is a user joining, not a further device; in the notes, nobody is left who
+    // could add it, so it founds their group anew.
     if !self.has_other_devices(&directory)? {
+      if self.refound_notes(conversation, &users, &directory).await? {
+        return Ok(MemberDeviceJoin::Joined);
+      }
       return Ok(MemberDeviceJoin::NotAMember);
     }
     self.member_join_attempts.insert(conversation, now);

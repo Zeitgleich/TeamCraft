@@ -30,6 +30,7 @@ mod key_packages;
 mod linking;
 mod member_device;
 mod messaging;
+mod notes_refound;
 mod notifications;
 mod org_backgrounds;
 mod org_recovery;
@@ -162,6 +163,10 @@ pub struct ClientSettings {
   /// A device without a group (a welcome it couldn't join) waits twice as long after each rejoin
   /// request, up to this.
   pub rejoin_retry_max: std::time::Duration,
+  /// The notes' group is founded anew (e2ee.md §4.6, "Re-founding the notes") only while the
+  /// server's queue is at most at this epoch: each epoch costs one commit on this device, and a
+  /// failed attempt is tried again after `rejoin_retry`.
+  pub max_refound_epoch: u64,
   /// A channel member's device that posted a self-add and isn't in the group after this long posts
   /// it again: the members may have refused it (issue #907).
   pub self_add_retry: std::time::Duration,
@@ -352,6 +357,7 @@ impl Default for ClientSettings {
       device_add_attempts: 6,
       rejoin_retry: std::time::Duration::from_secs(10 * 60),
       rejoin_retry_max: std::time::Duration::from_secs(24 * 60 * 60),
+      max_refound_epoch: 1_000,
       self_add_retry: std::time::Duration::from_secs(30 * 60),
       self_add_retry_max: std::time::Duration::from_secs(24 * 60 * 60),
       pending_addition_expiry: std::time::Duration::from_secs(90 * 24 * 60 * 60),

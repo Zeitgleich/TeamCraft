@@ -933,6 +933,44 @@ people the DM was opened for, kept by the server also once one is deactivated) a
 never because the user is its only member left: a DM whose other person was deactivated stays that
 DM (issue #643). Showing it is display only; the group's membership is unaffected either way.
 
+**Re-founding the notes** (issue #910). The notes' group holds only the user's own devices, so when
+all of them are lost (a private window was the only device, and the user recovers, §6), nobody is
+left to add the recovered device: it reads the history from the key bag, but new notes would stay
+locked for good. "Dead" is decided by the client from signatures, never from the server's word
+(last seen, an unsigned revocation, a member list): the device founds the group anew only when
+
+- the conversation is the notes (§ above) and the server lists nobody but the user in it,
+- this device has no group for it, and
+- the user's newest signed device list (verified with the pinned identity key) names this device
+  with its signing key and **no other active device**. Without a list nothing is founded.
+
+While the list still names another device (the lost one was never revoked), the device waits and
+asks to be added, like any further device; the banner says that removing the lost devices in the
+settings sets the notes up again. Revoking them (§3) makes the next sync check at once.
+
+The new group starts with this device alone. The server keeps one queue per conversation, with
+first commit per epoch wins, so the device advances the new group, on its own and unseen,
+with empty commits up to the epoch the server's queue is in, then posts one real commit (a self
+update with the new group information) for that epoch. No server change is needed. If the server
+refuses it with an epoch conflict, a device of the old group committed first and is alive: the
+new group is dropped and that device adds this one. Once accepted, the device starts a fresh
+content key (the lost devices know the old ones; those stay in the ring and the key bag for the
+history), and devices linked later join the new group as usual. A device of the old group that
+still runs can't read the new group: it falls out on that commit and asks to be added back
+(§4.6, "Falling out and coming back"), which only works if the user's list names it. At most
+`max_refound_epoch` (client, default 1 000) epochs are skipped this way, and an attempt that
+fails (an epoch conflict, a lost answer) is tried again only after `rejoin_retry`, so a server
+can't make a device spin on a made-up epoch. The group, its cursor and the fresh content key are
+stored in one group of writes (§9.5): after a crash the device has either no group (and founds
+again, one epoch on) or the group with the fresh key, never the group with the old key.
+
+This never applies to a conversation with another person's devices: those are added back by the
+other members (§4.6, rejoin), never replaced by one device alone. What a hostile server can still
+do: claim a DM is the notes, or withhold a newer device list while the device enrolls, so that a
+device founds a group holding only itself. Nothing becomes readable to anyone else that way; the
+user's other devices (or the DM's other person) are only split off until added back, the same
+denial of service the server can always cause.
+
 **Founding a DM, and finishing it.** A DM or group DM has no creator who must found it: whichever
 participant's device first commits at epoch 0 owns the group, and the server keeps only that commit.
 The device that opened the DM keeps a setup record until its group holds every participant it asked

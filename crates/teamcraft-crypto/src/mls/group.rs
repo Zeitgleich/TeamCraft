@@ -167,6 +167,41 @@ impl ConversationGroup {
     Ok(Self::from_group(conversation_id, group, ChangeHistory::default()))
   }
 
+  /// Founds a conversation's group anew, with this device as the only member, when no device is
+  /// left that could add it to the old one (e2ee.md §4.6, "Re-founding the notes"). The new group
+  /// is advanced on this device alone, with empty commits nobody else sees, to `epoch`, the epoch
+  /// the server's queue for the conversation is in. Its first real commit, returned here and
+  /// pending until the server accepts it ([`Self::confirm_commit`]), then takes the queue over
+  /// like any commit: first commit per epoch wins, so a device of the old group that is still
+  /// alive and commits first makes the server refuse it. Old devices can't read the new group; one
+  /// that comes back falls out and asks to be added back like any device that missed a commit.
+  pub fn refound(
+    provider: &impl OpenMlsProvider,
+    device: &DeviceKeyPair,
+    certificate: &SignedDeviceCertificate,
+    conversation_id: ConversationId,
+    epoch: u64,
+  ) -> Result<(Self, CommitOutput), MlsError> {
+    let mut founded = Self::create(provider, device, certificate, conversation_id)?;
+    while founded.epoch() < epoch {
+      // Through the one commit path, so the web bundle carries no second copy of it.
+      founded.stage_commit(provider, device, Vec::new(), Vec::new(), true)?;
+      founded
+        .group
+        .merge_pending_commit(provider)
+        .map_err(|error| MlsError::openmls("merging own commit", error))?;
+    }
+    founded.history.joined_epoch = epoch;
+    let output = founded.stage_commit(provider, device, Vec::new(), Vec::new(), true)?;
+    founded.maybe_pending = Some(PendingCommit {
+      commit: output.commit.clone(),
+      maybe_change: None,
+      removed: Vec::new(),
+      maybe_rejoin: None,
+    });
+    Ok((founded, output))
+  }
+
   /// Joins a group from a welcome. Every member credential in the group is verified against the
   /// pinned identities before the group is accepted.
   pub fn join(
@@ -515,7 +550,7 @@ impl ConversationGroup {
     self.check_not_removed(&proposed)?;
 
     self.group.set_aad(signed_change.to_bytes()?);
-    let result = self.stage_commit(provider, device, validated_key_packages, removed_leaves);
+    let result = self.stage_commit(provider, device, validated_key_packages, removed_leaves, false);
     self.group.set_aad(Vec::new());
     let output = result?;
     self.maybe_pending = Some(PendingCommit {
@@ -563,7 +598,7 @@ impl ConversationGroup {
     }
     self.check_device_additions(&proposed)?;
     self.check_not_removed(&proposed)?;
-    let output = self.stage_commit(provider, device, validated_key_packages, Vec::new())?;
+    let output = self.stage_commit(provider, device, validated_key_packages, Vec::new(), false)?;
     self.maybe_pending = Some(PendingCommit {
       commit: output.commit.clone(),
       maybe_change: None,
@@ -605,7 +640,13 @@ impl ConversationGroup {
     let mut aad = REJOIN_AAD_MAGIC.to_vec();
     aad.extend_from_slice(&signed.to_bytes()?);
     self.group.set_aad(aad);
-    let result = self.stage_commit(provider, device, vec![key_package], vec![(old_leaf, member)]);
+    let result = self.stage_commit(
+      provider,
+      device,
+      vec![key_package],
+      vec![(old_leaf, member)],
+      false,
+    );
     self.group.set_aad(Vec::new());
     let output = result?;
     self.maybe_pending = Some(PendingCommit {
@@ -847,10 +888,12 @@ impl ConversationGroup {
     device: &DeviceKeyPair,
     key_packages: Vec<KeyPackage>,
     removed_leaves: Vec<(LeafNodeIndex, GroupMember)>,
+    is_self_update: bool,
   ) -> Result<CommitOutput, MlsError> {
     let bundle = self
       .group
       .commit_builder()
+      .force_self_update(is_self_update)
       .propose_adds(key_packages)
       .propose_removals(removed_leaves.into_iter().map(|(index, _)| index))
       .load_psks(provider.storage())

@@ -1123,6 +1123,73 @@ fn one_member_is_verified_alone_and_a_welcome_names_its_maker() {
   assert_eq!(staged.sender().unwrap(), member(&world.alice.user));
 }
 
+mod refounding {
+  use super::*;
+
+  #[test]
+  fn a_refounded_group_commits_at_the_queues_epoch_and_takes_further_devices() {
+    let alice = Client::new(ALICE);
+    let directory = TestDirectory::with(&[&alice.user]);
+    let (mut group, output) = ConversationGroup::refound(
+      &alice.provider,
+      &alice.user.device,
+      &alice.user.certificate,
+      CONVERSATION,
+      5,
+    )
+    .unwrap();
+    assert_eq!(group.epoch(), 5, "the commit addresses the queue's epoch");
+    assert!(output.maybe_group_info.is_some());
+    assert!(group.pending_commit().unwrap().is_commit(&output.commit));
+    group.confirm_commit(&alice.provider).unwrap();
+    assert_eq!(group.epoch(), 6);
+    assert_eq!(group.members().unwrap(), vec![member(&alice.user)]);
+
+    let laptop = Client::from_user(alice.user.new_device(101));
+    let added = group
+      .commit_device_additions(
+        &alice.provider,
+        &alice.user.device,
+        &[laptop.key_package()],
+        &directory,
+      )
+      .unwrap();
+    group.confirm_commit(&alice.provider).unwrap();
+    let laptop_group = ConversationGroup::join(
+      &laptop.provider,
+      &added.maybe_welcome.unwrap(),
+      CONVERSATION,
+      &directory,
+    )
+    .unwrap();
+    assert_eq!(laptop_group.epoch(), 7);
+    assert_eq!(laptop_group.members().unwrap().len(), 2);
+  }
+
+  #[test]
+  fn a_device_of_the_old_group_cannot_read_the_new_one() {
+    let mut world = World::new();
+    let epoch = world.alice_group.epoch();
+    let alice_laptop = Client::from_user(world.alice.user.new_device(102));
+    let (_, output) = ConversationGroup::refound(
+      &alice_laptop.provider,
+      &alice_laptop.user.device,
+      &alice_laptop.user.certificate,
+      CONVERSATION,
+      epoch,
+    )
+    .unwrap();
+    let event = world.carol_group.process_message(
+      &world.carol.provider,
+      &output.commit,
+      &world.directory,
+      &world.authority,
+    );
+    assert!(event.is_err(), "the old group refuses the new group's commit");
+    assert_eq!(world.carol_group.epoch(), epoch);
+  }
+}
+
 /// Alice (admin) and Carol share a group; Bob and Dave are pinned but not members.
 struct World {
   alice: Client,
@@ -1246,6 +1313,7 @@ impl World {
       &self.alice.user.device,
       key_packages,
       removals,
+      false,
     );
     self.alice_group.discard_commit(&self.alice.provider).unwrap();
     output.unwrap().commit
