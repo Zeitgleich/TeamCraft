@@ -7,11 +7,14 @@
 use std::time::{Duration, Instant};
 
 use chromiumoxide::page::Page;
+use teamcraft_core::api::HttpServerApi;
+use teamcraft_core::client::{LinkAnnouncement, NewDeviceLink};
+use teamcraft_core::{CoreError, LinkOffer};
 use teamcraft_e2e::browser::{BrowserSession, WebPortLease, lease_web_port, web_dir};
 use teamcraft_e2e::peer::PASSPHRASE;
 use teamcraft_e2e::scenario::{channel_with, space_with};
 use teamcraft_e2e::{Peer, Stack, StackBuilder};
-use teamcraft_proto::ConversationId;
+use teamcraft_proto::{ConversationId, DeviceLinkPlatform};
 
 pub(crate) const WEB_ORIGIN: &str = "http://127.0.0.1:8082";
 /// The default policy only lets pages talk to https: and wss: origins; the dev Keycloak is plain http.
@@ -192,6 +195,53 @@ async fn the_service_worker_loads_its_push_code() {
         answer.contains("\"ready\":true"),
         "the push code did not load: {answer}"
       );
+    })
+    .await;
+  rig.finish().await;
+}
+
+/// A new device that asks to be linked shows up on the open page within seconds, with no reload
+/// (e2ee.md §5, approve prompt); once denied there it goes, and the next request shows up too.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_link_request_shows_on_the_open_page_and_goes_once_denied() {
+  let Some(rig) = Rig::start().await else { return };
+  let api = HttpServerApi::new(rig.stack.base_url.clone(), rig.alice.tokens.clone());
+  rig
+    .browser
+    .screenshot_on_failure("web-link-request", |page| async move {
+      sign_in_as_alice(&page).await;
+      wait_for_text(&page, "browser-channel").await;
+      // Nothing asks yet: the page is up before the request, so only a live update can show it.
+      tokio::time::sleep(Duration::from_secs(2)).await;
+
+      for name in ["First tablet", "Second tablet"] {
+        let offer = LinkOffer::generate();
+        let announcement = LinkAnnouncement {
+          device_name: name.to_owned(),
+          platform: DeviceLinkPlatform::Android,
+        };
+        let new_device = async {
+          // The request is only taken once the new device waits in the relay, as in the app.
+          let announce = async {
+            let deadline = Instant::now() + WAIT;
+            while let Err(error) = offer.announce(&api, &announcement).await {
+              assert!(Instant::now() < deadline, "the request was never taken: {error}");
+              tokio::time::sleep(Duration::from_millis(200)).await;
+            }
+          };
+          tokio::join!(NewDeviceLink::connect(&api, &offer), announce).0
+        };
+        let (link, ()) = tokio::join!(new_device, async {
+          wait_for_text(&page, name).await;
+          click_text(&page, "Deny").await;
+          wait_for_text_gone(&page, name).await;
+        });
+        assert!(
+          matches!(link, Err(CoreError::LinkDenied)),
+          "{name}: {:?}",
+          link.err()
+        );
+      }
     })
     .await;
   rig.finish().await;

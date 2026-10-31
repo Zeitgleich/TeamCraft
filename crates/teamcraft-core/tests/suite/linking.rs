@@ -414,6 +414,33 @@ mod announced {
     assert!(alice.client.link_requests().is_empty());
   }
 
+  /// Denying a request the server no longer holds fails with a reason the user can read, and the
+  /// request leaves the list (it would otherwise stay until the next connect).
+  #[tokio::test]
+  async fn denying_a_request_that_is_gone_says_so_and_drops_it() {
+    let server = FakeServer::new();
+    let mut alice = Peer::enroll(&server, "Alice").await;
+    let laptop_api = alice.api.clone();
+    let offer = LinkOffer::generate();
+    let announcement = tablet();
+
+    let waiting = tokio::time::timeout(
+      Duration::from_millis(200),
+      connect_and_announce(&laptop_api, &offer, &announcement),
+    );
+    let (_, id) = tokio::join!(waiting, async {
+      settle(&mut [&mut alice]).await;
+      alice.client.link_requests()[0].id.clone()
+    });
+    // The new device gave up; this device has not heard of it yet.
+
+    assert!(matches!(
+      alice.client.reject_link_request(&id).await,
+      Err(CoreError::LinkRequestGone)
+    ));
+    assert!(alice.client.link_requests().is_empty());
+  }
+
   #[tokio::test]
   async fn only_the_users_own_devices_see_the_request() {
     let server = FakeServer::new();
@@ -435,9 +462,10 @@ mod announced {
       )
     });
     assert_eq!((alices, mallorys), (1, 0));
+    // Another user's request is unknown to Mallory, as if it never existed.
     assert!(matches!(
       mallory.client.reject_link_request(&offer_id(&offer)).await,
-      Err(CoreError::Api(_))
+      Err(CoreError::LinkRequestGone)
     ));
   }
 

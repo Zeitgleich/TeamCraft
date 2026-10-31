@@ -5,11 +5,13 @@
 
 use leptos::prelude::*;
 use leptos::task::spawn_local;
+use teamcraft_client_api::failure::ActionFailure;
 use teamcraft_client_api::remote::LinkRequestView;
 use teamcraft_proto::DeviceLinkPlatform;
 
 use crate::areas::{self, Place, lazy_area};
 use crate::components::icons::{Icon, IconName};
+use crate::feedback::report_failure;
 use crate::i18n::{I18n, use_i18n};
 use crate::reactive::{SetIfAlive, UpdateIfAlive};
 use crate::remote_backend;
@@ -50,7 +52,7 @@ pub fn LinkRequestPrompt() -> impl IntoView {
         if let Some(soonest) = maybe_soonest {
           let wait_ms = u32::try_from(soonest.saturating_mul(1000)).unwrap_or(u32::MAX);
           set_timeout(
-            move || spawn_local(async move { reload_after_expiry(requests).await }),
+            move || spawn_local(async move { reread(requests).await }),
             std::time::Duration::from_millis(u64::from(wait_ms.saturating_add(EXPIRY_SLACK_MS))),
           );
         }
@@ -83,7 +85,11 @@ pub fn LinkRequestCards(
     active.set(Some((request.clone(), Step::Joining)));
     spawn_local(async move {
       let step = match remote_backend::link_request_review(&request.id).await {
-        Ok(()) => Step::Typing { maybe_error: None },
+        Ok(()) => {
+          // Taken up: it left the core's list, and stays out of this one once the prompt closes.
+          requests.update_if_alive(|list| list.retain(|listed| listed.id != request.id));
+          Step::Typing { maybe_error: None }
+        },
         Err(message) => Step::Failed(message),
       };
       active.update_if_alive(|current| {
@@ -95,9 +101,15 @@ pub fn LinkRequestCards(
   };
   let deny = move |id: String| {
     spawn_local(async move {
-      // A failure means the request is gone already (taken up elsewhere, expired): same result.
-      drop(remote_backend::link_request_reject(&id).await);
-      requests.update_if_alive(|list| list.retain(|request| request.id != id));
+      match remote_backend::link_request_reject(&id).await {
+        Ok(()) => requests.update_if_alive(|list| list.retain(|request| request.id != id)),
+        // Not denied (offline, or the request is gone already): said, and the list read again so
+        // it shows what is still open.
+        Err(message) => {
+          report_failure(ActionFailure::from_wire(&message));
+          reread(requests).await;
+        },
+      }
     });
   };
   view! {
@@ -137,7 +149,8 @@ pub fn LinkRequestCards(
   }
 }
 
-async fn reload_after_expiry(requests: RwSignal<Vec<LinkRequestView>>) {
+/// The core's list as it is now.
+async fn reread(requests: RwSignal<Vec<LinkRequestView>>) {
   if let Ok(list) = remote_backend::link_requests().await {
     requests.set_if_alive(list);
   }
