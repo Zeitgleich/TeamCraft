@@ -32,6 +32,8 @@ pub struct MeetingService {
   tokens: GuestTokens,
   guest_grace: Duration,
   max_shared_link_guests: u32,
+  /// How long before an occurrence a call in the meeting's chat rings the invitees (`None`: never).
+  maybe_start_ring_lead: Option<Duration>,
   /// Token of the inbox handler that forwards RSVP e-mail; `None` disables that endpoint.
   maybe_inbox_token: Option<Vec<u8>>,
 }
@@ -83,6 +85,8 @@ impl MeetingService {
       tokens: GuestTokens::new(&config.guest_token_secret)?,
       guest_grace: Duration::from_secs(config.guest_grace_secs),
       max_shared_link_guests: config.max_shared_link_guests,
+      maybe_start_ring_lead: (config.start_ring_lead_secs > 0)
+        .then(|| Duration::from_secs(config.start_ring_lead_secs)),
       maybe_inbox_token: config
         .maybe_inbox_token
         .as_ref()
@@ -125,6 +129,11 @@ impl MeetingService {
   /// How long after the end of a meeting guests may still use their link and session.
   pub fn guest_grace(&self) -> Duration {
     self.guest_grace
+  }
+
+  /// How long before an occurrence a call started in the meeting's chat rings its invitees.
+  pub fn start_ring_lead(&self) -> Option<Duration> {
+    self.maybe_start_ring_lead
   }
 
   /// Most guests one shared guest link lets into the lobby.

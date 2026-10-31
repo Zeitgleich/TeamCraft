@@ -55,6 +55,7 @@ fn meetings_config() -> MeetingsConfig {
     guest_token_secret: "0123456789abcdef0123456789abcdef".to_owned().into(),
     guest_grace_secs: 7200,
     max_shared_link_guests: 50,
+    start_ring_lead_secs: 3600,
     maybe_inbox_token: None,
     smtp: None,
     mail_texts: MailTexts::default(),

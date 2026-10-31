@@ -2826,6 +2826,7 @@ impl ServerApi for FakeServerApi {
         conversation_id,
         join_url: format!("https://chat.example.com/meeting/{conversation_id}"),
         maybe_recurrence: None,
+        is_occurrence_cancelled: false,
         attendees: Vec::new(),
         undelivered_invitations: Vec::new(),
       };

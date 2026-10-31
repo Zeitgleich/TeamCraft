@@ -4,7 +4,9 @@
 ## Einrichtung der Schlüssel
 # ---- Meetings ----
 meetings-title = Meetings
-meetings-start-now = Jetzt starten
+meetings-start-now = Sofort-Meeting
+meetings-start-now-hint = Ein neues Meeting sofort, noch ohne Eingeladene. Ein geplantes Meeting startest du früher mit „Starten“ an diesem Meeting.
+meetings-start = Starten
 meetings-schedule = Planen
 meetings-empty = Plane eines für später oder starte gleich eins.
 meetings-today = Heute
@@ -13,6 +15,16 @@ meetings-join = Beitreten
 meetings-edit = Meeting bearbeiten
 meetings-cancel = Meeting absagen
 meetings-cancelled = Abgesagt
+meetings-restore = Wiederherstellen
+meetings-remove = Aus der Liste entfernen
+meetings-cancel-title = Dieses Meeting absagen?
+meetings-cancel-title-series = Welche Meetings möchtest du absagen?
+meetings-cancel-occurrence = Nur dieses Meeting
+meetings-cancel-following = Dieses und alle folgenden Meetings
+meetings-cancel-series = Alle Meetings der Serie
+meetings-cancel-hint = Alle Eingeladenen werden benachrichtigt. Bis zu seinem Termin bleibt ein abgesagtes Meeting in der Liste; dort kannst du es wiederherstellen.
+meetings-cancel-keep = Behalten
+meetings-cancel-confirm = Meeting absagen
 meetings-recurring = Wiederholt sich
 meetings-organizer = Organisiert von { $name }
 meetings-rsvp = Deine Antwort
@@ -63,9 +75,29 @@ schedule-repeat-never = Keine Wiederholung
 schedule-repeat-daily = Täglich
 schedule-repeat-weekly = Wöchentlich
 schedule-repeat-monthly = Monatlich
-schedule-interval = Alle
-schedule-count = Mal
-schedule-count-open = Bis zur Absage
+schedule-every = Alle
+schedule-unit-never = { "" }
+schedule-unit-daily = { $count ->
+    [one] Tag
+   *[other] Tage
+}
+schedule-unit-weekly = { $count ->
+    [one] Woche
+   *[other] Wochen
+}
+schedule-unit-monthly = { $count ->
+    [one] Monat
+   *[other] Monate
+}
+schedule-unit-meetings = { $count ->
+    [one] Meeting
+   *[other] Meetings
+}
+schedule-on-days = An
+schedule-ends = Endet
+schedule-ends-never = Nie
+schedule-ends-count = Nach
+schedule-ends-date = Am
 schedule-lobby = Gäste warten in einer Lobby, bis ein Gastgeber sie einlässt
 schedule-lobby-hint = Schalte das nur für Meetings aus, bei denen jeder mit Link sofort beitreten darf.
 schedule-notetaker = Notetaker nimmt an den Anrufen teil
@@ -77,7 +109,12 @@ meeting-error-title = Gib dem Meeting einen Titel.
 meeting-error-start = Wähle Datum und Uhrzeit des Beginns.
 meeting-error-past = Der Beginn liegt in der Vergangenheit.
 meeting-error-duration = Wähle eine Dauer zwischen einer Minute und einem Tag.
-meeting-error-interval = Das Wiederholungsintervall muss mindestens 1 sein.
+meeting-error-interval = Gib eine Zahl von 1 bis 100 ein.
+meeting-error-no-weekday = Wähle mindestens einen Tag.
+meeting-error-start-weekday = Das erste Meeting liegt an einem anderen Tag: Wähle diesen Tag auch, oder verschiebe den Beginn.
+meeting-error-count = Gib die Anzahl der Meetings ein, von 1 bis 1000.
+meeting-error-until = Wähle das Datum des letzten Meetings.
+meeting-error-until-before = Das letzte Datum liegt vor dem ersten Meeting.
 meeting-error-email = „{ $email }" ist keine gültige E-Mail-Adresse.
 guest-title = Dem Meeting beitreten
 guest-subtitle = Gib deinen Namen ein, damit die Gastgeber wissen, wer beitritt. Du brauchst kein Konto.

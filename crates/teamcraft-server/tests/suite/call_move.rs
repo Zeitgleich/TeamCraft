@@ -286,6 +286,75 @@ async fn only_people_in_the_call_move_it_and_only_into_their_own_meeting() {
   scene.app.stop().await;
 }
 
+#[tokio::test]
+async fn starting_a_scheduled_meeting_early_rings_the_invitees_who_did_not_decline() {
+  let Some(scene) = dm_call().await else { return };
+  let Scene {
+    app,
+    alice,
+    bob,
+    carol,
+    ids: [_, bob_id, carol_id],
+    devices: [alice_device, bob_device, carol_device],
+    ..
+  } = &scene;
+  let now = std::time::SystemTime::now()
+    .duration_since(std::time::UNIX_EPOCH)
+    .unwrap()
+    .as_millis() as i64;
+  let schedule = |starts_at: i64| {
+    app.post(
+      alice,
+      "/meetings",
+      json!({
+        "title": "Standup", "starts_at": starts_at, "ends_at": starts_at + 900_000,
+        "invitees": [{"kind": "user", "user_id": bob_id}, {"kind": "user", "user_id": carol_id}],
+        "recurrence": {"frequency": "daily", "interval": 1},
+      }),
+    )
+  };
+  // Starts in half an hour: inside the hour before it that rings.
+  let soon = schedule(now + 1_800_000).await;
+  assert_eq!(soon.status, StatusCode::CREATED, "{}", soon.body);
+  let room = soon.body["conversation_id"].as_str().unwrap().to_owned();
+  let declined = app
+    .put(
+      carol,
+      &format!("/meetings/{}/rsvp", soon.id()),
+      json!({"status": "declined"}),
+    )
+    .await;
+  assert_eq!(declined.status, StatusCode::NO_CONTENT, "{}", declined.body);
+  let mut bob_socket = ws::connect(app, bob, bob_device).await;
+  let mut carol_socket = ws::connect(app, carol, carol_device).await;
+  ws::events(&mut bob_socket, QUIET).await;
+  ws::events(&mut carol_socket, QUIET).await;
+
+  let call = join_token(app, alice, &room, alice_device).await;
+  report(app, "joined", &call, &scene.ids[0], alice_device).await;
+
+  let kinds = |events: Vec<Value>| -> Vec<String> {
+    events
+      .iter()
+      .map(|e| e["type"].as_str().unwrap().to_owned())
+      .collect()
+  };
+  let bob_kinds = kinds(call_events(&ws::events(&mut bob_socket, QUIET).await));
+  assert!(bob_kinds.contains(&"call_ring".to_owned()), "{bob_kinds:?}");
+  let carol_kinds = kinds(call_events(&ws::events(&mut carol_socket, QUIET).await));
+  assert!(!carol_kinds.contains(&"call_ring".to_owned()), "{carol_kinds:?}");
+
+  // A meeting three hours away doesn't ring yet: its chat's call is just a call.
+  let later = schedule(now + 3 * 3_600_000).await;
+  let later_room = later.body["conversation_id"].as_str().unwrap().to_owned();
+  ws::events(&mut bob_socket, QUIET).await;
+  let later_call = join_token(app, alice, &later_room, alice_device).await;
+  report(app, "joined", &later_call, &scene.ids[0], alice_device).await;
+  let bob_kinds = kinds(call_events(&ws::events(&mut bob_socket, QUIET).await));
+  assert!(!bob_kinds.contains(&"call_ring".to_owned()), "{bob_kinds:?}");
+  scene.app.stop().await;
+}
+
 /// Alice and Bob have a DM; Alice is in its call; Carol is somebody else.
 struct Scene {
   app: TestApp,
@@ -332,6 +401,7 @@ fn meetings_config() -> MeetingsConfig {
     caldav: None,
     max_invitees: 10,
     max_shared_link_guests: 50,
+    start_ring_lead_secs: 3600,
     guest_token_secret: "0123456789abcdef0123456789abcdef".to_owned().into(),
     guest_grace_secs: 7200,
     maybe_inbox_token: None,

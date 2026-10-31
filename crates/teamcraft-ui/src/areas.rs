@@ -47,7 +47,9 @@ use crate::components::lightbox::Lightbox;
 use crate::components::link_request_prompt::{LinkRequestCards, Step as LinkStep};
 use crate::components::log_view::IntegrationFeed;
 use crate::components::login::{EnrollScreen, SessionGate};
-use crate::components::meetings_view::{MeetingCreatedDialog, MeetingsView, ScheduleMeetingDialog};
+use crate::components::meetings_view::{
+  CancelMeetingDialog, MeetingCreatedDialog, MeetingsView, ScheduleMeetingDialog,
+};
 use crate::components::members_panel::MembersPanel;
 use crate::components::message_actions::{EditHistoryDialog, ForwardDialog, PinsPanel, SavedView};
 use crate::components::profile_views::UserProfileDialog;
@@ -173,6 +175,7 @@ areas! {
   meetings(_unit: ()) => meetings: view! { <MeetingsView /> };
   schedule_meeting(_unit: ()) => meetings: view! { <ScheduleMeetingDialog /> };
   edit_meeting(meeting: MeetingId) => meetings: view! { <ScheduleMeetingDialog maybe_edit=meeting /> };
+  cancel_meeting(meeting: MeetingId, occurrence: i64) => meetings: view! { <CancelMeetingDialog meeting=meeting occurrence=occurrence /> };
   meeting_created(_unit: ()) => meetings: view! { <MeetingCreatedDialog /> };
   /// What a guest sees after a host let them in: the meeting chat and its call. A module of its
   /// own, not the signed-in app's: somebody from outside who joins once loads only what the

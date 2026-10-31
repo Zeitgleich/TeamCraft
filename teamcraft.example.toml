@@ -448,6 +448,9 @@ served_hostnames = []
 # Most guests one shared guest link of a meeting lets into the lobby; every one of them still waits
 # for a host.
 # max_shared_link_guests = 50
+# A call started in a scheduled meeting's chat rings its invitees (who haven't declined) when it
+# starts at most this long before an occurrence, or during it; 0 turns this off.
+# start_ring_lead_secs = 3600
 # Shared secret of the inbox handler that forwards RSVP e-mail (iMIP REPLY) to
 # POST /api/internal/v1/meetings/replies with `Authorization: Bearer <token>`. The handler vouches for
 # the sender (DKIM/SPF). Without it that endpoint answers 503. Prefer TEAMCRAFT_MEETINGS__INBOX_TOKEN.

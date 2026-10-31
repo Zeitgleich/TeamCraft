@@ -987,6 +987,10 @@ pub struct MeetingsConfig {
   /// Most guests one shared guest link of a meeting lets into the lobby (docs/meetings.md).
   #[serde(default = "default_max_shared_link_guests")]
   pub max_shared_link_guests: u32,
+  /// A call started in a scheduled meeting's chat rings its invitees when it starts at most this
+  /// long before an occurrence (or during it); 0: never.
+  #[serde(default = "default_start_ring_lead_secs")]
+  pub start_ring_lead_secs: u64,
   /// Shared secret of the inbox handler that forwards received RSVP e-mail (iMIP REPLY) to
   /// `POST /api/internal/v1/meetings/replies` as `Authorization: Bearer <token>`. Without it that
   /// endpoint answers 503. Prefer `TEAMCRAFT_MEETINGS__INBOX_TOKEN`.
@@ -1582,6 +1586,10 @@ fn default_guest_grace_secs() -> u64 {
 
 fn default_max_shared_link_guests() -> u32 {
   50
+}
+
+fn default_start_ring_lead_secs() -> u64 {
+  3600
 }
 
 fn default_smtp_port() -> u16 {

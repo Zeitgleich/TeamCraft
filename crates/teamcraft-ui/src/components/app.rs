@@ -419,6 +419,9 @@ pub fn Shell(backend: Rc<dyn Backend>, settings: Settings) -> impl IntoView {
         Overlay::ScheduleMeeting => lazy_area(Place::Overlay, || areas::schedule_meeting(())),
         Overlay::EditMeeting(meeting) => lazy_area(Place::Overlay, move || areas::edit_meeting(meeting)),
         Overlay::MeetingCreated => lazy_area(Place::Overlay, || areas::meeting_created(())),
+        Overlay::CancelMeeting(meeting, occurrence) => {
+          lazy_area(Place::Overlay, move || areas::cancel_meeting(meeting, occurrence))
+        },
         Overlay::ShareFile(conversation, message, file) => {
           lazy_area(Place::Overlay, move || areas::share_file(conversation, message, file))
         },

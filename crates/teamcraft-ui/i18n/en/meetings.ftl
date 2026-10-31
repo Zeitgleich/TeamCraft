@@ -4,7 +4,9 @@
 ## First-run key setup
 # ---- Meetings ----
 meetings-title = Meetings
-meetings-start-now = Start now
+meetings-start-now = Meet now
+meetings-start-now-hint = A new meeting right away, with nobody invited yet. To start a planned meeting early, use Start on it.
+meetings-start = Start
 meetings-schedule = Schedule
 meetings-empty = Schedule one for later or start one right now.
 meetings-today = Today
@@ -13,6 +15,16 @@ meetings-join = Join
 meetings-edit = Edit meeting
 meetings-cancel = Cancel meeting
 meetings-cancelled = Cancelled
+meetings-restore = Restore
+meetings-remove = Remove from list
+meetings-cancel-title = Cancel this meeting?
+meetings-cancel-title-series = Which meetings do you want to cancel?
+meetings-cancel-occurrence = Only this meeting
+meetings-cancel-following = This and all following meetings
+meetings-cancel-series = All meetings of the series
+meetings-cancel-hint = Everyone invited is told. Until it would have taken place, a cancelled meeting stays in the list, where you can restore it.
+meetings-cancel-keep = Keep
+meetings-cancel-confirm = Cancel meeting
 meetings-recurring = Repeats
 meetings-organizer = Organized by { $name }
 meetings-rsvp = Your answer
@@ -63,9 +75,29 @@ schedule-repeat-never = Does not repeat
 schedule-repeat-daily = Daily
 schedule-repeat-weekly = Weekly
 schedule-repeat-monthly = Monthly
-schedule-interval = Every
-schedule-count = Times
-schedule-count-open = Until cancelled
+schedule-every = Every
+schedule-unit-never = { "" }
+schedule-unit-daily = { $count ->
+    [one] day
+   *[other] days
+}
+schedule-unit-weekly = { $count ->
+    [one] week
+   *[other] weeks
+}
+schedule-unit-monthly = { $count ->
+    [one] month
+   *[other] months
+}
+schedule-unit-meetings = { $count ->
+    [one] meeting
+   *[other] meetings
+}
+schedule-on-days = On
+schedule-ends = Ends
+schedule-ends-never = Never
+schedule-ends-count = After
+schedule-ends-date = On
 schedule-lobby = Guests wait in a lobby until a host lets them in
 schedule-lobby-hint = Turn this off only for meetings where anyone with a link may join straight away.
 schedule-notetaker = Notetaker joins the calls
@@ -77,7 +109,12 @@ meeting-error-title = Give the meeting a title.
 meeting-error-start = Pick a start date and time.
 meeting-error-past = The start is in the past.
 meeting-error-duration = Pick a length between a minute and a day.
-meeting-error-interval = The repeat interval must be at least 1.
+meeting-error-interval = Enter a number from 1 to 100.
+meeting-error-no-weekday = Pick at least one day.
+meeting-error-start-weekday = The first meeting is on another day: pick its day too, or move the start.
+meeting-error-count = Enter how many meetings, from 1 to 1000.
+meeting-error-until = Pick the date of the last meeting.
+meeting-error-until-before = The last date is before the first meeting.
 meeting-error-email = "{ $email }" is not a valid email address.
 guest-title = Join the meeting
 guest-subtitle = Enter your name so the hosts know who is joining. You do not need an account.

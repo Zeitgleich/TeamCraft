@@ -235,3 +235,56 @@
   font-size: var(--text-sm);
 }
 
+
+/* Repeat: "Every [2] weeks", the days as chips, how the series ends (issue #1006). */
+.repeat-fields {
+  display: grid;
+  gap: 8px;
+  border: 0;
+  margin: 0;
+  padding: 0;
+}
+
+.repeat-fields legend {
+  padding: 0;
+  margin-bottom: 4px;
+}
+
+.repeat-row,
+.repeat-end {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.schedule-form .repeat-row .input.narrow,
+.schedule-form .repeat-end .input.narrow {
+  width: 5.5em;
+}
+
+.schedule-form .repeat-end .input[type="date"] {
+  width: auto;
+}
+
+.repeat-ends {
+  display: grid;
+  gap: 6px;
+  margin: 0;
+}
+
+.repeat-end .radio {
+  min-width: 4.5em;
+}
+
+/* Scrolled to the middle of the dialog when a submit is refused; the focused field shows itself. */
+.schedule-form [aria-invalid="true"] {
+  border-color: var(--danger);
+}
+
+.schedule-form .set-chips[aria-invalid="true"],
+.schedule-form fieldset[aria-invalid="true"] {
+  border-radius: var(--radius-sm);
+  outline: 1px solid var(--danger);
+  outline-offset: 4px;
+}

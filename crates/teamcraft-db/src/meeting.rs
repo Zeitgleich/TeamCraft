@@ -30,6 +30,9 @@ pub struct StoredMeeting {
   pub status: String,
   pub has_lobby: bool,
   pub sequence: i32,
+  /// When the whole meeting was cancelled; `None` while it is on, and for meetings cancelled before
+  /// this was recorded.
+  pub maybe_cancelled_at: Option<OffsetDateTime>,
 }
 
 /// An invitee as stored. `rsvp` is the wire name.
@@ -77,6 +80,8 @@ pub struct MeetingChanges<'a> {
   pub maybe_starts_at: Option<OffsetDateTime>,
   pub maybe_ends_at: Option<OffsetDateTime>,
   pub maybe_has_lobby: Option<bool>,
+  /// A new RRULE value (a series is never turned back into a single meeting).
+  pub maybe_recurrence_rule: Option<&'a str>,
 }
 
 /// A join link of a meeting: a personal one-time link, or the meeting's shared guest link.
@@ -186,7 +191,7 @@ impl Database {
   pub async fn get_meeting(&self, id: MeetingId) -> Result<Option<StoredMeeting>, DbError> {
     let row = sqlx::query!(
       r#"SELECT id, uid, organizer_user_id, conversation_id, title, description, starts_at, ends_at,
-                recurrence_rule, kind, status, has_lobby, sequence
+                recurrence_rule, kind, status, has_lobby, sequence, cancelled_at
          FROM meetings WHERE id = $1"#,
       to_db(id),
     )
@@ -208,6 +213,7 @@ impl Database {
           status: row.status,
           has_lobby: row.has_lobby,
           sequence: row.sequence,
+          maybe_cancelled_at: row.cancelled_at,
         })
       })
       .transpose()
@@ -224,8 +230,9 @@ impl Database {
   }
 
   /// Meetings the user organizes or is invited to that end after `from` and start before `to`,
-  /// soonest first. Cancelled meetings are included (clients show them struck through). A repeating
-  /// series is included whatever `from` is, as its stored first occurrence; the caller expands it.
+  /// soonest first. Cancelled meetings are included (clients show them struck through) until the
+  /// organizer takes them off the lists. A repeating series is included whatever `from` is, as its
+  /// stored first occurrence; the caller expands it.
   pub async fn list_meetings_of_user(
     &self,
     user: UserId,
@@ -236,6 +243,7 @@ impl Database {
     let ids = sqlx::query_scalar!(
       r#"SELECT m.id FROM meetings m
          WHERE (m.ends_at > $2 OR m.recurrence_rule IS NOT NULL) AND ($3::timestamptz IS NULL OR m.starts_at < $3)
+           AND m.hidden_at IS NULL
            AND (m.organizer_user_id = $1
                 OR EXISTS (SELECT 1 FROM meeting_attendees a WHERE a.meeting_id = m.id AND a.user_id = $1))
          ORDER BY m.starts_at, m.id LIMIT $4"#,
@@ -322,6 +330,7 @@ impl Database {
            starts_at = COALESCE($4, starts_at),
            ends_at = COALESCE($5, ends_at),
            has_lobby = COALESCE($6, has_lobby),
+           recurrence_rule = COALESCE($7, recurrence_rule),
            sequence = sequence + 1
          WHERE id = $1"#,
       to_db(id),
@@ -330,6 +339,7 @@ impl Database {
       changes.maybe_starts_at,
       changes.maybe_ends_at,
       changes.maybe_has_lobby,
+      changes.maybe_recurrence_rule,
     )
     .execute(self.pool())
     .await?;
@@ -449,7 +459,8 @@ impl Database {
   pub async fn cancel_meeting(&self, meeting: &StoredMeeting) -> Result<bool, DbError> {
     let mut tx = self.pool().begin().await?;
     let result = sqlx::query!(
-      "UPDATE meetings SET status = 'cancelled', sequence = sequence + 1 WHERE id = $1 AND status = 'scheduled'",
+      r#"UPDATE meetings SET status = 'cancelled', cancelled_at = now(), sequence = sequence + 1
+         WHERE id = $1 AND status = 'scheduled'"#,
       to_db(meeting.id),
     )
     .execute(&mut *tx)
@@ -465,6 +476,110 @@ impl Database {
     .await?;
     tx.commit().await?;
     Ok(true)
+  }
+
+  /// Takes a cancellation back: the meeting is scheduled again and its chat no longer archived.
+  /// `false` if it was not cancelled.
+  pub async fn restore_meeting(&self, meeting: &StoredMeeting) -> Result<bool, DbError> {
+    let mut tx = self.pool().begin().await?;
+    let result = sqlx::query!(
+      r#"UPDATE meetings SET status = 'scheduled', cancelled_at = NULL, hidden_at = NULL, sequence = sequence + 1
+         WHERE id = $1 AND status = 'cancelled'"#,
+      to_db(meeting.id),
+    )
+    .execute(&mut *tx)
+    .await?;
+    if result.rows_affected() == 0 {
+      return Ok(false);
+    }
+    sqlx::query!(
+      "UPDATE conversations SET archived_at = NULL WHERE id = $1",
+      to_db(meeting.conversation),
+    )
+    .execute(&mut *tx)
+    .await?;
+    tx.commit().await?;
+    Ok(true)
+  }
+
+  /// Takes a cancelled meeting off everybody's lists; its chat stays. `false` if it is not cancelled.
+  pub async fn hide_meeting(&self, id: MeetingId) -> Result<bool, DbError> {
+    let result = sqlx::query!(
+      "UPDATE meetings SET hidden_at = now() WHERE id = $1 AND status = 'cancelled' AND hidden_at IS NULL",
+      to_db(id),
+    )
+    .execute(self.pool())
+    .await?;
+    Ok(result.rows_affected() == 1)
+  }
+
+  /// Cancels one occurrence of a series (by its start in the series) and increases the iCalendar
+  /// sequence. `false` if it was cancelled already.
+  pub async fn cancel_occurrence(
+    &self,
+    meeting: MeetingId,
+    starts_at: OffsetDateTime,
+  ) -> Result<bool, DbError> {
+    let mut tx = self.pool().begin().await?;
+    let result = sqlx::query!(
+      r#"INSERT INTO meeting_cancelled_occurrences (meeting_id, starts_at) VALUES ($1, $2)
+         ON CONFLICT DO NOTHING"#,
+      to_db(meeting),
+      starts_at,
+    )
+    .execute(&mut *tx)
+    .await?;
+    if result.rows_affected() == 0 {
+      return Ok(false);
+    }
+    bump_sequence(&mut *tx, meeting).await?;
+    tx.commit().await?;
+    Ok(true)
+  }
+
+  /// Takes back the cancellation of one occurrence. `false` if it was not cancelled.
+  pub async fn restore_occurrence(
+    &self,
+    meeting: MeetingId,
+    starts_at: OffsetDateTime,
+  ) -> Result<bool, DbError> {
+    let mut tx = self.pool().begin().await?;
+    let result = sqlx::query!(
+      "DELETE FROM meeting_cancelled_occurrences WHERE meeting_id = $1 AND starts_at = $2",
+      to_db(meeting),
+      starts_at,
+    )
+    .execute(&mut *tx)
+    .await?;
+    if result.rows_affected() == 0 {
+      return Ok(false);
+    }
+    bump_sequence(&mut *tx, meeting).await?;
+    tx.commit().await?;
+    Ok(true)
+  }
+
+  /// The cancelled occurrences of the meetings, soonest first per meeting.
+  pub async fn cancelled_occurrences(
+    &self,
+    meetings: &[MeetingId],
+  ) -> Result<HashMap<MeetingId, Vec<OffsetDateTime>>, DbError> {
+    let raw: Vec<i64> = meetings.iter().map(|meeting| to_db(*meeting)).collect();
+    let rows = sqlx::query!(
+      r#"SELECT meeting_id, starts_at FROM meeting_cancelled_occurrences
+         WHERE meeting_id = ANY($1) ORDER BY meeting_id, starts_at"#,
+      &raw,
+    )
+    .fetch_all(self.pool())
+    .await?;
+    let mut found: HashMap<MeetingId, Vec<OffsetDateTime>> = HashMap::new();
+    for row in rows {
+      found
+        .entry(from_db(row.meeting_id)?)
+        .or_default()
+        .push(row.starts_at);
+    }
+    Ok(found)
   }
 
   /// Records an invitee's answer; `false` if nobody matches.
@@ -913,6 +1028,17 @@ impl Database {
     users.dedup();
     Ok(users)
   }
+}
+
+/// Every change sent to invitees increases the event's iCalendar SEQUENCE.
+async fn bump_sequence(tx: &mut sqlx::PgConnection, meeting: MeetingId) -> Result<(), DbError> {
+  sqlx::query!(
+    "UPDATE meetings SET sequence = sequence + 1 WHERE id = $1",
+    to_db(meeting)
+  )
+  .execute(tx)
+  .await?;
+  Ok(())
 }
 
 fn same_person(existing: &StoredAttendee, candidate: &NewAttendee) -> bool {
