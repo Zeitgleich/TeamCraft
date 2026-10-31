@@ -582,7 +582,17 @@ impl<'a, A: ServerApi, S: LocalStore> Importer<'a, A, S> {
   async fn set_member_state(&mut self, item: &Item, conversation: ConversationId) -> Result<(), RunError> {
     let favorites: HashSet<(SourceId, SourceId)> = self.export.favorites.iter().copied().collect();
     let mutes: HashSet<(SourceId, SourceId)> = self.export.mutes.iter().copied().collect();
-    let members: HashSet<UserId> = item.members.iter().copied().collect();
+    // Only people who are members in TeamCraft: a merged channel keeps its own members.
+    let members: HashSet<UserId> = self
+      .client
+      .api()
+      .list_members(conversation)
+      .await
+      .map_err(CoreError::from)?
+      .members
+      .into_iter()
+      .map(|member| member.user.id)
+      .collect();
     let synology_members: Vec<SourceId> = self
       .export
       .channels
@@ -663,7 +673,12 @@ impl<'a, A: ServerApi, S: LocalStore> Importer<'a, A, S> {
       return Ok(());
     }
     let in_group: HashSet<UserId> = self.client.group_users(conversation)?.into_iter().collect();
-    if let Some(missing) = item.members.iter().find(|user| !in_group.contains(user)) {
+    // A merged channel keeps its members: nobody of the old system is waited for there.
+    let expected: &[UserId] = match item.target {
+      Target::ExistingChannel { .. } => &[],
+      _ => &item.members,
+    };
+    if let Some(missing) = expected.iter().find(|user| !in_group.contains(user)) {
       let name = self.username_of(*missing);
       self.progress.note(
         &key,
