@@ -8,7 +8,9 @@ use std::time::Duration;
 use leptos::prelude::*;
 
 pub use teamcraft_client_api::calls::*;
+use teamcraft_client_api::failure::CallFailure;
 use teamcraft_client_api::model::{ConversationId, UserId};
+use teamcraft_client_api::remote::CoreConnection;
 use teamcraft_proto::MediaStreamId;
 
 /// The DM call this device is in moved into a meeting room, announced by `by` in the DM's
@@ -642,6 +644,16 @@ pub fn selected_camera_is_rear(cameras: &[MediaDevice], selected_id: &str) -> bo
     .is_some_and(|camera| is_rear_camera(&camera.label))
 }
 
+/// Why a call that broke off couldn't be resumed (issue #427): with the chat server still
+/// connected, the call server went away (restarted or crashed, and not back within the reconnect
+/// grace period); otherwise this device's own connection broke.
+pub fn lost_call_failure(maybe_connection: Option<CoreConnection>) -> CallFailure {
+  match maybe_connection {
+    Some(CoreConnection::Connected) => CallFailure::ServerLost,
+    _ => CallFailure::ConnectionLost,
+  }
+}
+
 #[cfg(test)]
 mod tests {
   use std::cell::RefCell;
@@ -674,6 +686,25 @@ mod tests {
     assert!(!is_rear_camera("Front Camera"));
     assert!(!is_rear_camera("camera2 1, facing front"));
     assert!(!is_rear_camera(""));
+  }
+
+  #[test]
+  fn a_lost_call_blames_the_call_server_only_while_the_chat_server_is_connected() {
+    let offline = CoreConnection::Offline {
+      retry_at_ms: 0,
+      maybe_interception: None,
+    };
+
+    assert_eq!(
+      lost_call_failure(Some(CoreConnection::Connected)),
+      CallFailure::ServerLost
+    );
+    assert_eq!(lost_call_failure(Some(offline)), CallFailure::ConnectionLost);
+    assert_eq!(
+      lost_call_failure(Some(CoreConnection::Connecting)),
+      CallFailure::ConnectionLost
+    );
+    assert_eq!(lost_call_failure(None), CallFailure::ConnectionLost);
   }
 
   /// #936: the app is out of sight below the pre-join screen and the call, not below a minimized

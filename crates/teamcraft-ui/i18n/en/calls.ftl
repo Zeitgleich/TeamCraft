@@ -297,6 +297,8 @@ error-call-move-refused = The call wasn't moved: the meeting room doesn't match 
 error-call-speakers-unavailable = The chosen speakers can't be used here. The test sound played on the default output.
 error-call-speakers-missing = No speakers were found. Connect speakers or headphones and try again.
 error-call-sound-blocked = The browser didn't let the page play sound. Click anywhere on the page, then try again.
+error-call-server-lost = The call server can't be reached anymore, so the call ended. Try again in a moment.
+error-call-connection-lost = The connection broke and the call couldn't be resumed. Check your connection, then call again.
 
 ## Settings: sections, search and rows (#327)
 calls-noise-hint = Filters typing, fans and other background noise.

@@ -1001,6 +1001,22 @@
         }
       }
     },
+    "call_server_lost": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "The call server can't be reached anymore, so the call ended. Try again in a moment."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Der Anrufserver ist zurzeit nicht mehr erreichbar, der Anruf wurde deshalb beendet. Versuche es gleich noch einmal."
+          }
+        }
+      }
+    },
     "call_start": {
       "localizations": {
         "en": {

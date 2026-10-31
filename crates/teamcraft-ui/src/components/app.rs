@@ -4,6 +4,7 @@ use std::time::Duration;
 
 use leptos::ev;
 use leptos::prelude::*;
+use teamcraft_client_api::failure::{ActionFailure, FailureKind};
 use teamcraft_client_api::os_notify::{NotificationTag, OsNotification, OsNotificationKind};
 use wasm_bindgen::JsCast;
 use wasm_bindgen::closure::Closure;
@@ -1212,6 +1213,7 @@ pub(crate) fn connect_calls(state: AppState) {
     maybe_fallback
   });
   // The shell ended the call (the other side hung up, the connection dropped): leave the screen.
+  // A call that broke off for good says why (issue #427).
   // Only the end of the call the screen is for: switching to another one (a call that moved into a
   // meeting) ends the previous call first. A 1:1 call that ended for both says so for a moment
   // first (#997).
@@ -1230,10 +1232,13 @@ pub(crate) fn connect_calls(state: AppState) {
       && call.phase.get_untracked() == CallPhase::Active
     {
       let maybe_reason = untrack(|| state.read(|backend| backend.call_end_reason()));
-      if maybe_reason == Some(CallEndReason::OtherSideLeft) {
-        call.show_ended();
-      } else {
-        call.leave();
+      match maybe_reason {
+        Some(CallEndReason::OtherSideLeft) => call.show_ended(),
+        Some(CallEndReason::ConnectionLost) => {
+          call.leave();
+          report_lost_call();
+        },
+        _ => call.leave(),
       }
     }
   });
@@ -1271,6 +1276,19 @@ pub(crate) fn connect_calls(state: AppState) {
     if call.phase.get_untracked() == CallPhase::Idle && call.incoming.get_untracked() != ringing {
       call.incoming.set(ringing);
     }
+  });
+}
+
+/// Tells the user why the call broke off for good (issue #427): the call server went away while
+/// the chat server stayed connected, or this device's own connection broke.
+fn report_lost_call() {
+  leptos::task::spawn_local(async {
+    let maybe_connection = crate::remote_backend::connection_state().await.ok();
+    let failure = crate::calls::lost_call_failure(maybe_connection);
+    crate::feedback::report_failure(ActionFailure::new(
+      FailureKind::Call(failure),
+      "the call broke off and couldn't be resumed",
+    ));
   });
 }
 

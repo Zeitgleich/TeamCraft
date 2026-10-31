@@ -154,6 +154,8 @@ pub fn failure_message_key(failure: &ActionFailure) -> &'static str {
       CallFailure::SpeakersUnavailable => "error-call-speakers-unavailable",
       CallFailure::SpeakersMissing => "error-call-speakers-missing",
       CallFailure::SoundBlocked => "error-call-sound-blocked",
+      CallFailure::ServerLost => "error-call-server-lost",
+      CallFailure::ConnectionLost => "error-call-connection-lost",
     },
     FailureKind::Server(code) => match code {
       ErrorCode::NotSpaceMember => "error-not-space-member",

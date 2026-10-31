@@ -53,6 +53,7 @@
   <string name="call_secured">End-to-end encrypted</string>
   <string name="call_ended">Call ended</string>
   <string name="call_failed">The call was interrupted.</string>
+  <string name="call_server_lost">The call server can\'t be reached anymore, so the call ended. Try again in a moment.</string>
   <string name="call_removed_by_host">The host removed you from the call.</string>
   <string name="call_ended_by_host">The host ended the call for everyone.</string>
   <string name="call_privacy_code_hint">Compare this code with the others to make sure nobody listens in:</string>

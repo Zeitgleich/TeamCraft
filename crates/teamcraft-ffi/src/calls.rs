@@ -13,7 +13,7 @@ use std::sync::{Arc, Mutex, MutexGuard};
 
 use futures_util::StreamExt;
 use teamcraft_core::client::CallKeySigner;
-use teamcraft_core::connection::NetworkChanges;
+use teamcraft_core::connection::{ConnectionState as CoreConnectionState, ConnectionStatus, NetworkChanges};
 use teamcraft_crypto::call_binding::{CallBindingError, CallId as CryptoCallId, SignedCallKeyBinding};
 use teamcraft_crypto::identity::VerifiedDevice;
 use teamcraft_media::audio_io::{AudioDeviceChoice, AudioSink, AudioSource};
@@ -196,6 +196,9 @@ pub enum CallEndReason {
   EndedByHost,
   /// The connection to the call broke (and rejoining failed within the grace period).
   Failed,
+  /// The call broke off and couldn't be resumed while the chat server stayed connected: the call
+  /// server went away (restarted or crashed) and didn't come back in time (issue #427).
+  ServerLost,
 }
 
 /// Which call status sounds play: a soft repeating tone while this device reconnects, short
@@ -470,6 +473,7 @@ pub(crate) async fn join(
   hub: CallHub,
   jobs: mpsc::UnboundedSender<Job>,
   network: &NetworkChanges,
+  connection: ConnectionStatus,
 ) -> Result<Arc<CallSession>, TeamCraftError> {
   let network_rx = network.subscribe();
   let conversation = preparation.conversation;
@@ -529,6 +533,7 @@ pub(crate) async fn join(
           own_device,
           camera: thread_camera,
           hub: thread_hub,
+          connection,
         };
         run_call(call, control_rx, network_rx, &context, &mut state).await;
       });
@@ -550,6 +555,9 @@ struct CallContext {
   own_device: DeviceId,
   camera: CameraSlot,
   hub: CallHub,
+  /// The chat server's (gateway's) connection: tells a call server that went away from this
+  /// device's own network.
+  connection: ConnectionStatus,
 }
 
 /// Applies the app's controls and reports the engine's events until the call ends.
@@ -620,9 +628,21 @@ async fn run_call(
     },
     Err(error) => info!(%error, "the call ended with an error"),
   }
+  if reason == CallEndReason::Failed {
+    reason = lost_call_reason(context.connection.get());
+  }
   state.phase = CallPhase::Ended;
   state.maybe_end_reason = Some(reason);
   context.hub.report(state.clone());
+}
+
+/// Why a call that broke off couldn't be resumed (issue #427): with the chat server still
+/// connected, the call server went away; otherwise this device's own connection broke.
+fn lost_call_reason(chat: CoreConnectionState) -> CallEndReason {
+  match chat {
+    CoreConnectionState::Connected => CallEndReason::ServerLost,
+    _ => CallEndReason::Failed,
+  }
 }
 
 async fn apply_control(
@@ -1144,6 +1164,24 @@ mod tests {
   use teamcraft_proto::{CallId, Id, Snowflake, VideoPublicationId, VideoTrack};
 
   use super::*;
+
+  #[test]
+  fn a_lost_call_blames_the_call_server_only_while_the_chat_server_is_connected() {
+    let offline = CoreConnectionState::Offline {
+      retry_at_ms: 0,
+      maybe_interception: None,
+    };
+
+    assert_eq!(
+      lost_call_reason(CoreConnectionState::Connected),
+      CallEndReason::ServerLost
+    );
+    assert_eq!(lost_call_reason(offline), CallEndReason::Failed);
+    assert_eq!(
+      lost_call_reason(CoreConnectionState::Connecting),
+      CallEndReason::Failed
+    );
+  }
 
   #[test]
   fn a_move_reaches_the_listener_only_for_the_call_this_device_is_in() {

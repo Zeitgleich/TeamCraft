@@ -297,6 +297,8 @@ error-call-move-refused = Der Anruf wurde nicht verschoben: Der Meetingraum pass
 error-call-speakers-unavailable = Die gewählten Lautsprecher lassen sich hier nicht nutzen. Der Testton lief über die Standardausgabe.
 error-call-speakers-missing = Es wurden keine Lautsprecher gefunden. Schließe Lautsprecher oder Kopfhörer an und versuche es erneut.
 error-call-sound-blocked = Der Browser hat der Seite keinen Ton erlaubt. Klicke irgendwo auf die Seite und versuche es erneut.
+error-call-server-lost = Der Anrufserver ist zurzeit nicht mehr erreichbar, der Anruf wurde deshalb beendet. Versuche es gleich noch einmal.
+error-call-connection-lost = Die Verbindung ist abgebrochen und der Anruf konnte nicht fortgesetzt werden. Prüfe deine Verbindung und ruf erneut an.
 
 ## Settings: sections, search and rows (#327)
 calls-noise-hint = Filtert Tippen, Lüfter und andere Hintergrundgeräusche.

@@ -467,6 +467,7 @@ private fun subtitle(ui: CallUiState): String {
         CallEndReason.REMOVED_BY_HOST -> R.string.call_removed_by_host
         CallEndReason.ENDED_BY_HOST -> R.string.call_ended_by_host
         CallEndReason.FAILED -> R.string.call_failed
+        CallEndReason.SERVER_LOST -> R.string.call_server_lost
         else -> R.string.call_ended
       },
     )
