@@ -210,16 +210,20 @@ function isGuestPage(client) {
 
 // Fetches the release's lazily loaded files that aren't cached yet, one at a time, after a delay.
 // Failures are left for the page's own request (it retries, and says so when it can't).
+// It stops as soon as a newer release waits (#1045): the browser activates a waiting worker only
+// once this one has no event left running, so a warm-up kept the user's "Reload" from switching for
+// as long as it ran.
 let warming = null;
 function warmLazyFiles(version) {
-  if (status.state !== 'verified' || !version) return Promise.resolve();
+  if (status.state !== 'verified' || !version || newerReleaseWaits()) return Promise.resolve();
   if (!warming) {
     warming = (async () => {
-      await new Promise((resolve) => setTimeout(resolve, WARM_DELAY_MS));
+      await Promise.race([new Promise((resolve) => setTimeout(resolve, WARM_DELAY_MS)), newerReleaseInstalled()]);
       const cache = await caches.open(CACHE_PREFIX + version);
       const files = await (await cache.match(FILES_KEY))?.json();
       const onDemand = new Set((await (await cache.match(ON_DEMAND_KEY))?.json()) || []);
       for (const path of Object.keys(files || {})) {
+        if (newerReleaseWaits()) return;
         if (onDemand.has(path)) continue;
         if (!(await cache.match('/' + path))) await storeVerified(cache, [cache], path, files[path]);
       }
@@ -231,6 +235,24 @@ function warmLazyFiles(version) {
   }
   return warming;
 }
+
+function newerReleaseWaits() {
+  return !!self.registration.waiting;
+}
+
+// Resolves once a newer release finished installing (it then waits for the user's reload).
+let onNewerRelease = [];
+function newerReleaseInstalled() {
+  return new Promise((resolve) => (newerReleaseWaits() ? resolve() : onNewerRelease.push(resolve)));
+}
+
+self.registration.addEventListener('updatefound', () => {
+  const worker = self.registration.installing;
+  if (!worker) return;
+  worker.addEventListener('statechange', () => {
+    if (worker.state === 'installed') for (const resolve of onNewerRelease.splice(0)) resolve();
+  });
+});
 
 // Not part of the signed release: nothing the app needs. Let it fail instead of trusting the network.
 function notInRelease() {

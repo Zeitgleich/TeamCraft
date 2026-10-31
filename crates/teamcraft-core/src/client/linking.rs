@@ -553,9 +553,18 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
 
   /// Denies a link request: it is closed at the server and the new device is told.
   pub async fn reject_link_request(&mut self, id: &str) -> Result<(), CoreError> {
-    self.api.reject_device_link(id).await?;
-    self.forget_link_request(id);
-    Ok(())
+    match self.api.reject_device_link(id).await {
+      Ok(()) => {
+        self.forget_link_request(id);
+        Ok(())
+      },
+      // Taken up elsewhere or expired: no longer listed here either, and the user is told.
+      Err(error) if error.is_not_found() => {
+        self.forget_link_request(id);
+        Err(CoreError::LinkRequestGone)
+      },
+      Err(error) => Err(error.into()),
+    }
   }
 
   /// A request arrived over the gateway (or the list read at connect).

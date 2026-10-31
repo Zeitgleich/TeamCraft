@@ -9,7 +9,11 @@
   background: var(--accent-soft);
   color: var(--text);
   border-bottom: 1px solid var(--border);
+  /* One banner changes its content (#1044): from "available" to its progress to "ready" the
+     colours cross-fade, nothing moves. */
+  transition: background-color 200ms ease-out, color 200ms ease-out, border-color 200ms ease-out;
 }
+.update-banner-error { color: var(--danger); }
 .update-banner[role="alert"] { background: var(--mention-bg); color: var(--mention-text); }
 /* A ready update (#729): the accent colour, the restart as a white button on it. It stays until
    the restart; in a call the button waits, disabled, and says so. */
@@ -18,6 +22,10 @@
 .update-banner.is-ready .update-banner-restart { border: 0; background: var(--on-accent); color: var(--accent); font-weight: var(--weight-semibold); }
 .update-banner.is-ready .update-banner-restart:disabled { opacity: 0.75; cursor: default; }
 @media (hover: hover) and (pointer: fine) { .update-banner.is-ready .update-banner-restart:hover:not(:disabled) { background: color-mix(in srgb, var(--on-accent) 88%, var(--accent)); } }
+/* "Hide" and other quiet buttons on the accent: the accent's text colour, an outline of it. */
+.update-banner.is-ready .update-banner-quiet { background: transparent; color: var(--on-accent); border-color: color-mix(in srgb, var(--on-accent) 55%, transparent); }
+@media (hover: hover) and (pointer: fine) { .update-banner.is-ready .update-banner-quiet:hover { background: color-mix(in srgb, var(--on-accent) 14%, transparent); } }
+.update-banner.is-ready .update-banner-error { color: var(--on-accent); text-decoration: underline; }
 .update-command {
   padding: 2px 6px;
   border-radius: var(--radius);

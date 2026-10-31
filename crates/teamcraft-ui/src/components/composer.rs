@@ -844,6 +844,15 @@ pub fn Composer(
       after_edit();
       return;
     }
+    if ev.key() == "Backspace"
+      && !has_modifier
+      && let Some(element) = editor.get_untracked()
+      && composer_editor::leave_block_at_start(&element)
+    {
+      ev.prevent_default();
+      after_edit();
+      return;
+    }
     if ev.key() != "Enter" {
       return;
     }

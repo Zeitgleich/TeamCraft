@@ -53,7 +53,7 @@ const MONOSPACE_FONTS: [&str; 6] = [
 ];
 
 /// Zero-width characters the editor uses to place the caret; never part of the message.
-const CARET_MARKERS: [char; 2] = ['\u{200B}', '\u{FEFF}'];
+pub(crate) const CARET_MARKERS: [char; 2] = ['\u{200B}', '\u{FEFF}'];
 
 /// A DOM node, read from the editor or from pasted HTML.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -502,7 +502,7 @@ fn apply_css(css: &str, style: &mut Style) {
 }
 
 /// The text of a `<pre>`, line breaks included.
-fn code_text(nodes: &[DomNode], out: &mut String) {
+pub(crate) fn code_text(nodes: &[DomNode], out: &mut String) {
   for node in nodes {
     match node {
       DomNode::Text(text) => out.extend(

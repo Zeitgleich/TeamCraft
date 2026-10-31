@@ -11,6 +11,7 @@ use wasm_bindgen::JsCast;
 use web_sys::{Document, Element, HtmlDocument, HtmlElement, Node, Range, Selection};
 
 use crate::editor_doc::{self, BlockFormat, DomElement, DomNode, InlineShortcut, InlineStyle, Whitespace};
+use crate::editor_lines::{self, LineBlock};
 use crate::markdown;
 
 /// Placed after inserted formatting so the caret leaves it; [`editor_doc`] drops it when reading.
@@ -30,6 +31,9 @@ const BLANK_PROBE: u32 = 64;
 
 /// Block elements the editor makes, from the innermost one at the caret outwards.
 const BLOCK_SELECTOR: &str = "h1, h2, h3, h4, h5, h6, blockquote, li, pre, p, div";
+
+/// Blocks whose lines the editor takes out itself (`editor_lines`); `formatBlock` can't.
+const LINE_BLOCK_SELECTOR: &str = "pre, blockquote";
 
 /// The editor's content as Markdown.
 pub fn markdown(editor: &HtmlElement) -> String {
@@ -191,6 +195,15 @@ pub fn set_block_format(editor: &HtmlElement, format: BlockFormat) {
   } else {
     format
   };
+  // #843: `formatBlock` leaves a code block or quote as it is; the selected lines leave it here.
+  if matches!(current, BlockFormat::CodeBlock | BlockFormat::Quote)
+    && target != current
+    && leave_line_blocks(editor)
+    && target == BlockFormat::Paragraph
+  {
+    drop(editor.focus());
+    return;
+  }
   // Lists toggle themselves; leaving a list first keeps a list from nesting inside a quote.
   match current {
     BlockFormat::Bulleted if target != BlockFormat::Bulleted => command("insertUnorderedList", ""),
@@ -210,13 +223,37 @@ pub fn set_block_format(editor: &HtmlElement, format: BlockFormat) {
 }
 
 /// A line break that continues the current block: a new list item or quote line, or a new line in a
-/// code block. An empty quote line or list item ends the quote or list instead.
+/// code block. An empty quote line, the empty last line of a code block or an empty list item ends
+/// the quote, code block or list instead (as in Slack and Notion).
 pub fn new_line(editor: &HtmlElement) {
+  if leave_on_blank_line(editor) {
+    return;
+  }
   match block_format(editor) {
     BlockFormat::CodeBlock => command("insertLineBreak", ""),
-    BlockFormat::Quote if caret_block_is_empty(editor) => command("formatBlock", "p"),
-    _ => command("insertParagraph", ""),
+    _ => {
+      command("insertParagraph", "");
+      leave_empty_inline_code(editor);
+    },
   }
+}
+
+/// Backspace at the very start of a code block or quote turns its first line into normal text, as
+/// in Slack and Notion. Returns whether it did.
+pub fn leave_block_at_start(editor: &HtmlElement) -> bool {
+  let Some((block, kind, before)) = caret_line_block(editor) else {
+    return false;
+  };
+  if !editor_lines::is_at_start(kind, &before) {
+    return false;
+  }
+  let Some(converted) = replace_lines(&block, kind, 0, 0) else {
+    return false;
+  };
+  if let Some(first) = converted.first() {
+    place_caret(first, 0);
+  }
+  true
 }
 
 /// Leaves a code block or quote at the very end of the editor with ↓, so there is a line to type on
@@ -517,10 +554,231 @@ fn start_empty_code(editor: &HtmlElement) {
   }
 }
 
-fn caret_block_is_empty(editor: &HtmlElement) -> bool {
-  caret_closest(editor, BLOCK_SELECTOR)
-    .and_then(|block| block.text_content())
-    .is_none_or(|text| text.replace(CARET_ESCAPE, "").trim().is_empty())
+/// Turns the selected lines of every code block and quote the selection touches into paragraphs;
+/// the lines around them stay in their block. Keeps the caret's place in its line, or selects the
+/// lines that left. Returns whether there was a block to leave.
+fn leave_line_blocks(editor: &HtmlElement) -> bool {
+  let Some(range) = selection().and_then(|selection| selection.get_range_at(0).ok()) else {
+    return false;
+  };
+  let is_collapsed = range.collapsed();
+  let (Ok(start), Ok(start_offset), Ok(end), Ok(end_offset)) = (
+    range.start_container(),
+    range.start_offset(),
+    range.end_container(),
+    range.end_offset(),
+  ) else {
+    return false;
+  };
+  let blocks = selected_line_blocks(editor, &range);
+  let mut maybe_first: Option<(Node, usize)> = None;
+  let mut maybe_last: Option<Node> = None;
+  // From the last block up, so a replaced block doesn't move the positions in the ones before it.
+  for (block, kind) in blocks.iter().rev() {
+    let (first, column) = match block.contains(Some(&start)) {
+      true => content_before(block, &start, start_offset)
+        .map(|before| {
+          (
+            editor_lines::line_index(*kind, &before),
+            editor_lines::column(*kind, &before),
+          )
+        })
+        .unwrap_or_default(),
+      false => (0, 0),
+    };
+    let last = match (is_collapsed, block.contains(Some(&end))) {
+      (true, _) => first,
+      (false, true) => content_before(block, &end, end_offset).map_or(first, |before| {
+        let index = editor_lines::line_index(*kind, &before);
+        // A selection that ends at the start of a line (a triple click) doesn't take that line.
+        if index > first && editor_lines::column(*kind, &before) == 0 {
+          index - 1
+        } else {
+          index
+        }
+      }),
+      (false, false) => usize::MAX,
+    };
+    let Some(converted) = replace_lines(block, *kind, first, last) else {
+      continue;
+    };
+    if maybe_last.is_none() {
+      maybe_last = converted.last().cloned();
+    }
+    maybe_first = converted.first().cloned().map(|node| (node, column));
+  }
+  match (maybe_first, maybe_last) {
+    (Some((first, column)), _) if is_collapsed => place_caret_at_column(&first, column),
+    (Some((first, _)), Some(last)) => select_between(&first, &last),
+    _ => return false,
+  }
+  true
+}
+
+/// The browser carries inline code at the end of a line into the new line (#843): every following
+/// line was code. The empty code element on the new line is unwrapped, so the line starts as text.
+fn leave_empty_inline_code(editor: &HtmlElement) {
+  let Some(code) = caret_closest(editor, "code") else {
+    return;
+  };
+  let is_empty = code
+    .text_content()
+    .is_none_or(|text| text.replace(CARET_ESCAPE, "").is_empty());
+  let Some(parent) = code.parent_node().filter(|_| is_empty) else {
+    return;
+  };
+  let offset = index_in_parent(&code);
+  let children = code.child_nodes();
+  let moved: Vec<Node> = (0..children.length())
+    .filter_map(|index| children.item(index))
+    .collect();
+  for child in &moved {
+    drop(parent.insert_before(child, Some(&code)));
+  }
+  code.remove();
+  place_caret(&parent, offset);
+}
+
+fn index_in_parent(node: &Node) -> u32 {
+  let mut index = 0;
+  let mut maybe_previous = node.previous_sibling();
+  while let Some(previous) = maybe_previous {
+    index += 1;
+    maybe_previous = previous.previous_sibling();
+  }
+  index
+}
+
+/// The outermost code blocks and quotes the range touches, in document order.
+fn selected_line_blocks(editor: &HtmlElement, range: &Range) -> Vec<(Element, LineBlock)> {
+  let Ok(list) = editor.query_selector_all(LINE_BLOCK_SELECTOR) else {
+    return Vec::new();
+  };
+  (0..list.length())
+    .filter_map(|index| list.item(index))
+    .filter(|node| range.intersects_node(node).unwrap_or(false))
+    .filter_map(|node| node.dyn_into::<Element>().ok())
+    .filter(|block| {
+      block
+        .parent_element()
+        .and_then(|parent| parent.closest(LINE_BLOCK_SELECTOR).ok().flatten())
+        .is_none_or(|outer| !editor.contains(Some(&outer)))
+    })
+    .filter_map(|block| LineBlock::of(&block.tag_name().to_ascii_lowercase()).map(|kind| (block, kind)))
+    .collect()
+}
+
+/// Enter on an empty quote line, or on the empty last line of a code block, leaves the block there.
+fn leave_on_blank_line(editor: &HtmlElement) -> bool {
+  let Some((block, kind, before)) = caret_line_block(editor) else {
+    return false;
+  };
+  let Some(DomNode::Element(read_block)) = read(&block, 0) else {
+    return false;
+  };
+  let lines = editor_lines::lines(kind, &read_block.children);
+  let index = editor_lines::line_index(kind, &before);
+  let is_last = index + 1 >= lines.len();
+  let is_blank = lines.get(index).is_none_or(editor_lines::Line::is_blank);
+  if !is_blank || (kind == LineBlock::Code && !is_last) {
+    return false;
+  }
+  let Some(converted) = replace_lines(&block, kind, index, index) else {
+    return false;
+  };
+  if let Some(first) = converted.first() {
+    place_caret(first, 0);
+  }
+  true
+}
+
+/// The code block or quote the collapsed caret is in, with its content before the caret. Not when
+/// the caret is in a list inside a quote: the list handles its own lines.
+fn caret_line_block(editor: &HtmlElement) -> Option<(Element, LineBlock, Vec<DomNode>)> {
+  if !matches!(block_format(editor), BlockFormat::CodeBlock | BlockFormat::Quote) {
+    return None;
+  }
+  let selection = selection().filter(Selection::is_collapsed)?;
+  let block = caret_closest(editor, LINE_BLOCK_SELECTOR)?;
+  let kind = LineBlock::of(&block.tag_name().to_ascii_lowercase())?;
+  let before = content_before(&block, &selection.anchor_node()?, selection.anchor_offset())?;
+  Some((block, kind, before))
+}
+
+/// The block's content from its start up to a position in it.
+fn content_before(block: &Element, node: &Node, offset: u32) -> Option<Vec<DomNode>> {
+  let range = block.owner_document()?.create_range().ok()?;
+  range.set_start(block, 0).ok()?;
+  range.set_end(node, offset).ok()?;
+  let fragment: Node = range.clone_contents().ok()?.into();
+  Some(read_children(&fragment))
+}
+
+/// Replaces the block with its lines `first..=last` as paragraphs between the rest of it; returns
+/// the paragraphs.
+fn replace_lines(block: &Element, kind: LineBlock, first: usize, last: usize) -> Option<Vec<Node>> {
+  let Some(DomNode::Element(read_block)) = read(block, 0) else {
+    return None;
+  };
+  let unwrapped = editor_lines::unwrap(&read_block, kind, first, last);
+  let document = block.owner_document()?;
+  let parent = block.parent_node()?;
+  let parts = unwrapped
+    .maybe_before
+    .iter()
+    .map(|node| (node, false))
+    .chain(unwrapped.lines.iter().map(|node| (node, true)))
+    .chain(unwrapped.maybe_after.iter().map(|node| (node, false)));
+  let mut converted = Vec::new();
+  for (node, is_line) in parts {
+    let built = build(&document, node)?;
+    parent.insert_before(&built, Some(block)).ok()?;
+    if is_line {
+      converted.push(built);
+    }
+  }
+  block.remove();
+  Some(converted)
+}
+
+/// Puts the caret `column` UTF-16 units into the text of `node` (at its end if the text is shorter).
+fn place_caret_at_column(node: &Node, column: usize) {
+  let walker = node.owner_document().and_then(|document| {
+    document
+      .create_tree_walker_with_what_to_show(node, SHOW_TEXT)
+      .ok()
+  });
+  let mut left = column as u32;
+  let mut maybe_last: Option<Node> = None;
+  while let Some(Ok(Some(text))) = walker.as_ref().map(web_sys::TreeWalker::next_node) {
+    let length = text.dyn_ref::<web_sys::Text>().map_or(0, |text| text.length());
+    if left <= length {
+      place_caret(&text, left);
+      return;
+    }
+    left -= length;
+    maybe_last = Some(text);
+  }
+  match maybe_last {
+    Some(text) => {
+      let length = text.dyn_ref::<web_sys::Text>().map_or(0, |text| text.length());
+      place_caret(&text, length);
+    },
+    None => place_caret(node, 0),
+  }
+}
+
+fn select_between(first: &Node, last: &Node) {
+  let (Some(selection), Some(document)) = (selection(), first.owner_document()) else {
+    return;
+  };
+  let Ok(range) = document.create_range() else {
+    return;
+  };
+  if range.set_start(first, 0).is_ok() && range.set_end(last, last.child_nodes().length()).is_ok() {
+    drop(selection.remove_all_ranges());
+    drop(selection.add_range(&range));
+  }
 }
 
 fn caret_at_end_of(block: &Element) -> bool {

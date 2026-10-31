@@ -1693,6 +1693,10 @@ impl<S: LocalStore> ChatBackend for CoreChatBackend<S> {
     self.read(crate::read_state::marks(&self.store)).meetings
   }
 
+  fn link_request_mark(&self) -> u64 {
+    self.read(crate::read_state::marks(&self.store)).link_requests
+  }
+
   fn notify_typing(&self, conversation: ConversationId, maybe_thread: Option<ThreadId>) {
     self.command(CoreCommand::Typing {
       conversation,
