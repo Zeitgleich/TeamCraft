@@ -18,9 +18,9 @@ catching-up-detail = Messages from while you were away are still loading.
 
 ## Messages
 badge-bot = BOT
-badge-imported = IMPORTED
 imported-from-synology = Synology Chat
 imported-from-other = another chat
+imported-until = Imported from { $source } up to here
 imported-title = Imported from { $source } by { $importer }
 badge-guest = GUEST
 badge-organization = Organization

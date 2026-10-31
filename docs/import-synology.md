@@ -25,7 +25,7 @@ and upload quotas, so it runs as fast as the server and the link allow. Plan for
 | Direct message (type 2)                   | The DM of the two people (merged into an existing one), only when both are mapped            |
 | My space (type 3)                         | The owner's notes                                                                            |
 | Chatbot conversation (type 5), Office (4) | Not imported                                                                                 |
-| Posts, threads, files, stickers, mentions | Imported with the original author and time, marked "Imported"                                |
+| Posts, threads, files, stickers, mentions | Imported with the original author and time; a line marks the end of the import               |
 | Reactions                                 | Part of the imported message (gemoji short codes as emoji)                                   |
 | Edits                                     | The last version, marked edited                                                              |
 | Read position (`last_view_at`)            | Read position; imported messages are never unread and notify nobody                          |
