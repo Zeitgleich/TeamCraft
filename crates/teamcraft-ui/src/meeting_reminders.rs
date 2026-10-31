@@ -451,6 +451,7 @@ mod tests {
       conversation_id: id_from_raw::<ConversationId>(9),
       join_url: "https://chat.example.com/meeting/1".into(),
       maybe_recurrence: None,
+      is_occurrence_cancelled: false,
       attendees: vec![attendee(RsvpStatus::Accepted)],
       undelivered_invitations: Vec::new(),
     }

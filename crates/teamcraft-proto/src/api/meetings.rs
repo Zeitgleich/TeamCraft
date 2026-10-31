@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
 use crate::wire_enum::wire_enum;
-use crate::{ConversationId, IdempotencyKey, MeetingId, UnixMillis, UserId, UserSummary};
+use crate::{ConversationId, IdempotencyKey, MeetingId, UnixMillis, UserId, UserSummary, Weekday};
 
 wire_enum! {
   pub enum MeetingStatus {
@@ -41,6 +41,18 @@ wire_enum! {
 }
 
 wire_enum! {
+  /// What `DELETE /api/v1/meetings/{id}` cancels of a repeating meeting.
+  pub enum CancelScope {
+    /// The whole meeting (the default, and the only scope of a meeting that doesn't repeat).
+    Series => "series",
+    /// One occurrence; the others stay.
+    Occurrence => "occurrence",
+    /// The occurrence and every one after it: the series ends before it.
+    Following => "following",
+  }
+}
+
+wire_enum! {
   /// A guest's place in the lobby of a meeting.
   pub enum LobbyState {
     Waiting => "waiting",
@@ -49,15 +61,23 @@ wire_enum! {
   }
 }
 
-/// A simple recurrence (iCalendar `RRULE` with `FREQ`, `INTERVAL` and `COUNT`).
+/// A recurrence (iCalendar `RRULE` with `FREQ`, `INTERVAL`, `BYDAY` and `COUNT` or `UNTIL`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 pub struct MeetingRecurrence {
   pub frequency: RecurrenceFrequency,
   /// Every n-th day, week or month; at least 1.
   pub interval: u32,
-  /// Number of occurrences; without it the series is open ended.
+  /// Only on these days of the week (daily and weekly series; "Monday to Friday"). Empty: every
+  /// day of a daily series, the first occurrence's day of a weekly one.
+  #[serde(default, skip_serializing_if = "Vec::is_empty")]
+  pub weekdays: Vec<Weekday>,
+  /// Number of occurrences, the first included. At most one of `count` and `until`; without both
+  /// the series is open ended.
   #[serde(rename = "count", default, skip_serializing_if = "Option::is_none")]
   pub maybe_count: Option<u32>,
+  /// No occurrence starts after this time.
+  #[serde(rename = "until", default, skip_serializing_if = "Option::is_none")]
+  pub maybe_until: Option<UnixMillis>,
 }
 
 /// Somebody invited to a meeting.
@@ -111,6 +131,29 @@ pub struct UpdateMeetingRequest {
   pub maybe_invitees: Option<Vec<MeetingInvitee>>,
   #[serde(rename = "has_lobby", default, skip_serializing_if = "Option::is_none")]
   pub maybe_has_lobby: Option<bool>,
+  /// A new repeat rule. A meeting that repeats keeps repeating; to end it, cancel the following
+  /// occurrences (`CancelScope::Following`).
+  #[serde(rename = "recurrence", default, skip_serializing_if = "Option::is_none")]
+  pub maybe_recurrence: Option<MeetingRecurrence>,
+}
+
+/// Query of `DELETE /api/v1/meetings/{id}`: what to cancel. Without it the whole meeting.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, ToSchema, utoipa::IntoParams)]
+#[into_params(parameter_in = Query)]
+pub struct CancelMeetingQuery {
+  #[serde(rename = "scope", default, skip_serializing_if = "Option::is_none")]
+  pub maybe_scope: Option<CancelScope>,
+  /// The start of the occurrence, as the list gives it; required for `occurrence` and `following`.
+  #[serde(rename = "occurrence", default, skip_serializing_if = "Option::is_none")]
+  pub maybe_occurrence: Option<UnixMillis>,
+}
+
+/// `POST /api/v1/meetings/{id}/restore` (organizer only): takes a cancellation back.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct RestoreMeetingRequest {
+  /// The cancelled occurrence to bring back; without it the cancelled meeting itself.
+  #[serde(rename = "occurrence", default, skip_serializing_if = "Option::is_none")]
+  pub maybe_occurrence: Option<UnixMillis>,
 }
 
 /// `POST /api/v1/meetings/instant`: "Meet now".
@@ -164,6 +207,10 @@ pub struct MeetingResponse {
   pub join_url: String,
   #[serde(rename = "recurrence", default, skip_serializing_if = "Option::is_none")]
   pub maybe_recurrence: Option<MeetingRecurrence>,
+  /// Only this occurrence of the repeating meeting is cancelled (`status` is `cancelled`); the
+  /// series goes on.
+  #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+  pub is_occurrence_cancelled: bool,
   pub attendees: Vec<MeetingAttendeeResponse>,
   /// Invitees whose invitation e-mail could not be sent (only set in replies to create and update).
   #[serde(default, skip_serializing_if = "Vec::is_empty")]

@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE meetings SET status = 'scheduled', cancelled_at = NULL, hidden_at = NULL, sequence = sequence + 1\n         WHERE id = $1 AND status = 'cancelled'",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int8"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "22478c5a9a7bc8edf2d118b23b087f37892b8d65a73d1fc08c6540f7e1ac20f1"
+}

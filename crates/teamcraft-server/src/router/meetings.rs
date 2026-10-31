@@ -6,7 +6,9 @@ use utoipa::OpenApi;
 use utoipa_axum::router::OpenApiRouter;
 use utoipa_axum::routes;
 
-use teamcraft_proto::{JoinMeetingRequest, JoinMeetingResponse, ListMeetingsQuery, MeetingReplyResponse};
+use teamcraft_proto::{
+  CancelMeetingQuery, JoinMeetingRequest, JoinMeetingResponse, ListMeetingsQuery, MeetingReplyResponse,
+};
 
 use crate::handlers;
 use crate::state::AppState;
@@ -20,6 +22,8 @@ pub(super) fn routes() -> OpenApiRouter<AppState> {
       handlers::update_meeting_handler,
       handlers::cancel_meeting_handler
     ))
+    .routes(routes!(handlers::restore_meeting_handler))
+    .routes(routes!(handlers::hide_meeting_handler))
     .routes(routes!(handlers::control_meeting_handler))
     .routes(routes!(handlers::create_guest_link_handler))
     .routes(routes!(handlers::leave_meeting_handler))
@@ -41,6 +45,7 @@ pub(super) fn routes() -> OpenApiRouter<AppState> {
 /// the inbox's replies.
 #[derive(OpenApi)]
 #[openapi(components(schemas(
+  CancelMeetingQuery,
   JoinMeetingRequest,
   JoinMeetingResponse,
   ListMeetingsQuery,

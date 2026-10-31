@@ -8,8 +8,8 @@ use leptos::prelude::*;
 use leptos::task::spawn_local;
 use teamcraft_client_api::failure::ActionFailure;
 use teamcraft_proto::{
-  IdempotencyKey, LobbyEntry, LobbyState, MeetingId, MeetingResponse, MeetingStatus, RsvpStatus,
-  UpdateMeetingRequest,
+  CancelScope, IdempotencyKey, LobbyEntry, LobbyState, MeetingId, MeetingResponse, MeetingStatus, RsvpStatus,
+  UnixMillis, UpdateMeetingRequest,
 };
 
 use crate::calls::{CallKind, CallRequest};
@@ -25,10 +25,11 @@ use crate::components::modal::Modal;
 use crate::components::pending_button::PendingButton;
 use crate::components::sliding_indicator::SlidingIndicator;
 use crate::feedback::PendingAction;
+use crate::form_errors::{error_id, focus_first_invalid};
 use crate::i18n::{I18n, use_i18n};
 use crate::meetings::{
-  ExternalInvitee, FormError, MeetingError, MeetingsHub, Repeat, STATUS_CONFLICT, STATUS_NOT_FOUND,
-  ScheduleForm, attending_users, hosts_lobby, is_over, my_rsvp,
+  ExternalInvitee, FormError, FormField, MeetingError, MeetingsHub, Repeat, STATUS_CONFLICT,
+  STATUS_NOT_FOUND, ScheduleForm, SeriesEnd, WEEKDAYS, attending_users, hosts_lobby, is_over, my_rsvp,
 };
 use crate::model::{ConversationId, UserId};
 use crate::reactive::{SetIfAlive, pause, use_interval_while_visible};
@@ -49,6 +50,8 @@ const JOIN_LEAD_MS: i64 = 15 * 60_000;
 /// Attendee pictures shown on a meeting; the names follow in text.
 const MAX_FACES: usize = 4;
 const DURATIONS: [u32; 6] = [15, 30, 45, 60, 90, 120];
+/// The element of the schedule dialog whose first invalid field gets the focus.
+const SCHEDULE_BODY_ID: &str = "schedule-form-body";
 
 #[component]
 pub fn MeetingsView() -> impl IntoView {
@@ -120,7 +123,12 @@ pub fn MeetingsView() -> impl IntoView {
         </div>
         // Guests join meetings but create none (the server refuses them, docs/meetings.md).
         <Show when=move || can_create fallback=|| ()>
-          <button class="btn" prop:disabled=move || is_starting.get() on:click=start_now>
+          <button
+            class="btn"
+            title=move || i18n.t("meetings-start-now-hint")
+            prop:disabled=move || is_starting.get()
+            on:click=start_now
+          >
             <Icon name=IconName::Video />
             <span>{move || i18n.t("meetings-start-now")}</span>
           </button>
@@ -238,11 +246,37 @@ fn MeetingCard(meeting: MeetingResponse) -> impl IntoView {
   let meeting_for_join = meeting.clone();
   let has_recurrence = meeting.maybe_recurrence.is_some();
   let has_lobby = hosts_lobby(&meeting, me);
+  let starts_at = meeting.starts_at;
+  let is_occurrence_cancelled = meeting.is_occurrence_cancelled;
+  // A cancellation can be taken back while what it cancelled is still to come.
+  let can_restore = is_host && is_cancelled && meeting.ends_at.0 > now;
+  // The organizer starts the meeting itself, also early (issue #1006): its invitees are rung.
+  let join_key = if is_host && !is_live {
+    "meetings-start"
+  } else {
+    "meetings-join"
+  };
+  let (restoring, hiding) = (PendingAction::new(), PendingAction::new());
 
-  let cancel = move |_| {
-    spawn_local(async move {
-      hub.run(me, now_ms(), hub.client().cancel(id)).await;
-    })
+  let cancel = move |_| state.overlay.set(Overlay::CancelMeeting(id, starts_at.0));
+  let restore = move |_| {
+    restoring.spawn(async move {
+      let maybe_occurrence = is_occurrence_cancelled.then_some(starts_at);
+      hub
+        .client()
+        .restore(id, maybe_occurrence)
+        .await
+        .map_err(|error| error.to_failure())?;
+      hub.refresh(me, now_ms()).await;
+      Ok(())
+    });
+  };
+  let hide = move |_| {
+    hiding.spawn(async move {
+      hub.client().hide(id).await.map_err(|error| error.to_failure())?;
+      hub.refresh(me, now_ms()).await;
+      Ok(())
+    });
   };
   let answer = move |status: RsvpStatus| {
     spawn_local(async move {
@@ -287,7 +321,7 @@ fn MeetingCard(meeting: MeetingResponse) -> impl IntoView {
                 }
                 join_meeting(state, i18n, meeting.conversation_id)
               }>
-                {move || i18n.t("meetings-join")}
+                {move || i18n.t(join_key)}
               </button>
             }
           })}
@@ -327,6 +361,22 @@ fn MeetingCard(meeting: MeetingResponse) -> impl IntoView {
                 {move || i18n.t("meetings-edit")}
               </button>
               <button class="btn btn-quiet" on:click=cancel>{move || i18n.t("meetings-cancel")}</button>
+            }
+          })}
+        {can_restore
+          .then(|| {
+            view! {
+              <PendingButton pending=restoring class="btn" on_click=restore>
+                {move || i18n.t("meetings-restore")}
+              </PendingButton>
+            }
+          })}
+        {(is_host && is_cancelled && !is_occurrence_cancelled)
+          .then(|| {
+            view! {
+              <PendingButton pending=hiding class="btn btn-quiet" on_click=hide>
+                {move || i18n.t("meetings-remove")}
+              </PendingButton>
             }
           })}
       </div>
@@ -671,6 +721,107 @@ pub fn MeetingCreatedDialog() -> impl IntoView {
   .into_any()
 }
 
+/// What to cancel of a meeting: of a repeating one this occurrence, it and all following, or the
+/// whole series (issue #1006: never all of them without asking). Everybody invited is told.
+#[component]
+pub fn CancelMeetingDialog(meeting: MeetingId, occurrence: i64) -> impl IntoView {
+  let state = use_app_state();
+  let i18n = use_i18n();
+  let hub = expect_context::<MeetingsHub>();
+  let me = state.me().id;
+  let Some(found) = hub.meetings.with_untracked(|all| {
+    all
+      .iter()
+      .find(|item| item.id == meeting && item.starts_at.0 == occurrence)
+      .cloned()
+  }) else {
+    state.close_overlay();
+    return ().into_any();
+  };
+  let is_series = found.maybe_recurrence.is_some();
+  let scope = RwSignal::new(if is_series {
+    CancelScope::Occurrence
+  } else {
+    CancelScope::Series
+  });
+  let pending = PendingAction::new();
+  let locale = i18n.locale().tag();
+  let when = format!(
+    "{}, {}",
+    format_date(occurrence, locale),
+    format_time(occurrence, locale)
+  );
+  let confirm = move |_| {
+    let chosen = scope.get_untracked();
+    pending.spawn(async move {
+      hub
+        .client()
+        .cancel(meeting, chosen, UnixMillis(occurrence))
+        .await
+        .map_err(|error| error.to_failure())?;
+      hub.refresh(me, now_ms()).await;
+      state.close_overlay();
+      Ok(())
+    });
+  };
+  let options = [
+    (CancelScope::Occurrence, "meetings-cancel-occurrence"),
+    (CancelScope::Following, "meetings-cancel-following"),
+    (CancelScope::Series, "meetings-cancel-series"),
+  ];
+  view! {
+    <Modal labelled_by="cancel-meeting-title">
+      <header class="modal-head">
+        <h2 id="cancel-meeting-title">{move || i18n.t(if is_series { "meetings-cancel-title-series" } else { "meetings-cancel-title" })}</h2>
+        <button type="button" class="icon-btn" aria-label=move || i18n.t("close") on:click=move |_| state.close_overlay()>
+          <Icon name=IconName::Close />
+        </button>
+      </header>
+      <div class="modal-body">
+        <p>
+          <strong translate="no">{found.title.clone()}</strong>
+          <br />
+          <span class="muted-text">{when}</span>
+        </p>
+        {is_series.then(|| view! {
+          <fieldset class="radio-group">
+            <legend class="visually-hidden">{move || i18n.t("meetings-cancel-title-series")}</legend>
+            {options
+              .into_iter()
+              .map(|(option, key)| {
+                let checked = option.clone();
+                view! {
+                  <label class="radio">
+                    <input
+                      type="radio"
+                      name="cancel-scope"
+                      value=option.as_str().to_owned()
+                      prop:checked=move || scope.get() == checked
+                      on:change=move |_| scope.set(option.clone())
+                    />
+                    <span>{move || i18n.t(key)}</span>
+                  </label>
+                }
+              })
+              .collect_view()}
+          </fieldset>
+        })}
+        <p class="muted-text small">{move || i18n.t("meetings-cancel-hint")}</p>
+      </div>
+      <footer class="modal-foot">
+        <span class="grow"></span>
+        <button type="button" class="btn" data-autofocus on:click=move |_| state.close_overlay()>
+          {move || i18n.t("meetings-cancel-keep")}
+        </button>
+        <PendingButton pending=pending class="btn btn-danger" on_click=confirm>
+          {move || i18n.t("meetings-cancel-confirm")}
+        </PendingButton>
+      </footer>
+    </Modal>
+  }
+  .into_any()
+}
+
 // ---- Opening a meeting from its link ----------------------------------------------------------------
 
 /// Where opening a meeting's link (`/meeting/{id}`) stands.
@@ -892,8 +1043,14 @@ pub fn ScheduleMeetingDialog(
     durations.push(form.get_untracked().duration_minutes);
     durations.sort_unstable();
   }
-  let maybe_error = RwSignal::new(None::<FormError>);
+  let errors = RwSignal::new(Vec::<FormError>::new());
+  // After a refused submit the errors follow the fields as they are corrected.
+  let was_refused = RwSignal::new(false);
   let is_saving = RwSignal::new(false);
+  // A series stays a series when edited (the server ends one by cancelling the following meetings).
+  let is_saved_series = maybe_before
+    .as_ref()
+    .is_some_and(|before| before.maybe_recurrence.is_some());
   let others = Memo::new(move |_| {
     state.read(|backend| {
       backend
@@ -916,6 +1073,27 @@ pub fn ScheduleMeetingDialog(
     external_email.set(String::new());
     external_name.set(String::new());
   };
+  let validate = {
+    let before = maybe_before.clone();
+    move |form: &ScheduleForm| -> Vec<FormError> {
+      let outcome = match &before {
+        Some(before) => form.to_update_request(now_ms(), before).map(|_| ()),
+        None => form.to_request(now_ms()).map(|_| ()),
+      };
+      outcome.err().unwrap_or_default()
+    }
+  };
+  Effect::new(move |_| {
+    let current = form.get();
+    if was_refused.get_untracked() {
+      errors.set(validate(&current));
+    }
+  });
+  let refuse = move |found: Vec<FormError>| {
+    errors.set(found);
+    was_refused.set(true);
+    focus_first_invalid(SCHEDULE_BODY_ID);
+  };
   let submit = move |ev: leptos::ev::SubmitEvent| {
     ev.prevent_default();
     if is_saving.get_untracked() {
@@ -924,9 +1102,9 @@ pub fn ScheduleMeetingDialog(
     let now = now_ms();
     if let Some(before) = maybe_before.clone() {
       match form.get_untracked().to_update_request(now, &before) {
-        Err(error) => maybe_error.set(Some(error)),
+        Err(found) => refuse(found),
         Ok(request) => {
-          maybe_error.set(None);
+          errors.set(Vec::new());
           is_saving.set(true);
           let conversation = before.conversation_id;
           let has_notetaker = form.get_untracked().maybe_notetaker.is_some();
@@ -951,9 +1129,9 @@ pub fn ScheduleMeetingDialog(
       return;
     }
     match form.get_untracked().to_request(now) {
-      Err(error) => maybe_error.set(Some(error)),
+      Err(found) => refuse(found),
       Ok(request) => {
-        maybe_error.set(None);
+        errors.set(Vec::new());
         is_saving.set(true);
         let has_notetaker = form.get_untracked().maybe_notetaker.is_some();
         spawn_local(async move {
@@ -985,16 +1163,19 @@ pub fn ScheduleMeetingDialog(
             <Icon name=IconName::Close />
           </button>
         </header>
-        <div class="modal-body schedule-form">
+        <div class="modal-body schedule-form" id=SCHEDULE_BODY_ID>
           <div class="field">
             <label for="meeting-title">{move || i18n.t("schedule-name")}</label>
             <input
               id="meeting-title"
               class="input"
               data-autofocus
+              aria-invalid=invalid(errors, FormField::Title)
+              aria-describedby=described(errors, FormField::Title)
               prop:value=move || form.get().title
               on:input=move |ev| form.update(|form| form.title = event_target_value(&ev))
             />
+            <FieldError errors=errors field=FormField::Title />
           </div>
           <div class="field-row">
             <div class="field grow">
@@ -1003,15 +1184,20 @@ pub fn ScheduleMeetingDialog(
                 id="meeting-start"
                 class="input"
                 type="datetime-local"
+                aria-invalid=invalid(errors, FormField::Start)
+                aria-describedby=described(errors, FormField::Start)
                 prop:value=move || form.get().starts_at
                 on:input=move |ev| form.update(|form| form.starts_at = event_target_value(&ev))
               />
+              <FieldError errors=errors field=FormField::Start />
             </div>
             <div class="field">
               <label for="meeting-duration">{move || i18n.t("schedule-duration")}</label>
               <select
                 id="meeting-duration"
                 class="input"
+                aria-invalid=invalid(errors, FormField::Duration)
+                aria-describedby=described(errors, FormField::Duration)
                 on:change=move |ev| {
                   if let Ok(minutes) = event_target_value(&ev).parse::<u32>() {
                     form.update(|form| form.duration_minutes = minutes);
@@ -1029,6 +1215,7 @@ pub fn ScheduleMeetingDialog(
                   })
                   .collect_view()}
               </select>
+              <FieldError errors=errors field=FormField::Duration />
             </div>
           </div>
           <div class="field">
@@ -1089,7 +1276,13 @@ pub fn ScheduleMeetingDialog(
               </For>
             </ul>
           </fieldset>
-          <fieldset class="field">
+          <fieldset
+            class="field"
+            id=FormField::Externals.id()
+            tabindex="-1"
+            aria-invalid=invalid(errors, FormField::Externals)
+            aria-describedby=described(errors, FormField::Externals)
+          >
             <legend>{move || i18n.t("schedule-invite-external")}</legend>
             <ul class="invite-list">
               {move || {
@@ -1134,64 +1327,9 @@ pub fn ScheduleMeetingDialog(
               />
               <button type="button" class="btn" on:click=add_external>{move || i18n.t("schedule-add")}</button>
             </div>
+            <FieldError errors=errors field=FormField::Externals />
           </fieldset>
-          <Show when=move || !is_edit fallback=|| ()>
-          <div class="field-row">
-            <div class="field grow">
-              <label for="meeting-repeat">{move || i18n.t("schedule-repeat")}</label>
-              <select
-                id="meeting-repeat"
-                class="input"
-                on:change=move |ev| {
-                  if let Some(repeat) = Repeat::from_slug(&event_target_value(&ev)) {
-                    form.update(|form| form.repeat = repeat);
-                  }
-                }
-              >
-                {Repeat::ALL
-                  .into_iter()
-                  .map(|repeat| {
-                    let key = format!("schedule-repeat-{}", repeat.slug());
-                    view! {
-                      <option value=repeat.slug() selected=move || form.get().repeat == repeat>
-                        {move || i18n.t(&key)}
-                      </option>
-                    }
-                  })
-                  .collect_view()}
-              </select>
-            </div>
-            <Show when=move || form.get().repeat != Repeat::Never fallback=|| ()>
-              <div class="field">
-                <label for="meeting-interval">{move || i18n.t("schedule-interval")}</label>
-                <input
-                  id="meeting-interval"
-                  class="input"
-                  type="number"
-                  min="1"
-                  prop:value=move || form.get().interval.to_string()
-                  on:input=move |ev| {
-                    if let Ok(interval) = event_target_value(&ev).parse::<u32>() {
-                      form.update(|form| form.interval = interval);
-                    }
-                  }
-                />
-              </div>
-              <div class="field">
-                <label for="meeting-count">{move || i18n.t("schedule-count")}</label>
-                <input
-                  id="meeting-count"
-                  class="input"
-                  type="number"
-                  min="1"
-                  placeholder=move || i18n.t("schedule-count-open")
-                  prop:value=move || form.get().maybe_count.map(|count| count.to_string()).unwrap_or_default()
-                  on:input=move |ev| form.update(|form| form.maybe_count = event_target_value(&ev).parse::<u32>().ok())
-                />
-              </div>
-            </Show>
-          </div>
-          </Show>
+          <RepeatFields form=form errors=errors is_saved_series=is_saved_series />
           <label class="checkbox">
             <input
               type="checkbox"
@@ -1201,15 +1339,6 @@ pub fn ScheduleMeetingDialog(
             <span>{move || i18n.t("schedule-lobby")}</span>
           </label>
           <p class="muted-text small">{move || i18n.t("schedule-lobby-hint")}</p>
-          {move || {
-            maybe_error.get().map(|error| {
-              let detail = match &error {
-                FormError::InvalidEmail(email) => email.clone(),
-                _ => String::new(),
-              };
-              view! { <div class="auth-alert" role="alert">{i18n.t_with(error.key(), &[("email", &detail)])}</div> }
-            })
-          }}
         </div>
         <footer class="modal-foot">
           <span class="grow"></span>
@@ -1221,6 +1350,212 @@ pub fn ScheduleMeetingDialog(
       </form>
     </Modal>
   }
+}
+
+/// How the meeting repeats: every N days, weeks or months, on which days, and until when.
+#[component]
+fn RepeatFields(
+  form: RwSignal<ScheduleForm>,
+  errors: RwSignal<Vec<FormError>>,
+  is_saved_series: bool,
+) -> impl IntoView {
+  let i18n = use_i18n();
+  let repeat = Memo::new(move |_| form.with(|form| form.repeat));
+  let is_repeating = move || repeat.get() != Repeat::Never;
+  let number = |ev: &leptos::ev::Event| event_target_value(ev).trim().parse::<u32>().unwrap_or(0);
+  view! {
+    <fieldset class="field repeat-fields">
+      <legend>{move || i18n.t("schedule-repeat")}</legend>
+      <select
+        id="meeting-repeat"
+        class="input"
+        aria-label=move || i18n.t("schedule-repeat")
+        on:change=move |ev| {
+          if let Some(choice) = Repeat::from_slug(&event_target_value(&ev)) {
+            form.update(|form| form.set_repeat(choice));
+          }
+        }
+      >
+        {Repeat::ALL
+          .into_iter()
+          .map(|choice| {
+            let key = format!("schedule-repeat-{}", choice.slug());
+            view! {
+              <option
+                value=choice.slug()
+                selected=move || repeat.get() == choice
+                disabled=is_saved_series && choice == Repeat::Never
+              >
+                {move || i18n.t(&key)}
+              </option>
+            }
+          })
+          .collect_view()}
+      </select>
+      <Show when=is_repeating fallback=|| ()>
+        <div class="repeat-row">
+          <label for="meeting-interval">{move || i18n.t("schedule-every")}</label>
+          <input
+            id="meeting-interval"
+            class="input narrow"
+            type="number"
+            inputmode="numeric"
+            min="1"
+            max="100"
+            aria-invalid=invalid(errors, FormField::Interval)
+            aria-describedby=described(errors, FormField::Interval)
+            prop:value=move || form.with(|form| form.interval.to_string())
+            on:input=move |ev| {
+              let value = number(&ev);
+              form.update(|form| form.interval = value);
+            }
+          />
+          <span class="field-unit">
+            {move || {
+              let count = form.with(|form| form.interval) as usize;
+              i18n.t_count(&format!("schedule-unit-{}", repeat.get().slug()), count)
+            }}
+          </span>
+        </div>
+        <FieldError errors=errors field=FormField::Interval />
+        <Show when=move || repeat.get().has_weekdays() fallback=|| ()>
+          <div class="repeat-row">
+            <span id="meeting-weekdays-label">{move || i18n.t("schedule-on-days")}</span>
+            <div
+              id=FormField::Weekdays.id()
+              class="set-chips"
+              role="group"
+              tabindex="-1"
+              aria-labelledby="meeting-weekdays-label"
+              aria-invalid=invalid(errors, FormField::Weekdays)
+              aria-describedby=described(errors, FormField::Weekdays)
+            >
+              {WEEKDAYS
+                .into_iter()
+                .enumerate()
+                .map(|(index, day)| {
+                  let key = format!("weekday-{}", day.as_str());
+                  view! {
+                    <button
+                      type="button"
+                      class="set-chip"
+                      aria-pressed=move || form.with(|form| form.weekdays[index]).to_string()
+                      on:click=move |_| form.update(|form| form.weekdays[index] = !form.weekdays[index])
+                    >
+                      {move || i18n.t(&key)}
+                    </button>
+                  }
+                })
+                .collect_view()}
+            </div>
+          </div>
+          <FieldError errors=errors field=FormField::Weekdays />
+        </Show>
+        <fieldset class="radio-group repeat-ends">
+          <legend>{move || i18n.t("schedule-ends")}</legend>
+          {SeriesEnd::ALL
+            .into_iter()
+            .map(|end| {
+              let key = format!("schedule-ends-{}", end.slug());
+              let is_chosen = move || form.with(|form| form.ends == end);
+              view! {
+                <div class="repeat-end">
+                  <label class="radio">
+                    <input
+                      type="radio"
+                      name="meeting-ends"
+                      value=end.slug()
+                      prop:checked=is_chosen
+                      on:change=move |_| form.update(|form| form.ends = end)
+                    />
+                    <span>{move || i18n.t(&key)}</span>
+                  </label>
+                  {match end {
+                    SeriesEnd::Never => ().into_any(),
+                    SeriesEnd::AfterCount => view! {
+                      <input
+                        id=FormField::Count.id()
+                        class="input narrow"
+                        type="number"
+                        inputmode="numeric"
+                        min="1"
+                        max="1000"
+                        aria-label=move || i18n.t("schedule-ends-count")
+                        aria-invalid=invalid(errors, FormField::Count)
+                        aria-describedby=described(errors, FormField::Count)
+                        // Typing into it chooses this end.
+                        on:focus=move |_| form.update(|form| form.ends = end)
+                        prop:value=move || form.with(|form| form.count.to_string())
+                        on:input=move |ev| {
+                          let value = number(&ev);
+                          form.update(|form| form.count = value);
+                        }
+                      />
+                      <span class="field-unit">
+                        {move || i18n.t_count("schedule-unit-meetings", form.with(|form| form.count) as usize)}
+                      </span>
+                    }
+                    .into_any(),
+                    SeriesEnd::OnDate => view! {
+                      <input
+                        id=FormField::Until.id()
+                        class="input"
+                        type="date"
+                        aria-label=move || i18n.t("schedule-ends-date")
+                        aria-invalid=invalid(errors, FormField::Until)
+                        aria-describedby=described(errors, FormField::Until)
+                        // Typing into it chooses this end.
+                        on:focus=move |_| form.update(|form| form.ends = end)
+                        prop:value=move || form.with(|form| form.until.clone())
+                        on:input=move |ev| form.update(|form| form.until = event_target_value(&ev))
+                      />
+                    }
+                    .into_any(),
+                  }}
+                </div>
+              }
+            })
+            .collect_view()}
+        </fieldset>
+        <FieldError errors=errors field=FormField::Count />
+        <FieldError errors=errors field=FormField::Until />
+      </Show>
+    </fieldset>
+  }
+}
+
+/// The message of the first error of `field`, where `aria-describedby` points to it.
+#[component]
+fn FieldError(errors: RwSignal<Vec<FormError>>, field: FormField) -> impl IntoView {
+  let i18n = use_i18n();
+  let maybe_error = move || errors.with(|all| all.iter().find(|error| error.field() == field).cloned());
+  view! {
+    <p class="field-error" id=error_id(field.id())>
+      {move || {
+        maybe_error().map(|error| {
+          let detail = match &error {
+            FormError::InvalidEmail(email) => email.clone(),
+            _ => String::new(),
+          };
+          i18n.t_with(error.key(), &[("email", &detail)])
+        })
+      }}
+    </p>
+  }
+}
+
+/// `aria-invalid` of a field: set while it has an error.
+fn invalid(errors: RwSignal<Vec<FormError>>, field: FormField) -> impl Fn() -> Option<&'static str> + Copy {
+  move || {
+    errors
+      .with(|all| all.iter().any(|error| error.field() == field))
+      .then_some("true")
+  }
+}
+
+/// `aria-describedby` of a field: its message while it has an error.
+fn described(errors: RwSignal<Vec<FormError>>, field: FormField) -> impl Fn() -> Option<String> + Copy {
+  move || invalid(errors, field)().map(|_| error_id(field.id()))
 }
 
 /// The notetaker's standing request for a meeting's calls (e2ee.md §8.2).
@@ -1315,6 +1650,7 @@ mod tests {
       conversation_id: id_from_raw(9),
       join_url: String::new(),
       maybe_recurrence: None,
+      is_occurrence_cancelled: false,
       attendees: Vec::new(),
       undelivered_invitations: Vec::new(),
     }

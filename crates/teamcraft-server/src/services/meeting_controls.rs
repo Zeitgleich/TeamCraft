@@ -70,9 +70,12 @@ pub async fn control_meeting(
     SfuControlAction::Lock => calls.set_locked(meeting.conversation, true),
     SfuControlAction::Unlock => calls.set_locked(meeting.conversation, false),
     SfuControlAction::RemoveParticipant { user_id } => calls.mark_removed(meeting.conversation, *user_id),
-    SfuControlAction::End => {
+    // Ending a series' call ends today's meeting, not the series (issue #1006): only a meeting
+    // that doesn't repeat is over for good.
+    SfuControlAction::End if meeting.maybe_recurrence_rule.is_none() => {
       state.database.end_meeting(meeting.id).await?;
     },
+    SfuControlAction::End => {},
     // Unknown is only what a newer peer might send; the server never builds it. Leaving on all
     // devices is not a host control (`calls::leave_call_everywhere`).
     SfuControlAction::MuteAll | SfuControlAction::DisconnectUser { .. } | SfuControlAction::Unknown => {},

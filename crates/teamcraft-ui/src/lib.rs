@@ -36,6 +36,7 @@ pub mod editor_doc;
 pub mod editor_lines;
 pub mod feed_motion;
 pub mod feedback;
+pub mod form_errors;
 pub mod gestures;
 // Shared with the mobile apps (through the FFI), so they live in the client API.
 pub use teamcraft_client_api::{emoji, emoji_catalog};

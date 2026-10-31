@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT id, uid, organizer_user_id, conversation_id, title, description, starts_at, ends_at,\n                recurrence_rule, kind, status, has_lobby, sequence\n         FROM meetings WHERE id = $1",
+  "query": "SELECT id, uid, organizer_user_id, conversation_id, title, description, starts_at, ends_at,\n                recurrence_rule, kind, status, has_lobby, sequence, cancelled_at\n         FROM meetings WHERE id = $1",
   "describe": {
     "columns": [
       {
@@ -145,6 +145,17 @@
             "name": "sequence"
           }
         }
+      },
+      {
+        "ordinal": 13,
+        "name": "cancelled_at",
+        "type_info": "Timestamptz",
+        "origin": {
+          "Table": {
+            "table": "meetings",
+            "name": "cancelled_at"
+          }
+        }
       }
     ],
     "parameters": {
@@ -165,8 +176,9 @@
       false,
       false,
       false,
-      false
+      false,
+      true
     ]
   },
-  "hash": "c9a5373c84af27ef7950c30f8344616e431f1c6dce54f18229c316c170948011"
+  "hash": "5a80c38fe1f98adb973440883b3cb56cf863c1e26f032f94de6c531558ef1253"
 }

@@ -211,6 +211,9 @@ pub enum Overlay {
   ScheduleMeeting,
   /// The same dialog filled with a meeting the user organizes.
   EditMeeting(MeetingId),
+  /// Asks what to cancel of a meeting the user organizes: the occurrence starting then (server
+  /// time, Unix milliseconds), the following ones too, or the whole series.
+  CancelMeeting(MeetingId, i64),
   /// The link of the meeting just scheduled or started (`MeetingsHub::maybe_created`), to copy.
   MeetingCreated,
   /// Pick a conversation to forward a message to.

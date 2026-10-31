@@ -276,6 +276,8 @@ struct Meeting: Decodable, Equatable, Identifiable, Sendable {
   let attendees: [MeetingAttendee]?
 
   var startDate: Date { Date(timeIntervalSince1970: TimeInterval(startsAt) / 1000) }
+  /// One occurrence of a repeating meeting: the series' ID and its start.
+  var occurrenceKey: String { "\(id)-\(startsAt)" }
   var endDate: Date { Date(timeIntervalSince1970: TimeInterval(endsAt) / 1000) }
 
   /// The user's own answer to the invitation, if they are an invitee.
