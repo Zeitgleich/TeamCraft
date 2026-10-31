@@ -1483,7 +1483,8 @@ fn RepeatFields(
                         aria-label=move || i18n.t("schedule-ends-count")
                         aria-invalid=invalid(errors, FormField::Count)
                         aria-describedby=described(errors, FormField::Count)
-                        prop:disabled=move || !is_chosen()
+                        // Typing into it chooses this end.
+                        on:focus=move |_| form.update(|form| form.ends = end)
                         prop:value=move || form.with(|form| form.count.to_string())
                         on:input=move |ev| {
                           let value = number(&ev);
@@ -1503,7 +1504,8 @@ fn RepeatFields(
                         aria-label=move || i18n.t("schedule-ends-date")
                         aria-invalid=invalid(errors, FormField::Until)
                         aria-describedby=described(errors, FormField::Until)
-                        prop:disabled=move || !is_chosen()
+                        // Typing into it chooses this end.
+                        on:focus=move |_| form.update(|form| form.ends = end)
                         prop:value=move || form.with(|form| form.until.clone())
                         on:input=move |ev| form.update(|form| form.until = event_target_value(&ev))
                       />
