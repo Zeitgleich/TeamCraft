@@ -218,6 +218,7 @@ incoming-accept-video = Accept with video
 ## Settings: display, sidebar, language, privacy, devices, calls
 calls-devices = Default devices
 calls-devices-hint = Used when you join a call. You can still change them before joining.
+calls-audio-system = Sound goes through { $system }.
 calls-system-default = System default
 calls-joining = When joining
 calls-start-muted = Join with the microphone off
@@ -271,6 +272,7 @@ calls-unavailable = Calls aren't available here. Use your other TeamCraft tab or
 error-call-microphone-denied = The browser blocked the microphone. Allow it for this site (the icon in the address bar), then join again.
 error-call-microphone-missing = No microphone was found. Connect one, then join again.
 error-call-microphone-in-use = The microphone can't be opened. Close other apps that use it and try again.
+error-call-microphone-unavailable = The microphone “{ $device }” can't be opened. Choose another one, or check it in the system's sound settings.
 error-call-camera-denied = The browser blocked the camera. Allow it for this site (the icon in the address bar), then turn the camera on again.
 error-call-camera-missing = No camera was found. Connect one, then turn the camera on again.
 error-call-camera-in-use = Another app is using the camera. Close that app, or choose another camera.

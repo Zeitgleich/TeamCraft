@@ -218,6 +218,7 @@ incoming-accept-video = Mit Video annehmen
 ## Einstellungen: Darstellung, Seitenleiste, Sprache, Datenschutz, Geräte, Anrufe
 calls-devices = Standardgeräte
 calls-devices-hint = Werden beim Beitritt zu einem Anruf verwendet. Vor dem Beitritt kannst du sie noch ändern.
+calls-audio-system = Ton läuft über { $system }.
 calls-system-default = Systemstandard
 calls-joining = Beim Beitritt
 calls-start-muted = Mit ausgeschaltetem Mikrofon beitreten
@@ -271,6 +272,7 @@ calls-unavailable = Anrufe sind hier nicht verfügbar. Nutze deinen anderen Team
 error-call-microphone-denied = Der Browser hat das Mikrofon blockiert. Erlaube es für diese Seite (Symbol in der Adressleiste) und tritt dann erneut bei.
 error-call-microphone-missing = Es wurde kein Mikrofon gefunden. Schließe eines an und tritt dann erneut bei.
 error-call-microphone-in-use = Das Mikrofon lässt sich nicht öffnen. Schließe andere Apps, die es nutzen, und versuche es erneut.
+error-call-microphone-unavailable = Das Mikrofon „{ $device }“ lässt sich nicht öffnen. Wähle ein anderes oder prüfe es in den Toneinstellungen des Systems.
 error-call-camera-denied = Der Browser hat die Kamera blockiert. Erlaube sie für diese Seite (Symbol in der Adressleiste) und schalte die Kamera dann erneut ein.
 error-call-camera-missing = Es wurde keine Kamera gefunden. Schließe eine an und schalte die Kamera dann erneut ein.
 error-call-camera-in-use = Eine andere App nutzt die Kamera. Schließe diese App oder wähle eine andere Kamera.

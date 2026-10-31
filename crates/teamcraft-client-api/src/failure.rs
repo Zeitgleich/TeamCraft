@@ -146,6 +146,9 @@ pub enum CallFailure {
   MicrophoneMissing,
   /// Another app holds the microphone.
   MicrophoneInUse,
+  /// The desktop app found the chosen microphone but couldn't start it (#1072). The detail's
+  /// first line is the device's name, the rest why.
+  MicrophoneUnavailable,
   CameraDenied,
   CameraMissing,
   /// Another app holds the camera.
@@ -215,10 +218,11 @@ pub enum CallFailure {
 }
 
 impl CallFailure {
-  const ALL: [Self; 29] = [
+  const ALL: [Self; 30] = [
     Self::MicrophoneDenied,
     Self::MicrophoneMissing,
     Self::MicrophoneInUse,
+    Self::MicrophoneUnavailable,
     Self::CameraDenied,
     Self::CameraMissing,
     Self::CameraInUse,
@@ -253,6 +257,7 @@ impl CallFailure {
       Self::MicrophoneDenied => "microphone_denied",
       Self::MicrophoneMissing => "microphone_missing",
       Self::MicrophoneInUse => "microphone_in_use",
+      Self::MicrophoneUnavailable => "microphone_unavailable",
       Self::CameraDenied => "camera_denied",
       Self::CameraMissing => "camera_missing",
       Self::CameraInUse => "camera_in_use",

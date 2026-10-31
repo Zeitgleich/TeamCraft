@@ -27,11 +27,13 @@ finish-args:
   - --socket=fallback-x11
   # GPU: WebKit rendering, the effects shaders (wgpu) and VA-API video encoding.
   - --device=dri
-  # Microphone and speakers (PulseAudio protocol, served by PipeWire on current desktops).
+  # Microphone and speakers: through PipeWire's own socket (below) where it runs, through the
+  # PulseAudio protocol on systems without PipeWire (#1072).
   - --socket=pulseaudio
-  # Screen shares with sound: other applications' playback is linked into our capture stream
-  # through PipeWire itself (the ScreenCast portal has no audio). Without it the "share sound"
-  # option is unavailable; nothing else uses the PipeWire socket.
+  # PipeWire itself: the call's microphone and speakers (devices, defaults and hotplug from its
+  # registry), and screen shares with sound, where other applications' playback is linked into
+  # our capture stream (the ScreenCast portal has no audio). Without it calls use the PulseAudio
+  # socket and the "share sound" option is unavailable.
   - --filesystem=xdg-run/pipewire-0
   # Refresh token in the desktop's keyring (GNOME Keyring, KWallet/ksecretd).
   - --talk-name=org.freedesktop.secrets

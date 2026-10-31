@@ -48,6 +48,8 @@ mod worker_thread;
 pub mod audio_codec;
 #[cfg(feature = "native")]
 pub mod audio_device;
+#[cfg(all(feature = "pipewire", target_os = "linux"))]
+pub mod audio_devices_pipewire;
 #[cfg(feature = "native")]
 pub mod audio_pipeline;
 #[cfg(feature = "native")]

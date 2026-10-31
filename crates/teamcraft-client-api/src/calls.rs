@@ -395,6 +395,25 @@ pub struct MediaDevices {
   pub camera_presence: DevicePresence,
   #[serde(default)]
   pub microphone_presence: DevicePresence,
+  /// The sound system the desktop app plays and records through (#1072), for the audio settings.
+  /// Browsers and older shells send nothing: [`AudioSystem::Unknown`].
+  #[serde(default)]
+  pub audio_system: AudioSystem,
+}
+
+/// Which sound system a desktop app's call audio goes through.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AudioSystem {
+  PipeWire,
+  PulseAudio,
+  Alsa,
+  CoreAudio,
+  Wasapi,
+  /// The browser's, another one, or not said (also what a newer value reads as).
+  #[default]
+  #[serde(other)]
+  Unknown,
 }
 
 /// What listing the devices found for one kind of input.
@@ -438,6 +457,20 @@ impl BrowserPermission {
   }
 }
 
+impl AudioSystem {
+  /// The sound system's own name (not translated); `None` when unknown.
+  pub fn name(self) -> Option<&'static str> {
+    match self {
+      Self::PipeWire => Some("PipeWire"),
+      Self::PulseAudio => Some("PulseAudio"),
+      Self::Alsa => Some("ALSA"),
+      Self::CoreAudio => Some("Core Audio"),
+      Self::Wasapi => Some("WASAPI"),
+      Self::Unknown => None,
+    }
+  }
+}
+
 impl MediaDevices {
   /// Devices from a platform that names every device it lists (the desktop app).
   pub fn listed(
@@ -448,6 +481,7 @@ impl MediaDevices {
     Self {
       camera_presence: DevicePresence::of_named(&cameras),
       microphone_presence: DevicePresence::of_named(&microphones),
+      audio_system: AudioSystem::Unknown,
       cameras,
       microphones,
       speakers,

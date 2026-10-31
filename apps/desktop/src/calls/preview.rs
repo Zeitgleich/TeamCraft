@@ -270,15 +270,25 @@ fn measure(
   levels.publish(0.0);
 }
 
-/// A microphone that didn't open, as the UI reads it.
-fn microphone_failure_wire(error: &AudioDeviceError) -> String {
-  let kind = match error {
-    AudioDeviceError::NoDevice(_) | AudioDeviceError::DeviceGone(_) => {
-      FailureKind::Call(CallFailure::MicrophoneMissing)
-    },
-    _ => FailureKind::Other,
-  };
-  ActionFailure::new(kind, error.to_string()).to_wire()
+/// An audio device that didn't open, as the UI reads it: a microphone that is there but didn't
+/// start is named in the message (#1072).
+pub(super) fn microphone_failure_wire(error: &AudioDeviceError) -> String {
+  match error {
+    AudioDeviceError::NoDevice("input") | AudioDeviceError::DeviceGone("input") => ActionFailure::new(
+      FailureKind::Call(CallFailure::MicrophoneMissing),
+      error.to_string(),
+    ),
+    AudioDeviceError::Open {
+      direction: "input",
+      device,
+      reason,
+    } => ActionFailure::new(
+      FailureKind::Call(CallFailure::MicrophoneUnavailable),
+      format!("{device}\n{reason}"),
+    ),
+    _ => ActionFailure::other(error.to_string()),
+  }
+  .to_wire()
 }
 
 #[cfg(test)]
@@ -428,6 +438,27 @@ mod tests {
       );
       let other = microphone_failure_wire(&AudioDeviceError::AudioThread);
       assert_eq!(ActionFailure::from_wire(&other).kind, FailureKind::Other);
+    }
+
+    #[test]
+    fn a_microphone_that_did_not_start_is_named() {
+      let wire = microphone_failure_wire(&AudioDeviceError::Open {
+        direction: "input",
+        device: "Headset Mono".into(),
+        reason: "busy".into(),
+      });
+      let failure = ActionFailure::from_wire(&wire);
+      assert_eq!(
+        failure.kind,
+        FailureKind::Call(CallFailure::MicrophoneUnavailable)
+      );
+      assert_eq!(failure.detail, "Headset Mono\nbusy");
+      let speakers = microphone_failure_wire(&AudioDeviceError::Open {
+        direction: "output",
+        device: "Speakers".into(),
+        reason: "busy".into(),
+      });
+      assert_eq!(ActionFailure::from_wire(&speakers).kind, FailureKind::Other);
     }
 
     fn watched(watch: &LevelWatch, channel: ChannelId) -> Receiver<f32> {

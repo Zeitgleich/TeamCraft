@@ -24,9 +24,9 @@ use futures::future::{Either, select};
 use js_sys::{Function, Promise, Reflect, Uint8Array};
 use teamcraft_client_api::call_view::{CallSignal, CallView};
 use teamcraft_client_api::calls::{
-  ActiveCall, BackgroundEffect, BrowserPermission, CallEndReason, CallPreview, CallRequest, CallStatusSounds,
-  CameraBackground, DevicePresence, EffectsOffer, JoinMedia, MediaDevice, MediaDevices, OrgBackgrounds,
-  PreviewCamera, PushToTalk, ScreenShareSound, VideoQuality,
+  ActiveCall, AudioSystem, BackgroundEffect, BrowserPermission, CallEndReason, CallPreview, CallRequest,
+  CallStatusSounds, CameraBackground, DevicePresence, EffectsOffer, JoinMedia, MediaDevice, MediaDevices,
+  OrgBackgrounds, PreviewCamera, PushToTalk, ScreenShareSound, VideoQuality,
 };
 use teamcraft_client_api::failure::{ActionFailure, CallFailure, FailureKind};
 use teamcraft_client_api::page_calls::{
@@ -595,6 +595,8 @@ impl Host {
         speakers: media_devices(&listed.outputs),
         camera_presence: presence(&listed.cameras, CAMERA_PERMISSION, has_listed_any).await,
         microphone_presence: presence(&listed.inputs, MICROPHONE_PERMISSION, has_listed_any).await,
+        // The browser's own; it doesn't say which.
+        audio_system: AudioSystem::Unknown,
       };
       if let Some(host) = host.upgrade() {
         host.state.borrow_mut().devices = devices;
