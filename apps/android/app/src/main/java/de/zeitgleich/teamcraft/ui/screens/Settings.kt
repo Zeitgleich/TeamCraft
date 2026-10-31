@@ -61,6 +61,7 @@ import de.zeitgleich.teamcraft.ui.LinkConfirmation
 import de.zeitgleich.teamcraft.ui.MainViewModel
 import uniffi.teamcraft_ffi.Presence
 import uniffi.teamcraft_ffi.PushService
+import uniffi.teamcraft_ffi.TeamCraftException
 
 /** The settings' pages; the hub lists them, each opens on top of it. */
 private enum class SettingsPage(val title: Int, val summary: Int) {
@@ -236,12 +237,17 @@ private fun ApproveDevice(viewModel: MainViewModel) {
   var isTyping by remember { mutableStateOf(false) }
   var maybeError by remember { mutableStateOf<Int?>(null) }
   var isDone by rememberSaveable { mutableStateOf(false) }
-  var hasFailed by rememberSaveable { mutableStateOf(false) }
+  var maybeFailure by rememberSaveable { mutableStateOf<Int?>(null) }
   var isScanning by rememberSaveable { mutableStateOf(false) }
   val approve: (String) -> Unit = { linkCode ->
-    hasFailed = false
+    maybeFailure = null
     scope.launch {
-      viewModel.approveLink(linkCode).onSuccess { isTyping = true }.onFailure { hasFailed = true }
+      viewModel.approveLink(linkCode)
+        .onSuccess { isTyping = true }
+        .onFailure { failure ->
+          // Says what to do, e.g. that a computer's "Link a phone" code belongs on the new phone.
+          maybeFailure = (failure as? TeamCraftException)?.let(MainViewModel::errorText) ?: R.string.error_generic
+        }
     }
   }
   if (isScanning) {
@@ -280,7 +286,7 @@ private fun ApproveDevice(viewModel: MainViewModel) {
               // The new device has to start again: back to the first step.
               isTyping = false
               code = ""
-              hasFailed = false
+              maybeFailure = null
               maybeError = R.string.approve_attempt_ended
             }
             LinkConfirmation.FAILED -> maybeError = R.string.error_generic
@@ -302,20 +308,22 @@ private fun ApproveDevice(viewModel: MainViewModel) {
         singleLine = true,
         modifier = Modifier.fillMaxWidth(),
       )
+      // A new computer shows a QR code: scanning it is the usual way, typing its code the fallback.
       Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
         Button(onClick = {
           maybeError = null
-          approve(code)
-        }, enabled = code.isNotBlank()) { Text(stringResource(R.string.approve_start)) }
-        OutlinedButton(onClick = {
-          maybeError = null
           isScanning = true
         }) { Text(stringResource(R.string.link_scan_qr)) }
+        OutlinedButton(onClick = {
+          maybeError = null
+          approve(code)
+        }, enabled = code.isNotBlank()) { Text(stringResource(R.string.approve_start)) }
       }
+      Text(stringResource(R.string.approve_new_phone_hint), style = MaterialTheme.typography.bodySmall)
       maybeError?.let { Text(stringResource(it), color = MaterialTheme.colorScheme.error) }
     }
   }
-  if (hasFailed) Text(stringResource(R.string.error_generic), color = MaterialTheme.colorScheme.error)
+  maybeFailure?.let { Text(stringResource(it), color = MaterialTheme.colorScheme.error) }
 }
 
 /** An emoji and text shown next to the user's name, cleared after the chosen time. */

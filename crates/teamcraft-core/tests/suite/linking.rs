@@ -510,3 +510,164 @@ mod failures_are_visible {
     drop(silent);
   }
 }
+
+/// Issue #998: the code goes on the screen that can't scan. A new phone scans the code a signed-in
+/// computer shows for it (*Link a phone*); each kind of code is refused by the wrong side.
+mod link_a_phone {
+  use std::time::Duration;
+
+  use teamcraft_core::LinkCodeKind;
+  use teamcraft_core::api::fake::RELAY_TTL_SECS;
+  use teamcraft_core::client::LinkWait;
+
+  use super::*;
+
+  #[tokio::test]
+  async fn a_new_phone_scans_the_code_a_signed_in_computer_shows() {
+    let server = FakeServer::new();
+    let mut computer = Peer::enroll(&server, "Alice").await;
+    let offer = LinkOffer::generate_for_new_phone();
+    assert_eq!(offer.kind(), LinkCodeKind::ShownBySignedInDevice);
+    let code = offer.to_code();
+    assert!(code.starts_with("tcjoin2:"));
+    // The computer waits in the relay first and knows how long its code is good for.
+    let wait = LinkWait::join(&computer.api, &offer).await.unwrap();
+    assert_eq!(wait.maybe_expires_in(), Some(Duration::from_secs(RELAY_TTL_SECS)));
+
+    let phone_api = computer.api.clone();
+    let (approval, phone_side) =
+      tokio::join!(wait.approval(), NewDeviceLink::join_scanned(&phone_api, &code));
+    let (approval, phone_side) = (approval.unwrap(), phone_side.unwrap());
+    // The user types the code the phone shows into the computer; it matches only the real phone.
+    assert_eq!(approval.short_code(), phone_side.short_code());
+
+    let phone_store = Arc::new(MemoryStore::new());
+    let (approved, received) = tokio::join!(
+      computer.client.complete_link_approval(approval),
+      phone_side.receive_secrets(&phone_store, "Phone")
+    );
+    approved.unwrap();
+    let phone = PendingEnrollment::new()
+      .complete(
+        phone_api,
+        phone_store,
+        clock(),
+        settings(),
+        linked_options(received.unwrap()),
+      )
+      .await
+      .unwrap();
+    assert_eq!(
+      phone.identity_fingerprint(),
+      computer.client.identity_fingerprint()
+    );
+  }
+
+  #[tokio::test]
+  async fn a_signed_in_device_refuses_a_code_meant_for_the_new_phone() {
+    let server = FakeServer::new();
+    let alice = Peer::enroll(&server, "Alice").await;
+    let offer = LinkOffer::generate_for_new_phone();
+    let _wait = LinkWait::join(&alice.api, &offer).await.unwrap();
+
+    let result = alice.client.start_link_approval(&offer.to_code()).await;
+
+    assert!(
+      matches!(result, Err(CoreError::LinkCodeForNewDevice)),
+      "{:?}",
+      result.err()
+    );
+  }
+
+  #[tokio::test]
+  async fn a_new_phone_refuses_the_code_of_another_new_device() {
+    let server = FakeServer::new();
+    let alice = Peer::enroll(&server, "Alice").await;
+    let offer = LinkOffer::generate();
+    let _wait = LinkWait::join(&alice.api, &offer).await.unwrap();
+
+    let result = NewDeviceLink::join_scanned(&alice.api, &offer.to_code()).await;
+
+    assert!(
+      matches!(result, Err(CoreError::LinkCodeForSignedInDevice)),
+      "{:?}",
+      result.err()
+    );
+  }
+
+  #[tokio::test]
+  async fn the_wrong_kind_of_wait_is_refused_too() {
+    let server = FakeServer::new();
+    let alice = Peer::enroll(&server, "Alice").await;
+    let for_phone = LinkWait::join(&alice.api, &LinkOffer::generate_for_new_phone())
+      .await
+      .unwrap();
+    assert!(matches!(
+      for_phone.new_device(&alice.api).await,
+      Err(CoreError::LinkCodeForNewDevice)
+    ));
+    let for_computer = LinkWait::join(&alice.api, &LinkOffer::generate()).await.unwrap();
+    assert!(matches!(
+      for_computer.approval().await,
+      Err(CoreError::LinkCodeForSignedInDevice)
+    ));
+  }
+
+  #[tokio::test]
+  async fn a_phone_that_scans_a_code_nobody_shows_any_more_fails_at_once() {
+    let server = FakeServer::new();
+    let alice = Peer::enroll(&server, "Alice").await;
+    let code = LinkOffer::generate_for_new_phone().to_code();
+
+    let result = NewDeviceLink::join_scanned(&alice.api, &code).await;
+
+    assert!(
+      matches!(result, Err(CoreError::LinkPeerGone)),
+      "{:?}",
+      result.err()
+    );
+  }
+
+  #[tokio::test]
+  async fn a_detached_wait_hands_over_the_approval_or_ends_when_stopped() {
+    let server = FakeServer::new();
+    let alice = Peer::enroll(&server, "Alice").await;
+    let offer = LinkOffer::generate_for_new_phone();
+    let code = offer.to_code();
+    let (waiting, _cancel) = LinkWait::join(&alice.api, &offer)
+      .await
+      .unwrap()
+      .detach_approval();
+    let (approval, phone_side) = tokio::join!(waiting, NewDeviceLink::join_scanned(&alice.api, &code));
+    assert_eq!(approval.unwrap().short_code(), phone_side.unwrap().short_code());
+
+    let (waiting, cancel) = LinkWait::join(&alice.api, &LinkOffer::generate_for_new_phone())
+      .await
+      .unwrap()
+      .detach_approval();
+    drop(cancel);
+    assert!(matches!(waiting.await, Err(CoreError::LinkCancelled)));
+  }
+
+  #[tokio::test]
+  async fn a_code_that_runs_out_tells_the_side_showing_it() {
+    let server = FakeServer::new();
+    let alice = Peer::enroll(&server, "Alice").await;
+    let for_phone = LinkWait::join(&alice.api, &LinkOffer::generate_for_new_phone())
+      .await
+      .unwrap();
+    let for_computer = LinkWait::join(&alice.api, &LinkOffer::generate()).await.unwrap();
+
+    server.expire_relays();
+
+    // Both screens then offer a fresh code.
+    assert!(matches!(
+      for_phone.approval().await,
+      Err(CoreError::LinkCodeExpired)
+    ));
+    assert!(matches!(
+      for_computer.new_device(&alice.api).await,
+      Err(CoreError::LinkCodeExpired)
+    ));
+  }
+}

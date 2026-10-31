@@ -30,7 +30,8 @@ use teamcraft_client_api::model::{
 };
 use teamcraft_client_api::remote::{
   CORE_CHANGED_EVENT, CORE_FAILED_EVENT, ChatAction, ChatAnswer, ChatQuery, ChatSnapshot, CoreConnection,
-  CoreStatus, EnrollRequest, EnrollSecret, LinkRequestView, LinkStatus, MessageWindow, StoreHealth,
+  CoreStatus, EnrollRequest, EnrollSecret, LinkRequestView, LinkStatus, MessageWindow, PhoneLinkStatus,
+  StoreHealth,
 };
 use teamcraft_client_api::search::{ParsedQuery, SavedSearch, SearchHit, SearchResults};
 use teamcraft_client_api::snapshot_changes::{SnapshotChanges, SnapshotCursor};
@@ -182,6 +183,16 @@ pub async fn link_request_reject(id: &str) -> Result<(), String> {
 
 pub async fn approval_cancel() -> Result<(), String> {
   call("core_approval_cancel", &json!({})).await
+}
+
+/// Signed-in device: shows a code a new phone scans (*Link a phone*, issue #998). Once it did, the
+/// user types the code the phone shows ([`approval_confirm`]); [`approval_cancel`] closes the code.
+pub async fn phone_link_start() -> Result<(), String> {
+  call("core_phone_link_start", &json!({})).await
+}
+
+pub async fn phone_link_status() -> Result<PhoneLinkStatus, String> {
+  call("core_phone_link_status", &json!({})).await
 }
 
 /// Browser: subscribes this browser to Web Push with the server's key, so the service worker can show

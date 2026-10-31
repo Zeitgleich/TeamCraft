@@ -35,7 +35,6 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.res.stringResource
@@ -50,13 +49,13 @@ import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.window.Dialog
+import androidx.compose.ui.window.DialogProperties
 import de.zeitgleich.teamcraft.R
-import de.zeitgleich.teamcraft.ui.SecretClipboard
+import de.zeitgleich.teamcraft.ui.AppState
 
 private const val MIN_PASSPHRASE_LENGTH = 12
 
-/** Share of the screen width the link QR code takes. */
-private const val QR_CODE_WIDTH_FRACTION = 0.7f
 internal const val LOGO_WIDTH_FRACTION = 0.6f
 internal val LOGO_MAX_HEIGHT = 96.dp
 
@@ -230,45 +229,71 @@ internal fun ErrorLine(@StringRes text: Int) {
 
 private enum class LinkAsk { IDLE, ASKING, ASKED, FAILED }
 
+/**
+ * New phone: no QR code, since nobody could scan it (issue #998). The user approves this phone from
+ * a prompt on a signed-in device, or scans the code a computer shows under "Link a device"; either
+ * way the other device then asks for the number shown here.
+ */
 @Composable
 fun LinkThisDeviceScreen(
-  code: String,
-  maybeShortCode: String?,
+  state: AppState.LinkingThisDevice,
   onAskOtherDevices: suspend () -> Result<Unit>,
+  onScanned: (String) -> Unit,
   onCancel: () -> Unit,
 ) {
   val scope = rememberCoroutineScope()
-  // Not saveable: asking hands the code's key to the server and must be a fresh choice each time.
-  var ask by remember { mutableStateOf(LinkAsk.IDLE) }
+  // Not saveable: asking hands the request's key to the server and must be a fresh choice each time.
+  var ask by remember(state.attempt) { mutableStateOf(LinkAsk.IDLE) }
+  var isScanning by rememberSaveable(state.attempt) { mutableStateOf(false) }
+  if (isScanning) {
+    Dialog(onDismissRequest = { isScanning = false }, properties = DialogProperties(usePlatformDefaultWidth = false)) {
+      Surface(Modifier.fillMaxSize()) {
+        // Without a camera the prompt above is the way: it needs none.
+        QrScanner(
+          onScanned = { scanned ->
+            isScanning = false
+            onScanned(scanned)
+          },
+          onCancel = { isScanning = false },
+        )
+      }
+    }
+  }
   Centered {
     Title(R.string.link_new_title)
+    val maybeShortCode = state.maybeShortCode
     if (maybeShortCode == null) {
-      Text(stringResource(R.string.link_steps_phone), style = MaterialTheme.typography.bodyMedium, modifier = Modifier.fillMaxWidth())
-      // The code holds the handshake key: shown on this screen only, never sent anywhere else.
-      QrCode(code, Modifier.fillMaxWidth(QR_CODE_WIDTH_FRACTION))
-      Text(stringResource(R.string.link_steps_computer), style = MaterialTheme.typography.bodyMedium, modifier = Modifier.fillMaxWidth())
-      // Not selectable: a copy goes through the button, marked sensitive and cleared again.
-      Text(code, fontFamily = FontFamily.Monospace, style = MaterialTheme.typography.bodySmall)
-      CopySecretButton(code)
-      // The prompt on the other devices needs the code's key at the server; scanning does not.
+      state.maybeNotice?.let { ErrorLine(it) }
+      Text(stringResource(R.string.link_phone_intro), style = MaterialTheme.typography.bodyMedium, modifier = Modifier.fillMaxWidth())
+      // The prompt on the other devices needs the request's key at the server; scanning does not.
       when (ask) {
-        LinkAsk.ASKED -> Text(stringResource(R.string.link_asked), modifier = Modifier.semantics { liveRegion = LiveRegionMode.Polite })
+        LinkAsk.ASKED -> {
+          Text(stringResource(R.string.link_asked), modifier = Modifier.semantics { liveRegion = LiveRegionMode.Polite })
+          Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp)
+            Text(stringResource(R.string.link_waiting))
+          }
+        }
         else -> {
-          Text(stringResource(R.string.link_ask_hint), style = MaterialTheme.typography.bodySmall)
-          OutlinedButton(
+          Button(
             enabled = ask != LinkAsk.ASKING,
             onClick = {
               ask = LinkAsk.ASKING
               scope.launch { ask = if (onAskOtherDevices().isSuccess) LinkAsk.ASKED else LinkAsk.FAILED }
             },
+            modifier = Modifier.fillMaxWidth(),
           ) { Text(stringResource(R.string.link_ask)) }
+          Text(stringResource(R.string.link_ask_hint), style = MaterialTheme.typography.bodySmall)
           if (ask == LinkAsk.FAILED) ErrorLine(R.string.link_ask_failed)
         }
       }
-      Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-        CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp)
-        Text(stringResource(R.string.link_waiting))
+      HorizontalDivider()
+      OutlinedButton(onClick = { isScanning = true }, modifier = Modifier.fillMaxWidth()) {
+        Text(stringResource(R.string.link_scan_code))
       }
+      Text(stringResource(R.string.link_scan_code_hint), style = MaterialTheme.typography.bodySmall)
+      HorizontalDivider()
+      Text(stringResource(R.string.link_no_other_device), style = MaterialTheme.typography.bodySmall)
     } else {
       // Connected: only the comparison matters now, large and read out at once.
       Text(stringResource(R.string.link_compare))
@@ -330,12 +355,3 @@ internal fun Centered(content: @Composable () -> Unit) {
 
 /** Passphrases: keyboards must not learn, suggest or sync them. */
 internal val PASSPHRASE_KEYBOARD = KeyboardOptions(keyboardType = KeyboardType.Password, autoCorrectEnabled = false)
-
-/** Copies a secret code, marked sensitive, and clears the clipboard again after a minute. */
-@Composable
-private fun CopySecretButton(secret: String) {
-  val context = LocalContext.current
-  TextButton(onClick = { SecretClipboard.copy(context.applicationContext, secret) }) {
-    Text(stringResource(R.string.link_copy_code))
-  }
-}

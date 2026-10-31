@@ -36,7 +36,8 @@ use teamcraft_core::runner::{RunnerCommand, RunnerHandle, RunnerSettings, SyncRu
 use teamcraft_core::store::{LocalStore as _, SealedSqliteStore, StaticKeySource};
 use teamcraft_core::ui_backend::{CoreChatBackend, CoreCommand};
 use teamcraft_core::{
-  Client, ClientSettings, CoreError, EnrollmentOptions, EnrollmentSecret, LinkOffer, PendingEnrollment,
+  Client, ClientSettings, CoreError, EnrollmentOptions, EnrollmentSecret, LinkCodeKind, LinkOffer,
+  PendingEnrollment,
 };
 use teamcraft_crypto::backup::Argon2Settings;
 use teamcraft_crypto::secret::{SecretBytes, SymmetricKey};
@@ -574,6 +575,22 @@ impl Engine {
       .clone()
       .ok_or(TeamCraftError::NoLinkInProgress)?;
     Ok(self.new_link.start(self.api(), offer))
+  }
+
+  /// New phone: joins the relay of the code a signed-in device shows for it (issue #998) instead of
+  /// waiting in its own; the receiver gets the short code. A code of the wrong kind is refused at
+  /// once and leaves the running wait alone; otherwise that wait ends.
+  pub(crate) fn join_scanned_device_link(
+    &mut self,
+    code: &str,
+  ) -> Result<oneshot::Receiver<Result<String, TeamCraftError>>, TeamCraftError> {
+    if self.maybe_link_offer.is_none() {
+      return Err(TeamCraftError::NoLinkInProgress);
+    }
+    if LinkOffer::parse(code)?.kind() != LinkCodeKind::ShownBySignedInDevice {
+      return Err(CoreError::LinkCodeForSignedInDevice.into());
+    }
+    Ok(self.new_link.start_scanned(self.api(), code.to_owned()))
   }
 
   pub(crate) async fn finish_device_link(
@@ -1335,11 +1352,23 @@ impl Engine {
 impl NewLinkWait {
   /// Joins the relay and waits there; a wait still running for an earlier link ends.
   fn start(&mut self, api: Api, offer: Rc<LinkOffer>) -> oneshot::Receiver<Result<String, TeamCraftError>> {
+    self.run(async move { NewDeviceLink::connect(&api, &offer).await })
+  }
+
+  /// Joins the relay of a scanned code (*Link a phone*); a wait still running ends.
+  fn start_scanned(&mut self, api: Api, code: String) -> oneshot::Receiver<Result<String, TeamCraftError>> {
+    self.run(async move { NewDeviceLink::join_scanned(&api, &code).await })
+  }
+
+  fn run(
+    &mut self,
+    connecting: impl Future<Output = Result<NewDeviceLink<HttpRendezvous>, CoreError>> + 'static,
+  ) -> oneshot::Receiver<Result<String, TeamCraftError>> {
     *self = Self::default();
     let slot = self.link.clone();
     let (answer, receiver) = oneshot::channel();
     self.maybe_task = Some(tokio::task::spawn_local(async move {
-      let result = match NewDeviceLink::connect(&api, &offer).await {
+      let result = match connecting.await {
         Ok(link) => {
           let short_code = link.short_code();
           *slot.borrow_mut() = Some(link);

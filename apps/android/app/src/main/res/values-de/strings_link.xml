@@ -2,14 +2,14 @@
 <resources>
   <string name="link_qr_description">QR-Code mit dem Verknüpfungscode</string>
   <string name="link_scan_qr">QR-Code scannen</string>
-  <string name="link_scan_hint">Richte die Kamera auf den QR-Code des neuen Geräts.</string>
-  <string name="link_camera_denied">Der Kamerazugriff wurde verweigert. Gib den Code stattdessen von Hand ein.</string>
+  <string name="link_scan_hint">Richte die Kamera auf den QR-Code des anderen Geräts.</string>
+  <string name="link_camera_denied">Der Kamerazugriff wurde verweigert. Erlaube ihn in den Systemeinstellungen oder nutze einen anderen Weg auf diesem Bildschirm.</string>
   <string name="link_new_title">Dieses Telefon verknüpfen</string>
   <string name="link_waiting">Warte auf das andere Gerät …</string>
   <string name="link_compare">Gib diese Zahl auf deinem anderen Gerät ein:</string>
   <string name="link_confirm_on_other">Bestätige auf dem anderen Gerät, um abzuschließen.</string>
   <string name="approve_title">Gerät verknüpfen</string>
-  <string name="approve_hint">Scanne den QR-Code auf dem neuen Gerät oder gib dessen Verknüpfungscode ein.</string>
+  <string name="approve_hint">Scanne den QR-Code, den der neue Computer zeigt, oder gib seinen Verknüpfungscode ein.</string>
   <string name="approve_code">Verknüpfungscode</string>
   <string name="approve_start">Weiter</string>
   <string name="approve_confirm">Genehmigen</string>
@@ -19,7 +19,7 @@
   <string name="approve_code_wrong">Das ist nicht der Code auf dem neuen Gerät. Versuche es noch einmal.</string>
   <string name="approve_attempt_ended">Der Code stimmte nicht überein. Beginne noch einmal auf dem neuen Gerät.</string>
   <string name="link_ask">Meine anderen Geräte fragen</string>
-  <string name="link_ask_hint">Statt zu scannen zeigen deine anderen Geräte eine Anfrage. Der Server sieht dann den Schlüssel in diesem Code; du gibst den hier angezeigten Code trotzdem auf dem anderen Gerät ein, ohne dich wird also nichts bestätigt.</string>
+  <string name="link_ask_hint">Deine angemeldeten Geräte (Computer oder Handy) zeigen eine Anfrage; gib dort die Zahl ein, die dieses Handy dann zeigt. Der Server sieht den Einmalschlüssel dieser Anfrage, ohne die Zahl wird aber nichts bestätigt.</string>
   <string name="link_asked">Deine anderen Geräte zeigen jetzt eine Anfrage.</string>
   <string name="link_ask_failed">Die anderen Geräte konnten nicht gefragt werden.</string>
   <string name="link_request_title">Ein neues Gerät möchte sich anmelden</string>
@@ -34,4 +34,14 @@
   <string name="link_platform_linux">Linux</string>
   <string name="link_platform_web">Web</string>
   <string name="link_platform_other">Andere</string>
+  <string name="link_phone_intro">Bestätige dieses Handy auf einem Gerät, auf dem du schon angemeldet bist.</string>
+  <string name="link_scan_code">Code scannen</string>
+  <string name="link_scan_code_hint">Öffne auf einem Computer TeamCraft, dann Einstellungen, Geräte und Sicherheit, Neues Gerät verknüpfen: Dort steht ein Code, den dieses Handy scannt.</string>
+  <string name="link_no_other_device">Nur auf einem anderen Handy angemeldet? Frag deine anderen Geräte: Auch das Handy zeigt die Anfrage. Gar kein anderes Gerät? Geh zurück und nutze deinen Wiederherstellungsschlüssel oder die Wiederherstellung durch die Organisation.</string>
+  <string name="link_expired_restarted">Die Anfrage oder der Code ist abgelaufen. Frag deine Geräte erneut oder scanne einen neuen Code.</string>
+  <string name="link_code_invalid">Das ist kein TeamCraft-Verknüpfungscode.</string>
+  <string name="link_code_for_new_device">Dieser Code ist für das neue Handy: Scanne ihn dort mit „Code scannen“.</string>
+  <string name="link_code_for_signed_in_device">Dieser Code kommt von einem neuen Gerät: Scanne ihn mit einem Gerät, auf dem du schon angemeldet bist.</string>
+  <string name="link_code_expired">Der Code ist abgelaufen. Lass einen neuen Code anzeigen und versuche es erneut.</string>
+  <string name="approve_new_phone_hint">Richtest du ein neues Handy ein? Wähle dort „Meine anderen Geräte fragen“ oder lass es den Code scannen, den ein Computer unter „Neues Gerät verknüpfen“ zeigt.</string>
 </resources>

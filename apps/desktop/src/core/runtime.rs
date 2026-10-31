@@ -14,14 +14,14 @@ use teamcraft_client_api::model::{Message, ThreadId};
 use teamcraft_client_api::remote::AttachmentPriority;
 use teamcraft_client_api::remote::{
   ChatAction, ChatAnswer, ChatQuery, ChatSnapshot, ContactKeys, CoreStatus, EnrollRequest, EnrollSecret,
-  LinkRequestView, LinkStatus, MessageWindow, SecuritySnapshot, StoreProblem,
+  LinkRequestView, LinkStatus, MessageWindow, PhoneLinkStatus, SecuritySnapshot, StoreProblem,
 };
 use teamcraft_client_api::snapshot_changes::{SnapshotChanges, SnapshotCursor};
 use teamcraft_core::api::{AccessTokenSource, ApiError, HttpServerApi, ServerApi};
 use teamcraft_core::client::files::{BlobUpload, sweep_staged_copies};
 use teamcraft_core::client::{
-  CatchUpFocus, LinkAnnouncement, LinkApproval, LinkReceipt, LinkedSecrets, NewDeviceLink, ReceiptCancel,
-  SIGN_OUT_REVOKE_PATIENCE,
+  CatchUpFocus, LinkAnnouncement, LinkApproval, LinkReceipt, LinkWait, LinkWaitCancel, LinkedSecrets,
+  ReceiptCancel, SIGN_OUT_REVOKE_PATIENCE,
 };
 use teamcraft_core::clock::{Clock, SystemClock};
 use teamcraft_core::connection::{
@@ -382,6 +382,9 @@ enum Request {
     reply: oneshot::Sender<Result<(), String>>,
   },
   ApprovalCancel,
+  /// Signed-in device: show a code for a new phone to scan (issue #998).
+  PhoneLinkStart(oneshot::Sender<Result<(), String>>),
+  PhoneLinkStatus(oneshot::Sender<PhoneLinkStatus>),
   LinkAnnounce(oneshot::Sender<Result<(), String>>),
   LinkRequests(oneshot::Sender<Vec<LinkRequestView>>),
   LinkRequestReview {
@@ -649,6 +652,19 @@ impl CoreRuntime {
     drop(self.requests.send(Request::ApprovalCancel));
   }
 
+  /// Signed-in device: shows a code a new phone scans (*Link a phone*, issue #998); once it did,
+  /// the user types the code the phone shows into [`Self::approval_confirm`].
+  pub async fn phone_link_start(&self) -> Result<(), String> {
+    self
+      .ask(Request::PhoneLinkStart)
+      .await
+      .unwrap_or_else(|| Err(stopped()))
+  }
+
+  pub async fn phone_link_status(&self) -> PhoneLinkStatus {
+    self.ask(Request::PhoneLinkStatus).await.unwrap_or_default()
+  }
+
   /// New device: asks the user's other devices to approve this one. This hands the code's key to
   /// the server, so it only happens when the user chooses it (e2ee.md §5).
   pub async fn link_announce(&self) -> Result<(), String> {
@@ -850,6 +866,8 @@ struct Core {
   link_failure: LinkStatus,
   approval: Option<LinkApproval<<Api as ServerApi>::Rendezvous>>,
   approval_misses: u8,
+  /// A code this signed-in device shows for a new phone (issue #998).
+  maybe_phone_link: Option<PhoneLinkRun>,
   /// Stops the wait for the receipt of the keys this device sent, which runs on a task of its own
   /// (issue #415).
   maybe_receipt: Option<ReceiptCancel>,
@@ -911,6 +929,20 @@ impl OpenRetry {
   }
 }
 
+/// A link this signed-in device approves, waiting for the code the new device shows.
+type Approval = LinkApproval<<Api as ServerApi>::Rendezvous>;
+
+/// A code shown for a new phone, waiting beside the loop until the phone scanned it. Dropping it
+/// closes the relay.
+struct PhoneLinkRun {
+  code: String,
+  maybe_expires_at_ms: Option<i64>,
+  scanned: Rc<RefCell<Option<Result<Approval, String>>>>,
+  /// The outcome once taken: `Scanned` moved the approval to [`Core::approval`].
+  maybe_outcome: Option<PhoneLinkStatus>,
+  _cancel: LinkWaitCancel,
+}
+
 /// A link in progress on this (new) device.
 struct LinkRun {
   device_name: String,
@@ -959,6 +991,7 @@ impl Core {
       link_failure: LinkStatus::Idle,
       approval: None,
       approval_misses: 0,
+      maybe_phone_link: None,
       maybe_receipt: None,
       maybe_attention: None,
       is_idle: false,
@@ -1374,9 +1407,12 @@ impl Core {
       },
       Request::ApprovalCancel => {
         self.approval = None;
+        self.maybe_phone_link = None;
         // A receipt still awaited: its wait ends, and the waiting call hears that it was cancelled.
         self.maybe_receipt = None;
       },
+      Request::PhoneLinkStart(reply) => drop(reply.send(self.phone_link_start().await)),
+      Request::PhoneLinkStatus(reply) => drop(reply.send(self.phone_link_status())),
       Request::LinkAnnounce(reply) => drop(reply.send(self.link_announce().await)),
       Request::LinkRequests(reply) => drop(reply.send(self.link_requests())),
       Request::LinkRequestReview { id, reply } => drop(reply.send(self.link_request_review(&id).await)),
@@ -1621,6 +1657,7 @@ impl Core {
     let offer = LinkOffer::generate();
     let view = Rc::new(RefCell::new(LinkStatus::WaitingForScan {
       code: offer.to_code(),
+      maybe_expires_at_ms: None,
     }));
     let future = Box::pin(link_task(
       self.api(),
@@ -1684,10 +1721,67 @@ impl Core {
     Ok(())
   }
 
+  /// Signed-in device: shows a code a new phone scans (*Link a phone*, issue #998). The wait runs
+  /// on a task beside the loop; once the phone answered, the user types the code it shows
+  /// ([`Self::approval_confirm`]). A new start or a cancel closes the earlier code.
+  async fn phone_link_start(&mut self) -> Result<(), String> {
+    if self.client.is_none() {
+      return Err("this device is not set up yet".to_owned());
+    }
+    self.maybe_phone_link = None;
+    let offer = LinkOffer::generate_for_new_phone();
+    let wait = LinkWait::join(&self.api(), &offer)
+      .await
+      .map_err(describe_failure)?;
+    let maybe_expires_at_ms = expiry_at_ms(wait.maybe_expires_in());
+    let (waiting, cancel) = wait.detach_approval();
+    let scanned = Rc::new(RefCell::new(None));
+    let slot = scanned.clone();
+    let on_change = self.on_change.clone();
+    tokio::task::spawn_local(async move {
+      *slot.borrow_mut() = Some(waiting.await.map_err(describe_failure));
+      on_change();
+    });
+    self.maybe_phone_link = Some(PhoneLinkRun {
+      code: offer.to_code(),
+      maybe_expires_at_ms,
+      scanned,
+      maybe_outcome: None,
+      _cancel: cancel,
+    });
+    Ok(())
+  }
+
+  /// Where the code for a new phone stands; once scanned, the approval waits for the typed code.
+  fn phone_link_status(&mut self) -> PhoneLinkStatus {
+    let Some(run) = self.maybe_phone_link.as_mut() else {
+      return PhoneLinkStatus::Idle;
+    };
+    if let Some(outcome) = &run.maybe_outcome {
+      return outcome.clone();
+    }
+    let status = match run.scanned.borrow_mut().take() {
+      None => {
+        return PhoneLinkStatus::WaitingForScan {
+          code: run.code.clone(),
+          maybe_expires_at_ms: run.maybe_expires_at_ms,
+        };
+      },
+      Some(Ok(approval)) => {
+        self.approval = Some(approval);
+        self.approval_misses = 0;
+        PhoneLinkStatus::Scanned
+      },
+      Some(Err(message)) => PhoneLinkStatus::Failed { message },
+    };
+    run.maybe_outcome = Some(status.clone());
+    status
+  }
+
   async fn link_announce(&mut self) -> Result<(), String> {
     let run = self.link.as_ref().ok_or("no device link in progress")?;
     let code = match &*run.view.borrow() {
-      LinkStatus::WaitingForScan { code } | LinkStatus::Confirm { code, .. } => code.clone(),
+      LinkStatus::WaitingForScan { code, .. } | LinkStatus::Confirm { code, .. } => code.clone(),
       _ => return Err("no device link in progress".to_owned()),
     };
     let announcement = LinkAnnouncement {
@@ -2603,9 +2697,13 @@ async fn link_task(
   view: Rc<RefCell<LinkStatus>>,
   on_change: Arc<dyn Fn() + Send + Sync>,
 ) -> Result<LinkedSecrets, String> {
-  let link = NewDeviceLink::connect(&api, &offer)
-    .await
-    .map_err(describe_failure)?;
+  let wait = LinkWait::join(&api, &offer).await.map_err(describe_failure)?;
+  *view.borrow_mut() = LinkStatus::WaitingForScan {
+    code: offer.to_code(),
+    maybe_expires_at_ms: expiry_at_ms(wait.maybe_expires_in()),
+  };
+  on_change();
+  let link = wait.new_device(&api).await.map_err(describe_failure)?;
   *view.borrow_mut() = LinkStatus::Confirm {
     code: offer.to_code(),
     short_code: link.short_code(),
@@ -2615,6 +2713,15 @@ async fn link_task(
     .receive_secrets(&store, &device_name)
     .await
     .map_err(describe_failure)
+}
+
+/// When a code that stays valid for `maybe_left` stops working, on this machine's clock.
+fn expiry_at_ms(maybe_left: Option<std::time::Duration>) -> Option<i64> {
+  maybe_left.map(|left| {
+    SystemClock
+      .now_ms()
+      .saturating_add(i64::try_from(left.as_millis()).unwrap_or(i64::MAX))
+  })
 }
 
 /// What this build runs on, for the prompt on the user's other devices.

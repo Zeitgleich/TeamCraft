@@ -35,6 +35,19 @@ pub enum TeamCraftError {
   /// The last try failed: the attempt is over and the new device has to start again.
   #[error("the code did not match; start again on the new device")]
   LinkAttemptEnded,
+  /// The scanned or typed text is no TeamCraft link code.
+  #[error("not a device link code")]
+  LinkCodeInvalid,
+  /// A signed-in device scanned the code a computer shows for a new phone: the new phone has to
+  /// scan it (issue #998).
+  #[error("this code is for the new phone")]
+  LinkCodeForNewDevice,
+  /// The new phone scanned the code of another new device: a signed-in device has to scan it.
+  #[error("this code is for a signed-in device")]
+  LinkCodeForSignedInDevice,
+  /// The code ran out, or the device that showed it no longer waits: show a new one.
+  #[error("the link code expired")]
+  LinkCodeExpired,
   /// The admins haven't answered the recovery request yet; try again later.
   #[error("the recovery request isn't answered yet")]
   RecoveryPending,
@@ -65,6 +78,10 @@ impl From<CoreError> for TeamCraftError {
       CoreError::KeyBag(key_bag) => Self::WrongPassphrase(key_bag.to_string()),
       CoreError::Store(store) => store.into(),
       refused @ CoreError::CallMoveRefused { .. } => Self::CallMoveRefused(refused.to_string()),
+      CoreError::LinkCodeInvalid => Self::LinkCodeInvalid,
+      CoreError::LinkCodeForNewDevice => Self::LinkCodeForNewDevice,
+      CoreError::LinkCodeForSignedInDevice => Self::LinkCodeForSignedInDevice,
+      CoreError::LinkCodeExpired | CoreError::LinkPeerGone => Self::LinkCodeExpired,
       other => Self::Core(other.to_string()),
     }
   }

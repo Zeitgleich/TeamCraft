@@ -287,7 +287,11 @@ async fn a_second_device_is_linked_with_a_code_and_confirmed_on_the_first() {
 
   second.link_start("Laptop".into()).await.expect("link start");
   let code = wait_for_link(&second, |status| match status {
-    LinkStatus::WaitingForScan { code } => Some(code),
+    // Once joined: the server then names the code's lifetime, and a scan finds the new device.
+    LinkStatus::WaitingForScan {
+      code,
+      maybe_expires_at_ms: Some(_),
+    } => Some(code),
     _ => None,
   })
   .await;

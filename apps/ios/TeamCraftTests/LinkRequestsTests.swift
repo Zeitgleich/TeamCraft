@@ -56,6 +56,19 @@ final class LinkRequestsTests: XCTestCase {
     XCTAssertEqual(CoreFailure(LinkAttemptEnded()), .linkAttemptEnded)
   }
 
+  func testCodesForTheOtherSideAreToldApart() {
+    // Issue #998: a computer's code for a new phone, and a new device's code, each have their side.
+    struct LinkCodeInvalid: Error {}
+    struct LinkCodeForNewDevice: Error {}
+    struct LinkCodeForSignedInDevice: Error {}
+    struct LinkCodeExpired: Error {}
+    XCTAssertEqual(CoreFailure(LinkCodeInvalid()), .linkCodeInvalid)
+    XCTAssertEqual(CoreFailure(LinkCodeForNewDevice()), .linkCodeForNewDevice)
+    XCTAssertEqual(CoreFailure(LinkCodeForSignedInDevice()), .linkCodeForSignedInDevice)
+    XCTAssertEqual(CoreFailure(LinkCodeExpired()), .linkCodeExpired)
+    XCTAssertEqual(AppFailure(.linkCodeForNewDevice).message, "link_code_for_new_device")
+  }
+
   private func request(_ id: String, secondsLeft: UInt64) -> LinkRequestItem {
     LinkRequestItem(id: id, deviceName: "Device", platform: .ios, secondsLeft: secondsLeft)
   }

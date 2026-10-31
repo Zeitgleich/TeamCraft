@@ -74,6 +74,13 @@ pub enum CoreError {
   /// The scanned or typed text is no device link code (another app's QR code, a cut-off paste).
   #[error("this is not a TeamCraft device link code; scan the code the new device shows")]
   LinkCodeInvalid,
+  /// A signed-in device read a code a signed-in device shows for a new phone ("Link a phone"):
+  /// the new device has to scan it (issue #998).
+  #[error("this code adds a new device; scan it with the new device")]
+  LinkCodeForNewDevice,
+  /// The new device read a code another new device shows: a signed-in device has to scan it.
+  #[error("this code comes from a new device; scan it with a device that is already signed in")]
+  LinkCodeForSignedInDevice,
   /// The new device no longer waits for this code (it gave up, went to sleep or the code expired):
   /// joining its relay would only wait for nobody (issue #645).
   #[error("the new device is no longer waiting for this code; show a new code there and scan again")]
@@ -264,6 +271,8 @@ impl CoreError {
         .map_or(FailureKind::Other, |code| FailureKind::Server(code.clone())),
       Self::CallEncryptionPending(_) => FailureKind::Call(CallFailure::EncryptionPending),
       Self::LinkCodeInvalid => FailureKind::Link(LinkFailure::CodeInvalid),
+      Self::LinkCodeForNewDevice => FailureKind::Link(LinkFailure::ForNewDevice),
+      Self::LinkCodeForSignedInDevice => FailureKind::Link(LinkFailure::ForSignedInDevice),
       Self::LinkVersionMismatch { .. } => FailureKind::Link(LinkFailure::OtherVersion),
       Self::LinkPeerGone => FailureKind::Link(LinkFailure::PeerGone),
       Self::LinkTimedOut => FailureKind::Link(LinkFailure::TimedOut),

@@ -3,13 +3,15 @@
 use leptos::prelude::*;
 use leptos::task::spawn_local;
 use teamcraft_client_api::failure::{ActionFailure, FailureKind};
+use teamcraft_client_api::remote::PhoneLinkStatus;
 
+use crate::clock::now_ms;
 use crate::components::icons::{Icon, IconName};
 use crate::components::modal::Modal;
 use crate::feedback::failure_message;
 use crate::i18n::use_i18n;
 use crate::model::{ConversationId, UserId};
-use crate::reactive::SetIfAlive;
+use crate::reactive::{SetIfAlive, use_interval_while};
 use crate::remote_backend;
 use crate::security::group_fingerprint;
 use crate::state::{Overlay, use_app_state};
@@ -152,8 +154,15 @@ fn LinkUnavailableDialog() -> impl IntoView {
   view! { <DemoLinkDialog /> }
 }
 
+/// How often the dialog asks whether the phone scanned the code, and ticks the time left.
+const PHONE_LINK_POLL_MS: u64 = 1000;
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum ApprovePhase {
+  /// A code for a new phone to scan (issue #998): the phone has the camera, this screen the code.
+  /// `None` while it is being made.
+  ShowCode(Option<ShownCode>),
+  /// The new device is a computer that shows a code: type or paste it here.
   EnterCode,
   Connecting,
   /// The new device shows a short code; the user types it here. The core checks it, so only
@@ -166,15 +175,64 @@ enum ApprovePhase {
   Failed(String),
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ShownCode {
+  code: String,
+  maybe_expires_at_ms: Option<i64>,
+}
+
 #[component]
 fn ApproveLinkDialog() -> impl IntoView {
   let state = use_app_state();
   let i18n = use_i18n();
   let code = RwSignal::new(String::new());
-  let phase = RwSignal::new(ApprovePhase::EnterCode);
+  let phase = RwSignal::new(ApprovePhase::ShowCode(None));
+  let now = RwSignal::new(now_ms());
   let close = move || {
     spawn_local(async { drop(remote_backend::approval_cancel().await) });
     state.close_overlay();
+  };
+
+  // The common case first: the new device is a phone, which scans this screen (issue #998). A new
+  // computer shows its own code instead ("Enter a code instead").
+  let show_code = move || {
+    phase.set(ApprovePhase::ShowCode(None));
+    spawn_local(async move {
+      if let Err(message) = remote_backend::phone_link_start().await {
+        phase.set_if_alive(ApprovePhase::Failed(message));
+      }
+    });
+  };
+  show_code();
+  let is_showing_code = move || matches!(phase.get(), ApprovePhase::ShowCode(_));
+  use_interval_while(PHONE_LINK_POLL_MS, is_showing_code, move || {
+    now.set(now_ms());
+    spawn_local(async move {
+      let Ok(status) = remote_backend::phone_link_status().await else {
+        return;
+      };
+      // Only while the code is still on screen: the user may have switched to typing a code.
+      if !matches!(phase.try_get_untracked(), Some(ApprovePhase::ShowCode(_))) {
+        return;
+      }
+      phase.set_if_alive(match status {
+        PhoneLinkStatus::Idle => return,
+        PhoneLinkStatus::WaitingForScan {
+          code,
+          maybe_expires_at_ms,
+        } => ApprovePhase::ShowCode(Some(ShownCode {
+          code,
+          maybe_expires_at_ms,
+        })),
+        PhoneLinkStatus::Scanned => ApprovePhase::ConfirmCode { error: None },
+        PhoneLinkStatus::Failed { message } => ApprovePhase::Failed(message),
+      });
+    });
+  });
+  let enter_code_instead = move |_| {
+    // The shown code is closed: only one way at a time.
+    spawn_local(async { drop(remote_backend::approval_cancel().await) });
+    phase.set(ApprovePhase::EnterCode);
   };
 
   let connect = move |ev: leptos::ev::SubmitEvent| {
@@ -220,6 +278,50 @@ fn ApproveLinkDialog() -> impl IntoView {
       </header>
       <div class="modal-body approval">
         {move || match phase.get() {
+          ApprovePhase::ShowCode(maybe_shown) => {
+            view! {
+              <p>{move || i18n.t("approve-link-phone-intro")}</p>
+              {match maybe_shown {
+                Some(shown) => {
+                  let maybe_expires_at_ms = shown.maybe_expires_at_ms;
+                  let seconds_left = move || {
+                    maybe_expires_at_ms.map(|expires_at_ms| ((expires_at_ms - now.get()).max(0) + 999) / 1000)
+                  };
+                  view! {
+                    <Show
+                      when=move || seconds_left() != Some(0)
+                      fallback=move || {
+                        view! {
+                          <p class="field-error" role="alert">{move || i18n.t("approve-link-phone-expired")}</p>
+                          <button type="button" class="btn btn-primary" data-autofocus on:click=move |_| show_code()>
+                            {move || i18n.t("approve-link-phone-new-code")}
+                          </button>
+                        }
+                      }
+                    >
+                      <div class="link-qr"><QrImage data=shown.code.clone() /></div>
+                      <p class="muted-text small" role="status">
+                        {move || {
+                          seconds_left()
+                            .map(|seconds| {
+                              i18n.t_with("link-code-valid", &[("time", &format_time_left(seconds))])
+                            })
+                            .unwrap_or_default()
+                        }}
+                      </p>
+                    </Show>
+                  }
+                  .into_any()
+                },
+                None => view! { <p class="auth-status" role="status"><span class="spinner" aria-hidden="true"></span></p> }.into_any(),
+              }}
+              <p class="muted-text small">{move || i18n.t("approve-link-phone-other-ways")}</p>
+              <button type="button" class="btn" on:click=enter_code_instead>
+                {move || i18n.t("approve-link-enter-instead")}
+              </button>
+            }
+            .into_any()
+          },
           ApprovePhase::EnterCode | ApprovePhase::Connecting => {
             let is_connecting = phase.get() == ApprovePhase::Connecting;
             view! {
@@ -239,6 +341,9 @@ fn ApproveLinkDialog() -> impl IntoView {
                 <p class="muted-text small">{move || i18n.t("approve-link-hint")}</p>
                 <button type="submit" class="btn btn-primary" prop:disabled=is_connecting>
                   {move || i18n.t("approve-link-connect")}
+                </button>
+                <button type="button" class="btn" prop:disabled=is_connecting on:click=move |_| show_code()>
+                  {move || i18n.t("approve-link-show-instead")}
                 </button>
               </form>
             }
@@ -279,7 +384,7 @@ fn ApproveLinkDialog() -> impl IntoView {
                 {move || if is_known { failure_message(i18n, &failure) } else { i18n.t("approve-link-failed") }}
               </p>
               {(!is_known).then(|| view! { <p class="small mono" translate="no">{message.clone()}</p> })}
-              <button type="button" class="btn" on:click=move |_| phase.set(ApprovePhase::EnterCode)>
+              <button type="button" class="btn" on:click=move |_| show_code()>
                 {move || i18n.t("approve-link-retry")}
               </button>
             }
@@ -289,6 +394,11 @@ fn ApproveLinkDialog() -> impl IntoView {
       </div>
     </Modal>
   }
+}
+
+/// "4:05" for the time a code stays valid.
+fn format_time_left(seconds: i64) -> String {
+  format!("{}:{:02}", seconds / 60, seconds % 60)
 }
 
 /// Demo screen of the browser-only build: a QR code that is not a real login.

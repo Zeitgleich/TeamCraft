@@ -248,6 +248,8 @@ fn main() -> anyhow::Result<()> {
       core::commands::core_link_status,
       core::commands::core_link_cancel,
       core::commands::core_approval_start,
+      core::commands::core_phone_link_start,
+      core::commands::core_phone_link_status,
       core::commands::core_approval_confirm,
       core::commands::core_approval_cancel,
       core::commands::core_link_announce,

@@ -32,6 +32,8 @@ const COMMANDS: &[&str] = &[
   "core_link_status",
   "core_link_cancel",
   "core_approval_start",
+  "core_phone_link_start",
+  "core_phone_link_status",
   "core_approval_confirm",
   "core_approval_cancel",
   "core_link_announce",

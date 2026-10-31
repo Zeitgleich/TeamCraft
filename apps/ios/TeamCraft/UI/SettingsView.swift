@@ -314,6 +314,7 @@ struct ApproveLinkView: View {
         Section {
           Text("approve_hint").foregroundStyle(Theme.textMuted)
           Button("approve_scan", systemImage: "qrcode.viewfinder") { isScanning = true }
+          Text("approve_new_phone_hint").font(.footnote).foregroundStyle(Theme.textMuted)
           TextField("approve_code", text: $code, axis: .vertical)
             .textInputAutocapitalization(.never)
             .autocorrectionDisabled()

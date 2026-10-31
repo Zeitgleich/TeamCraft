@@ -25,6 +25,10 @@ pub enum RendezvousClientMessage {
 pub enum RendezvousServerMessage {
   Joined {
     peer_present: bool,
+    /// How long the relay stays open from now; the device that shows the code shows it too, and
+    /// offers a fresh code once it ran out (issue #998). Missing from servers before 1.0.15.
+    #[serde(default, rename = "expires_in_secs", skip_serializing_if = "Option::is_none")]
+    maybe_expires_in_secs: Option<u64>,
   },
   PeerJoined,
   /// The other device left; the relay is closed.
@@ -67,8 +71,22 @@ mod tests {
       r#"{"type":"peer_left"}"#
     );
     assert_eq!(
-      serde_json::to_string(&RendezvousServerMessage::Joined { peer_present: true }).unwrap(),
-      r#"{"type":"joined","peer_present":true}"#
+      serde_json::to_string(&RendezvousServerMessage::Joined {
+        peer_present: true,
+        maybe_expires_in_secs: Some(300),
+      })
+      .unwrap(),
+      r#"{"type":"joined","peer_present":true,"expires_in_secs":300}"#
+    );
+    // An older server sends no lifetime.
+    let older: RendezvousServerMessage =
+      serde_json::from_str(r#"{"type":"joined","peer_present":false}"#).unwrap();
+    assert_eq!(
+      older,
+      RendezvousServerMessage::Joined {
+        peer_present: false,
+        maybe_expires_in_secs: None,
+      }
     );
   }
 

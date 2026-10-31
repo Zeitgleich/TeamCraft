@@ -20,7 +20,8 @@ struct RootView: View {
       case .needsEnrollment(let hasExistingIdentity, let failure):
         EnrollmentView(hasExistingIdentity: hasExistingIdentity, failure: failure)
       case .linking(let progress):
-        LinkThisDeviceView(progress: progress)
+        // A fresh attempt forgets an earlier "asked".
+        LinkThisDeviceView(progress: progress).id(progress.attempt)
       case .recovering(let progress, let failure):
         OrgRecoveryView(progress: progress, failure: failure)
       case .ready(let account):

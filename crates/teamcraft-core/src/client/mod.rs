@@ -88,8 +88,8 @@ pub use groups::{DmSetupStatus, dm_setup_status};
 pub use guest::{GuestAdmission, GuestLinkMaterial, guest_link_fragment};
 pub use join_requests::is_open_private_channel;
 pub use linking::{
-  LinkAnnouncement, LinkApproval, LinkOffer, LinkReceipt, LinkRequestInfo, LinkRequestList, LinkedSecrets,
-  NewDeviceLink, ReceiptCancel,
+  LinkAnnouncement, LinkApproval, LinkCodeKind, LinkOffer, LinkReceipt, LinkRequestInfo, LinkRequestList,
+  LinkWait, LinkWaitCancel, LinkedSecrets, NewDeviceLink, ReceiptCancel,
 };
 pub use member_device::{GroupAccess, is_waiting_for_device};
 pub use messaging::FlushReport;
