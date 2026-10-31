@@ -1428,9 +1428,9 @@ ciphertext, in `MessageMeta::imported` (`ImportedOrigin`):
   epoch; clients show `sent_at_ms`, never the ID's time, for an imported message.
 - **No unread, no pushes.** The server counts no imported message as unread and sends no push and no
   `message_create` for it; when a conversation's import is finished it announces a
-  `conversation_update` whose `imported_through` changed, and clients that had reached the start of
-  that conversation's history load it again from there. Read positions come from the old system
-  (admin.md §3.8).
+  `conversation_update` (with `imported_through`). Imported messages lie before everything a client
+  holds of the conversation, so paging back loads them like older history. Read positions come from
+  the old system (admin.md §3.8).
 - **Files** are attachments of the importer's message (§4.5), encrypted with a fresh key each and
   uploaded from the export as a stream (multipart above 8 MiB), with thumbnails for pictures.
   Stickers of the old system are pictures.
@@ -1459,14 +1459,13 @@ its group, and leaves once it is done:
   participant's device commits it (the keys rotate, §4.2), and the import account leaves the
   conversation on the server without a line. Group DMs of the old system would be handled the same
   way.
-- **The import account in a DM is no person of it.** Clients leave the policy's import account out of
-  a DM's name and member list, and show no "joined" or "left" line for it there. Whoever is in a DM's
-  or the notes' group without being a participant is shown, from the group itself rather than the
-  server's word: for the import account the banner "History is being imported. The import account
-  can read this conversation until the import is finished.", for anybody else a warning that
-  somebody who isn't a participant can read it. That is the trade-off: until everybody is in, an
-  admin's device can read what the participants write there, which the banner says and the signed
-  policy bounds in time.
+- **The import account in a DM is no person of it.** Clients leave the policy's import account out
+  of a DM's name and member list, and show no "joined" or "left" line for it there. Whoever is a
+  member of a DM or the notes without being a participant is shown: for the import account the
+  banner "History is being imported. The import account can read this conversation until the import
+  is finished.", for anybody else a warning that somebody who isn't a participant can read it. That
+  is the trade-off: until everybody is in, an admin's device can read what the participants write
+  there, which the banner says and the signed policy bounds in time.
 
 **Waiting for people.** A person who never signed in has no device: they are listed by the server
 (pre-provisioned from the identity provider, admin.md §3.8) and their additions wait on the import

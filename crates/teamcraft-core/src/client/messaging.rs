@@ -524,7 +524,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     )
   }
 
-  fn message_context(
+  pub(super) fn message_context(
     &self,
     conversation: ConversationId,
     client_message_id: ClientMessageId,

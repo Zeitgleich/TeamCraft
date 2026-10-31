@@ -274,7 +274,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
   /// has it or someone else founded it first. Until the group holds everybody, a setup record
   /// stays behind so that a setup cut short (crash, lost network) is finished on a later sync
   /// ([`Self::repair_dm_setups`]).
-  async fn found_participants_group(
+  pub(super) async fn found_participants_group(
     &mut self,
     conversation: teamcraft_proto::ConversationResponse,
     others: &[UserId],
@@ -1984,7 +1984,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
   /// not which (#403). Nothing goes out unless this device saw the user stay a member since: a
   /// share still pending after a removal (and maybe a new addition from the join on) is dropped,
   /// also one the group moves past while it is being sent.
-  async fn send_history(
+  pub(super) async fn send_history(
     &mut self,
     conversation: ConversationId,
     user: UserId,
@@ -2724,7 +2724,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
   /// Who may make signed changes in the group, with the signed roster's freshness judged at
   /// `at_ms` (the server's time of the commit being checked).
   /// The users with a device in the conversation's group.
-  pub(crate) fn group_users(&mut self, conversation: ConversationId) -> Result<Vec<UserId>, CoreError> {
+  pub fn group_users(&mut self, conversation: ConversationId) -> Result<Vec<UserId>, CoreError> {
     let mut users = Vec::new();
     for member in self.group_or_error(conversation)?.members()? {
       let user = convert::user_from_crypto(member.user_id)?;

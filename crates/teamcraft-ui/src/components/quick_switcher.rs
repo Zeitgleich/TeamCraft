@@ -1076,6 +1076,7 @@ mod tests {
       reactions: Vec::new(),
       reply_count: 0,
       maybe_thread: None,
+      maybe_imported: None,
     }
   }
 

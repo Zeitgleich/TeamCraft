@@ -7,6 +7,7 @@ use crate::components::admin_backgrounds::BackgroundsSection;
 use crate::components::admin_brands::BrandsSection;
 use crate::components::admin_calendar::CalendarSection;
 use crate::components::admin_channels::ChannelsSection;
+use crate::components::admin_import::ImportSection;
 use crate::components::admin_instance::InstanceSection;
 use crate::components::admin_integrations::IntegrationsSection;
 use crate::components::admin_mail::MailSection;
@@ -80,6 +81,7 @@ pub fn AdminConsole(section: AdminSection) -> impl IntoView {
           {nav_item(AdminSection::Instance, IconName::Monitor)}
           {nav_item(AdminSection::Integrations, IconName::Terminal)}
           {nav_item(AdminSection::Notetaker, IconName::Compose)}
+          {nav_item(AdminSection::Import, IconName::Download)}
           {nav_item(AdminSection::Audit, IconName::List)}
         </ul>
       </nav>
@@ -112,6 +114,7 @@ pub fn AdminConsole(section: AdminSection) -> impl IntoView {
           AdminSection::Updates => view! { <UpdatesPolicySection /> }.into_any(),
           AdminSection::Integrations => view! { <IntegrationsSection /> }.into_any(),
           AdminSection::Notetaker => view! { <NotetakerSection /> }.into_any(),
+          AdminSection::Import => view! { <ImportSection /> }.into_any(),
           AdminSection::Audit => view! { <AuditSection /> }.into_any(),
         }}
       </div>

@@ -71,6 +71,10 @@ use teamcraft_proto::{CreateDeviceLinkRequest, DeviceLinkRequest};
 use teamcraft_proto::{CreateInstantMeetingRequest, MeetingId, MeetingResponse};
 use teamcraft_proto::{GatewayInfoResponse, PushGatewayResponse, WebPushKeyResponse};
 use teamcraft_proto::{
+  ImportDmRequest, ImportMemberStateRequest, ImportMessagesRequest, ImportMessagesResponse,
+  ProvisionUsersRequest, ProvisionUsersResponse,
+};
+use teamcraft_proto::{
   ListCallHistoryQuery, ListCallHistoryResponse, ListPresenceResponse, PrivacyResponse, UpdatePrivacyRequest,
 };
 use teamcraft_proto::{ListThreadsQuery, ListThreadsResponse, MessageId, SyncHeadsResponse, UnreadResponse};
@@ -388,6 +392,31 @@ pub trait ServerApi {
     conversation: ConversationId,
     request: &SendMessageRequest,
   ) -> impl Future<Output = Result<MessageResponse, ApiError>>;
+  /// The import account pre-provisions accounts by user name (admin.md §3.8).
+  fn provision_users(
+    &self,
+    request: &ProvisionUsersRequest,
+  ) -> impl Future<Output = Result<ProvisionUsersResponse, ApiError>>;
+  /// The import account opens a DM or somebody's notes as a member that is no participant.
+  fn import_dm(
+    &self,
+    request: &ImportDmRequest,
+  ) -> impl Future<Output = Result<ConversationResponse, ApiError>>;
+  /// The import account stores a batch of imported messages (e2ee.md §4.10).
+  fn import_messages(
+    &self,
+    conversation: ConversationId,
+    request: &ImportMessagesRequest,
+  ) -> impl Future<Output = Result<ImportMessagesResponse, ApiError>>;
+  /// The import account sets a member's read position, favourite and mute.
+  fn set_import_member_state(
+    &self,
+    conversation: ConversationId,
+    user: UserId,
+    request: &ImportMemberStateRequest,
+  ) -> impl Future<Output = Result<(), ApiError>>;
+  /// The import account marks a conversation's import as finished.
+  fn finish_import(&self, conversation: ConversationId) -> impl Future<Output = Result<(), ApiError>>;
   fn list_messages(
     &self,
     conversation: ConversationId,

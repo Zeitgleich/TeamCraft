@@ -403,6 +403,11 @@ pub enum MembershipIssue {
   /// and no member has let it in yet; it asks again on its own (issue #907). Only messages from
   /// the join on become readable.
   WaitingForAdmission,
+  /// The import account is in this DM or notes while it imports their history (e2ee.md §4.10):
+  /// it can read what is written here until the import is finished.
+  ImportInProgress { importer: UserId },
+  /// Somebody who is no participant of this DM is a member of it and can read it.
+  ReadByOutsider { user: UserId },
   #[serde(other)]
   Unknown,
 }
@@ -667,6 +672,40 @@ pub struct Message {
   pub reply_count: u32,
   /// Set on replies: the thread they belong to.
   pub maybe_thread: Option<ThreadId>,
+  /// Imported from another chat (e2ee.md §4.10), as the import account states it: `author` is the
+  /// original author when they have an account, `sent_at` the original time.
+  #[serde(rename = "imported", default, skip_serializing_if = "Option::is_none")]
+  pub maybe_imported: Option<ImportedMark>,
+}
+
+/// Where an imported message came from, and who wrote it when that is nobody with an account.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ImportedMark {
+  pub source: ImportedFrom,
+  pub author: ImportedAuthorView,
+  /// The import account, whose statement the origin is ("Imported from … by …").
+  pub importer: UserId,
+}
+
+/// The chat system an imported message came from.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ImportedFrom {
+  SynologyChat,
+  #[serde(other)]
+  Other,
+}
+
+/// Who wrote an imported message.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ImportedAuthorView {
+  /// The message's `author`, an account.
+  Person,
+  /// Somebody without an account here: shown like a deleted account.
+  Deleted,
+  /// A bot or webhook of the old system, by its name there.
+  Named { name: String },
 }
 
 /// Other people typing in one place right now (#882): a conversation itself, or with
@@ -844,6 +883,7 @@ mod tests {
         reactions: Vec::new(),
         reply_count: 0,
         maybe_thread: None,
+        maybe_imported: None,
       })
     };
     assert_eq!(line("[ERROR] disk full").kind, MessageKind::Log(LogLevel::Error));
@@ -868,6 +908,7 @@ mod tests {
       reactions: Vec::new(),
       reply_count: 0,
       maybe_thread: None,
+      maybe_imported: None,
     };
     as_chat_message(&mut message);
     assert_eq!(

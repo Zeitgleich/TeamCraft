@@ -405,6 +405,10 @@ pub struct MessageMeta {
     skip_serializing_if = "Option::is_none"
   )]
   pub maybe_channel_roles_head: Option<Box<crate::channel_roles::ChannelRolesHead>>,
+  /// Imported from another chat system: the original author and time (e2ee.md §4.10). Believed
+  /// only from the import account of the verified policy ([`crate::imported::trusted_origin`]).
+  #[serde(rename = "imported", default, skip_serializing_if = "Option::is_none")]
+  pub maybe_imported: Option<crate::imported::ImportedOrigin>,
 }
 
 /// The quoted message: the reference, plus enough to show it where it isn't loaded.

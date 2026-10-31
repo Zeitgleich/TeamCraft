@@ -638,6 +638,7 @@ mod tests {
       reactions: Vec::new(),
       reply_count: 0,
       maybe_thread,
+      maybe_imported: None,
     }
   }
 }

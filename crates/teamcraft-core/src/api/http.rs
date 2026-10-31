@@ -54,6 +54,10 @@ use teamcraft_proto::{
 use teamcraft_proto::{CreateInstantMeetingRequest, MeetingId, MeetingResponse};
 use teamcraft_proto::{DeviceListResponse, PutDeviceListRequest, UserEnrollmentResponse};
 use teamcraft_proto::{
+  ImportDmRequest, ImportMemberStateRequest, ImportMessagesRequest, ImportMessagesResponse,
+  ProvisionUsersRequest, ProvisionUsersResponse,
+};
+use teamcraft_proto::{
   ListCallHistoryQuery, ListCallHistoryResponse, ListPresenceResponse, PrivacyResponse, UpdatePrivacyRequest,
 };
 use teamcraft_proto::{ListThreadsQuery, ListThreadsResponse, MessageId, SyncHeadsResponse, UnreadResponse};
@@ -711,6 +715,56 @@ impl<T: AccessTokenSource> ServerApi for HttpServerApi<T> {
         Method::POST,
         &format!("/conversations/{conversation}/messages"),
         request,
+      )
+      .await
+  }
+
+  async fn provision_users(
+    &self,
+    request: &ProvisionUsersRequest,
+  ) -> Result<ProvisionUsersResponse, ApiError> {
+    self.send_json(Method::POST, "/admin/import/users", request).await
+  }
+
+  async fn import_dm(&self, request: &ImportDmRequest) -> Result<ConversationResponse, ApiError> {
+    self.send_json(Method::POST, "/admin/import/dms", request).await
+  }
+
+  async fn import_messages(
+    &self,
+    conversation: ConversationId,
+    request: &ImportMessagesRequest,
+  ) -> Result<ImportMessagesResponse, ApiError> {
+    self
+      .send_json(
+        Method::POST,
+        &format!("/admin/import/conversations/{conversation}/messages"),
+        request,
+      )
+      .await
+  }
+
+  async fn set_import_member_state(
+    &self,
+    conversation: ConversationId,
+    user: UserId,
+    request: &ImportMemberStateRequest,
+  ) -> Result<(), ApiError> {
+    self
+      .send_without_response(
+        Method::PUT,
+        &format!("/admin/import/conversations/{conversation}/members/{user}"),
+        Some(request),
+      )
+      .await
+  }
+
+  async fn finish_import(&self, conversation: ConversationId) -> Result<(), ApiError> {
+    self
+      .send_without_response::<()>(
+        Method::POST,
+        &format!("/admin/import/conversations/{conversation}/finish"),
+        None,
       )
       .await
   }

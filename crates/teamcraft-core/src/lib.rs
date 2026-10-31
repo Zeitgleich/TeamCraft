@@ -12,6 +12,7 @@ pub mod connection;
 pub mod device_activity;
 pub mod downloads;
 pub mod error;
+pub mod imported;
 pub mod integration_sources;
 pub mod link_preview;
 // The keys come from the UI contract (client-api), which the hosts of a UI build in; the service

@@ -304,6 +304,16 @@ fn MembershipIssueBanners(conversation: ConversationId, info: Memo<Option<Conver
           MembershipIssue::EncryptionSetup { .. } => ("status", i18n.t("dm-setup-pending"), None),
           MembershipIssue::EncryptionSetupFailed => ("alert", i18n.t("dm-setup-failed"), None),
           MembershipIssue::WaitingForAdmission => ("status", i18n.t("waiting-for-admission"), None),
+          MembershipIssue::ImportInProgress { importer } => (
+            "status",
+            i18n.t_with("import-in-progress", &[("name", &name_of(importer))]),
+            None,
+          ),
+          MembershipIssue::ReadByOutsider { user } => (
+            "alert",
+            i18n.t_with("read-by-outsider", &[("name", &name_of(user))]),
+            None,
+          ),
           MembershipIssue::Unknown => return None,
         };
         // The DM's setup has its own retry: asking the other side's devices for a welcome (#278).

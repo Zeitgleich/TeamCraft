@@ -218,7 +218,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
   /// before (its answer lost, the app killed, or shown as failed) is continued from the step it
   /// reached, with the announcement it already has. `Ok` also when a leave waits for the members'
   /// commit or an admin watches its change; the pending queue finishes those.
-  async fn record_and_run_removal(
+  pub(super) async fn record_and_run_removal(
     &mut self,
     conversation: ConversationId,
     user: UserId,

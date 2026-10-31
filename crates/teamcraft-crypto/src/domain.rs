@@ -54,6 +54,8 @@ pub(crate) const DEVICE_LIST: &str = "TeamCraft-v1 device list";
 /// HPKE info of content keys sealed to one member device.
 pub(crate) const SEALED_CONTENT_KEYS: &str = "TeamCraft-v1 sealed content keys";
 pub(crate) const WORKSPACE_LOG_HASH: &str = "TeamCraft-v1 workspace log entry hash";
+/// Hash input label of an imported message's client message ID (e2ee.md §4.10).
+pub(crate) const IMPORTED_MESSAGE_ID: &str = "TeamCraft-v1 imported message";
 
 /// Returns `len(label) || label || body`.
 pub(crate) fn labeled(label: &str, body: &[u8]) -> Vec<u8> {
@@ -70,7 +72,7 @@ pub(crate) fn labeled(label: &str, body: &[u8]) -> Vec<u8> {
 mod tests {
   use super::*;
 
-  const ALL_LABELS: [&str; 39] = [
+  const ALL_LABELS: [&str; 40] = [
     DEVICE_CERTIFICATE,
     IDENTITY_FINGERPRINT,
     MESSAGE_AAD,
@@ -100,6 +102,7 @@ mod tests {
     RENDEZVOUS_COMMITMENT,
     EPOCH_CONTENT_KEY,
     DEVICE_LIST,
+    IMPORTED_MESSAGE_ID,
     WORKSPACE_LOG_HASH,
     LOCAL_STORE_LOOKUP_KEY,
     LOCAL_STORE_LOOKUP,
