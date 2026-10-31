@@ -101,14 +101,18 @@ in [docs/performance.md](../../docs/performance.md) ("Clients"). A change that t
 | Idle, connected, in the foreground: CPU                 | ≤ 0.5 %   | ≤ 1 %                       | ≤ 1 %                                        |
 | Network while idle besides the gateway heartbeat        | none      | none                        | none                                         |
 | In the background                                       | –         | –                           | no wakelocks, no polling; push wakes the app |
-| Download size (first visit, compressed)                 | –         | ≤ 4.7 MB wasm, gzip -9      | –                                            |
+| Download size, a guest in a meeting (compressed)        | –         | ≤ 5.6 MB wasm, gzip -9      | –                                            |
+| Download size, signed-in first visit (compressed)       | –         | ≤ 5.2 MB wasm, gzip -9      | –                                            |
 
-- The download size counts the compressed wasm a signed-in user's first visit transfers: the app,
-  the signed-in app's chunks and the service worker, measured as gzip -9 (brotli, where the server
-  offers it, is about 30 % smaller). CI checks it on every change to the web client
-  (`.github/workflows/web-size.yml`); see docs/performance.md, "Web bundle size", for where it
-  stands. Parts of the app a first visit doesn't need are split off and load when first used
-  (`areas.rs`).
+- The strict download budget is a guest's: somebody from outside who opens a meeting link, often
+  once and in a browser that never saw the app, waits for the lobby (the app and the service
+  worker), then the meeting's chunks (`guest`, `calls`) and the call module. The signed-in first
+  visit (the app, the signed-in app's chunks and the service worker) has a looser ceiling against
+  big regressions: a member loads it once, then from the service worker's cache. Both are measured
+  as gzip -9 (brotli, where the server offers it, is about 30 % smaller). CI checks them on every
+  change to the web client (`.github/workflows/web-size.yml`); see docs/performance.md, "Web bundle
+  size", for where they stand. Parts a guest or a first visit doesn't need are split off and load
+  when first used (`areas.rs`); nothing a guest's meeting uses goes into the signed-in app's chunks.
 - Lists that can grow (messages, members, channels, search hits) are virtualised or paged; nothing
   renders or loads "all of them".
 - No work proportional to a conversation's or workspace's size on a hot path (send, switch, scroll,

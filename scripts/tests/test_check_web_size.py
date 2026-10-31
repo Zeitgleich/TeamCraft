@@ -30,7 +30,7 @@ class BudgetTest(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertIn("| app ", out)
         self.assertIn("| total ", out)
-        self.assertIn("gzip -9; headroom", out)
+        self.assertIn("headroom", out)
         self.assertNotIn("::warning::", out)
 
     def test_over_the_compressed_budget_fails_counting_both_files(self):
@@ -86,11 +86,69 @@ class BudgetTest(unittest.TestCase):
             code, out, err = run(str(dist), "--budget-bytes", "1500")
         self.assertEqual(code, 1)
         self.assertIn("| signed-in app ", out)
-        self.assertIn("A guest's first visit", out)
+        self.assertIn("A guest's meeting visit", out)
         self.assertIn("over the budget of 1,500", err)
         lazy = out.split("Loaded when first used")[1]
         self.assertNotIn("split-session", lazy)
         self.assertIn("split-admin", lazy)
+
+    def test_a_guest_visit_counts_the_call_module_but_not_the_signed_in_app(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            dist = dist_with(tmp, app_bytes=600, service_worker_bytes=300)
+            first_visit = gzip_total_of(dist)
+            (dist / "teamcraft-web-calls-0123abcd_bg.wasm").write_bytes(os.urandom(400))
+            (dist / "teamcraft-ui-split-session-0123abcd.wasm").write_bytes(os.urandom(5000))
+            (dist / "init.js").write_text(
+                "for (const href of ['/teamcraft-ui-split-session-0123abcd.wasm']) {}\n")
+            guest = first_visit + len(gzip.compress((dist / "teamcraft-web-calls-0123abcd_bg.wasm").read_bytes(), 9))
+            code, out, err = run(str(dist), "--guest-budget-bytes", str(guest), "--budget-bytes", "100000")
+            self.assertEqual(code, 0, err)
+            self.assertIn(f"meeting visit (lobby, meeting, call module): {guest / 1_000_000:.2f} MB", out)
+            code, _, err = run(str(dist), "--guest-budget-bytes", str(guest - 1), "--budget-bytes", "100000")
+        self.assertEqual(code, 1)
+        self.assertIn("a guest's meeting visit is", err)
+
+    def test_a_guest_visit_counts_the_meetings_modules_and_their_chunks_once(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            dist = dist_with(tmp, app_bytes=600, service_worker_bytes=300)
+            lobby = gzip_total_of(dist)
+            files = {
+                "teamcraft-ui-split-guest-0123abcd.wasm": 200,
+                "teamcraft-ui-split-calls-0123abcd.wasm": 300,
+                "teamcraft-ui-chunk-1-0123abcd.wasm": 400,
+                "teamcraft-ui-split-session-0123abcd.wasm": 5000,
+            }
+            for name, size in files.items():
+                (dist / name).write_bytes(os.urandom(size))
+            (dist / "teamcraft-ui-split-0123abcd.js").write_text(split_loader({
+                "guest": ["teamcraft-ui-split-guest-0123abcd.wasm", "__chunk_1"],
+                "calls": ["teamcraft-ui-split-calls-0123abcd.wasm", "__chunk_1"],
+                "session": ["teamcraft-ui-split-session-0123abcd.wasm"],
+            }, {"__chunk_1": "teamcraft-ui-chunk-1-0123abcd.wasm"}))
+            meeting = sum(len(gzip.compress((dist / name).read_bytes(), 9)) for name in list(files)[:3])
+            code, out, err = run(str(dist), "--budget-bytes", "100000")
+        self.assertEqual(code, 0, err)
+        self.assertIn(f"meeting visit (lobby, meeting, call module): {(lobby + meeting) / 1_000_000:.2f} MB", out)
+
+    def test_a_split_loader_without_the_guest_module_is_an_error(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            dist = dist_with(tmp, app_bytes=10, service_worker_bytes=10)
+            (dist / "teamcraft-ui-split-calls-0123abcd.wasm").write_bytes(b"\0")
+            (dist / "teamcraft-ui-split-0123abcd.js").write_text(
+                split_loader({"calls": ["teamcraft-ui-split-calls-0123abcd.wasm"]}, {}))
+            code, _, err = run(str(dist))
+        self.assertEqual(code, 2)
+        self.assertIn("no module guest", err)
+
+    def test_a_signed_in_visit_over_its_ceiling_fails_while_the_guest_passes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            dist = dist_with(tmp, app_bytes=600, service_worker_bytes=300)
+            (dist / "teamcraft-ui-split-session-0123abcd.wasm").write_bytes(os.urandom(5000))
+            (dist / "init.js").write_text(
+                "for (const href of ['/teamcraft-ui-split-session-0123abcd.wasm']) {}\n")
+            code, _, err = run(str(dist), "--guest-budget-bytes", "100000", "--budget-bytes", "3000")
+        self.assertEqual(code, 1)
+        self.assertIn("the signed-in web wasm is", err)
 
     def test_a_listed_session_file_that_is_missing_is_an_error(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -150,6 +208,20 @@ def dist_with(tmp, app_bytes, service_worker_bytes, compressible=False):
     (dist / APP).write_bytes(content(app_bytes))
     (dist / SERVICE_WORKER).write_bytes(content(service_worker_bytes))
     return dist
+
+
+def split_loader(modules, chunks):
+    """A split loader script as teamcraft-web-bundle writes it: shared chunks, then each module's
+    file and the chunks it imports."""
+    parts = []
+    for name, file in chunks.items():
+        parts.append(f'const {name} = makeLoad(() => {{\n    const src = fetch(new URL("./{file}", '
+                     f'import.meta.url));\n}}\n, []);\n')
+    for module, (file, *deps) in modules.items():
+        parts.append(f'export const __wasm_split_load_{module} = wrapAsyncCb(makeLoad(() => {{\n'
+                     f'    const src = fetch(new URL("./{file}", import.meta.url));\n}}\n'
+                     f', [{", ".join(deps)}]));\n')
+    return "".join(parts)
 
 
 def gzip_total_of(dist):

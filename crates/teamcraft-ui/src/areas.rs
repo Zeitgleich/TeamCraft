@@ -174,8 +174,10 @@ areas! {
   schedule_meeting(_unit: ()) => meetings: view! { <ScheduleMeetingDialog /> };
   edit_meeting(meeting: MeetingId) => meetings: view! { <ScheduleMeetingDialog maybe_edit=meeting /> };
   meeting_created(_unit: ()) => meetings: view! { <MeetingCreatedDialog /> };
-  /// What a guest sees after a host let them in: the meeting chat and its call.
-  guest_meeting(session: GuestSession) => session: view! { <GuestMeeting session=session /> };
+  /// What a guest sees after a host let them in: the meeting chat and its call. A module of its
+  /// own, not the signed-in app's: somebody from outside who joins once loads only what the
+  /// meeting needs (docs/performance.md, "Web bundle size").
+  guest_meeting(session: GuestSession) => guest: view! { <GuestMeeting session=session /> };
   directory(_unit: ()) => directory: view! { <DirectoryView /> };
   search(_unit: ()) => search: view! { <SearchView /> };
   /// The top bar's search (Ctrl/Cmd+K), in the chunk of the search results it leads to (#695).
