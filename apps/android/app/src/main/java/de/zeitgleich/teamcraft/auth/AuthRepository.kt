@@ -27,6 +27,9 @@ import net.openid.appauth.AuthorizationResponse
 import net.openid.appauth.AuthorizationService
 import net.openid.appauth.AuthorizationServiceConfiguration
 import net.openid.appauth.ResponseTypeValues
+import net.openid.appauth.browser.AnyBrowserMatcher
+import net.openid.appauth.browser.BrowserMatcher
+import net.openid.appauth.browser.BrowserSelector
 import net.openid.appauth.connectivity.ConnectionBuilder
 import de.zeitgleich.teamcraft.BuildConfig
 import de.zeitgleich.teamcraft.R
@@ -248,6 +251,7 @@ class AuthRepository(
       context,
       AppAuthConfiguration.Builder()
         .setConnectionBuilder(connections)
+        .setBrowserMatcher(signInBrowser())
         // AppAuth rejects ID tokens of a plain-HTTP issuer; a development stack's Keycloak is one.
         .setSkipIssuerHttpsCheck(issuer.scheme == "http" && isPlainHttpAllowed(issuer.host, isInsecureHttpAllowed))
         .build(),
@@ -256,6 +260,22 @@ class AuthRepository(
     val file = SealedFile(File(context.filesDir, StoragePaths.sessionFile(storageKey)), KeystoreBox(SESSION_KEY_ALIAS))
     val localFile = SealedFile(File(context.filesDir, StoragePaths.localSessionFile(storageKey)), KeystoreBox(SESSION_KEY_ALIAS))
     return Session(server, file, localFile, service, connections, loadState(file), loadLocal(localFile))
+  }
+
+  /**
+   * The browser that shows the identity provider's sign-in page (issue #1063): the first installed
+   * browser of [PREFERRED_SIGN_IN_BROWSERS] with Custom Tabs, else any browser. Some default
+   * browsers (Firefox forks) have no ephemeral Custom Tabs and don't reliably hand the redirect
+   * back to the app, so a user with one of them couldn't sign in.
+   */
+  private fun signInBrowser(): BrowserMatcher {
+    val withCustomTabs = BrowserSelector.getAllBrowsers(context).filter { it.useCustomTab }
+    val maybePreferred = PREFERRED_SIGN_IN_BROWSERS.firstNotNullOfOrNull { packageName ->
+      withCustomTabs.firstOrNull { it.packageName == packageName }
+    }
+    return maybePreferred?.let { preferred ->
+      BrowserMatcher { it.packageName == preferred.packageName && it.useCustomTab }
+    } ?: AnyBrowserMatcher.INSTANCE
   }
 
   private suspend fun refresh(session: Session, current: AuthState): String? =
@@ -359,5 +379,13 @@ class AuthRepository(
 
     const val SESSION_KEY_ALIAS = "teamcraft_session"
     const val REFRESH_TIMEOUT_SECONDS = 10L
+
+    /** Browsers with full Custom Tabs support (ephemeral tabs, reliable redirects), in order. */
+    val PREFERRED_SIGN_IN_BROWSERS = listOf(
+      "com.android.chrome",
+      "com.microsoft.emmx",
+      "com.sec.android.app.sbrowser",
+      "com.brave.browser",
+    )
   }
 }

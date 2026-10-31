@@ -1,5 +1,6 @@
 package de.zeitgleich.teamcraft.ui
 
+import android.util.Log
 import android.app.Application
 import android.content.Intent
 import android.graphics.Bitmap
@@ -266,6 +267,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     try {
       graph.auth.loginIntent(page.value?.maybeLoginPageAlwaysShown)
     } catch (failure: Exception) {
+      Log.w(TAG, "sign-in could not start", failure)
       state.value = AppState.SignedOut(signInError(failure) ?: R.string.sign_in_failed)
       null
     }
@@ -294,6 +296,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
       graph.auth.completeLogin(result)
       loadAccountState()
     } catch (failure: Exception) {
+      Log.w(TAG, "sign-in failed", failure)
       AppState.SignedOut(signInError(failure))
     }
   }
@@ -303,6 +306,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     state.value = try {
       ready(graph.core.core().enroll(deviceName(), passphrase))
     } catch (failure: TeamCraftException) {
+      Log.w(TAG, "enrollment failed", failure)
       current.copy(maybeError = errorText(failure))
     }
   }
@@ -937,6 +941,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
   companion object {
     const val MESSAGE_PAGE = 200
+
+    private const val TAG = "TeamCraftSignIn"
 
     /** A sign-in page this young (just fetched with the server check) is not asked for again. */
     private const val PAGE_REUSE_MILLIS = 10_000L

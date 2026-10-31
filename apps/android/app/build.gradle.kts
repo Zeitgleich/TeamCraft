@@ -69,6 +69,11 @@ android {
   }
 
   buildTypes {
+    // Installs next to the store app, so a test build doesn't replace it.
+    debug {
+      applicationIdSuffix = ".debug"
+      versionNameSuffix = "-debug"
+    }
     release {
       uploadSigning?.let { signingConfig = it }
       isMinifyEnabled = true
