@@ -119,6 +119,12 @@ Start the full import only once the transfer finished (`DONE` exists and the fil
 `file-count.txt`): a message is posted once, so a file missing then stays missing (the message names
 it, and the report lists it).
 
+The export holds everybody's messages and files in plain text: keep it readable by one account only
+(`chmod 700`), and run the tool as that account. If the files belong to `root` and the tool runs as
+another user, give them to that user first (`chown -R import: /data/chat-export /data/mapping`); the
+tool only reads them. Its state directory (`--state`) must be writable by the same user. Delete the
+export once the import is checked (section 10).
+
 ## 6. The mappings
 
 Two CSV files with a header row; `teamcraft-import plan` writes templates of both from the export
