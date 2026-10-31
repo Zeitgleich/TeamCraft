@@ -532,7 +532,7 @@ impl Database {
     if result.rows_affected() == 0 {
       return Ok(false);
     }
-    bump_sequence(&mut *tx, meeting).await?;
+    bump_sequence(&mut tx, meeting).await?;
     tx.commit().await?;
     Ok(true)
   }
@@ -554,7 +554,7 @@ impl Database {
     if result.rows_affected() == 0 {
       return Ok(false);
     }
-    bump_sequence(&mut *tx, meeting).await?;
+    bump_sequence(&mut tx, meeting).await?;
     tx.commit().await?;
     Ok(true)
   }

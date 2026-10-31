@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE meetings SET hidden_at = now() WHERE id = $1 AND status = 'cancelled' AND hidden_at IS NULL",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int8"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "a3b6ae39e5573355afb0c6a1bbc94a9417f1cb6451d9138a14671642a49bd9e9"
+}

@@ -77,6 +77,8 @@ Details: [.claude/rules/](.claude/rules/). The short version:
   interfaces/config; a specific vendor is an implementation, never a hard dependency of the design.
 - **Design:** all UI work uses the `apple-design` skill, and emoji are never icons (user content
   only) – see [design.md](.claude/rules/design.md).
+- **Forms:** errors at their field (`aria-invalid`, `aria-describedby`), a refused submit focuses and
+  scrolls to the first one, units visible – see [forms.md](.claude/rules/forms.md).
 - **Markdown tables are space-padded** so columns align in plain text.
 
 ## Before you commit

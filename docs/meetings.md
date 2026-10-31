@@ -42,8 +42,9 @@ the change, and people taken off the list are removed from the group.
 2. **Change / cancel** (`PATCH` / `DELETE /meetings/{id}`, organizer only): SEQUENCE increases,
    the event is replaced or deleted, staying invitees get an update, new ones an invitation,
    removed ones and everybody on cancellation a CANCEL. The chat of a cancelled meeting is archived
-   and stays readable. The app's edit dialog (title, time, length, description, invitees, lobby;
-   the repeat rule is fixed after scheduling) sends the whole invitee list; once the server saved it,
+   and stays readable. Cancelling always asks first; of a repeating meeting it asks what (see
+   "Repeating meetings"). The app's edit dialog (title, time, length, description, invitees, lobby,
+   the repeat rule; a series stays a series) sends the whole invitee list; once the server saved it,
    the organizer's device calls `update_meeting_chat_members` with that list and the users taken off
    it, so later invitees join the chat's encryption group and removed ones leave it (a signed
    commit that rotates the key). The list comes from the organizer's request, never from the
@@ -62,6 +63,12 @@ the change, and people taken off the list are removed from the group.
    day, and a wall-clock time the zone skips moves an hour on. The clients remind per occurrence.
    They read the list again when the gateway sends `meeting_update` (a meeting created, moved or
    cancelled elsewhere) and after each reconnect, not on a timer.
+   **Starting** a meeting is joining its chat's call. When that call starts at most
+   `start_ring_lead_secs` (default an hour) before an occurrence that isn't cancelled, or during
+   it, it rings the invited users who haven't declined (gateway `call_ring` and a ring push, as
+   for a call moved into a meeting), also when the organizer starts it early. Their ringing ends
+   with the ring timeout, not when the first of them joins. The organizer's app labels the button
+   of a planned meeting "Start"; "Meet now" is the separate meeting with nobody invited.
 4. **Guests**: the personal link is `<base>/meeting/<id>#invite=<token>`; the token is in the
    fragment, which browsers never send to servers. The web client sends it to
    `POST /meetings/join` (no authentication) together with a display name and receives a guest
@@ -128,6 +135,45 @@ the change, and people taken off the list are removed from the group.
    | A forged or redirected move | The server's `call_move` without a matching announcement shows nothing; a room holding somebody the announcement didn't name is refused.                                                                                     |
    | Two people add at once      | The second move into another room gets 409; that user's app says so and both follow the first room.                                                                                                                          |
    | Server restart mid-move     | Calls and rings live in memory: the ring of the added people is lost, they find the running call in the meeting room.                                                                                                        |
+
+## Repeating meetings
+
+A series repeats every N days, weeks or months (`RRULE` `FREQ`, `INTERVAL`), daily and weekly
+series optionally only on chosen days of the week (`BYDAY`, the organizer's days: "Monday to
+Friday"), and ends never, after a number of meetings (`COUNT`) or on a date (`UNTIL`, the end of
+that day in the organizer's time zone; not both). The first meeting is the stored start, also on a
+day the rule doesn't name (RFC 5545); the app asks for its day to be one of the chosen ones. The
+calendar gets the rule next to a UTC `DTSTART`, so its `BYDAY` days move with the start when the
+organizer's day and the UTC day differ (a meeting at 00:30 in Berlin).
+
+Cancelling a meeting of a series asks what to cancel (`DELETE /meetings/{id}?scope=…&occurrence=…`,
+`occurrence` the start as listed):
+
+| Scope        | What happens                                                                                                                                     |
+|--------------|--------------------------------------------------------------------------------------------------------------------------------------------------|
+| `occurrence` | That meeting is listed as cancelled (`is_occurrence_cancelled`), the calendar event gets an `EXDATE`, invitees a CANCEL with its `RECURRENCE-ID` |
+| `following`  | The series ends before it (`UNTIL`, `COUNT` dropped), invitees get the changed series; from the first meeting on it is the whole series          |
+| `series`     | The default, and the only scope of a meeting that doesn't repeat: the whole meeting is cancelled as before                                       |
+
+`POST /meetings/{id}/restore` takes a cancellation back: with `occurrence` that one meeting (the
+`EXDATE` goes, invitees get the series again), without it the cancelled meeting (scheduled again,
+calendar event and update mails, chat no longer archived) while it is not over. A cancelled series
+is listed once, marked, at the meeting that was next when it was cancelled, then it is gone; the
+organizer can restore it there or take it off everybody's lists at once (`POST
+/meetings/{id}/hide`). At most 1000 meetings of a series are cancelled one by one; beyond that the
+rule ends it. Ending the call of a series for everyone (host controls) ends that call, not the
+series.
+
+Public holidays: a single meeting on a holiday is cancelled like any other; a holiday calendar
+that skips them by itself is a follow-up (v1.1).
+
+| Condition                        | What happens                                                                                                          |
+|----------------------------------|-----------------------------------------------------------------------------------------------------------------------|
+| Two devices cancel the same date | The second gets 409 (cancelled already); the list converges on the next `meeting_update`                              |
+| Calendar down while cancelling   | The cancellation stands (logged); the event follows on the next change of the meeting                                 |
+| The series' start moves          | Cancelled dates are kept by their old start and no longer match; the moved series has all its meetings                |
+| Server restart while ringing     | Rings live in memory: the ring is lost, the meeting's call goes on and shows in the list                              |
+| Old clients                      | They see a cancelled occurrence as a cancelled meeting, ignore `weekdays` and `until`, and cancel only whole meetings |
 
 ## Links
 
@@ -243,8 +289,9 @@ fake calendar and mailer; one test sends through the real SMTP sender to Mailpit
 
 ## Not done yet
 
-- "In a meeting" presence from the calendar (PLAN.md §9), recurring-series exceptions, host controls
-  (mute all, remove, lock, end for everyone) and meetings created in other CalDAV clients.
+- "In a meeting" presence from the calendar (PLAN.md §9), moving a single meeting of a series (only
+  cancelling one), a holiday calendar, host controls (mute all, remove, lock, end for everyone) and
+  meetings created in other CalDAV clients.
 - Per-organizer calendars (see above).
 - Meeting links: member clients reacting to `lobby_decision` instead of asking; revoking the shared
   guest link also turning away the guests still waiting from it; the desktop app opening

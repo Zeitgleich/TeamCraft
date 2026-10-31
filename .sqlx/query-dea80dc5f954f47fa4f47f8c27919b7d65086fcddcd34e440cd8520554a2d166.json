@@ -1,0 +1,40 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT meeting_id, starts_at FROM meeting_cancelled_occurrences\n         WHERE meeting_id = ANY($1) ORDER BY meeting_id, starts_at",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "meeting_id",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "meeting_cancelled_occurrences",
+            "name": "meeting_id"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "starts_at",
+        "type_info": "Timestamptz",
+        "origin": {
+          "Table": {
+            "table": "meeting_cancelled_occurrences",
+            "name": "starts_at"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8Array"
+      ]
+    },
+    "nullable": [
+      false,
+      false
+    ]
+  },
+  "hash": "dea80dc5f954f47fa4f47f8c27919b7d65086fcddcd34e440cd8520554a2d166"
+}
