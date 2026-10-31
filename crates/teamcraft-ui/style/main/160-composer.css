@@ -79,7 +79,8 @@
 .composer-editor pre {
   margin: 4px 0;
   padding: 8px 12px;
-  border: 1px solid var(--border);
+  /* The edge shows where the block ends while it is written (#843): 3:1 like a field's. */
+  border: 1px solid var(--border-strong);
   border-radius: var(--radius-sm);
   background: var(--code-bg);
   font: var(--text-xs)/1.5 var(--font-mono);
@@ -168,7 +169,8 @@ ol.md-list {
   min-width: 28px;
   height: 28px;
   padding: 0 6px;
-  border: 0;
+  /* Transparent until pressed, so pressing doesn't move the glyph. */
+  border: 1px solid transparent;
   border-radius: var(--radius-sm);
   background: transparent;
   color: var(--text-muted);
@@ -188,6 +190,8 @@ ol.md-list {
 }
 
 .format-btn[aria-pressed="true"] {
+  /* The fill alone is 1.2:1 against the toolbar; the edge makes the state 3:1 (WCAG 1.4.11, #843). */
+  border-color: var(--accent);
   background: var(--accent-soft);
   color: var(--accent-strong);
 }

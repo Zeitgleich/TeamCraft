@@ -216,7 +216,8 @@
 .md-code {
   margin: 4px 0 0;
   padding: 8px 12px;
-  border: 1px solid var(--border);
+  /* 3:1 against the surface, as in the composer (#843). */
+  border: 1px solid var(--border-strong);
   border-radius: var(--radius-sm);
   background: var(--code-bg);
   font: var(--text-xs)/1.5 var(--font-mono);
