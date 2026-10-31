@@ -1,7 +1,8 @@
 # Desktop updates
 
-How the desktop app stays current, and how organizations control it. Release mechanics are in
-[release.md](release.md); the signed workspace policy in [admin.md](admin.md) §2.3.
+How the desktop app stays current, and how organizations control it; the Android libre app's F-Droid
+repository is in §8. Release mechanics are in [release.md](release.md); the signed workspace
+policy in [admin.md](admin.md) §2.3.
 
 ## 1. Goals
 
@@ -219,6 +220,8 @@ apt/pool/<tag>/*.deb
 rpm/{stable,prerelease}/          rpms signed with rpmsign, repodata with a signed repomd.xml
 teamcraft-archive-keyring.gpg     the repository key (binary, for Signed-By)
 teamcraft-archive-keyring.asc     the same key, armored (for rpm/dnf)
+fdroid/repo/                      F-Droid repository of the libre Android app (§8)
+fdroid/qr.svg, fingerprint.txt    its QR code and key fingerprint, shown on the page
 site-build.txt                    the workflow run that built the site (checked after deploying)
 ```
 
@@ -321,6 +324,7 @@ update source; for those the release page ("What's new") has the new bundle. The
 | `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` | Its password                                             |
 | `LINUX_REPO_GPG_PRIVATE_KEY`         | ASCII-armored GPG private key for APT/RPM signing        |
 | `LINUX_REPO_GPG_PASSPHRASE`          | Its passphrase                                           |
+| `FDROID_KEYSTORE_BASE64` and others  | F-Droid repository key (§8.3)                            |
 
 Updater key (on a trusted machine, never in CI):
 
@@ -347,3 +351,89 @@ Keep offline backups of both private keys. Losing the updater key means every in
 updated by hand once (a new key ships with that version); a leaked key means an attacker who also
 controls the feed can push updates: rotate it with a release that carries the new public key, signed
 with the old one.
+
+## 8. F-Droid repository (Android)
+
+The libre Android app (`de.zeitgleich.teamcraft.libre`, push through UnifiedPush, no Google
+services) has its own F-Droid repository on the Pages site. Users add it once in F-Droid, Droid-ify or
+Neo Store and the app updates with their other apps. The `full` flavor stays with Google Play and the
+release APK.
+
+### 8.1 Adding it
+
+The site's "Updates through F-Droid" section (`#fdroid`) has an "Add to F-Droid" button
+(`fdroidrepos://` link) and a QR code; both carry the fingerprint, so the client checks the
+repository key from the first download on. By hand: F-Droid → Repositories → Add repository → the
+address `https://zeitgleich.github.io/TeamCraft/fdroid/repo`, then compare the fingerprint the app
+shows with the one on the page.
+
+### 8.2 How it is built
+
+`scripts/fdroid-repo.py`, called by `packages.yml` after the APT/RPM repositories are built:
+
+- `fetch` downloads `teamcraft-android-X.Y.Z-libre-release.apk` of the newest published **stable**
+  releases that have one (3 by default; repository variable `FDROID_KEEP_VERSIONS`, about 85 MB
+  each, so the Pages site stays well below its 1 GB limit). Releases without the signed libre APK
+  (Android build failed, no upload key) are skipped; candidates are not in the repository.
+- `build` runs `fdroid update` (fdroidserver, pinned in the workflow) on them with the store listing
+  from `apps/android/store` (texts, icon, feature graphic, screenshots; the Firebase line of the
+  description is replaced, the libre app has none), the licence, source, issue and changelog links,
+  and per version the release's highlights as "What's new". The "added" date of a version is its
+  release's publication, so a rebuild doesn't redate old versions.
+- The APKs are the release files as they are, signed with the app key (`apps/android/README.md`,
+  "Signing"), so the GitHub APK, the F-Droid install and (for the full flavor) Google Play share one
+  signature: an install from the release APK updates through F-Droid and the other way round.
+- Before publishing, the script checks that the index lists every fetched version, that all are
+  signed with one key, that each has its changelog, and that `index-v1.jar` and `entry.jar` are
+  signed with the repository key. `index-v2.json`/`entry.jar` serve current F-Droid clients;
+  fdroidserver also writes `index-v1.jar` (and the older v0 index), which Droid-ify, Neo Store and
+  older F-Droid versions still read.
+- The finished repository goes into the site with one rename; the Pages deployment then replaces the
+  whole site at once, so a client never sees a new index with missing APKs.
+- The step is optional: without the key, or when it fails, the site is built and published without
+  the F-Droid repository (a warning in the run) and APT, RPM and the manifests are unaffected. Like
+  the rest of the site it has no state: the next run rebuilds it, and re-running `android-release`
+  for a release whose Android build was late starts the site build again (release.md).
+- F-Droid checks the repository about once a day (and on a pull to refresh), so a nightly release
+  reaches it within a day of publication.
+
+### 8.3 Key and secrets
+
+The repository key signs the index only; it is not the app signing key, and losing it means users
+have to remove and re-add the repository (the apps stay installed). Create it once on a trusted
+machine, keep an offline backup, and never commit it:
+
+```sh
+keytool -genkeypair -v -storetype PKCS12 -keystore teamcraft-fdroid.p12 -alias fdroid \
+  -keyalg RSA -keysize 4096 -validity 10000 -dname "CN=TeamCraft F-Droid repository"
+base64 -w0 teamcraft-fdroid.p12 | gh secret set FDROID_KEYSTORE_BASE64
+gh secret set FDROID_KEYSTORE_PASSWORD   # the store password chosen above
+gh secret set FDROID_KEY_PASSWORD        # PKCS12: the same password
+gh secret set FDROID_KEY_ALIAS --body fdroid
+```
+
+| Secret                     | What                                         |
+|----------------------------|----------------------------------------------|
+| `FDROID_KEYSTORE_BASE64`   | The PKCS12 keystore file, base64             |
+| `FDROID_KEYSTORE_PASSWORD` | Its store password                           |
+| `FDROID_KEY_ALIAS`         | Alias of the key in it (`fdroid` above)      |
+| `FDROID_KEY_PASSWORD`      | The key's password (PKCS12: the store's)     |
+
+The fingerprint users compare is the SHA-256 of the key's certificate; the site shows it, and
+`keytool -list -v -keystore teamcraft-fdroid.p12` prints it (without the colons, upper case).
+
+Test it without the real key:
+
+```sh
+keytool -genkeypair -storetype PKCS12 -keystore /path/to/test.p12 -alias fdroid -keyalg RSA \
+  -keysize 4096 -validity 365 -dname "CN=test" -storepass testpass -keypass testpass
+export FDROID_KEYSTORE=/path/to/test.p12 FDROID_KEYSTORE_PASSWORD=testpass \
+  FDROID_KEY_ALIAS=fdroid FDROID_KEY_PASSWORD=testpass
+scripts/fdroid-repo.py fetch --work /path/to/work --repo Zeitgleich/TeamCraft --keep 2
+scripts/fdroid-repo.py build --work /path/to/work --site /path/to/site \
+  --site-url http://10.0.2.2:8765 --repo Zeitgleich/TeamCraft
+(cd /path/to/site && python3 -m http.server 8765)
+```
+
+The Android emulator reaches the host as `10.0.2.2`; add `http://10.0.2.2:8765/fdroid/repo` by hand
+(the `fdroidrepos://` link is https only).

@@ -238,18 +238,22 @@ def render_page(channels, site, site_url, repo, env):
     main_channel = maybe_stable or maybe_prerelease
     repo_url = f"https://github.com/{repo}"
     linux_repositories = render_linux_repositories(channels, main_channel, site, site_url)
+    fdroid = render_fdroid(site, site_url)
     body = "\n".join([
         render_header(repo_url),
         '<main id="main">',
         render_hero(main_channel, env.get("APP_STORE_URL", "")),
         render_features(main_channel, env),
-        render_downloads(maybe_stable, maybe_prerelease, env, has_linux_repositories=bool(linux_repositories)),
+        render_downloads(maybe_stable, maybe_prerelease, env, has_linux_repositories=bool(linux_repositories),
+                         has_fdroid=bool(fdroid)),
         render_channels(maybe_stable, maybe_prerelease),
         linux_repositories,
+        fdroid,
         render_verify(channels, site, repo, env),
         render_self_hosting(repo_url),
         "</main>",
-        render_footer(channels, site, repo_url, has_linux_repositories=bool(linux_repositories)),
+        render_footer(channels, site, repo_url, has_linux_repositories=bool(linux_repositories),
+                      has_fdroid=bool(fdroid)),
     ])
     return PAGE.format(csp=CSP, body=body)
 
@@ -405,10 +409,10 @@ def pseudo_qr_code(size=25, seed=7):
     return f'<svg class="qr" viewBox="-2 -2 {size + 4} {size + 4}" aria-hidden="true">{rects}</svg>'
 
 
-def render_downloads(maybe_stable, maybe_prerelease, env, has_linux_repositories):
+def render_downloads(maybe_stable, maybe_prerelease, env, has_linux_repositories, has_fdroid):
     parts = []
     if maybe_stable:
-        parts.append(render_channel_downloads(maybe_stable, env, has_linux_repositories))
+        parts.append(render_channel_downloads(maybe_stable, env, has_linux_repositories, has_fdroid))
     else:
         parts.append(f"""<div class="notice">
       {ICON_INFO}
@@ -420,10 +424,10 @@ def render_downloads(maybe_stable, maybe_prerelease, env, has_linux_repositories
         if maybe_stable:
             parts.append(f"""<details class="channel-more">
       <summary>Try the beta: {esc(maybe_prerelease.tag)} {prerelease_badge()}</summary>
-      {render_channel_downloads(maybe_prerelease, env, has_linux_repositories)}
+      {render_channel_downloads(maybe_prerelease, env, has_linux_repositories, has_fdroid)}
     </details>""")
         else:
-            parts.append(render_channel_downloads(maybe_prerelease, env, has_linux_repositories))
+            parts.append(render_channel_downloads(maybe_prerelease, env, has_linux_repositories, has_fdroid))
     downloads = "\n    ".join(parts)
     return f"""<section class="section section-tinted" id="download" aria-labelledby="download-title">
   <div class="wrap">
@@ -438,13 +442,13 @@ def render_downloads(maybe_stable, maybe_prerelease, env, has_linux_repositories
 </section>"""
 
 
-def render_channel_downloads(channel, env, has_linux_repositories):
+def render_channel_downloads(channel, env, has_linux_repositories, has_fdroid):
     badge = prerelease_badge() if channel.is_prerelease else '<span class="badge badge-stable">Stable</span>'
     date = ""
     if channel.published:
         date = (f'<span class="channel-sep" aria-hidden="true">·</span><time datetime="{esc(channel.published)}">'
                 f'{esc(format_date(channel.published))}</time>')
-    cards = "\n".join(render_platform(channel, os_name, env, has_linux_repositories) for os_name in OS_TITLES)
+    cards = "\n".join(render_platform(channel, os_name, env, has_linux_repositories, has_fdroid) for os_name in OS_TITLES)
     return f"""<div class="channel" data-channel-block="{esc(channel.name)}">
       <p class="channel-head">{badge}<strong>{esc(channel.title)}</strong>{date}<span class="channel-sep" aria-hidden="true">·</span><a href="{esc(channel.notes_url)}">Release notes</a></p>
       <div class="platforms">
@@ -453,7 +457,7 @@ def render_channel_downloads(channel, env, has_linux_repositories):
     </div>"""
 
 
-def render_platform(channel, os_name, env, has_linux_repositories):
+def render_platform(channel, os_name, env, has_linux_repositories, has_fdroid):
     downloads = [d for d in channel.downloads if d.os == os_name]
     primaries = [d for d in downloads if d.is_primary]
     others = [d for d in downloads if not d.is_primary]
@@ -469,6 +473,10 @@ def render_platform(channel, os_name, env, has_linux_repositories):
           replace an install from a store, and the signed release will need a fresh install.</span></p>""")
     if os_name == "android" and env.get("PLAY_STORE_URL"):
         body.append(f'<a class="button button-secondary store" href="{esc(env["PLAY_STORE_URL"])}">Get it on Google Play</a>')
+    # The F-Droid repository has the stable libre app only.
+    if os_name == "android" and has_fdroid and not channel.is_prerelease:
+        body.append('<p class="primary-alt">Without Google services, with updates: '
+                    '<a href="#fdroid">add the F-Droid repository</a></p>')
     if others:
         body.append(render_more_downloads(others, channel))
     if not body:
@@ -747,6 +755,48 @@ sudo zypper install {package}"""
     return "\n        ".join(parts)
 
 
+def render_fdroid(site, site_url):
+    """The F-Droid repository of the libre Android app (scripts/fdroid-repo.py), when the site has it."""
+    fingerprint_file = site / "fdroid" / "fingerprint.txt"
+    if not fingerprint_file.is_file() or not (site / "fdroid" / "repo" / "index-v1.jar").is_file():
+        return ""
+    fingerprint = fingerprint_file.read_text(encoding="utf-8").strip()
+    repo_url = f"{site_url}/fdroid/repo"
+    # F-Droid and its forks open fdroidrepos:// links (the https repository) in their "add" screen.
+    add_link = f"fdroidrepos://{urlsplit(site_url).netloc}{urlsplit(site_url).path}/fdroid/repo?fingerprint={fingerprint}"
+    groups = [fingerprint[i:i + 4] for i in range(0, len(fingerprint), 4)]
+    half = (len(groups) + 1) // 2
+    grouped = f'{" ".join(groups[:half])} <wbr>{" ".join(groups[half:])}'
+    return f"""<section class="section" id="fdroid" aria-labelledby="fdroid-title">
+  <div class="wrap">
+    <header class="section-head">
+      <p class="eyebrow">Android without Google</p>
+      <h2 id="fdroid-title">Updates through F-Droid.</h2>
+      <p class="section-lead">Add the TeamCraft repository to F-Droid, Droid-ify or Neo Store and the
+      libre app (push through UnifiedPush) updates with your other apps. It serves the same signed APK
+      as the release, so an install from either updates the other.</p>
+    </header>
+    <div class="fdroid-panel">
+      <div class="fdroid-copy">
+        <a class="button button-primary" href="{esc(add_link)}">{ICON_DOWNLOAD}<span>Add to F-Droid</span></a>
+        <p class="hint">On the phone: tap the button, or scan the code with the F-Droid app
+        (Repositories &rsaquo; Add repository &rsaquo; Scan QR code). Elsewhere: add the address by hand
+        and compare the fingerprint the app shows.</p>
+        {render_snippet("fdroid-url", "Repository address", repo_url, is_wide=True)}
+        <div>
+          <p class="hint">Fingerprint (SHA-256 of the repository key):</p>
+          <p class="fingerprint"><code>{grouped}</code></p>
+        </div>
+      </div>
+      <figure class="fdroid-qr">
+        <img src="fdroid/qr.svg" width="200" height="200" alt="QR code of the repository address with its fingerprint">
+        <figcaption>Scan with F-Droid</figcaption>
+      </figure>
+    </div>
+  </div>
+</section>"""
+
+
 def render_snippet(snippet_id, title, text, is_wide=False):
     wide = " snippet-wide" if is_wide else ""
     return f"""<figure class="snippet{wide}">
@@ -840,11 +890,12 @@ def render_self_hosting(repo_url):
 </section>"""
 
 
-def render_footer(channels, site, repo_url, has_linux_repositories):
+def render_footer(channels, site, repo_url, has_linux_repositories, has_fdroid):
     manifests = "".join(
         f'<li><a href="updates/{name}/latest.json">Update manifest ({"beta" if name == "prerelease" else name})</a></li>'
         for name in channels if (site / "updates" / name / "latest.json").is_file())
     linux = '<li><a href="#linux">Linux repositories</a></li>' if has_linux_repositories else ""
+    fdroid = '<li><a href="#fdroid">F-Droid repository</a></li>' if has_fdroid else ""
     return f"""<footer class="site-footer">
   <div class="wrap footer-grid">
     <div class="footer-brand">
@@ -856,6 +907,7 @@ def render_footer(channels, site, repo_url, has_linux_repositories):
       <ul>
         <li><a href="#download">All platforms</a></li>
         {linux}
+        {fdroid}
         <li><a href="#verify">Verify a download</a></li>
         {manifests}
       </ul>

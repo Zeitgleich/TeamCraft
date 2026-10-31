@@ -122,7 +122,8 @@ candidates, prereleases and special cases.
    images, desktop packages and web client are built; the Android files join it when the
    `android-release` job is done (see below). Wait for them before publishing if you can.
    Publishing runs `packages.yml`:
-   the Pages site with the update manifests and the APT/RPM repositories is rebuilt, and installed
+   the Pages site with the update manifests, the APT/RPM repositories and the F-Droid repository of
+   the libre Android app (updates.md §8) is rebuilt, and installed
    desktop apps see the release (stable: `releases/latest/download/latest.json`). It also runs
    `google-play.yml`, which uploads the App Bundle to Google Play's internal testing track
    ([Google Play](#google-play)); a published candidate goes there too.
@@ -305,6 +306,8 @@ Updater and repository secrets (how to create them: [updates.md](updates.md) §7
 `plugins.updater.pubkey` of `apps/desktop/tauri.conf.json`), `LINUX_REPO_GPG_PRIVATE_KEY`,
 `LINUX_REPO_GPG_PASSPHRASE`. Without the updater key a release has no `latest.json` and installed apps
 don't see it; without the repository key the Pages site has the manifests but no APT/RPM repositories.
+The F-Droid repository needs `FDROID_KEYSTORE_BASE64`, `FDROID_KEYSTORE_PASSWORD`, `FDROID_KEY_ALIAS`
+and `FDROID_KEY_PASSWORD` ([updates.md](updates.md) §8.3); without them the site has none.
 
 Web client key (e2ee.md §9.3): `TEAMCRAFT_WEB_RELEASE_KEY`, an Ed25519 private key in PEM. The release
 signs the web bundle with it (`crates/teamcraft-ui/scripts/sign-web-release.sh`: `release.json` plus the

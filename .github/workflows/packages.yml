@@ -1,10 +1,15 @@
 # Package site (docs/updates.md §5): when a release is published (or by hand), rebuilds the GitHub
 # Pages site: the landing page with the downloads, the desktop update manifests per channel
 # (updates/{stable,prerelease}/latest.json) and the signed APT and RPM repositories, from the newest
-# published stable release and the newest published release of any kind. Stateless: every run rebuilds everything from the releases.
+# published stable release and the newest published release of any kind, plus the F-Droid repository
+# of the libre Android app (fdroid/repo, docs/updates.md §8) from the newest stable releases.
+# Stateless: every run rebuilds everything from the releases.
 #
 # One-time setup: Settings > Pages > Source: GitHub Actions; the secrets LINUX_REPO_GPG_PRIVATE_KEY
-# (armored) and LINUX_REPO_GPG_PASSPHRASE. Without the key the site has the manifests only.
+# (armored) and LINUX_REPO_GPG_PASSPHRASE. Without the key the site has the manifests only. The
+# F-Droid repository needs FDROID_KEYSTORE_BASE64, FDROID_KEYSTORE_PASSWORD, FDROID_KEY_ALIAS and
+# FDROID_KEY_PASSWORD (docs/updates.md §8.3); without them, or when its step fails, the site is
+# published without it.
 name: Packages
 
 on:
@@ -27,10 +32,10 @@ jobs:
       contents: read
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - name: Tools (apt-ftparchive, createrepo_c, rpmsign)
+      - name: Tools (apt-ftparchive, createrepo_c, rpmsign, qrencode)
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y -qq apt-utils createrepo-c rpm
+          sudo apt-get install -y -qq apt-utils createrepo-c rpm qrencode
       - id: pages
         uses: actions/configure-pages@45bfe0192ca1faeb007ade9deae92b16b8254a0d # v6.0.0
       - name: Download the packages of the newest releases
@@ -54,6 +59,40 @@ jobs:
             echo "GPG_KEY_ID=$fingerprint"
             echo "GPG_PASSPHRASE_FILE=$GNUPGHOME/passphrase"
           } >> "$GITHUB_ENV"
+      # Optional and isolated: a missing key or a failure here leaves the F-Droid repository out of
+      # this build, never the APT/RPM repositories or the page. fdroid-repo.py moves the finished
+      # repository into the site in one rename, so a failure leaves nothing half-written behind.
+      - name: F-Droid repository (optional)
+        id: fdroid
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          SITE_URL: ${{ steps.pages.outputs.base_url }}
+          # How many stable versions the repository offers (the newest first); about 85 MB each.
+          KEEP_VERSIONS: ${{ vars.FDROID_KEEP_VERSIONS || '3' }}
+          KEYSTORE_BASE64: ${{ secrets.FDROID_KEYSTORE_BASE64 }}
+          FDROID_KEYSTORE_PASSWORD: ${{ secrets.FDROID_KEYSTORE_PASSWORD }}
+          FDROID_KEY_ALIAS: ${{ secrets.FDROID_KEY_ALIAS }}
+          FDROID_KEY_PASSWORD: ${{ secrets.FDROID_KEY_PASSWORD }}
+        run: |
+          if [ -z "$KEYSTORE_BASE64" ]; then
+            echo "::warning::no F-Droid repository key (FDROID_KEYSTORE_BASE64): no F-Droid repository"
+            exit 0
+          fi
+          export FDROID_KEYSTORE="$RUNNER_TEMP/fdroid/keystore.p12"
+          mkdir -p "$(dirname "$FDROID_KEYSTORE")"
+          trap 'rm -f "$FDROID_KEYSTORE"' EXIT
+          (umask 077 && printf '%s' "$KEYSTORE_BASE64" | base64 -d > "$FDROID_KEYSTORE")
+          pipx install fdroidserver==2.4.5
+          scripts/fdroid-repo.py fetch --work "$RUNNER_TEMP/work" --repo "$REPO" --keep "$KEEP_VERSIONS"
+          scripts/fdroid-repo.py build --work "$RUNNER_TEMP/work" --site "$RUNNER_TEMP/site" \
+            --site-url "$SITE_URL" --repo "$REPO"
+      - name: F-Droid repository failed
+        if: steps.fdroid.outcome == 'failure'
+        run: |
+          rm -rf "$RUNNER_TEMP/site/fdroid" "$RUNNER_TEMP/site/.fdroid-staging"
+          echo "::warning::the F-Droid repository failed; this build publishes the site without it"
       - name: Build the site
         env:
           SITE_URL: ${{ steps.pages.outputs.base_url }}
