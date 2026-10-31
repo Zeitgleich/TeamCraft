@@ -31,6 +31,7 @@ use crate::calls::CallHost;
 use crate::core::commands::CoreHost;
 
 pub use feed::BUILD_VERSION;
+#[cfg(target_os = "linux")]
 pub use feed::install_kind;
 
 const FILE_NAME: &str = "updates.json";
