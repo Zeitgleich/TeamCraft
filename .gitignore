@@ -13,3 +13,8 @@ core.[0-9]*
 !core/
 # The UI stylesheet joined from its area files by a Trunk hook (crates/teamcraft-ui/scripts/bundle-css.sh).
 crates/teamcraft-ui/gen/
+# Signing keys (Android app, F-Droid repository): kept in the password manager and GitHub secrets,
+# never in the tree (apps/android/README.md "Signing", docs/updates.md §8.3).
+*.p12
+*.jks
+*.keystore

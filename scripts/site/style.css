@@ -3041,3 +3041,59 @@ details[open] > summary .chevron {
     border: 1px solid CanvasText;
   }
 }
+
+/* ---- F-Droid ---- */
+
+.fdroid-panel {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 32px;
+  align-items: start;
+}
+
+.fdroid-copy {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 16px;
+  min-width: 0;
+}
+
+.fdroid-copy > *,
+.fdroid-copy .fingerprint {
+  align-self: stretch;
+}
+
+.fdroid-copy > .button {
+  align-self: flex-start;
+}
+
+.fdroid-qr {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+  padding: 16px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  background: var(--surface);
+  color: var(--text-2);
+  font-size: 0.875rem;
+}
+
+/* The code keeps its light background in dark mode; scanners need the contrast. */
+.fdroid-qr img {
+  display: block;
+  border-radius: 8px;
+  background: #fff;
+}
+
+@media (max-width: 760px) {
+  .fdroid-panel {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .fdroid-qr {
+    justify-self: center;
+  }
+}

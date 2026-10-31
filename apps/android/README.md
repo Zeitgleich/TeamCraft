@@ -318,6 +318,10 @@ The certificate's SHA-256 (`keytool -list -v -keystore teamcraft.p12`) is the on
 shows as the app signing key certificate and the one `apksigner verify --print-certs` prints for a
 release APK.
 
+The F-Droid repository on the Pages site (docs/updates.md §8) serves the libre release APKs as they
+are, so they carry this signature too, and an install from the GitHub APK and one from F-Droid update
+each other. Its index is signed with a separate repository key (`FDROID_*` secrets), never this one.
+
 ## Google Play closed testing
 
 1. Create the app in the Play Console with the deployment's application ID (`de.zeitgleich.teamcraft`
