@@ -944,7 +944,12 @@ impl<S: LocalStore> CoreChatBackend<S> {
     // message was read; one newer than all of them is read once this device marked the
     // conversation read after it arrived.
     let maybe_lines_read = self.read(lines_read_through(&self.store, response.id));
+    // Imported history counts as read (e2ee.md §4.10), like on the server.
+    let maybe_importer = self.importer();
     move |message: &StoredMessage| {
+      if crate::imported::trusted_origin(message, maybe_importer).is_some() {
+        return false;
+      }
       let is_read_line = message
         .line_position()
         .is_some_and(|at| maybe_lines_read.is_some_and(|read| at <= read));
@@ -3153,6 +3158,45 @@ mod tests {
       let party = row.reactions.iter().find(|r| r.emoji == "\u{1f389}").unwrap();
       assert_eq!(party.count, 1);
       assert!(!party.reacted_by_me);
+    }
+
+    #[test]
+    fn imported_history_is_never_unread() {
+      let backend = backend_with_importer(Some(IMPORTER));
+      let stored = imported_message(IMPORTER, ImportedAuthor::Deleted, Vec::new());
+      let conversation = ConversationResponse {
+        id: id(10),
+        maybe_space_id: None,
+        kind: ConversationKindProto::Channel,
+        maybe_name: Some("general".into()),
+        maybe_topic: None,
+        maybe_description: None,
+        visibility: ConversationVisibility::Public,
+        history_policy: teamcraft_proto::HistoryPolicy::Full,
+        maybe_category_id: None,
+        is_archived: false,
+        moderation: Default::default(),
+        is_integration: false,
+        contains_guests: false,
+        maybe_organizer_user_id: None,
+        maybe_my_permissions: None,
+        maybe_importer_user_id: None,
+        maybe_imported_through: None,
+        maybe_my_membership: None,
+        participants: Vec::new(),
+        maybe_image: None,
+      };
+      assert!(!backend.unread_check(&conversation, None)(&stored));
+      let live = StoredMessage {
+        content: MessageContent::Text {
+          body: "live".into(),
+          mentions: Vec::new(),
+          meta: MessageMeta::default(),
+        },
+        sender_user_id: id(3),
+        ..stored
+      };
+      assert!(backend.unread_check(&conversation, None)(&live));
     }
 
     fn backend_with_importer(maybe_importer: Option<i64>) -> CoreChatBackend<MemoryStore> {
