@@ -718,7 +718,7 @@ extension CallManager: CallListener {
 
   private static func reason(for end: CallEndReason?) -> CXCallEndedReason {
     switch end {
-    case .failed: return .failed
+    case .failed, .serverLost: return .failed
     case .removedByHost, .endedByHost: return .remoteEnded
     default: return .remoteEnded
     }
@@ -727,6 +727,7 @@ extension CallManager: CallListener {
   private static func note(for end: CallEndReason?) -> LocalizedStringResource? {
     switch end {
     case .failed: return "call_failed"
+    case .serverLost: return "call_server_lost"
     case .removedByHost: return "call_removed_by_host"
     case .endedByHost: return "call_ended_by_host"
     default: return nil

@@ -771,6 +771,7 @@ impl TeamCraft {
       hub,
       self.engine_jobs()?.clone(),
       &self.network,
+      self.connection.clone(),
     )
     .await
   }

@@ -53,6 +53,7 @@
   <string name="call_secured">Ende-zu-Ende-verschlüsselt</string>
   <string name="call_ended">Anruf beendet</string>
   <string name="call_failed">Der Anruf wurde unterbrochen.</string>
+  <string name="call_server_lost">Der Anrufserver ist zurzeit nicht mehr erreichbar, der Anruf wurde deshalb beendet. Versuche es gleich noch einmal.</string>
   <string name="call_removed_by_host">Der Gastgeber hat dich aus dem Anruf entfernt.</string>
   <string name="call_ended_by_host">Der Gastgeber hat den Anruf für alle beendet.</string>
   <string name="call_privacy_code_hint">Vergleiche diesen Code mit den anderen, damit niemand mithört:</string>

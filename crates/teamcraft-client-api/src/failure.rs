@@ -197,10 +197,17 @@ pub enum CallFailure {
   /// The browser didn't let the page play sound (no interaction with the page yet, or a site
   /// setting).
   SoundBlocked,
+  /// The call broke off and couldn't be resumed within the reconnect grace period while the chat
+  /// server stayed reachable: the call server went away (restarted, crashed) and didn't come back
+  /// in time (issue #427).
+  ServerLost,
+  /// The call broke off and couldn't be resumed within the reconnect grace period, along with the
+  /// connection to the chat server: this device's own network.
+  ConnectionLost,
 }
 
 impl CallFailure {
-  const ALL: [Self; 27] = [
+  const ALL: [Self; 29] = [
     Self::MicrophoneDenied,
     Self::MicrophoneMissing,
     Self::MicrophoneInUse,
@@ -228,6 +235,8 @@ impl CallFailure {
     Self::SpeakersUnavailable,
     Self::SpeakersMissing,
     Self::SoundBlocked,
+    Self::ServerLost,
+    Self::ConnectionLost,
   ];
 
   /// Stable name on the wire, after [`CALL_PREFIX`].
@@ -260,6 +269,8 @@ impl CallFailure {
       Self::SpeakersUnavailable => "speakers_unavailable",
       Self::SpeakersMissing => "speakers_missing",
       Self::SoundBlocked => "sound_blocked",
+      Self::ServerLost => "server_lost",
+      Self::ConnectionLost => "connection_lost",
     }
   }
 
