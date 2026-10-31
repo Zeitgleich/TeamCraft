@@ -26,6 +26,7 @@ import androidx.core.graphics.drawable.IconCompat
 import de.zeitgleich.teamcraft.R
 import de.zeitgleich.teamcraft.security.AppLockPrefs
 import de.zeitgleich.teamcraft.ui.MainActivity
+import de.zeitgleich.teamcraft.ui.ShareShortcuts
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -455,6 +456,8 @@ class MessageNotifier(
       .setShortLabel(label)
       .setLongLived(true)
       .setLocusId(LocusIdCompat(spec.id))
+      // Also a direct share target, so this push doesn't drop the share sheet's entry (#829).
+      .setCategories(setOf(ShareShortcuts.CATEGORY))
       .setIcon(shortcutIcon(spec, label))
       .setIntent(openConversationIntent(spec.id).setAction(Intent.ACTION_VIEW))
       .apply { spec.maybePerson?.let { setPerson(person(it)) } }

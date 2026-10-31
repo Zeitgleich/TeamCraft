@@ -165,6 +165,14 @@ pub struct ConversationItem {
   /// The other person in a one-to-one DM, so the list can show their profile picture.
   #[uniffi(default = None)]
   pub maybe_peer_id: Option<String>,
+  /// The user's notes to themself ("Notes" in the lists, issue #829), decided by the core from
+  /// the DM's participants; its `name` is empty, the apps name it in the user's language.
+  #[uniffi(default = false)]
+  pub is_notes_to_self: bool,
+  /// When the newest top-level message was sent; filled only where the order needs it
+  /// ([`share_targets`]), `None` elsewhere and for conversations without messages.
+  #[uniffi(default = None)]
+  pub maybe_last_activity_ms: Option<i64>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
@@ -477,8 +485,23 @@ impl ConversationItem {
       can_post: conversation.can_post,
       maybe_peer_presence: maybe_peer.as_ref().and_then(|peer| peer.maybe_presence),
       maybe_peer_id: maybe_peer.map(|peer| peer.id.to_string()),
+      is_notes_to_self: conversation.is_notes_to_self,
+      maybe_last_activity_ms: None,
     }
   }
+}
+
+/// Where a share from another app can go (issue #829): the conversations the user may post in,
+/// their notes first, then the most recently active, then by name.
+pub(crate) fn share_targets(items: Vec<ConversationItem>) -> Vec<ConversationItem> {
+  let mut targets: Vec<ConversationItem> = items.into_iter().filter(|item| item.can_post).collect();
+  targets.sort_by(|a, b| {
+    b.is_notes_to_self
+      .cmp(&a.is_notes_to_self)
+      .then_with(|| b.maybe_last_activity_ms.cmp(&a.maybe_last_activity_ms))
+      .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
+  });
+  targets
 }
 
 /// The other person in a one-to-one DM; `maybe_presence` is `None` while they are not known yet.
@@ -1060,6 +1083,51 @@ mod tests {
     assert_eq!(unknown.author_name, "");
   }
 
+  /// Issue #829: the notes reach the apps marked as such (their name is empty).
+  #[test]
+  fn the_notes_item_is_marked() {
+    let notes = ConversationItem::from_view(notes_view(), None, None, false);
+    assert!(notes.is_notes_to_self);
+    assert_eq!(notes.name, "");
+    let dm = ConversationItem::from_view(conversation_view(6, "Alex Example"), None, None, false);
+    assert!(!dm.is_notes_to_self);
+  }
+
+  mod share_targets {
+    use super::*;
+
+    #[test]
+    fn notes_come_first_then_the_most_recent_then_by_name() {
+      let item = |view, maybe_last_activity_ms| ConversationItem {
+        maybe_last_activity_ms,
+        ..ConversationItem::from_view(view, None, None, false)
+      };
+      let targets = share_targets(vec![
+        item(conversation_view(1, "zeta"), None),
+        item(conversation_view(2, "Alpha"), None),
+        item(conversation_view(3, "old"), Some(100)),
+        item(notes_view(), None),
+        item(conversation_view(4, "new"), Some(200)),
+      ]);
+      let ids: Vec<&str> = targets.iter().map(|target| target.id.as_str()).collect();
+      assert_eq!(ids, vec!["9", "4", "3", "2", "1"]);
+    }
+
+    #[test]
+    fn conversations_the_user_may_not_post_in_are_left_out() {
+      let read_only = view::Conversation {
+        can_post: false,
+        ..conversation_view(1, "announcements")
+      };
+      let targets = share_targets(vec![
+        ConversationItem::from_view(read_only, None, None, false),
+        ConversationItem::from_view(notes_view(), None, None, false),
+      ]);
+      assert_eq!(targets.len(), 1);
+      assert!(targets[0].is_notes_to_self);
+    }
+  }
+
   fn message() -> view::Message {
     view::Message {
       id: view::id_from_raw(7),
@@ -1090,6 +1158,39 @@ mod tests {
       is_deleted: false,
       device_setup: view::DeviceSetup::Unknown,
       maybe_email: None,
+    }
+  }
+
+  fn notes_view() -> view::Conversation {
+    view::Conversation {
+      kind: ConversationKindView::Direct,
+      category: view::SidebarCategory::DirectMessages,
+      member_ids: vec![view::id_from_raw(1)],
+      is_notes_to_self: true,
+      ..conversation_view(9, "")
+    }
+  }
+
+  fn conversation_view(id: u64, name: &str) -> view::Conversation {
+    view::Conversation {
+      id: view::id_from_raw(id),
+      maybe_space: None,
+      kind: ConversationKindView::Public,
+      category: view::SidebarCategory::Channels,
+      name: name.into(),
+      topic: String::new(),
+      member_ids: Vec::new(),
+      unread_count: 0,
+      mention_count: 0,
+      is_favorite: false,
+      is_muted: false,
+      can_post: true,
+      bookmarks: Vec::new(),
+      is_catching_up: false,
+      maybe_image_version: None,
+      is_notes_to_self: false,
+      maybe_permissions: None,
+      has_only_deactivated_others: false,
     }
   }
 }

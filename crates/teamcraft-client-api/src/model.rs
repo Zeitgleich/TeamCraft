@@ -399,6 +399,10 @@ pub enum MembershipIssue {
   },
   /// That welcome didn't come in time; "retry" asks the members again.
   EncryptionSetupFailed,
+  /// This device asked to be let into a channel's encryption group (a join, an admin's self-join)
+  /// and no member has let it in yet; it asks again on its own (issue #907). Only messages from
+  /// the join on become readable.
+  WaitingForAdmission,
   #[serde(other)]
   Unknown,
 }

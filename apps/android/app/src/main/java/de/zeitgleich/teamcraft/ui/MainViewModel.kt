@@ -368,6 +368,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
   suspend fun conversations(): List<ConversationItem> = read { conversations() } ?: emptyList()
 
+  /** Where a share can go (notes first, then by last activity), or null when it can't be read. */
+  suspend fun shareTargets(): List<ConversationItem>? = read { shareTargets() }
+
   /**
    * The newest message of each conversation, for the chat list. Reads the local store only (one
    * small window per conversation); names come from the snapshot.

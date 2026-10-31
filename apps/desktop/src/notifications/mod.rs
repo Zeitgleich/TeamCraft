@@ -109,7 +109,14 @@ pub async fn notify_user(
     return Ok(());
   }
   // The plugin shows title and text only.
-  notify_plugin(&app, notification)
+  let is_ringing = notification.kind.is_ringing();
+  let result = notify_plugin(&app, notification);
+  if is_ringing && result.is_err() {
+    // A call must not ring unseen (#962): the window with its incoming-call card comes up instead.
+    tracing::warn!("no notification for a ringing call; bringing the window up");
+    crate::tray::show_main_window(&app);
+  }
+  result
 }
 
 /// The toast's logo: the picture's file, cut to a circle by the toast for a person.
@@ -331,6 +338,7 @@ mod linux {
       }),
     };
     let Some(id) = probe.buses().notify(&desktop).await else {
+      tracing::debug!(kind = ?notification.kind, "the notification service did not answer");
       return false;
     };
     shown.remember(tag, id, &notification.title, lines);

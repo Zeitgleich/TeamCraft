@@ -290,6 +290,10 @@ const ABANDONED_KEY: &str = "abandoned";
 /// Longest saved file name in bytes; common file systems allow 255 and the copy suffix needs room.
 const MAX_FILE_NAME_BYTES: usize = 200;
 
+/// Numbered names tried for a saved file whose name is taken (`name (2)` … `name (N)`).
+#[cfg(not(target_arch = "wasm32"))]
+const MAX_NAME_ATTEMPTS: usize = 10_000;
+
 /// How long the browser gets to start reading a download before its object URL is revoked.
 #[cfg(target_arch = "wasm32")]
 const REVOKE_DELAY_MS: i32 = 1000;
@@ -1012,8 +1016,8 @@ impl DiskDownload {
     let file_name = download.reference().file_name.clone();
     let plaintext = download.open().await?;
     std::fs::create_dir_all(&directory).map_err(CoreError::LocalFile)?;
-    let path = unique_path(&directory, &file_name);
-    write_file(&path, plaintext.expose_secret())?;
+    let (file, path) = create_unique(&directory, &file_name)?;
+    write_into(file, &path, plaintext.expose_secret())?;
     Ok(path.to_string_lossy().into_owned())
   }
 
@@ -1064,6 +1068,15 @@ impl DiskDownload {
   pub fn to_path(self, path: std::path::PathBuf) -> Self {
     Self {
       maybe_target: Some(path),
+      ..self
+    }
+  }
+
+  /// Writes the file under a new name into `folder` (picked for several files at once) instead of
+  /// the download directory. The browser saves to its download folder anyway.
+  pub fn into_folder(self, folder: std::path::PathBuf) -> Self {
+    Self {
+      maybe_directory: Some(folder),
       ..self
     }
   }
@@ -1511,31 +1524,49 @@ fn revoke_later(url: String) {
   }
 }
 
-/// `name`, or `name (2)`, `name (3)`, ... if taken. The name is sanitized first.
+/// Creates `name`, or `name (2)`, `name (3)`, ... if taken, in `directory`. The name is sanitized
+/// first. Each name is claimed by creating the file exclusively, so several downloads of files with
+/// the same name into one folder ("Download all" of six `image.jpg`, #1014) never write over each
+/// other or a file that was there before.
 #[cfg(not(target_arch = "wasm32"))]
-fn unique_path(directory: &std::path::Path, file_name: &str) -> std::path::PathBuf {
+fn create_unique(
+  directory: &std::path::Path,
+  file_name: &str,
+) -> Result<(std::fs::File, std::path::PathBuf), CoreError> {
   let safe = sanitize_file_name(file_name);
-  let candidate = directory.join(&safe);
-  if !candidate.exists() {
-    return candidate;
-  }
   let (stem, extension) = match safe.rsplit_once('.') {
     Some((stem, extension)) => (stem.to_string(), format!(".{extension}")),
     None => (safe.clone(), String::new()),
   };
-  (2..)
-    .map(|number| directory.join(format!("{stem} ({number}){extension}")))
-    .find(|path| !path.exists())
-    .unwrap_or(candidate)
+  let candidates =
+    std::iter::once(safe.clone()).chain((2..).map(|number| format!("{stem} ({number}){extension}")));
+  for name in candidates.take(MAX_NAME_ATTEMPTS) {
+    let path = directory.join(name);
+    match std::fs::File::create_new(&path) {
+      Ok(file) => return Ok((file, path)),
+      Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+      Err(error) => return Err(CoreError::LocalFile(error)),
+    }
+  }
+  Err(CoreError::LocalFile(std::io::Error::new(
+    std::io::ErrorKind::AlreadyExists,
+    "every numbered name is taken",
+  )))
 }
 
 /// Writes a downloaded file. A write that fails halfway removes what it left, so no cut-off file
 /// looks like the real one.
 #[cfg(not(target_arch = "wasm32"))]
 fn write_file(path: &std::path::Path, bytes: &[u8]) -> Result<(), CoreError> {
+  let file = std::fs::File::create(path).map_err(CoreError::LocalFile)?;
+  write_into(file, path, bytes)
+}
+
+/// Writes `bytes` into the opened `file` at `path`; removes it again when the write fails.
+#[cfg(not(target_arch = "wasm32"))]
+fn write_into(mut file: std::fs::File, path: &std::path::Path, bytes: &[u8]) -> Result<(), CoreError> {
   use std::io::Write;
 
-  let mut file = std::fs::File::create(path).map_err(CoreError::LocalFile)?;
   if let Err(error) = file.write_all(bytes) {
     drop(file);
     // Deliberately ignored: the write error is what the user needs; a file that can't be removed
@@ -1650,11 +1681,17 @@ mod tests {
       rand_core::RngCore::next_u64(&mut OsRng)
     ));
     std::fs::create_dir_all(&directory).unwrap();
-    let escaped = unique_path(&directory, "../../etc/passwd");
+    let created = |name: &str| create_unique(&directory, name).unwrap().1;
+    let escaped = created("../../etc/passwd");
     assert_eq!(escaped.parent(), Some(directory.as_path()));
-    assert_eq!(unique_path(&directory, "...").file_name().unwrap(), "file");
+    assert_eq!(created("...").file_name().unwrap(), "file");
     std::fs::write(directory.join("a.txt"), b"x").unwrap();
-    assert_eq!(unique_path(&directory, "a.txt").file_name().unwrap(), "a (2).txt");
+    assert_eq!(created("a.txt").file_name().unwrap(), "a (2).txt");
+    // Several files of the same name into one folder each get their own (#1014).
+    assert_eq!(created("a.txt").file_name().unwrap(), "a (3).txt");
+    assert_eq!(created("b").file_name().unwrap(), "b");
+    assert_eq!(created("b").file_name().unwrap(), "b (2)");
+    assert_eq!(std::fs::read(directory.join("a.txt")).unwrap(), b"x");
     std::fs::remove_dir_all(&directory).unwrap();
   }
 

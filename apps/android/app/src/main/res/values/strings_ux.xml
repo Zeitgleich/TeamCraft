@@ -71,6 +71,14 @@
     <item quantity="one">%d file</item>
     <item quantity="other">%d files</item>
   </plurals>
+  <!-- The notes to self, as the web and desktop name them (notes-title). -->
+  <string name="notes_title">Notes</string>
+  <string name="share_recent">Recent</string>
+  <string name="share_no_match">No conversation matches.</string>
+  <string name="share_empty_title">Nowhere to share to yet</string>
+  <string name="share_empty">Conversations you can write in show up here once they have synced.</string>
+  <string name="share_load_failed_title">Conversations didn\'t load</string>
+  <string name="share_load_failed">Your shared content is kept. Try again in a moment.</string>
 
   <!-- App lock and composer settings -->
   <string name="app_lock">App lock (fingerprint, face or screen lock)</string>

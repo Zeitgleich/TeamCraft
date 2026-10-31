@@ -65,6 +65,14 @@
     <item quantity="one">%d Datei</item>
     <item quantity="other">%d Dateien</item>
   </plurals>
+  <!-- The notes to self, as the web and desktop name them (notes-title). -->
+  <string name="notes_title">Mein Speicher</string>
+  <string name="share_recent">Zuletzt</string>
+  <string name="share_no_match">Keine Unterhaltung passt.</string>
+  <string name="share_empty_title">Noch nichts zum Teilen</string>
+  <string name="share_empty">Unterhaltungen, in denen du schreiben kannst, erscheinen hier, sobald sie synchronisiert sind.</string>
+  <string name="share_load_failed_title">Unterhaltungen nicht geladen</string>
+  <string name="share_load_failed">Deine geteilten Inhalte bleiben erhalten. Versuche es gleich noch einmal.</string>
 
   <!-- App lock and composer settings -->
   <string name="app_lock">App-Sperre (Fingerabdruck, Gesicht oder Displaysperre)</string>

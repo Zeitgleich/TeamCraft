@@ -357,6 +357,14 @@ impl TeamCraft {
       .await
   }
 
+  /// Where a share from another app can go: the conversations the user may post in, their notes
+  /// first, then by last activity (issue #829).
+  pub async fn share_targets(&self) -> Result<Vec<ConversationItem>, TeamCraftError> {
+    self
+      .call(|engine| Box::pin(async move { engine.share_targets() }))
+      .await
+  }
+
   /// The newest `limit` top-level messages, oldest first.
   pub async fn messages(
     &self,

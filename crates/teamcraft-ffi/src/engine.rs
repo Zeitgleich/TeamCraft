@@ -50,7 +50,7 @@ use crate::types::{
   AccountState, AppConfig, ConversationItem, DirectPeer, LinkPlatform, LinkRequestItem, MentionSettings,
   MessageItem, NotificationContent, NotificationContentSettings, Presence, PushDiagnosticsInfo,
   PushNotification, PushService, SearchHitItem, SegmentPrefetchMode, SegmentPrefetchResult, StoreProblem,
-  TestPushResult,
+  TestPushResult, share_targets,
 };
 use crate::{EventListener, TokenProvider};
 
@@ -781,6 +781,26 @@ impl Engine {
         })
         .collect(),
     )
+  }
+
+  /// Where a share from another app can go ([`share_targets`]), each with its last activity.
+  pub(crate) fn share_targets(&self) -> Result<Vec<ConversationItem>, TeamCraftError> {
+    let backend = self.backend()?;
+    let items = self
+      .conversations()?
+      .into_iter()
+      .filter(|item| item.can_post)
+      .map(|item| {
+        let maybe_last_activity_ms = parse_id::<ConversationId>(&item.id)
+          .ok()
+          .and_then(|id| backend.last_activity(id));
+        ConversationItem {
+          maybe_last_activity_ms,
+          ..item
+        }
+      })
+      .collect();
+    Ok(share_targets(items))
   }
 
   pub(crate) fn messages(

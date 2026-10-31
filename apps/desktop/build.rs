@@ -44,6 +44,7 @@ const COMMANDS: &[&str] = &[
   "core_query",
   "core_attachment",
   "core_save_attachment",
+  "core_save_attachments",
   "core_stage_file",
   "core_focus",
   "core_stop",

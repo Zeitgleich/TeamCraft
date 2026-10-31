@@ -37,6 +37,8 @@ mod webview_downloads;
 #[cfg(target_os = "linux")]
 mod webview_memory;
 mod webview_menu;
+#[cfg(target_os = "linux")]
+mod webview_scrolling;
 mod window_chrome;
 #[cfg(windows)]
 mod windows_shell;
@@ -95,7 +97,7 @@ fn main() -> anyhow::Result<()> {
   let builder = builder.plugin(tauri_plugin_clipboard_manager::init());
   builder
     .plugin(tauri_plugin_opener::init())
-    // The save dialog of "Save…" (core_save_attachment); the webview gets no dialog permission.
+    // The save and folder dialogs of "Save…" and "Download all" (core_save_attachment[s]); the webview gets no dialog permission.
     .plugin(tauri_plugin_dialog::init())
     .plugin(tauri_plugin_global_shortcut::Builder::new().build())
     .plugin(tauri_plugin_notification::init())
@@ -258,6 +260,7 @@ fn main() -> anyhow::Result<()> {
       core::commands::core_query,
       core::commands::core_attachment,
       core::commands::core_save_attachment,
+      core::commands::core_save_attachments,
       core::commands::core_stage_file,
       core::commands::core_stop,
       core::media::core_media_get,
@@ -418,11 +421,12 @@ fn create_main_window(app: &tauri::App) -> tauri::Result<()> {
     let configured = window.with_webview(move |webview| {
       let webview = webview.inner();
       webview_memory::configure(&webview);
+      webview_scrolling::configure(&webview);
       webview_menu::filter_menus(&webview);
       dropped_files::watch(&webview, dropped, handle);
     });
     if let Err(error) = configured {
-      tracing::warn!(%error, "could not set up the webview's memory caches, menus and file drops");
+      tracing::warn!(%error, "could not set up the webview's memory caches, scrolling, menus and file drops");
     }
   }
   tray::reveal_without_host(app.handle());

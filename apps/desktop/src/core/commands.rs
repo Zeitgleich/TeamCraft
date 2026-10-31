@@ -18,7 +18,7 @@ use teamcraft_media::effects::normalize_background_file;
 use teamcraft_proto::{ConversationId, MessageId, UserId};
 use tokio::sync::oneshot::error::RecvError;
 
-use super::runtime::{CoreConfig, CoreRuntime, FailureHandler, KeyChoice, TokenCache};
+use super::runtime::{CoreConfig, CoreRuntime, FailureHandler, KeyChoice, SaveTo, TokenCache};
 use crate::auth::commands::Service;
 use crate::auth::{AuthService, TokenStore};
 use crate::calls::CallHost;
@@ -402,9 +402,55 @@ pub async fn core_save_attachment(
   // Never the path: it names the file.
   tracing::info!(conversation_id = %conversation, message_id = %message, "saving a file to the picked place");
   runtime
-    .save_attachment(conversation, message, file_id, path)
+    .save_attachment(conversation, message, file_id, SaveTo::File(path))
     .await?;
   Ok(true)
+}
+
+/// "Download all" under several files (#1014): asks once for a folder, then the core downloads and
+/// decrypts every file into it under its own name (a taken name gets a number), a few at a time
+/// beside its loop; each file's card shows its progress and result. Answers how many files are on
+/// their way, `0` when the user cancelled the dialog. One dialog for all files: a save dialog per
+/// file competed for the window's one sheet, and only the first file was saved.
+#[tauri::command(rename_all = "snake_case")]
+pub async fn core_save_attachments(
+  window: tauri::WebviewWindow,
+  host: State<'_, CoreHost>,
+  conversation: ConversationId,
+  message: MessageId,
+  file_ids: Vec<String>,
+) -> Result<usize, CommandError> {
+  let runtime = host.current()?;
+  let maybe_folder = ask_folder(&window).await.map_err(|error| {
+    tracing::warn!(%error, conversation_id = %conversation, "no files saved");
+    CommandError(error.to_string())
+  })?;
+  let Some(folder) = maybe_folder else {
+    tracing::debug!(conversation_id = %conversation, "the folder dialog was cancelled");
+    return Ok(0);
+  };
+  tracing::info!(
+    conversation_id = %conversation,
+    message_id = %message,
+    files = file_ids.len(),
+    "saving files to the picked folder"
+  );
+  let mut queued = 0;
+  let mut maybe_failure = None;
+  for file_id in file_ids {
+    match runtime
+      .save_attachment(conversation, message, file_id, SaveTo::Folder(folder.clone()))
+      .await
+    {
+      Ok(()) => queued += 1,
+      Err(error) => maybe_failure = Some(error),
+    }
+  }
+  match maybe_failure {
+    // A file that couldn't even be queued has no card state to show it: the UI says so.
+    Some(error) => Err(CommandError(error)),
+    None => Ok(queued),
+  }
 }
 
 /// Why the save dialog gave no place to save to, though the user didn't cancel it.
@@ -436,6 +482,20 @@ async fn ask_save_path(
     dialog = dialog.set_directory(downloads);
   }
   dialog.save_file(move |maybe_path| drop(sender.send(maybe_path)));
+  picked_path(receiver.await)
+}
+
+/// The folder the user picks in the system's folder dialog, starting in the downloads folder;
+/// `None` when cancelled.
+async fn ask_folder(window: &tauri::WebviewWindow) -> Result<Option<PathBuf>, SaveDialogError> {
+  use tauri_plugin_dialog::DialogExt;
+
+  let (sender, receiver) = tokio::sync::oneshot::channel();
+  let mut dialog = window.dialog().file().set_parent(window);
+  if let Ok(downloads) = window.path().download_dir() {
+    dialog = dialog.set_directory(downloads);
+  }
+  dialog.pick_folder(move |maybe_path| drop(sender.send(maybe_path)));
   picked_path(receiver.await)
 }
 

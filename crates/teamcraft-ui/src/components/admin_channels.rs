@@ -12,7 +12,7 @@ use crate::components::pending_button::PendingButton;
 use crate::components::sliding_indicator::SlidingIndicator;
 use crate::feedback::PendingAction;
 use crate::i18n::{I18n, use_i18n};
-use crate::model::{ConversationId, ConversationKind, UserId};
+use crate::model::{ConversationId, ConversationKind, MembershipIssue, UserId};
 use crate::state::{AppState, use_app_state};
 
 const INACTIVE_AFTER_DAYS: i64 = 30;
@@ -513,13 +513,22 @@ fn ChannelDetail(channel: AdminChannel, latest: Memo<Option<AdminChannel>>) -> i
       <span>{move || i18n.t("admin-no-content")}</span>
     </p>
     <div class="detail-actions">
-      {is_private.then(|| {
-        view! {
-          <button class="btn" on:click=move |_| outcome.set(Some(state.write(|backend| backend.admin_join_channel(id))))>
-            {move || i18n.t("admin-join")}
-          </button>
-        }
-      })}
+      {move || {
+        // Only for an admin who isn't in the channel yet, or whose device no member let in (a
+        // refused self-join asks again from here, issue #907).
+        let join = admin_join_state(state, id);
+        (is_private && join != AdminJoinState::Joined).then(|| {
+          let label = match join {
+            AdminJoinState::Waiting => "admin-join-again",
+            AdminJoinState::NotMember | AdminJoinState::Joined => "admin-join",
+          };
+          view! {
+            <button class="btn" on:click=move |_| outcome.set(Some(state.write(|backend| backend.admin_join_channel(id))))>
+              {move || i18n.t(label)}
+            </button>
+          }
+        })
+      }}
       <button class="btn" disabled title=move || i18n.t("admin-soon")>{move || i18n.t("admin-archive")}</button>
     </div>
     {move || maybe_owner.get().is_none().then(|| view! { <OwnerAssign channel=id /> })}
@@ -536,6 +545,31 @@ fn ChannelDetail(channel: AdminChannel, latest: Memo<Option<AdminChannel>>) -> i
       }}
     </p>
   }
+}
+
+/// Where the admin viewing the console stands in a channel.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum AdminJoinState {
+  NotMember,
+  /// A member whose device asked to be let into the encryption group and waits.
+  Waiting,
+  Joined,
+}
+
+fn admin_join_state(state: AppState, channel: ConversationId) -> AdminJoinState {
+  state.read(|backend| {
+    if backend.conversation(channel).is_none() {
+      return AdminJoinState::NotMember;
+    }
+    let is_waiting = backend
+      .membership_issues(channel)
+      .contains(&MembershipIssue::WaitingForAdmission);
+    if is_waiting {
+      AdminJoinState::Waiting
+    } else {
+      AdminJoinState::Joined
+    }
+  })
 }
 
 /// Picks a new owner for a channel without one, from its members (admin.md §2.5).

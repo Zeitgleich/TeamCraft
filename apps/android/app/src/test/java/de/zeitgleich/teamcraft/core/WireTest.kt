@@ -43,6 +43,17 @@ class WireTest {
   }
 
   @Test
+  fun theNotesFlagDecodesAndDefaultsToFalse() {
+    val notes = WireJson.decodeFromString(
+      Conversation.serializer(),
+      """{"id":"9","kind":"Direct","name":"","is_notes_to_self":true}""",
+    )
+    assertTrue(notes.isNotesToSelf)
+    val older = WireJson.decodeFromString(Conversation.serializer(), """{"id":"9","kind":"Direct","name":"Amy"}""")
+    assertFalse(older.isNotesToSelf)
+  }
+
+  @Test
   fun theKeyBackupStateDecodesAndToleratesNewMethods() {
     val security = WireJson.decodeFromString(
       SecuritySnapshot.serializer(),

@@ -1,7 +1,6 @@
 //! Managing spaces and channels through the core: creating and editing them, the channel browser
 //! and joining, categories, invitations, and announcing changes as encrypted system messages.
 
-use teamcraft_crypto::membership::{HistoryShare, MembershipAction};
 use teamcraft_proto::{
   AddSpaceMemberRequest, CategoryId, ConversationId, ConversationKind, ConversationResponse,
   ConversationVisibility, CreateCategoryRequest, CreateChannelRequest, CreateInviteRequest,
@@ -13,10 +12,10 @@ use teamcraft_proto::{
 
 use super::Client;
 use super::member_device::GroupInfoOutcome;
+use super::self_add::SelfAddState;
 use super::server_changes::{Asked, Observed};
 use crate::api::{ApiError, ServerApi};
 use crate::client::groups::CREATE_ATTEMPTS;
-use crate::convert;
 use crate::error::CoreError;
 use crate::records;
 use crate::store::{ConversationEvent, LocalStore, MessageContent, Table};
@@ -233,14 +232,24 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
         continue;
       }
       let is_channel = response.maybe_space_id.is_some() && response.kind == ConversationKind::Channel;
-      let key = format!("self-add/{}", response.id);
-      if !is_channel
-        || response.maybe_my_membership.is_none()
-        || response.is_archived
-        || self.has_group(response.id)?
-        || records::get_json::<bool>(&self.store, Table::SyncState, &key)?.is_some()
-      {
+      if !is_channel || response.maybe_my_membership.is_none() || response.is_archived {
         continue;
+      }
+      if self.has_group(response.id)? {
+        self.forget_self_add(response.id)?;
+        continue;
+      }
+      match self.self_add_state(response.id)? {
+        // `retry_due_self_adds` posts it again when no member let this device in.
+        SelfAddState::Noted => continue,
+        // An earlier version posted it once and never again (issue #907): due now, without a
+        // second "joined" line.
+        SelfAddState::LegacyMark => {
+          self.post_self_add_change(response.id).await?;
+          requested += 1;
+          continue;
+        },
+        SelfAddState::None => {},
       }
       // A further device of a user who is in the group already joins as that, unannounced
       // (e2ee.md §4.6); only a user who isn't signs a self-add.
@@ -253,28 +262,23 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
           continue;
         },
       }
-      // Marked first: a failed attempt is not repeated on every sync, and a member's own add wins.
-      records::put_json(&self.store, Table::SyncState, &key, &true)?;
       self.post_self_add(&response).await?;
       requested += 1;
+    }
+    // Self-adds no member answered (refused, or never committed) are posted again when due.
+    match self.retry_due_self_adds().await {
+      Ok(posted) => requested += posted,
+      Err(error) => {
+        tracing::warn!(%error, "could not post a self-add again");
+        maybe_first_error.get_or_insert(error);
+      },
     }
     maybe_first_error.map_or(Ok(requested), Err)
   }
 
   async fn post_self_add(&mut self, response: &ConversationResponse) -> Result<(), CoreError> {
     let conversation = response.id;
-    // Nobody chose to show the past to somebody joining on their own: history from the join on
-    // (e2ee.md §4.7). Members' clients refuse a self-add that says otherwise.
-    let history = HistoryShare::FromJoin;
-    self
-      .post_admin_change(
-        conversation,
-        MembershipAction::AddUser {
-          user_id: convert::user(self.account.user_id),
-          history,
-        },
-      )
-      .await?;
+    self.post_self_add_change(conversation).await?;
     // Sent once this device has the conversation's keys.
     self.enqueue(
       conversation,
