@@ -262,6 +262,7 @@ fn options() -> RunOptions {
   RunOptions {
     deleted_name: "Deleted user".into(),
     join_wait: std::time::Duration::from_millis(50),
+    maybe_max_file_bytes: None,
   }
 }
 

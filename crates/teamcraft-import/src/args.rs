@@ -16,7 +16,8 @@ inputs:
   --uploads <dir>       the attachments (default: <export>/raw/uploads)
   --channels <csv>      the channel mapping
   --users <csv>         the user mapping
-  --language <de|en>    how mentions of people without an account read (default: en)";
+  --language <de|en>    how mentions of people without an account read (default: en)
+  --max-file-mib <n>    leave files larger than this out, named on their message (default: none)";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Args {
@@ -40,6 +41,8 @@ pub struct Inputs {
   pub channels: PathBuf,
   pub users: PathBuf,
   pub language: Language,
+  /// Files above this size are left out (named on their message); `None`: every file.
+  pub maybe_max_file_bytes: Option<u64>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -88,7 +91,14 @@ pub fn parse(arguments: impl IntoIterator<Item = String>) -> Result<Args, String
   };
   let known: &[&str] = match maybe_command.as_deref() {
     Some("login") => &["server"],
-    _ => &["export", "uploads", "channels", "users", "language"],
+    _ => &[
+      "export",
+      "uploads",
+      "channels",
+      "users",
+      "language",
+      "max-file-mib",
+    ],
   };
   if let Some((unknown, _)) = options.iter().find(|(key, _)| !known.contains(&key.as_str())) {
     return Err(format!("unknown option --{unknown}"));
@@ -103,6 +113,15 @@ pub fn parse(arguments: impl IntoIterator<Item = String>) -> Result<Args, String
         None | Some("en") => Language::En,
         Some("de") => Language::De,
         Some(other) => return Err(format!("unknown language {other:?}")),
+      },
+      maybe_max_file_bytes: match take("max-file-mib") {
+        None => None,
+        Some(value) => Some(
+          value
+            .parse::<u64>()
+            .map_err(|_| format!("--max-file-mib takes a number of MiB, not {value:?}"))?
+            .saturating_mul(1024 * 1024),
+        ),
       },
     })
   };
@@ -143,6 +162,13 @@ mod tests {
     };
     assert_eq!(inputs.language, Language::De);
     assert_eq!(inputs.maybe_uploads, None);
+    assert_eq!(inputs.maybe_max_file_bytes, None);
+    let capped = args("--state s run --export e --channels c --users u --max-file-mib 2").unwrap();
+    let Command::Run(inputs) = capped.command else {
+      panic!()
+    };
+    assert_eq!(inputs.maybe_max_file_bytes, Some(2 * 1024 * 1024));
+    assert!(args("--state s run --export e --channels c --users u --max-file-mib x").is_err());
   }
 
   #[test]

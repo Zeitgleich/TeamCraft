@@ -49,6 +49,8 @@ pub struct RunOptions {
   pub deleted_name: String,
   /// How long to wait for a member's device to let the import account in ([`DEFAULT_JOIN_WAIT`]).
   pub join_wait: Duration,
+  /// Files above this size are left out and named on their message.
+  pub maybe_max_file_bytes: Option<u64>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -74,6 +76,7 @@ pub struct Importer<'a, A: ServerApi, S: LocalStore> {
   last_heartbeat: Instant,
   spaces: HashMap<String, SpaceId>,
   join_wait: Duration,
+  maybe_max_file_bytes: Option<u64>,
 }
 
 impl<'a, A: ServerApi, S: LocalStore> Importer<'a, A, S> {
@@ -100,6 +103,7 @@ impl<'a, A: ServerApi, S: LocalStore> Importer<'a, A, S> {
       last_heartbeat: Instant::now(),
       spaces: HashMap::new(),
       join_wait: options.join_wait,
+      maybe_max_file_bytes: options.maybe_max_file_bytes,
     };
     importer.keep_gateway().await;
     Ok(importer)
@@ -376,6 +380,10 @@ impl<'a, A: ServerApi, S: LocalStore> Importer<'a, A, S> {
         missing.push(file.file_name.clone());
         continue;
       };
+      if self.maybe_max_file_bytes.is_some_and(|max| metadata.len() > max) {
+        missing.push(file.file_name.clone());
+        continue;
+      }
       match self.upload_one(conversation, file, metadata.len()).await {
         Ok(attachment) => {
           if is_sticker {
