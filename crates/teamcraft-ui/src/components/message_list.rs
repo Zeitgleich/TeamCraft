@@ -2,6 +2,7 @@
 //! by two spacer heights. Row heights are estimated first and corrected by measuring rendered rows.
 
 use std::cell::{Cell, RefCell};
+use std::ops::Range;
 use std::time::Duration;
 
 use leptos::ev;
@@ -28,6 +29,10 @@ use crate::unread_divider::{DividerEvent, DwellClock, ReadMarkerGate};
 
 /// Extra pixels rendered above and below the viewport.
 const OVERSCAN_PX: f64 = 700.0;
+/// How far beyond the rendered rows messages are loaded ahead, in viewport heights. A page is
+/// asked for when its first rows are this far away instead of when they come into view, so at a
+/// brisk wheel speed it has arrived before it is reached (issue #1050).
+const PREFETCH_VIEWPORTS: f64 = 4.0;
 /// Distance from the bottom that still counts as "following the latest message".
 const STICK_THRESHOLD_PX: f64 = 8.0;
 const ESTIMATED_MESSAGE_HEIGHT: f32 = 68.0;
@@ -117,6 +122,27 @@ pub fn compute_window(heights: &[f32], scroll_top: f64, viewport: f64) -> Window
     total,
     first_visible: first_visible.unwrap_or(heights.len().saturating_sub(1)),
   }
+}
+
+/// The rows to have loaded around `window`: [`PREFETCH_VIEWPORTS`] viewport heights above its first
+/// and below its last rendered row. Walks only those rows.
+pub fn prefetch_range(heights: &[f32], window: &Window, viewport: f64) -> Range<usize> {
+  let distance = viewport.max(1.0) * PREFETCH_VIEWPORTS;
+  let first = window.first.min(heights.len());
+  let end = window.end.clamp(first, heights.len());
+  let mut start = first;
+  let mut above = 0.0_f64;
+  while start > 0 && above < distance {
+    start -= 1;
+    above += f64::from(heights[start]);
+  }
+  let mut stop = end;
+  let mut below = 0.0_f64;
+  while stop < heights.len() && below < distance {
+    below += f64::from(heights[stop]);
+    stop += 1;
+  }
+  start..stop
 }
 
 #[component]
@@ -328,6 +354,13 @@ pub fn MessageList(
   Effect::new(move |_| {
     window.track();
     schedule_measure();
+  });
+  // The pages beyond the rendered rows load ahead, so scrolling into them doesn't wait (#1050).
+  // Asked again after every change too, like the rows read theirs: a backend keeps what is read.
+  Effect::new(move |_| {
+    let window = window.get();
+    let range = heights.with_value(|heights| prefetch_range(heights, &window, viewport.get_untracked()));
+    state.read(|backend| backend.prefetch_messages(conversation, range.start, range.len()));
   });
   // The side panel changes the width, hence the wrapping and heights.
   Effect::new(move |_| {
@@ -1173,6 +1206,39 @@ mod tests {
       assert!(!intent.is_user_scrolling(4_000), "a clock that went back");
       intent.is_dragging = true;
       assert!(intent.is_user_scrolling(60_000));
+    }
+  }
+
+  mod prefetch {
+    use super::*;
+
+    #[test]
+    fn reaches_a_few_viewports_beyond_the_rendered_rows() {
+      let heights = vec![50.0_f32; 1000];
+      let window = compute_window(&heights, 25_000.0, 600.0);
+      let range = prefetch_range(&heights, &window, 600.0);
+      let rows = (600.0 * PREFETCH_VIEWPORTS / 50.0) as usize;
+      assert_eq!(range, window.first - rows..window.end + rows);
+    }
+
+    #[test]
+    fn stops_at_both_ends() {
+      let heights = vec![50.0_f32; 100];
+      let window = compute_window(&heights, 0.0, 600.0);
+      assert_eq!(prefetch_range(&heights, &window, 600.0).start, 0);
+      let window = compute_window(&heights, 4_400.0, 600.0);
+      assert_eq!(prefetch_range(&heights, &window, 600.0).end, 100);
+      let empty = compute_window(&[], 0.0, 600.0);
+      assert_eq!(prefetch_range(&[], &empty, 600.0), 0..0);
+    }
+
+    #[test]
+    fn log_lines_reach_further_in_rows() {
+      // Short rows: the distance is in pixels, so a log channel asks for more rows ahead.
+      let heights = vec![ESTIMATED_LOG_HEIGHT; 10_000];
+      let window = compute_window(&heights, 100_000.0, 800.0);
+      let range = prefetch_range(&heights, &window, 800.0);
+      assert!(window.first - range.start > 140, "{range:?} for {window:?}");
     }
   }
 

@@ -97,6 +97,12 @@ pub trait ChatBackend {
   }
   /// Top-level messages `start..start + len`, oldest first. Out-of-range parts are clipped.
   fn messages(&self, conversation: ConversationId, start: usize, len: usize) -> Vec<Message>;
+  /// Messages `start..start + len` will be read soon (the rows just beyond what the feed shows):
+  /// a backend that loads them asynchronously starts now, so they are there when scrolled to
+  /// (issue #1050). Like a read, it says the rows are wanted: asked again after every change, so
+  /// a backend may drop what neither was asked for. Backends that hold every message have
+  /// nothing to do.
+  fn prefetch_messages(&self, _conversation: ConversationId, _start: usize, _len: usize) {}
   /// [`Self::message_count`] and [`Self::messages`] together, for a feed window: a backend that
   /// reads the whole conversation for each of them reads it once here.
   fn message_page(&self, conversation: ConversationId, start: usize, len: usize) -> (usize, Vec<Message>) {

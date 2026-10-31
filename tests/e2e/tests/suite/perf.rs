@@ -27,6 +27,10 @@ use chromiumoxide::cdp::browser_protocol::network::{
 };
 use chromiumoxide::cdp::browser_protocol::performance::{EnableParams, GetMetricsParams};
 use chromiumoxide::cdp::js_protocol::heap_profiler::CollectGarbageParams;
+use chromiumoxide::cdp::js_protocol::profiler::{
+  EnableParams as ProfilerEnableParams, SetSamplingIntervalParams, StartParams as ProfilerStartParams,
+  StopParams as ProfilerStopParams,
+};
 use chromiumoxide::cdp::js_protocol::runtime::{EvaluateParams, EventConsoleApiCalled};
 use chromiumoxide::page::Page;
 use futures_util::StreamExt;
@@ -117,6 +121,7 @@ async fn the_web_client_stays_fast_and_lean_with_a_large_workspace() {
       let seeded = seed(stack_ref, &mut alice, &mut bob, scale).await;
       eprintln!("seeded the {} workspace in {:?}", scale.name, started.elapsed());
       let mut report = measure(&page, &seeded, &profile, scale).await;
+      scroll_through_held_history(&page, &mut alice, &seeded, scale, &mut report).await;
       report.seconds_sign_in_and_unlock = first_setup;
       report.pss_mib_empty_browser = baseline;
       report.empty_browser_idle_cpu_percent = baseline_cpu;
@@ -213,6 +218,16 @@ struct Report {
   long_channel_open_ms: f64,
   long_channel_rows_in_dom: f64,
   long_channel_rows_after_scrolling_back: f64,
+  /// Scrolling up at a steady wheel speed into pages not loaded yet (issue #1050): frames that showed
+  /// a placeholder row in the viewport (the user caught up with the loading), the longest frame and
+  /// the main-thread tasks over 50 ms meanwhile.
+  steady_scroll_frames: f64,
+  steady_scroll_frames_with_placeholders: f64,
+  steady_scroll_longest_frame_ms: f64,
+  steady_scroll_frames_over_33ms: f64,
+  steady_scroll_long_tasks: f64,
+  steady_scroll_longest_task_ms: f64,
+  steady_scroll_frames_moving_backwards: f64,
   scroll_frames: f64,
   scroll_frames_over_50ms: f64,
   scroll_frames_moving_backwards: f64,
@@ -479,6 +494,56 @@ async fn serve_a_mobile_device(stack: &Stack, alice: &mut Peer, seeded: &Seeded,
 async fn send(sender: &mut Peer, channel: ConversationId, index: usize) {
   let body = format!("{} ({index})", SENTENCES[index % SENTENCES.len()]);
   sender.client.send_text(channel, None, &body).await.unwrap();
+}
+
+/// Scrolling back through history the client holds, as the desktop app does after weeks in a busy
+/// channel (issue #1050). The browser only has the newest page of a channel it joined; history it
+/// was away for is caught up completely. So Carol leaves, the long channel grows by
+/// `long_channel_messages`, and she comes back and scrolls up steadily from the newest message.
+async fn scroll_through_held_history(
+  page: &Page,
+  alice: &mut Peer,
+  seeded: &Seeded,
+  scale: Scale,
+  report: &mut Report,
+) {
+  page.goto("about:blank").await.unwrap();
+  let long_channel = seeded.channels[0];
+  for index in 0..scale.long_channel_messages {
+    send(alice, long_channel, index).await;
+  }
+  let last = "newest of the held history";
+  alice.client.send_text(long_channel, None, last).await.unwrap();
+  page
+    .evaluate(format!("location.href = '{WEB_ORIGIN}/?backend=server'"))
+    .await
+    .unwrap();
+  come_back(page, &seeded.first_space_channels[1].0).await;
+  wait_until_done(page).await;
+  switch_within(page, &seeded.long_channel.0, last, Duration::from_secs(120)).await;
+  settle(page).await;
+  // PERF_PROFILE_SCROLL=1 records a CPU profile of the scrolling (open it in Chrome's DevTools).
+  let is_profiling = std::env::var("PERF_PROFILE_SCROLL").is_ok_and(|value| value == "1");
+  if is_profiling {
+    page.execute(ProfilerEnableParams::default()).await.unwrap();
+    page.execute(SetSamplingIntervalParams::new(200)).await.unwrap();
+    page.execute(ProfilerStartParams::default()).await.unwrap();
+  }
+  let steady = scroll_back_steadily(page).await;
+  if is_profiling {
+    let profile = page.execute(ProfilerStopParams::default()).await.unwrap();
+    let path = artifact_dir().join("perf-scroll.cpuprofile");
+    let _ = std::fs::create_dir_all(artifact_dir());
+    std::fs::write(&path, serde_json::to_vec(&profile.result.profile).unwrap()).unwrap();
+    eprintln!("scroll profile: {}", path.display());
+  }
+  report.steady_scroll_frames = steady[0];
+  report.steady_scroll_frames_with_placeholders = steady[1];
+  report.steady_scroll_longest_frame_ms = steady[2];
+  report.steady_scroll_frames_over_33ms = steady[3];
+  report.steady_scroll_long_tasks = steady[4];
+  report.steady_scroll_longest_task_ms = steady[5];
+  report.steady_scroll_frames_moving_backwards = steady[6];
 }
 
 async fn measure(page: &Page, seeded: &Seeded, profile: &str, scale: Scale) -> Report {
@@ -960,6 +1025,64 @@ async fn rows_in_dom(page: &Page) -> f64 {
   .unwrap()
 }
 
+/// Scrolls the long channel upwards at a steady, brisk wheel speed (60 px a frame, about 3,600 px
+/// a second, for 400 frames: several pages of older messages) and returns `[frames, frames with a
+/// placeholder row in the viewport, longest frame ms, frames over 33 ms, long tasks, longest task
+/// ms, frames that moved the list backwards]`. A placeholder in sight means the user outran the
+/// loading; at this speed the next page has to be there before its rows come into view (#1050).
+async fn scroll_back_steadily(page: &Page) -> Vec<f64> {
+  let script = r#"new Promise(resolve => {
+    const list = document.querySelector('.message-list');
+    const tasks = [0, 0];
+    const observer = new PerformanceObserver(entries => {
+      for (const entry of entries.getEntries()) {
+        tasks[0] += 1;
+        tasks[1] = Math.max(tasks[1], entry.duration);
+      }
+    });
+    observer.observe({ type: 'longtask' });
+    let frames = 0, placeholders = 0, longest = 0, over33 = 0, backwards = 0, last = null, tracked = null;
+    const viewport = () => list.getBoundingClientRect();
+    const pick = () => {
+      const top = viewport().top;
+      const row = [...list.querySelectorAll('.row[data-idx]')].find(row => row.getBoundingClientRect().top > top);
+      tracked = row ? { idx: row.dataset.idx, top: row.getBoundingClientRect().top } : null;
+    };
+    const check = () => {
+      const row = tracked && list.querySelector(`.row[data-idx="${tracked.idx}"]`);
+      if (row && row.getBoundingClientRect().top < tracked.top - 1) backwards += 1;
+      const { top, bottom } = viewport();
+      const isWaiting = [...list.querySelectorAll('.row .msg-skeleton')].some(skeleton => {
+        const rect = skeleton.getBoundingClientRect();
+        return rect.bottom > top && rect.top < bottom;
+      });
+      if (isWaiting) placeholders += 1;
+    };
+    const tick = now => {
+      if (last !== null) {
+        const frame = now - last;
+        longest = Math.max(longest, frame);
+        if (frame > 33) over33 += 1;
+      }
+      last = now;
+      frames += 1;
+      if (frames <= 400 && list.scrollTop > 0) {
+        pick();
+        list.dispatchEvent(new WheelEvent('wheel', { deltaY: -60, bubbles: true }));
+        list.scrollTop = Math.max(0, list.scrollTop - 60);
+        setTimeout(check, 0);
+        requestAnimationFrame(tick);
+      } else {
+        observer.disconnect();
+        resolve([frames, placeholders, longest, over33, tasks[0], tasks[1], backwards]);
+      }
+    };
+    requestAnimationFrame(tick);
+  })"#;
+  let values = evaluate_value(page, script.into()).await;
+  (0..7).map(|index| values[index].as_f64().unwrap()).collect()
+}
+
 /// Scrolls the long channel upwards in steps (loading older pages as a user would) and counts
 /// frames, frames slower than 50 ms and frames that moved the list backwards meanwhile (#642): the
 /// row at the top may only move down while scrolling up, checked after the frame was painted (the
@@ -1091,6 +1214,28 @@ impl Report {
         "long_channel_rows_after_scrolling_back",
         self.long_channel_rows_after_scrolling_back,
       ),
+      ("steady_scroll_frames", self.steady_scroll_frames),
+      (
+        "steady_scroll_frames_with_placeholders",
+        self.steady_scroll_frames_with_placeholders,
+      ),
+      (
+        "steady_scroll_longest_frame_ms",
+        self.steady_scroll_longest_frame_ms,
+      ),
+      (
+        "steady_scroll_frames_over_33ms",
+        self.steady_scroll_frames_over_33ms,
+      ),
+      ("steady_scroll_long_tasks", self.steady_scroll_long_tasks),
+      (
+        "steady_scroll_longest_task_ms",
+        self.steady_scroll_longest_task_ms,
+      ),
+      (
+        "steady_scroll_frames_moving_backwards",
+        self.steady_scroll_frames_moving_backwards,
+      ),
       ("scroll_frames", self.scroll_frames),
       ("scroll_frames_over_50ms", self.scroll_frames_over_50ms),
       (
@@ -1157,6 +1302,20 @@ impl Report {
     assert_eq!(
       self.scroll_frames_moving_backwards, 0.0,
       "the list jumps while scrolling back (#642): {self:#?}"
+    );
+    // #1050: the scroll covers several pages of history the browser holds, which arrive ahead of
+    // the reader without the list jumping.
+    assert!(
+      self.steady_scroll_frames > 300.0,
+      "the held history is shorter than the scroll: {self:#?}"
+    );
+    assert!(
+      self.steady_scroll_frames_with_placeholders < 10.0,
+      "scrolling up waits for older messages (#1050): {self:#?}"
+    );
+    assert_eq!(
+      self.steady_scroll_frames_moving_backwards, 0.0,
+      "the list jumps while older pages arrive (#1050): {self:#?}"
     );
     assert!(self.pss_mib_after_switches < 2000.0, "{self:#?}");
     assert!(
