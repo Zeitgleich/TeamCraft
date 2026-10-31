@@ -925,7 +925,8 @@ key bag may hold them too.
 returns the same conversation every time). Its only participant is the user, so its group holds only
 that user's devices: the device that finds none after a sync founds the group like any DM's, and
 the user's further devices join it as further devices (#179). Nobody else can be added; the server
-never lists it among anyone else's conversations. The apps show it as "Notes" pinned above the
+never lists it among anyone else's conversations (except the import account's, while it imports the
+user's history into it, §4.10). The apps show it as "Notes" pinned above the
 direct messages (`ClientSettings::creates_notes_to_self`). Two devices opening it at once still get
 one conversation: the DM's participants key is unique, and the request that loses the insert
 returns the winner's conversation. A conversation is the notes only when its *participants* (the
@@ -1375,6 +1376,103 @@ kind of change; a server that numbers messages could at most hand a device such 
 saw before (an older one, re-timed into the window), or drop the real one so that a member's
 competing claim is the only one that fits. A member racing the real announcement with their own
 only makes the line name nobody. Signed channel properties would close this.
+
+### 4.10 Imported history (issue #402)
+
+History from another chat system (Synology Chat first; Slack, Teams and Mattermost later, #209) comes
+in through a client, never through the server: the server can't write into an encrypted
+conversation. The **importer** is `teamcraft-import` (`tools/teamcraft-import`), a headless client on
+`teamcraft-core` with a device of its own, run by an operator next to the export (admin.md §3.8, runbook
+[import-synology.md](import-synology.md)). It signs in as a dedicated **import account**: an ordinary
+member of the identity provider with the admin role, so it is a workspace admin of the signed roster
+(admin.md §2.3). Bots can't import: they have a guest's rights.
+
+**The import policy.** Who imports is the owners' signed decision, not the server's: the workspace
+policy (admin.md §2.3) names the import account and how long it may join conversations
+(`import: { importer, joins_until_ms }`, off when absent). Members' clients act on an imported message
+or an importer joining only for that account, under the verified policy. Clearing `joins_until_ms`
+(or letting it pass) ends the joins; the importer stays named so that what it imported keeps showing
+its origin. Naming another account makes the first one's messages show as its own again.
+
+**An imported message** is an ordinary encrypted message of the importer's device: the same content
+key, associated data and sender signature (§4.4). What it says about its origin is inside the
+ciphertext, in `MessageMeta::imported` (`ImportedOrigin`):
+
+| Field          | Meaning                                                                                                                                                                                  |
+|----------------|------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `source`       | The system it came from (`synology`), forward compatible                                                                                                                                 |
+| `source_id`    | The message's ID there (opaque), for idempotence                                                                                                                                         |
+| `author`       | `user` (a TeamCraft account the mapping names), `deleted` (unmapped, deleted or left people: shown as "Deleted user") or `named` (a bot or webhook of the old system, by its name there) |
+| `sent_at_ms`   | The original time                                                                                                                                                                        |
+| `edited_at_ms` | Set when the original was edited                                                                                                                                                         |
+| `reactions`    | Emoji with the authors who reacted, as above                                                                                                                                             |
+| `missing`      | Names of files the export didn't have                                                                                                                                                    |
+
+- **Whose word it is.** The signature proves the importer's device wrote the message; author and time
+  are the importer's statement. Clients show them only when the sender is the policy's import
+  account: the author's name and picture (or "Deleted user", or the bot's name with a "bot" mark),
+  the original time, and an "Imported" mark saying "Imported from Synology Chat by <import account>".
+  From any other sender `imported` is ignored, so a member can't post in somebody else's name.
+  Clients before this version show the message from the import account.
+- **Fixed.** The original authors can't edit or delete an imported message, and its reactions can't
+  be taken back (they are part of the message); everybody can react anew. Moderators delete it like
+  any message. Mentions stay in the text (`@username`), but the server isn't told (no
+  `mentioned_user_ids`): nobody is notified of old mentions.
+- **IDs.** The client message ID is derived (`SHA-256("TeamCraft-v1 imported message" ‖ conversation ‖
+  source ‖ source_id)`, first 16 bytes), so a second run sends the same IDs and the server keeps the
+  first (§4.4, deduplication). Threads, reply quotes and pins point at the imported messages as usual.
+- **Order.** Server IDs are time-sortable from 2026 on and decide the order. The server numbers
+  imported messages (admin.md §3.8) on a worker number of their own, below every message of the
+  conversation that wasn't imported: the history goes before what the conversation already holds.
+  The ID's time is the original time where it can be (from 2026), otherwise the first IDs after the
+  epoch; clients show `sent_at_ms`, never the ID's time, for an imported message.
+- **No unread, no pushes.** The server counts no imported message as unread and sends no push and no
+  `message_create` for it; when a conversation's import is finished it announces a
+  `conversation_update` whose `imported_through` changed, and clients that had reached the start of
+  that conversation's history load it again from there. Read positions come from the old system
+  (admin.md §3.8).
+- **Files** are attachments of the importer's message (§4.5), encrypted with a fresh key each and
+  uploaded from the export as a stream (multipart above 8 MiB), with thumbnails for pictures.
+  Stickers of the old system are pictures.
+- **Search** indexes an imported message under its original month (`sent_at_ms`).
+
+**Into which group.** The importer posts with the conversation's current content key, as a member of
+its group, and leaves once it is done:
+
+- **A new channel**: it creates the channel, posts the history while it is the only member, then adds
+  the members with the full history (§4.3) and makes the most active mapped member channel admin
+  (§4.6.1) before it leaves. Somebody without a device yet is a pending addition (§4.3, "Nobody to add
+  yet"), so the importer keeps running until everybody joined (below).
+- **An existing channel**: it joins as a workspace admin (admin.md §2.4: from the join on, and every
+  member sees "… joined this channel as a workspace admin"), posts, and leaves. Members are not
+  changed; a member added later with the full history gets the imported history with the rest.
+  A channel that shares history only from the join on would hide the import from everybody who joined
+  after the original dates, so the importer refuses it.
+- **A DM, or somebody's notes** (participants: the two people, or the user alone; §4.6, "Notes to
+  self"): the server makes the conversation for the participants and lists the import account as a
+  member that isn't a participant (admin.md §3.8). Without a group yet the importer founds it and
+  adds the participants with the full history. A participant's device accepts that welcome as the
+  DM's founding (§4.6, "Founding a DM") when the founder is the policy's import account, the commit's
+  server time is before `joins_until_ms`, and the tree holds the participants and the import account
+  only. Into an existing group the importer posts a signed addition of itself (from the join on),
+  which a participant's device commits under the same conditions; nobody else's addition is accepted
+  in a DM. Once every participant is in the group, the importer posts its signed leave, a
+  participant's device commits it (the keys rotate, §4.2), and the server drops its membership.
+  Group DMs of the old system would be handled the same way.
+- **The import account in a DM is no person of it.** Clients leave it out of the DM's name and member
+  list. While it is in the group they show a banner instead: "History is being imported. The import
+  account can read this conversation until the import is finished." It writes no "joined" or "left"
+  line in a DM or the notes. That is the trade-off: until everybody is in, an admin's device can read
+  what the participants write there, which the banner says and the signed policy bounds in time.
+
+**Waiting for people.** A person who never signed in has no device: they are listed by the server
+(pre-provisioned from the identity provider, admin.md §3.8) and their additions wait on the import
+device, which alone holds them (§4.3). The importer therefore keeps running after the import
+(`teamcraft-import serve`) with `pending_addition_expiry` off, adds each person's first device with the
+full history, and leaves each conversation once nobody is missing. If somebody's first device joins
+on its own first (a member committed the device's signed self-add, which shares from the join on),
+the importer, which holds that person's pending full-history addition, seals the history to the new
+devices like the history of a new member (§4.3). Its report lists who is still missing, where.
 
 ## 5. Adding a device (Threema/WhatsApp style)
 

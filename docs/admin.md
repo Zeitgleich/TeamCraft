@@ -637,6 +637,71 @@ OpenRouter (a company in the USA) and the provider that runs the model are proce
 - Access requests and erasure: transcripts are messages in the conversation; the providers keep
   nothing with zero data retention on.
 
+### 3.8 Importing history from another chat (issue #402)
+
+Teams moving from another chat system bring their channels, direct messages, files, threads,
+reactions and read state. The import is end-to-end encrypted like every message: it runs on a client,
+`teamcraft-import`, on a host the operator trusts (e2ee.md §4.10); the runbook for Synology Chat is
+[import-synology.md](import-synology.md). The server only lets the import account post with the
+original order and keeps imports quiet.
+
+**Setting up.**
+
+1. An import account at the identity provider with the TeamCraft `admin` role; an owner's client puts
+   it into the signed roster like any admin (§2.3). One account per instance; it is a person of the
+   directory only to admins (below).
+2. Administration → Import (owners sign it, like every policy page): pick the import account and until
+   when it may join conversations (default 90 days). This is the signed `import` part of the
+   workspace policy (e2ee.md §4.10); "End import" clears the date.
+3. Run `teamcraft-import` with the export and the mappings (runbook). It signs in as the import
+   account in the system browser and enrolls its own device.
+
+**What the import account may do on the server** while the policy names it and the date hasn't passed
+(otherwise 403 `import_not_allowed`), audit `import_*`:
+
+| Endpoint                                              | Does                                                                                                                                                                                                                                                                                              |
+|-------------------------------------------------------|---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `POST /admin/import/users`                            | Pre-provisions accounts from the identity provider by user name (`[oidc.sync]` service account): the account exists before its first sign-in, with the provider's name, e-mail and role; the sign-in finds it by issuer and subject. Unknown, disabled or role-less names come back as not found. |
+| `POST /admin/import/dms`                              | The DM of two people, or somebody's notes (one), made if missing, with the import account as a member that is not a participant.                                                                                                                                                                  |
+| `POST /admin/import/conversations/{id}/messages`      | Up to 100 encrypted messages in their original order, each with `sent_at_ms`; see below.                                                                                                                                                                                                          |
+| `PUT /admin/import/conversations/{id}/members/{user}` | That member's read position (never moved back), favourite and mute, from the old system.                                                                                                                                                                                                          |
+| `POST /admin/import/conversations/{id}/finish`        | Marks the conversation's import done (`imported_through`), announced as `conversation_update`.                                                                                                                                                                                                    |
+| `DELETE /admin/import/conversations/{id}/importer`    | Drops the import account's membership of a DM or notes once its devices left the group (e2ee.md §4.10).                                                                                                                                                                                           |
+
+Channels are created, joined, archived and left with the ordinary endpoints; the import account is a
+workspace admin.
+
+**Imported messages on the server.** Each gets an ID from the reserved import worker (the highest
+worker number, which `server.worker_id` may not use), at its original millisecond when that is from
+2026 on, else in the first milliseconds of the epoch, and at least one above the conversation's last
+imported message; it must stay below the conversation's first message that wasn't imported
+(409 `import_window_full` otherwise, which only happens when far more messages than fit are imported
+after the first live one). The row is marked `is_imported`: it counts for no unread or mention count,
+causes no push, no reminder, no thread follow and no `message_create`. Everything else (size limits,
+thread roots in the same conversation, the device being the caller's) is checked like a send. A
+retry with the same client message IDs returns the stored messages.
+
+Retention judges an imported message by its ID like every message, which is never later than its
+original time, so a retention period removes imported history no later than it would have removed
+the original.
+
+**People.** Only mapped accounts take part. Somebody the mapping doesn't name (left the company,
+never had an account) is like a deleted account: their channel messages stay and show "Deleted user",
+direct messages with them are not imported. Accounts are pre-provisioned so the importer can make
+them members before they sign in; until then the conversation says they haven't set up the app yet,
+and the importer adds them with the history when they do (it keeps running, `teamcraft-import serve`).
+Pre-provisioned accounts are ordinary accounts: the identity provider sync deactivates them like
+any other.
+
+**The import account in the directory.** People lists, the mention picker and DM names leave it out;
+admins see it in the user list with an "Import" mark. In a DM it shows only as the banner of e2ee.md
+§4.10.
+
+**After the import.** `teamcraft-import report` lists per conversation what was imported and skipped
+(with the reason), who is still missing, and the old system's webhooks to recreate as bridge sources
+(docs/bridge.md, "Sources"; their tokens are not carried over). Once nobody is missing the import
+account has left everywhere; then end the import (above) and deactivate the account.
+
 ## 4. Audit log
 
 Every admin action, recovery, device change and role change is logged with actor, target and time.
