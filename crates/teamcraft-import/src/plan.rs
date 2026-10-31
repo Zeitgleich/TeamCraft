@@ -205,10 +205,10 @@ fn channel_target(
     },
     ChannelTarget::New => Target::NewChannel {
       space: row.space.clone(),
-      name: if row.name.is_empty() {
-        title_of(channel)
-      } else {
-        row.name.clone()
+      name: match &row.maybe_teamcraft_name {
+        Some(teamcraft_name) => teamcraft_name.clone(),
+        None if row.name.is_empty() => title_of(channel),
+        None => row.name.clone(),
       },
       is_public: row.is_public,
       maybe_topic: channel

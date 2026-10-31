@@ -12,6 +12,8 @@ use crate::export::SourceId;
 pub struct ChannelRow {
   pub channel_id: SourceId,
   pub name: String,
+  /// The new channel's name in TeamCraft instead of `name` (optional column `teamcraft_name`).
+  pub maybe_teamcraft_name: Option<String>,
   pub is_public: bool,
   pub space: String,
   pub target: ChannelTarget,
@@ -85,6 +87,7 @@ pub fn parse_channels(text: &str, file: &str) -> Result<BTreeMap<SourceId, Chann
   let target = table.column("teamcraft_channel")?;
   let history = table.column("import_history")?;
   let import = table.column("import")?;
+  let maybe_teamcraft_name = table.optional_column("teamcraft_name");
   let mut rows = BTreeMap::new();
   for (line, record) in table.records() {
     let row_error = |reason: String| MappingError::Row {
@@ -119,6 +122,9 @@ pub fn parse_channels(text: &str, file: &str) -> Result<BTreeMap<SourceId, Chann
     let row = ChannelRow {
       channel_id,
       name: value(name),
+      maybe_teamcraft_name: maybe_teamcraft_name
+        .map(value)
+        .filter(|teamcraft_name| !teamcraft_name.is_empty()),
       is_public: value(visibility).eq_ignore_ascii_case("public"),
       space: value(space),
       target,
@@ -188,6 +194,10 @@ impl Table {
       header,
       rows: records,
     })
+  }
+
+  fn optional_column(&self, name: &str) -> Option<usize> {
+    self.header.iter().position(|column| column == name)
   }
 
   fn column(&self, name: &'static str) -> Result<usize, MappingError> {
@@ -296,6 +306,15 @@ mod tests {
     assert_eq!(rows[&3].name, "Mine, all");
     assert_eq!(rows[&3].target, ChannelTarget::Notes);
     assert!(!rows[&4].is_included);
+    assert_eq!(rows[&1].maybe_teamcraft_name, None);
+  }
+
+  #[test]
+  fn a_teamcraft_name_renames_a_new_channel() {
+    let text = "channel_id,name,visibility,space,teamcraft_channel,teamcraft_name,import_history,import\n1,Same,private,Team,,Same_2,,\n2,Same,private,Team,,,,\n";
+    let rows = parse_channels(text, "c.csv").unwrap();
+    assert_eq!(rows[&1].maybe_teamcraft_name.as_deref(), Some("Same_2"));
+    assert_eq!(rows[&2].maybe_teamcraft_name, None);
   }
 
   #[test]

@@ -816,9 +816,56 @@ pub async fn dry_plan<A: ServerApi, S: LocalStore>(
     .into_iter()
     .map(|(id, name)| (name, id))
     .collect();
+  // Two new channels of one space with the same name, or a new one named like an existing one: the
+  // operator decides (`teamcraft_name` in the mapping); the run would make both.
+  let mut new_names: HashMap<(String, String), Vec<SourceId>> = HashMap::new();
+  for item in &plan.items {
+    if let Target::NewChannel { space, name, .. } = &item.target {
+      new_names
+        .entry((space.clone(), name.to_lowercase()))
+        .or_default()
+        .push(item.source);
+    }
+  }
   for item in &plan.items {
     let key = item.key();
     progress.clear_notes(&key)?;
+    if let Target::NewChannel { space, name, .. } = &item.target {
+      let same = &new_names[&(space.clone(), name.to_lowercase())];
+      if same.len() > 1 {
+        let others: Vec<String> = same
+          .iter()
+          .filter(|source| **source != item.source)
+          .map(ToString::to_string)
+          .collect();
+        progress.note(
+          &key,
+          now_ms(),
+          &format!(
+            "problem: Synology channel(s) {} get the same name in {space:?}",
+            others.join(", ")
+          ),
+        )?;
+      }
+      if let Some(space_id) = spaces.get(space) {
+        let existing = client
+          .api()
+          .admin_channel_names(*space_id)
+          .await
+          .map_err(CoreError::from)?;
+        if existing.iter().any(|(_, maybe_name)| {
+          maybe_name
+            .as_deref()
+            .is_some_and(|other| other.eq_ignore_ascii_case(name))
+        }) {
+          progress.note(
+            &key,
+            now_ms(),
+            &format!("problem: {space}/{name} exists already; a second channel of that name would be made"),
+          )?;
+        }
+      }
+    }
     match &item.target {
       Target::NewChannel { space, .. } if !spaces.contains_key(space) => {
         progress.note(&key, now_ms(), &format!("the space {space:?} will be created"))?;

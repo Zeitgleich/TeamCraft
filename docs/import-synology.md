@@ -122,16 +122,17 @@ Two CSV files with a header row; `teamcraft-import plan` writes templates of bot
 
 **Channels** (`channels.csv`), one row per channel of type 0, 1 and 5:
 
-| Column                                                            | Meaning                                                                                                               |
-|-------------------------------------------------------------------|-----------------------------------------------------------------------------------------------------------------------|
-| `channel_id`                                                      | The Synology channel ID                                                                                               |
-| `name`                                                            | The new channel's name                                                                                                |
-| `visibility`                                                      | `public` or `private` (anything else: private)                                                                        |
-| `webhook`, `members`, `posts`, `last_post`, `created`, `archived` | Information only                                                                                                      |
-| `space`                                                           | The TeamCraft space a new channel goes into (made if missing)                                                         |
-| `teamcraft_channel`                                               | Empty: a new channel. `Space/Channel`: merge into that existing channel. `notes`: into the notes of its single member |
-| `import_history`                                                  | `no`: the channel with its members but without posts (log and webhook channels); else the full history                |
-| `import`                                                          | `f`, `false`, `n` or `no` (any case): skip the channel; else import it                                                |
+| Column                                                            | Meaning                                                                                                                 |
+|-------------------------------------------------------------------|-------------------------------------------------------------------------------------------------------------------------|
+| `channel_id`                                                      | The Synology channel ID                                                                                                 |
+| `name`                                                            | The new channel's name                                                                                                  |
+| `visibility`                                                      | `public` or `private` (anything else: private)                                                                          |
+| `webhook`, `members`, `posts`, `last_post`, `created`, `archived` | Information only                                                                                                        |
+| `space`                                                           | The TeamCraft space a new channel goes into (made if missing)                                                           |
+| `teamcraft_channel`                                               | Empty: a new channel. `Space/Channel`: merge into that existing channel. `notes`: into the notes of its single member   |
+| `teamcraft_name`                                                  | Optional: the new channel's name instead of `name` (also to tell two channels of one space apart); ignored when merging |
+| `import_history`                                                  | `no`: the channel with its members but without posts (log and webhook channels); else the full history                  |
+| `import`                                                          | `f`, `false`, `n` or `no` (any case): skip the channel; else import it                                                  |
 
 Channels without posts are skipped. DMs (type 2) and "My space" (type 3) need no row.
 
@@ -150,7 +151,8 @@ text ("@Deleted user"). `plan` reads everything, checks the mappings against the
 at the identity provider) and changes nothing. It prints and writes (`report-plan.md` in the state
 directory) what each channel, DM and notes conversation would get, every skipped item with its reason,
 and every problem (an unknown user name, a merge target that doesn't exist or shares history only from
-the join on). Fix the mappings until it reports no problems. The same inputs go to `run`, `serve` and
+the join on, two new channels with the same name in one space, a new channel named like an existing
+one). Fix the mappings until it reports no problems. The same inputs go to `run`, `serve` and
 `report`.
 
 ## 8. Import
