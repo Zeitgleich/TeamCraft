@@ -213,7 +213,9 @@ fn origin_of(peer: &Peer, conversation: ConversationId, body: &str) -> ImportedO
     .unwrap()
     .into_iter()
     .find_map(|message| match message.content {
-      MessageContent::Text { body: text, meta, .. } if text == body => meta.maybe_imported.map(|origin| *origin),
+      MessageContent::Text { body: text, meta, .. } if text == body => {
+        meta.maybe_imported.map(|origin| *origin)
+      },
       _ => None,
     })
     .unwrap()
