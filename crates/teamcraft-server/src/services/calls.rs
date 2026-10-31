@@ -2226,6 +2226,34 @@ MCowBQYDK2VwAyEA8YVjY2Zv9XPhv003tFAgzW7J6gfDn+ICj5xCB2LXMVg=
     }
 
     #[test]
+    fn a_call_nobody_rejoins_after_an_sfu_restart_ends_after_the_grace() {
+      let service = service();
+      let start = Instant::now();
+      running_call(&service, id(1), id(100), &[entry(4, 40), entry(5, 50)]);
+
+      // Issue #427: the SFU went away without reporting leaves, and nobody comes back.
+      let first = reconcile(&service, &roster(0, &[]), start);
+      let within = reconcile(&service, &roster(59, &[]), start + Duration::from_secs(59));
+      assert_eq!((first.changes, within.changes), (Vec::new(), Vec::new()));
+      assert_eq!(service.running_call(id(1)), Some(id(100)));
+      let after = reconcile(&service, &roster(60, &[]), start + Duration::from_secs(60));
+
+      assert_eq!(
+        after.changes,
+        vec![LeaveChange::Ended {
+          conversation_id: id(1),
+          call_id: id(100),
+        }]
+      );
+      assert_eq!(
+        after.users,
+        HashSet::from([id(4), id(5)]),
+        "their presence is updated"
+      );
+      assert_eq!(service.running_call(id(1)), None);
+    }
+
+    #[test]
     fn devices_the_server_missed_come_back_as_joins() {
       let service = service();
       running_call(&service, id(1), id(100), &[entry(4, 40)]);
