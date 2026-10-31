@@ -3050,6 +3050,47 @@ impl ServerApi for FakeServerApi {
     })
   }
 
+  async fn admin_space_names(&self) -> Result<Vec<(SpaceId, String)>, ApiError> {
+    self.with(|state, _| {
+      state.default_space_entry();
+      Ok(
+        state
+          .spaces
+          .values()
+          .map(|space| (space.id, space.name.clone()))
+          .collect(),
+      )
+    })
+  }
+
+  async fn admin_channel_names(
+    &self,
+    space: SpaceId,
+  ) -> Result<Vec<(ConversationId, Option<String>)>, ApiError> {
+    self.with(|state, _| {
+      Ok(
+        state
+          .conversations
+          .iter()
+          .filter(|(_, entry)| entry.response.maybe_space_id == Some(space))
+          .map(|(id, entry)| (*id, entry.response.maybe_name.clone()))
+          .collect(),
+      )
+    })
+  }
+
+  async fn admin_find_user(&self, username: &str) -> Result<Option<UserId>, ApiError> {
+    self.with(|state, _| {
+      Ok(
+        state
+          .users
+          .values()
+          .find(|user| user.maybe_username.as_deref() == Some(username))
+          .map(|user| user.id),
+      )
+    })
+  }
+
   async fn send_message(
     &self,
     conversation: ConversationId,

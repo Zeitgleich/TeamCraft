@@ -769,6 +769,60 @@ impl<T: AccessTokenSource> ServerApi for HttpServerApi<T> {
       .await
   }
 
+  async fn admin_space_names(&self) -> Result<Vec<(SpaceId, String)>, ApiError> {
+    let spaces: teamcraft_proto::ListAdminSpacesResponse = self.get("/admin/spaces").await?;
+    Ok(
+      spaces
+        .spaces
+        .into_iter()
+        .map(|space| (space.id, space.name))
+        .collect(),
+    )
+  }
+
+  async fn admin_channel_names(
+    &self,
+    space: SpaceId,
+  ) -> Result<Vec<(ConversationId, Option<String>)>, ApiError> {
+    let mut channels = Vec::new();
+    loop {
+      let after = channels
+        .last()
+        .map(|(last, _): &(ConversationId, Option<String>)| format!("&after={last}"))
+        .unwrap_or_default();
+      let page: ListAdminConversationsResponse = self
+        .get(&format!("/admin/conversations?space_id={space}{after}"))
+        .await?;
+      channels.extend(
+        page
+          .conversations
+          .iter()
+          .map(|channel| (channel.id, channel.maybe_name.clone())),
+      );
+      if !page.has_more || page.conversations.is_empty() {
+        return Ok(channels);
+      }
+    }
+  }
+
+  async fn admin_find_user(&self, username: &str) -> Result<Option<UserId>, ApiError> {
+    let query: String = url::form_urlencoded::byte_serialize(username.as_bytes()).collect();
+    let page: teamcraft_proto::ListAdminUsersResponse =
+      self.get(&format!("/admin/users?query={query}")).await?;
+    Ok(
+      page
+        .users
+        .into_iter()
+        .find(|user| {
+          user
+            .maybe_username
+            .as_deref()
+            .is_some_and(|name| name.eq_ignore_ascii_case(username))
+        })
+        .map(|user| user.id),
+    )
+  }
+
   async fn list_messages(
     &self,
     conversation: ConversationId,

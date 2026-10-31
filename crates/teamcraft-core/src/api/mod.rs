@@ -417,6 +417,15 @@ pub trait ServerApi {
   ) -> impl Future<Output = Result<(), ApiError>>;
   /// The import account marks a conversation's import as finished.
   fn finish_import(&self, conversation: ConversationId) -> impl Future<Output = Result<(), ApiError>>;
+  /// Every space of the instance, by ID and name (admins).
+  fn admin_space_names(&self) -> impl Future<Output = Result<Vec<(SpaceId, String)>, ApiError>>;
+  /// Every channel of a space, also private ones, by ID and name (admins).
+  fn admin_channel_names(
+    &self,
+    space: SpaceId,
+  ) -> impl Future<Output = Result<Vec<(ConversationId, Option<String>)>, ApiError>>;
+  /// The account with exactly this identity provider user name, if the server knows it (admins).
+  fn admin_find_user(&self, username: &str) -> impl Future<Output = Result<Option<UserId>, ApiError>>;
   fn list_messages(
     &self,
     conversation: ConversationId,

@@ -647,14 +647,15 @@ original order and keeps imports quiet.
 
 **Setting up.**
 
-1. An import account at the identity provider with the TeamCraft `admin` role; an owner's client puts
-   it into the signed roster like any admin (§2.3). One account per instance; it is a person of the
-   directory only to admins (below).
-2. Administration → Import (owners sign it, like every policy page): pick the import account and until
+1. An import account at the identity provider with the TeamCraft `admin` role, used for nothing
+   else. One account per instance.
+2. `teamcraft-import login` (runbook): it signs in as the import account in the browser and enrolls
+   the tool's device, the account's first and only one.
+3. An owner confirms the account in the signed roster like any admin (§2.3).
+4. Administration → Import (owners sign it, like every policy page): pick the import account and until
    when it may join conversations (default 90 days). This is the signed `import` part of the
    workspace policy (e2ee.md §4.10); "End import" clears the date.
-3. Run `teamcraft-import` with the export and the mappings (runbook). It signs in as the import
-   account in the system browser and enrolls its own device.
+5. Run `teamcraft-import` with the export and the mappings (runbook).
 
 **What the import account may do on the server** while the policy names it and the date hasn't passed
 (otherwise 403 `import_not_allowed`), audit `import_*`:
@@ -696,9 +697,8 @@ and the importer adds them with the history when they do (it keeps running, `tea
 Pre-provisioned accounts are ordinary accounts: the identity provider sync deactivates them like
 any other.
 
-**The import account in the directory.** People lists, the mention picker and DM names leave it out;
-admins see it in the user list with an "Import" mark. In a DM it shows only as the banner of e2ee.md
-§4.10.
+**The import account in DMs.** Clients leave it out of a DM's name and member list and show the
+banner of e2ee.md §4.10 instead; elsewhere it is an ordinary admin account.
 
 **After the import.** `teamcraft-import report` lists per conversation what was imported and skipped
 (with the reason), who is still missing, and the old system's webhooks to recreate as bridge sources

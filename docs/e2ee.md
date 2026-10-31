@@ -1381,7 +1381,7 @@ only makes the line name nobody. Signed channel properties would close this.
 
 History from another chat system (Synology Chat first; Slack, Teams and Mattermost later, #209) comes
 in through a client, never through the server: the server can't write into an encrypted
-conversation. The **importer** is `teamcraft-import` (`tools/teamcraft-import`), a headless client on
+conversation. The **importer** is `teamcraft-import` (`crates/teamcraft-import`), a headless client on
 `teamcraft-core` with a device of its own, run by an operator next to the export (admin.md §3.8, runbook
 [import-synology.md](import-synology.md)). It signs in as a dedicated **import account**: an ordinary
 member of the identity provider with the admin role, so it is a workspace admin of the signed roster
