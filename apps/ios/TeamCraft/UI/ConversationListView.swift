@@ -264,7 +264,7 @@ struct ConversationRow: View {
         }
       VStack(alignment: .leading, spacing: 2) {
         HStack {
-          Text(conversation.name)
+          Text(conversation.listName)
             .fontWeight(isUnread ? .semibold : .regular)
             .lineLimit(1)
           if conversation.isMuted {
@@ -319,6 +319,7 @@ struct ConversationRow: View {
   }
 
   private var icon: String {
+    if conversation.isNotesToSelf { return "bookmark" }
     switch conversation.kind {
     case .direct: return "person"
     case .group: return "person.2"
