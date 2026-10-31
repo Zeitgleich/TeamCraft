@@ -37,7 +37,7 @@ web-sys = { version = "0.3", features = [
   "PointerEvent", "WheelEvent", "HtmlAnchorElement", "HtmlImageElement", "AddEventListenerOptions",
   "HtmlCanvasElement", "CanvasRenderingContext2d", "HtmlMediaElement", "HtmlVideoElement", "Selection", "MediaStream",
   "VisualViewport", "MutationObserver", "MutationObserverInit", "Performance", "TouchEvent", "TouchList", "Touch",
-  "HtmlDocument", "DomParser", "SupportedType", "Range", "Text", "CharacterData", "InputEvent", "TreeWalker",
+  "HtmlDocument", "DomParser", "SupportedType", "Range", "DocumentFragment", "Text", "CharacterData", "InputEvent", "TreeWalker",
   "ImageBitmap", "IntersectionObserver", "IntersectionObserverEntry", "TimeRanges", "HtmlButtonElement",
   # The pre-join speaker test (speaker_test.rs): it has to start inside the click.
   "AudioContext", "AudioContextState", "AudioBuffer", "AudioBufferSourceNode", "AudioDestinationNode",

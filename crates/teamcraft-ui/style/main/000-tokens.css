@@ -26,7 +26,8 @@
   --on-danger: #ffffff;
   --mention-bg: #fff2cc;
   --mention-text: #6a4b00;
-  --code-bg: #eef0f4;
+  /* Code fills (#843): 1.2:1 against the surface so a code block reads as one; text on it 13:1. */
+  --code-bg: #e8ebf0;
   --shadow: 0 8px 28px rgba(16, 24, 40, 0.18);
 
   --chrome: #111926;
@@ -203,7 +204,7 @@
     --star: #e8a317;
     --mention-bg: #4a3b10;
     --mention-text: #ffd978;
-    --code-bg: #1d2535;
+    --code-bg: #222b3d;
     --shadow: 0 8px 28px rgba(0, 0, 0, 0.55);
     --shadow-card: 0 1px 2px rgba(0, 0, 0, 0.3), 0 16px 40px rgba(0, 0, 0, 0.45);
     /* A raised surface is lighter in the dark, and its top edge catches the light. */
@@ -247,7 +248,7 @@
   --star: #e8a317;
   --mention-bg: #4a3b10;
   --mention-text: #ffd978;
-  --code-bg: #1d2535;
+  --code-bg: #222b3d;
   --shadow: 0 8px 28px rgba(0, 0, 0, 0.55);
   --shadow-card: 0 1px 2px rgba(0, 0, 0, 0.3), 0 16px 40px rgba(0, 0, 0, 0.45);
   /* A raised surface is lighter in the dark, and its top edge catches the light. */
