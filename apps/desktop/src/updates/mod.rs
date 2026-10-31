@@ -19,9 +19,9 @@ use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, Manager, State, Url};
 use tauri_plugin_updater::{Update, UpdaterExt};
 use teamcraft_client_api::updates::{
-  CheckPlan, ClientVersion, Delivery, InstallKind, ManualUpdate, PackageManager, PackageManagerHint,
-  PackageSource, PlanInputs, UpdatePlan, UpdatePreference, UpdateState, UpdateStatus, is_offered,
-  missing_version, next_check_delay, plan, required_version,
+  CheckPlan, ClientVersion, Delivery, InstallKind, InstallPhase, ManualUpdate, PackageManager,
+  PackageManagerHint, PackageSource, PlanInputs, UpdatePlan, UpdatePreference, UpdateState, UpdateStatus,
+  is_offered, missing_version, next_check_delay, plan, required_version,
 };
 use teamcraft_proto::{ClientCompatibilityResponse, ClientUpdatePolicy};
 use tokio::sync::Notify;
@@ -458,13 +458,18 @@ pub async fn update_download(
     return Err(in_call());
   }
   let host = host.inner().clone();
+  let offer = host.lock().state.clone();
   host.download(&app).await.map_err(|message| {
-    host.set_state(
-      &app,
+    // The banner's download failed: the offer stays, with the error next to the button that tries
+    // again (#1044). The found update is still there to download.
+    let state = if matches!(offer, UpdateState::Available { .. }) {
+      offer
+    } else {
       UpdateState::Failed {
         message: message.clone(),
-      },
-    );
+      }
+    };
+    host.set_state(&app, state);
     UpdateCommandError {
       kind: "failed",
       message,
@@ -528,19 +533,27 @@ pub async fn update_with_package_manager(
   host: State<'_, Arc<UpdateHost>>,
 ) -> Result<(), UpdateCommandError> {
   let host = host.inner().clone();
-  let UpdateState::Available { version, .. } = host.lock().state.clone() else {
+  let offer = host.lock().state.clone();
+  let UpdateState::Available { version, .. } = offer.clone() else {
     return Err(UpdateCommandError {
       kind: "not_ready",
       message: "no update is available".to_owned(),
     });
   };
-  host.set_state(
-    &app,
-    UpdateState::Installing {
-      version: version.clone(),
-    },
-  );
-  match install_package().await {
+  let set_phase = {
+    let (app, host, version) = (app.clone(), host.clone(), version.clone());
+    move |phase| {
+      host.set_state(
+        &app,
+        UpdateState::Installing {
+          version: version.clone(),
+          phase,
+        },
+      );
+    }
+  };
+  set_phase(InstallPhase::Running);
+  match install_package(set_phase).await {
     Ok(()) => {
       tracing::info!(%version, "package updated");
       host.set_state(
@@ -554,12 +567,8 @@ pub async fn update_with_package_manager(
     },
     Err(message) => {
       tracing::warn!(%message, "package update failed");
-      host.set_state(
-        &app,
-        UpdateState::Failed {
-          message: message.clone(),
-        },
-      );
+      // The offer stays, so the banner shows the error next to the button that tries again (#1044).
+      host.set_state(&app, offer);
       Err(UpdateCommandError {
         kind: "failed",
         message,
@@ -569,15 +578,15 @@ pub async fn update_with_package_manager(
 }
 
 #[cfg(target_os = "linux")]
-async fn install_package() -> Result<(), String> {
-  package_kit::update_teamcraft()
+async fn install_package(on_phase: impl Fn(InstallPhase)) -> Result<(), String> {
+  package_kit::update_teamcraft(on_phase)
     .await
     .map(|_| ())
     .map_err(|error| error.to_string())
 }
 
 #[cfg(not(target_os = "linux"))]
-async fn install_package() -> Result<(), String> {
+async fn install_package(_on_phase: impl Fn(InstallPhase)) -> Result<(), String> {
   Err("package managers are only used on Linux".to_owned())
 }
 
