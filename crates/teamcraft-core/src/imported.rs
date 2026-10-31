@@ -97,7 +97,7 @@ pub fn trusted_origin(message: &StoredMessage, maybe_importer: Option<UserId>) -
     return None;
   }
   match &message.content {
-    MessageContent::Text { meta, .. } => meta.maybe_imported.as_ref(),
+    MessageContent::Text { meta, .. } => meta.maybe_imported.as_deref(),
     _ => None,
   }
 }
@@ -189,7 +189,7 @@ mod tests {
 
   fn imported_by(sender: UserId) -> StoredMessage {
     let meta = MessageMeta {
-      maybe_imported: Some(ImportedOrigin {
+      maybe_imported: Some(Box::new(ImportedOrigin {
         source: ImportSource::Synology,
         source_id: "1".into(),
         author: ImportedAuthor::Deleted,
@@ -197,7 +197,7 @@ mod tests {
         maybe_edited_at_ms: None,
         reactions: Vec::new(),
         missing_files: Vec::new(),
-      }),
+      })),
       ..MessageMeta::default()
     };
     StoredMessage {

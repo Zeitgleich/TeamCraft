@@ -3185,7 +3185,7 @@ mod tests {
           body: "old news".into(),
           mentions: Vec::new(),
           meta: MessageMeta {
-            maybe_imported: Some(ImportedOrigin {
+            maybe_imported: Some(Box::new(ImportedOrigin {
               source: ImportSource::Synology,
               source_id: "1".into(),
               author,
@@ -3193,7 +3193,7 @@ mod tests {
               maybe_edited_at_ms: None,
               reactions,
               missing_files: Vec::new(),
-            }),
+            })),
             ..MessageMeta::default()
           },
         },

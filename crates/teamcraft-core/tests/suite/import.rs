@@ -190,7 +190,7 @@ fn draft(source_id: &str, body: &str, author: ImportedAuthor, sent_at_ms: i64) -
       body: body.into(),
       mentions: Vec::new(),
       meta: MessageMeta {
-        maybe_imported: Some(ImportedOrigin {
+        maybe_imported: Some(Box::new(ImportedOrigin {
           source: ImportSource::Synology,
           source_id: source_id.into(),
           author,
@@ -198,7 +198,7 @@ fn draft(source_id: &str, body: &str, author: ImportedAuthor, sent_at_ms: i64) -
           maybe_edited_at_ms: None,
           reactions: Vec::new(),
           missing_files: Vec::new(),
-        }),
+        })),
         ..MessageMeta::default()
       },
     },
@@ -213,7 +213,7 @@ fn origin_of(peer: &Peer, conversation: ConversationId, body: &str) -> ImportedO
     .unwrap()
     .into_iter()
     .find_map(|message| match message.content {
-      MessageContent::Text { body: text, meta, .. } if text == body => meta.maybe_imported,
+      MessageContent::Text { body: text, meta, .. } if text == body => meta.maybe_imported.map(|origin| *origin),
       _ => None,
     })
     .unwrap()
