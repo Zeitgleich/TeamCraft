@@ -112,7 +112,7 @@ pub fn is_import_line(message: &StoredMessage, maybe_importer: Option<UserId>) -
 }
 
 /// The import account adding people to what it imported, and other members letting those people
-/// in once they set up the app: not shown, the people of an imported conversation were in it in
+/// in (or they saying they joined) once they set up the app: not shown, the people of an imported conversation were in it in
 /// the old system (e2ee.md §4.10).
 pub struct ImportAdditions {
   maybe_importer: Option<UserId>,
@@ -149,14 +149,18 @@ impl ImportAdditions {
     self.hides(message)
   }
 
-  /// Whether `message` adds one of them.
+  /// Whether `message` adds one of them, or is one of them saying they joined.
   pub fn hides(&self, message: &StoredMessage) -> bool {
-    match message.content {
+    let subject = match message.content {
       MessageContent::Event {
         event: ConversationEvent::MemberAdded { user, .. },
-      } => self.added.contains(&user) && Some(user) != self.maybe_importer,
-      _ => false,
-    }
+      } => user,
+      MessageContent::Event {
+        event: ConversationEvent::Joined,
+      } => message.sender_user_id,
+      _ => return false,
+    };
+    self.added.contains(&subject) && Some(subject) != self.maybe_importer
   }
 }
 
@@ -236,6 +240,14 @@ mod tests {
     let member: UserId = "1".parse().unwrap();
     assert!(additions.hides(&adding(member, other)));
     assert!(!additions.hides(&adding(member, "9".parse().unwrap())));
+    let joined = |sender: UserId| StoredMessage {
+      content: MessageContent::Event {
+        event: ConversationEvent::Joined,
+      },
+      ..adding(sender, sender)
+    };
+    assert!(additions.hides(&joined(other)));
+    assert!(!additions.hides(&joined(member)));
   }
 
   #[test]
