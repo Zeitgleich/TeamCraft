@@ -8,6 +8,8 @@
 //!
 //! [`MessageMeta::imported`]: crate::store::MessageMeta::imported
 
+use std::collections::BTreeSet;
+
 use serde::{Deserialize, Serialize};
 use teamcraft_proto::{ClientMessageId, ConversationId, ImportPolicy, UserId};
 
@@ -109,16 +111,49 @@ pub fn is_import_line(message: &StoredMessage, maybe_importer: Option<UserId>) -
     && (message.line_position().is_some() || matches!(message.content, MessageContent::Event { .. }))
 }
 
-/// Whether `message` is the import account `maybe_importer` adding somebody else: not shown, the
-/// people of an imported conversation were in it in the old system.
-pub fn is_import_addition(message: &StoredMessage, maybe_importer: Option<UserId>) -> bool {
-  maybe_importer == Some(message.sender_user_id)
-    && matches!(
-      message.content,
+/// The import account adding people to what it imported, and other members letting those people
+/// in once they set up the app: not shown, the people of an imported conversation were in it in
+/// the old system (e2ee.md §4.10).
+pub struct ImportAdditions {
+  maybe_importer: Option<UserId>,
+  added: BTreeSet<UserId>,
+}
+
+impl ImportAdditions {
+  /// The people `maybe_importer` added among a conversation's messages `all`.
+  pub fn of(all: &[StoredMessage], maybe_importer: Option<UserId>) -> Self {
+    let added = all
+      .iter()
+      .filter_map(|message| imported_addition(message, maybe_importer))
+      .collect();
+    Self {
+      maybe_importer,
+      added,
+    }
+  }
+
+  /// Whether `message` adds one of them.
+  pub fn hides(&self, message: &StoredMessage) -> bool {
+    match message.content {
       MessageContent::Event {
         event: ConversationEvent::MemberAdded { user, .. },
-      } if Some(user) != maybe_importer
-    )
+      } => self.added.contains(&user) && Some(user) != self.maybe_importer,
+      _ => false,
+    }
+  }
+}
+
+/// The person `message` says the import account `maybe_importer` added, if it does.
+fn imported_addition(message: &StoredMessage, maybe_importer: Option<UserId>) -> Option<UserId> {
+  if maybe_importer != Some(message.sender_user_id) {
+    return None;
+  }
+  match message.content {
+    MessageContent::Event {
+      event: ConversationEvent::MemberAdded { user, .. },
+    } if Some(user) != maybe_importer => Some(user),
+    _ => None,
+  }
 }
 
 /// The client message ID of an imported message (e2ee.md §4.10): the same for every run of the
@@ -167,11 +202,17 @@ mod tests {
       },
       ..imported_by(sender)
     };
-    assert!(is_import_addition(&adding(importer, other), Some(importer)));
-    assert!(!is_import_addition(&adding(other, importer), Some(importer)));
-    assert!(!is_import_addition(&adding(importer, importer), Some(importer)));
-    assert!(!is_import_addition(&adding(importer, other), None));
-    assert!(!is_import_addition(&imported_by(importer), Some(importer)));
+    let by_import = adding(importer, other);
+    let additions = ImportAdditions::of(std::slice::from_ref(&by_import), Some(importer));
+    assert!(additions.hides(&by_import));
+    assert!(!additions.hides(&adding(other, importer)));
+    assert!(!additions.hides(&adding(importer, importer)));
+    assert!(!additions.hides(&imported_by(importer)));
+    assert!(!ImportAdditions::of(std::slice::from_ref(&by_import), None).hides(&by_import));
+    // Another member letting that person's device in: left out too; adding anybody else not.
+    let member: UserId = "1".parse().unwrap();
+    assert!(additions.hides(&adding(member, other)));
+    assert!(!additions.hides(&adding(member, "9".parse().unwrap())));
   }
 
   #[test]

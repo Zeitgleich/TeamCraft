@@ -1431,8 +1431,9 @@ ciphertext, in `MessageMeta::imported` (`ImportedOrigin`):
   `conversation_update` (with `imported_through`). Imported messages lie before everything a client
   holds of the conversation, so paging back loads them like older history; a client that holds the
   conversation loads one page of them on that update, or on its next sync when it missed the update.
-  Clients count no imported message as unread and don't show the import account adding people:
-  they were in the conversation in the old system. Read positions come from the old system (admin.md §3.8).
+  Clients count no imported message as unread and don't show the import account adding people, nor
+  a member letting one of them in once they set up the app: they were in the conversation in the
+  old system. Read positions come from the old system (admin.md §3.8).
 - **Files** are attachments of the importer's message (§4.5), encrypted with a fresh key each and
   uploaded from the export as a stream (multipart above 8 MiB), with thumbnails for pictures.
   Stickers of the old system are pictures.
