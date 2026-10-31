@@ -11,7 +11,7 @@ use common::fake_keycloak::{CLIENT_SECRET, FakeKeycloak, fake_user};
 use common::*;
 use reqwest::StatusCode;
 use serde_json::{Value, json};
-use teamcraft_proto::{ImportPolicy, MessageId, SNOWFLAKE_EPOCH_MS, UserId};
+use teamcraft_proto::{ImportPolicy, MessageId, UserId};
 use teamcraft_server::testing::{TestApp, TestUser};
 
 /// 2024-05-01, before the Snowflake epoch.
@@ -118,25 +118,44 @@ mod messages {
   }
 
   #[tokio::test]
-  async fn times_from_2026_keep_their_millisecond() {
+  async fn two_conversations_never_get_the_same_id() {
     let app = app!();
-    let (importer, device, channel, _) = channel_with_live_message(&app).await;
-    let at = SNOWFLAKE_EPOCH_MS + 86_400_000;
-    let ids = import(&app, &importer, &channel, &device, &[(10, at)]).await;
-    assert_eq!(teamcraft_proto::Id::snowflake(ids[0]).unix_millis(), at);
-    assert_eq!(
-      teamcraft_proto::Id::snowflake(ids[0]).worker(),
-      teamcraft_proto::IMPORT_WORKER
+    let (importer, device, channel, carol) = channel_with_live_message(&app).await;
+    let carol_id = user_id(&app, &carol).await;
+    let notes = app
+      .post(
+        &importer,
+        "/admin/import/dms",
+        json!({"participants": [carol_id]}),
+      )
+      .await
+      .id();
+    let in_channel = import(&app, &importer, &channel, &device, &[(10, OLD_MS), (11, OLD_MS)]).await;
+    let in_notes = import(&app, &importer, &notes, &device, &[(10, OLD_MS), (11, OLD_MS)]).await;
+    assert!(
+      in_notes.iter().all(|id| !in_channel.contains(id)),
+      "{in_channel:?} {in_notes:?}"
     );
+    assert!(in_notes[0] > in_channel[1]);
+    for id in in_channel.iter().chain(&in_notes) {
+      assert_eq!(
+        teamcraft_proto::Id::snowflake(*id).worker(),
+        teamcraft_proto::IMPORT_WORKER
+      );
+    }
   }
 
   #[tokio::test]
-  async fn nothing_goes_after_the_first_live_message() {
+  async fn even_a_later_original_time_goes_before_the_live_messages() {
     let app = app!();
-    let (importer, device, channel, _) = channel_with_live_message(&app).await;
-    let reply = import_reply(&app, &importer, &channel, &device, &[(10, now_ms() + 60_000)]).await;
-    assert_eq!(reply.status, StatusCode::CONFLICT, "{}", reply.body);
-    assert_eq!(reply.body["error_code"], "import_window_full");
+    let (importer, device, channel, carol) = channel_with_live_message(&app).await;
+    let live: MessageId = list(&app, &carol, &channel).await[0]["id"]
+      .as_str()
+      .unwrap()
+      .parse()
+      .unwrap();
+    let ids = import(&app, &importer, &channel, &device, &[(10, now_ms() + 60_000)]).await;
+    assert!(ids[0] < live);
   }
 
   #[tokio::test]

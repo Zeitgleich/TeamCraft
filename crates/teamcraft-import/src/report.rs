@@ -101,10 +101,13 @@ pub fn render(
     let _ = writeln!(out, "| Name | Channel | Kind | Target |");
     let _ = writeln!(out, "|---|---|---|---|");
     for webhook in &export.webhooks {
-      let channel = export
-        .channels
-        .get(&webhook.channel_id)
-        .map_or_else(|| webhook.channel_id.to_string(), crate::plan::title_of);
+      let channel = match webhook.channel_id {
+        Some(id) => export
+          .channels
+          .get(&id)
+          .map_or_else(|| id.to_string(), crate::plan::title_of),
+        None => "-".to_owned(),
+      };
       let kind = if webhook.is_outgoing {
         "outgoing"
       } else {

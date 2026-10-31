@@ -189,7 +189,9 @@ struct MemberRow {
 pub struct Webhook {
   #[serde(default)]
   pub name: Option<String>,
-  pub channel_id: SourceId,
+  /// Absent for a webhook whose channel is gone.
+  #[serde(default)]
+  pub channel_id: Option<SourceId>,
   #[serde(default)]
   pub url: Option<String>,
   #[serde(default)]

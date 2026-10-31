@@ -1421,11 +1421,11 @@ ciphertext, in `MessageMeta::imported` (`ImportedOrigin`):
 - **IDs.** The client message ID is derived (`SHA-256("TeamCraft-v1 imported message" ‖ conversation ‖
   source ‖ source_id)`, first 16 bytes), so a second run sends the same IDs and the server keeps the
   first (§4.4, deduplication). Threads, reply quotes and pins point at the imported messages as usual.
-- **Order.** Server IDs are time-sortable from 2026 on and decide the order. The server numbers
-  imported messages (admin.md §3.8) on a worker number of their own, below every message of the
-  conversation that wasn't imported: the history goes before what the conversation already holds.
-  The ID's time is the original time where it can be (from 2026), otherwise the first IDs after the
-  epoch; clients show `sent_at_ms`, never the ID's time, for an imported message.
+- **Order.** Server IDs decide the order. The server numbers imported messages (admin.md §3.8) from
+  one sequence of its own (a reserved worker number, starting at the epoch), in the order the
+  importer sends them: within a conversation oldest first, and below every message of the
+  conversation that wasn't imported, so the history goes before what the conversation already
+  holds. The ID's time says nothing about an imported message; clients show `sent_at_ms`.
 - **No unread, no pushes.** The server counts no imported message as unread and sends no push and no
   `message_create` for it; when a conversation's import is finished it announces a
   `conversation_update` (with `imported_through`). Imported messages lie before everything a client

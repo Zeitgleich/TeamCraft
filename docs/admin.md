@@ -675,19 +675,19 @@ the conversation. While it may import, it passes the rate limits (per user, and 
 authenticated from there, for ten minutes after its last request) and the upload limits (per file
 and per user): it brings a whole team's history and files at once.
 
-**Imported messages on the server.** Each gets an ID from the reserved import worker (the highest
-worker number, which `server.worker_id` may not use), at its original millisecond when that is from
-2026 on, else in the first milliseconds of the epoch, and at least one above the conversation's last
-imported message; it must stay below the conversation's first message that wasn't imported
-(409 `import_window_full` otherwise, which only happens when far more messages than fit are imported
-after the first live one). The row is marked `is_imported`: it counts for no unread or mention count,
-causes no push, no reminder, no thread follow and no `message_create`. Everything else (size limits,
-thread roots in the same conversation, the device being the caller's) is checked like a send. A
-retry with the same client message IDs returns the stored messages.
+**Imported messages on the server.** They get IDs from one sequence for the whole server, on the
+reserved import worker (the highest worker number, which `server.worker_id` may not use), starting
+at the Snowflake epoch: imports wait for each other (an advisory lock), so IDs never collide between
+conversations and follow the order the importer sends. An ID must stay below the conversation's
+first message that wasn't imported (409 `import_window_full` otherwise; with IDs at the epoch that
+only happens to a server whose live messages are from its first milliseconds). The row is marked
+`is_imported`: it counts for no unread or mention count, causes no push, no reminder, no thread
+follow and no `message_create`. Everything else (size limits, thread roots in the same conversation,
+the device being the caller's) is checked like a send. A retry with the same client message IDs
+returns the stored messages.
 
-Retention judges an imported message by its ID like every message, which is never later than its
-original time, so a retention period removes imported history no later than it would have removed
-the original.
+Retention judges an imported message by its ID like every message, and an imported ID is from the
+start of 2026: a retention period counts imported history as that old, whatever its original date.
 
 **People.** Only mapped accounts take part. Somebody the mapping doesn't name (left the company,
 never had an account) is like a deleted account: their channel messages stay and show "Deleted user",

@@ -9,6 +9,9 @@ use crate::database::Database;
 use crate::error::DbError;
 use crate::ids::{from_db, from_db_opt, to_db};
 
+/// The advisory lock that serializes imports, so they number from one sequence.
+const IMPORT_LOCK: i64 = 0x7463_696d_706f_7274;
+
 /// One imported message to store.
 #[derive(Debug, Clone)]
 pub struct NewImportedMessage<'a> {
@@ -34,8 +37,9 @@ pub enum ImportOutcome {
 
 impl Database {
   /// Stores `messages` of `sender` in `conversation`, in order, in one transaction. Each new one gets
-  /// [`next_import_id`] after the conversation's last imported message, which must stay below its
-  /// first message that wasn't imported.
+  /// [`next_import_id`] after the newest imported message of the whole server (imports are
+  /// serialized by an advisory lock), which must stay below the conversation's first message that
+  /// wasn't imported.
   pub async fn store_imported_messages(
     &self,
     conversation: ConversationId,
@@ -53,20 +57,30 @@ impl Database {
     else {
       return Ok(ImportOutcome::ConversationGone);
     };
-    let mut maybe_last: Option<MessageId> = from_db_opt(row.import_last_message_id)?;
-    // Live messages all lie above the imported ones, so the first after the last imported is the
-    // first live one.
+    let maybe_conversation_last: Option<MessageId> = from_db_opt(row.import_last_message_id)?;
+    // One import sequence for the whole server: imports wait for each other here.
+    sqlx::query!("SELECT pg_advisory_xact_lock($1)", IMPORT_LOCK)
+      .execute(&mut *tx)
+      .await?;
+    let mut maybe_last: Option<MessageId> = from_db_opt(
+      sqlx::query_scalar!(r#"SELECT max(id) AS "max" FROM messages WHERE is_imported"#)
+        .fetch_one(&mut *tx)
+        .await?,
+    )?;
+    // Live messages all lie above the conversation's imported ones, so the first after its last
+    // imported one is its first live one.
     let maybe_first_live: Option<MessageId> = from_db_opt(
       sqlx::query_scalar!(
         r#"SELECT id FROM messages
            WHERE conversation_id = $1 AND id > $2 AND NOT is_imported
            ORDER BY id LIMIT 1"#,
         to_db(conversation),
-        maybe_last.map_or(0, to_db),
+        maybe_conversation_last.map_or(0, to_db),
       )
       .fetch_optional(&mut *tx)
       .await?,
     )?;
+    let mut maybe_conversation_last = maybe_conversation_last;
 
     let mut stored = Vec::with_capacity(messages.len());
     for message in messages {
@@ -95,7 +109,7 @@ impl Database {
           return Ok(ImportOutcome::UnknownThread(message.client_message_id));
         }
       }
-      let Some(id) = next_import_id(maybe_last, message.sent_at_ms) else {
+      let Some(id) = next_import_id(maybe_last) else {
         return Ok(ImportOutcome::WindowFull);
       };
       if maybe_first_live.is_some_and(|first_live| id >= first_live) {
@@ -126,12 +140,13 @@ impl Database {
       .execute(&mut *tx)
       .await?;
       maybe_last = Some(id);
+      maybe_conversation_last = Some(id);
       stored.push((message.client_message_id, id));
     }
     sqlx::query!(
       "UPDATE conversations SET import_last_message_id = $2 WHERE id = $1",
       to_db(conversation),
-      maybe_last.map(to_db),
+      maybe_conversation_last.map(to_db),
     )
     .execute(&mut *tx)
     .await?;
