@@ -2429,7 +2429,11 @@ everything (§9.1). Signing the releases narrows this to what the operator contr
   and a release's cache is deleted only once no page uses it, so a page never loads files of two
   releases. Pages call `registration.update()` when they become visible, come back online and
   hourly, at most every 15 minutes, and ask `GET /api/v1/client-compatibility`; a version the server
-  no longer supports asks for the reload too.
+  no longer supports asks for the reload too. "Reload now" asks the waiting worker to take over and
+  reloads only once it did (`controllerchange`), never under the old worker: the browser activates
+  the new worker only after the running one finished its events, so the running worker stops its
+  background fetch of lazily loaded files as soon as a newer release waits (#1045). If the switch
+  doesn't happen within a minute the banner says so and the button tries again.
 - **Call module.** The browser's call engine (`teamcraft-web-calls`, §8) is a separate ES module and
   wasm the page imports after sign-in. Its files are part of the release like any other (listed in
   the manifest, served from the verified cache); the build gives them content-hashed names and writes

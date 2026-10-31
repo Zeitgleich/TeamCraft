@@ -11,6 +11,7 @@ use std::time::Duration;
 
 use crate::reactive::SetIfAlive;
 use leptos::prelude::*;
+use teamcraft_client_api::failure::ActionFailure;
 use teamcraft_client_api::updates::ClientVersion;
 use teamcraft_proto::ClientCompatibilityResponse;
 use wasm_bindgen::closure::Closure;
@@ -21,8 +22,9 @@ use wasm_bindgen::{JsCast, JsValue};
 const UPDATE_CHECK_THROTTLE: Duration = Duration::from_secs(15 * 60);
 /// A page open for long looks this often even without becoming visible or online again.
 const UPDATE_CHECK_INTERVAL_MS: u64 = 60 * 60 * 1000;
-/// If the new release does not take over within this time after "reload", reload anyway.
-const SKIP_WAITING_TIMEOUT: Duration = Duration::from_secs(5);
+/// How long "Reload now" waits for the new release to take over before it says that it didn't. The
+/// running worker may first finish an event (a push, a file it is fetching).
+const SWITCH_TIMEOUT: Duration = Duration::from_secs(60);
 const COMPATIBILITY_PATH: &str = "/api/v1/client-compatibility";
 
 thread_local! {
@@ -211,39 +213,121 @@ pub fn watch_releases(state: RwSignal<ReleaseUpdate>) {
   });
 }
 
-/// Reloads into the new release: the waiting worker takes over, then the page reloads (on
-/// `controllerchange`). Without a waiting worker (another tab switched already) it just reloads.
-pub fn apply_update() {
+/// Reloads into the new release: asks the waiting worker to take over and reloads once it has
+/// (`controllerchange`). Without a waiting worker (another tab switched already) it just reloads.
+///
+/// It never reloads before the new release took over (#1045): the browser activates the waiting
+/// worker only once the running one has finished its events, and a reload before that comes back
+/// on the old release, with the banner still there. Fails when the switch took longer than
+/// [`SWITCH_TIMEOUT`]; the page then keeps running and the user can try again.
+pub async fn apply_update() -> Result<(), ActionFailure> {
   IS_RELOADING.set(true);
-  let Some(window) = web_sys::window() else { return };
-  let Ok(ready) = window.navigator().service_worker().ready() else {
-    reload();
-    return;
-  };
-  wasm_bindgen_futures::spawn_local(async move {
-    let waiting = wasm_bindgen_futures::JsFuture::from(ready)
+  let maybe_registration = match web_sys::window().map(|window| window.navigator().service_worker().ready()) {
+    Some(Ok(ready)) => wasm_bindgen_futures::JsFuture::from(ready)
       .await
       .ok()
-      .and_then(|registration| {
-        registration
-          .unchecked_into::<web_sys::ServiceWorkerRegistration>()
-          .waiting()
-      });
-    let Some(worker) = waiting else {
-      reload();
-      return;
-    };
-    let message = js_sys::Object::new();
-    drop(js_sys::Reflect::set(
-      &message,
-      &"type".into(),
-      &"skip_waiting".into(),
-    ));
-    drop(worker.post_message(&message));
-    // The page reloads on `controllerchange`; this is the fallback if that never comes.
-    wait(SKIP_WAITING_TIMEOUT).await;
+      .map(JsCast::unchecked_into::<web_sys::ServiceWorkerRegistration>),
+    _ => None,
+  };
+  let Some(registration) = maybe_registration else {
     reload();
-  });
+    return stays_on_page().await;
+  };
+  let deadline_ms = js_sys::Date::now() + SWITCH_TIMEOUT.as_secs_f64() * 1000.0;
+  let mut maybe_worker = registration.waiting();
+  while let Some(worker) = maybe_worker {
+    ask_to_take_over(&worker);
+    let remaining_ms = deadline_ms - js_sys::Date::now();
+    let event = if remaining_ms <= 0.0 {
+      SwitchEvent::TimedOut
+    } else {
+      next_switch_event(&worker, remaining_ms).await
+    };
+    maybe_worker = match switch_step(event, registration.waiting().is_some()) {
+      // The page reloads on `controllerchange` (`watch_releases`).
+      SwitchStep::KeepWaiting => Some(worker),
+      SwitchStep::AskNewer => registration.waiting(),
+      SwitchStep::GiveUp => {
+        return Err(ActionFailure::other("the new release did not take over in time"));
+      },
+      SwitchStep::Reload => None,
+    };
+  }
+  reload();
+  stays_on_page().await
+}
+
+/// What happened to the waiting worker while the page waits for it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SwitchEvent {
+  State(web_sys::ServiceWorkerState),
+  TimedOut,
+}
+
+/// What [`apply_update`] does next.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SwitchStep {
+  /// It takes over (or still waits for the running worker to finish): the reload follows on
+  /// `controllerchange`.
+  KeepWaiting,
+  /// It was replaced by an even newer release, which waits now: ask that one.
+  AskNewer,
+  /// Nothing waits any more: the newest release is active, a reload loads it.
+  Reload,
+  GiveUp,
+}
+
+fn switch_step(event: SwitchEvent, has_waiting: bool) -> SwitchStep {
+  match event {
+    SwitchEvent::TimedOut => SwitchStep::GiveUp,
+    SwitchEvent::State(web_sys::ServiceWorkerState::Redundant) if has_waiting => SwitchStep::AskNewer,
+    SwitchEvent::State(web_sys::ServiceWorkerState::Redundant) => SwitchStep::Reload,
+    SwitchEvent::State(_) => SwitchStep::KeepWaiting,
+  }
+}
+
+fn ask_to_take_over(worker: &web_sys::ServiceWorker) {
+  let message = js_sys::Object::new();
+  drop(js_sys::Reflect::set(
+    &message,
+    &"type".into(),
+    &"skip_waiting".into(),
+  ));
+  if let Err(error) = worker.post_message(&message) {
+    tracing::warn!(?error, "could not ask the new release to take over");
+  }
+}
+
+/// The worker's next state change, or [`SwitchEvent::TimedOut`] after `timeout_ms`.
+async fn next_switch_event(worker: &web_sys::ServiceWorker, timeout_ms: f64) -> SwitchEvent {
+  let changed = {
+    let worker = worker.clone();
+    js_sys::Promise::new(&mut |resolve, _reject| {
+      let options = web_sys::AddEventListenerOptions::new();
+      options.set_once(true);
+      drop(
+        worker.add_event_listener_with_callback_and_add_event_listener_options(
+          "statechange",
+          &resolve,
+          &options,
+        ),
+      );
+    })
+  };
+  let timeout = wait_promise(Duration::from_secs_f64(timeout_ms / 1000.0));
+  let race = js_sys::Promise::race(&js_sys::Array::of2(&changed, &timeout));
+  match wasm_bindgen_futures::JsFuture::from(race).await {
+    // The timer resolves with `undefined`, a `statechange` with its event.
+    Ok(value) if value.is_undefined() => SwitchEvent::TimedOut,
+    _ => SwitchEvent::State(worker.state()),
+  }
+}
+
+/// After `reload()` the page goes away; if it is still here after [`SWITCH_TIMEOUT`], the reload
+/// didn't happen.
+async fn stays_on_page() -> Result<(), ActionFailure> {
+  wait(SWITCH_TIMEOUT).await;
+  Err(ActionFailure::other("the page did not reload"))
 }
 
 /// Marks the update as ready when a new release finished installing while this page runs.
@@ -334,13 +418,17 @@ async fn fetch_compatibility() -> Result<ClientCompatibilityResponse, String> {
 
 /// A `setTimeout` as a future.
 async fn wait(duration: Duration) {
+  drop(wasm_bindgen_futures::JsFuture::from(wait_promise(duration)).await);
+}
+
+/// A promise that resolves with `undefined` after `duration`.
+fn wait_promise(duration: Duration) -> js_sys::Promise {
   let timeout_ms = i32::try_from(duration.as_millis()).unwrap_or(i32::MAX);
-  let timer = js_sys::Promise::new(&mut |resolve, _reject| {
+  js_sys::Promise::new(&mut |resolve, _reject| {
     if let Some(window) = web_sys::window() {
       drop(window.set_timeout_with_callback_and_timeout_and_arguments_0(&resolve, timeout_ms));
     }
-  });
-  drop(wasm_bindgen_futures::JsFuture::from(timer).await);
+  })
 }
 
 fn has_controller() -> bool {
@@ -367,6 +455,45 @@ mod tests {
       for key in ["release-ready", "release-too-old", "release-reload"] {
         assert_ne!(translate(locale, key, None), key, "{locale:?} lacks {key}");
       }
+    }
+  }
+
+  #[test]
+  fn the_switch_waits_for_the_new_release_and_never_reloads_onto_the_old_one() {
+    use web_sys::ServiceWorkerState as State;
+    // Still waiting for the running worker, or taking over: the reload comes with
+    // `controllerchange`, not before.
+    for state in [State::Installed, State::Activating, State::Activated] {
+      assert_eq!(
+        switch_step(SwitchEvent::State(state), true),
+        SwitchStep::KeepWaiting
+      );
+      assert_eq!(
+        switch_step(SwitchEvent::State(state), false),
+        SwitchStep::KeepWaiting
+      );
+    }
+    // Replaced by an even newer release (a nightly while the user decided).
+    assert_eq!(
+      switch_step(SwitchEvent::State(State::Redundant), true),
+      SwitchStep::AskNewer
+    );
+    assert_eq!(
+      switch_step(SwitchEvent::State(State::Redundant), false),
+      SwitchStep::Reload
+    );
+    // Too long: say so instead of reloading onto the old release.
+    assert_eq!(switch_step(SwitchEvent::TimedOut, true), SwitchStep::GiveUp);
+  }
+
+  #[test]
+  fn the_switch_failure_is_translated() {
+    use crate::i18n::{Locale, translate};
+    for locale in [Locale::En, Locale::De] {
+      assert_ne!(
+        translate(locale, "release-switch-failed", None),
+        "release-switch-failed"
+      );
     }
   }
 

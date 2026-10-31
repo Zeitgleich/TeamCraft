@@ -210,6 +210,8 @@ pub enum UpdateState {
   /// PackageKit is installing the package.
   Installing {
     version: String,
+    #[serde(default)]
+    phase: InstallPhase,
   },
   /// Downloaded and verified (or installed by the package manager): a restart applies it.
   Ready {
@@ -220,6 +222,23 @@ pub enum UpdateState {
   Failed {
     message: String,
   },
+}
+
+/// Where PackageKit is in an install (docs/updates.md §4.5).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum InstallPhase {
+  #[default]
+  Running,
+  /// polkit asks the user to authorize it (a password dialog of the system).
+  WaitingForAuthorization,
+}
+
+/// An update on its way, as the banner shows it while the user waits (#1044).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum UpdateProgress {
+  Downloading { maybe_percent: Option<u8> },
+  Installing(InstallPhase),
 }
 
 /// The banner the app shows, if any.
@@ -236,6 +255,12 @@ pub enum UpdateBanner {
     version: String,
     maybe_notes_url: Option<String>,
     action: AvailableAction,
+  },
+  /// The update the user asked for downloads or installs; the banner of "Available" stays and
+  /// shows how far it is, and turns into "Ready" when done (#1044).
+  InProgress {
+    version: String,
+    progress: UpdateProgress,
   },
   /// "This version is too old for your organization" — stays until updated.
   TooOld {
@@ -271,6 +296,8 @@ pub enum TooOldAction {
   /// The app can update itself; what the user can do about it right now.
   SelfUpdate(SelfUpdateStep),
   Manual(ManualUpdate),
+  /// The update downloads or installs.
+  InProgress(UpdateProgress),
   /// Updates are off here (policy, machine, Flatpak): IT or the store has to do it.
   Elsewhere,
 }
@@ -281,7 +308,7 @@ pub enum SelfUpdateStep {
   Restart { can_restart: bool },
   /// Found, not downloaded (notify only, or waiting for a call to end).
   Download { can_download: bool },
-  /// Checking, downloading, or not found yet: nothing to click.
+  /// Checking or not found yet: nothing to click.
   Wait,
 }
 
@@ -619,7 +646,41 @@ impl UpdateStatus {
           },
         },
       }),
+      _ if self.is_progress_shown() => self.progress_banner(),
       _ => None,
+    }
+  }
+
+  /// The banner of an update on its way, also one the banner doesn't show by itself: the UI shows
+  /// it while a click of the user's is still running.
+  pub fn progress_banner(&self) -> Option<UpdateBanner> {
+    let version = match &self.state {
+      UpdateState::Downloading { version, .. } | UpdateState::Installing { version, .. } => version.clone(),
+      _ => return None,
+    };
+    Some(UpdateBanner::InProgress {
+      version,
+      progress: self.progress()?,
+    })
+  }
+
+  fn progress(&self) -> Option<UpdateProgress> {
+    match &self.state {
+      UpdateState::Downloading { maybe_percent, .. } => Some(UpdateProgress::Downloading {
+        maybe_percent: *maybe_percent,
+      }),
+      UpdateState::Installing { phase, .. } => Some(UpdateProgress::Installing(*phase)),
+      _ => None,
+    }
+  }
+
+  /// Progress follows a click: only the user starts PackageKit, and a download only where the
+  /// user decides about updates. An automatic download stays quiet until it is ready.
+  fn is_progress_shown(&self) -> bool {
+    match self.state {
+      UpdateState::Installing { .. } => true,
+      UpdateState::Downloading { .. } => self.preference != UpdatePreference::Automatic,
+      _ => false,
     }
   }
 
@@ -629,6 +690,9 @@ impl UpdateStatus {
   }
 
   fn too_old_action(&self) -> TooOldAction {
+    if let Some(progress) = self.progress() {
+      return TooOldAction::InProgress(progress);
+    }
     match (&self.state, &self.maybe_manual) {
       (UpdateState::Off { .. }, _) => TooOldAction::Elsewhere,
       (_, Some(manual)) => TooOldAction::Manual(manual.clone()),
@@ -1088,7 +1152,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn nothing_is_shown_while_idle_checking_or_downloading() {
+    fn nothing_is_shown_while_idle_checking_or_downloading_automatically() {
       for state in [
         UpdateState::Idle {
           maybe_checked_at: None,
@@ -1107,6 +1171,93 @@ mod tests {
       ] {
         assert_eq!(status(state).banner(), None);
       }
+    }
+
+    #[test]
+    fn an_update_the_user_started_shows_its_progress_in_the_banner() {
+      let mut installing = status(UpdateState::Installing {
+        version: "1.0.1".into(),
+        phase: InstallPhase::WaitingForAuthorization,
+      });
+      installing.install = InstallKind::Deb;
+      installing.maybe_manual = Some(ManualUpdate::PackageManager(apt_hint()));
+      assert_eq!(
+        installing.banner(),
+        Some(UpdateBanner::InProgress {
+          version: "1.0.1".into(),
+          progress: UpdateProgress::Installing(InstallPhase::WaitingForAuthorization),
+        })
+      );
+      assert_eq!(installing.dismissal(), Dismissal::Never);
+
+      let downloading = UpdateState::Downloading {
+        version: "1.0.1".into(),
+        maybe_percent: Some(40),
+      };
+      let expected = Some(UpdateBanner::InProgress {
+        version: "1.0.1".into(),
+        progress: UpdateProgress::Downloading {
+          maybe_percent: Some(40),
+        },
+      });
+      let mut notify_only = status(downloading.clone());
+      notify_only.preference = UpdatePreference::NotifyOnly;
+      assert_eq!(notify_only.banner(), expected);
+      // An automatic download is quiet, unless the UI still waits for a click of the user's.
+      let automatic = status(downloading);
+      assert_eq!(automatic.banner(), None);
+      assert_eq!(automatic.progress_banner(), expected);
+      assert_eq!(status(UpdateState::Checking).progress_banner(), None);
+    }
+
+    #[test]
+    fn a_too_old_version_shows_the_progress_of_its_update() {
+      let mut current = status(UpdateState::Downloading {
+        version: "1.3.0".into(),
+        maybe_percent: None,
+      });
+      current.maybe_required_version = Some("1.2.0".into());
+      assert_eq!(
+        current.banner(),
+        Some(UpdateBanner::TooOld {
+          required_version: "1.2.0".into(),
+          action: TooOldAction::InProgress(UpdateProgress::Downloading { maybe_percent: None }),
+        })
+      );
+      current.maybe_manual = Some(ManualUpdate::PackageManager(apt_hint()));
+      current.state = UpdateState::Installing {
+        version: "1.3.0".into(),
+        phase: InstallPhase::Running,
+      };
+      assert!(matches!(
+        current.banner(),
+        Some(UpdateBanner::TooOld {
+          action: TooOldAction::InProgress(UpdateProgress::Installing(InstallPhase::Running)),
+          ..
+        })
+      ));
+    }
+
+    #[test]
+    fn an_install_reads_without_its_phase() {
+      let state: UpdateState =
+        serde_json::from_value(serde_json::json!({"kind": "installing", "version": "1.0.1"}))
+          .unwrap_or(UpdateState::Checking);
+      assert_eq!(
+        state,
+        UpdateState::Installing {
+          version: "1.0.1".into(),
+          phase: InstallPhase::Running
+        }
+      );
+      assert_eq!(
+        serde_json::to_value(UpdateState::Installing {
+          version: "1.0.1".into(),
+          phase: InstallPhase::WaitingForAuthorization,
+        })
+        .unwrap_or_default(),
+        serde_json::json!({"kind": "installing", "version": "1.0.1", "phase": "waiting_for_authorization"})
+      );
     }
 
     #[test]
