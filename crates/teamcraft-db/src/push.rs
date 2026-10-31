@@ -142,7 +142,7 @@ impl Database {
                 SELECT 1 FROM messages m
                 WHERE m.conversation_id = ms.conversation_id AND m.thread_id IS NULL
                   AND m.sender_user_id <> ms.user_id
-                  AND m.id > COALESCE(ms.last_read_message_id, 0)
+                  AND m.id > COALESCE(ms.last_read_message_id, 0) AND NOT m.is_imported
                   AND m.id >= tc_snowflake_floor(ms.joined_at)
                   AND (c.kind IN ('dm', 'group') OR ms.user_id = ANY(m.mentioned_user_ids))))
          + (SELECT COUNT(*) FROM threads_followed tf
@@ -151,7 +151,7 @@ impl Database {
                 SELECT 1 FROM messages m
                 WHERE m.conversation_id = tf.conversation_id AND m.thread_id = tf.thread_id
                   AND m.sender_user_id <> tf.user_id
-                  AND m.id > COALESCE(tf.last_read_message_id, 0)
+                  AND m.id > COALESCE(tf.last_read_message_id, 0) AND NOT m.is_imported
                   AND tf.user_id = ANY(m.mentioned_user_ids)))
            AS "badge!""#,
       to_db(user),

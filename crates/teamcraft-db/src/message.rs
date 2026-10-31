@@ -49,6 +49,9 @@ pub struct HistoryQuery {
   pub maybe_after: Option<MessageId>,
   /// Messages with a smaller ID are invisible to the caller (history policy, guests).
   pub maybe_not_before: Option<MessageId>,
+  /// Imported messages are visible whatever `maybe_not_before` says (a DM's participants, who get
+  /// its imported history, e2ee.md §4.10).
+  pub sees_imported: bool,
   pub limit: i64,
 }
 
@@ -163,12 +166,13 @@ impl Database {
         r#"SELECT id, client_message_id, conversation_id, sender_user_id, sender_device_id, thread_id,
                   mentioned_user_ids, is_urgent, content_key_id, ciphertext AS "ciphertext?"
            FROM messages
-           WHERE conversation_id = $1 AND id > $2 AND ($3::bigint IS NULL OR id >= $3)
+           WHERE conversation_id = $1 AND id > $2 AND ($3::bigint IS NULL OR id >= $3 OR (is_imported AND $5))
            ORDER BY id ASC LIMIT $4"#,
         to_db(query.conversation),
         query.maybe_after.map(to_db),
         query.maybe_not_before.map(to_db),
         query.limit + 1,
+        query.sees_imported,
       )
       .fetch_all(self.pool())
       .await?
@@ -193,12 +197,14 @@ impl Database {
         r#"SELECT id, client_message_id, conversation_id, sender_user_id, sender_device_id, thread_id,
                   mentioned_user_ids, is_urgent, content_key_id, ciphertext AS "ciphertext?"
            FROM messages
-           WHERE conversation_id = $1 AND ($2::bigint IS NULL OR id < $2) AND ($3::bigint IS NULL OR id >= $3)
+           WHERE conversation_id = $1 AND ($2::bigint IS NULL OR id < $2)
+             AND ($3::bigint IS NULL OR id >= $3 OR (is_imported AND $5))
            ORDER BY id DESC LIMIT $4"#,
         to_db(query.conversation),
         query.maybe_before.map(to_db),
         query.maybe_not_before.map(to_db),
         query.limit + 1,
+        query.sees_imported,
       )
       .fetch_all(self.pool())
       .await?

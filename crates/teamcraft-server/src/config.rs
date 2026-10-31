@@ -100,7 +100,8 @@ pub struct ServerConfig {
   /// Address of the HTTP listener. TLS is terminated by the reverse proxy. The default `[::]` is a
   /// dual-stack socket (IPv4 and IPv6); set e.g. `127.0.0.1:8080` to bind a single address.
   pub listen_addr: SocketAddr,
-  /// Unique number (0-1023) of this server instance in generated Snowflake IDs.
+  /// Unique number (0-1022) of this server instance in generated Snowflake IDs; 1023 is reserved for
+  /// imported messages.
   pub worker_id: u16,
   /// How many months of message partitions are created ahead of time.
   pub partitions_ahead_months: u32,

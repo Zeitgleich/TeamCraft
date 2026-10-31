@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT id, client_message_id, conversation_id, sender_user_id, sender_device_id, thread_id,\n                  mentioned_user_ids, is_urgent, content_key_id, ciphertext AS \"ciphertext?\"\n           FROM messages\n           WHERE conversation_id = $1 AND id > $2 AND ($3::bigint IS NULL OR id >= $3)\n           ORDER BY id ASC LIMIT $4",
+  "query": "SELECT id, client_message_id, conversation_id, sender_user_id, sender_device_id, thread_id,\n                  mentioned_user_ids, is_urgent, content_key_id, ciphertext AS \"ciphertext?\"\n           FROM messages\n           WHERE conversation_id = $1 AND ($2::bigint IS NULL OR id < $2)\n             AND ($3::bigint IS NULL OR id >= $3 OR (is_imported AND $5))\n           ORDER BY id DESC LIMIT $4",
   "describe": {
     "columns": [
       {
@@ -119,7 +119,8 @@
         "Int8",
         "Int8",
         "Int8",
-        "Int8"
+        "Int8",
+        "Bool"
       ]
     },
     "nullable": [
@@ -135,5 +136,5 @@
       true
     ]
   },
-  "hash": "5a0a8f5f82e13b52c35d5445249f72ee372510f3d1653f4eb6121c3575bf5b44"
+  "hash": "0389055592f3628373bb5618506ad7a028917d76ff02c06180abdf3cbaddca2b"
 }

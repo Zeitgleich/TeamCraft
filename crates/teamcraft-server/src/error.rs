@@ -53,6 +53,12 @@ pub enum ApiError {
   /// Channel members must belong to the channel's space; the user is not in it (yet).
   #[error("the user is not a member of the space")]
   NotSpaceMember,
+  /// The signed policy doesn't name the caller as the importer, or the import period is over.
+  #[error("this account may not import")]
+  ImportNotAllowed,
+  /// No ID is left for imported messages below the conversation's first live message.
+  #[error("no room for imported messages before the conversation's first message")]
+  ImportWindowFull,
   /// A guest tried to start a direct message that `guest_dm_start` doesn't allow.
   #[error("guests may not start this direct message")]
   GuestDmNotAllowed,
@@ -301,6 +307,7 @@ impl ApiError {
       Self::Auth(AuthError::NoTeamcraftRole | AuthError::AccountDeactivated)
       | Self::Forbidden(_)
       | Self::GuestDmNotAllowed
+      | Self::ImportNotAllowed
       | Self::RecoveryPassphraseNotAllowed
       | Self::MfaRequired => StatusCode::FORBIDDEN,
       Self::Auth(AuthError::KeysUnavailable(_)) => StatusCode::SERVICE_UNAVAILABLE,
@@ -313,6 +320,7 @@ impl ApiError {
       | Self::CallDeviceLimit { .. }
       | Self::CannotDeleteSelf
       | Self::LastAdmin
+      | Self::ImportWindowFull
       | Self::KeyPackageExhausted
       | Self::EpochConflict { .. }
       | Self::VersionConflict { .. } => StatusCode::CONFLICT,
@@ -340,6 +348,8 @@ impl ApiError {
       Self::Auth(AuthError::AccountDeleted) => ErrorCode::AccountDeleted,
       Self::Forbidden(_) => ErrorCode::Forbidden,
       Self::GuestDmNotAllowed => ErrorCode::GuestDmNotAllowed,
+      Self::ImportNotAllowed => ErrorCode::ImportNotAllowed,
+      Self::ImportWindowFull => ErrorCode::ImportWindowFull,
       Self::Auth(AuthError::KeysUnavailable(_)) => ErrorCode::Unavailable,
       Self::NotFound { code, .. } => code.clone(),
       Self::InvalidRequest(_) => ErrorCode::InvalidRequest,
@@ -598,6 +608,16 @@ mod tests {
         ErrorCode::CannotDeleteSelf,
       ),
       (ApiError::LastAdmin, StatusCode::CONFLICT, ErrorCode::LastAdmin),
+      (
+        ApiError::ImportNotAllowed,
+        StatusCode::FORBIDDEN,
+        ErrorCode::ImportNotAllowed,
+      ),
+      (
+        ApiError::ImportWindowFull,
+        StatusCode::CONFLICT,
+        ErrorCode::ImportWindowFull,
+      ),
       (
         ApiError::RecoveryPassphraseNotAllowed,
         StatusCode::FORBIDDEN,

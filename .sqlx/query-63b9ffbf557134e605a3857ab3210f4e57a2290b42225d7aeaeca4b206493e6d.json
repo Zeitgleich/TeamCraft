@@ -1,0 +1,23 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT\n           (SELECT COUNT(*) FROM memberships ms\n            JOIN conversations c ON c.id = ms.conversation_id\n            WHERE ms.user_id = $1\n              AND EXISTS (\n                SELECT 1 FROM messages m\n                WHERE m.conversation_id = ms.conversation_id AND m.thread_id IS NULL\n                  AND m.sender_user_id <> ms.user_id\n                  AND m.id > COALESCE(ms.last_read_message_id, 0) AND NOT m.is_imported\n                  AND m.id >= tc_snowflake_floor(ms.joined_at)\n                  AND (c.kind IN ('dm', 'group') OR ms.user_id = ANY(m.mentioned_user_ids))))\n         + (SELECT COUNT(*) FROM threads_followed tf\n            WHERE tf.user_id = $1 AND tf.state = 'following'\n              AND EXISTS (\n                SELECT 1 FROM messages m\n                WHERE m.conversation_id = tf.conversation_id AND m.thread_id = tf.thread_id\n                  AND m.sender_user_id <> tf.user_id\n                  AND m.id > COALESCE(tf.last_read_message_id, 0) AND NOT m.is_imported\n                  AND tf.user_id = ANY(m.mentioned_user_ids)))\n           AS \"badge!\"",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "badge!",
+        "type_info": "Int8",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8"
+      ]
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "63b9ffbf557134e605a3857ab3210f4e57a2290b42225d7aeaeca4b206493e6d"
+}

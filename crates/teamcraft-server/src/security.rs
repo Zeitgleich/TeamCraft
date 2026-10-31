@@ -8,7 +8,7 @@
 use std::collections::HashMap;
 use std::net::{IpAddr, SocketAddr};
 use std::sync::{Mutex, PoisonError};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use axum::extract::{ConnectInfo, Request, State};
 use axum::http::header::{
@@ -26,6 +26,9 @@ use crate::state::AppState;
 /// More entries than this trigger a sweep of idle buckets.
 const SWEEP_THRESHOLD: usize = 50_000;
 const API_CSP: &str = "default-src 'none'; frame-ancestors 'none'";
+/// How long an address the import account authenticated from passes the per-address limit
+/// (admin.md §3.8); each of its requests renews it.
+const IMPORT_EXEMPTION: Duration = Duration::from_secs(10 * 60);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 enum Kind {
@@ -49,6 +52,10 @@ pub struct RateLimits {
   /// E-mails the meetings of one organizer may still send, refilled over an hour. A quota, not a
   /// rate limit: it applies even when rate limits are switched off.
   mail_budgets: Mutex<HashMap<UserId, Bucket>>,
+  /// Addresses the import account sent an authenticated request from, until when they pass the
+  /// per-address limit: the address limit runs before authentication, so the importer's address is
+  /// learned from its requests.
+  import_addresses: Mutex<HashMap<String, Instant>>,
 }
 
 impl RateLimits {
@@ -57,7 +64,28 @@ impl RateLimits {
       config: config.clone(),
       buckets: Mutex::new(HashMap::new()),
       mail_budgets: Mutex::new(HashMap::new()),
+      import_addresses: Mutex::new(HashMap::new()),
     }
+  }
+
+  /// The import account authenticated from `ip`: its requests from there pass the per-address
+  /// limit for [`IMPORT_EXEMPTION`].
+  pub fn note_import_address(&self, ip: &str, now: Instant) {
+    let mut addresses = self
+      .import_addresses
+      .lock()
+      .unwrap_or_else(PoisonError::into_inner);
+    addresses.retain(|_, until| *until > now);
+    addresses.insert(ip.to_owned(), now + IMPORT_EXEMPTION);
+  }
+
+  fn is_import_address(&self, ip: &str, now: Instant) -> bool {
+    self
+      .import_addresses
+      .lock()
+      .unwrap_or_else(PoisonError::into_inner)
+      .get(ip)
+      .is_some_and(|until| *until > now)
   }
 
   /// Spends `count` e-mails of the user's hourly budget of `per_hour`. `false` (and nothing spent)
@@ -210,8 +238,12 @@ pub async fn guard(State(state): State<AppState>, request: Request, next: Next) 
   request.extensions_mut().insert(ClientIp(ip.clone()));
   let now = Instant::now();
   let limits = &state.rate_limits;
-  let refusal = limits
-    .check_ip(&ip, now)
+  let refusal = if limits.is_import_address(&ip, now) {
+    Ok(())
+  } else {
+    limits.check_ip(&ip, now)
+  };
+  let refusal = refusal
     .and_then(|()| limits.check_not_blocked(&ip, now))
     .and_then(|()| {
       if is_unauthenticated_endpoint(&path) {
@@ -385,6 +417,17 @@ mod tests {
 
   mod buckets {
     use super::*;
+
+    #[test]
+    fn the_import_accounts_address_passes_for_a_while() {
+      let limits = limits(|_| ());
+      let start = Instant::now();
+      assert!(!limits.is_import_address("1.2.3.4", start));
+      limits.note_import_address("1.2.3.4", start);
+      assert!(limits.is_import_address("1.2.3.4", start + Duration::from_secs(60)));
+      assert!(!limits.is_import_address("5.6.7.8", start));
+      assert!(!limits.is_import_address("1.2.3.4", start + IMPORT_EXEMPTION));
+    }
 
     #[test]
     fn a_burst_is_allowed_then_refused_with_a_retry_time_and_refills() {

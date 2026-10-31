@@ -549,6 +549,9 @@ pub struct WorkspacePolicy {
   /// The AI notetaker of calls (e2ee.md §8.2); off when absent.
   #[serde(default)]
   pub notetaker: NotetakerPolicy,
+  /// Importing history from another chat (e2ee.md §4.10); off when absent.
+  #[serde(default)]
+  pub import: crate::ImportPolicy,
 }
 
 /// The JSON document a policy entry's `payload` must contain (and the owner signs).
@@ -594,6 +597,7 @@ impl Default for WorkspacePolicy {
       recovery: RecoveryPolicy::default(),
       screen_share: ScreenSharePolicy::default(),
       notetaker: NotetakerPolicy::default(),
+      import: crate::ImportPolicy::default(),
     }
   }
 }
