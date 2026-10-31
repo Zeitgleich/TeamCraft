@@ -3,10 +3,43 @@
 //! platform's native controls differ per webview (WebKitGTK's GStreamer bar, WKWebView, WebView2),
 //! so the player draws its own on every platform.
 
+use std::time::Duration;
+
 /// Seconds the arrow keys seek.
 pub const SEEK_STEP_SECONDS: f64 = 5.0;
 /// Volume step of the up and down arrow keys.
 pub const VOLUME_STEP: f64 = 0.1;
+/// How long a video may give no sign of playing before the player says it can't be played (#804):
+/// from the file being there to its length and size being known, and from "play" to the first
+/// frame or the clock moving. The file is already decrypted in memory, so a webview that can play
+/// it does both within a moment. WebKitGTK without a decoder fires no error: it either never gets
+/// that far, or it reports the length with a picture size of zero ([`PlaybackState::lacks_picture`]).
+pub const STALL_TIMEOUT: Duration = Duration::from_secs(8);
+
+/// What the player waits for, checked [`STALL_TIMEOUT`] after it began waiting.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum StallCheck {
+  /// The video's length and size, from when the player got the file.
+  Metadata,
+  /// A frame or a moving clock, from "play" at this position.
+  Start { from_seconds: f64 },
+}
+
+/// What the video element reports when a check is due.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PlaybackState {
+  /// `readyState` reached `HAVE_METADATA`.
+  pub has_metadata: bool,
+  /// `readyState` reached `HAVE_CURRENT_DATA`. Not proof of a picture: WebKitGTK gets there
+  /// without a video decoder too.
+  pub has_frame: bool,
+  /// The picture's size is known (`videoWidth` above zero).
+  pub has_picture: bool,
+  pub is_paused: bool,
+  pub is_ended: bool,
+  pub is_seeking: bool,
+  pub current_seconds: f64,
+}
 
 /// What a key does to the focused player.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -89,6 +122,31 @@ pub fn format_seconds(seconds: f64) -> String {
   match hours {
     0 => format!("{minutes}:{seconds:02}"),
     _ => format!("{hours}:{minutes:02}:{seconds:02}"),
+  }
+}
+
+impl PlaybackState {
+  /// The length is known but the picture has no size: the webview can't decode the video track
+  /// (WebKitGTK without an H.264 or HEVC decoder). Known the moment the metadata is there, so the
+  /// player says so at once.
+  pub fn lacks_picture(self) -> bool {
+    self.has_metadata && !self.has_picture
+  }
+}
+
+impl StallCheck {
+  /// Whether the video gave no sign of playing in time: it can't be played here. A user who paused
+  /// or seeked meanwhile started something else, which is not a stall.
+  pub fn is_stalled(self, state: PlaybackState) -> bool {
+    match self {
+      Self::Metadata => !state.has_metadata || state.lacks_picture(),
+      Self::Start { from_seconds } => {
+        let is_waiting = !state.is_paused && !state.is_ended && !state.is_seeking;
+        let has_moved = state.current_seconds > from_seconds;
+        // Sound alone moves the clock: without a picture it still doesn't play.
+        is_waiting && (state.lacks_picture() || (!has_moved && !state.has_frame))
+      },
+    }
   }
 }
 
@@ -183,6 +241,112 @@ mod tests {
       assert_eq!(format_seconds(3723.0), "1:02:03");
       assert_eq!(format_seconds(f64::NAN), "0:00");
       assert_eq!(format_seconds(-3.0), "0:00");
+    }
+  }
+
+  mod stalls {
+    use super::*;
+
+    #[test]
+    fn a_player_that_never_gets_metadata_is_stalled() {
+      assert!(StallCheck::Metadata.is_stalled(nothing_loaded()));
+      assert!(!StallCheck::Metadata.is_stalled(loaded()));
+    }
+
+    #[test]
+    fn metadata_without_a_picture_size_is_unplayable() {
+      // What WebKitGTK reports for an H.264 video without a decoder (#804).
+      let without_decoder = PlaybackState {
+        has_picture: false,
+        has_frame: true,
+        ..loaded()
+      };
+      assert!(without_decoder.lacks_picture());
+      assert!(StallCheck::Metadata.is_stalled(without_decoder));
+      assert!(!loaded().lacks_picture());
+      assert!(!nothing_loaded().lacks_picture(), "not known before the metadata");
+    }
+
+    #[test]
+    fn sound_without_a_picture_is_not_playing() {
+      let sound_only = PlaybackState {
+        is_paused: false,
+        has_picture: false,
+        current_seconds: 4.0,
+        ..loaded()
+      };
+      assert!(StallCheck::Start { from_seconds: 0.0 }.is_stalled(sound_only));
+    }
+
+    #[test]
+    fn playing_at_zero_without_a_frame_is_stalled() {
+      let playing = PlaybackState {
+        is_paused: false,
+        ..loaded()
+      };
+      assert!(StallCheck::Start { from_seconds: 0.0 }.is_stalled(playing));
+    }
+
+    #[test]
+    fn a_frame_or_a_moving_clock_is_playing() {
+      let playing = PlaybackState {
+        is_paused: false,
+        ..loaded()
+      };
+      let check = StallCheck::Start { from_seconds: 3.0 };
+      assert!(!check.is_stalled(PlaybackState {
+        has_frame: true,
+        current_seconds: 3.0,
+        ..playing
+      }));
+      assert!(!check.is_stalled(PlaybackState {
+        current_seconds: 3.5,
+        ..playing
+      }));
+    }
+
+    #[test]
+    fn pausing_seeking_or_the_end_is_not_a_stall() {
+      let check = StallCheck::Start { from_seconds: 0.0 };
+      for state in [
+        PlaybackState {
+          is_paused: true,
+          ..nothing_loaded()
+        },
+        PlaybackState {
+          is_paused: false,
+          is_seeking: true,
+          ..nothing_loaded()
+        },
+        PlaybackState {
+          is_paused: false,
+          is_ended: true,
+          ..nothing_loaded()
+        },
+      ] {
+        assert!(!check.is_stalled(state), "{state:?}");
+      }
+    }
+
+    fn nothing_loaded() -> PlaybackState {
+      PlaybackState {
+        has_metadata: false,
+        has_frame: false,
+        has_picture: false,
+        is_paused: true,
+        is_ended: false,
+        is_seeking: false,
+        current_seconds: 0.0,
+      }
+    }
+
+    /// Length and size known, nothing decoded yet.
+    fn loaded() -> PlaybackState {
+      PlaybackState {
+        has_metadata: true,
+        has_picture: true,
+        ..nothing_loaded()
+      }
     }
   }
 }

@@ -17,7 +17,7 @@
 //!   instead of starting another one.
 
 use std::cell::RefCell;
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::future::Future;
 use std::hash::Hash;
 use std::rc::Rc;
@@ -54,6 +54,9 @@ thread_local! {
   /// Files being downloaded and decrypted, shared by the renditions made from them.
   static LOADING_BYTES: RefCell<InFlight<(MediaKey, AttachmentPriority), BytesResult>> =
     RefCell::new(InFlight::default());
+  /// Videos this webview couldn't play (#804): the lightbox says so at once instead of trying
+  /// again. Only failures go in, and a newly installed codec needs a restart anyway.
+  static UNPLAYABLE: RefCell<HashSet<MediaKey>> = RefCell::new(HashSet::new());
 }
 
 type UrlResult = Result<Rc<ObjectUrl>, FetchError>;
@@ -246,6 +249,16 @@ fn persist(persisted_key: CacheKey, url: &ObjectUrl) {
 /// The image if it is in the cache (and marks it as just used).
 pub fn cached(key: MediaKey, rendition: Rendition) -> Option<Rc<ObjectUrl>> {
   CACHE.with_borrow_mut(|cache| cache.get(&(key, rendition)))
+}
+
+/// Remembers that the webview couldn't play the video `key` in this session.
+pub fn mark_unplayable(key: MediaKey) {
+  UNPLAYABLE.with(|unplayable| unplayable.borrow_mut().insert(key));
+}
+
+/// Whether the video `key` already failed to play in this session.
+pub fn is_unplayable(key: MediaKey) -> bool {
+  UNPLAYABLE.with(|unplayable| unplayable.borrow().contains(&key))
 }
 
 impl<K: PartialEq, V: Clone> Lru<K, V> {

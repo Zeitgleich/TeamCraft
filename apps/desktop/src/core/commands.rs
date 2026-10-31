@@ -526,7 +526,7 @@ fn picked_path(answer: Result<Option<FilePath>, RecvError>) -> Result<Option<Pat
 
 /// The name the save dialog suggests: the sender's file name without path separators or control
 /// characters, so it can't point the dialog elsewhere.
-fn save_name(file_name: &str) -> String {
+pub(crate) fn save_name(file_name: &str) -> String {
   let cleaned: String = file_name
     .chars()
     .map(|character| match character {

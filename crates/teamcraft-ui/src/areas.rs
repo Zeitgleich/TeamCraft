@@ -150,8 +150,8 @@ areas! {
   lightbox(conversation: ConversationId, start: MediaKey) => lightbox: view! { <Lightbox conversation=conversation start=start /> };
   /// The app's own video player in a message row, once play is pressed (#638): a first visit
   /// doesn't need it (#695). The lightbox's chunk uses it as well.
-  inline_video_player(src: String, video: NodeRef<html::Video>, label: String, on_error: Callback<()>) => video: view! {
-    <VideoPlayer src=src video=video label=label class="media-video-player" is_autoplay=true on_error=on_error />
+  inline_video_player(src: String, video: NodeRef<html::Video>, label: String, on_unplayable: Callback<()>) => video: view! {
+    <VideoPlayer src=src video=video label=label class="media-video-player" is_autoplay=true on_unplayable=on_unplayable />
   };
   /// The preview of Markdown, HTML, PDF and text files (#557), with the text and log viewer (#821).
   file_preview(conversation: ConversationId, key: MediaKey) => preview: view! { <FilePreview conversation=conversation key=key /> };

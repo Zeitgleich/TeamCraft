@@ -1,7 +1,7 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "What the main window may call: the shell's own commands (listed in build.rs) and event subscriptions. No plugin commands: the webview opens links only through `open_external` (web and mail addresses) and the Screen Recording settings only through `open_screen_recording_settings` (a fixed address), shows notifications or runs the updater itself.",
+  "description": "What the main window may call: the shell's own commands (listed in build.rs) and event subscriptions. No plugin commands: the webview opens links only through `open_external` (web and mail addresses) the Screen Recording settings only through `open_screen_recording_settings` (a fixed address) and videos only through `open_video_externally` (with a video extension), shows notifications or runs the updater itself.",
   "windows": [
     "main"
   ],
@@ -107,6 +107,8 @@
     "allow-update-restart",
     "allow-update-with-package-manager",
     "allow-update-dismiss",
+    "allow-video-playback",
+    "allow-open-video-externally",
     "allow-window-chrome",
     "allow-window-action"
   ]

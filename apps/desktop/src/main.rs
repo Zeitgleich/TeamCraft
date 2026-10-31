@@ -33,6 +33,7 @@ mod single_instance;
 mod startup_env;
 mod tray;
 mod updates;
+mod video_playback;
 mod webview_downloads;
 #[cfg(target_os = "linux")]
 mod webview_memory;
@@ -168,6 +169,9 @@ fn main() -> anyhow::Result<()> {
         tracing::warn!(%error, "no tray icon");
       }
       create_main_window(app)?;
+      video_playback::clear_opened_videos(app.handle());
+      // Logs once whether GStreamer can play phone videos (#804), off the start-up path.
+      tauri::async_runtime::spawn(video_playback::video_playback());
       match app.path().app_cache_dir() {
         Ok(dir) => app
           .state::<notifications::pictures::NotificationPictures>()
@@ -318,6 +322,8 @@ fn main() -> anyhow::Result<()> {
       updates::update_restart,
       updates::update_with_package_manager,
       updates::update_dismiss,
+      video_playback::video_playback,
+      video_playback::open_video_externally,
       window_chrome::window_chrome,
       window_chrome::window_action,
     ])

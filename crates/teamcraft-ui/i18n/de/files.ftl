@@ -239,6 +239,11 @@ video-unmute = Ton an
 video-volume = Lautstärke
 video-fullscreen = Vollbild
 video-exit-fullscreen = Vollbild beenden
+# Ein Video, das der Player der App nicht abspielen kann (#804); $packages sind Linux-Paketnamen
+video-unplayable = Dieses Video kann hier nicht abgespielt werden.
+video-unplayable-install = Auf diesem System fehlt ein Video-Decoder. Installiere { $packages } und starte TeamCraft neu.
+video-unplayable-codecs = Auf diesem System fehlt ein Video-Decoder. Installiere die GStreamer-Plugins deiner Distribution für H.264 und HEVC und starte TeamCraft neu.
+video-open-externally = Im Videoplayer öffnen
 # Audiodateien, die im Gespräch abgespielt werden (#802)
 audio-play = { $name } abspielen
 audio-pause = { $name } pausieren

@@ -21,6 +21,8 @@ pub mod message_sounds;
 #[cfg(feature = "native")]
 pub mod openh264_library;
 pub mod picture_check;
+#[cfg(all(feature = "gstreamer", not(target_os = "android")))]
+pub mod playback_gstreamer;
 pub mod ringtone;
 pub mod rtp;
 #[cfg(feature = "sound-files")]

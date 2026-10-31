@@ -5,6 +5,8 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
+use teamcraft_client_api::actions::FileInfo;
+use teamcraft_client_api::video_playback::VideoPlayback;
 use teamcraft_client_api::window_chrome::{TitleBar, TrayIconStyle, WindowAction, WindowChrome};
 use teamcraft_proto::{AvatarContentType, UserId};
 use wasm_bindgen::{JsCast, JsValue};
@@ -661,6 +663,31 @@ pub async fn update_with_package_manager() -> Result<(), String> {
 /// Hides the hint for this version for good (deb, rpm, Flatpak: the app can't install it).
 pub async fn update_dismiss(version: &str) -> Result<(), String> {
   call::<()>("update_dismiss", &serde_json::json!({ "version": version })).await
+}
+
+/// Linux desktop only: which parts for phone videos GStreamer has (#804). `None` in the browser and
+/// on systems whose webview doesn't play through GStreamer.
+pub async fn video_playback() -> Option<VideoPlayback> {
+  if !is_available() {
+    return None;
+  }
+  call::<Option<VideoPlayback>>("video_playback", &serde_json::json!({}))
+    .await
+    .inspect_err(|error| tracing::debug!(%error, "no video playback report"))
+    .ok()
+    .flatten()
+}
+
+/// Desktop only: opens a video attachment in the system's default player.
+pub async fn open_video_externally(file: &FileInfo) -> Result<(), String> {
+  let args = serde_json::json!({
+    "conversation": file.conversation,
+    "message": file.message,
+    "file_id": file.file_id,
+    "file_name": file.file_name,
+    "media_type": file.media_type,
+  });
+  call::<()>("open_video_externally", &args).await
 }
 
 /// Calls a desktop command with JSON arguments and reads its JSON answer. Errors come back as text.
