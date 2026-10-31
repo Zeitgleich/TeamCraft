@@ -18,10 +18,10 @@ catching-up-detail = Nachrichten aus der Zeit, in der du weg warst, werden noch 
 
 ## Nachrichten
 badge-bot = BOT
-badge-imported = IMPORTIERT
 imported-from-synology = Synology Chat
 imported-from-other = einem anderen Chat
-imported-title = Importiert aus { $source } von { $importer }
+imported-until = Bis hier aus { $source } importiert
+imported-title = Importiert aus { $source }
 badge-guest = GAST
 badge-organization = Organisation
 

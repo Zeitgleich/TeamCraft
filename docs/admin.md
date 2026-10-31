@@ -647,14 +647,15 @@ original order and keeps imports quiet.
 
 **Setting up.**
 
-1. An import account at the identity provider with the TeamCraft `admin` role; an owner's client puts
-   it into the signed roster like any admin (§2.3). One account per instance; it is a person of the
-   directory only to admins (below).
-2. Administration → Import (owners sign it, like every policy page): pick the import account and until
+1. An import account at the identity provider with the TeamCraft `admin` role, used for nothing
+   else. One account per instance.
+2. `teamcraft-import login` (runbook): it signs in as the import account in the browser and enrolls
+   the tool's device, the account's first and only one.
+3. An owner confirms the account in the signed roster like any admin (§2.3).
+4. Administration → Import (owners sign it, like every policy page): pick the import account and until
    when it may join conversations (default 90 days). This is the signed `import` part of the
    workspace policy (e2ee.md §4.10); "End import" clears the date.
-3. Run `teamcraft-import` with the export and the mappings (runbook). It signs in as the import
-   account in the system browser and enrolls its own device.
+5. Run `teamcraft-import` with the export and the mappings (runbook).
 
 **What the import account may do on the server** while the policy names it and the date hasn't passed
 (otherwise 403 `import_not_allowed`), audit `import_*`:
@@ -674,19 +675,19 @@ the conversation. While it may import, it passes the rate limits (per user, and 
 authenticated from there, for ten minutes after its last request) and the upload limits (per file
 and per user): it brings a whole team's history and files at once.
 
-**Imported messages on the server.** Each gets an ID from the reserved import worker (the highest
-worker number, which `server.worker_id` may not use), at its original millisecond when that is from
-2026 on, else in the first milliseconds of the epoch, and at least one above the conversation's last
-imported message; it must stay below the conversation's first message that wasn't imported
-(409 `import_window_full` otherwise, which only happens when far more messages than fit are imported
-after the first live one). The row is marked `is_imported`: it counts for no unread or mention count,
-causes no push, no reminder, no thread follow and no `message_create`. Everything else (size limits,
-thread roots in the same conversation, the device being the caller's) is checked like a send. A
-retry with the same client message IDs returns the stored messages.
+**Imported messages on the server.** They get IDs from one sequence for the whole server, on the
+reserved import worker (the highest worker number, which `server.worker_id` may not use), starting
+at the Snowflake epoch: imports wait for each other (an advisory lock), so IDs never collide between
+conversations and follow the order the importer sends. An ID must stay below the conversation's
+first message that wasn't imported (409 `import_window_full` otherwise; with IDs at the epoch that
+only happens to a server whose live messages are from its first milliseconds). The row is marked
+`is_imported`: it counts for no unread or mention count, causes no push, no reminder, no thread
+follow and no `message_create`. Everything else (size limits, thread roots in the same conversation,
+the device being the caller's) is checked like a send. A retry with the same client message IDs
+returns the stored messages.
 
-Retention judges an imported message by its ID like every message, which is never later than its
-original time, so a retention period removes imported history no later than it would have removed
-the original.
+Retention judges an imported message by its ID like every message, and an imported ID is from the
+start of 2026: a retention period counts imported history as that old, whatever its original date.
 
 **People.** Only mapped accounts take part. Somebody the mapping doesn't name (left the company,
 never had an account) is like a deleted account: their channel messages stay and show "Deleted user",
@@ -696,9 +697,8 @@ and the importer adds them with the history when they do (it keeps running, `tea
 Pre-provisioned accounts are ordinary accounts: the identity provider sync deactivates them like
 any other.
 
-**The import account in the directory.** People lists, the mention picker and DM names leave it out;
-admins see it in the user list with an "Import" mark. In a DM it shows only as the banner of e2ee.md
-§4.10.
+**The import account in DMs.** Clients leave it out of a DM's name and member list and show the
+banner of e2ee.md §4.10 instead; elsewhere it is an ordinary admin account.
 
 **After the import.** `teamcraft-import report` lists per conversation what was imported and skipped
 (with the reason), who is still missing, and the old system's webhooks to recreate as bridge sources

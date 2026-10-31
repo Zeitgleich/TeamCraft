@@ -11,7 +11,8 @@ use teamcraft_core::api::fake::FakeServer;
 use teamcraft_core::client::import::ImportDraft;
 use teamcraft_core::imported::{ImportSource, ImportedAuthor, ImportedOrigin};
 use teamcraft_core::store::{LocalStore, MessageContent, MessageFilter, MessageMeta};
-use teamcraft_proto::{ConversationId, HistoryPolicy};
+use teamcraft_core::workspace::RosterRole;
+use teamcraft_proto::{ConversationId, HistoryPolicy, ImportPolicy, WorkspacePolicy};
 
 /// 2024-05-01.
 const OLD_MS: i64 = 1_714_521_600_000;
@@ -182,6 +183,99 @@ async fn a_dm_is_founded_by_the_import_account_which_leaves_once_both_are_in() {
   alice.client.send_text(dm, None, "still here").await.unwrap();
   settle(&mut [&mut importer, &mut alice, &mut bob]).await;
   assert_eq!(bob.texts(dm), vec!["hi from the old chat", "still here"]);
+}
+
+#[tokio::test]
+async fn a_device_that_held_the_channel_gets_the_history_merged_into_it() {
+  let server = FakeServer::new();
+  let mut importer = Peer::enroll(&server, "Import").await;
+  let mut alice = Peer::enroll(&server, "Alice").await;
+  let space = alice.space().await;
+  let channel = alice.client.create_channel(space, "Daily").await.unwrap();
+  alice.client.send_text(channel, None, "live").await.unwrap();
+  alice
+    .client
+    .add_member_with_history(channel, importer.client.user_id(), Some(HistoryPolicy::Full))
+    .await
+    .unwrap();
+  settle(&mut [&mut importer, &mut alice]).await;
+  alice.client.catch_up_messages(channel).await.unwrap();
+  assert_eq!(alice.texts(channel), vec!["live"]);
+
+  importer
+    .client
+    .send_imported(channel, &[draft("1", "old", ImportedAuthor::Deleted, OLD_MS)])
+    .await
+    .unwrap();
+  importer.client.finish_import(channel).await.unwrap();
+  // The import sends no message events; the update that it finished brings the history.
+  settle(&mut [&mut importer, &mut alice]).await;
+  assert_eq!(alice.texts(channel), vec!["old", "live"]);
+}
+
+#[tokio::test]
+async fn a_dm_its_participant_holds_alone_is_taken_over_by_the_import_accounts_group() {
+  let server = FakeServer::new();
+  let mut alice = Peer::enroll(&server, "Alice").await;
+  let mut importer = Peer::enroll(&server, "Import").await;
+  let bob_api = server.add_user("Bob");
+  let bob_id = bob_api.user_id();
+  let (alice_id, importer_id) = (alice.client.user_id(), importer.client.user_id());
+  alice
+    .client
+    .publish_roster(&[(alice_id, RosterRole::Owner), (importer_id, RosterRole::Admin)])
+    .await
+    .unwrap();
+  alice
+    .client
+    .publish_policy(WorkspacePolicy {
+      import: ImportPolicy {
+        maybe_importer: Some(importer_id),
+        maybe_joins_until_ms: Some(i64::MAX),
+      },
+      ..WorkspacePolicy::default()
+    })
+    .await
+    .unwrap();
+  // Alice wrote to Bob, who has no device yet: her device holds the DM's group alone.
+  let dm = alice.client.open_dm(bob_id).await.unwrap();
+  alice.client.send_text(dm, None, "live").await.unwrap();
+  settle(&mut [&mut alice, &mut importer]).await;
+
+  let participants = vec![alice_id, bob_id];
+  let response = importer
+    .client
+    .open_import_dm(participants.clone())
+    .await
+    .unwrap();
+  assert_eq!(response.id, dm);
+  importer
+    .client
+    .set_up_import_dm(response, &participants)
+    .await
+    .unwrap();
+  settle(&mut [&mut alice, &mut importer]).await;
+  importer
+    .client
+    .send_imported(dm, &[draft("1", "old", ImportedAuthor::Deleted, OLD_MS)])
+    .await
+    .unwrap();
+  importer.client.finish_import(dm).await.unwrap();
+  settle(&mut [&mut alice, &mut importer]).await;
+  // Her device took the import account's group, so it reads what was imported.
+  assert_eq!(alice.texts(dm), vec!["old", "live"]);
+
+  // Bob sets up the app: he is added with all of it, also what Alice wrote before.
+  let mut bob = Peer::enroll_as(bob_api, "Bob").await;
+  for _ in 0..2 {
+    settle(&mut [&mut alice, &mut importer, &mut bob]).await;
+    importer.client.apply_pending_changes().await.unwrap();
+    alice.client.apply_pending_changes().await.unwrap();
+  }
+  settle(&mut [&mut alice, &mut importer, &mut bob]).await;
+  bob.client.full_sync().await.unwrap();
+  bob.client.catch_up_messages(dm).await.unwrap();
+  assert_eq!(bob.texts(dm), vec!["old", "live"]);
 }
 
 fn draft(source_id: &str, body: &str, author: ImportedAuthor, sent_at_ms: i64) -> ImportDraft {

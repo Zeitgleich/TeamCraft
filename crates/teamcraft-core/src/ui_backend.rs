@@ -45,7 +45,7 @@ use crate::client::bookmarks_key;
 use crate::client::workspace_admin::{ChannelOptions, StoredRoster};
 use crate::clock::Clock;
 use crate::error::CoreError;
-use crate::imported::{ImportSource, ImportedAuthor, ImportedOrigin};
+use crate::imported::{ImportAdditions, ImportSource, ImportedAuthor, ImportedOrigin};
 use crate::notify_rules::{MentionPreferences, load_mention_preferences};
 use crate::records::{self, Draft};
 use crate::store::{
@@ -655,7 +655,11 @@ impl<S: LocalStore> CoreChatBackend<S> {
     let mut memo = self.mentions.borrow_mut();
     memo.follow(&rules);
     let mut counts = EntryCounts::default();
+    let mut additions = ImportAdditions::new(self.importer());
     self.visit_top_level(response.id, &mut |message| {
+      if additions.note(message) {
+        return;
+      }
       if !is_deleted(message) {
         counts.messages += 1;
         counts.maybe_last_activity = counts.maybe_last_activity.max(Some(message.sent_at_ms));
@@ -921,9 +925,10 @@ impl<S: LocalStore> CoreChatBackend<S> {
     messages: Vec<StoredMessage>,
   ) -> Vec<StoredMessage> {
     let is_unread = self.unread_check(response, maybe_mark);
+    let mut additions = ImportAdditions::new(self.importer());
     messages
       .into_iter()
-      .filter(|message| is_unread(message))
+      .filter(|message| !additions.note(message) && is_unread(message))
       .collect()
   }
 
@@ -944,7 +949,15 @@ impl<S: LocalStore> CoreChatBackend<S> {
     // message was read; one newer than all of them is read once this device marked the
     // conversation read after it arrived.
     let maybe_lines_read = self.read(lines_read_through(&self.store, response.id));
+    // Imported history counts as read (e2ee.md §4.10), like on the server, and so do the lines of
+    // the import account adding people: they are part of the import.
+    let maybe_importer = self.importer();
     move |message: &StoredMessage| {
+      if crate::imported::trusted_origin(message, maybe_importer).is_some()
+        || crate::imported::is_import_line(message, maybe_importer)
+      {
+        return false;
+      }
       let is_read_line = message
         .line_position()
         .is_some_and(|at| maybe_lines_read.is_some_and(|read| at <= read));
@@ -1051,7 +1064,11 @@ impl<S: LocalStore> CoreChatBackend<S> {
   ) -> FeedTail {
     let mut tail = FeedTail::default();
     self.with_all_messages(conversation, &mut |all| {
-      let feed: Vec<&StoredMessage> = all.iter().filter(|message| is_feed_row(message)).collect();
+      let additions = ImportAdditions::of(all, self.importer());
+      let feed: Vec<&StoredMessage> = all
+        .iter()
+        .filter(|message| is_feed_row(message) && !additions.hides(message))
+        .collect();
       let anchor_at = maybe_oldest
         .and_then(|anchor| anchor.position_in(&feed))
         .unwrap_or(feed.len());
@@ -1260,17 +1277,17 @@ impl<S: LocalStore> ChatBackend for CoreChatBackend<S> {
       .len()
   }
 
+  /// The rows of the feed, as [`Self::message_page`] pages them.
   fn message_count(&self, conversation: ConversationId) -> usize {
-    self
-      .read(
-        self
-          .store
-          .messages(conversation, MessageFilter::TopLevel)
-          .map_err(CoreError::from),
-      )
-      .iter()
-      .filter(|message| !is_deleted(message))
-      .count()
+    let mut count = 0;
+    self.with_all_messages(conversation, &mut |all| {
+      let additions = ImportAdditions::of(all, self.importer());
+      count = all
+        .iter()
+        .filter(|message| is_feed_row(message) && !additions.hides(message))
+        .count();
+    });
+    count
   }
 
   fn last_activity(&self, conversation: ConversationId) -> Option<TimestampMs> {
@@ -1297,7 +1314,11 @@ impl<S: LocalStore> ChatBackend for CoreChatBackend<S> {
   fn message_page(&self, conversation: ConversationId, start: usize, len: usize) -> (usize, Vec<Message>) {
     let mut answer = (0, Vec::new());
     self.with_all_messages(conversation, &mut |all| {
-      let top_level: Vec<&StoredMessage> = all.iter().filter(|message| is_feed_row(message)).collect();
+      let additions = ImportAdditions::of(all, self.importer());
+      let top_level: Vec<&StoredMessage> = all
+        .iter()
+        .filter(|message| is_feed_row(message) && !additions.hides(message))
+        .collect();
       let end = start.saturating_add(len).min(top_level.len());
       let start = start.min(end);
       let relations = Relations::of(all, self.importer());
@@ -2512,7 +2533,8 @@ fn unread_position(message: &StoredMessage) -> Option<MessageId> {
 /// where a line about a change the server reports sits; time-ordered like the messages', and no
 /// outbox message's), or a stable stand-in for outbox messages.
 /// Whether a stored message is a row of the conversation's feed: top level (or a reply also sent
-/// to the channel), not hidden, not deleted.
+/// to the channel), not hidden, not deleted. The import account's additions are left out too
+/// ([`ImportAdditions`]).
 fn is_feed_row(message: &StoredMessage) -> bool {
   (message.maybe_thread_id.is_none() || message.is_also_in_channel())
     && !message.is_hidden()
@@ -3153,6 +3175,63 @@ mod tests {
       let party = row.reactions.iter().find(|r| r.emoji == "\u{1f389}").unwrap();
       assert_eq!(party.count, 1);
       assert!(!party.reacted_by_me);
+    }
+
+    #[test]
+    fn imported_history_is_never_unread() {
+      let backend = backend_with_importer(Some(IMPORTER));
+      let stored = imported_message(IMPORTER, ImportedAuthor::Deleted, Vec::new());
+      let conversation = ConversationResponse {
+        id: id(10),
+        maybe_space_id: None,
+        kind: ConversationKindProto::Channel,
+        maybe_name: Some("general".into()),
+        maybe_topic: None,
+        maybe_description: None,
+        visibility: ConversationVisibility::Public,
+        history_policy: teamcraft_proto::HistoryPolicy::Full,
+        maybe_category_id: None,
+        is_archived: false,
+        moderation: Default::default(),
+        is_integration: false,
+        contains_guests: false,
+        maybe_organizer_user_id: None,
+        maybe_my_permissions: None,
+        maybe_importer_user_id: None,
+        maybe_imported_through: None,
+        maybe_my_membership: None,
+        participants: Vec::new(),
+        maybe_image: None,
+      };
+      assert!(!backend.unread_check(&conversation, None)(&stored));
+      let live = StoredMessage {
+        content: MessageContent::Text {
+          body: "live".into(),
+          mentions: Vec::new(),
+          meta: MessageMeta::default(),
+        },
+        sender_user_id: id(3),
+        ..stored
+      };
+      assert!(backend.unread_check(&conversation, None)(&live));
+      // The import account adding somebody, as an event and as a line: part of the import.
+      let import_event = StoredMessage {
+        sender_user_id: id(IMPORTER),
+        content: MessageContent::Event {
+          event: ConversationEvent::MemberAdded {
+            user: id(3),
+            history: teamcraft_proto::HistoryPolicy::Full,
+          },
+        },
+        ..live.clone()
+      };
+      assert!(!backend.unread_check(&conversation, None)(&import_event));
+      let import_line = StoredMessage {
+        sender_user_id: id(IMPORTER),
+        maybe_verified_commit: Some(id(9)),
+        ..live
+      };
+      assert!(!backend.unread_check(&conversation, None)(&import_line));
     }
 
     fn backend_with_importer(maybe_importer: Option<i64>) -> CoreChatBackend<MemoryStore> {

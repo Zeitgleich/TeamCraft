@@ -1,0 +1,48 @@
+[package]
+name = "teamcraft-import"
+description = "Imports the history of another chat system (Synology Chat) into TeamCraft, end-to-end encrypted"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[lib]
+name = "teamcraft_import"
+path = "src/lib.rs"
+
+[[bin]]
+name = "teamcraft-import"
+path = "src/main.rs"
+
+[dependencies]
+# The import is a client: it encrypts like the apps (e2ee.md §4.10).
+teamcraft-core = { path = "../teamcraft-core" }
+teamcraft-crypto = { path = "../teamcraft-crypto" }
+# The authorization URL and PKCE of the sign-in, as the desktop app makes them.
+teamcraft-client-api = { path = "../teamcraft-client-api" }
+teamcraft-proto.workspace = true
+anyhow.workspace = true
+base64.workspace = true
+# Gemoji short codes (Synology's reactions and `:name:` in texts) as emoji: data only, MIT/Apache.
+emojis = "0.6"
+oauth2 = { version = "5", default-features = false }
+rand_core.workspace = true
+reqwest.workspace = true
+# The import's progress (IDs only, no content); unified with the core's SQLCipher build.
+rusqlite = "0.39"
+secrecy.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread", "sync", "time", "macros", "signal", "net", "io-util", "fs"] }
+tracing.workspace = true
+tracing-subscriber.workspace = true
+url.workspace = true
+
+[dev-dependencies]
+teamcraft-core = { path = "../teamcraft-core", features = ["test-support"] }

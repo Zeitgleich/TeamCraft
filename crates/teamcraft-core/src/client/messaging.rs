@@ -287,9 +287,59 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       self.receive_page(page.messages)?;
       // The newest page's `has_more` speaks of older messages, not newer ones.
       if is_newest_page || !page.has_more {
-        return Ok(total);
+        return Ok(total + self.load_imported_history(conversation).await?);
       }
     }
+  }
+
+  /// Loads the history of an import that just finished, which came without message events: the
+  /// conversation's first page if this device hasn't read it yet, else a page of the import.
+  pub(super) async fn load_finished_import(&mut self, conversation: ConversationId) -> Result<(), CoreError> {
+    if self.unloaded_import(conversation)?.is_some() {
+      self.catch_up_messages(conversation).await?;
+    }
+    Ok(())
+  }
+
+  /// History imported into a conversation this device already held (e2ee.md §4.10) lies before
+  /// everything it has; paging back finds it, but a short conversation gives the user nothing to
+  /// page back from. So once per finished import a page of it is loaded.
+  async fn load_imported_history(&mut self, conversation: ConversationId) -> Result<usize, CoreError> {
+    let Some(through) = self.unloaded_import(conversation)? else {
+      return Ok(0);
+    };
+    let is_held = self
+      .store
+      .edge_server_id(conversation, MessageEdge::Oldest)?
+      .is_some_and(|oldest| oldest <= through);
+    let loaded = if is_held {
+      0
+    } else {
+      self.load_older_messages(conversation).await?
+    };
+    records::put_json(
+      &self.store,
+      Table::SyncState,
+      &imported_key(conversation),
+      &through,
+    )?;
+    Ok(loaded)
+  }
+
+  /// Where a finished import of `conversation` ends, if this device hasn't loaded it yet. The
+  /// import doesn't move the conversation's newest message, so a sync that compares heads reads
+  /// the conversation again for this alone.
+  pub(super) fn unloaded_import(&self, conversation: ConversationId) -> Result<Option<MessageId>, CoreError> {
+    let Some(through) = records::get_json::<teamcraft_proto::ConversationResponse>(
+      &self.store,
+      Table::Conversations,
+      &conversation.to_string(),
+    )?
+    .and_then(|response| response.maybe_imported_through) else {
+      return Ok(None);
+    };
+    let loaded = records::get_json::<MessageId>(&self.store, Table::SyncState, &imported_key(conversation))?;
+    Ok((loaded != Some(through)).then_some(through))
   }
 
   /// Whether the first page of history was loaded (the first catch-up of a conversation).
@@ -770,6 +820,12 @@ fn early_controls_key(conversation: ConversationId, target: ClientMessageId) -> 
 }
 
 /// Where a conversation's bookmarks bar is kept: the newest `Bookmarks` message that was applied.
+/// Marks in [`Table::SyncState`] up to which imported message a conversation's imported history
+/// was looked at.
+fn imported_key(conversation: ConversationId) -> String {
+  format!("imported_loaded/{conversation}")
+}
+
 /// Marks in [`Table::SyncState`] that a conversation's first page of history was loaded.
 fn history_key(conversation: ConversationId) -> String {
   format!("history_loaded/{conversation}")

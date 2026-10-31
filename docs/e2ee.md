@@ -1381,7 +1381,7 @@ only makes the line name nobody. Signed channel properties would close this.
 
 History from another chat system (Synology Chat first; Slack, Teams and Mattermost later, #209) comes
 in through a client, never through the server: the server can't write into an encrypted
-conversation. The **importer** is `teamcraft-import` (`tools/teamcraft-import`), a headless client on
+conversation. The **importer** is `teamcraft-import` (`crates/teamcraft-import`), a headless client on
 `teamcraft-core` with a device of its own, run by an operator next to the export (admin.md §3.8, runbook
 [import-synology.md](import-synology.md)). It signs in as a dedicated **import account**: an ordinary
 member of the identity provider with the admin role, so it is a workspace admin of the signed roster
@@ -1411,7 +1411,7 @@ ciphertext, in `MessageMeta::imported` (`ImportedOrigin`):
 - **Whose word it is.** The signature proves the importer's device wrote the message; author and time
   are the importer's statement. Clients show them only when the sender is the policy's import
   account: the author's name and picture (or "Deleted user", or the bot's name with a "bot" mark),
-  the original time, and an "Imported" mark saying "Imported from Synology Chat by <import account>".
+  the original time; the time's tooltip says "Imported from Synology Chat", and one line marks where the imported history ends and the conversation's own messages begin.
   From any other sender `imported` is ignored, so a member can't post in somebody else's name.
   Clients before this version show the message from the import account.
 - **Fixed.** The original authors can't edit or delete an imported message, and its reactions can't
@@ -1421,16 +1421,19 @@ ciphertext, in `MessageMeta::imported` (`ImportedOrigin`):
 - **IDs.** The client message ID is derived (`SHA-256("TeamCraft-v1 imported message" ‖ conversation ‖
   source ‖ source_id)`, first 16 bytes), so a second run sends the same IDs and the server keeps the
   first (§4.4, deduplication). Threads, reply quotes and pins point at the imported messages as usual.
-- **Order.** Server IDs are time-sortable from 2026 on and decide the order. The server numbers
-  imported messages (admin.md §3.8) on a worker number of their own, below every message of the
-  conversation that wasn't imported: the history goes before what the conversation already holds.
-  The ID's time is the original time where it can be (from 2026), otherwise the first IDs after the
-  epoch; clients show `sent_at_ms`, never the ID's time, for an imported message.
+- **Order.** Server IDs decide the order. The server numbers imported messages (admin.md §3.8) from
+  one sequence of its own (a reserved worker number, starting at the epoch), in the order the
+  importer sends them: within a conversation oldest first, and below every message of the
+  conversation that wasn't imported, so the history goes before what the conversation already
+  holds. The ID's time says nothing about an imported message; clients show `sent_at_ms`.
 - **No unread, no pushes.** The server counts no imported message as unread and sends no push and no
   `message_create` for it; when a conversation's import is finished it announces a
   `conversation_update` (with `imported_through`). Imported messages lie before everything a client
-  holds of the conversation, so paging back loads them like older history. Read positions come from
-  the old system (admin.md §3.8).
+  holds of the conversation, so paging back loads them like older history; a client that holds the
+  conversation loads one page of them on that update, or on its next sync when it missed the update.
+  Clients count no imported message as unread and don't show the import account adding people, nor
+  a member letting one of them in once they set up the app: they were in the conversation in the
+  old system. Read positions come from the old system (admin.md §3.8).
 - **Files** are attachments of the importer's message (§4.5), encrypted with a fresh key each and
   uploaded from the export as a stream (multipart above 8 MiB), with thumbnails for pictures.
   Stickers of the old system are pictures.
@@ -1453,6 +1456,11 @@ its group, and leaves once it is done:
   member that isn't a participant (admin.md §3.8). Without a group yet the importer founds it and
   adds the participants with the full history; a participant's device joins from that welcome like
   any DM's (the server lists the import account, so its identity is pinned and its leaf verified).
+  A participant who wrote in the DM before, while the other had no device yet, holds a group of one
+  that was never committed; their device takes the importer's welcome in its place when it comes
+  from the import account of the signed policy and the tree holds nobody but that account and the
+  DM's participants (a participant without a device yet is added later, by the importer's pending
+  addition). Any other welcome still has to hold exactly the participants.
   Into an existing group the importer posts its signed self-addition as a workspace admin (admin.md
   §2.4: from the join on, only under `admin_self_join = visible`), which a participant's device
   commits. Once every participant is in the group, the importer posts its signed leave, a

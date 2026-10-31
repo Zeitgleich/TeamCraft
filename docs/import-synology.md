@@ -25,14 +25,14 @@ and upload quotas, so it runs as fast as the server and the link allow. Plan for
 | Direct message (type 2)                   | The DM of the two people (merged into an existing one), only when both are mapped            |
 | My space (type 3)                         | The owner's notes                                                                            |
 | Chatbot conversation (type 5), Office (4) | Not imported                                                                                 |
-| Posts, threads, files, stickers, mentions | Imported with the original author and time, marked "Imported"                                |
+| Posts, threads, files, stickers, mentions | Imported with the original author and time; a line marks the end of the import               |
 | Reactions                                 | Part of the imported message (gemoji short codes as emoji)                                   |
 | Edits                                     | The last version, marked edited                                                              |
 | Read position (`last_view_at`)            | Read position; imported messages are never unread and notify nobody                          |
 | Favourite, mute                           | Favourite, mute                                                                              |
 | Archived channel                          | Archived after the import                                                                    |
 | Webhooks                                  | Listed in the report, to recreate as bridge sources (docs/bridge.md); tokens don't come over |
-| Bots, webhooks as authors                 | Their name, marked as a bot                                                                  |
+| Bots, webhooks as authors                 | Their name, marked as a bot; their posts in DMs and notes are left out                       |
 | People the mapping doesn't name           | "Deleted user" on their channel posts; DMs with them are not imported                        |
 | Profile pictures, Office documents        | Not imported: people set their own picture                                                   |
 
@@ -58,15 +58,28 @@ on; `ssh -L <port>:127.0.0.1:<port> <host>` and open the printed address in your
 - A TeamCraft server of this version or later, with the identity provider sync configured
   (`[oidc.sync]`, docs/operations.md): it pre-provisions the mapped accounts, so people who never
   signed in still get their channels and DMs.
+- **Every app on this version or later** (desktop, web, Android, iOS) before the import starts. An
+  older app shows imported messages under the import account's name, and it turns down the import
+  account's group of a DM its user wrote in before the other person had the app: that user then
+  can't read the DM's imported history.
 - An **import account** at the identity provider (for example `import`), with the TeamCraft `admin`
-  client role. Sign in with it once in the web app so an owner's client adds it to the signed roster
-  (admin.md §2.3); an owner confirms it there.
+  client role. Don't set it up in an app: the tool's device is its first and only device.
+- **Sign in with the tool** (it makes the import account's keys and device):
+
+  ```sh
+  teamcraft-import --state /data/import-state login --server https://chat.example.com
+  ```
+
+  It prints an address to open in the browser (the identity provider's page); over SSH, forward the
+  port it names first. The state directory now holds the device's encrypted store and keys.
+- **Workspace roster**, as an owner in the app: confirm the import account as an admin (admin.md
+  §2.3), so members' apps accept what it signs.
 - **Administration → Import**, as an owner: pick the import account and the date until which it may
   join conversations (default: 90 days). Without this signed policy the server refuses the import and
   the apps show imported messages as the import account's.
-- The host that runs the import (section 2): `teamcraft-import` (release archive, or `cargo build
-  --release -p teamcraft-import`), the export on a local disk, and a little disk space for the tool's
-  state (IDs and keys, no content).
+- The host that runs the import (section 2): `teamcraft-import` (`cargo build --release -p
+  teamcraft-import`, crate `crates/teamcraft-import`), the export on a local disk, and a little disk
+  space for the tool's state (IDs and keys, no content).
 
 ## 4. Export on the NAS
 
@@ -106,6 +119,12 @@ Start the full import only once the transfer finished (`DONE` exists and the fil
 `file-count.txt`): a message is posted once, so a file missing then stays missing (the message names
 it, and the report lists it).
 
+The export holds everybody's messages and files in plain text: keep it readable by one account only
+(`chmod 700`), and run the tool as that account. If the files belong to `root` and the tool runs as
+another user, give them to that user first (`chown -R import: /data/chat-export /data/mapping`); the
+tool only reads them. Its state directory (`--state`) must be writable by the same user. Delete the
+export once the import is checked (section 10).
+
 ## 6. The mappings
 
 Two CSV files with a header row; `teamcraft-import plan` writes templates of both from the export
@@ -113,16 +132,17 @@ Two CSV files with a header row; `teamcraft-import plan` writes templates of bot
 
 **Channels** (`channels.csv`), one row per channel of type 0, 1 and 5:
 
-| Column                                                            | Meaning                                                                                                               |
-|-------------------------------------------------------------------|-----------------------------------------------------------------------------------------------------------------------|
-| `channel_id`                                                      | The Synology channel ID                                                                                               |
-| `name`                                                            | The new channel's name                                                                                                |
-| `visibility`                                                      | `public` or `private` (anything else: private)                                                                        |
-| `webhook`, `members`, `posts`, `last_post`, `created`, `archived` | Information only                                                                                                      |
-| `space`                                                           | The TeamCraft space a new channel goes into (made if missing)                                                         |
-| `teamcraft_channel`                                               | Empty: a new channel. `Space/Channel`: merge into that existing channel. `notes`: into the notes of its single member |
-| `import_history`                                                  | `no`: the channel with its members but without posts (log and webhook channels); else the full history                |
-| `import`                                                          | `f`, `false`, `n` or `no` (any case): skip the channel; else import it                                                |
+| Column                                                            | Meaning                                                                                                                 |
+|-------------------------------------------------------------------|-------------------------------------------------------------------------------------------------------------------------|
+| `channel_id`                                                      | The Synology channel ID                                                                                                 |
+| `name`                                                            | The new channel's name                                                                                                  |
+| `visibility`                                                      | `public` or `private` (anything else: private)                                                                          |
+| `webhook`, `members`, `posts`, `last_post`, `created`, `archived` | Information only                                                                                                        |
+| `space`                                                           | The TeamCraft space a new channel goes into (made if missing)                                                           |
+| `teamcraft_channel`                                               | Empty: a new channel. `Space/Channel`: merge into that existing channel. `notes`: into the notes of its single member   |
+| `teamcraft_name`                                                  | Optional: the new channel's name instead of `name` (also to tell two channels of one space apart); ignored when merging |
+| `import_history`                                                  | `no`: the channel with its members but without posts (log and webhook channels); else the full history                  |
+| `import`                                                          | `f`, `false`, `n` or `no` (any case): skip the channel; else import it                                                  |
 
 Channels without posts are skipped. DMs (type 2) and "My space" (type 3) need no row.
 
@@ -132,17 +152,18 @@ are read; the other columns are information. Rows without `teamcraft_user` are u
 ## 7. Dry run
 
 ```sh
-teamcraft-import --state /data/import-state login --server https://chat.example.com
 teamcraft-import --state /data/import-state plan \
-  --export /data/chat-export --channels channels.csv --users users.csv
+  --export /data/chat-export --channels channels.csv --users users.csv --language de
 ```
 
-`login` opens the identity provider's page in the browser and enrolls the tool's device (once). `plan`
-reads everything, checks the mappings against the server (spaces, channels to merge into, user names
+`--language` (`en`, `de`) is how a mention of somebody without an account reads in the imported
+text ("@Deleted user"). `plan` reads everything, checks the mappings against the server (spaces, channels to merge into, user names
 at the identity provider) and changes nothing. It prints and writes (`report-plan.md` in the state
 directory) what each channel, DM and notes conversation would get, every skipped item with its reason,
 and every problem (an unknown user name, a merge target that doesn't exist or shares history only from
-the join on). Fix the mappings until it reports no problems.
+the join on, two new channels with the same name in one space, a new channel named like an existing
+one). Fix the mappings until it reports no problems. The same inputs go to `run`, `serve` and
+`report`.
 
 ## 8. Import
 

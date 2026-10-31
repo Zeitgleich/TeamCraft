@@ -23,8 +23,8 @@ use crate::i18n::use_i18n;
 use crate::markdown;
 use crate::message_links::{as_permalink, own_hosts};
 use crate::model::{
-  DeviceSetup, Id, ImportedAuthorView, ImportedFrom, LogLevel, Message, MessageKind, PresenceStatus,
-  SystemEvent, User, UserId, is_pending, thread_id_of,
+  DeviceSetup, Id, ImportedAuthorView, ImportedFrom, ImportedMark, LogLevel, Message, MessageKind,
+  PresenceStatus, SystemEvent, User, UserId, is_pending, thread_id_of,
 };
 use crate::reactive::{SetIfAlive, use_interval};
 use crate::state::{Overlay, use_app_state};
@@ -74,6 +74,19 @@ pub fn MessageRow(
       </div>
     }
   });
+  // One line where the imported history ends and the conversation's own messages begin.
+  let imported_until = maybe_prev
+    .as_ref()
+    .and_then(|prev| prev.maybe_imported.as_ref())
+    .filter(|_| message.maybe_imported.is_none() && !in_thread)
+    .map(|mark| {
+      let source = imported_source_text(mark.source);
+      view! {
+        <div class="date-divider" role="separator">
+          <DatePill label=i18n.t_with("imported-until", &[("source", &source)]) />
+        </div>
+      }
+    });
 
   let body = match &message.kind {
     MessageKind::Log(level) => log_line(&message, *level, locale).into_any(),
@@ -90,6 +103,7 @@ pub fn MessageRow(
     },
   };
   view! {
+    {imported_until}
     {divider_view}
     {body}
   }
@@ -261,6 +275,9 @@ fn user_message(message: Message, is_grouped: bool, in_thread: bool, motion: Row
   );
   let me = state.me();
   let time = format_time(message.sent_at, locale);
+  // Where an imported message comes from, on its time: the original author and time are the import
+  // account's statement (e2ee.md §4.10).
+  let imported_title = maybe_imported.as_ref().map(imported_origin_text);
   let thread_root = message.maybe_thread.unwrap_or_else(|| thread_id_of(message.id));
   let conversation = message.conversation;
   let message_id = message.id;
@@ -302,7 +319,8 @@ fn user_message(message: Message, is_grouped: bool, in_thread: bool, motion: Row
     (false, Some(user)) => view! { <Avatar user=user size=AvatarSize::Large /> }.into_any(),
     _ => {
       let time = time.clone();
-      view! { <time class="hover-time">{time}</time> }.into_any()
+      let title = imported_title.clone();
+      view! { <time class="hover-time" title=title>{time}</time> }.into_any()
     },
   };
 
@@ -356,18 +374,6 @@ fn user_message(message: Message, is_grouped: bool, in_thread: bool, motion: Row
     hover_card.set(None);
   };
 
-  let imported_badge = maybe_imported.as_ref().map(|mark| {
-    let importer = state
-      .read(|backend| backend.user(mark.importer))
-      .map(|user| user.display_name)
-      .unwrap_or_default();
-    let source = match mark.source {
-      ImportedFrom::SynologyChat => i18n.t("imported-from-synology"),
-      ImportedFrom::Other => i18n.t("imported-from-other"),
-    };
-    let title = i18n.t_with("imported-title", &[("source", &source), ("importer", &importer)]);
-    view! { <span class="badge badge-imported" title=title.clone() aria-label=title>{move || i18n.t("badge-imported")}</span> }
-  });
   let header = (!is_grouped).then(|| {
     let status = author.as_ref().and_then(|user| user.maybe_custom_status.clone());
     let badge_bot = author.as_ref().is_some_and(|user| user.is_bot);
@@ -403,10 +409,9 @@ fn user_message(message: Message, is_grouped: bool, in_thread: bool, motion: Row
           />
         })}
         {badge_bot.then(|| view! { <span class="badge">{move || i18n.t("badge-bot")}</span> })}
-        {imported_badge.clone()}
         {badge_guest.then(|| view! { <span class="badge badge-guest">{move || i18n.t("badge-guest")}</span> })}
         {status.filter(|_| state.settings.prefs.get_untracked().display.show_status_in_messages).map(|status| view! { <span class="msg-status" title=status.text>{status.emoji}</span> })}
-        <time class="msg-time" datetime=message.sent_at.to_string()>
+        <time class="msg-time" datetime=message.sent_at.to_string() title=imported_title.clone()>
           {time.clone()}
         </time>
       </div>
@@ -1136,6 +1141,22 @@ fn date_divider(message: &Message, maybe_prev: Option<&Message>) -> Option<i64> 
   match maybe_prev {
     Some(prev) if local_day(prev.sent_at) == local_day(message.sent_at) => None,
     _ => Some(message.sent_at),
+  }
+}
+
+/// "Imported from Synology Chat": where an imported message's author and time come from.
+fn imported_origin_text(mark: &ImportedMark) -> String {
+  use_i18n().t_with(
+    "imported-title",
+    &[("source", &imported_source_text(mark.source))],
+  )
+}
+
+fn imported_source_text(source: ImportedFrom) -> String {
+  let i18n = use_i18n();
+  match source {
+    ImportedFrom::SynologyChat => i18n.t("imported-from-synology"),
+    ImportedFrom::Other => i18n.t("imported-from-other"),
   }
 }
 

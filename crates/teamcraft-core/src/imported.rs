@@ -8,12 +8,14 @@
 //!
 //! [`MessageMeta::imported`]: crate::store::MessageMeta::imported
 
+use std::collections::BTreeSet;
+
 use serde::{Deserialize, Serialize};
 use teamcraft_proto::{ClientMessageId, ConversationId, ImportPolicy, UserId};
 
 use crate::convert;
 use crate::records;
-use crate::store::{LocalStore, MessageContent, StoredMessage, Table};
+use crate::store::{ConversationEvent, LocalStore, MessageContent, StoredMessage, Table};
 use crate::workspace::WorkspaceState;
 
 /// Where an imported message came from and whom it is by.
@@ -102,6 +104,79 @@ pub fn trusted_origin(message: &StoredMessage, maybe_importer: Option<UserId>) -
   }
 }
 
+/// Whether `message` is the import account `maybe_importer` telling of a change it made, like
+/// adding people to what it imported: an event message or a line derived from its commit.
+pub fn is_import_line(message: &StoredMessage, maybe_importer: Option<UserId>) -> bool {
+  maybe_importer == Some(message.sender_user_id)
+    && (message.line_position().is_some() || matches!(message.content, MessageContent::Event { .. }))
+}
+
+/// The import account adding people to what it imported, and other members letting those people
+/// in (or they saying they joined) once they set up the app: not shown, the people of an imported conversation were in it in
+/// the old system (e2ee.md §4.10).
+pub struct ImportAdditions {
+  maybe_importer: Option<UserId>,
+  added: BTreeSet<UserId>,
+}
+
+impl ImportAdditions {
+  /// The people `maybe_importer` added among a conversation's messages `all`.
+  pub fn of(all: &[StoredMessage], maybe_importer: Option<UserId>) -> Self {
+    let added = all
+      .iter()
+      .filter_map(|message| imported_addition(message, maybe_importer))
+      .collect();
+    Self {
+      maybe_importer,
+      added,
+    }
+  }
+
+  /// None noted yet, for a pass over a conversation in order ([`Self::note`]).
+  pub fn new(maybe_importer: Option<UserId>) -> Self {
+    Self {
+      maybe_importer,
+      added: BTreeSet::new(),
+    }
+  }
+
+  /// [`Self::hides`] for a pass in conversation order: the import account adds people before
+  /// anybody lets them in again.
+  pub fn note(&mut self, message: &StoredMessage) -> bool {
+    if let Some(user) = imported_addition(message, self.maybe_importer) {
+      self.added.insert(user);
+    }
+    self.hides(message)
+  }
+
+  /// Whether `message` adds one of them, or is one of them saying they joined.
+  pub fn hides(&self, message: &StoredMessage) -> bool {
+    let subject = match message.content {
+      MessageContent::Event {
+        event: ConversationEvent::MemberAdded { user, .. },
+      } => user,
+      MessageContent::Event {
+        event: ConversationEvent::Joined,
+      } => message.sender_user_id,
+      _ => return false,
+    };
+    self.added.contains(&subject) && Some(subject) != self.maybe_importer
+  }
+}
+
+/// The person `message` says the import account `maybe_importer` added, if it does.
+fn imported_addition(message: &StoredMessage, maybe_importer: Option<UserId>) -> Option<UserId> {
+  if maybe_importer != Some(message.sender_user_id) {
+    return None;
+  }
+  match message.content {
+    MessageContent::Event {
+      event: ConversationEvent::MemberAdded { user, .. },
+    } if Some(user) != maybe_importer => Some(user),
+    _ => None,
+  }
+}
+
 /// The client message ID of an imported message (e2ee.md §4.10): the same for every run of the
 /// import, so the server keeps the first.
 pub fn imported_message_id(
@@ -132,6 +207,47 @@ mod tests {
     assert!(trusted_origin(&message, None).is_none());
     let forged = imported_by("8".parse().unwrap());
     assert!(trusted_origin(&forged, Some(importer)).is_none());
+  }
+
+  #[test]
+  fn only_the_import_account_adding_somebody_else_is_left_out() {
+    let importer: UserId = IMPORTER.parse().unwrap();
+    let other: UserId = "8".parse().unwrap();
+    let adding = |sender: UserId, user: UserId| StoredMessage {
+      sender_user_id: sender,
+      content: MessageContent::Event {
+        event: ConversationEvent::MemberAdded {
+          user,
+          history: teamcraft_proto::HistoryPolicy::Full,
+        },
+      },
+      ..imported_by(sender)
+    };
+    let by_import = adding(importer, other);
+    let additions = ImportAdditions::of(std::slice::from_ref(&by_import), Some(importer));
+    let mut in_order = ImportAdditions::new(Some(importer));
+    assert!(
+      !in_order.note(&adding("1".parse().unwrap(), other)),
+      "before the import's"
+    );
+    assert!(in_order.note(&by_import));
+    assert!(additions.hides(&by_import));
+    assert!(!additions.hides(&adding(other, importer)));
+    assert!(!additions.hides(&adding(importer, importer)));
+    assert!(!additions.hides(&imported_by(importer)));
+    assert!(!ImportAdditions::of(std::slice::from_ref(&by_import), None).hides(&by_import));
+    // Another member letting that person's device in: left out too; adding anybody else not.
+    let member: UserId = "1".parse().unwrap();
+    assert!(additions.hides(&adding(member, other)));
+    assert!(!additions.hides(&adding(member, "9".parse().unwrap())));
+    let joined = |sender: UserId| StoredMessage {
+      content: MessageContent::Event {
+        event: ConversationEvent::Joined,
+      },
+      ..adding(sender, sender)
+    };
+    assert!(additions.hides(&joined(other)));
+    assert!(!additions.hides(&joined(member)));
   }
 
   #[test]

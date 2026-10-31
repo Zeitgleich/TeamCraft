@@ -46,14 +46,15 @@ impl ImportPolicy {
   }
 }
 
-/// The ID of an imported message sent at `sent_at_ms`, after the conversation's last imported one
-/// (`maybe_previous`): the first ID of that millisecond on the import worker (times before the
-/// epoch take its first millisecond), or the next one after `maybe_previous` when that is not
-/// smaller. IDs stay on [`IMPORT_WORKER`]; `None` only beyond the 41-bit time range.
-pub fn next_import_id(maybe_previous: Option<MessageId>, sent_at_ms: i64) -> Option<MessageId> {
-  let at = import_snowflake(sent_at_ms.saturating_sub(SNOWFLAKE_EPOCH_MS).max(0), 0)?;
+/// The ID of the next imported message, after the newest imported one of the whole server
+/// (`maybe_previous`): one sequence for every conversation, so imported IDs never collide, and
+/// within each conversation they keep the order they were sent in. The sequence starts at the
+/// epoch's first millisecond on [`IMPORT_WORKER`], which no generated ID uses, so imported history
+/// lies before every live message; its time says nothing (clients show the original time).
+/// `None` only beyond the 41-bit time range.
+pub fn next_import_id(maybe_previous: Option<MessageId>) -> Option<MessageId> {
   let next = match maybe_previous {
-    Some(previous) if previous.snowflake() >= at => {
+    Some(previous) => {
       let previous = previous.snowflake();
       let millis = previous.unix_millis() - SNOWFLAKE_EPOCH_MS;
       let sequence = previous.sequence();
@@ -63,7 +64,7 @@ pub fn next_import_id(maybe_previous: Option<MessageId>, sent_at_ms: i64) -> Opt
         import_snowflake(millis + 1, 0)?
       }
     },
-    _ => at,
+    None => import_snowflake(0, 0)?,
   };
   Some(MessageId::from_snowflake(next))
 }
@@ -140,7 +141,7 @@ pub struct ImportedMessage {
   /// An imported message of the same conversation (sent before) whose thread this one answers.
   #[serde(rename = "thread_id", default, skip_serializing_if = "Option::is_none")]
   pub maybe_thread_id: Option<ThreadId>,
-  /// The original time (Unix milliseconds); it decides the ID's place.
+  /// The original time (Unix milliseconds), for the record; the ID follows the import's order.
   pub sent_at_ms: i64,
 }
 
@@ -179,19 +180,17 @@ mod tests {
     use super::*;
 
     #[test]
-    fn an_id_carries_its_time_on_the_import_worker() {
-      let at = SNOWFLAKE_EPOCH_MS + 5_000;
-      let id = next_import_id(None, at).unwrap().snowflake();
-      assert_eq!(id.unix_millis(), at);
-      assert_eq!(id.worker(), IMPORT_WORKER);
-      assert_eq!(id.sequence(), 0);
+    fn the_sequence_starts_at_the_epoch_on_the_import_worker() {
+      let first = next_import_id(None).unwrap().snowflake();
+      assert_eq!(first.unix_millis(), SNOWFLAKE_EPOCH_MS);
+      assert_eq!(first.worker(), IMPORT_WORKER);
+      assert_eq!(first.sequence(), 0);
     }
 
     #[test]
-    fn times_before_the_epoch_take_its_first_millisecond_in_order() {
-      let first = next_import_id(None, 1_600_000_000_000).unwrap();
-      assert_eq!(first.snowflake().unix_millis(), SNOWFLAKE_EPOCH_MS);
-      let second = next_import_id(Some(first), 1_500_000_000_000).unwrap();
+    fn each_id_follows_the_one_before() {
+      let first = next_import_id(None).unwrap();
+      let second = next_import_id(Some(first)).unwrap();
       assert!(second > first);
       assert_eq!(second.snowflake().sequence(), 1);
       assert_eq!(second.snowflake().worker(), IMPORT_WORKER);
@@ -200,23 +199,15 @@ mod tests {
     #[test]
     fn a_full_millisecond_moves_to_the_next() {
       let full = MessageId::from_snowflake(import_snowflake(10, MAX_SEQUENCE).unwrap());
-      let next = next_import_id(Some(full), SNOWFLAKE_EPOCH_MS)
-        .unwrap()
-        .snowflake();
+      let next = next_import_id(Some(full)).unwrap().snowflake();
       assert_eq!(next.unix_millis(), SNOWFLAKE_EPOCH_MS + 11);
       assert_eq!(next.sequence(), 0);
     }
 
     #[test]
-    fn a_later_time_than_the_previous_id_takes_its_own_millisecond() {
-      let previous = next_import_id(None, SNOWFLAKE_EPOCH_MS + 10).unwrap();
-      let later = next_import_id(Some(previous), SNOWFLAKE_EPOCH_MS + 20).unwrap();
-      assert_eq!(later.snowflake().unix_millis(), SNOWFLAKE_EPOCH_MS + 20);
-    }
-
-    #[test]
     fn beyond_the_time_range_there_is_none() {
-      assert!(next_import_id(None, i64::MAX).is_none());
+      let last = MessageId::from_snowflake(import_snowflake(MAX_MILLIS, MAX_SEQUENCE).unwrap());
+      assert!(next_import_id(Some(last)).is_none());
     }
   }
 

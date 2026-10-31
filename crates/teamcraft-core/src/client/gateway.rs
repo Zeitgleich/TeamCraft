@@ -467,9 +467,11 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
         }
         Ok(())
       },
-      GatewayEvent::MembershipAdd { conversation_id, .. }
-      | GatewayEvent::ConversationUpdate { conversation_id } => {
-        self.refresh_conversation(conversation_id).await
+      GatewayEvent::MembershipAdd { conversation_id, .. } => self.refresh_conversation(conversation_id).await,
+      GatewayEvent::ConversationUpdate { conversation_id } => {
+        self.refresh_conversation(conversation_id).await?;
+        // A finished import sends no messages, only this update (e2ee.md §4.10).
+        self.load_finished_import(conversation_id).await
       },
       GatewayEvent::ConversationDelete { conversation_id } => self.purge_conversation(conversation_id),
       GatewayEvent::MembershipRemove {

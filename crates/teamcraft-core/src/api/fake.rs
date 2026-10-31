@@ -2966,6 +2966,14 @@ impl ServerApi for FakeServerApi {
   ) -> Result<teamcraft_proto::ImportMessagesResponse, ApiError> {
     self.with(|state, me| {
       state.ensure_own_device(me, request.device_id)?;
+      // Like the server: one sequence for every conversation.
+      let mut maybe_last = state
+        .conversations
+        .values()
+        .flat_map(|entry| entry.messages.iter())
+        .filter(|stored| stored.id.snowflake().worker() == teamcraft_proto::IMPORT_WORKER)
+        .map(|stored| stored.id)
+        .max();
       let entry = state.member_conversation_mut(conversation, me)?;
       let mut stored = Vec::new();
       for message in &request.messages {
@@ -2980,14 +2988,9 @@ impl ServerApi for FakeServerApi {
           });
           continue;
         }
-        let maybe_last = entry
-          .messages
-          .iter()
-          .filter(|stored| stored.id.snowflake().worker() == teamcraft_proto::IMPORT_WORKER)
-          .map(|stored| stored.id)
-          .max();
-        let id = teamcraft_proto::next_import_id(maybe_last, message.sent_at_ms)
+        let id = teamcraft_proto::next_import_id(maybe_last)
           .ok_or_else(|| ApiError::status(409, ErrorCode::ImportWindowFull, "no room"))?;
+        maybe_last = Some(id);
         let response = MessageResponse {
           id,
           client_message_id: message.client_message_id,
@@ -3047,6 +3050,47 @@ impl ServerApi for FakeServerApi {
         },
       );
       Ok(())
+    })
+  }
+
+  async fn admin_space_names(&self) -> Result<Vec<(SpaceId, String)>, ApiError> {
+    self.with(|state, _| {
+      state.default_space_entry();
+      Ok(
+        state
+          .spaces
+          .values()
+          .map(|space| (space.id, space.name.clone()))
+          .collect(),
+      )
+    })
+  }
+
+  async fn admin_channel_names(
+    &self,
+    space: SpaceId,
+  ) -> Result<Vec<(ConversationId, Option<String>)>, ApiError> {
+    self.with(|state, _| {
+      Ok(
+        state
+          .conversations
+          .iter()
+          .filter(|(_, entry)| entry.response.maybe_space_id == Some(space))
+          .map(|(id, entry)| (*id, entry.response.maybe_name.clone()))
+          .collect(),
+      )
+    })
+  }
+
+  async fn admin_find_user(&self, username: &str) -> Result<Option<UserId>, ApiError> {
+    self.with(|state, _| {
+      Ok(
+        state
+          .users
+          .values()
+          .find(|user| user.maybe_username.as_deref() == Some(username))
+          .map(|user| user.id),
+      )
     })
   }
 
