@@ -55,6 +55,7 @@ const POSTS: &[&str] = &[
   r#"{"id":105,"channel_id":1,"user_id":8,"type":2,"message":"lost.png","create_at":1600000005000,"file_props":{"name":"lost.png","size":9,"is_image":true,"type":"png"}}"#,
   r#"{"id":106,"channel_id":1,"user_id":7,"type":1,"message":"edited later","create_at":1600000006000,"update_at":1600000900000}"#,
   r#"{"id":200,"channel_id":2,"user_id":8,"type":1,"message":"just us","create_at":1600000010000}"#,
+  r#"{"id":201,"channel_id":2,"user_id":50,"type":1,"message":"build passed","create_at":1600000011000}"#,
   r#"{"id":300,"channel_id":3,"user_id":9,"type":1,"message":"dm with carl","create_at":1600000020000}"#,
   r#"{"id":400,"channel_id":4,"user_id":7,"type":1,"message":"note to self","create_at":1600000030000}"#,
   r#"{"id":500,"channel_id":5,"user_id":7,"type":1,"message":"hi bot","create_at":1600000040000}"#,

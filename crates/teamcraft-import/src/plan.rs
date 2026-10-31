@@ -57,6 +57,13 @@ pub enum Target {
   },
 }
 
+impl Target {
+  /// A DM or somebody's notes: only people's posts go in, not those of bots or webhooks.
+  pub fn is_direct(&self) -> bool {
+    matches!(self, Self::Dm { .. } | Self::Notes { .. })
+  }
+}
+
 /// A conversation left out, and why.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Skip {
@@ -142,6 +149,11 @@ pub fn plan(export: &Export, mapping: &Mapping, accounts: &HashMap<SourceId, Use
       Err(reason) => plan.skips.push(skip(reason)),
       Ok(_) if post_count == 0 => plan.skips.push(skip(SkipReason::NoPosts)),
       Ok((target, has_history)) => {
+        let post_count = if target.is_direct() {
+          post_count.saturating_sub(bot_posts(export, channel.id))
+        } else {
+          post_count
+        };
         let members = match &target {
           Target::Dm { participants } => participants.to_vec(),
           Target::Notes { user } => vec![*user],
@@ -255,4 +267,14 @@ pub fn title_of(channel: &Channel) -> String {
     .find(|name| !name.trim().is_empty())
     .cloned()
     .unwrap_or_else(|| format!("channel {}", channel.id))
+}
+
+/// The posts of bots and webhooks in `channel`.
+fn bot_posts(export: &Export, channel: SourceId) -> u64 {
+  export
+    .authors(channel)
+    .iter()
+    .filter(|(author, _)| export.bots.contains_key(author))
+    .map(|(_, count)| count)
+    .sum()
 }

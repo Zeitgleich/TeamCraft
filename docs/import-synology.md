@@ -32,7 +32,7 @@ and upload quotas, so it runs as fast as the server and the link allow. Plan for
 | Favourite, mute                           | Favourite, mute                                                                              |
 | Archived channel                          | Archived after the import                                                                    |
 | Webhooks                                  | Listed in the report, to recreate as bridge sources (docs/bridge.md); tokens don't come over |
-| Bots, webhooks as authors                 | Their name, marked as a bot                                                                  |
+| Bots, webhooks as authors                 | Their name, marked as a bot; their posts in DMs and notes are left out                       |
 | People the mapping doesn't name           | "Deleted user" on their channel posts; DMs with them are not imported                        |
 | Profile pictures, Office documents        | Not imported: people set their own picture                                                   |
 

@@ -330,6 +330,11 @@ impl<'a, A: ServerApi, S: LocalStore> Importer<'a, A, S> {
       if self.progress.message_of(post.id)?.is_some() {
         continue;
       }
+      // A webhook writing into a DM has no place in it in TeamCraft (a reply to it goes in at
+      // the top).
+      if item.target.is_direct() && self.people.bots.contains_key(&post.user_id) {
+        continue;
+      }
       let prepared = prepare(post, self.export, &self.people);
       // A reply needs its root's server ID: send what waits first if the root is among it.
       if let Some(root) = prepared.maybe_root
