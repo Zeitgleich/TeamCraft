@@ -3913,6 +3913,22 @@
         }
       }
     },
+    "loading_older_messages": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Loading older messages…"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Ältere Nachrichten werden geladen …"
+          }
+        }
+      }
+    },
     "jump_down": {
       "localizations": {
         "en": {

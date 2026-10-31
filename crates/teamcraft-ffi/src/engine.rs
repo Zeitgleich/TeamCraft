@@ -34,7 +34,7 @@ use teamcraft_core::push_preview::{
 };
 use teamcraft_core::runner::{RunnerCommand, RunnerHandle, RunnerSettings, SyncRunner};
 use teamcraft_core::store::{LocalStore as _, SealedSqliteStore, StaticKeySource};
-use teamcraft_core::ui_backend::{CoreChatBackend, CoreCommand};
+use teamcraft_core::ui_backend::{CoreChatBackend, CoreCommand, FeedAnchor};
 use teamcraft_core::{
   Client, ClientSettings, CoreError, EnrollmentOptions, EnrollmentSecret, LinkCodeKind, LinkOffer,
   PendingEnrollment,
@@ -49,7 +49,7 @@ use crate::calls::{CallHub, CallPreparation};
 use crate::error::TeamCraftError;
 use crate::types::{
   AccountState, AppConfig, ConversationItem, DirectPeer, LinkPlatform, LinkRequestItem, MentionSettings,
-  MessageItem, NotificationContent, NotificationContentSettings, Presence, PushDiagnosticsInfo,
+  MessageItem, MessagePage, NotificationContent, NotificationContentSettings, Presence, PushDiagnosticsInfo,
   PushNotification, PushService, SearchHitItem, SegmentPrefetchMode, SegmentPrefetchResult, StoreProblem,
   TestPushResult, share_targets,
 };
@@ -834,6 +834,27 @@ impl Engine {
     Ok(self.message_items(backend, &messages))
   }
 
+  pub(crate) fn messages_from(
+    &self,
+    conversation_id: &str,
+    maybe_oldest_id: Option<&str>,
+    oldest_sent_at_ms: i64,
+    older: u32,
+  ) -> Result<MessagePage, TeamCraftError> {
+    let backend = self.backend()?;
+    let conversation: ConversationId = parse_id(conversation_id)?;
+    self.signals.catch_up_focus.set(conversation);
+    let tail = backend.feed_tail(
+      conversation,
+      feed_anchor(maybe_oldest_id, oldest_sent_at_ms)?,
+      older_len(older),
+    );
+    Ok(MessagePage {
+      messages: self.message_items(backend, &tail.messages),
+      has_older: tail.has_older,
+    })
+  }
+
   pub(crate) fn thread(
     &self,
     conversation_id: &str,
@@ -1463,6 +1484,25 @@ pub(crate) fn parse_id<T: Id + std::str::FromStr>(text: &str) -> Result<T, TeamC
   text
     .parse()
     .map_err(|_| TeamCraftError::InvalidInput(format!("not an ID: {text}")))
+}
+
+/// The oldest row a paging list holds, as the apps name it ([`crate::TeamCraft::messages_from`]).
+pub(crate) fn feed_anchor(
+  maybe_id: Option<&str>,
+  sent_at_ms: i64,
+) -> Result<Option<FeedAnchor>, TeamCraftError> {
+  maybe_id
+    .map(|id| {
+      parse_id(id).map(|id| FeedAnchor {
+        id,
+        sent_at: sent_at_ms,
+      })
+    })
+    .transpose()
+}
+
+pub(crate) fn older_len(older: u32) -> usize {
+  usize::try_from(older).unwrap_or(usize::MAX)
 }
 
 /// Downloads of older versions lay directly in the shared folder, visible to every account of

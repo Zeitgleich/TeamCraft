@@ -113,6 +113,7 @@ import de.zeitgleich.teamcraft.ui.messageActions
 import de.zeitgleich.teamcraft.ui.EmojiInput
 import de.zeitgleich.teamcraft.ui.FirstUnread
 import de.zeitgleich.teamcraft.ui.Mentions
+import de.zeitgleich.teamcraft.ui.PagedFeed
 import de.zeitgleich.teamcraft.ui.PendingShare
 import de.zeitgleich.teamcraft.ui.TypingLine
 import de.zeitgleich.teamcraft.ui.shouldNotifyTyping
@@ -129,6 +130,8 @@ import uniffi.teamcraft_ffi.needsChannelConfirmation
 /** Quick reactions in the action sheet. */
 private val QUICK_REACTIONS = listOf("👍", "❤️", "😂", "🎉", "😮", "🙏")
 private const val PAGE = 200
+/** Messages each step back through the history adds (issue #1058). */
+private const val PAGE_BACK = 100
 
 @Composable
 fun ConversationScreen(
@@ -151,6 +154,12 @@ fun ConversationScreen(
   // Counts sends from this screen's composer: each one brings the newest message into view.
   var sentCount by remember { mutableIntStateOf(0) }
   var undecrypted by remember { mutableStateOf(0) }
+  val feed = remember(conversationId) {
+    PagedFeed(PAGE, PAGE_BACK) { maybeOldest, older -> viewModel.readChat { tail(conversationId, maybeOldest, older) } }
+  }
+  var hasOlder by remember(conversationId) { mutableStateOf(false) }
+  var isLoadingOlder by remember(conversationId) { mutableStateOf(false) }
+  val scope = rememberCoroutineScope()
   val rights = rememberRights(viewModel, conversationId, changes)
   LaunchedEffect(conversationId) {
     // Where the user stopped reading, before marking the conversation read.
@@ -159,9 +168,10 @@ fun ConversationScreen(
   }
   LaunchedEffect(changes, conversationId) {
     snapshot = viewModel.readChat { snapshot() }
-    val maybeWindow = viewModel.readChat { latest(conversationId, PAGE) }
-    messages = maybeWindow?.messages ?: emptyList()
-    undecrypted = maybeWindow?.undecrypted ?: 0
+    val maybeTail = feed.reread()
+    messages = maybeTail?.messages ?: emptyList()
+    hasOlder = maybeTail?.hasOlder ?: false
+    undecrypted = maybeTail?.undecrypted ?: 0
     extras = viewModel.readChat { extras(conversationId, messages.map { it.id }) } ?: emptyMap()
     pinned = viewModel.readChat { query(ChatQueries.pinned(conversationId)).messages } ?: emptyList()
     joinRequests = requestsIn(conversationId, viewModel.joinRequests.list())
@@ -212,6 +222,19 @@ fun ConversationScreen(
       modifier = Modifier.weight(1f),
       maybeFocusMessage = maybeFocusMessage,
       onOpenPermalink = onOpenPermalink,
+      older = OlderMessages(hasOlder, isLoadingOlder) {
+        if (isLoadingOlder) return@OlderMessages
+        isLoadingOlder = true
+        scope.launch {
+          // A failed read leaves the rows as they are; the next scroll near the top asks again.
+          feed.older()?.let { tail ->
+            messages = tail.messages
+            hasOlder = tail.hasOlder
+            undecrypted = tail.undecrypted
+          }
+          isLoadingOlder = false
+        }
+      },
     )
     TypingIndicator(viewModel, conversationId, snapshot, changes)
     if (conversation?.canPost != false) {
@@ -564,6 +587,7 @@ private fun MessageList(
   modifier: Modifier,
   maybeFocusMessage: String?,
   onOpenPermalink: (String) -> Unit,
+  older: OlderMessages = OlderMessages.None,
 ) {
   var maybeSelected by remember { mutableStateOf<Message?>(null) }
   MessageFeed(
@@ -580,6 +604,7 @@ private fun MessageList(
     maybeFocusMessage = maybeFocusMessage,
     onOpenPermalink = onOpenPermalink,
     canReact = rights.canReact,
+    older = older,
   )
   maybeSelected?.let { message ->
     MessageActions(

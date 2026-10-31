@@ -524,6 +524,17 @@ final class AppModel {
     }
   }
 
+  /// What a feed that pages back shows (issue #1058): the messages from `maybeOldest` (the oldest
+  /// one it shows) to the newest, and `older` messages before it; `nil` when the read failed.
+  func messages(conversationId: String, from maybeOldest: MessageItem?, older: UInt32) async -> MessagePage? {
+    guard
+      let page = try? await core().messagesFrom(
+        conversationId: conversationId, maybeOldestId: maybeOldest?.id, oldestSentAtMs: maybeOldest?.sentAtMs ?? 0,
+        older: older)
+    else { return nil }
+    return MessagePage(messages: page.messages.map { $0.namingDeletedAuthor() }, hasOlder: page.hasOlder)
+  }
+
   func thread(conversationId: String, threadId: String) async -> [MessageItem] {
     ((try? await core().thread(conversationId: conversationId, threadId: threadId)) ?? []).map {
       $0.namingDeletedAuthor()

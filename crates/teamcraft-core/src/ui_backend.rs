@@ -432,6 +432,22 @@ pub struct CoreChatBackend<S> {
   pub(crate) search: RefCell<crate::ui_search::UiSearchState>,
 }
 
+/// The oldest row a paging list holds, for [`CoreChatBackend::feed_tail`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FeedAnchor {
+  pub id: MessageId,
+  /// Finds the place again when the row itself went away (deleted, hidden).
+  pub sent_at: TimestampMs,
+}
+
+/// The newest rows of a feed down to an anchor, oldest first.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct FeedTail {
+  pub messages: Vec<Message>,
+  /// Rows older than the first one exist: the list can page further back.
+  pub has_older: bool,
+}
+
 impl<S: LocalStore> CoreChatBackend<S> {
   /// `store` is shared with the sync engine (e.g. an `Arc`); `me` is the signed-in user.
   pub fn new(store: S, me: UserId, clock: Box<dyn Clock>) -> Self {
@@ -927,6 +943,36 @@ impl<S: LocalStore> CoreChatBackend<S> {
     }
   }
 
+  /// The newest rows of a conversation's feed down to `maybe_oldest` (the oldest row a list
+  /// holds), and `older` rows before it: what a list that pages back shows, reread on every change
+  /// without losing the rows it already paged to or jumping when new ones arrive (issue #1058).
+  /// Without an anchor, or when the anchor row went away and none sent at or after
+  /// `oldest_sent_at` remains, it is the newest `older` rows.
+  pub fn feed_tail(
+    &self,
+    conversation: ConversationId,
+    maybe_oldest: Option<FeedAnchor>,
+    older: usize,
+  ) -> FeedTail {
+    let mut tail = FeedTail::default();
+    self.with_all_messages(conversation, &mut |all| {
+      let feed: Vec<&StoredMessage> = all.iter().filter(|message| is_feed_row(message)).collect();
+      let anchor_at = maybe_oldest
+        .and_then(|anchor| anchor.position_in(&feed))
+        .unwrap_or(feed.len());
+      let start = anchor_at.saturating_sub(older);
+      let relations = Relations::of(all);
+      tail = FeedTail {
+        messages: feed[start..]
+          .iter()
+          .map(|message| self.to_message_among(message, &relations))
+          .collect(),
+        has_older: start > 0,
+      };
+    });
+    tail
+  }
+
   /// A conversation's messages lent to `read` without a copy where the store holds them.
   pub(crate) fn with_all_messages(
     &self,
@@ -1156,14 +1202,7 @@ impl<S: LocalStore> ChatBackend for CoreChatBackend<S> {
   fn message_page(&self, conversation: ConversationId, start: usize, len: usize) -> (usize, Vec<Message>) {
     let mut answer = (0, Vec::new());
     self.with_all_messages(conversation, &mut |all| {
-      let top_level: Vec<&StoredMessage> = all
-        .iter()
-        .filter(|message| {
-          (message.maybe_thread_id.is_none() || message.is_also_in_channel())
-            && !message.is_hidden()
-            && !is_deleted(message)
-        })
-        .collect();
+      let top_level: Vec<&StoredMessage> = all.iter().filter(|message| is_feed_row(message)).collect();
       let end = start.saturating_add(len).min(top_level.len());
       let start = start.min(end);
       let relations = Relations::of(all);
@@ -2169,6 +2208,16 @@ pub(crate) struct MentionMemo {
   decided: HashMap<(ClientMessageId, usize), bool>,
 }
 
+impl FeedAnchor {
+  /// Where the anchor row is in `feed`, or the first row sent at or after it.
+  fn position_in(self, feed: &[&StoredMessage]) -> Option<usize> {
+    feed
+      .iter()
+      .position(|message| ui_message_id(message) == self.id)
+      .or_else(|| feed.iter().position(|message| message.sent_at_ms >= self.sent_at))
+  }
+}
+
 impl MentionMemo {
   /// Decisions kept at most; past it they are made again (a bound, not a working size).
   const MAX_DECIDED: usize = 200_000;
@@ -2324,6 +2373,14 @@ fn unread_position(message: &StoredMessage) -> Option<MessageId> {
 /// The ID the UI uses: the server's, for a line this device derived its place (a commit's ID, or
 /// where a line about a change the server reports sits; time-ordered like the messages', and no
 /// outbox message's), or a stable stand-in for outbox messages.
+/// Whether a stored message is a row of the conversation's feed: top level (or a reply also sent
+/// to the channel), not hidden, not deleted.
+fn is_feed_row(message: &StoredMessage) -> bool {
+  (message.maybe_thread_id.is_none() || message.is_also_in_channel())
+    && !message.is_hidden()
+    && !is_deleted(message)
+}
+
 pub(crate) fn ui_message_id(message: &StoredMessage) -> MessageId {
   if let Some(id) = message.maybe_server_id {
     return id;
@@ -2410,6 +2467,81 @@ mod tests {
     // #641: the reaction raises the unread count, so the open conversation must see it to read it.
     assert_eq!(backend.messages(conversation, 0, 10).len(), 1);
     assert_eq!(backend.newest_message(conversation), Some(id(102)));
+  }
+
+  mod feed_tail {
+    use super::*;
+
+    #[test]
+    fn without_an_anchor_it_is_the_newest_rows() {
+      let (backend, conversation) = feed_of(5);
+      let tail = backend.feed_tail(conversation, None, 2);
+      assert_eq!(server_ids(&tail), [104, 105]);
+      assert!(tail.has_older);
+    }
+
+    #[test]
+    fn it_keeps_the_rows_paged_to_and_adds_older_ones() {
+      let (backend, conversation) = feed_of(5);
+      let tail = backend.feed_tail(conversation, Some(anchor(103, 3_000)), 1);
+      assert_eq!(server_ids(&tail), [102, 103, 104, 105]);
+      assert!(tail.has_older);
+      let all = backend.feed_tail(conversation, Some(anchor(102, 2_000)), 10);
+      assert_eq!(server_ids(&all), [101, 102, 103, 104, 105]);
+      assert!(!all.has_older);
+    }
+
+    #[test]
+    fn a_gone_anchor_is_found_again_by_its_time() {
+      let (backend, conversation) = feed_of(5);
+      let tail = backend.feed_tail(conversation, Some(anchor(999, 2_500)), 0);
+      assert_eq!(server_ids(&tail), [103, 104, 105]);
+    }
+
+    fn feed_of(count: i64) -> (CoreChatBackend<std::sync::Arc<MemoryStore>>, ConversationId) {
+      let store = std::sync::Arc::new(MemoryStore::new());
+      let conversation = id::<ConversationId>(10);
+      for n in 1..=count {
+        store
+          .upsert_message(&StoredMessage {
+            conversation_id: conversation,
+            client_message_id: ClientMessageId::from_bytes([u8::try_from(n).unwrap(); 16]),
+            maybe_server_id: Some(id(100 + n)),
+            sender_user_id: id(2),
+            maybe_thread_id: None,
+            sent_at_ms: n * 1_000,
+            content: MessageContent::Text {
+              body: format!("message {n}"),
+              mentions: Vec::new(),
+              meta: Default::default(),
+            },
+            is_edited: false,
+            edits: Vec::new(),
+            maybe_edit_id: None,
+            is_pinned: false,
+            maybe_verified_commit: None,
+            maybe_server_change: None,
+          })
+          .unwrap();
+      }
+      let backend = CoreChatBackend::new(store, id(1), Box::new(ManualClock::new(10_000)));
+      (backend, conversation)
+    }
+
+    fn anchor(server_id: i64, sent_at: TimestampMs) -> FeedAnchor {
+      FeedAnchor {
+        id: id(server_id),
+        sent_at,
+      }
+    }
+
+    fn server_ids(tail: &FeedTail) -> Vec<i64> {
+      tail
+        .messages
+        .iter()
+        .map(|message| message.id.snowflake().get())
+        .collect()
+    }
   }
 
   #[test]

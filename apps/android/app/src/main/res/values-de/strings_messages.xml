@@ -30,6 +30,7 @@
   <string name="forwarded_from">Weitergeleitet von %1$s</string>
   <string name="replying_to">Antwort an %1$s</string>
   <string name="new_messages">Neue Nachrichten</string>
+  <string name="loading_older_messages">Ältere Nachrichten werden geladen …</string>
   <string name="file_failed">Die Datei konnte nicht gesendet oder geladen werden.</string>
   <string name="file_cancel_upload">Abbrechen</string>
   <string name="file_upload_retrying">Wird erneut versucht …</string>

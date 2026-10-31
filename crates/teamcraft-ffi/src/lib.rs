@@ -54,7 +54,7 @@ use tokio::sync::{mpsc, oneshot};
 pub use types::{
   AccountState, AppActivity, AppConfig, BrandAccent, BrandLinks, ConnectionState, ConversationItem,
   ConversationKind, EmojiSuggestion, LinkPlatform, LinkRequestItem, LoginBrand, MentionSettings, MessageItem,
-  NetworkInterception, NetworkProxy, NotificationAttachmentKind, NotificationContent,
+  MessagePage, NetworkInterception, NetworkProxy, NotificationAttachmentKind, NotificationContent,
   NotificationContentSettings, NotificationGap, NotificationSuppression, OrgRecoveryStart, Presence,
   PushDiagnosticsInfo, PushNotification, PushNotificationKind, PushService, ReactionItem, SearchHitItem,
   SegmentPrefetchMode, SegmentPrefetchResult, StoreProblem, TestPushOutcome, TestPushResult,
@@ -388,6 +388,31 @@ impl TeamCraft {
       .await
   }
 
+  /// What a conversation list that pages back shows (issue #1058): every message from the oldest
+  /// one it holds (`maybe_oldest_id`, sent at `oldest_sent_at_ms`) to the newest, and `older`
+  /// messages before it. Rereading with the same anchor after a change keeps the rows paged to;
+  /// growing `older` pages further back. Without an anchor it is the newest `older` messages.
+  pub async fn messages_from(
+    &self,
+    conversation_id: String,
+    maybe_oldest_id: Option<String>,
+    oldest_sent_at_ms: i64,
+    older: u32,
+  ) -> Result<MessagePage, TeamCraftError> {
+    self
+      .call(move |engine| {
+        Box::pin(async move {
+          engine.messages_from(
+            &conversation_id,
+            maybe_oldest_id.as_deref(),
+            oldest_sent_at_ms,
+            older,
+          )
+        })
+      })
+      .await
+  }
+
   /// Root and replies of a thread, oldest first.
   pub async fn thread(
     &self,
@@ -616,6 +641,28 @@ impl TeamCraft {
   ) -> Result<String, TeamCraftError> {
     self
       .call(move |engine| Box::pin(async move { engine.window_json(&conversation_id, start, len) }))
+      .await
+  }
+
+  /// [`Self::messages_from`] as JSON (`MessageTail`), with the messages of the JSON bridge.
+  pub async fn message_tail(
+    &self,
+    conversation_id: String,
+    maybe_oldest_id: Option<String>,
+    oldest_sent_at_ms: i64,
+    older: u32,
+  ) -> Result<String, TeamCraftError> {
+    self
+      .call(move |engine| {
+        Box::pin(async move {
+          engine.tail_json(
+            &conversation_id,
+            maybe_oldest_id.as_deref(),
+            oldest_sent_at_ms,
+            older,
+          )
+        })
+      })
       .await
   }
 
