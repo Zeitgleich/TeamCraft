@@ -655,7 +655,11 @@ impl<S: LocalStore> CoreChatBackend<S> {
     let mut memo = self.mentions.borrow_mut();
     memo.follow(&rules);
     let mut counts = EntryCounts::default();
+    let mut additions = ImportAdditions::new(self.importer());
     self.visit_top_level(response.id, &mut |message| {
+      if additions.note(message) {
+        return;
+      }
       if !is_deleted(message) {
         counts.messages += 1;
         counts.maybe_last_activity = counts.maybe_last_activity.max(Some(message.sent_at_ms));
@@ -921,9 +925,10 @@ impl<S: LocalStore> CoreChatBackend<S> {
     messages: Vec<StoredMessage>,
   ) -> Vec<StoredMessage> {
     let is_unread = self.unread_check(response, maybe_mark);
+    let mut additions = ImportAdditions::new(self.importer());
     messages
       .into_iter()
-      .filter(|message| is_unread(message))
+      .filter(|message| !additions.note(message) && is_unread(message))
       .collect()
   }
 
@@ -1272,17 +1277,17 @@ impl<S: LocalStore> ChatBackend for CoreChatBackend<S> {
       .len()
   }
 
+  /// The rows of the feed, as [`Self::message_page`] pages them.
   fn message_count(&self, conversation: ConversationId) -> usize {
-    self
-      .read(
-        self
-          .store
-          .messages(conversation, MessageFilter::TopLevel)
-          .map_err(CoreError::from),
-      )
-      .iter()
-      .filter(|message| !is_deleted(message))
-      .count()
+    let mut count = 0;
+    self.with_all_messages(conversation, &mut |all| {
+      let additions = ImportAdditions::of(all, self.importer());
+      count = all
+        .iter()
+        .filter(|message| is_feed_row(message) && !additions.hides(message))
+        .count();
+    });
+    count
   }
 
   fn last_activity(&self, conversation: ConversationId) -> Option<TimestampMs> {

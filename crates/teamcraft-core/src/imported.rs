@@ -132,6 +132,23 @@ impl ImportAdditions {
     }
   }
 
+  /// None noted yet, for a pass over a conversation in order ([`Self::note`]).
+  pub fn new(maybe_importer: Option<UserId>) -> Self {
+    Self {
+      maybe_importer,
+      added: BTreeSet::new(),
+    }
+  }
+
+  /// [`Self::hides`] for a pass in conversation order: the import account adds people before
+  /// anybody lets them in again.
+  pub fn note(&mut self, message: &StoredMessage) -> bool {
+    if let Some(user) = imported_addition(message, self.maybe_importer) {
+      self.added.insert(user);
+    }
+    self.hides(message)
+  }
+
   /// Whether `message` adds one of them.
   pub fn hides(&self, message: &StoredMessage) -> bool {
     match message.content {
@@ -204,6 +221,12 @@ mod tests {
     };
     let by_import = adding(importer, other);
     let additions = ImportAdditions::of(std::slice::from_ref(&by_import), Some(importer));
+    let mut in_order = ImportAdditions::new(Some(importer));
+    assert!(
+      !in_order.note(&adding("1".parse().unwrap(), other)),
+      "before the import's"
+    );
+    assert!(in_order.note(&by_import));
     assert!(additions.hides(&by_import));
     assert!(!additions.hides(&adding(other, importer)));
     assert!(!additions.hides(&adding(importer, importer)));
