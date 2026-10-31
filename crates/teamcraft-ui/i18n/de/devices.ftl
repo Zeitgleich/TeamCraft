@@ -113,7 +113,7 @@ kit-file-never = TeamCraft und deine IT-Abteilung werden dich nie nach diesem Sc
 # ---- Meetings ----
 enroll-link = Mit anderem Gerät verknüpfen
 link-new-title = Dieses Gerät verknüpfen
-link-new-steps = Öffne auf einem Gerät, auf dem du schon angemeldet bist, TeamCraft, dann Einstellungen, Geräte und Sicherheit, Neues Gerät verknüpfen, und scanne oder gib diesen Code dort ein. Die Kamera-App allein kann ihn nicht lesen.
+link-new-steps = Öffne TeamCraft auf deinem Handy (oder einem anderen Gerät, auf dem du angemeldet bist), dann Einstellungen, Geräte, Gerät verknüpfen, und scanne diesen Code. Auf einem Computer gibst du ihn dort ein. Die Kamera-App allein kann ihn nicht lesen.
 link-new-compare = Gib auf dem anderen Gerät diesen Code ein, um zu bestätigen. Bestätige nicht, wenn du das nicht selbst gestartet hast.
 link-new-failed = Das Verknüpfen hat nicht geklappt.
 link-new-back = Zurück
@@ -121,7 +121,7 @@ link-new-retry = Erneut versuchen
 approve-link-retry = Erneut versuchen
 link-new-no-device = Kein anderes Gerät angemeldet? Geh zurück und nutze dein Wiederherstellungs-Kit oder bitte einen Admin um die Wiederherstellung durch die Organisation.
 approve-link-title = Neues Gerät verknüpfen
-approve-link-intro = Gib den Code ein, den das neue Gerät zeigt.
+approve-link-intro = Gib den Code ein, den der neue Computer zeigt.
 approve-link-code = Code des neuen Geräts
 approve-link-hint = Der Code enthält einen Einmalschlüssel; gib ihn nur hier ein.
 approve-link-connect = Verbinden
@@ -158,6 +158,15 @@ error-link-code-expired = Der Code wurde nicht rechtzeitig verwendet. Versuche e
 error-link-denied = Ein Gerät deines Kontos hat die Anfrage abgelehnt.
 error-link-not-confirmed = Die Schlüssel sind auf dem neuen Gerät nicht angekommen. Verknüpfe es erneut.
 error-link-request-gone = Diese Anfrage ist nicht mehr offen: Ein anderes Gerät hat sie übernommen, oder sie ist abgelaufen.
+approve-link-phone-intro = Richtest du ein neues Handy ein? Wähle in TeamCraft auf dem Handy „Mit anderem Gerät verknüpfen“, dann „Code scannen“, und richte es auf diesen Code.
+link-code-valid = Dieser Code gilt noch { $time }.
+approve-link-phone-expired = Der Code ist abgelaufen, bevor ein Handy ihn gescannt hat.
+approve-link-phone-new-code = Neuen Code zeigen
+approve-link-phone-other-ways = Das neue Handy kann auch um Bestätigung bitten: Dieses Gerät zeigt dann eine Anfrage.
+approve-link-enter-instead = Das neue Gerät ist ein Computer: seinen Code eingeben
+approve-link-show-instead = Stattdessen einen Code für ein Handy zeigen
+error-link-for-new-device = Dieser Code ist für das neue Handy: Scanne ihn dort mit „Code scannen“.
+error-link-for-signed-in-device = Dieser Code kommt von einem neuen Gerät: Scanne ihn mit einem Gerät, auf dem du schon angemeldet bist.
 
 ## Settings: sections, search and rows (#327)
 # Startseiten (Issue #585)

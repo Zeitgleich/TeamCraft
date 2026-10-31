@@ -247,6 +247,18 @@ impl TeamCraft {
     peer.await.map_err(|_| TeamCraftError::NoLinkInProgress)?
   }
 
+  /// New phone: scanned the code a signed-in computer shows for it (*Link a phone*, issue #998).
+  /// Joins that device instead of waiting for one; returns the short code to show, which the user
+  /// types on the computer. A wait of [`Self::wait_for_link_peer`] still running ends (it fails with
+  /// `NoLinkInProgress`). A code of another new device is `LinkCodeForSignedInDevice`, before
+  /// anything joins. Then [`Self::finish_device_link`] as for any link.
+  pub async fn join_scanned_device_link(&self, code: String) -> Result<String, TeamCraftError> {
+    let peer = self
+      .call(move |engine| Box::pin(async move { engine.join_scanned_device_link(&code) }))
+      .await?;
+    peer.await.map_err(|_| TeamCraftError::NoLinkInProgress)?
+  }
+
   /// New device: receives the keys after the user confirmed the code, and enrolls.
   pub async fn finish_device_link(&self, device_name: String) -> Result<AccountState, TeamCraftError> {
     self

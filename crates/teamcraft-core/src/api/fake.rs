@@ -73,6 +73,8 @@ const PAGE_SIZE: usize = 50;
 /// People per directory answer (the server's default `max_directory_results`).
 const DIRECTORY_PAGE: usize = 50;
 const HEARTBEAT_INTERVAL_MS: u64 = 30_000;
+/// The lifetime a relay reports on join, as the server's default.
+pub const RELAY_TTL_SECS: u64 = 300;
 const DAY_MS: i64 = 24 * 60 * 60 * 1000;
 /// The server's defaults: key packages are handed out while they stay valid this long, and count as
 /// "expiring soon" within the renewal window (e2ee.md §4.3).
@@ -729,6 +731,16 @@ impl FakeServer {
   /// The next `count` binary frames sent over any relay are lost.
   pub fn lose_relay_frames(&self, count: u32) {
     self.lock().relay_frames_to_lose = count;
+  }
+
+  /// Every relay's lifetime ends, as the server's timer would end it.
+  pub fn expire_relays(&self) {
+    let mut state = self.lock();
+    for (_, relay) in std::mem::take(&mut state.relays) {
+      for (_, _, endpoint) in relay.endpoints {
+        let _ = endpoint.unbounded_send(RendezvousFrame::Control(RendezvousServerMessage::Expired));
+      }
+    }
   }
 
   /// The user's devices that are not revoked.
@@ -4857,6 +4869,7 @@ impl RendezvousConnection for FakeRendezvous {
       .sender
       .unbounded_send(RendezvousFrame::Control(RendezvousServerMessage::Joined {
         peer_present: is_peer_present,
+        maybe_expires_in_secs: Some(RELAY_TTL_SECS),
       }));
     let held = std::mem::take(&mut relay.held);
     for (from, frame) in held {

@@ -10,8 +10,6 @@
   <string name="passphrase_hide">Hide passphrase</string>
   <string name="restore_link_hint">Your account is already set up on another device. Link this phone from it: it\'s quickest, and your message history comes along.</string>
   <string name="restore_passphrase_hint">No other device at hand? Enter your recovery passphrase.</string>
-  <string name="link_steps_phone">On your other phone: open TeamCraft, Settings → Devices → Link a device, and scan this code.</string>
-  <string name="link_steps_computer">On a computer: Settings → Devices and security → Link a new device, and enter this code.</string>
   <string name="notification_prompt_title">Don\'t miss messages</string>
   <string name="notification_prompt_text">Allow notifications to hear about direct messages, mentions and calls while TeamCraft is closed. Message content stays encrypted until it reaches this phone.</string>
   <string name="notification_prompt_allow">Allow</string>

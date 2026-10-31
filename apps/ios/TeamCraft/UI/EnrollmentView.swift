@@ -41,7 +41,7 @@ struct EnrollmentView: View {
   @ViewBuilder
   private var restore: some View {
     Text("restore_link_hint").foregroundStyle(Theme.textMuted)
-    Button("link_instead") { Task { await model.startLinking() } }
+    Button("link_instead") { model.startLinking() }
       .buttonStyle(PrimaryButtonStyle())
       .disabled(model.isBusy)
     Divider().padding(.vertical, 8)
@@ -133,14 +133,16 @@ struct PassphraseField: View {
   }
 }
 
-/// New device: shows the code (and a QR code) another device of the user approves, then the short
-/// code both compare (e2ee.md §5).
+/// New phone: no QR code, since nobody could scan it (issue #998). The user approves this phone from
+/// a prompt on a signed-in device, or scans the code a computer shows under "Link a new device";
+/// either way the other device then asks for the number shown here (e2ee.md §5).
 struct LinkThisDeviceView: View {
   @Environment(AppModel.self) private var model
   let progress: LinkProgress
 
-  /// Not kept across screens: asking hands the code's key to the server and is a fresh choice.
+  /// Not kept across attempts: asking hands the request's key to the server and is a fresh choice.
   @State private var askState = AskState.idle
+  @State private var isScanning = false
 
   private enum AskState { case idle, asking, asked, failed }
 
@@ -157,34 +159,43 @@ struct LinkThisDeviceView: View {
           Text("link_confirm_on_other").foregroundStyle(Theme.textMuted)
           ProgressView()
         } else {
-          Text("link_steps_phone").foregroundStyle(Theme.textMuted).frame(maxWidth: .infinity, alignment: .leading)
-          QRCodeView(text: progress.code).frame(width: 220, height: 220)
-          Text("link_steps_computer").foregroundStyle(Theme.textMuted).frame(maxWidth: .infinity, alignment: .leading)
-          Text(progress.code)
-            .font(.system(.footnote, design: .monospaced))
-            .textSelection(.enabled)
-            .padding()
-            .background(Theme.surface)
-            .clipShape(RoundedRectangle(cornerRadius: Theme.radius))
+          if let notice = progress.maybeNotice {
+            Text(notice).font(.footnote).foregroundStyle(Theme.danger).frame(maxWidth: .infinity, alignment: .leading)
+          }
+          Text("link_phone_intro").foregroundStyle(Theme.textMuted).frame(maxWidth: .infinity, alignment: .leading)
+          // The prompt on the other devices needs the request's key at the server; scanning does not.
           if askState == .asked {
             Text("link_asked").foregroundStyle(Theme.textMuted)
+            ProgressView("link_waiting")
           } else {
-            Text("link_ask_hint").font(.footnote).foregroundStyle(Theme.textMuted)
             Button("link_ask") {
               askState = .asking
               Task { askState = await model.askOtherDevices() ? .asked : .failed }
             }
-            .buttonStyle(.bordered)
+            .buttonStyle(PrimaryButtonStyle())
             .disabled(askState == .asking)
+            Text("link_ask_hint").font(.footnote).foregroundStyle(Theme.textMuted)
             if askState == .failed {
               Text("link_ask_failed").font(.footnote).foregroundStyle(Theme.danger)
             }
           }
-          ProgressView("link_waiting")
+          Divider()
+          Button("link_scan_code", systemImage: "qrcode.viewfinder") { isScanning = true }
+            .buttonStyle(.bordered)
+          Text("link_scan_code_hint").font(.footnote).foregroundStyle(Theme.textMuted)
+          Divider()
+          Text("link_no_other_device").font(.footnote).foregroundStyle(Theme.textMuted)
         }
         Button("cancel") { model.cancelLinking() }.padding(.top, 16)
       }
       .padding(24)
+    }
+    .sheet(isPresented: $isScanning) {
+      // Without a camera the prompt above is the way: it needs none.
+      ScanLinkCodeView { scanned in
+        isScanning = false
+        model.linkScannedCode(scanned)
+      }
     }
   }
 }

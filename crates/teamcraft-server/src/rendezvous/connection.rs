@@ -67,6 +67,7 @@ pub async fn run(state: AppState, mut socket: WebSocket, ip: String) {
     &mut socket,
     &RendezvousServerMessage::Joined {
       peer_present: joined.peer_present,
+      maybe_expires_in_secs: Some(config.ttl_secs),
     },
   )
   .await

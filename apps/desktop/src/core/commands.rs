@@ -10,7 +10,7 @@ use teamcraft_client_api::model::{Message, ThreadId};
 use teamcraft_client_api::remote::{AttachmentPriority, LinkRequestView};
 use teamcraft_client_api::remote::{
   CORE_CHANGED_EVENT, CORE_FAILED_EVENT, ChatAction, ChatAnswer, ChatQuery, ChatSnapshot, CoreConnection,
-  CoreStatus, EnrollRequest, LinkStatus, MessageWindow,
+  CoreStatus, EnrollRequest, LinkStatus, MessageWindow, PhoneLinkStatus,
 };
 use teamcraft_client_api::snapshot_changes::{SnapshotChanges, SnapshotCursor};
 use teamcraft_crypto::backup::Argon2Settings;
@@ -245,6 +245,17 @@ pub async fn core_link_status(host: State<'_, CoreHost>) -> Result<LinkStatus, C
 pub fn core_link_cancel(host: State<'_, CoreHost>) -> Result<(), CommandError> {
   host.current()?.link_cancel();
   Ok(())
+}
+
+/// Signed-in device: shows a code a new phone scans (issue #998).
+#[tauri::command(rename_all = "snake_case")]
+pub async fn core_phone_link_start(host: State<'_, CoreHost>) -> Result<(), CommandError> {
+  Ok(host.current()?.phone_link_start().await?)
+}
+
+#[tauri::command(rename_all = "snake_case")]
+pub async fn core_phone_link_status(host: State<'_, CoreHost>) -> Result<PhoneLinkStatus, CommandError> {
+  Ok(host.current()?.phone_link_status().await)
 }
 
 #[tauri::command(rename_all = "snake_case")]

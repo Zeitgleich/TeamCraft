@@ -36,6 +36,8 @@
     "allow-core-link-status",
     "allow-core-link-cancel",
     "allow-core-approval-start",
+    "allow-core-phone-link-start",
+    "allow-core-phone-link-status",
     "allow-core-approval-confirm",
     "allow-core-approval-cancel",
     "allow-core-link-announce",

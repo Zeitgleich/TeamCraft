@@ -113,7 +113,7 @@ kit-file-never = TeamCraft and your IT department will never ask you for this ke
 # ---- Meetings ----
 enroll-link = Link with another device
 link-new-title = Link this device
-link-new-steps = On a device you are already signed in on, open TeamCraft, then Settings, Devices and security, Link a new device, and scan or enter this code there. The camera app alone cannot read it.
+link-new-steps = Open TeamCraft on your phone (or another device you are signed in on), then Settings, Devices, Link a device, and scan this code. On a computer, enter it there instead. The camera app alone cannot read it.
 link-new-compare = On the other device, type this code to approve. Do not approve if you did not start this.
 link-new-failed = Linking did not work.
 link-new-back = Back
@@ -121,7 +121,7 @@ link-new-retry = Try again
 approve-link-retry = Try again
 link-new-no-device = No other device signed in? Go back and use your recovery kit or ask an admin for organization recovery.
 approve-link-title = Link a new device
-approve-link-intro = Enter the code the new device shows.
+approve-link-intro = Enter the code the new computer shows.
 approve-link-code = Code of the new device
 approve-link-hint = The code contains a one-time key; enter it only here.
 approve-link-connect = Connect
@@ -158,6 +158,15 @@ error-link-code-expired = Nobody used this code in time. Try again for a new cod
 error-link-denied = A device of your account denied this request.
 error-link-not-confirmed = The keys did not arrive on the new device. Link it again.
 error-link-request-gone = This request is no longer open: another device took it up, or it expired.
+approve-link-phone-intro = Setting up a new phone? In TeamCraft on the phone, choose Link with another device, then Scan code, and point it at this code.
+link-code-valid = This code works for { $time } more.
+approve-link-phone-expired = This code ran out before a phone scanned it.
+approve-link-phone-new-code = Show a new code
+approve-link-phone-other-ways = The new phone can also ask for approval: this device then shows a prompt.
+approve-link-enter-instead = The new device is a computer: enter its code
+approve-link-show-instead = Show a code for a phone instead
+error-link-for-new-device = This code is for the new phone: scan it there with Scan code.
+error-link-for-signed-in-device = This code comes from a new device: scan it with a device that is already signed in.
 
 ## Settings: sections, search and rows (#327)
 # Home pages (issue #585)

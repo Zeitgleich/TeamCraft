@@ -80,10 +80,14 @@ pub enum LinkFailure {
   NotConfirmed,
   /// The request was taken up by another device, withdrawn or expired.
   RequestGone,
+  /// A signed-in device read a code that the new device has to scan (issue #998).
+  ForNewDevice,
+  /// The new device read a code that a signed-in device has to scan.
+  ForSignedInDevice,
 }
 
 impl LinkFailure {
-  const ALL: [Self; 8] = [
+  const ALL: [Self; 10] = [
     Self::CodeInvalid,
     Self::OtherVersion,
     Self::PeerGone,
@@ -92,6 +96,8 @@ impl LinkFailure {
     Self::Denied,
     Self::NotConfirmed,
     Self::RequestGone,
+    Self::ForNewDevice,
+    Self::ForSignedInDevice,
   ];
 
   /// Stable name on the wire, after [`LINK_PREFIX`].
@@ -105,6 +111,8 @@ impl LinkFailure {
       Self::Denied => "denied",
       Self::NotConfirmed => "not_confirmed",
       Self::RequestGone => "request_gone",
+      Self::ForNewDevice => "for_new_device",
+      Self::ForSignedInDevice => "for_signed_in_device",
     }
   }
 

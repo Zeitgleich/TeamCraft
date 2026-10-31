@@ -230,13 +230,13 @@
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Scan the code the new device shows, or type it."
+            "value": "Scan the code the new computer shows, or type it."
           }
         },
         "de": {
           "stringUnit": {
             "state": "translated",
-            "value": "Scanne den Code, den das neue Gerät anzeigt, oder gib ihn ein."
+            "value": "Scanne den Code, den der neue Computer zeigt, oder gib ihn ein."
           }
         }
       }
@@ -6585,38 +6585,6 @@
         }
       }
     },
-    "link_steps_phone": {
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "On your other phone: open TeamCraft, Settings → Devices → Link a device, and scan or enter this code."
-          }
-        },
-        "de": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Auf deinem anderen Telefon: TeamCraft öffnen, Einstellungen → Geräte → Gerät verknüpfen, und diesen Code scannen oder eingeben."
-          }
-        }
-      }
-    },
-    "link_steps_computer": {
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "On a computer: Settings → Devices and security → Link a new device, and enter this code."
-          }
-        },
-        "de": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Am Computer: Einstellungen → Geräte und Sicherheit → Neues Gerät verknüpfen, und diesen Code eingeben."
-          }
-        }
-      }
-    },
     "notification_prompt_title": {
       "localizations": {
         "en": {
@@ -7694,13 +7662,13 @@
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Point the camera at the code on the new device."
+            "value": "Point the camera at the code on the other device."
           }
         },
         "de": {
           "stringUnit": {
             "state": "translated",
-            "value": "Richte die Kamera auf den Code auf dem neuen Gerät."
+            "value": "Richte die Kamera auf den Code des anderen Geräts."
           }
         }
       }
@@ -8078,13 +8046,13 @@
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Instead of scanning, your other devices show a prompt. The server then sees the key in this code; you still type the code shown here on the other device, so nothing is approved without you."
+            "value": "Your signed-in devices (computer or phone) show a prompt; type the number this phone then shows there. The server sees the one-time key of this request, but nothing is approved without the number."
           }
         },
         "de": {
           "stringUnit": {
             "state": "translated",
-            "value": "Statt zu scannen zeigen deine anderen Geräte eine Anfrage. Der Server sieht dann den Schlüssel in diesem Code; du gibst den hier angezeigten Code trotzdem auf dem anderen Gerät ein, ohne dich wird also nichts bestätigt."
+            "value": "Deine angemeldeten Geräte (Computer oder Handy) zeigen eine Anfrage; gib dort die Zahl ein, die dieses Handy dann zeigt. Der Server sieht den Einmalschlüssel dieser Anfrage, ohne die Zahl wird aber nichts bestätigt."
           }
         }
       }
@@ -9021,6 +8989,166 @@
           "stringUnit": {
             "state": "translated",
             "value": "Dieses Gerät kann die Anfrage nicht annehmen: Die signierte Richtlinie verlangt keine Zustimmung eines Eigentümers mehr, oder es ist kein privater Kanal, in dem du bist."
+          }
+        }
+      }
+    },
+    "link_phone_intro": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Approve this phone from a device where you are already signed in."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Bestätige dieses Handy auf einem Gerät, auf dem du schon angemeldet bist."
+          }
+        }
+      }
+    },
+    "link_scan_code": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Scan code"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Code scannen"
+          }
+        }
+      }
+    },
+    "link_scan_code_hint": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "On a computer, open TeamCraft, then Settings, Devices and security, Link a new device: it shows a code for this phone to scan."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Öffne auf einem Computer TeamCraft, dann Einstellungen, Geräte und Sicherheit, Neues Gerät verknüpfen: Dort steht ein Code, den dieses Handy scannt."
+          }
+        }
+      }
+    },
+    "link_no_other_device": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Only signed in on another phone? Ask your other devices: the phone shows the prompt too. No other device at all? Go back and use your recovery key or organization recovery."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Nur auf einem anderen Handy angemeldet? Frag deine anderen Geräte: Auch das Handy zeigt die Anfrage. Gar kein anderes Gerät? Geh zurück und nutze deinen Wiederherstellungsschlüssel oder die Wiederherstellung durch die Organisation."
+          }
+        }
+      }
+    },
+    "link_expired_restarted": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "The request or code ran out. Ask your devices again, or scan a new code."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Die Anfrage oder der Code ist abgelaufen. Frag deine Geräte erneut oder scanne einen neuen Code."
+          }
+        }
+      }
+    },
+    "link_code_invalid": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "That is not a TeamCraft link code."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Das ist kein TeamCraft-Verknüpfungscode."
+          }
+        }
+      }
+    },
+    "link_code_for_new_device": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "This code is for the new phone: scan it there with Scan code."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Dieser Code ist für das neue Handy: Scanne ihn dort mit „Code scannen“."
+          }
+        }
+      }
+    },
+    "link_code_for_signed_in_device": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "This code comes from a new device: scan it with a device that is already signed in."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Dieser Code kommt von einem neuen Gerät: Scanne ihn mit einem Gerät, auf dem du schon angemeldet bist."
+          }
+        }
+      }
+    },
+    "link_code_expired": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "The code ran out. Show a new code and try again."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Der Code ist abgelaufen. Lass einen neuen Code anzeigen und versuche es erneut."
+          }
+        }
+      }
+    },
+    "approve_new_phone_hint": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Setting up a new phone? Choose Ask my other devices on it, or let it scan the code a computer shows under Link a new device."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Richtest du ein neues Handy ein? Wähle dort „Meine anderen Geräte fragen“ oder lass es den Code scannen, den ein Computer unter „Neues Gerät verknüpfen“ zeigt."
           }
         }
       }

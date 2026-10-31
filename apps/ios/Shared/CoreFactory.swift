@@ -103,6 +103,8 @@ enum CoreFailure: Equatable {
   case callMoveRefused
   /// Device linking: the typed code is not the one on the new device (try again), or the last try failed.
   case linkCodeRejected, linkAttemptEnded
+  /// Device linking: not a link code; a code for the other side (issue #998); a code that ran out.
+  case linkCodeInvalid, linkCodeForNewDevice, linkCodeForSignedInDevice, linkCodeExpired
   case other
 
   init(_ error: Error) {
@@ -125,6 +127,14 @@ enum CoreFailure: Equatable {
       self = .linkCodeRejected
     } else if name.hasPrefix("linkattemptended") {
       self = .linkAttemptEnded
+    } else if name.hasPrefix("linkcodeinvalid") {
+      self = .linkCodeInvalid
+    } else if name.hasPrefix("linkcodefornewdevice") {
+      self = .linkCodeForNewDevice
+    } else if name.hasPrefix("linkcodeforsignedindevice") {
+      self = .linkCodeForSignedInDevice
+    } else if name.hasPrefix("linkcodeexpired") {
+      self = .linkCodeExpired
     } else {
       self = .other
     }

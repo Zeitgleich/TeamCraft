@@ -117,7 +117,7 @@ fun AppRoot(
         maybeError = current.maybeError,
         isBusy = isBusy,
         onEnroll = viewModel::enroll,
-        onLink = viewModel::linkThisDevice,
+        onLink = { viewModel.linkThisDevice() },
         onOrgRecovery = viewModel::recoverThroughOrganization,
       )
       is AppState.RecoveringThroughOrganization -> OrgRecoveryScreen(
@@ -128,9 +128,9 @@ fun AppRoot(
         onCancel = viewModel::cancelLinking,
       )
       is AppState.LinkingThisDevice -> LinkThisDeviceScreen(
-        code = current.code,
-        maybeShortCode = current.maybeShortCode,
+        state = current,
         onAskOtherDevices = viewModel::askOtherDevices,
+        onScanned = viewModel::linkScannedCode,
         onCancel = viewModel::cancelLinking,
       )
       is AppState.Failed -> MessageScreen(message = current.error, onRetry = viewModel::refresh)

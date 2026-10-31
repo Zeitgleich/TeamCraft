@@ -1383,7 +1383,9 @@ Two ways, the user picks whichever is convenient:
 1. **Approve prompt:** the new device logs in via OIDC and shows a short code. Every other device of
    that user gets a prompt "New login on Firefox/Linux – code 471 902. Approve?". On approval the old
    device transfers the identity key and the key bag.
-2. **QR code:** the new device shows a QR code, the phone scans it (like WhatsApp Web).
+2. **QR code:** the device that can't scan shows a QR code, the phone scans it (like WhatsApp Web).
+   A new computer shows its code to a signed-in phone; a new phone scans the code a signed-in
+   computer shows for it (*Link a phone*). A new phone never shows a QR code (issue #998).
 
 Transport for the transfer, modeled on Threema's connection rendezvous protocol. Threema implements it
 in Rust (`libthreema`, module `d2d_rendezvous`, AGPL-3.0, compiled to WASM and exposed via UniFFI –
@@ -1438,6 +1440,22 @@ Implemented as (`teamcraft-crypto::rendezvous`, `teamcraft-core` linking):
   changes `AK` cannot complete a link: the handshake with the real new device would not produce the
   code the user types. Not yet: a notification on a backgrounded phone (needs a push for the
   request).
+- **The code goes on the screen that can't scan (issue #998).** A phone is the device with the
+  camera, so a new phone shows no QR code: it offers the prompt on the other devices (above, which
+  works from a signed-in phone too) and *Scan code*. For the latter a signed-in computer or browser
+  (*Link a new device*) draws `AK` and a relay ID and shows them as `tcjoin2:<id>:<AK>`: same
+  payload and version, another prefix. Then the roles in the relay swap: the signed-in device joins
+  first and is the *initiator*, the new phone that scans it is the *responder*; the handshake, the
+  commitment and the short code are the same. The keys still go from the signed-in device to the new
+  one, and the user still types the code the *new* device shows into the signed-in one, which checks
+  it as for a scanned code. Each kind of code is refused by the side that must not scan it, before
+  anything joins the relay (`LinkCodeForNewDevice` on a signed-in device, `LinkCodeForSignedInDevice`
+  on a new one), so two devices never meet that both wait to send, or to receive, the keys. `AK` of
+  a `tcjoin` code never reaches the server. A phone without camera access uses the prompt, which
+  needs none; a computer that can't show a code to scan types the new computer's code. The server's
+  `joined` answer names the relay's lifetime (`expires_in_secs`, absent from servers before 1.0.15);
+  the device that shows a code counts it down and offers a fresh code when it ran out. A new phone
+  whose wait ran out unasked starts a fresh one by itself and says so.
 - **Failures are visible, never a silent wait (issue #645).** The relay belongs to whoever joins
   first. A device that scans a code after the new device left its relay (the code's lifetime ran
   out, the new device slept or went offline) would otherwise open an empty relay and wait for nobody.

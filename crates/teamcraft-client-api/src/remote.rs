@@ -366,12 +366,36 @@ pub enum LinkStatus {
   /// Showing the code (QR) and waiting for the other device to answer.
   WaitingForScan {
     code: String,
+    /// When the relay closes and the code stops working, on this machine's clock (issue #998).
+    /// `None` until joined, or from a server that doesn't say.
+    #[serde(default)]
+    maybe_expires_at_ms: Option<i64>,
   },
   /// Both devices show the short code; the user confirms on the existing device.
   Confirm {
     code: String,
     short_code: String,
   },
+  Failed {
+    message: String,
+  },
+}
+
+/// A signed-in device showing a code for a new phone to scan (*Link a phone*, e2ee.md §5, issue
+/// #998). Once the phone scanned it, the user types the code the phone shows, as for a code this
+/// device scanned.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum PhoneLinkStatus {
+  #[default]
+  Idle,
+  WaitingForScan {
+    code: String,
+    /// When the code stops working, on this machine's clock; `None` from a server that doesn't say.
+    maybe_expires_at_ms: Option<i64>,
+  },
+  /// The phone scanned the code and ran the handshake: type the code it shows.
+  Scanned,
   Failed {
     message: String,
   },

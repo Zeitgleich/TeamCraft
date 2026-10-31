@@ -2,14 +2,14 @@
 <resources>
   <string name="link_qr_description">QR code with the link code</string>
   <string name="link_scan_qr">Scan QR code</string>
-  <string name="link_scan_hint">Point the camera at the QR code on the new device.</string>
-  <string name="link_camera_denied">Camera access was denied. Enter the code by hand instead.</string>
+  <string name="link_scan_hint">Point the camera at the QR code on the other device.</string>
+  <string name="link_camera_denied">Camera access was denied. Allow it in the system settings, or use another way on this screen.</string>
   <string name="link_new_title">Link this phone</string>
   <string name="link_waiting">Waiting for the other device…</string>
   <string name="link_compare">Type this number on your other device:</string>
   <string name="link_confirm_on_other">Confirm on the other device to finish.</string>
   <string name="approve_title">Link a device</string>
-  <string name="approve_hint">Scan the QR code on the new device, or enter its link code.</string>
+  <string name="approve_hint">Scan the QR code the new computer shows, or enter its link code.</string>
   <string name="approve_code">Link code</string>
   <string name="approve_start">Continue</string>
   <string name="approve_confirm">Approve</string>
@@ -19,7 +19,7 @@
   <string name="approve_code_wrong">That is not the code on the new device. Try again.</string>
   <string name="approve_attempt_ended">The code did not match. Start again on the new device.</string>
   <string name="link_ask">Ask my other devices</string>
-  <string name="link_ask_hint">Instead of scanning, your other devices show a prompt. The server then sees the key in this code; you still type the code shown here on the other device, so nothing is approved without you.</string>
+  <string name="link_ask_hint">Your signed-in devices (computer or phone) show a prompt; type the number this phone then shows there. The server sees the one-time key of this request, but nothing is approved without the number.</string>
   <string name="link_asked">Your other devices show a prompt now.</string>
   <string name="link_ask_failed">The other devices could not be asked.</string>
   <string name="link_request_title">A new device wants to sign in</string>
@@ -34,4 +34,14 @@
   <string name="link_platform_linux">Linux</string>
   <string name="link_platform_web">Web</string>
   <string name="link_platform_other">Other</string>
+  <string name="link_phone_intro">Approve this phone from a device where you are already signed in.</string>
+  <string name="link_scan_code">Scan code</string>
+  <string name="link_scan_code_hint">On a computer, open TeamCraft, then Settings, Devices and security, Link a new device: it shows a code for this phone to scan.</string>
+  <string name="link_no_other_device">Only signed in on another phone? Ask your other devices: the phone shows the prompt too. No other device at all? Go back and use your recovery key or organization recovery.</string>
+  <string name="link_expired_restarted">The request or code ran out. Ask your devices again, or scan a new code.</string>
+  <string name="link_code_invalid">That is not a TeamCraft link code.</string>
+  <string name="link_code_for_new_device">This code is for the new phone: scan it there with Scan code.</string>
+  <string name="link_code_for_signed_in_device">This code comes from a new device: scan it with a device that is already signed in.</string>
+  <string name="link_code_expired">The code ran out. Show a new code and try again.</string>
+  <string name="approve_new_phone_hint">Setting up a new phone? Choose Ask my other devices on it, or let it scan the code a computer shows under Link a new device.</string>
 </resources>

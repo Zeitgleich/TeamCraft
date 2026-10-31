@@ -15,6 +15,7 @@ import java.io.OutputStream
 import java.util.Locale
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.withContext
 import androidx.annotation.StringRes
 import androidx.compose.runtime.mutableStateMapOf
@@ -70,6 +71,7 @@ import uniffi.teamcraft_ffi.checkServerInfo
 import uniffi.teamcraft_ffi.normalizeServerAddress
 import uniffi.teamcraft_ffi.signInPage
 import uniffi.teamcraft_ffi.ssoOnlySignInPage
+import uniffi.teamcraft_ffi.TeamCraft
 import uniffi.teamcraft_ffi.TeamCraftException
 import uniffi.teamcraft_ffi.TestPushResult
 
@@ -87,7 +89,16 @@ sealed interface AppState {
   data class ConfirmServer(val checked: CheckedServer) : AppState
   data class SignedOut(@StringRes val maybeError: Int? = null) : AppState
   data class NeedsEnrollment(val hasExistingIdentity: Boolean, @StringRes val maybeError: Int? = null) : AppState
-  data class LinkingThisDevice(val code: String, val maybeShortCode: String? = null) : AppState
+  /**
+   * This phone waits to be linked (issue #998): it shows no code, the other device approves it from a
+   * prompt, or this phone scans the code a computer shows. [attempt] counts fresh starts, so the
+   * screen forgets an earlier "asked"; [maybeNotice] says why the last attempt ended.
+   */
+  data class LinkingThisDevice(
+    val maybeShortCode: String? = null,
+    val attempt: Int = 0,
+    @StringRes val maybeNotice: Int? = null,
+  ) : AppState
   data class RecoveringThroughOrganization(val code: String, @StringRes val maybeError: Int? = null) : AppState
   data class Ready(val userId: String, val displayName: String, val identityFingerprint: String) : AppState
   data class Failed(@StringRes val error: Int) : AppState
@@ -296,17 +307,51 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
   }
 
-  fun linkThisDevice() = launchBusy {
-    val core = graph.core.core()
-    val code = core.startDeviceLink(deviceName(), LinkPlatform.ANDROID)
-    state.value = AppState.LinkingThisDevice(code)
-    try {
-      val shortCode = core.waitForLinkPeer()
-      state.value = AppState.LinkingThisDevice(code, shortCode)
-      state.value = ready(core.finishDeviceLink(deviceName()))
-    } catch (failure: TeamCraftException) {
-      state.value = AppState.NeedsEnrollment(hasExistingIdentity = true, maybeError = errorText(failure))
+  /** The running link of this (new) phone; a scan or a fresh start replaces it. */
+  private var linkJob: Job? = null
+
+  /**
+   * New phone: waits in the relay so the other devices can be asked (no code to show: nobody could
+   * scan it, issue #998). A wait that ran out starts again by itself, saying why.
+   */
+  fun linkThisDevice(@StringRes maybeNotice: Int? = null) {
+    val attempt = ((state.value as? AppState.LinkingThisDevice)?.attempt ?: 0) + 1
+    startLink(AppState.LinkingThisDevice(attempt = attempt, maybeNotice = maybeNotice)) { core ->
+      core.startDeviceLink(deviceName(), LinkPlatform.ANDROID)
+      core.waitForLinkPeer()
     }
+  }
+
+  /** New phone: scanned the code a signed-in computer shows for it ("Link a phone"). */
+  fun linkScannedCode(code: String) {
+    val current = state.value as? AppState.LinkingThisDevice ?: return
+    startLink(current.copy(maybeNotice = null)) { core -> core.joinScannedDeviceLink(code.trim()) }
+  }
+
+  private fun startLink(waiting: AppState.LinkingThisDevice, peer: suspend (TeamCraft) -> String) {
+    linkJob?.cancel()
+    linkJob = launchBusy {
+      val core = graph.core.core()
+      state.value = waiting
+      try {
+        val shortCode = peer(core)
+        state.value = waiting.copy(maybeShortCode = shortCode, maybeNotice = null)
+        state.value = ready(core.finishDeviceLink(deviceName()))
+      } catch (failure: TeamCraftException.LinkCodeExpired) {
+        if (waiting.maybeShortCode == null) linkThisDevice(R.string.link_expired_restarted) else linkFailed(failure)
+      } catch (failure: TeamCraftException.LinkCodeForSignedInDevice) {
+        // The wait this replaced lost its listener: start a fresh one, saying what was wrong.
+        linkThisDevice(R.string.link_code_for_signed_in_device)
+      } catch (failure: TeamCraftException.LinkCodeInvalid) {
+        linkThisDevice(R.string.link_code_invalid)
+      } catch (failure: TeamCraftException) {
+        linkFailed(failure)
+      }
+    }
+  }
+
+  private fun linkFailed(failure: TeamCraftException) {
+    state.value = AppState.NeedsEnrollment(hasExistingIdentity = true, maybeError = errorText(failure))
   }
 
   /** Asks the organization's admins to recover the account; shows the code to read to one. */
@@ -331,6 +376,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
   }
 
   fun cancelLinking() {
+    linkJob?.cancel()
+    linkJob = null
     state.value = AppState.NeedsEnrollment(hasExistingIdentity = true)
   }
 
@@ -917,6 +964,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
       is TeamCraftException.WrongPassphrase -> R.string.error_wrong_passphrase
       is TeamCraftException.Storage -> R.string.error_storage
       is TeamCraftException.CallMoveRefused -> R.string.error_call_move_refused
+      is TeamCraftException.LinkCodeInvalid -> R.string.link_code_invalid
+      is TeamCraftException.LinkCodeForNewDevice -> R.string.link_code_for_new_device
+      is TeamCraftException.LinkCodeForSignedInDevice -> R.string.link_code_for_signed_in_device
+      is TeamCraftException.LinkCodeExpired -> R.string.link_code_expired
       else -> R.string.error_generic
     }
   }

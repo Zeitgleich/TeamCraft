@@ -10,8 +10,6 @@
   <string name="passphrase_hide">Passphrase verbergen</string>
   <string name="restore_link_hint">Dein Konto ist schon auf einem anderen Gerät eingerichtet. Verknüpfe dieses Telefon von dort: Das geht am schnellsten, und dein Nachrichtenverlauf kommt mit.</string>
   <string name="restore_passphrase_hint">Kein anderes Gerät zur Hand? Gib deine Wiederherstellungs-Passphrase ein.</string>
-  <string name="link_steps_phone">Auf deinem anderen Telefon: TeamCraft öffnen, Einstellungen → Geräte → Gerät verknüpfen, und diesen Code scannen.</string>
-  <string name="link_steps_computer">Am Computer: Einstellungen → Geräte und Sicherheit → Neues Gerät verknüpfen, und diesen Code eingeben.</string>
   <string name="notification_prompt_title">Keine Nachricht verpassen</string>
   <string name="notification_prompt_text">Erlaube Mitteilungen, um bei Direktnachrichten, Erwähnungen und Anrufen benachrichtigt zu werden, auch wenn TeamCraft geschlossen ist. Inhalte bleiben verschlüsselt, bis sie auf diesem Telefon ankommen.</string>
   <string name="notification_prompt_allow">Erlauben</string>

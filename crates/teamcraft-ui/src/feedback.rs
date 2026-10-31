@@ -120,6 +120,8 @@ pub fn failure_message_key(failure: &ActionFailure) -> &'static str {
       LinkFailure::Denied => "error-link-denied",
       LinkFailure::NotConfirmed => "error-link-not-confirmed",
       LinkFailure::RequestGone => "error-link-request-gone",
+      LinkFailure::ForNewDevice => "error-link-for-new-device",
+      LinkFailure::ForSignedInDevice => "error-link-for-signed-in-device",
     },
     FailureKind::Notification(failure) => match failure {
       NotificationFailure::NotAllowed => "error-notification-not-allowed",

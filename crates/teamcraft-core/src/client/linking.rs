@@ -16,6 +16,15 @@
 //!
 //! The protocol version is in the code itself (`tclink2`): a device that speaks another version
 //! refuses the code when it is scanned, before any key leaves the existing device.
+//!
+//! The code belongs on the screen that can't scan (issue #998). A new computer shows it and a phone
+//! scans it, as above. A new phone has no one to show it to: it asks the other devices instead
+//! ([`LinkOffer::announce`]), or it scans the code a signed-in computer shows for it (*Link a
+//! phone*, `tcjoin2`). Then the roles in the relay swap: the signed-in device waits there
+//! ([`LinkWait::approval`]) and the new phone joins ([`NewDeviceLink::join_scanned`]). The keys
+//! still go from the signed-in device to the new one, and the user still types the code the new
+//! device shows into the signed-in one. Each kind of code is refused by the side that must not
+//! scan it, so neither device waits for the wrong partner.
 
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
@@ -35,14 +44,17 @@ use teamcraft_proto::{
 use zeroize::Zeroizing;
 
 use super::Client;
-use crate::api::{RendezvousConnection, RendezvousFrame, ServerApi};
+use crate::api::{ApiError, RendezvousConnection, RendezvousFrame, ServerApi};
 use crate::error::CoreError;
 use crate::store::LocalStore;
 use crate::{convert, platform, records};
 
 /// Version of the linking protocol: 2 added the receipt.
 const LINK_PROTOCOL_VERSION: u32 = 2;
+/// Prefix of a code a new device shows; a signed-in device scans it.
 const OFFER_PREFIX: &str = "tclink";
+/// Prefix of a code a signed-in device shows for a new phone, which scans it (issue #998).
+const JOIN_PREFIX: &str = "tcjoin";
 /// How long the existing device waits for the receipt after sending the keys. The new device
 /// answers as soon as it opened the key bag, which takes well under a second.
 const RECEIPT_TIMEOUT: Duration = Duration::from_secs(60);
@@ -53,8 +65,28 @@ const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(30);
 /// What the QR code carries: where to meet (relay ID) and the handshake's authentication key.
 #[derive(Debug)]
 pub struct LinkOffer {
+  kind: LinkCodeKind,
   rendezvous_id: String,
   key: RendezvousKey,
+}
+
+/// Which device shows a link code, and so which one may scan it (issue #998).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LinkCodeKind {
+  /// A new device shows it (a computer); a signed-in device scans it and sends the keys.
+  ShownByNewDevice,
+  /// A signed-in device shows it for a new phone (*Link a phone*); the phone scans it and
+  /// receives the keys.
+  ShownBySignedInDevice,
+}
+
+/// The device that showed a code, waiting in the relay for the one that scans it. It knows how long
+/// the relay stays open, so the screen can show when the code runs out.
+pub struct LinkWait<R> {
+  kind: LinkCodeKind,
+  connection: R,
+  initiator: Initiator,
+  maybe_expires_in: Option<Duration>,
 }
 
 /// What the new device tells the user's other devices about itself, so they can ask to approve it
@@ -145,6 +177,9 @@ pub struct LinkReceipt<R> {
 /// Stops the wait of [`LinkReceipt::detach`] when cancelled or dropped.
 pub struct ReceiptCancel(AbortHandle);
 
+/// Stops the wait of [`LinkWait::detach_approval`] when dropped: the relay closes, the code is dead.
+pub struct LinkWaitCancel(AbortHandle);
+
 #[derive(Serialize, Deserialize)]
 struct TransferPayload {
   /// Missing in version 1.
@@ -175,19 +210,38 @@ enum ReceiptOutcome {
 }
 
 impl LinkOffer {
+  /// A code for a new device to show.
   pub fn generate() -> Self {
+    Self::generate_shown_by(LinkCodeKind::ShownByNewDevice)
+  }
+
+  /// A code for a signed-in device to show, which a new phone scans (*Link a phone*).
+  pub fn generate_for_new_phone() -> Self {
+    Self::generate_shown_by(LinkCodeKind::ShownBySignedInDevice)
+  }
+
+  fn generate_shown_by(kind: LinkCodeKind) -> Self {
     let mut id = [0u8; 16];
     OsRng.fill_bytes(&mut id);
     Self {
+      kind,
       rendezvous_id: hex(&id),
       key: RendezvousKey::generate(&mut OsRng),
     }
   }
 
+  pub fn kind(&self) -> LinkCodeKind {
+    self.kind
+  }
+
   /// The QR code text. Contains the authentication key: show it, never send it anywhere else.
   pub fn to_code(&self) -> String {
+    let prefix = match self.kind {
+      LinkCodeKind::ShownByNewDevice => OFFER_PREFIX,
+      LinkCodeKind::ShownBySignedInDevice => JOIN_PREFIX,
+    };
     format!(
-      "{OFFER_PREFIX}{LINK_PROTOCOL_VERSION}:{}:{}",
+      "{prefix}{LINK_PROTOCOL_VERSION}:{}:{}",
       self.rendezvous_id,
       hex(self.key.expose_secret())
     )
@@ -202,6 +256,7 @@ impl LinkOffer {
     }
     let key = Zeroizing::new(<[u8; 32]>::try_from(request.key.as_slice()).map_err(|_| invalid())?);
     Ok(Self {
+      kind: LinkCodeKind::ShownByNewDevice,
       rendezvous_id: request.id.clone(),
       key: RendezvousKey::from_bytes(*key),
     })
@@ -232,11 +287,15 @@ impl LinkOffer {
   pub fn parse(code: &str) -> Result<Self, CoreError> {
     let invalid = || CoreError::LinkCodeInvalid;
     let mut parts = code.trim().split(':');
-    let version = parts
-      .next()
-      .and_then(|prefix| prefix.strip_prefix(OFFER_PREFIX))
-      .and_then(|version| version.parse::<u32>().ok())
-      .ok_or_else(invalid)?;
+    let head = parts.next().ok_or_else(invalid)?;
+    let (kind, version) = [
+      (OFFER_PREFIX, LinkCodeKind::ShownByNewDevice),
+      (JOIN_PREFIX, LinkCodeKind::ShownBySignedInDevice),
+    ]
+    .into_iter()
+    .find_map(|(prefix, kind)| Some((kind, head.strip_prefix(prefix)?)))
+    .ok_or_else(invalid)?;
+    let version = version.parse::<u32>().map_err(|_| invalid())?;
     check_version(version)?;
     let rendezvous_id = parts
       .next()
@@ -250,9 +309,107 @@ impl LinkOffer {
       return Err(invalid());
     }
     Ok(Self {
+      kind,
       rendezvous_id: rendezvous_id.to_string(),
       key: RendezvousKey::from_bytes(*key),
     })
+  }
+
+  /// The offer, if a device on `side` may scan it; the other kind says which device to use.
+  fn scanned_by(self, side: LinkCodeKind) -> Result<Self, CoreError> {
+    match (self.kind, side) {
+      (shown, scanning) if shown == scanning => Ok(self),
+      (LinkCodeKind::ShownBySignedInDevice, _) => Err(CoreError::LinkCodeForNewDevice),
+      (LinkCodeKind::ShownByNewDevice, _) => Err(CoreError::LinkCodeForSignedInDevice),
+    }
+  }
+}
+
+impl<R: RendezvousConnection> LinkWait<R> {
+  /// Joins the relay of a code this device shows. Returns once the server took the join, before
+  /// anyone scanned the code.
+  pub async fn join<A: ServerApi<Rendezvous = R>>(api: &A, offer: &LinkOffer) -> Result<Self, CoreError> {
+    let mut connection = join(api, offer).await?;
+    let initiator = Initiator::new(&offer.key, &mut OsRng);
+    let maybe_expires_in = match connection.receive().await {
+      Some(Ok(RendezvousFrame::Control(RendezvousServerMessage::Joined {
+        maybe_expires_in_secs,
+        ..
+      }))) => maybe_expires_in_secs.map(Duration::from_secs),
+      other => return Err(join_failure(other)),
+    };
+    Ok(Self {
+      kind: offer.kind,
+      connection,
+      initiator,
+      maybe_expires_in,
+    })
+  }
+
+  /// How long the relay stays open from the join; `None` from a server that doesn't say.
+  pub fn maybe_expires_in(&self) -> Option<Duration> {
+    self.maybe_expires_in
+  }
+
+  /// New device: waits until a signed-in device scanned the code and ran the handshake.
+  pub async fn new_device<A: ServerApi<Rendezvous = R>>(
+    self,
+    api: &A,
+  ) -> Result<NewDeviceLink<R>, CoreError> {
+    if self.kind != LinkCodeKind::ShownByNewDevice {
+      return Err(CoreError::LinkCodeForNewDevice);
+    }
+    let user = api.me().await?.id;
+    let (connection, channel) = self.handshake().await?;
+    Ok(NewDeviceLink {
+      connection,
+      channel,
+      user,
+    })
+  }
+
+  /// Signed-in device (*Link a phone*): waits until the new phone scanned the code and ran the
+  /// handshake. The user then types the code the phone shows, as for a code this device scanned.
+  pub async fn approval(self) -> Result<LinkApproval<R>, CoreError> {
+    if self.kind != LinkCodeKind::ShownBySignedInDevice {
+      return Err(CoreError::LinkCodeForSignedInDevice);
+    }
+    let (connection, channel) = self.handshake().await?;
+    Ok(LinkApproval { connection, channel })
+  }
+
+  /// [`Self::approval`] as a future that borrows nothing, to run on a task of its own beside the
+  /// app's loop while the code is on screen, and the handle that stops it. A stopped (or dropped)
+  /// handle ends the wait at once with [`CoreError::LinkCancelled`] and closes the relay.
+  pub fn detach_approval(
+    self,
+  ) -> (
+    impl Future<Output = Result<LinkApproval<R>, CoreError>> + use<R>,
+    LinkWaitCancel,
+  ) {
+    let (handle, registration) = AbortHandle::new_pair();
+    let waiting = Abortable::new(self.approval(), registration)
+      .map(|outcome| outcome.unwrap_or(Err(CoreError::LinkCancelled)));
+    (waiting, LinkWaitCancel(handle))
+  }
+
+  /// The handshake as initiator, once the scanning device answered. Waits as long as the relay
+  /// lives; when it ends unused the code expired and the app offers a new one.
+  async fn handshake(mut self) -> Result<(R, RendezvousChannel), CoreError> {
+    let hello = next_binary(&mut self.connection)
+      .await
+      .map_err(|error| match error {
+        CoreError::Gateway(_) => CoreError::LinkCodeExpired,
+        other => other,
+      })?;
+    let (awaiting, auth_hello) = self
+      .initiator
+      .receive_hello(&hello, &mut OsRng)
+      .map_err(link_error)?;
+    self.connection.send_binary(auth_hello).await?;
+    let auth = next_binary(&mut self.connection).await?;
+    let channel = awaiting.receive_auth(&auth).map_err(link_error)?;
+    Ok((self.connection, channel))
   }
 }
 
@@ -261,19 +418,17 @@ impl<R: RendezvousConnection> NewDeviceLink<R> {
   /// Nothing about the code leaves the device except to the relay: the key reaches the server only
   /// when the user asks for the prompt on the other devices ([`LinkOffer::announce`]).
   pub async fn connect<A: ServerApi<Rendezvous = R>>(api: &A, offer: &LinkOffer) -> Result<Self, CoreError> {
+    LinkWait::join(api, offer).await?.new_device(api).await
+  }
+
+  /// New phone: joins the relay of the code a signed-in device shows for it (*Link a phone*,
+  /// issue #998) and runs the handshake. The signed-in device waits there; without it the code
+  /// expired or was closed ([`CoreError::LinkPeerGone`]). A code another new device shows is
+  /// refused ([`CoreError::LinkCodeForSignedInDevice`]) before anything joins.
+  pub async fn join_scanned<A: ServerApi<Rendezvous = R>>(api: &A, code: &str) -> Result<Self, CoreError> {
+    let offer = LinkOffer::parse(code)?.scanned_by(LinkCodeKind::ShownBySignedInDevice)?;
     let user = api.me().await?.id;
-    let mut connection = join(api, offer).await?;
-    let initiator = Initiator::new(&offer.key, &mut OsRng);
-    // Waits for the approving device as long as the relay lives; when it ends unused, the code
-    // expired and the app offers a new one.
-    let hello = next_binary(&mut connection).await.map_err(|error| match error {
-      CoreError::Gateway(_) => CoreError::LinkCodeExpired,
-      other => other,
-    })?;
-    let (awaiting, auth_hello) = initiator.receive_hello(&hello, &mut OsRng).map_err(link_error)?;
-    connection.send_binary(auth_hello).await?;
-    let auth = next_binary(&mut connection).await?;
-    let channel = awaiting.receive_auth(&auth).map_err(link_error)?;
+    let (connection, channel) = respond(api, &offer).await?;
     Ok(Self {
       connection,
       channel,
@@ -463,27 +618,16 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     }
   }
 
-  /// Scans a new device's code, joins the relay and runs the handshake as responder.
+  /// Scans a new device's code, joins the relay and runs the handshake as responder. A code a
+  /// signed-in device shows for a new phone is refused ([`CoreError::LinkCodeForNewDevice`]).
   pub async fn start_link_approval(&self, code: &str) -> Result<LinkApproval<A::Rendezvous>, CoreError> {
-    let offer = LinkOffer::parse(code)?;
+    let offer = LinkOffer::parse(code)?.scanned_by(LinkCodeKind::ShownByNewDevice)?;
     self.approve_offer(&offer).await
   }
 
-  /// Joins the new device's relay as the approving device. The new device joined first and waits
-  /// there; a relay without it (expired, or the new device went away) fails at once with
-  /// [`CoreError::LinkPeerGone`] instead of waiting for nobody (issue #645).
+  /// Joins the new device's relay as the approving device.
   async fn approve_offer(&self, offer: &LinkOffer) -> Result<LinkApproval<A::Rendezvous>, CoreError> {
-    let mut connection = join(&self.api, offer).await?;
-    if !with_timeout(wait_joined(&mut connection)).await? {
-      return Err(CoreError::LinkPeerGone);
-    }
-    let (responder, hello) = Responder::new(&offer.key, &mut OsRng).map_err(link_error)?;
-    connection.send_binary(hello).await?;
-    let auth_hello = with_timeout(next_binary(&mut connection)).await?;
-    let (channel, auth) = responder
-      .receive_auth_hello(&auth_hello, &mut OsRng)
-      .map_err(link_error)?;
-    connection.send_binary(auth).await?;
+    let (connection, channel) = respond(&self.api, offer).await?;
     Ok(LinkApproval { connection, channel })
   }
 
@@ -572,6 +716,12 @@ impl Drop for ReceiptCancel {
   }
 }
 
+impl Drop for LinkWaitCancel {
+  fn drop(&mut self) {
+    self.0.abort();
+  }
+}
+
 impl<R: RendezvousConnection> LinkApproval<R> {
   /// The new device's receipt; a closed relay, a garbled frame or silence count as failure.
   async fn wait_for_receipt(&mut self) -> Result<(), CoreError> {
@@ -608,6 +758,28 @@ impl std::fmt::Debug for LinkedSecrets {
   }
 }
 
+/// Joins the relay of a code this device scanned and runs the handshake as responder. The device
+/// that shows the code joined first and waits there; a relay without it (expired, or that device
+/// went away) fails at once with [`CoreError::LinkPeerGone`] instead of waiting for nobody (issue
+/// #645).
+async fn respond<A: ServerApi>(
+  api: &A,
+  offer: &LinkOffer,
+) -> Result<(A::Rendezvous, RendezvousChannel), CoreError> {
+  let mut connection = join(api, offer).await?;
+  if !with_timeout(wait_joined(&mut connection)).await? {
+    return Err(CoreError::LinkPeerGone);
+  }
+  let (responder, hello) = Responder::new(&offer.key, &mut OsRng).map_err(link_error)?;
+  connection.send_binary(hello).await?;
+  let auth_hello = with_timeout(next_binary(&mut connection)).await?;
+  let (channel, auth) = responder
+    .receive_auth_hello(&auth_hello, &mut OsRng)
+    .map_err(link_error)?;
+  connection.send_binary(auth).await?;
+  Ok((connection, channel))
+}
+
 async fn join<A: ServerApi>(api: &A, offer: &LinkOffer) -> Result<A::Rendezvous, CoreError> {
   let mut connection = api.connect_rendezvous().await?;
   connection
@@ -622,14 +794,23 @@ async fn join<A: ServerApi>(api: &A, offer: &LinkOffer) -> Result<A::Rendezvous,
 /// Whether the other device was in the relay when this one joined (the server's `joined` answer).
 async fn wait_joined<R: RendezvousConnection>(connection: &mut R) -> Result<bool, CoreError> {
   match connection.receive().await {
-    Some(Ok(RendezvousFrame::Control(RendezvousServerMessage::Joined { peer_present }))) => Ok(peer_present),
-    Some(Ok(RendezvousFrame::Control(RendezvousServerMessage::Error { error }))) => {
-      Err(CoreError::Gateway(error.message))
+    Some(Ok(RendezvousFrame::Control(RendezvousServerMessage::Joined { peer_present, .. }))) => {
+      Ok(peer_present)
     },
-    Some(Ok(RendezvousFrame::Control(other))) => Err(CoreError::Gateway(format!("relay ended: {other:?}"))),
-    Some(Ok(RendezvousFrame::Binary(_))) => Err(CoreError::Gateway("relay sent data before the join".into())),
-    Some(Err(error)) => Err(error.into()),
-    None => Err(CoreError::Gateway("relay closed".into())),
+    other => Err(join_failure(other)),
+  }
+}
+
+/// What a first frame other than `joined` means.
+fn join_failure(frame: Option<Result<RendezvousFrame, ApiError>>) -> CoreError {
+  match frame {
+    Some(Ok(RendezvousFrame::Control(RendezvousServerMessage::Error { error }))) => {
+      CoreError::Gateway(error.message)
+    },
+    Some(Ok(RendezvousFrame::Control(other))) => CoreError::Gateway(format!("relay ended: {other:?}")),
+    Some(Ok(RendezvousFrame::Binary(_))) => CoreError::Gateway("relay sent data before the join".into()),
+    Some(Err(error)) => error.into(),
+    None => CoreError::Gateway("relay closed".into()),
   }
 }
 
@@ -722,6 +903,27 @@ mod tests {
         "{garbage}"
       );
     }
+  }
+
+  #[test]
+  fn each_kind_of_code_keeps_its_kind() {
+    for offer in [LinkOffer::generate(), LinkOffer::generate_for_new_phone()] {
+      let parsed = LinkOffer::parse(&offer.to_code()).unwrap();
+      assert_eq!(parsed.kind, offer.kind);
+      assert_eq!(parsed.rendezvous_id, offer.rendezvous_id);
+    }
+    assert!(
+      LinkOffer::generate_for_new_phone()
+        .to_code()
+        .starts_with("tcjoin2:")
+    );
+    let newer = LinkOffer::generate_for_new_phone()
+      .to_code()
+      .replacen("tcjoin2", "tcjoin3", 1);
+    assert!(matches!(
+      LinkOffer::parse(&newer),
+      Err(CoreError::LinkVersionMismatch { theirs: 3, .. })
+    ));
   }
 
   #[test]

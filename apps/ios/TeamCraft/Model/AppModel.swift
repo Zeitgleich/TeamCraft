@@ -7,6 +7,7 @@ import UserNotifications
 /// Why something failed, as the screens show it (translated per case).
 enum AppFailure: Equatable {
   case network, signedOut, wrongPassphrase, storage, signInFailed, recoveryPending, callMoveRefused, generic
+  case linkCodeInvalid, linkCodeForNewDevice, linkCodeForSignedInDevice, linkCodeExpired
 
   init(_ failure: CoreFailure) {
     switch failure {
@@ -16,6 +17,10 @@ enum AppFailure: Equatable {
     case .storage: self = .storage
     case .recoveryPending: self = .recoveryPending
     case .callMoveRefused: self = .callMoveRefused
+    case .linkCodeInvalid: self = .linkCodeInvalid
+    case .linkCodeForNewDevice: self = .linkCodeForNewDevice
+    case .linkCodeForSignedInDevice: self = .linkCodeForSignedInDevice
+    case .linkCodeExpired: self = .linkCodeExpired
     case .notEnrolled, .linkCodeRejected, .linkAttemptEnded, .other: self = .generic
     }
   }
@@ -30,6 +35,10 @@ enum AppFailure: Equatable {
     case .recoveryPending: return "recovery_pending"
     case .callMoveRefused: return "call_move_refused"
     case .generic: return "error_generic"
+    case .linkCodeInvalid: return "link_code_invalid"
+    case .linkCodeForNewDevice: return "link_code_for_new_device"
+    case .linkCodeForSignedInDevice: return "link_code_for_signed_in_device"
+    case .linkCodeExpired: return "link_code_expired"
     }
   }
 }
@@ -41,10 +50,14 @@ struct Account: Equatable {
   let identityFingerprint: String
 }
 
-/// A device link this (new) device waits for: the code the other device scans or types.
+/// A device link this (new) phone waits for. It shows no code (nobody could scan it, issue #998):
+/// the other device approves it from a prompt, or this phone scans the code a computer shows.
+/// `attempt` counts fresh starts, so the screen forgets an earlier "asked"; `maybeNotice` says why
+/// the last attempt ended.
 struct LinkProgress: Equatable {
-  let code: String
   var maybeShortCode: String?
+  var attempt = 0
+  var maybeNotice: LocalizedStringKey?
 }
 
 /// An organization recovery this device asked for: the code the user reads to an admin.
@@ -119,6 +132,8 @@ final class AppModel {
   @ObservationIgnored private let container = SharedContainer()
   @ObservationIgnored private lazy var factory = CoreFactory(container: container, vault: vault, servers: servers)
   @ObservationIgnored private let login = WebLogin()
+  /// The running link of this (new) phone; a scan or a fresh start replaces it.
+  @ObservationIgnored private var maybeLinkTask: Task<Void, Never>?
   @ObservationIgnored private let serverInfo = ServerInfoClient()
   @ObservationIgnored private let localAuth = LocalAuthClient()
   /// The sign-in page came with the server check just now: the screen need not ask again.
@@ -342,19 +357,50 @@ final class AppModel {
     }
   }
 
-  /// New device: shows a code another device scans, waits for it, receives the keys (e2ee.md §5).
-  func startLinking() async {
-    await busy {
+  /// New phone: waits in the relay so the other devices can be asked, then receives the keys
+  /// (e2ee.md §5). A wait that ran out starts again by itself, saying why.
+  func startLinking(notice maybeNotice: LocalizedStringKey? = nil) {
+    var attempt = 1
+    if case .linking(let progress) = phase { attempt = progress.attempt + 1 }
+    let deviceName = deviceName
+    runLink(LinkProgress(attempt: attempt, maybeNotice: maybeNotice)) { core in
+      _ = try await core.startDeviceLink(deviceName: deviceName, platform: .ios)
+      return try await core.waitForLinkPeer()
+    }
+  }
+
+  /// New phone: scanned the code a signed-in computer shows for it ("Link a phone", issue #998).
+  func linkScannedCode(_ code: String) {
+    guard case .linking(var progress) = phase else { return }
+    progress.maybeNotice = nil
+    let trimmed = code.trimmingCharacters(in: .whitespacesAndNewlines)
+    runLink(progress) { core in try await core.joinScannedDeviceLink(code: trimmed) }
+  }
+
+  private func runLink(_ waiting: LinkProgress, peer: @escaping (TeamCraft) async throws -> String) {
+    maybeLinkTask?.cancel()
+    maybeLinkTask = Task {
       do {
         let core = try self.core()
-        let code = try await core.startDeviceLink(deviceName: deviceName, platform: .ios)
-        phase = .linking(LinkProgress(code: code))
-        let shortCode = try await core.waitForLinkPeer()
-        phase = .linking(LinkProgress(code: code, maybeShortCode: shortCode))
+        phase = .linking(waiting)
+        let shortCode = try await peer(core)
+        guard !Task.isCancelled else { return }
+        var connected = waiting
+        connected.maybeShortCode = shortCode
+        connected.maybeNotice = nil
+        phase = .linking(connected)
         let account = try await core.finishDeviceLink(deviceName: deviceName)
         await adopt(account)
       } catch {
-        phase = .needsEnrollment(hasExistingIdentity: true, failure: AppFailure(CoreFailure(error)))
+        // A replaced wait ends with an error too; the newer one owns the screen.
+        guard !Task.isCancelled else { return }
+        switch CoreFailure(error) {
+        case .linkCodeExpired where waiting.maybeShortCode == nil: startLinking(notice: "link_expired_restarted")
+        // The wait the scan replaced lost its listener: a fresh one, saying what was wrong.
+        case .linkCodeForSignedInDevice: startLinking(notice: "link_code_for_signed_in_device")
+        case .linkCodeInvalid: startLinking(notice: "link_code_invalid")
+        default: phase = .needsEnrollment(hasExistingIdentity: true, failure: AppFailure(CoreFailure(error)))
+        }
       }
     }
   }
@@ -371,6 +417,8 @@ final class AppModel {
   }
 
   func cancelLinking() {
+    maybeLinkTask?.cancel()
+    maybeLinkTask = nil
     phase = .needsEnrollment(hasExistingIdentity: true, failure: nil)
   }
 

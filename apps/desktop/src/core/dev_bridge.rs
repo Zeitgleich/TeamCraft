@@ -333,6 +333,15 @@ async fn invoke(bridge: &Arc<Bridge>, body: &str) -> Value {
       bridge.alice.runtime.link_cancel();
       Ok(Value::Null)
     },
+    "core_phone_link_start" => bridge
+      .alice
+      .runtime
+      .phone_link_start()
+      .await
+      .map(|()| Value::Null),
+    "core_phone_link_status" => {
+      Ok(serde_json::to_value(bridge.alice.runtime.phone_link_status().await).expect("phone link status"))
+    },
     "core_approval_start" => bridge
       .alice
       .runtime

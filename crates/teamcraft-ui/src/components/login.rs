@@ -1569,15 +1569,25 @@ fn LinkScreen(device_name: String, control: SessionControl, on_back: Callback<()
       <h1>{move || i18n.t("link-new-title")}</h1>
       {move || match status.get() {
         LinkStatus::Idle => view! { <p class="auth-status" role="status"><span class="spinner" aria-hidden="true"></span></p> }.into_any(),
-        LinkStatus::WaitingForScan { code } | LinkStatus::Confirm { code, .. } => {
-          let short = match status.get() {
-            LinkStatus::Confirm { short_code, .. } => Some(short_code),
-            _ => None,
+        LinkStatus::WaitingForScan { code, .. } | LinkStatus::Confirm { code, .. } => {
+          let (short, maybe_expires_at_ms) = match status.get() {
+            LinkStatus::Confirm { short_code, .. } => (Some(short_code), None),
+            LinkStatus::WaitingForScan { maybe_expires_at_ms, .. } => (None, maybe_expires_at_ms),
+            _ => (None, None),
           };
+          // The status is read every second, so this ticks; at the end the core reports the expiry
+          // and "Try again" brings a fresh code (issue #998).
+          let time_left = maybe_expires_at_ms.map(|expires_at_ms| {
+            let seconds = ((expires_at_ms - now_ms()).max(0) + 999) / 1000;
+            format!("{}:{:02}", seconds / 60, seconds % 60)
+          });
           view! {
             <p class="muted-text">{move || i18n.t("link-new-steps")}</p>
             <div class="link-qr"><QrImage data=code.clone() /></div>
             <p class="small mono link-code" translate="no">{code}</p>
+            {time_left.map(|time| view! {
+              <p class="muted-text small">{move || i18n.t_with("link-code-valid", &[("time", &time)])}</p>
+            })}
             {move || match asking.get() {
               AskState::Asked => view! { <p role="status">{move || i18n.t("link-new-asked")}</p> }.into_any(),
               state => view! {
