@@ -218,7 +218,8 @@ async fn a_dm_its_participant_holds_alone_is_taken_over_by_the_import_accounts_g
   let server = FakeServer::new();
   let mut alice = Peer::enroll(&server, "Alice").await;
   let mut importer = Peer::enroll(&server, "Import").await;
-  let bob_id = server.add_user("Bob").user_id();
+  let bob_api = server.add_user("Bob");
+  let bob_id = bob_api.user_id();
   let (alice_id, importer_id) = (alice.client.user_id(), importer.client.user_id());
   alice
     .client
@@ -263,6 +264,18 @@ async fn a_dm_its_participant_holds_alone_is_taken_over_by_the_import_accounts_g
   settle(&mut [&mut alice, &mut importer]).await;
   // Her device took the import account's group, so it reads what was imported.
   assert_eq!(alice.texts(dm), vec!["old", "live"]);
+
+  // Bob sets up the app: he is added with all of it, also what Alice wrote before.
+  let mut bob = Peer::enroll_as(bob_api, "Bob").await;
+  for _ in 0..2 {
+    settle(&mut [&mut alice, &mut importer, &mut bob]).await;
+    importer.client.apply_pending_changes().await.unwrap();
+    alice.client.apply_pending_changes().await.unwrap();
+  }
+  settle(&mut [&mut alice, &mut importer, &mut bob]).await;
+  bob.client.full_sync().await.unwrap();
+  bob.client.catch_up_messages(dm).await.unwrap();
+  assert_eq!(bob.texts(dm), vec!["old", "live"]);
 }
 
 fn draft(source_id: &str, body: &str, author: ImportedAuthor, sent_at_ms: i64) -> ImportDraft {
