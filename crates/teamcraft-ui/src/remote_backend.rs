@@ -234,6 +234,13 @@ struct Feed {
   is_used: bool,
   /// The core changed while nobody read this feed: its pages are reloaded on the next read.
   is_stale: bool,
+  /// Pages the UI read or asked ahead for since it was last told about a change: a refresh reloads
+  /// these and drops the others, so its work stays with what is shown, not with how far the user
+  /// scrolled back (issue #1050).
+  read_pages: BTreeSet<usize>,
+  /// The pages of rows the UI showed since that change (read, not only asked ahead for): a page
+  /// loaded ahead tells the UI only when one of its rows is waiting for it.
+  shown_pages: BTreeSet<usize>,
 }
 
 struct Mirror {
@@ -309,6 +316,46 @@ impl Feed {
       }
     }
     is_changed
+  }
+
+  /// The pages with a row of `start..end` that is not held.
+  fn missing_pages(&self, start: usize, end: usize) -> Vec<usize> {
+    if start >= end {
+      return Vec::new();
+    }
+    (start / PAGE..=(end - 1) / PAGE)
+      .filter(|page| {
+        let rows = (page * PAGE).max(start)..((page + 1) * PAGE).min(end);
+        self.rows.range(rows.clone()).count() < rows.len()
+      })
+      .collect()
+  }
+
+  /// Notes that the UI reads (or will read) rows `start..end`.
+  fn note_read(&mut self, start: usize, end: usize) {
+    if start < end {
+      self.read_pages.extend(start / PAGE..=(end - 1) / PAGE);
+    }
+  }
+
+  /// Notes that the UI shows rows `start..end`.
+  fn note_shown(&mut self, start: usize, end: usize) {
+    self.note_read(start, end);
+    if start < end {
+      self.shown_pages.extend(start / PAGE..=(end - 1) / PAGE);
+    }
+  }
+
+  /// The held pages a refresh reloads: the ones read since the last change and the last one.
+  /// The rows of the other pages are dropped; they are out of date after the change and are
+  /// loaded again when read.
+  fn pages_to_refresh(&mut self) -> Vec<usize> {
+    let last = self.total.saturating_sub(1) / PAGE;
+    let read_pages = &self.read_pages;
+    self
+      .rows
+      .retain(|index, _| index / PAGE == last || read_pages.contains(&(index / PAGE)));
+    self.held_pages()
   }
 
   /// The pages held, plus the last one (where new messages arrive).
@@ -470,6 +517,8 @@ impl RemoteChat {
       mirror.used_threads.clear();
       for feed in mirror.feeds.values_mut() {
         feed.is_used = false;
+        feed.read_pages.clear();
+        feed.shown_pages.clear();
       }
     }
     let notify = self.notify.borrow().clone();
@@ -573,9 +622,12 @@ impl RemoteChat {
           continue;
         }
         if feed.is_used {
-          plan
-            .pages
-            .extend(feed.held_pages().into_iter().map(|page| (*conversation, page)));
+          plan.pages.extend(
+            feed
+              .pages_to_refresh()
+              .into_iter()
+              .map(|page| (*conversation, page)),
+          );
         } else {
           feed.is_stale = true;
         }
@@ -617,6 +669,34 @@ impl RemoteChat {
         backend.changed();
       }
     });
+  }
+
+  /// Loads a page the UI will read soon. Its rows are read when they come into view; the UI is
+  /// told only if it already shows one of them. Telling it re-reads everything shown, a long task
+  /// in the frame the page arrives in (issue #1050).
+  fn load_page_ahead(&self, conversation: ConversationId, page: usize) {
+    let backend = self.clone();
+    spawn_local(async move {
+      let total_before = backend.feed_total(conversation);
+      if backend.fetch_page(conversation, page).await
+        && (backend.is_shown(conversation, page) || backend.feed_total(conversation) != total_before)
+      {
+        backend.changed();
+      }
+    });
+  }
+
+  fn is_shown(&self, conversation: ConversationId, page: usize) -> bool {
+    let mirror = self.mirror.borrow();
+    mirror
+      .feeds
+      .get(&conversation)
+      .is_some_and(|feed| feed.shown_pages.contains(&page))
+  }
+
+  fn feed_total(&self, conversation: ConversationId) -> usize {
+    let mirror = self.mirror.borrow();
+    mirror.feeds.get(&conversation).map_or(0, |feed| feed.total)
   }
 
   /// Reads one page of a feed; returns whether it differs from the rows held.
@@ -1671,6 +1751,29 @@ impl ChatBackend for RemoteChat {
     self.mirror.borrow().snapshot.last_activity_of(conversation)
   }
 
+  fn prefetch_messages(&self, conversation: ConversationId, start: usize, len: usize) {
+    let total = self.message_count(conversation);
+    let missing = {
+      let mut mirror = self.mirror.borrow_mut();
+      let end = start.saturating_add(len).min(total);
+      let feed = mirror.feeds.entry(conversation).or_default();
+      feed.note_read(start, end);
+      feed.missing_pages(start, end)
+    };
+    for page in missing {
+      // A page already in flight is not asked for twice: `fetch_page` only marks it outdated, and
+      // nothing changed that it could predate.
+      if !self
+        .mirror
+        .borrow()
+        .loading
+        .contains(&LoadKey::Page(conversation, page))
+      {
+        self.load_page_ahead(conversation, page);
+      }
+    }
+  }
+
   fn messages(&self, conversation: ConversationId, start: usize, len: usize) -> Vec<Message> {
     let total = self.message_count(conversation);
     let end = total.min(start.saturating_add(len));
@@ -1684,6 +1787,7 @@ impl ChatBackend for RemoteChat {
       let mut mirror = self.mirror.borrow_mut();
       let feed = mirror.feeds.get_mut(&conversation).map(|feed| {
         feed.is_used = true;
+        feed.note_shown(start, end);
         if std::mem::take(&mut feed.is_stale) {
           stale_pages = feed.held_pages();
         }
@@ -1944,6 +2048,41 @@ mod tests {
       let mut feed = Feed::default();
       feed.apply(window(PAGE * 3, &["a"]));
       assert_eq!(feed.held_pages(), vec![0, 2]);
+    }
+
+    #[test]
+    fn a_refresh_keeps_the_pages_read_since_the_last_change() {
+      let mut feed = Feed::default();
+      let bodies: Vec<String> = (0..PAGE * 5).map(|index| index.to_string()).collect();
+      let bodies: Vec<&str> = bodies.iter().map(String::as_str).collect();
+      feed.apply(window(PAGE * 5, &bodies));
+      feed.note_read(PAGE * 2 + 10, PAGE * 2 + 40);
+
+      assert_eq!(
+        feed.pages_to_refresh(),
+        vec![2, 4],
+        "the read page and the newest"
+      );
+      assert_eq!(feed.rows.len(), PAGE * 2, "the others are dropped");
+      assert_eq!(feed.missing_pages(0, PAGE * 5), vec![0, 1, 3]);
+    }
+
+    #[test]
+    fn missing_pages_are_the_ones_with_a_row_not_held() {
+      let mut feed = Feed::default();
+      let held: Vec<String> = (0..PAGE).map(|index| index.to_string()).collect();
+      let held: Vec<&str> = held.iter().map(String::as_str).collect();
+      feed.apply(MessageWindow {
+        start: PAGE,
+        ..window(PAGE * 3 + 10, &held)
+      });
+      assert_eq!(feed.missing_pages(0, PAGE * 4), vec![0, 2, 3]);
+      assert!(
+        feed.missing_pages(PAGE + 5, PAGE + 50).is_empty(),
+        "inside a held page"
+      );
+      assert_eq!(feed.missing_pages(PAGE * 3 + 5, PAGE * 3 + 10), vec![3]);
+      assert!(feed.missing_pages(10, 10).is_empty());
     }
   }
 

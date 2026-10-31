@@ -318,13 +318,19 @@ pub fn Composer(
   // that arrives after the user typed, sent or cleared here is older than the editor (#977).
   let draft_restore = StoredValue::new(DraftRestore::Waiting);
   let draft_generation = RwSignal::new(0_u32);
+  // Once per editor: the editing commands make the browser lay out the page, so not on every change
+  // of the backend (#1050, each page of messages scrolled to was one).
+  Effect::new(move |_| {
+    if editor.get().is_some() {
+      composer_editor::prepare();
+    }
+  });
   Effect::new(move |_| {
     let stored = state.read(|backend| backend.draft(conversation, maybe_thread));
     if draft_restore.get_value() == DraftRestore::Settled {
       return;
     }
     let Some(element) = editor.get() else { return };
-    composer_editor::prepare();
     if let Some(text) = draft_restore.get_value().take(stored) {
       draft_restore.set_value(DraftRestore::Settled);
       if composer_editor::is_blank(&element) {
