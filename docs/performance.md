@@ -612,6 +612,46 @@ What the numbers say:
   Idle network was not at the time (the 30 s poll and the once-a-minute account data sync); both are
   gone since (#183, #252), re-measured below.
 
+#### Scrolling back through held history (issue #1050)
+
+The scroll back above never left the newest page: a browser that joins a channel holds only its
+newest messages (the core loads one page of history), so the 1,500-message channel was about 50
+rows in the browser. The desktop app, open for weeks in a busy channel, holds all of it and reads it
+from the core a page of 100 at a time while the reader scrolls up; that is where scrolling stalled.
+`perf.rs` now also lets Carol be away while the long channel grows by 1,500 messages, so the
+catch-up stores them all, and scrolls up from the newest one at a brisk, steady wheel speed (60 px
+a frame, about 3,600 px a second, 400 frames, several pages). Release web build in headless Chrome,
+the machine above with other builds running (load 3 to 6), CPU profile of the scroll:
+
+| While scrolling 400 frames                           | Before  | After   |
+|------------------------------------------------------|---------|---------|
+| Main-thread time of the app                          | 2.44 s  | 1.73 s  |
+| Of that in `document.execCommand` (forced layout)    | 0.85 s  | –       |
+| Frames with a placeholder row in sight               | 0       | 0       |
+| Frames over 33 ms / longest frame                    | 1 / 33  | 1 / 33  |
+| Tasks over 50 ms                                     | 0–1     | 0       |
+| Frames in which the list moved backwards             | 0       | 0       |
+
+What the numbers say, and what changed:
+
+- In the browser the core runs in the page and answers a page within the frame, so nothing waited
+  for messages even before; the stall there was work on the main thread when a page arrived. On the
+  desktop the answer crosses the shell's IPC from the core thread, which may be busy, and the
+  WebKitGTK webview lays out slower: there the same work showed as a stop.
+- Each page the list read told the whole UI to read again (one change notification for the app),
+  and with no draft for the conversation, the composer answered every such notification with two
+  editing commands that make the browser lay out the page. The composer prepares its editor once
+  now, and a page loaded ahead tells the UI nothing unless a row on screen waits for it: the rows
+  read it from the mirror when they come into view.
+- The list asks for the rows four viewport heights beyond what it renders
+  (`ChatBackend::prefetch_messages`), so a page is in the mirror before it is reached, also over a
+  slow IPC answer. With 22 px log lines that is about 150 rows ahead.
+- A refresh after a change in the core (a new line in a log channel) reloaded every page the
+  mirror ever read: the further back the reader had scrolled, the more pages every new line cost.
+  It now reloads the pages read or asked ahead for since the last change and drops the others.
+- Android and iOS show the newest 200 messages without paging back, so they have no page boundary
+  to stall at.
+
 #### Large workspace
 
 `PERF_SCALE=large`: 20 spaces, 300 channels, 100k messages (20,000 in one channel), 200 photos,

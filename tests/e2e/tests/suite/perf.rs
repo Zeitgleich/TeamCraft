@@ -1303,6 +1303,20 @@ impl Report {
       self.scroll_frames_moving_backwards, 0.0,
       "the list jumps while scrolling back (#642): {self:#?}"
     );
+    // #1050: the scroll covers several pages of history the browser holds, which arrive ahead of
+    // the reader without the list jumping.
+    assert!(
+      self.steady_scroll_frames > 300.0,
+      "the held history is shorter than the scroll: {self:#?}"
+    );
+    assert!(
+      self.steady_scroll_frames_with_placeholders < 10.0,
+      "scrolling up waits for older messages (#1050): {self:#?}"
+    );
+    assert_eq!(
+      self.steady_scroll_frames_moving_backwards, 0.0,
+      "the list jumps while older pages arrive (#1050): {self:#?}"
+    );
     assert!(self.pss_mib_after_switches < 2000.0, "{self:#?}");
     assert!(
       self.js_heap_mib_after_more_switches < self.js_heap_mib_after_first_switches * 1.5 + 5.0,
