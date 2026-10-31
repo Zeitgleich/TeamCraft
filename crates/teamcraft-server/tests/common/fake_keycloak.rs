@@ -155,8 +155,11 @@ async fn list_users(
   let first: usize = query.get("first").and_then(|v| v.parse().ok()).unwrap_or(0);
   let max: usize = query.get("max").and_then(|v| v.parse().ok()).unwrap_or(100);
   let users = state.lock().unwrap();
+  // `username` (with `exact=true`) finds one user; the fake's user names are their IDs.
+  let maybe_username = query.get("username");
   let page: Vec<Value> = users
     .iter()
+    .filter(|user| maybe_username.is_none_or(|name| *name == user.id))
     .skip(first)
     .take(max)
     .map(|user| json!({"id": user.id, "username": user.id, "enabled": user.is_enabled}))

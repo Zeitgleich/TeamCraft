@@ -33,6 +33,7 @@ mod guests;
 mod hardening;
 mod health;
 mod identity;
+mod import;
 mod integration_channels;
 mod key_bag;
 mod key_packages;

@@ -180,6 +180,8 @@ pub async fn remove_member(
   let Some(members) = authorize_removal(state, caller, id, user_id).await? else {
     return Ok(());
   };
+  // The import account leaves without a line in the conversation (e2ee.md §4.10).
+  let was_importer = state.database.remove_importer(id, user_id).await?;
   state.database.remove_conversation_member(id, user_id).await?;
   if user_id != caller.user.id {
     audit::record(
@@ -203,7 +205,9 @@ pub async fn remove_member(
   } else {
     SystemEventKind::MemberRemoved
   };
-  system_events::emit(state, id, kind, Some(caller.user.id), Some(user_id)).await;
+  if !was_importer {
+    system_events::emit(state, id, kind, Some(caller.user.id), Some(user_id)).await;
+  }
   super::calls::evict_from_call(state, id, user_id).await;
   Ok(())
 }
@@ -362,7 +366,12 @@ async fn authorize_removal(
   user_id: UserId,
 ) -> Result<Option<Vec<teamcraft_db::ConversationMember>>, ApiError> {
   let access = load_conversation(state, caller, id).await?;
-  ensure_open_channel_for_leaving(&access)?;
+  // The import account leaves a DM or notes it imported into like a channel (e2ee.md §4.10).
+  let is_importer_leaving =
+    user_id == caller.user.id && access.view.conversation.maybe_importer == Some(caller.user.id);
+  if !is_importer_leaving {
+    ensure_open_channel_for_leaving(&access)?;
+  }
   if user_id != caller.user.id {
     require(state, caller, Permission::ManageMembers, &access.target())?;
   }

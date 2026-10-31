@@ -123,6 +123,7 @@ impl Database {
            AND m.id >= tc_snowflake_floor(ms.joined_at)
            AND m.id > COALESCE(CASE WHEN m.thread_id IS NULL THEN ms.last_read_message_id
                                     ELSE COALESCE(tf.last_read_message_id, ms.last_read_message_id) END, 0)
+           AND NOT m.is_imported
            -- The instance default is never 'none', so a user without any choice counts.
            AND COALESCE(CASE WHEN ms.notification_overridden THEN ms.notification_level
                              ELSE COALESCE(sm.notification_level, uns.notification_level) END, 'all') <> 'none'

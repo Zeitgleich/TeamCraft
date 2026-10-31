@@ -184,6 +184,8 @@ pub fn conversation_response(
     contains_guests: extras.with_guests.contains(&conversation.id),
     maybe_organizer_user_id: None,
     maybe_my_permissions: None,
+    maybe_importer_user_id: conversation.maybe_importer,
+    maybe_imported_through: conversation.maybe_imported_through,
     maybe_my_membership: view.maybe_membership.as_ref().map(my_membership),
     participants: extras
       .participants

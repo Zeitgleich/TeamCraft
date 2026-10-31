@@ -85,6 +85,15 @@ pub struct ConversationResponse {
   /// scheme themselves.
   #[serde(rename = "my_permissions", default, skip_serializing_if = "Option::is_none")]
   pub maybe_my_permissions: Option<Vec<Permission>>,
+  /// The import account while it is a member of this DM or notes without being a participant
+  /// (e2ee.md §4.10): clients leave it out of the name and member list and show the import banner,
+  /// if the signed policy names it.
+  #[serde(rename = "importer_user_id", default, skip_serializing_if = "Option::is_none")]
+  pub maybe_importer_user_id: Option<UserId>,
+  /// The newest imported message once an import into this conversation finished; when it changes,
+  /// clients that had loaded the history's start load it again.
+  #[serde(rename = "imported_through", default, skip_serializing_if = "Option::is_none")]
+  pub maybe_imported_through: Option<MessageId>,
 }
 
 impl ConversationResponse {
@@ -305,6 +314,8 @@ mod tests {
     assert!(!archived.may_post());
     let announcement = ConversationResponse {
       maybe_my_permissions: Some(vec![Permission::AddReaction]),
+      maybe_importer_user_id: None,
+      maybe_imported_through: None,
       ..older.clone()
     };
     let json = serde_json::to_value(&announcement).unwrap();
@@ -368,6 +379,8 @@ mod tests {
       maybe_image: None,
       maybe_organizer_user_id: None,
       maybe_my_permissions: None,
+      maybe_importer_user_id: None,
+      maybe_imported_through: None,
     }
   }
 

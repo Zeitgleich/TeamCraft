@@ -309,6 +309,11 @@ async fn check_announcement(
   if request.size_bytes == 0 {
     return Err(ApiError::InvalidRequest("size_bytes must be positive".into()));
   }
+  // The import account brings a whole team's files: no per-file or per-user limits for it
+  // (admin.md §3.8).
+  if super::import::is_importing(state, caller.user.id) {
+    return Ok(());
+  }
   let max_attachment_bytes = state.settings.get().max_attachment_bytes;
   if request.size_bytes > max_attachment_bytes {
     return Err(ApiError::PayloadTooLarge(format!(

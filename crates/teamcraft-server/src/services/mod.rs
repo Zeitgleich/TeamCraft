@@ -24,6 +24,7 @@ pub mod directory;
 pub mod email_digest;
 pub mod guests;
 pub mod identity;
+pub mod import;
 pub mod invites;
 pub mod key_bag;
 pub mod key_packages;
