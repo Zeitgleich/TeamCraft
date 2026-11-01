@@ -142,6 +142,8 @@ async fn a_dm_is_founded_by_the_import_account_which_leaves_once_both_are_in() {
     .await
     .unwrap();
   let dm = response.id;
+  // The tool records the participants as the DM's import grant before anything else.
+  importer.client.grant_imported_history(dm, &participants).unwrap();
   assert!(
     importer
       .client
@@ -206,6 +208,11 @@ async fn a_device_that_held_the_channel_gets_the_history_merged_into_it() {
   alice.client.catch_up_messages(channel).await.unwrap();
   assert_eq!(alice.texts(channel), vec!["live"]);
 
+  // The mapping names Alice as a member of the channel in the old system.
+  importer
+    .client
+    .name_import_readers(channel, &[alice.client.user_id()])
+    .unwrap();
   importer
     .client
     .send_imported(channel, &[draft("1", "old", ImportedAuthor::Deleted, OLD_MS)])
@@ -453,6 +460,10 @@ mod existing {
     assert_eq!(response.id, existing);
     importer
       .client
+      .grant_imported_history(existing, participants)
+      .unwrap();
+    importer
+      .client
       .set_up_import_dm(response, participants)
       .await
       .unwrap()
@@ -511,8 +522,12 @@ mod existing {
 
 mod guests {
   //! Guests of the old system in what the import made (e2ee.md §4.10, "Guests in imported
-  //! conversations", issue #1074).
+  //! conversations", issue #1074), and who gets the import key (issue #1078).
   use super::*;
+  use teamcraft_core::api::ServerApi;
+  use teamcraft_core::imported::imported_message_id;
+  use teamcraft_core::store::Table;
+  use teamcraft_proto::{ListMessagesQuery, MessageResponse};
 
   #[tokio::test]
   async fn a_guest_the_import_adds_gets_the_history() {
@@ -839,6 +854,179 @@ mod guests {
     assert!(guest.texts(channel).is_empty(), "{:?}", guest.texts(channel));
   }
 
+  /// A channel merged into: the import key goes to the members the mapping names, not to a member
+  /// it doesn't name (the server's word that somebody is no guest is not enough) nor to a guest
+  /// member, and members writing during the import write under the group's key.
+  #[tokio::test]
+  async fn a_merged_channel_seals_the_import_key_only_to_members_the_mapping_names() {
+    let server = FakeServer::new();
+    let (mut owner, mut importer) = import_policy(&server, Some(i64::MAX)).await;
+    let mut alice = Peer::enroll(&server, "Alice").await;
+    let mut mallory = Peer::enroll(&server, "Mallory").await;
+    let mut gus = Peer::enroll_as(server.add_guest("Gus"), "Gus").await;
+    let space = alice.space().await;
+    let channel = alice.client.create_channel(space, "Daily").await.unwrap();
+    for (user, history) in [
+      (importer.client.user_id(), HistoryPolicy::FromJoin),
+      (mallory.client.user_id(), HistoryPolicy::Full),
+      (gus.client.user_id(), HistoryPolicy::FromJoin),
+    ] {
+      add_with(&mut alice, channel, user, history).await;
+    }
+    settle(&mut [&mut alice, &mut importer, &mut mallory, &mut gus]).await;
+    alice.client.send_text(channel, None, "before").await.unwrap();
+    settle(&mut [&mut alice, &mut importer, &mut mallory, &mut gus]).await;
+
+    importer
+      .client
+      .name_import_readers(channel, &[alice.client.user_id(), gus.client.user_id()])
+      .unwrap();
+    import_batch(&mut importer, channel, "1", "old 1").await;
+    settle(&mut [&mut alice, &mut importer, &mut mallory, &mut gus]).await;
+    alice.client.send_text(channel, None, "during").await.unwrap();
+    settle(&mut [&mut alice, &mut importer, &mut mallory, &mut gus]).await;
+    import_batch(&mut importer, channel, "2", "old 2").await;
+    importer.client.finish_import(channel).await.unwrap();
+    settle(&mut [&mut owner, &mut alice, &mut importer, &mut mallory, &mut gus]).await;
+
+    let keys = import_keys_on_server(&alice, channel).await;
+    assert_eq!(keys.len(), 1, "one import key");
+    let live = live_keys_on_server(&alice, channel).await;
+    assert!(
+      live.iter().all(|key| !keys.contains(key)),
+      "nobody wrote under the import key"
+    );
+    assert!(alice.client.has_content_key(channel, &keys[0]));
+    for peer in [&mallory, &gus] {
+      assert!(!peer.client.has_content_key(channel, &keys[0]), "{}", peer.name);
+    }
+    alice.client.catch_up_messages(channel).await.unwrap();
+    assert_eq!(alice.texts(channel), vec!["old 1", "old 2", "before", "during"]);
+  }
+
+  #[tokio::test]
+  async fn a_member_removed_during_the_import_gets_no_later_import_key() {
+    let server = FakeServer::new();
+    let (mut owner, mut importer) = import_policy(&server, Some(i64::MAX)).await;
+    let mut alice = Peer::enroll(&server, "Alice").await;
+    let mut bob = Peer::enroll(&server, "Bob").await;
+    let space = importer.space().await;
+    let channel = importer.client.create_channel(space, "History").await.unwrap();
+    importer
+      .client
+      .grant_imported_history(channel, &[alice.client.user_id(), bob.client.user_id()])
+      .unwrap();
+    import_batch(&mut importer, channel, "1", "old 1").await;
+    for user in [alice.client.user_id(), bob.client.user_id()] {
+      add_full(&mut importer, channel, user).await;
+    }
+    settle(&mut [&mut importer, &mut alice, &mut bob]).await;
+    importer
+      .client
+      .remove_member(channel, bob.client.user_id())
+      .await
+      .unwrap();
+    for _ in 0..2 {
+      settle(&mut [&mut importer, &mut alice, &mut bob]).await;
+      importer.client.apply_pending_changes().await.unwrap();
+    }
+    assert!(
+      !importer
+        .client
+        .group_users(channel)
+        .unwrap()
+        .contains(&bob.client.user_id())
+    );
+    import_batch(&mut importer, channel, "2", "old 2").await;
+    importer.client.finish_import(channel).await.unwrap();
+    settle(&mut [&mut owner, &mut importer, &mut alice, &mut bob]).await;
+
+    let keys = import_keys_on_server(&alice, channel).await;
+    assert_eq!(keys.len(), 2, "a new import key after the removal");
+    assert!(alice.client.has_content_key(channel, &keys[1]));
+    assert!(bob.client.has_content_key(channel, &keys[0]));
+    assert!(!bob.client.has_content_key(channel, &keys[1]));
+    alice.client.catch_up_messages(channel).await.unwrap();
+    assert_eq!(alice.texts(channel), vec!["old 1", "old 2"]);
+  }
+
+  #[tokio::test]
+  async fn a_member_who_joins_after_the_last_batch_gets_the_import_key_on_the_next_pass() {
+    let server = FakeServer::new();
+    let (mut owner, mut importer) = import_policy(&server, Some(i64::MAX)).await;
+    let mut alice = Peer::enroll(&server, "Alice").await;
+    let mut carol = Peer::enroll(&server, "Carol").await;
+    let space = alice.space().await;
+    let channel = alice.client.create_channel(space, "Daily").await.unwrap();
+    add_with(
+      &mut alice,
+      channel,
+      importer.client.user_id(),
+      HistoryPolicy::FromJoin,
+    )
+    .await;
+    settle(&mut [&mut alice, &mut importer]).await;
+    importer
+      .client
+      .name_import_readers(channel, &[alice.client.user_id(), carol.client.user_id()])
+      .unwrap();
+    import_batch(&mut importer, channel, "1", "old").await;
+    importer.client.finish_import(channel).await.unwrap();
+    settle(&mut [&mut owner, &mut alice, &mut importer]).await;
+
+    add_with(
+      &mut alice,
+      channel,
+      carol.client.user_id(),
+      HistoryPolicy::FromJoin,
+    )
+    .await;
+    settle(&mut [&mut alice, &mut importer, &mut carol]).await;
+    let keys = import_keys_on_server(&alice, channel).await;
+    assert!(!carol.client.has_content_key(channel, &keys[0]));
+    // `serve`'s next pass.
+    importer.client.share_import_key(channel).await.unwrap();
+    settle(&mut [&mut alice, &mut importer, &mut carol]).await;
+    assert!(carol.client.has_content_key(channel, &keys[0]));
+  }
+
+  /// A record of an earlier version that noted every key of the ring, the live one included, is
+  /// not read: a guest gets the import and nothing members wrote.
+  #[tokio::test]
+  async fn a_leftover_note_of_an_earlier_version_gives_a_guest_nothing_live() {
+    let server = FakeServer::new();
+    let (mut owner, mut importer) = import_policy(&server, Some(i64::MAX)).await;
+    let late_api = server.add_guest("Lea");
+    let late_id = late_api.user_id();
+    let channel = imported_channel(&mut importer, &[owner.client.user_id(), late_id]).await;
+    add_full(&mut importer, channel, owner.client.user_id()).await;
+    settle(&mut [&mut owner, &mut importer]).await;
+    owner.client.send_text(channel, None, "live").await.unwrap();
+    settle(&mut [&mut owner, &mut importer]).await;
+    let mut noted: Vec<String> = live_keys_on_server(&owner, channel)
+      .await
+      .iter()
+      .chain(import_keys_on_server(&owner, channel).await.iter())
+      .map(|key| key.iter().map(|byte| format!("{byte:02x}")).collect())
+      .collect();
+    noted.dedup();
+    importer
+      .store
+      .put(
+        Table::SyncState,
+        &format!("import_keys/{channel}"),
+        &serde_json::to_vec(&noted).unwrap(),
+      )
+      .unwrap();
+    // `serve`'s next pass, then Lea's waiting addition.
+    importer.client.share_import_key(channel).await.unwrap();
+    add_full(&mut importer, channel, late_id).await;
+    let mut late = Peer::enroll_as(late_api, "Lea").await;
+    join_late(&mut importer, &mut late).await;
+    late.client.catch_up_messages(channel).await.unwrap();
+    assert_eq!(late.texts(channel), vec!["old"]);
+  }
+
   /// An owner and the import account, with the signed roster and the import policy
   /// (`joins_until_ms`; `None`: no policy at all).
   async fn import_policy(server: &FakeServer, maybe_until: Option<i64>) -> (Peer, Peer) {
@@ -918,6 +1106,64 @@ mod guests {
       .add_member_with_history(channel, user, Some(HistoryPolicy::Full))
       .await
       .unwrap();
+  }
+
+  async fn add_with(adder: &mut Peer, channel: ConversationId, user: UserId, history: HistoryPolicy) {
+    adder
+      .client
+      .add_member_with_history(channel, user, Some(history))
+      .await
+      .unwrap();
+  }
+
+  async fn import_batch(importer: &mut Peer, channel: ConversationId, source_id: &str, body: &str) {
+    importer
+      .client
+      .send_imported(
+        channel,
+        &[draft(source_id, body, ImportedAuthor::Deleted, OLD_MS)],
+      )
+      .await
+      .unwrap();
+  }
+
+  /// The distinct content keys of the imported messages (source IDs "1" and "2"), oldest first, as
+  /// the server lists them to `reader`.
+  async fn import_keys_on_server(reader: &Peer, channel: ConversationId) -> Vec<Vec<u8>> {
+    keys_on_server(reader, channel, |message| is_imported(channel, message)).await
+  }
+
+  /// The distinct content keys of every other message, as the server lists them to `reader`.
+  async fn live_keys_on_server(reader: &Peer, channel: ConversationId) -> Vec<Vec<u8>> {
+    keys_on_server(reader, channel, |message| !is_imported(channel, message)).await
+  }
+
+  fn is_imported(channel: ConversationId, message: &MessageResponse) -> bool {
+    ["1", "2"].iter().any(|source_id| {
+      message.client_message_id == imported_message_id(channel, ImportSource::Synology, source_id)
+    })
+  }
+
+  async fn keys_on_server(
+    reader: &Peer,
+    channel: ConversationId,
+    filter: impl Fn(&MessageResponse) -> bool,
+  ) -> Vec<Vec<u8>> {
+    let mut page = reader
+      .api
+      .list_messages(channel, &ListMessagesQuery::default())
+      .await
+      .unwrap()
+      .messages;
+    page.sort_by_key(|message| message.id);
+    let mut keys: Vec<Vec<u8>> = Vec::new();
+    for message in page.iter().filter(|message| filter(message)) {
+      let key = message.content_key_id.as_slice().to_vec();
+      if !keys.contains(&key) {
+        keys.push(key);
+      }
+    }
+    keys
   }
 
   /// `late` set up the app after the run; `serve` applies the waiting additions.

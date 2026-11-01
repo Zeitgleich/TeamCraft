@@ -1504,17 +1504,34 @@ device then seals **the import's keys**, and no other, to the guest's devices. A
 imported history and everything from their join on, not what members wrote before the guest's join,
 also not during the import.
 
-**The import key (issue #1078).** The import device encrypts imported messages under a content key
-of their own, one per conversation, which it makes for the import and never makes anybody's current
-key: in its own ring it isn't current (it encrypts with a ring that holds this key alone), and it
-reaches members only sealed to their devices (§4.6, a share that names no current key), which never
-switches them to it. So no member writes a live message under it, also in a conversation that had
-members during the import (an existing DM or notes, a channel merged into, or a new channel somebody
-joined early). Before each batch of imported messages the import device seals the key to every
-verified device in the group that hasn't got it from it yet, except guests' devices the import grant
-doesn't name (a member on an earlier version takes it like any sealed key); members added later with
-the full history get it with the rest of the ring (§4.3). The import's keys a guest gets are this key
-alone.
+**The import key (issue #1078).** The import device encrypts imported messages under content keys
+of their own, the conversation's **import keys**, which it makes for the import and never makes
+anybody's current key: in its own ring they aren't current (it encrypts with a ring that holds the
+one key alone), and they reach members only sealed to their devices (§4.6, a share that names no
+current key), which never switches them to it. So no member writes a live message under them, also
+in a conversation that had members during the import (an existing DM or notes, a channel merged
+into, or a new channel somebody joined early). A member on an earlier version takes the sealed key
+like any other.
+
+- **Who gets it.** Before each batch, when the import is finished and on every later pass of
+  `serve` until it leaves, the import device seals the current import key to each verified device
+  in the group that hasn't got it from it yet and whose user may read the import: a guest only when
+  the import grant names them; anybody else only when something besides the server names them, the
+  import's mapping (the grant, or for a channel merged into the members the mapping names there,
+  the *readers*) or the verified roster, and the server doesn't call them a guest. Being in the
+  group, or not being a guest, is the server's word and never enough on its own (security review
+  A9): a member the mapping doesn't name, like somebody who joined a public channel during the
+  import, gets the imported history only from a member who adds them with the full history (§4.3).
+  Members added later with the full history get the import keys with the rest of the ring.
+- **A new key when the group changed.** When the group is in another epoch than when the current
+  import key was made (somebody joined or left, §4.2), the next batch takes a new import key. A
+  device that was in the group in between and left keeps the keys it got, but reads nothing
+  imported after it left. So does a ring that lost the key (it never replaces one silently).
+- **A guest's share.** The import's keys a guest the grant names gets are the import keys, all of
+  them, and no other key from before their join.
+- **Earlier versions.** History an earlier version imported (or the part of a conversation imported
+  before) is under keys members wrote under too. The keys those versions noted for it are not used
+  (and are deleted): a guest gets none of that history from the import device.
 
 The import device seals the import's keys when it commits the guest's addition, when a waiting
 addition of its own finds the guest's device let in by somebody else meanwhile, and to a device of
@@ -1535,10 +1552,8 @@ the guest added back, and only when all of this holds at that moment:
   grant: there the import changes no members. The grant names the policy's `joins_until_ms` it was
   recorded under; under another date (also a renewed policy) it counts only once the tool records it
   again.
-- **There is an import key.** A conversation imported by a version before the import key (or the
-  part of it imported before) has its history under keys members wrote under too; the keys earlier
-  versions noted for it are not used. A guest gets none of that history from the import device;
-  only what this version imports, under the import key.
+- **There are import keys.** Only history under the conversation's import keys is shared (see "The
+  import key" above).
 
 Nothing on the wire is new: the addition is an ordinary "from the join on" addition, and sealed keys
 are an ordinary sealed share (§4.3), which every client version takes. Members' devices never share
@@ -1553,10 +1568,13 @@ else as before. It can't check the mapping; the import device decides what can b
 What the exception can and can't give away, with a compromised server:
 
 - The server's word decides who is a guest (§4.3), as before: claiming a guest is a member already
-  lifts the rule for any full-history addition, with or without this exception. The exception adds
-  no new reliance on the server.
-- Who may get the keys is the mapping's statement, kept on the import device; the server can't add
-  a name to it. Adding somebody else to the conversation gets them nothing from the import device.
+  lifts the rule for any full-history addition. For the import keys it can only do that for
+  somebody the mapping or the roster names: a guest of the old system the mapping names as a reader
+  of a merged channel, called a member, gets that channel's import. That is the only reliance on
+  the server's word the import adds.
+- Who may get the keys is the mapping's statement (and the signed roster), kept on the import
+  device; the server can't add a name to it. Adding somebody else to the conversation, or letting
+  them join, gets them nothing from the import device.
 - What they may get is the import's keys of that conversation's group, which the import device
   holds only as a member of it: another conversation's history can't be routed to a guest by
   swapping IDs, and nothing members wrote is under those keys: the import key is nobody's current

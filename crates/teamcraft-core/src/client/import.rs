@@ -62,14 +62,67 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     Ok(())
   }
 
-  /// The keys of the import of `conversation`, as hex IDs: the import key
-  /// ([`Self::import_content_key`]) once one was made; empty before, and for a conversation an
-  /// earlier version imported (its history went out under keys members also wrote under, e2ee.md
-  /// §4.10).
+  /// Records that the import's mapping names `users` as members of `conversation`, a channel the
+  /// import merges into (it gets no import grant): those who aren't guests get its import key
+  /// ([`Self::is_import_reader`]). Adds to what was recorded.
+  pub fn name_import_readers(
+    &mut self,
+    conversation: ConversationId,
+    users: &[UserId],
+  ) -> Result<(), CoreError> {
+    let key = import_readers_key(conversation);
+    let mut readers: BTreeSet<UserId> =
+      records::get_json(&self.store, Table::SyncState, &key)?.unwrap_or_default();
+    let before = readers.len();
+    readers.extend(users.iter().copied().filter(|user| *user != self.account.user_id));
+    if readers.len() != before {
+      records::put_json(&self.store, Table::SyncState, &key, &readers)?;
+    }
+    Ok(())
+  }
+
+  /// The keys of the import of `conversation`, as hex IDs: its import keys
+  /// ([`Self::import_content_key`]); empty before the first batch, and for history an earlier
+  /// version imported (it went out under keys members also wrote under, e2ee.md §4.10).
   pub(crate) fn import_keys(&self, conversation: ConversationId) -> Result<BTreeSet<String>, CoreError> {
     let maybe_record: Option<ImportKey> =
       records::get_json(&self.store, Table::SyncState, &import_key_key(conversation))?;
-    Ok(maybe_record.map(|record| record.id).into_iter().collect())
+    Ok(
+      maybe_record
+        .map(|record| record.ids)
+        .unwrap_or_default()
+        .into_iter()
+        .collect(),
+    )
+  }
+
+  /// Whether something other than the server names `user` as somebody who may read the import of
+  /// `conversation`: the import's mapping (its grant, or the readers of a merged channel,
+  /// [`Self::name_import_readers`]) or the verified roster. Guests among them are left out by the
+  /// caller, on the server's word, which can only lower what is shared.
+  pub(crate) fn is_import_reader(
+    &self,
+    conversation: ConversationId,
+    user: UserId,
+  ) -> Result<bool, CoreError> {
+    let maybe_grant: Option<ImportGrant> =
+      records::get_json(&self.store, Table::SyncState, &import_grant_key(conversation))?;
+    if maybe_grant.is_some_and(|grant| grant.users.contains(&user)) {
+      return Ok(true);
+    }
+    let maybe_readers: Option<BTreeSet<UserId>> =
+      records::get_json(&self.store, Table::SyncState, &import_readers_key(conversation))?;
+    if maybe_readers.is_some_and(|readers| readers.contains(&user)) {
+      return Ok(true);
+    }
+    Ok(
+      self
+        .workspace()?
+        .roster
+        .members
+        .iter()
+        .any(|member| member.user_id == user),
+    )
   }
 
   /// Whether this device may share the history of `conversation` with `user` although the user
@@ -160,8 +213,9 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     self.post_self_add_change(conversation).await
   }
 
-  /// Encrypts `drafts` with the conversation's current content key and stores them as imported
-  /// messages, oldest first; returns their server IDs in order. A draft sent before keeps its ID.
+  /// Encrypts `drafts` with the conversation's import key ([`Self::import_content_key`]), sealed
+  /// to the members first, and stores them as imported messages, oldest first; returns their
+  /// server IDs in order. A draft sent before keeps its ID.
   /// Nothing is stored locally: the import device never reads its own history.
   pub async fn send_imported(
     &mut self,
@@ -175,7 +229,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       ));
     }
     let key = self.import_content_key(conversation)?;
-    self.share_import_key(conversation, &key).await?;
+    self.share_import_key(conversation).await?;
     // The import key is current only in this ring, which encrypts nothing else.
     let mut ring = ContentKeyRing::new(convert::conversation(conversation));
     ring.insert(key.duplicate())?;
@@ -223,49 +277,74 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
 
   /// The content key the import of `conversation` encrypts with (e2ee.md §4.10, "The import
   /// key"): made by this device for the import alone and never anybody's current key, so nobody
-  /// writes a live message under it. A guest the import grant names gets this key and no other
-  /// one from before their join. Made once and kept in the ring.
+  /// writes a live message under it. A guest the import grant names gets the import keys and no
+  /// other one from before their join. A new one is made when the group changed (another epoch)
+  /// since the last one was used: a device that was in the group meanwhile and left keeps that
+  /// key, but reads nothing imported after it left. Also when the ring lost it. The earlier ones
+  /// stay import keys.
   fn import_content_key(&mut self, conversation: ConversationId) -> Result<ContentKey, CoreError> {
-    let maybe_record: Option<ImportKey> =
-      records::get_json(&self.store, Table::SyncState, &import_key_key(conversation))?;
+    let epoch = self.group_or_error(conversation)?.epoch();
+    let record_key = import_key_key(conversation);
+    let mut record: ImportKey =
+      records::get_json(&self.store, Table::SyncState, &record_key)?.unwrap_or_default();
     let ring_id = convert::conversation(conversation);
-    if let Some(record) = maybe_record
-      && let Some(key) = self
+    let maybe_key = record.ids.last().and_then(|id| {
+      self
         .account
         .key_bag
         .ring(ring_id)
-        .and_then(|ring| ring.keys().iter().find(|key| key_hex(key.id()) == record.id))
-    {
-      return Ok(key.duplicate());
+        .and_then(|ring| ring.keys().iter().find(|key| key_hex(key.id()) == *id))
+        .map(ContentKey::duplicate)
+    });
+    match maybe_key {
+      Some(key) if record.epoch == epoch => return Ok(key),
+      Some(_) => {
+        tracing::info!(conversation_id = %conversation, "the group changed during the import: imported history goes on under a new import key");
+      },
+      None if !record.ids.is_empty() => {
+        tracing::warn!(conversation_id = %conversation, "the import key is missing from the ring: imported history goes on under a new one");
+      },
+      None => {},
     }
     let fresh = ContentKey::generate(&mut OsRng);
     self.account.key_bag.ring_mut(ring_id).insert(fresh.duplicate())?;
     self.persist_keys()?;
-    let record = ImportKey {
-      id: key_hex(fresh.id()),
-      sealed_to: BTreeSet::new(),
-    };
-    records::put_json(
-      &self.store,
-      Table::SyncState,
-      &import_key_key(conversation),
-      &record,
-    )?;
+    record.ids.push(key_hex(fresh.id()));
+    record.sealed_to.clear();
+    record.epoch = epoch;
+    records::put_json(&self.store, Table::SyncState, &record_key, &record)?;
     Ok(fresh)
   }
 
-  /// Seals the import key to the group's member devices that don't have it from this device yet
-  /// ([`Self::seal_import_key`]) and notes them.
-  async fn share_import_key(
-    &mut self,
-    conversation: ConversationId,
-    key: &ContentKey,
-  ) -> Result<(), CoreError> {
+  /// Seals the import key of `conversation` to the group's member devices that may read the
+  /// import and don't have the key from this device yet ([`Self::seal_import_key`]), and notes
+  /// them. Before every batch, when the import is finished and on every later pass, so a device
+  /// that joined since gets it too. Nothing to do without an import key or a group.
+  pub async fn share_import_key(&mut self, conversation: ConversationId) -> Result<(), CoreError> {
+    // Earlier versions noted every key of the ring here (#1078); nothing reads it any more.
+    self
+      .store
+      .delete(Table::SyncState, &format!("import_keys/{conversation}"))?;
+    if !self.has_group(conversation)? {
+      return Ok(());
+    }
     let record_key = import_key_key(conversation);
     let Some(mut record) = records::get_json::<ImportKey>(&self.store, Table::SyncState, &record_key)? else {
       return Ok(());
     };
-    let sealed = self.seal_import_key(conversation, key, &record.sealed_to).await?;
+    let Some(key) = record.ids.last().and_then(|id| {
+      self
+        .account
+        .key_bag
+        .ring(convert::conversation(conversation))
+        .and_then(|ring| ring.keys().iter().find(|key| key_hex(key.id()) == *id))
+        .map(ContentKey::duplicate)
+    }) else {
+      return Ok(());
+    };
+    let sealed = self
+      .seal_import_key(conversation, &key, &record.sealed_to)
+      .await?;
     if !sealed.is_empty() {
       record.sealed_to.extend(sealed);
       records::put_json(&self.store, Table::SyncState, &record_key, &record)?;
@@ -288,9 +367,12 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     )
   }
 
-  /// Marks the conversation's import as finished, so its members load its history's start again.
+  /// Marks the conversation's import as finished, so its members load its history's start again,
+  /// and seals the import key to member devices that joined since the last batch
+  /// ([`Self::share_import_key`]).
   pub async fn finish_import(&mut self, conversation: ConversationId) -> Result<(), CoreError> {
-    Ok(self.api.finish_import(conversation).await?)
+    self.api.finish_import(conversation).await?;
+    self.share_import_key(conversation).await
   }
 
   /// Leaves a conversation the import is done with, without a goodbye: a signed removal of this
@@ -313,14 +395,15 @@ struct ImportGrant {
   users: BTreeSet<UserId>,
 }
 
-/// The import key of a conversation ([`Client::import_content_key`]) and the member devices this
-/// device sealed it to.
-#[derive(Debug, Serialize, Deserialize)]
+/// The import keys of a conversation ([`Client::import_content_key`]) and who has the last one.
+#[derive(Debug, Default, Serialize, Deserialize)]
 struct ImportKey {
-  /// The key's ID in the ring, as hex.
-  id: String,
-  /// Member devices (`user/device`) it was sealed to.
+  /// The keys' IDs in the ring, as hex, oldest first; the last one encrypts.
+  ids: Vec<String>,
+  /// Member devices (`user/device`) this device sealed the last key to.
   sealed_to: BTreeSet<String>,
+  /// The group's epoch when the last key was made: in another one, the next batch takes a new key.
+  epoch: u64,
 }
 
 /// Where the import key of a conversation is kept ([`Client::import_content_key`]). Not the
@@ -328,6 +411,11 @@ struct ImportKey {
 /// import, live ones included (#1078): those are no longer read.
 fn import_key_key(conversation: ConversationId) -> String {
   format!("import_key/{conversation}")
+}
+
+/// Where the readers of a merged channel's import are kept ([`Client::name_import_readers`]).
+fn import_readers_key(conversation: ConversationId) -> String {
+  format!("import_readers/{conversation}")
 }
 
 /// Where the import grant of a conversation is kept ([`Client::grant_imported_history`]).

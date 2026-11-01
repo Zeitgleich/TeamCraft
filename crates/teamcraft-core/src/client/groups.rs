@@ -2058,9 +2058,9 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
   }
 
   /// Seals the import key of `conversation` (e2ee.md §4.10, "The import key") to each verified
-  /// member device of the group not named in `sealed_to` whose user may read the conversation's
-  /// history: no guest, unless the import grant names them. The bundle names no current key, so
-  /// nobody writes under it. Returns the devices it went to, as `user/device`.
+  /// member device of the group not named in `sealed_to` whose user may read the import
+  /// ([`Self::may_get_import_key`]). The bundle names no current key, so nobody writes under it.
+  /// Returns the devices it went to, as `user/device`.
   pub(crate) async fn seal_import_key(
     &mut self,
     conversation: ConversationId,
@@ -2075,19 +2075,21 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
         due.push((member, name));
       }
     }
-    if due.is_empty() {
+    // Decided per user before anything is asked of the server: who may not read stays out of
+    // `sealed_to` and is asked again (locally) next time, in case they may by then.
+    let mut eligible = Vec::with_capacity(due.len());
+    for (member, name) in due {
+      let user = convert::user_from_crypto(member.user_id)?;
+      if self.may_get_import_key(conversation, user).await? {
+        eligible.push((member, name));
+      }
+    }
+    if eligible.is_empty() {
       return Ok(Vec::new());
     }
     let directory = self.member_directory(conversation).await?;
     let mut sealed = Vec::new();
-    for (member, name) in due {
-      let user = convert::user_from_crypto(member.user_id)?;
-      // Not noted: a guest made a member later gets it on the next batch.
-      if !self.is_import_granted(conversation, user)?
-        && !self.may_read_imported_history(conversation, user).await?
-      {
-        continue;
-      }
+    for (member, name) in eligible {
       let recipient = match self
         .group_or_error(conversation)?
         .verified_member(member, &directory)
@@ -2108,13 +2110,22 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     Ok(sealed)
   }
 
-  /// Whether `user`, a member, may read what the import writes before their join: anybody but a
-  /// guest. When the server doesn't say (a refusal, not a network error), they may not.
-  async fn may_read_imported_history(
+  /// Whether `user`, a member of the group, gets the import key of `conversation`: a guest only
+  /// when the import grant names them, anybody else only when the import's mapping or the
+  /// verified roster names them ([`Self::is_import_reader`]). Being a member, or not a guest, is
+  /// the server's word and never enough on its own (security review A9). When the server doesn't
+  /// say whether the user is a guest (a refusal, not a network error), they don't.
+  async fn may_get_import_key(
     &mut self,
     conversation: ConversationId,
     user: UserId,
   ) -> Result<bool, CoreError> {
+    if self.is_import_granted(conversation, user)? {
+      return Ok(true);
+    }
+    if !self.is_import_reader(conversation, user)? {
+      return Ok(false);
+    }
     match self.is_listed_guest(user).await {
       Ok(is_guest) => Ok(!is_guest),
       Err(error) if error.is_transient() => Err(error),
