@@ -325,6 +325,12 @@ pub trait ServerApi {
     conversation: ConversationId,
     request: &SetReadPositionRequest,
   ) -> impl Future<Output = Result<(), ApiError>>;
+  /// Adds reaction messages to those the caller saw (`PUT /conversations/{id}/reactions-seen`).
+  fn mark_reactions_seen(
+    &self,
+    conversation: ConversationId,
+    request: &teamcraft_proto::MarkReactionsSeenRequest,
+  ) -> impl Future<Output = Result<(), ApiError>>;
   /// Moves the caller's read position in a followed thread forward (`PUT /conversations/{id}/threads/{id}/read`).
   fn set_thread_read(
     &self,

@@ -76,6 +76,8 @@ const HEARTBEAT_INTERVAL_MS: u64 = 30_000;
 /// The lifetime a relay reports on join, as the server's default.
 pub const RELAY_TTL_SECS: u64 = 300;
 const DAY_MS: i64 = 24 * 60 * 60 * 1000;
+/// The server's default `limits.max_seen_reactions`.
+const FAKE_MAX_SEEN_REACTIONS: usize = 200;
 /// The server's defaults: key packages are handed out while they stay valid this long, and count as
 /// "expiring soon" within the renewal window (e2ee.md §4.3).
 const KEY_PACKAGE_MIN_VALIDITY_MS: i64 = 42 * DAY_MS;
@@ -403,6 +405,8 @@ struct Conversation {
   messages: Vec<MessageResponse>,
   favorites: HashMap<UserId, bool>,
   read_positions: HashMap<UserId, MessageId>,
+  /// The reactions to their own messages each member saw.
+  reactions_seen: HashMap<UserId, teamcraft_proto::ReactionsSeen>,
   /// How far each member read each thread.
   thread_read_positions: HashMap<(UserId, ThreadId), MessageId>,
   pinned: HashSet<MessageId>,
@@ -2596,6 +2600,29 @@ impl ServerApi for FakeServerApi {
         .entry(me)
         .or_insert(request.message_id);
       *position = (*position).max(request.message_id);
+      Ok(())
+    })
+  }
+
+  async fn mark_reactions_seen(
+    &self,
+    conversation: ConversationId,
+    request: &teamcraft_proto::MarkReactionsSeenRequest,
+  ) -> Result<(), ApiError> {
+    self.with(|state, me| {
+      // Like the server: only grows, and the user's other devices read the conversation again.
+      state
+        .member_conversation_mut(conversation, me)?
+        .reactions_seen
+        .entry(me)
+        .or_default()
+        .add(request.message_ids.iter().copied(), FAKE_MAX_SEEN_REACTIONS);
+      state.publish(
+        [me],
+        &GatewayEvent::ConversationUpdate {
+          conversation_id: conversation,
+        },
+      );
       Ok(())
     })
   }
@@ -5585,6 +5612,7 @@ impl State {
         messages: Vec::new(),
         favorites: HashMap::new(),
         read_positions: HashMap::new(),
+        reactions_seen: HashMap::new(),
         thread_read_positions: HashMap::new(),
         pinned: HashSet::new(),
         maybe_group_info: None,
@@ -5764,6 +5792,7 @@ impl Conversation {
       maybe_last_read_message_id: self.read_positions.get(&me).copied(),
       maybe_muted_until: None,
       is_notification_inherited: false,
+      reactions_seen: self.reactions_seen.get(&me).cloned().unwrap_or_default(),
     });
     response
   }

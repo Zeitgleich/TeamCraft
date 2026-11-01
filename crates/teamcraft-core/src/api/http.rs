@@ -600,6 +600,17 @@ impl<T: AccessTokenSource> ServerApi for HttpServerApi<T> {
       .await
   }
 
+  async fn mark_reactions_seen(
+    &self,
+    conversation: ConversationId,
+    request: &teamcraft_proto::MarkReactionsSeenRequest,
+  ) -> Result<(), ApiError> {
+    let path = format!("/conversations/{conversation}/reactions-seen");
+    self
+      .send_without_response(Method::PUT, &path, Some(request))
+      .await
+  }
+
   async fn set_thread_read(
     &self,
     conversation: ConversationId,

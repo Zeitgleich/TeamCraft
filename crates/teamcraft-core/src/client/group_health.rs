@@ -192,6 +192,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     self.forget_conversation(conversation)?;
     self.clear_leftovers(conversation)?;
     self.store.delete_messages(conversation)?;
+    crate::unseen_reactions::forget(&self.store, conversation)?;
     let id = conversation.to_string();
     let prefix = format!("{conversation}/");
     for table in PER_CONVERSATION_TABLES {
