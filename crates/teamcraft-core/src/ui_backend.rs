@@ -45,7 +45,7 @@ use crate::client::bookmarks_key;
 use crate::client::workspace_admin::{ChannelOptions, StoredRoster};
 use crate::clock::Clock;
 use crate::error::CoreError;
-use crate::imported::{ImportAdditions, ImportSource, ImportedAuthor, ImportedOrigin};
+use crate::imported::{Authorship, ImportAdditions, ImportSource, ImportedAuthor, ImportedOrigin};
 use crate::notify_rules::{MentionPreferences, load_mention_preferences};
 use crate::records::{self, Draft};
 use crate::store::{
@@ -1001,30 +1001,14 @@ impl<S: LocalStore> CoreChatBackend<S> {
       | MessageContent::Notetaker { .. }
       | MessageContent::Unknown => String::new(),
     };
-    let (kind, mut author) = match &stored.content {
-      MessageContent::Event { event } => system_view(event, stored.sender_user_id),
-      _ => (MessageKind::User, stored.sender_user_id),
-    };
     // Shown with its original author and time only from the import account (e2ee.md §4.10).
-    let maybe_origin = crate::imported::trusted_origin(stored, relations.maybe_importer);
-    let maybe_imported = maybe_origin.map(|origin| {
-      let view = match &origin.author {
-        ImportedAuthor::User { user_id } => {
-          author = *user_id;
-          ImportedAuthorView::Person
-        },
-        ImportedAuthor::Named { name } => ImportedAuthorView::Named { name: name.clone() },
-        ImportedAuthor::Deleted | ImportedAuthor::Unknown => ImportedAuthorView::Deleted,
-      };
-      ImportedMark {
-        source: match origin.source {
-          ImportSource::Synology => ImportedFrom::SynologyChat,
-          ImportSource::Unknown => ImportedFrom::Other,
-        },
-        author: view,
-        importer: stored.sender_user_id,
-      }
-    });
+    let authorship = Authorship::of(stored, relations.maybe_importer);
+    let (kind, author) = match &stored.content {
+      MessageContent::Event { event } => system_view(event, stored.sender_user_id),
+      _ => (MessageKind::User, authorship.author),
+    };
+    let maybe_origin = authorship.maybe_origin;
+    let maybe_imported = maybe_origin.map(|origin| imported_mark(origin, stored.sender_user_id));
     let reply_count = stored.maybe_server_id.map_or(0, |server_id| {
       relations.reply_count(ThreadId::from_snowflake(server_id.snowflake()))
     });
@@ -1033,7 +1017,7 @@ impl<S: LocalStore> CoreChatBackend<S> {
       conversation: stored.conversation_id,
       author,
       kind,
-      sent_at: maybe_origin.map_or(stored.sent_at_ms, |origin| origin.sent_at_ms),
+      sent_at: authorship.sent_at_ms,
       body,
       is_edited: stored.is_edited || maybe_origin.is_some_and(|origin| origin.maybe_edited_at_ms.is_some()),
       reactions: with_imported_reactions(
@@ -2447,6 +2431,27 @@ fn reactions_of<'a>(
   by_emoji.into_values().collect()
 }
 
+/// How the list shows where an imported message came from; `importer` is its sender.
+fn imported_mark(origin: &ImportedOrigin, importer: UserId) -> ImportedMark {
+  ImportedMark {
+    source: match origin.source {
+      ImportSource::Synology => ImportedFrom::SynologyChat,
+      ImportSource::Unknown => ImportedFrom::Other,
+    },
+    author: imported_author_view(&origin.author),
+    importer,
+  }
+}
+
+/// Who wrote an imported message, as the views show it.
+pub(crate) fn imported_author_view(author: &ImportedAuthor) -> ImportedAuthorView {
+  match author {
+    ImportedAuthor::User { .. } => ImportedAuthorView::Person,
+    ImportedAuthor::Named { name } => ImportedAuthorView::Named { name: name.clone() },
+    ImportedAuthor::Deleted | ImportedAuthor::Unknown => ImportedAuthorView::Deleted,
+  }
+}
+
 /// Adds the reactions an imported message brought (e2ee.md §4.10) to the live ones: each author
 /// counts once per emoji, also one who reacted again here.
 fn with_imported_reactions(
@@ -3270,6 +3275,108 @@ mod tests {
         "the history and the import account's own joining"
       );
       assert_eq!(backend.message_count(id(10)), 2);
+    }
+
+    mod outside_the_list {
+      use teamcraft_client_api::model::ImportedAuthorView;
+      use teamcraft_proto::{AttachmentId, Base64Bytes};
+
+      use super::*;
+      use crate::client::{forward_content, imported_author_name, reply_ref};
+      use crate::imported::Authorship;
+      use crate::store::AttachmentRef;
+
+      #[test]
+      fn the_lightbox_and_files_show_the_original_author_and_time() {
+        let backend = backend_with_importer(Some(IMPORTER));
+        let stored = with_picture(imported_message(
+          IMPORTER,
+          ImportedAuthor::User { user_id: id(2) },
+          Vec::new(),
+        ));
+        let files = backend.files_of(&stored, backend.importer());
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0].maybe_sender, Some(id(2)));
+        assert_eq!(files[0].maybe_sent_at, Some(1_600_000_000_000));
+        assert_eq!(files[0].maybe_imported_author, Some(ImportedAuthorView::Person));
+      }
+
+      #[test]
+      fn a_bots_file_names_no_account() {
+        let backend = backend_with_importer(Some(IMPORTER));
+        let stored = with_picture(imported_message(
+          IMPORTER,
+          ImportedAuthor::Named {
+            name: "Monitor".into(),
+          },
+          Vec::new(),
+        ));
+        let file = backend.files_of(&stored, backend.importer()).remove(0);
+        assert_eq!(file.maybe_sender, None);
+        assert_eq!(
+          file.maybe_imported_author,
+          Some(ImportedAuthorView::Named {
+            name: "Monitor".into()
+          })
+        );
+      }
+
+      #[test]
+      fn a_forged_origin_keeps_the_sender_and_its_time() {
+        let backend = backend_with_importer(Some(IMPORTER));
+        let forged = with_picture(imported_message(
+          3,
+          ImportedAuthor::User { user_id: id(2) },
+          Vec::new(),
+        ));
+        let file = backend.files_of(&forged, backend.importer()).remove(0);
+        assert_eq!(
+          (file.maybe_sender, file.maybe_sent_at),
+          (Some(id(3)), Some(5_000))
+        );
+        assert_eq!(file.maybe_imported_author, None);
+      }
+
+      #[test]
+      fn replies_and_forwards_quote_the_original_author_and_time() {
+        let stored = imported_message(IMPORTER, ImportedAuthor::User { user_id: id(2) }, Vec::new());
+        assert_eq!(reply_ref(&stored, Some(id(IMPORTER))).author, id(2));
+        let authorship = Authorship::of(&stored, Some(id(IMPORTER)));
+        let Some(MessageContent::Text { meta, .. }) =
+          forward_content(&authorship, &stored, "Original".into(), None, "")
+        else {
+          panic!("a forward");
+        };
+        assert_eq!(meta.maybe_forwarded.unwrap().sent_at_ms, 1_600_000_000_000);
+        let bot = imported_message(
+          IMPORTER,
+          ImportedAuthor::Named {
+            name: "Monitor".into(),
+          },
+          Vec::new(),
+        );
+        assert_eq!(
+          imported_author_name(&Authorship::of(&bot, Some(id(IMPORTER)))),
+          "Monitor"
+        );
+      }
+
+      fn with_picture(mut stored: StoredMessage) -> StoredMessage {
+        if let MessageContent::Text { meta, .. } = &mut stored.content {
+          meta.attachments.push(AttachmentRef {
+            attachment_id: AttachmentId::from_snowflake(Snowflake::new(7).unwrap()),
+            key: Base64Bytes::new(Vec::new()),
+            ciphertext_sha256: Base64Bytes::new(Vec::new()),
+            file_name: "screenshot.png".into(),
+            media_type: "image/png".into(),
+            size_bytes: 1,
+            maybe_thumbnail: None,
+            maybe_dimensions: None,
+            maybe_duration_ms: None,
+          });
+        }
+        stored
+      }
     }
 
     fn backend_with_importer(maybe_importer: Option<i64>) -> CoreChatBackend<MemoryStore> {

@@ -189,7 +189,7 @@ struct PictureViewer: View {
   private var shownFile: FileInfo? { model.currentFile ?? model.target.file }
 
   private var senderName: String? {
-    shownFile?.maybeSender.flatMap { displayNames[$0] }
+    shownFile?.maybeSender.flatMap { displayNames[$0] } ?? shownFile?.importedAuthor?.standInName
   }
 
   private var sentDate: Date? {

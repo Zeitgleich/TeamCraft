@@ -104,6 +104,44 @@ pub fn trusted_origin(message: &StoredMessage, maybe_importer: Option<UserId>) -
   }
 }
 
+/// Who a message is shown as written by, and when: for an imported message of the import account
+/// its original author and time (e2ee.md §4.10), otherwise its sender and the time it was sent.
+/// Every view that names a message's author or time (the list, the lightbox, files, search,
+/// activity) takes them from here, never from the sender or the message ID.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Authorship<'a> {
+  /// The account shown as the author: the original author when the import maps them to one, the
+  /// sender otherwise (also for imported authors without an account, see `maybe_origin`).
+  pub author: UserId,
+  pub sent_at_ms: i64,
+  /// The trusted origin of an imported message.
+  pub maybe_origin: Option<&'a ImportedOrigin>,
+}
+
+impl<'a> Authorship<'a> {
+  pub fn of(message: &'a StoredMessage, maybe_importer: Option<UserId>) -> Self {
+    let maybe_origin = trusted_origin(message, maybe_importer);
+    let author = match maybe_origin.map(|origin| &origin.author) {
+      Some(ImportedAuthor::User { user_id }) => *user_id,
+      _ => message.sender_user_id,
+    };
+    Self {
+      author,
+      sent_at_ms: maybe_origin.map_or(message.sent_at_ms, |origin| origin.sent_at_ms),
+      maybe_origin,
+    }
+  }
+
+  /// The author as an account, `None` for an imported author without one (a deleted account, a
+  /// bot of the old system): those are not the import account.
+  pub fn maybe_account(&self) -> Option<UserId> {
+    match self.maybe_origin.map(|origin| &origin.author) {
+      None | Some(ImportedAuthor::User { .. }) => Some(self.author),
+      Some(ImportedAuthor::Deleted | ImportedAuthor::Named { .. } | ImportedAuthor::Unknown) => None,
+    }
+  }
+}
+
 /// Whether `message` is the import account `maybe_importer` telling of a change it made, like
 /// adding people to what it imported: an event message or a line derived from its commit.
 pub fn is_import_line(message: &StoredMessage, maybe_importer: Option<UserId>) -> bool {

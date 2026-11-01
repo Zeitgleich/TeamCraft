@@ -137,13 +137,10 @@ pub async fn load(
   {
     return Ok(Some(hit));
   }
-  let (_permit, maybe_max_side, priority) = match rendition {
-    Rendition::Full => (None, None, AttachmentPriority::Now),
-    Rendition::Inline => (
-      Some(Permit::acquire().await),
-      Some(INLINE_RENDITION_SIDE),
-      AttachmentPriority::Background,
-    ),
+  let maybe_max_side = rendition.maybe_max_side();
+  let (_permit, priority) = match rendition {
+    Rendition::Full => (None, AttachmentPriority::Now),
+    Rendition::Inline => (Some(Permit::acquire().await), AttachmentPriority::Background),
   };
   if let Some(hit) = cached(key, rendition) {
     return Ok(Some(hit));
@@ -259,6 +256,17 @@ pub fn mark_unplayable(key: MediaKey) {
 /// Whether the video `key` already failed to play in this session.
 pub fn is_unplayable(key: MediaKey) -> bool {
   UNPLAYABLE.with(|unplayable| unplayable.borrow().contains(&key))
+}
+
+impl Rendition {
+  /// The longest side the picture is scaled down to, `None` for the original's own pixels: the
+  /// lightbox zooms into those, never into an enlarged preview (#1089).
+  pub fn maybe_max_side(self) -> Option<u32> {
+    match self {
+      Self::Inline => Some(INLINE_RENDITION_SIDE),
+      Self::Full => None,
+    }
+  }
 }
 
 impl<K: PartialEq, V: Clone> Lru<K, V> {
@@ -422,6 +430,12 @@ mod tests {
 
   thread_local! {
     static TEST_LOADS: RefCell<InFlight<u32, u32>> = RefCell::new(InFlight::default());
+  }
+
+  #[test]
+  fn the_lightbox_gets_the_originals_pixels_and_the_conversation_a_smaller_copy() {
+    assert_eq!(Rendition::Full.maybe_max_side(), None);
+    assert_eq!(Rendition::Inline.maybe_max_side(), Some(INLINE_RENDITION_SIDE));
   }
 
   #[test]

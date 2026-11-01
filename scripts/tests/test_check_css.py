@@ -138,7 +138,7 @@ class LayerHintsTest(unittest.TestCase):
         )
 
     def test_listed_selectors_and_auto_pass(self):
-        css = ".lightbox-image { will-change: transform; }\n.sidebar { will-change: auto; }\n"
+        css = ".lightbox-track { will-change: transform; }\n.sidebar { will-change: auto; }\n"
         self.assertEqual(findings(css), [])
 
 
