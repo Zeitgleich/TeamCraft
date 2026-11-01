@@ -163,7 +163,7 @@ pub fn GuestJoinPage(link: GuestLink) -> impl IntoView {
         .await;
         match setup {
           Ok((own_code, maybe_unreported)) => {
-            unreported.set_value(maybe_unreported);
+            unreported.try_set_value(maybe_unreported);
             let organizer_code = organizer_fingerprint
               .as_deref()
               .map(code_of_fingerprint)
