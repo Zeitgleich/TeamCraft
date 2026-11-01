@@ -27,6 +27,7 @@ and upload quotas, so it runs as fast as the server and the link allow. Plan for
 | Chatbot conversation (type 5), Office (4) | Not imported                                                                                 |
 | Posts, threads, files, stickers, mentions | Imported with the original author and time; a line marks the end of the import               |
 | Reactions                                 | Part of the imported message (gemoji short codes as emoji)                                   |
+| Emoji short codes in the text             | Emoji (`:grin::thumbsup:`), the same names as reactions; unknown codes and code stay as text |
 | Edits                                     | The last version, marked edited                                                              |
 | Read position (`last_view_at`)            | Read position; imported messages are never unread and notify nobody                          |
 | Favourite, mute                           | Favourite, mute                                                                              |
