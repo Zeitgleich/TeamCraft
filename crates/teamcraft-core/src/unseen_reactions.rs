@@ -13,15 +13,15 @@
 //! actions.
 
 use serde::{Deserialize, Serialize};
+#[cfg(feature = "ui")]
 use teamcraft_client_api::model::UnseenReactions;
-use teamcraft_proto::{
-  ClientMessageId, ConversationId, ConversationResponse, MessageId, ReactionsSeen, UserId,
-};
+use teamcraft_proto::{ClientMessageId, ConversationId, MessageId, UserId};
+#[cfg(feature = "ui")]
+use teamcraft_proto::{ConversationResponse, ReactionsSeen};
 
 use crate::error::CoreError;
 use crate::records;
 use crate::store::{LocalStore, MessageContent, StoredMessage, Table};
-use crate::ui_backend::ui_message_id;
 
 /// The index's keys in [`Table::SyncState`]: `my_reactions/{conversation}/{target}/{user}/{emoji}`.
 /// A write is a change of the conversation's state shown to the UI.
@@ -95,6 +95,7 @@ pub(crate) fn note_received(
 
 /// The unseen reactions of a conversation: entries of others' added reactions that neither this
 /// device nor (by the synced state) any other device saw.
+#[cfg(feature = "ui")]
 pub(crate) fn unseen(
   store: &impl LocalStore,
   conversation: ConversationId,
@@ -116,6 +117,7 @@ pub(crate) fn unseen(
 /// Marks the unseen reactions to `targets` as seen on this device and returns their reaction
 /// messages, for the server. Entries the synced state covers by its `through` are dropped: a
 /// reaction message up to it counts as seen whatever arrives later.
+#[cfg(feature = "ui")]
 pub(crate) fn mark_seen(
   store: &impl LocalStore,
   conversation: ConversationId,
@@ -159,9 +161,12 @@ fn index(
 ) -> Result<(), CoreError> {
   // The user's own listed messages: a thread reply isn't a row of the conversation view.
   let is_listed = reacted_to.maybe_thread_id.is_none() || reacted_to.is_also_in_channel();
-  if reacted_to.sender_user_id != me || reacted_to.maybe_server_id.is_none() || !is_listed {
+  let Some(reaction_target) = reacted_to
+    .maybe_server_id
+    .filter(|_| is_listed && reacted_to.sender_user_id == me)
+  else {
     return Ok(());
-  }
+  };
   let key = index_key(
     reacted_to.conversation_id,
     reacted_to.client_message_id,
@@ -175,7 +180,7 @@ fn index(
   let entry = IndexEntry {
     reaction,
     is_added,
-    target: ui_message_id(reacted_to),
+    target: reaction_target,
     is_seen_here: false,
   };
   records::put_json(store, Table::SyncState, &key, &entry)
@@ -212,6 +217,7 @@ fn resolve_early(store: &impl LocalStore, me: UserId, stored: &StoredMessage) ->
   Ok(())
 }
 
+#[cfg(feature = "ui")]
 fn entries(
   store: &impl LocalStore,
   conversation: ConversationId,
@@ -225,11 +231,13 @@ fn entries(
   )
 }
 
+#[cfg(feature = "ui")]
 fn is_unseen(entry: &IndexEntry, seen: &ReactionsSeen) -> bool {
   entry.is_added && !entry.is_seen_here && !seen.is_seen(entry.reaction)
 }
 
 /// What the server last said the user saw in the conversation (from any device).
+#[cfg(feature = "ui")]
 fn synced_state(store: &impl LocalStore, conversation: ConversationId) -> Result<ReactionsSeen, CoreError> {
   Ok(
     records::get_json::<ConversationResponse>(store, Table::Conversations, &conversation.to_string())?
@@ -249,6 +257,7 @@ fn early_key(conversation: ConversationId, target: ClientMessageId, reaction: Me
 }
 
 #[cfg(test)]
+#[cfg(feature = "ui")]
 mod tests {
   use teamcraft_client_api::model::id_from_raw;
 
