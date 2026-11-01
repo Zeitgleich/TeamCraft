@@ -70,6 +70,8 @@ futures-channel = "0.3"
 oauth2 = { version = "5", default-features = false }
 # oauth2 draws its random values (state, PKCE verifier) from getrandom; wasm needs the JS backend.
 getrandom = { version = "0.2", features = ["js"] }
+# The rules the apps share with mobile (row_badge); the browser build adds the engine below.
+teamcraft-core = { path = "../teamcraft-core", default-features = false }
 tracing = "0.1"
 console_error_panic_hook = "0.1"
 tracing-subscriber = { version = "0.3", default-features = false, features = ["registry", "fmt"] }

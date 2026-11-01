@@ -1225,6 +1225,46 @@
         }
       }
     },
+    "chat_mentions %lld": {
+      "localizations": {
+        "en": {
+          "variations": {
+            "plural": {
+              "one": {
+                "stringUnit": {
+                  "state": "translated",
+                  "value": "%lld mention"
+                }
+              },
+              "other": {
+                "stringUnit": {
+                  "state": "translated",
+                  "value": "%lld mentions"
+                }
+              }
+            }
+          }
+        },
+        "de": {
+          "variations": {
+            "plural": {
+              "one": {
+                "stringUnit": {
+                  "state": "translated",
+                  "value": "%lld Erwähnung"
+                }
+              },
+              "other": {
+                "stringUnit": {
+                  "state": "translated",
+                  "value": "%lld Erwähnungen"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "chat_muted": {
       "localizations": {
         "en": {
@@ -1253,6 +1293,46 @@
           "stringUnit": {
             "state": "translated",
             "value": "Unterhaltung geändert"
+          }
+        }
+      }
+    },
+    "chat_unread %lld": {
+      "localizations": {
+        "en": {
+          "variations": {
+            "plural": {
+              "one": {
+                "stringUnit": {
+                  "state": "translated",
+                  "value": "%lld unread message"
+                }
+              },
+              "other": {
+                "stringUnit": {
+                  "state": "translated",
+                  "value": "%lld unread messages"
+                }
+              }
+            }
+          }
+        },
+        "de": {
+          "variations": {
+            "plural": {
+              "one": {
+                "stringUnit": {
+                  "state": "translated",
+                  "value": "%lld ungelesene Nachricht"
+                }
+              },
+              "other": {
+                "stringUnit": {
+                  "state": "translated",
+                  "value": "%lld ungelesene Nachrichten"
+                }
+              }
+            }
           }
         }
       }
