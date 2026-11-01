@@ -3234,6 +3234,44 @@ mod tests {
       assert!(!backend.unread_check(&conversation, None)(&import_line));
     }
 
+    /// Issue #1079: the feed (desktop, web and the mobile apps alike) shows no line of the import
+    /// account adding a workspace admin or leaving, only its own joining and the history.
+    #[test]
+    fn the_feed_leaves_out_the_import_account_s_lines_but_its_own_joining() {
+      let backend = backend_with_importer(Some(IMPORTER));
+      let history = imported_message(IMPORTER, ImportedAuthor::Deleted, Vec::new());
+      let line = |n: u8, user: i64| StoredMessage {
+        client_message_id: ClientMessageId::from_bytes([n; 16]),
+        maybe_server_id: None,
+        content: MessageContent::Event {
+          event: ConversationEvent::AdminJoined {
+            user: id(user),
+            is_approved: false,
+          },
+        },
+        maybe_verified_commit: Some(id(100 + i64::from(n))),
+        ..history.clone()
+      };
+      let left = StoredMessage {
+        client_message_id: ClientMessageId::from_bytes([5; 16]),
+        maybe_server_id: Some(id(105)),
+        content: MessageContent::Event {
+          event: ConversationEvent::Left,
+        },
+        ..history.clone()
+      };
+      for message in [&history, &line(2, IMPORTER), &line(3, 3), &left] {
+        backend.store.upsert_message(message).unwrap();
+      }
+      let rows = backend.messages(id(10), 0, 10);
+      assert_eq!(
+        rows.iter().map(|row| row.id).collect::<Vec<_>>(),
+        vec![id::<MessageId>(101), id(102)],
+        "the history and the import account's own joining"
+      );
+      assert_eq!(backend.message_count(id(10)), 2);
+    }
+
     fn backend_with_importer(maybe_importer: Option<i64>) -> CoreChatBackend<MemoryStore> {
       let backend = CoreChatBackend::new(MemoryStore::new(), id(1), Box::new(ManualClock::new(0)));
       let mut state = WorkspaceState::default();

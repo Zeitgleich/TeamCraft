@@ -111,9 +111,31 @@ pub fn is_import_line(message: &StoredMessage, maybe_importer: Option<UserId>) -
     && (message.line_position().is_some() || matches!(message.content, MessageContent::Event { .. }))
 }
 
-/// The import account adding people to what it imported, and other members letting those people
-/// in (or they saying they joined) once they set up the app: not shown, the people of an imported conversation were in it in
-/// the old system (e2ee.md §4.10).
+/// Whether `message` is a line of the import account that no client shows: the people it added
+/// (workspace admins too), the changes it announced (archiving a channel) and its leave. Only its
+/// own joining shows, as a workspace admin above all: that is how the members of a channel merged
+/// into learn that the import account can read it (e2ee.md §4.10, issue #1079).
+pub fn is_quiet_import_line(message: &StoredMessage, maybe_importer: Option<UserId>) -> bool {
+  is_import_line(message, maybe_importer) && !is_own_join(message)
+}
+
+/// Whether `message` is its sender telling that they joined.
+fn is_own_join(message: &StoredMessage) -> bool {
+  match message.content {
+    MessageContent::Event {
+      event: ConversationEvent::Joined,
+    } => true,
+    MessageContent::Event {
+      event: ConversationEvent::AdminJoined { user, .. } | ConversationEvent::MemberAdded { user, .. },
+    } => user == message.sender_user_id,
+    _ => false,
+  }
+}
+
+/// The import account's lines ([`is_quiet_import_line`]), the import account adding people to
+/// what it imported, and other members letting those people in (or they saying they joined) once
+/// they set up the app: not shown, the people of an imported conversation were in it in the old
+/// system (e2ee.md §4.10).
 pub struct ImportAdditions {
   maybe_importer: Option<UserId>,
   added: BTreeSet<UserId>,
@@ -149,8 +171,12 @@ impl ImportAdditions {
     self.hides(message)
   }
 
-  /// Whether `message` adds one of them, or is one of them saying they joined.
+  /// Whether `message` is a quiet line of the import account, adds one of them, or is one of them
+  /// saying they joined.
   pub fn hides(&self, message: &StoredMessage) -> bool {
+    if is_quiet_import_line(message, self.maybe_importer) {
+      return true;
+    }
     let subject = match message.content {
       MessageContent::Event {
         event: ConversationEvent::MemberAdded { user, .. },
@@ -233,7 +259,7 @@ mod tests {
     assert!(in_order.note(&by_import));
     assert!(additions.hides(&by_import));
     assert!(!additions.hides(&adding(other, importer)));
-    assert!(!additions.hides(&adding(importer, importer)));
+    assert!(!additions.hides(&adding(importer, importer)), "its own joining");
     assert!(!additions.hides(&imported_by(importer)));
     assert!(!ImportAdditions::of(std::slice::from_ref(&by_import), None).hides(&by_import));
     // Another member letting that person's device in: left out too; adding anybody else not.
@@ -248,6 +274,68 @@ mod tests {
     };
     assert!(additions.hides(&joined(other)));
     assert!(!additions.hides(&joined(member)));
+  }
+
+  /// Issue #1079: a workspace admin the import account added, the channel it archived and its
+  /// leave show no line; its own joining does, and so do other people's lines.
+  #[test]
+  fn the_import_account_s_lines_are_quiet_except_its_own_joining() {
+    let importer: UserId = IMPORTER.parse().unwrap();
+    let admin: UserId = "8".parse().unwrap();
+    let member: UserId = "1".parse().unwrap();
+    let event = |sender: UserId, event: ConversationEvent| StoredMessage {
+      content: MessageContent::Event { event },
+      ..imported_by(sender)
+    };
+    let admin_line = |sender: UserId, user: UserId| StoredMessage {
+      maybe_verified_commit: Some("90".parse().unwrap()),
+      ..event(
+        sender,
+        ConversationEvent::AdminJoined {
+          user,
+          is_approved: false,
+        },
+      )
+    };
+    let archived_line = StoredMessage {
+      maybe_server_change: Some(crate::store::ServerChange {
+        at: "91".parse().unwrap(),
+        seen_after: "90".parse().unwrap(),
+        seen_until: "90".parse().unwrap(),
+        actor: crate::store::ChangeActor::Announced {
+          announcement: ClientMessageId::from_bytes([2; 16]),
+        },
+      }),
+      ..event(importer, ConversationEvent::Archived)
+    };
+    let additions = ImportAdditions::new(Some(importer));
+
+    for quiet in [
+      admin_line(importer, admin),
+      archived_line.clone(),
+      event(importer, ConversationEvent::Archived),
+      event(importer, ConversationEvent::Left),
+    ] {
+      assert!(
+        is_quiet_import_line(&quiet, Some(importer)),
+        "{:?}",
+        quiet.content
+      );
+      assert!(additions.hides(&quiet), "{:?}", quiet.content);
+    }
+    for shown in [
+      admin_line(importer, importer),
+      event(importer, ConversationEvent::Joined),
+      admin_line(member, admin),
+      StoredMessage {
+        sender_user_id: member,
+        ..archived_line
+      },
+      imported_by(importer),
+    ] {
+      assert!(!additions.hides(&shown), "{:?}", shown.content);
+    }
+    assert!(!ImportAdditions::new(None).hides(&admin_line(importer, admin)));
   }
 
   #[test]
