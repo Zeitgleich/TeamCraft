@@ -6,6 +6,7 @@ use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
 use teamcraft_client_api::actions::FileInfo;
+use teamcraft_client_api::oidc_login::shown_error_code;
 use teamcraft_client_api::video_playback::VideoPlayback;
 use teamcraft_client_api::window_chrome::{TitleBar, TrayIconStyle, WindowAction, WindowChrome};
 use teamcraft_proto::{AvatarContentType, UserId};
@@ -266,6 +267,8 @@ fn map_kind(kind: &str, message: String) -> AuthError {
   match kind {
     "cancelled" => AuthError::Cancelled,
     "denied" => AuthError::Denied(message),
+    // The desktop shell sends the provider's cleaned `error` code as the message.
+    "authorization_refused" => AuthError::AuthorizationRefused(shown_error_code(&message)),
     "network" => AuthError::Network(message),
     "state_mismatch" => AuthError::StateMismatch,
     "not_signed_in" => AuthError::NotSignedIn,
@@ -525,12 +528,14 @@ pub async fn os_attention() -> Option<OsAttention> {
 
 /// Desktop only: unread count (`None` keeps the badge) and menu texts for the tray icon and the dock/taskbar badge.
 /// `maybe_menu` are the macOS menu bar's texts (the shell's `AppMenuLabels`); `None` leaves them.
+/// `maybe_deleted_user_name` is how the shell's core names deleted accounts (issue #1066).
 pub async fn tray_update(
   maybe_unread: Option<u32>,
   tooltip: &str,
   show_label: &str,
   quit_label: &str,
   maybe_menu: Option<serde_json::Value>,
+  maybe_deleted_user_name: Option<&str>,
 ) {
   if !is_available() {
     return;
@@ -542,6 +547,7 @@ pub async fn tray_update(
       "show_label": show_label,
       "quit_label": quit_label,
       "menu": maybe_menu,
+      "deleted_user_name": maybe_deleted_user_name,
     }
   });
   if let Err(error) = call::<()>("tray_update", &args).await {
@@ -1130,6 +1136,10 @@ mod tests {
   #[test]
   fn command_error_kinds_map_to_auth_errors() {
     assert_eq!(map_kind("cancelled", String::new()), AuthError::Cancelled);
+    assert_eq!(
+      map_kind("authorization_refused", "access_denied".into()),
+      AuthError::AuthorizationRefused("access_denied".into())
+    );
     assert_eq!(
       map_kind("network", "down".into()),
       AuthError::Network("down".into())

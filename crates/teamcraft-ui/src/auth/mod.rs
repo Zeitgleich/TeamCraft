@@ -31,6 +31,10 @@ pub enum AuthError {
   /// The identity provider refused the request (`error` and `error_description` of RFC 6749).
   #[error("the identity provider refused the request: {0}")]
   Denied(String),
+  /// The identity provider answered the sign-in redirect with an `error` (RFC 6749 §4.1.2.1); the
+  /// code as [`shown_error_code`](teamcraft_client_api::oidc_login::shown_error_code) cleaned it.
+  #[error("the identity provider refused the sign-in: {0}")]
+  AuthorizationRefused(String),
   /// The identity provider or the server could not be reached.
   #[error("network error: {0}")]
   Network(String),

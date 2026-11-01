@@ -9,6 +9,8 @@ final class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCent
     didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]? = nil
   ) -> Bool {
     UNUserNotificationCenter.current().delegate = self
+    // DM titles, members and notifications name deleted accounts in the user's language (#1066).
+    setDeletedUserName(name: String(localized: "user_deleted_name"))
     NotificationCategories.register(in: UNUserNotificationCenter.current())
     // Before anything else: a call push that launches the app is delivered to this registry.
     AppModel.shared.calls.start()

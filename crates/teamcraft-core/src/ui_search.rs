@@ -233,7 +233,8 @@ impl<S: LocalStore> CoreChatBackend<S> {
       .entry(stored.conversation_id)
       .or_insert_with(|| self.stored(stored.conversation_id));
     let message: Message = self.message_view(stored, all);
-    let author = ChatBackend::user(self, stored.sender_user_id);
+    // The author the hit shows: the original one of an imported message.
+    let author = ChatBackend::user(self, message.author);
     let (username, display_name) = author
       .map(|user| (user.username, user.display_name))
       .unwrap_or_default();

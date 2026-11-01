@@ -5,6 +5,7 @@
 use leptos::prelude::*;
 use teamcraft_proto::SettingSource;
 
+use crate::form_errors::{error_id, focus_first_invalid};
 use crate::i18n::use_i18n;
 
 /// A field id and the i18n key of what is wrong with it.
@@ -48,6 +49,21 @@ pub fn bind<T: Validated + Send + Sync + 'static>(
       }
     }),
   }
+}
+
+/// Checks a draft on submit: shows its errors and, when there are any, moves the focus to the first
+/// invalid field inside the form `form_id` (forms.md). Returns whether the draft may be sent.
+pub fn accept_or_refuse<T: Validated + Send + Sync + 'static>(
+  draft: RwSignal<T>,
+  show_errors: RwSignal<bool>,
+  form_id: impl Into<String>,
+) -> bool {
+  show_errors.set(true);
+  let is_valid = draft.with_untracked(|draft| draft.errors().is_empty());
+  if !is_valid {
+    focus_first_invalid(form_id);
+  }
+  is_valid
 }
 
 /// The reactive ends of a checkbox of a draft.
@@ -94,7 +110,8 @@ pub fn TextField(
   #[prop(into, optional)] disabled: Signal<bool>,
 ) -> impl IntoView {
   let i18n = use_i18n();
-  let describedby = format!("{id}-hint");
+  let hint_id = format!("{id}-hint");
+  let describedby = described_by(id, hint.map(|_| hint_id.clone()), error);
   view! {
     <div class="field">
       <label for=id>{move || i18n.t(label)}</label>
@@ -108,7 +125,7 @@ pub fn TextField(
           step=(input_type == "number").then_some("any")
           // Service credentials (SMTP, CalDAV), never the admin's own login: no autofill.
           autocomplete=(input_type == "password").then_some("new-password")
-          aria-describedby=describedby.clone()
+          aria-describedby=describedby
           aria-invalid=move || error.get().map(|_| "true")
           prop:disabled=move || disabled.get()
           prop:value=move || value.get()
@@ -116,8 +133,8 @@ pub fn TextField(
         />
         {(!unit.is_empty()).then(|| view! { <span class="field-unit muted-text">{move || i18n.t(unit)}</span> })}
       </div>
-      {hint.map(|hint| view! { <p id=describedby.clone() class="muted-text small">{move || i18n.t(hint)}</p> })}
-      {move || error.get().map(|key| view! { <p class="field-error" role="alert">{i18n.t(key)}</p> })}
+      {hint.map(|hint| view! { <p id=hint_id class="muted-text small">{move || i18n.t(hint)}</p> })}
+      <p class="field-error" id=error_id(id)>{move || error.get().map(|key| i18n.t(key))}</p>
     </div>
   }
 }
@@ -135,7 +152,8 @@ pub fn TextAreaField(
   #[prop(into, optional)] disabled: Signal<bool>,
 ) -> impl IntoView {
   let i18n = use_i18n();
-  let describedby = format!("{id}-hint");
+  let hint_id = format!("{id}-hint");
+  let describedby = described_by(id, hint.map(|_| hint_id.clone()), error);
   view! {
     <div class="field">
       <label for=id>{move || i18n.t(label)}</label>
@@ -144,14 +162,14 @@ pub fn TextAreaField(
         class="input"
         translate="no"
         rows=rows.to_string()
-        aria-describedby=describedby.clone()
+        aria-describedby=describedby
         aria-invalid=move || error.get().map(|_| "true")
         prop:disabled=move || disabled.get()
         prop:value=move || value.get()
         on:input=move |ev| on_input.run(event_target_value(&ev))
       ></textarea>
-      {hint.map(|hint| view! { <p id=describedby.clone() class="muted-text small">{move || i18n.t(hint)}</p> })}
-      {move || error.get().map(|key| view! { <p class="field-error" role="alert">{i18n.t(key)}</p> })}
+      {hint.map(|hint| view! { <p id=hint_id class="muted-text small">{move || i18n.t(hint)}</p> })}
+      <p class="field-error" id=error_id(id)>{move || error.get().map(|key| i18n.t(key))}</p>
     </div>
   }
 }
@@ -179,6 +197,19 @@ pub fn CheckField(
         {hint.map(|hint| view! { <small class="muted-text">{move || i18n.t(hint)}</small> })}
       </span>
     </label>
+  }
+}
+
+/// `aria-describedby` of a field row: its hint, and its message while it has an error.
+fn described_by(
+  id: &'static str,
+  maybe_hint_id: Option<String>,
+  error: Signal<Option<&'static str>>,
+) -> impl Fn() -> Option<String> + Send + Sync + 'static {
+  move || {
+    let maybe_error_id = error.get().map(|_| error_id(id));
+    let ids: Vec<String> = maybe_hint_id.iter().cloned().chain(maybe_error_id).collect();
+    (!ids.is_empty()).then(|| ids.join(" "))
   }
 }
 

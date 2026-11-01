@@ -94,6 +94,18 @@ class FeedTest {
     assertEquals(FeedContentType.FollowUp, grouped.last().contentType)
   }
 
+  @Test
+  fun onlyDaysOutsideTheCurrentYearShowTheirYear() {
+    val today = LocalDate.of(2026, 10, 22)
+    assertEquals(false, dayShowsYear(LocalDate.of(2026, 1, 1), today))
+    assertEquals(true, dayShowsYear(LocalDate.of(2025, 12, 31), today))
+    assertEquals(true, dayShowsYear(LocalDate.of(2027, 1, 1), today))
+    // New Year's Eve: the same day gains its year once the next year has begun.
+    val eve = LocalDate.of(2026, 12, 31)
+    assertEquals(false, dayShowsYear(eve, eve))
+    assertEquals(true, dayShowsYear(eve, eve.plusDays(1)))
+  }
+
   private fun entries(vararg messages: Message): List<FeedItem.Entry> =
     feedItems(messages.toList(), maybeFirstUnread = null, zone = ZoneOffset.UTC).filterIsInstance<FeedItem.Entry>()
 

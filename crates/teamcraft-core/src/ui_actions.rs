@@ -13,8 +13,9 @@ use teamcraft_client_api::receipts::{is_read_by_all, seen_by};
 use teamcraft_proto::{ClientMessageId, SourceChange, SourceId};
 
 use crate::client::previews::queue_preview;
-use crate::client::{apply_control, forward_content, reply_ref, stored_account_data};
+use crate::client::{apply_control, forward_content, imported_author_name, reply_ref, stored_account_data};
 use crate::error::CoreError;
+use crate::imported::Authorship;
 use crate::integration_sources::{SourceAuthority, SourceLedger};
 use crate::link_preview::is_allowed;
 use crate::read_state;
@@ -102,7 +103,7 @@ impl<S: LocalStore> CoreChatBackend<S> {
     let maybe_reply_to = message
       .maybe_reply_to
       .and_then(|id| self.find_stored(conversation, id))
-      .map(|target| reply_ref(&target));
+      .map(|target| reply_ref(&target, self.importer()));
     let meta = MessageMeta {
       maybe_reply_to,
       priority: priority_of(message.priority),
@@ -223,17 +224,27 @@ impl<S: LocalStore> CoreChatBackend<S> {
     let Some(original) = self.find_stored(from, message) else {
       return;
     };
-    let users = self.summaries();
-    let author_name = users
-      .get(&original.sender_user_id)
-      .map(|summary| summary.display_name.clone())
-      .unwrap_or_default();
+    let authorship = Authorship::of(&original, self.importer());
+    let author_name = match authorship.maybe_account() {
+      Some(author) => self
+        .summaries()
+        .get(&author)
+        .map(|summary| summary.display_name.clone())
+        .unwrap_or_default(),
+      None => imported_author_name(&authorship),
+    };
     let maybe_conversation_name = self
       .conversations_raw()
       .iter()
       .find(|conversation| conversation.id == from)
       .and_then(|conversation| conversation.maybe_name.clone());
-    match forward_content(&original, author_name, maybe_conversation_name, comment) {
+    match forward_content(
+      &authorship,
+      &original,
+      author_name,
+      maybe_conversation_name,
+      comment,
+    ) {
       Some(content) => {
         self.enqueue(to, None, content);
       },
@@ -443,7 +454,7 @@ impl<S: LocalStore> CoreChatBackend<S> {
       MessageContent::Text { .. } | MessageContent::File { .. } => LinkedMessage::Visible {
         target,
         message: self.to_message(&stored, &[]),
-        files: self.files_of(&stored),
+        files: self.files_of(&stored, self.importer()),
       },
       // Reactions, edits, events and the like are no message one can link to.
       _ => LinkedMessage::Unavailable,
@@ -466,6 +477,7 @@ impl<S: LocalStore> CoreChatBackend<S> {
   ) -> Vec<MessageExtras> {
     let data = self.read(stored_account_data(self.store_ref()));
     let ticks = Ticks::read(self, conversation);
+    let maybe_importer = self.importer();
     messages
       .iter()
       .filter_map(|id| {
@@ -510,13 +522,15 @@ impl<S: LocalStore> CoreChatBackend<S> {
           ));
         }
         match &stored.content {
-          MessageContent::Text { meta, .. } => self.fill_from_meta(&mut extras, meta, conversation),
+          MessageContent::Text { meta, .. } => {
+            self.fill_from_meta(&mut extras, meta, conversation, maybe_importer)
+          },
           MessageContent::Event { event } => {
             extras.maybe_workspace_event = workspace_event(event, stored);
           },
           _ => {},
         }
-        extras.files = self.files_of(stored);
+        extras.files = self.files_of(stored, maybe_importer);
         if stored.maybe_server_id.is_none() {
           extras.is_send_failed = self.read(records::is_send_failed(
             self.store_ref(),
@@ -529,19 +543,29 @@ impl<S: LocalStore> CoreChatBackend<S> {
       .collect()
   }
 
-  fn fill_from_meta(&self, extras: &mut MessageExtras, meta: &MessageMeta, conversation: ConversationId) {
-    extras.maybe_reply = meta.maybe_reply_to.as_ref().map(|reply| ReplyPreview {
-      maybe_message: self
-        .read(
-          self
-            .store_ref()
-            .message(conversation, reply.target)
-            .map_err(CoreError::from),
-        )
-        .as_ref()
-        .map(ui_message_id),
-      author: reply.author,
-      excerpt: reply.excerpt.clone(),
+  fn fill_from_meta(
+    &self,
+    extras: &mut MessageExtras,
+    meta: &MessageMeta,
+    conversation: ConversationId,
+    maybe_importer: Option<UserId>,
+  ) {
+    extras.maybe_reply = meta.maybe_reply_to.as_ref().map(|reply| {
+      let maybe_target = self.read(
+        self
+          .store_ref()
+          .message(conversation, reply.target)
+          .map_err(CoreError::from),
+      );
+      ReplyPreview {
+        maybe_message: maybe_target.as_ref().map(ui_message_id),
+        // The author the list shows, also for replies that named the import account as the
+        // author of an imported message before it was told apart.
+        author: maybe_target.as_ref().map_or(reply.author, |target| {
+          Authorship::of(target, maybe_importer).author
+        }),
+        excerpt: reply.excerpt.clone(),
+      }
     });
     extras.maybe_forwarded = meta.maybe_forwarded.as_ref().map(|forwarded| ForwardedFrom {
       author_name: forwarded.author_name.clone(),

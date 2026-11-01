@@ -56,9 +56,10 @@ pub use types::{
   AccountState, AppActivity, AppConfig, BrandAccent, BrandLinks, ConnectionState, ConversationItem,
   ConversationKind, EmojiSuggestion, LinkPlatform, LinkRequestItem, LoginBrand, MentionSettings, MessageItem,
   MessagePage, NetworkInterception, NetworkProxy, NotificationAttachmentKind, NotificationContent,
-  NotificationContentSettings, NotificationGap, NotificationSuppression, OrgRecoveryStart, Presence,
-  PushDiagnosticsInfo, PushNotification, PushNotificationKind, PushService, ReactionItem, SearchHitItem,
-  SegmentPrefetchMode, SegmentPrefetchResult, StoreProblem, TestPushOutcome, TestPushResult,
+  NotificationContentSettings, NotificationGap, NotificationSuppression, NotifiedConversation,
+  NotifiedMessage, OrgRecoveryStart, Presence, PushDiagnosticsInfo, PushNotification, PushNotificationKind,
+  PushService, ReactionItem, SearchHitItem, SegmentPrefetchMode, SegmentPrefetchResult, StoreProblem,
+  TestPushOutcome, TestPushResult,
 };
 
 pub use video::{CameraFrame, VideoFrameRgba};
@@ -552,6 +553,18 @@ impl TeamCraft {
       .await
   }
 
+  /// What the newest notification showed of a conversation (its name, the notified message),
+  /// while this device hasn't caught it up yet: the conversation screen shows it at once instead of
+  /// an empty screen without a name (issue #1065). `None` once the store has it all.
+  pub async fn notified_conversation(
+    &self,
+    conversation_id: String,
+  ) -> Result<Option<NotifiedConversation>, TeamCraftError> {
+    self
+      .call(move |engine| Box::pin(async move { engine.notified_conversation(&conversation_id) }))
+      .await
+  }
+
   /// What this device saw of pushes (notification diagnostics).
   pub async fn push_diagnostics(&self) -> Result<PushDiagnosticsInfo, TeamCraftError> {
     self
@@ -985,6 +998,14 @@ pub fn set_network_proxy(maybe_proxy: Option<NetworkProxy>) {
 #[uniffi::export]
 pub fn set_trusted_certificates(der_certificates: Vec<Vec<u8>>) {
   teamcraft_core::api::set_platform_roots(der_certificates);
+}
+
+/// The app's own "Deleted user" in the user's language (`user_deleted_name`): every name the core
+/// puts together shows it for a deleted account, DM titles, members and notifications included
+/// (issue #1066). Call at start, in the notification extension too, and when the language changes.
+#[uniffi::export]
+pub fn set_deleted_user_name(name: String) {
+  teamcraft_core::people_names::set_deleted_user_name(name);
 }
 
 impl TeamCraft {

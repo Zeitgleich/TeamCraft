@@ -4,12 +4,13 @@ use teamcraft_proto::{CalDavSettings, SettingSource, UpdateCalendarSettingsReque
 use crate::admin::SettingsTestKind;
 use crate::components::admin_console::SectionHeader;
 use crate::components::admin_fields::{
-  CheckField, FieldErrors, SourceBadge, TextField, Validated, bind, bind_bool, is_web_url,
+  CheckField, FieldErrors, SourceBadge, TextField, Validated, accept_or_refuse, bind, bind_bool, is_web_url,
 };
 use crate::components::admin_mail::secret_update;
 use crate::i18n::use_i18n;
 use crate::state::use_app_state;
 
+const FORM_ID: &str = "admin-calendar-form";
 const MAX_TEXT_CHARS: usize = 500;
 /// The placeholder of the free/busy URL template that stands for a person's address.
 const EMAIL_PLACEHOLDER: &str = "{email}";
@@ -89,16 +90,11 @@ pub fn CalendarSection() -> impl IntoView {
 
   let save = move |ev: web_sys::SubmitEvent| {
     ev.prevent_default();
-    show_errors.set(true);
-    let request = draft.with_untracked(|draft| {
-      draft
-        .errors()
-        .is_empty()
-        .then(|| draft.to_request(can_store_secrets.get_untracked()))
-    });
-    if let Some(request) = request {
-      state.write(|backend| backend.save_calendar_settings(request));
+    if !accept_or_refuse(draft, show_errors, FORM_ID) {
+      return;
     }
+    let request = draft.with_untracked(|draft| draft.to_request(can_store_secrets.get_untracked()));
+    state.write(|backend| backend.save_calendar_settings(request));
   };
 
   view! {
@@ -115,7 +111,7 @@ pub fn CalendarSection() -> impl IntoView {
         ().into_any()
       }
     }}
-    <form class="policy-form" on:submit=save hidden=move || !is_available.get()>
+    <form id=FORM_ID class="policy-form" on:submit=save hidden=move || !is_available.get()>
       <fieldset class="policy-group">
         <legend>{move || i18n.t("admin-calendar-server")}</legend>
         <p class="settings-source small">

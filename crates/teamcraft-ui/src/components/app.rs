@@ -73,6 +73,7 @@ pub fn App() -> impl IntoView {
   apply_zoom(settings);
   apply_text_size(settings);
   apply_language_attribute();
+  apply_deleted_user_name(i18n);
   crate::viewport::sync_theme_color(move || settings.theme.track());
   crate::brand::provide_brand(settings);
   provide_window_chrome();
@@ -788,6 +789,15 @@ fn apply_language_attribute() {
   });
 }
 
+/// The core in the page (web) names deleted accounts in the UI's language: DM titles, members,
+/// notifications (issue #1066). The desktop shell's core gets it with the tray texts.
+fn apply_deleted_user_name(i18n: crate::i18n::I18n) {
+  #[cfg(target_arch = "wasm32")]
+  Effect::new(move |_| teamcraft_core::people_names::set_deleted_user_name(i18n.t("user-deleted-name")));
+  #[cfg(not(target_arch = "wasm32"))]
+  let _ = i18n;
+}
+
 /// First space and conversation to show, if the backend has any.
 fn initial_location(backend: &dyn Backend) -> Option<(SpaceId, ConversationId)> {
   let space = backend.spaces().into_iter().next()?;
@@ -805,7 +815,10 @@ fn sync_tray_labels(i18n: crate::i18n::I18n) {
     let name = brand.0.with(|brand| brand.display_name.clone());
     let (show, quit) = (i18n.t("tray-show"), i18n.t("tray-quit"));
     let menu = menu_bar_labels(i18n, &name);
-    leptos::task::spawn_local(async move { tauri::tray_update(None, &name, &show, &quit, Some(menu)).await });
+    let deleted = i18n.t("user-deleted-name");
+    leptos::task::spawn_local(async move {
+      tauri::tray_update(None, &name, &show, &quit, Some(menu), Some(&deleted)).await
+    });
   });
 }
 
@@ -908,7 +921,7 @@ fn sync_tray(state: AppState, i18n: crate::i18n::I18n) {
       };
       let (show, quit) = (i18n.t("tray-show"), i18n.t("tray-quit"));
       leptos::task::spawn_local(async move {
-        tauri::tray_update(Some(unread), &tooltip, &show, &quit, None).await
+        tauri::tray_update(Some(unread), &tooltip, &show, &quit, None, None).await
       });
     }
     current

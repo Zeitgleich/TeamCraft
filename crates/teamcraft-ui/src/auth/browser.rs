@@ -15,7 +15,8 @@ use oauth2::{
 use secrecy::{ExposeSecret, SecretString};
 use serde::{Deserialize, Serialize};
 use teamcraft_client_api::oidc_login::{
-  LoginRequest, OidcClient, OidcTokenResponse, authorization_url, oidc_client,
+  AuthorizationErrorKind, LoginRequest, OidcClient, OidcTokenResponse, authorization_url, oidc_client,
+  shown_error_code,
 };
 use teamcraft_client_api::server_entry::{HttpPolicy, SERVER_INFO_PATH, check_discovery};
 use teamcraft_proto::{SERVER_INFO_PRODUCT, ServerInfoResponse};
@@ -95,6 +96,14 @@ struct Pending {
   /// hold nothing but public IDs (route.rs).
   #[serde(default, rename = "return_path")]
   maybe_return_path: Option<String>,
+  /// The request's login page and language, so an automatic retry asks the same (issue #1063).
+  #[serde(default)]
+  is_login_page_shown: bool,
+  #[serde(default, rename = "locale")]
+  maybe_locale: Option<String>,
+  /// Automatic retries of this sign-in so far.
+  #[serde(default)]
+  retries: u32,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -123,10 +132,8 @@ impl BrowserAuth {
     session_remove(LOCAL_SESSION_KEY);
     let params = location_params();
     if let Some(error) = params.get("error") {
-      let description = params.get("error_description").unwrap_or(error);
       clean_location_to(None);
-      session_remove(PENDING_KEY);
-      return Err(AuthError::Denied(description.clone()));
+      return self.refused(error, params.get("state")).await;
     }
     if let (Some(code), Some(state)) = (params.get("code"), params.get("state")) {
       let outcome = self.finish_login(code, state).await;
@@ -158,15 +165,40 @@ impl BrowserAuth {
     Ok(false)
   }
 
+  /// The identity provider refused the sign-in in its redirect (issue #1063). `already_logged_in`
+  /// of this tab's own request goes to the provider once more, with a fresh `state` and verifier
+  /// and the same login page; everything else ends on the sign-in screen with the code.
+  async fn refused(&self, error: &str, maybe_state: Option<&String>) -> Result<bool, AuthError> {
+    let code = shown_error_code(error);
+    let kind = AuthorizationErrorKind::from_code(&code);
+    let maybe_pending = session_get(PENDING_KEY).and_then(|json| serde_json::from_str::<Pending>(&json).ok());
+    session_remove(PENDING_KEY);
+    // Only a redirect for the request this tab sent is retried, never a link someone crafted.
+    if let Some(pending) = maybe_pending.filter(|pending| Some(&pending.state) == maybe_state)
+      && kind.is_retried(pending.retries)
+    {
+      tracing::warn!(error_code = %code, ?kind, "the identity provider refused the sign-in, trying again");
+      let sign_in = self.sign_in().await?;
+      let maybe_hint = stored_login_hint(&sign_in);
+      let request = LoginRequest {
+        is_login_page_shown: pending.is_login_page_shown,
+        maybe_login_hint: maybe_hint.as_deref(),
+        maybe_locale: pending.maybe_locale.as_deref(),
+      };
+      self
+        .go_to_provider(&sign_in, &request, pending.maybe_return_path, pending.retries + 1)
+        .await?;
+      std::future::pending::<()>().await;
+    }
+    tracing::warn!(error_code = %code, ?kind, "the identity provider refused the sign-in");
+    Err(AuthError::AuthorizationRefused(code))
+  }
+
   /// Goes to the identity provider. `maybe_look` is set for a sign-in the user started: it then
   /// asks for the login page with the last account and the app's language (issue #448); a silent
   /// renewal after a reload (`None`) sends none of that.
   async fn begin_login(&self, maybe_look: Option<&SignInLook>) -> Result<(), AuthError> {
     let sign_in = self.sign_in().await?;
-    let discovery = self.discovery().await?;
-    let redirect_uri = redirect_uri()?;
-    let client = self.client(&discovery, &redirect_uri, &sign_in)?;
-    let (challenge, verifier) = PkceCodeChallenge::new_random_sha256();
     let maybe_hint = stored_login_hint(&sign_in);
     let page_language = document_language();
     let request = login_request(
@@ -175,12 +207,33 @@ impl BrowserAuth {
       maybe_hint.as_deref(),
       page_language.as_deref(),
     );
-    let (url, state) = authorization_url(&client, &sign_in.scopes, challenge, &request);
+    self
+      .go_to_provider(&sign_in, &request, current_route_path(), 0)
+      .await
+  }
+
+  /// Navigates to the provider's authorization endpoint with a fresh `state` and PKCE verifier,
+  /// which wait in `sessionStorage` for the redirect back.
+  async fn go_to_provider(
+    &self,
+    sign_in: &SignIn,
+    request: &LoginRequest<'_>,
+    maybe_return_path: Option<String>,
+    retries: u32,
+  ) -> Result<(), AuthError> {
+    let discovery = self.discovery().await?;
+    let redirect_uri = redirect_uri()?;
+    let client = self.client(&discovery, &redirect_uri, sign_in)?;
+    let (challenge, verifier) = PkceCodeChallenge::new_random_sha256();
+    let (url, state) = authorization_url(&client, &sign_in.scopes, challenge, request);
     let pending = Pending {
       state: state.secret().clone(),
       verifier: verifier.secret().clone(),
       redirect_uri,
-      maybe_return_path: current_route_path(),
+      maybe_return_path,
+      is_login_page_shown: request.is_login_page_shown,
+      maybe_locale: request.maybe_locale.map(str::to_owned),
+      retries,
     };
     let pending =
       serde_json::to_string(&pending).map_err(|error| AuthError::InvalidResponse(error.to_string()))?;

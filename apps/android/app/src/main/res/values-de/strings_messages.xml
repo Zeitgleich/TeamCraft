@@ -6,6 +6,8 @@
   <string name="reply_in_thread">Im Thread antworten</string>
   <string name="pending">Wird gesendet …</string>
   <string name="edited">(bearbeitet)</string>
+  <string name="conversation_loading">Unterhaltung wird geladen …</string>
+  <string name="messages_loading">Nachrichten werden geladen …</string>
   <string name="read_only_channel">Du kannst in diesem Kanal nicht schreiben.</string>
   <plurals name="replies">
     <item quantity="one">%d Antwort</item>

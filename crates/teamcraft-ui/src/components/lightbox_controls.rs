@@ -24,6 +24,7 @@ use crate::components::icons::{Icon, IconName};
 use crate::components::lightbox::{FullMedia, sizes};
 use crate::components::lightbox_motion::StageMotion;
 use crate::components::message_actions::copy_to_clipboard;
+use crate::components::message_row::shown_author;
 use crate::components::sheet::PopoverBackdrop;
 use crate::copy_image::{self, CopiedPicture, CopyRoute};
 use crate::i18n::{I18n, use_i18n};
@@ -554,13 +555,11 @@ fn MoreMenu(
 /// Name, type, size, dimensions, sender and time of the file on screen.
 #[component]
 fn FileDetails(actions: MediaActions, is_open: RwSignal<bool>) -> impl IntoView {
-  let state = use_app_state();
   let i18n = use_i18n();
   let file = move || actions.current_file.get();
   let sender = move || {
     file()
-      .and_then(|file| file.maybe_sender)
-      .and_then(|user| state.read(|backend| backend.user(user)))
+      .and_then(|file| shown_author(file.maybe_sender, file.maybe_imported_author.as_ref()))
       .map(|user| user.display_name)
       .unwrap_or_default()
   };

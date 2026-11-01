@@ -11,14 +11,16 @@ use wasm_bindgen_futures::JsFuture;
 use crate::admin::format_bytes;
 use crate::components::admin_console::SectionHeader;
 use crate::components::admin_fields::{
-  Bound, CheckField, FieldErrors, TextAreaField, TextField, Validated, bind, bind_bool, is_dns_name,
-  is_email_address, is_email_domain, is_web_url, list_text, parse_list,
+  Bound, CheckField, FieldErrors, TextAreaField, TextField, Validated, accept_or_refuse, bind, bind_bool,
+  is_dns_name, is_email_address, is_email_domain, is_web_url, list_text, parse_list,
 };
+use crate::form_errors::error_id;
 use crate::i18n::use_i18n;
 use crate::reactive::SetIfAlive;
 use crate::state::use_app_state;
 
 /// Below this contrast ratio (WCAG AA for normal text) a color pair is flagged.
+const EDITOR_ID: &str = "admin-brand-editor";
 const MIN_CONTRAST: f64 = 4.5;
 const MAX_NAME_CHARS: usize = 100;
 const MAX_TEXT_CHARS: usize = 1000;
@@ -305,18 +307,16 @@ fn BrandEditor(
   let save_id = id.clone();
   let save = move |ev: web_sys::SubmitEvent| {
     ev.prevent_default();
-    show_errors.set(true);
-    let Some((settings, brand_id, is_default)) = draft.with_untracked(|draft| {
-      draft.errors().is_empty().then(|| {
-        (
-          draft.to_settings(),
-          draft.new_id.trim().to_owned(),
-          draft.is_default,
-        )
-      })
-    }) else {
+    if !accept_or_refuse(draft, show_errors, EDITOR_ID) {
       return;
-    };
+    }
+    let (settings, brand_id, is_default) = draft.with_untracked(|draft| {
+      (
+        draft.to_settings(),
+        draft.new_id.trim().to_owned(),
+        draft.is_default,
+      )
+    });
     if is_new {
       let request = CreateBrandRequest {
         id: brand_id,
@@ -353,7 +353,7 @@ fn BrandEditor(
   let colors_assets_id = id.clone();
 
   view! {
-    <form class="brand-editor" on:submit=save>
+    <form id=EDITOR_ID class="brand-editor" on:submit=save>
       <fieldset class="policy-group" prop:disabled=is_read_only>
         <legend>{move || i18n.t(&title)}</legend>
         {is_read_only
@@ -633,12 +633,13 @@ fn ColorColumn(draft: RwSignal<BrandDraft>, show_errors: RwSignal<bool>, is_dark
         .map(|(index, key)| {
           let id = format!("brand-color-{}-{key}", if is_dark { "dark" } else { "light" });
           let label = format!("admin-brands-color-{}", key.replace('_', "-"));
-          let error_id = COLOR_FIELDS[usize::from(is_dark)][index];
+          let field = COLOR_FIELDS[usize::from(is_dark)][index];
+          let message_id = error_id(&id);
           let value = Signal::derive(move || draft.with(|draft| draft.theme_colors(is_dark)[index].1.clone()));
           let error = Signal::derive(move || {
             if show_errors.get() {
               draft.with(|draft| {
-                draft.errors().into_iter().find(|(field, _)| *field == error_id).map(|(_, key)| key)
+                draft.errors().into_iter().find(|(error_field, _)| *error_field == field).map(|(_, key)| key)
               })
             } else {
               None
@@ -655,6 +656,10 @@ fn ColorColumn(draft: RwSignal<BrandDraft>, show_errors: RwSignal<bool>, is_dark
                   translate="no"
                   placeholder="#0b7f78"
                   aria-invalid=move || error.get().map(|_| "true")
+                  aria-describedby={
+                    let message_id = message_id.clone();
+                    move || error.get().map(|_| message_id.clone())
+                  }
                   prop:value=move || value.get()
                   on:input=move |ev| {
                     let text = event_target_value(&ev);
@@ -672,7 +677,7 @@ fn ColorColumn(draft: RwSignal<BrandDraft>, show_errors: RwSignal<bool>, is_dark
                   }
                 />
               </div>
-              {move || error.get().map(|key| view! { <p class="field-error" role="alert">{i18n.t(key)}</p> })}
+              <p class="field-error" id=message_id.clone()>{move || error.get().map(|key| i18n.t(key))}</p>
             </div>
           }
         })
@@ -734,7 +739,8 @@ fn BrandAssets(id: String, response: Memo<Option<AdminBrandsResponse>>, is_read_
       .is_some_and(|response| response.is_image_upload_available)
   });
   let max_bytes = Memo::new(move |_| response.get().map_or(0, |response| response.max_asset_bytes));
-  let maybe_error = RwSignal::new(None::<&'static str>);
+  // The slot (by its label) whose image was refused, and why: shown in that slot's row.
+  let maybe_error = RwSignal::new(None::<(&'static str, &'static str)>);
   view! {
     <fieldset class="policy-group" prop:disabled=is_read_only>
       <legend>{move || i18n.t("admin-brands-images")}</legend>
@@ -769,6 +775,9 @@ fn BrandAssets(id: String, response: Memo<Option<AdminBrandsResponse>>, is_read_
             };
             let upload_id = id.clone();
             let upload_slot = slot.clone();
+            let field_id = format!("brand-asset-{}", slot.as_str());
+            let message_id = error_id(&field_id);
+            let slot_error = move || maybe_error.get().filter(|(slot_label, _)| *slot_label == label).map(|(_, key)| key);
             let delete_id = id.clone();
             let delete_slot = slot.clone();
             view! {
@@ -788,9 +797,15 @@ fn BrandAssets(id: String, response: Memo<Option<AdminBrandsResponse>>, is_read_
                   </span>
                 </span>
                 <input
+                  id=field_id
                   type="file"
                   accept=IMAGE_TYPES.join(",")
                   aria-label=move || i18n.t(label)
+                  aria-invalid=move || slot_error().map(|_| "true")
+                  aria-describedby={
+                    let message_id = message_id.clone();
+                    move || slot_error().map(|_| message_id.clone())
+                  }
                   prop:disabled=move || !can_upload.get()
                   on:change=move |ev| {
                     let input = event_target::<web_sys::HtmlInputElement>(&ev);
@@ -799,7 +814,7 @@ fn BrandAssets(id: String, response: Memo<Option<AdminBrandsResponse>>, is_read_
                     };
                     let content_type = file.type_();
                     if let Err(key) = check_asset(&content_type, file.size() as u64, max_bytes.get_untracked()) {
-                      maybe_error.set(Some(key));
+                      maybe_error.set(Some((label, key)));
                       input.set_value("");
                       return;
                     }
@@ -811,7 +826,7 @@ fn BrandAssets(id: String, response: Memo<Option<AdminBrandsResponse>>, is_read_
                           let bytes = js_sys::Uint8Array::new(&buffer).to_vec();
                           state.try_write(|backend| backend.upload_brand_asset(id, slot, bytes, content_type));
                         },
-                        Err(_) => maybe_error.set_if_alive(Some("admin-error-image-unreadable")),
+                        Err(_) => maybe_error.set_if_alive(Some((label, "admin-error-image-unreadable"))),
                       }
                       // async-ok: a DOM input element, not a signal.
                       input.set_value("");
@@ -829,12 +844,12 @@ fn BrandAssets(id: String, response: Memo<Option<AdminBrandsResponse>>, is_read_
                 >
                   {move || i18n.t("admin-brands-image-delete")}
                 </button>
+                <p class="field-error brand-asset-error" id=message_id>{move || slot_error().map(|key| i18n.t(key))}</p>
               </li>
             }
           })
           .collect_view()}
       </ul>
-      {move || maybe_error.get().map(|key| view! { <p class="field-error" role="alert">{i18n.t(key)}</p> })}
     </fieldset>
   }
 }

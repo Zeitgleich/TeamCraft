@@ -51,8 +51,12 @@
 .lightbox-stage.is-video { cursor: default; touch-action: auto; }
 /* No box behind the picture (#727): a transparent PNG or SVG floats on the backdrop. Its shadow is a
    `drop-shadow`, which follows the picture's alpha, not a `box-shadow` around its rectangle. */
-.lightbox-image { max-width: 100%; max-height: 100%; background: none; transform-origin: center; will-change: transform; -webkit-user-drag: none; filter: drop-shadow(0 8px 28px rgba(0, 0, 0, .4)); transition: transform var(--dur-fast) var(--ease-out); }
+.lightbox-image { max-width: 100%; max-height: 100%; background: none; transform-origin: center; -webkit-user-drag: none; filter: drop-shadow(0 8px 28px rgba(0, 0, 0, .4)); transition: transform var(--dur-fast) var(--ease-out); }
 .lightbox-stage.zoomed .lightbox-image, .lightbox-stage.is-live .lightbox-image { transition: none; }
+/* A layer only while a gesture moves the picture: a promoted layer is rasterised once, at the size
+   it had then, and scaled as a bitmap, so a permanent one shows a zoomed picture as enlarged pixels
+   (#1089). Once the gesture settles the picture is painted again at its zoom, sharp, in place. */
+.lightbox-stage.is-live .lightbox-image { will-change: transform; }
 /* The previous, current and next picture side by side; the track moves as one while paging, and
    carries the picture into and out of its tile. Its transform and opacity are written per frame. */
 .lightbox-track { position: absolute; inset: 0; padding: inherit; transform-origin: center; will-change: transform; }
@@ -201,7 +205,7 @@
   .lightbox-main [data-tip]::after { display: none; }
 }
 @media (prefers-reduced-motion: reduce) {
-  .lightbox-image { will-change: auto; transition: none; }
+  .lightbox-image { transition: none; }
   .lightbox-nav { transition: none; }
 }
 .composer-error { color: var(--danger); margin: .25rem 0; }

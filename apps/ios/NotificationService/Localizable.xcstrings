@@ -192,6 +192,22 @@
           }
         }
       }
+    },
+    "user_deleted_name": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Deleted user"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Gelöschter Nutzer"
+          }
+        }
+      }
     }
   },
   "version": "1.0"

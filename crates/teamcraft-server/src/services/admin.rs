@@ -29,6 +29,8 @@ const REMOVAL_SWEEP_BATCH: i64 = 50;
 /// The identity provider sync deactivating this many users within an hour looks like an outage or
 /// a misconfiguration, not people leaving: the automatic removal leaves them to an admin.
 const MASS_OIDC_DEACTIVATION: i64 = 10;
+/// Deleted accounts whose leftover DMs one housekeeping run deletes; the rest follow in the next.
+const LEFTOVER_SWEEP_BATCH: i64 = 20;
 
 pub async fn list_spaces(
   state: &AppState,
@@ -453,6 +455,21 @@ pub async fn prune_deleted_conversations(state: &AppState, now: OffsetDateTime) 
   let days = state.settings.get().policy.deleted_conversations_kept_days.max(1);
   let cutoff = now - time::Duration::days(i64::from(days));
   Ok(state.database.prune_deleted_conversations(cutoff).await?)
+}
+
+/// Deletes the DMs that deletions of accounts left behind: a deletion before this version found a
+/// DM only by membership, which a removal from all chats had already taken (issue #1066). Run with
+/// the account housekeeping, a few accounts per round; returns how many DMs went.
+pub async fn delete_leftover_direct_conversations(state: &AppState) -> Result<usize, ApiError> {
+  let mut deleted = 0;
+  for user in state
+    .database
+    .deleted_users_with_direct_conversations(LEFTOVER_SWEEP_BATCH)
+    .await?
+  {
+    deleted += delete_direct_conversations(state, user).await?;
+  }
+  Ok(deleted)
 }
 
 /// Deletes the user's 1:1 direct messages, and group DMs that would keep at most one other person,

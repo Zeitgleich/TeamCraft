@@ -1,4 +1,5 @@
 import Foundation
+import OSLog
 import Observation
 import SwiftUI
 import UIKit
@@ -9,6 +10,9 @@ enum AppFailure: Equatable {
   case network, signedOut, wrongPassphrase, storage, signInFailed, recoveryPending, callMoveRefused, generic
   case backupOutOfMemory, backupTooNew, backupDamaged
   case linkCodeInvalid, linkCodeForNewDevice, linkCodeForSignedInDevice, linkCodeExpired
+  /// The identity provider refused the sign-in (issue #1063); `code` is its cleaned `error`.
+  case providerDenied, providerAlreadySignedIn
+  case providerMisconfigured(code: String), providerRefused(code: String)
 
   init(_ failure: CoreFailure) {
     switch failure {
@@ -46,6 +50,27 @@ enum AppFailure: Equatable {
     case .linkCodeForNewDevice: return "link_code_for_new_device"
     case .linkCodeForSignedInDevice: return "link_code_for_signed_in_device"
     case .linkCodeExpired: return "link_code_expired"
+    case .providerDenied: return "sign_in_provider_denied"
+    case .providerAlreadySignedIn: return "sign_in_provider_already_signed_in"
+    case .providerMisconfigured(let code): return "sign_in_provider_misconfigured \(code)"
+    case .providerRefused(let code): return "sign_in_provider_refused \(code)"
+    }
+  }
+
+  /// What the sign-in screen says after a failed browser sign-in; `nil` when the user cancelled.
+  /// The one automatic retry of `already_logged_in` happened before (`WebLogin`).
+  static func signIn(_ error: Error) -> AppFailure? {
+    switch error {
+    case OidcError.cancelled: return nil
+    case OidcError.network: return .network
+    case OidcError.providerRefused(let code):
+      switch authorizationErrorKind(code: code) {
+      case .alreadySignedIn: return .providerAlreadySignedIn
+      case .accessDenied: return .providerDenied
+      case .misconfigured: return .providerMisconfigured(code: code)
+      case .other: return .providerRefused(code: code)
+      }
+    default: return .signInFailed
     }
   }
 }
@@ -95,6 +120,7 @@ enum AppPhase {
 @Observable
 final class AppModel {
   static let shared = AppModel()
+  private static let signInLog = Logger(subsystem: "de.zeitgleich.teamcraft", category: "sign-in")
 
   private(set) var phase: AppPhase = .starting
   private(set) var isBusy = false
@@ -257,20 +283,30 @@ final class AppModel {
       return
     }
     await busy {
+      let session: OidcSession
       do {
-        let session = try await login.login(
+        session = try await login.login(
           server: server, maybeLoginPageAlwaysShown: maybeSignInPage?.maybeLoginPageAlwaysShown)
-        try vault.save(session)
-        rememberLoginHint(session.loginHint, for: server)
-        container.activeAccount = session.subject
-        container.displayName = session.displayName
-        await refreshAccountState()
-      } catch OidcError.cancelled {
-        phase = .signedOut(nil)
       } catch {
-        AppLog.failure("sign-in", error)
-        phase = .signedOut(.signInFailed)
+        let maybeFailure = AppFailure.signIn(error)
+        if maybeFailure != nil {
+          // The error's case and the provider's cleaned code; it carries no token or redirect code.
+          AppLog.failure("sign-in", error, logger: Self.signInLog)
+        }
+        phase = .signedOut(maybeFailure)
+        return
       }
+      do {
+        try vault.save(session)
+      } catch {
+        Self.signInLog.warning("the session could not be stored")
+        phase = .signedOut(.storage)
+        return
+      }
+      rememberLoginHint(session.loginHint, for: server)
+      container.activeAccount = session.subject
+      container.displayName = session.displayName
+      await refreshAccountState()
     }
   }
 
@@ -539,6 +575,12 @@ final class AppModel {
     (try? await core().conversations()) ?? []
   }
 
+  /// What the newest notification showed of a conversation, while the store hasn't caught it up
+  /// yet (issue #1065): its name and the notified message.
+  func notifiedConversation(_ conversationId: String) async -> NotifiedConversation? {
+    (try? await core().notifiedConversation(conversationId: conversationId)) ?? nil
+  }
+
   func messages(conversationId: String, limit: UInt32 = 200) async -> [MessageItem] {
     ((try? await core().messages(conversationId: conversationId, limit: limit)) ?? []).map {
       $0.namingDeletedAuthor()
@@ -781,7 +823,9 @@ final class AppModel {
   /// A notification's tap or action (reply, mark as read, answer or decline a call).
   /// The conversation ID comes from the notification, which a forged push could fill: it is only
   /// acted on if the local store knows that conversation (the extension sets it from the decrypted
-  /// payload, and drops it when it decrypted nothing).
+  /// payload, and drops it when it decrypted nothing). A tap also opens a conversation the store
+  /// doesn't have yet when the core kept what a notification of it showed (issue #1065): the
+  /// screen shows that until the sync brings the conversation.
   /// Reply, mark-as-read and answer also need the extension's tag over the ID
   /// (`NotificationAuthenticator`): the server can show an alert without the extension, naming a
   /// conversation the user is in.
@@ -789,7 +833,12 @@ final class AppModel {
     notificationAction identifier: String, conversationId: String, tag: String?, replyText: String?,
     maybeThreadId: String? = nil, notificationId: String? = nil
   ) async {
-    guard let conversation = await conversations().first(where: { $0.id == conversationId }) else { return }
+    guard let conversation = await conversations().first(where: { $0.id == conversationId }) else {
+      if identifier == UNNotificationDefaultActionIdentifier, await notifiedConversation(conversationId) != nil {
+        openConversationId = conversationId
+      }
+      return
+    }
     let isAuthentic = NotificationAuthenticator().isValid(tag: tag, for: conversationId)
     switch identifier {
     case NotificationCategories.replyAction:

@@ -265,11 +265,28 @@ data class FileInfo(
   /** The sender's preview of an image (PNG or JPEG; decoders read the format from the bytes). */
   @SerialName("maybe_thumbnail_png") val maybeThumbnail: ImageBytes? = null,
   val transfer: FileTransfer,
-  /** Who sent the message and when (Unix milliseconds), for the image viewer. */
+  /**
+   * Who wrote the message and when (Unix milliseconds), for the image viewer: the original author
+   * and time of an imported message (e2ee.md §4.10).
+   */
   @SerialName("maybe_sender") val maybeSender: String? = null,
   @SerialName("maybe_sent_at") val maybeSentAt: Long? = null,
+  /** Who wrote an imported message when that is nobody with an account here. */
+  @SerialName("imported_author") val maybeImportedAuthor: ImportedAuthor? = null,
 ) {
   val isImage: Boolean get() = mediaType.startsWith("image/")
+}
+
+/** Who wrote an imported message: `person` (the file's sender), `deleted` or `named` (a bot). */
+@Serializable
+data class ImportedAuthor(val kind: String, val name: String? = null) {
+  /** The name shown instead of an account: a bot's old name, or [deletedName]; null for a person. */
+  fun standInName(deletedName: String): String? =
+    when (kind) {
+      "named" -> name
+      "deleted" -> deletedName
+      else -> null
+    }
 }
 
 @Serializable

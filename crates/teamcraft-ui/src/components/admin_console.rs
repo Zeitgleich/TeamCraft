@@ -94,7 +94,8 @@ pub fn AdminConsole(section: AdminSection) -> impl IntoView {
               Some(key) => i18n.t(key),
               None => i18n.t_with("admin-error", &[("detail", &detail)]),
             };
-            view! { <p class="auth-alert" role="alert">{text}</p> }
+            // Sticky: a save refused far down the page still shows (forms.md, #1054).
+            view! { <p class="auth-alert admin-error" role="alert">{text}</p> }
           })
         }}
         {move || match section {

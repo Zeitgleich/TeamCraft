@@ -9,7 +9,9 @@
 use serde::{Deserialize, Serialize};
 use teamcraft_proto::{CategoryId, HistoryPolicy, IdempotencyKey};
 
-use crate::model::{ConversationId, Message, MessageId, SpaceId, ThreadId, TimestampMs, UserId};
+use crate::model::{
+  ConversationId, ImportedAuthorView, Message, MessageId, SpaceId, ThreadId, TimestampMs, UserId,
+};
 
 /// How strongly a message asks for attention (Teams-style "important" / "urgent").
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -199,12 +201,18 @@ pub struct FileInfo {
   #[serde(default)]
   pub maybe_thumbnail_png: Option<Vec<u8>>,
   pub transfer: FileTransfer,
-  /// Who sent the message the file belongs to (shown in the image viewer).
+  /// Who wrote the message the file belongs to (shown in the image viewer): its `Message::author`,
+  /// the original author of an imported message (e2ee.md §4.10). `None` for an imported author
+  /// without an account, see `maybe_imported_author`.
   #[serde(default)]
   pub maybe_sender: Option<UserId>,
-  /// When that message was sent.
+  /// When that message was written: its `Message::sent_at`, the original time when imported.
   #[serde(default)]
   pub maybe_sent_at: Option<TimestampMs>,
+  /// Who wrote the message when it is imported: shown instead of `maybe_sender` when that is
+  /// nobody with an account (a deleted account, a bot of the old system).
+  #[serde(rename = "imported_author", default, skip_serializing_if = "Option::is_none")]
+  pub maybe_imported_author: Option<ImportedAuthorView>,
   /// Width and height of a picture, from the sender; reserves its space before anything loads.
   #[serde(default)]
   pub maybe_dimensions: Option<PixelSize>,
@@ -714,6 +722,25 @@ mod tests {
       .iter()
       .map(|file| file.message.to_string().parse().unwrap())
       .collect()
+  }
+
+  #[test]
+  fn the_imported_author_of_a_file_is_on_the_wire_only_when_imported() {
+    let mut file = media_file(1, "image/png");
+    assert!(file.maybe_imported_author.is_none());
+    assert!(
+      serde_json::to_value(&file)
+        .unwrap()
+        .get("imported_author")
+        .is_none()
+    );
+    file.maybe_imported_author = Some(ImportedAuthorView::Named {
+      name: "Monitor".into(),
+    });
+    assert_eq!(
+      serde_json::to_value(&file).unwrap()["imported_author"],
+      serde_json::json!({ "kind": "named", "name": "Monitor" })
+    );
   }
 
   #[test]

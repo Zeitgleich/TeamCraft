@@ -8,6 +8,7 @@ use teamcraft_proto::WorkspacePolicy;
 use crate::admin::{PolicyBlocker, RosterEntry};
 use crate::components::admin_owners::RosterConfirm;
 use crate::components::icons::{Icon, IconName};
+use crate::form_errors::error_id;
 use crate::i18n::use_i18n;
 use crate::state::use_app_state;
 
@@ -219,6 +220,9 @@ pub fn SelectRow(
   #[prop(into)] selected: Signal<String>,
   #[prop(into)] on_select: Callback<String>,
   #[prop(into, optional)] disabled: Signal<bool>,
+  /// What is wrong with the choice, shown below the row (forms.md).
+  #[prop(into, optional)]
+  error: Signal<Option<String>>,
 ) -> impl IntoView {
   view! {
     <div class="field inline">
@@ -226,6 +230,8 @@ pub fn SelectRow(
       <select
         id=id
         class="input"
+        aria-invalid=move || error.with(Option::is_some).then_some("true")
+        aria-describedby=move || error.with(Option::is_some).then(|| error_id(id))
         prop:disabled=move || disabled.get()
         prop:value=move || selected.get()
         on:change=move |ev| on_select.run(event_target_value(&ev))
@@ -243,5 +249,6 @@ pub fn SelectRow(
         }}
       </select>
     </div>
+    <p class="field-error" id=error_id(id)>{move || error.get()}</p>
   }
 }

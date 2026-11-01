@@ -10,6 +10,7 @@ use std::collections::{HashMap, HashSet};
 use teamcraft_client_api::activity::{ActivityFeed, ActivityItem, ActivityKind};
 use teamcraft_client_api::model::{ConversationId, Id, MessageId, ThreadId, UserId};
 
+use crate::imported::Authorship;
 use crate::read_state;
 use crate::store::{LocalStore, MessageContent, StoredMessage};
 use crate::ui_backend::{CoreChatBackend, CoreCommand, ui_message_id};
@@ -47,6 +48,7 @@ impl<S: LocalStore> CoreChatBackend<S> {
       .map(|response| (response.id, response))
       .collect();
     let ids = self.conversation_ids();
+    let maybe_importer = self.importer();
     let mut cache = self.activity.borrow_mut();
     cache.retain(|conversation, _| ids.contains(conversation));
     let mut items = Vec::new();
@@ -76,7 +78,7 @@ impl<S: LocalStore> CoreChatBackend<S> {
       }
       let mut fresh = Vec::new();
       self.with_all_messages(conversation, &mut |messages| {
-        fresh = conversation_items(self.me_id(), &reads, conversation, messages);
+        fresh = conversation_items(self.me_id(), maybe_importer, &reads, conversation, messages);
       });
       if let Some(revision) = maybe_revision {
         cache.insert(
@@ -142,11 +144,18 @@ impl<S: LocalStore> CoreChatBackend<S> {
 /// The feed for `me` over the stored messages and read state of the given conversations.
 pub fn build_feed(
   me: UserId,
+  maybe_importer: Option<UserId>,
   conversations: impl IntoIterator<Item = (ConversationId, ConversationReads, Vec<StoredMessage>)>,
 ) -> ActivityFeed {
   let mut items = Vec::new();
   for (conversation, reads, messages) in conversations {
-    items.extend(conversation_items(me, &reads, conversation, &messages));
+    items.extend(conversation_items(
+      me,
+      maybe_importer,
+      &reads,
+      conversation,
+      &messages,
+    ));
   }
   feed_of(items)
 }
@@ -160,6 +169,7 @@ fn feed_of(mut items: Vec<ActivityItem>) -> ActivityFeed {
 
 fn conversation_items(
   me: UserId,
+  maybe_importer: Option<UserId>,
   reads: &ConversationReads,
   conversation: ConversationId,
   messages: &[StoredMessage],
@@ -177,14 +187,28 @@ fn conversation_items(
   for stored in messages.iter().filter(|stored| stored.sender_user_id != me) {
     match &stored.content {
       MessageContent::Text { body, mentions, .. } if mentions.contains(&me) => {
-        items.push(item(stored, conversation, &read, ActivityKind::Mention, body));
+        items.push(item(
+          stored,
+          maybe_importer,
+          conversation,
+          &read,
+          ActivityKind::Mention,
+          body,
+        ));
       },
       MessageContent::Text { body, .. }
         if stored
           .maybe_thread_id
           .is_some_and(|thread| my_threads.contains(&thread)) =>
       {
-        items.push(item(stored, conversation, &read, ActivityKind::ThreadReply, body));
+        items.push(item(
+          stored,
+          maybe_importer,
+          conversation,
+          &read,
+          ActivityKind::ThreadReply,
+          body,
+        ));
       },
       MessageContent::Reaction { target, emoji, .. } => {
         let key = (*target, stored.sender_user_id, emoji.clone());
@@ -232,6 +256,7 @@ fn conversation_items(
 
 fn item(
   stored: &StoredMessage,
+  maybe_importer: Option<UserId>,
   conversation: ConversationId,
   read: &ReadCheck,
   kind: ActivityKind,
@@ -242,14 +267,16 @@ fn item(
     ActivityKind::Reaction { .. } => "reaction",
     ActivityKind::ThreadReply => "reply",
   };
+  // Who wrote it and when, as the list shows it: the original author of an imported message.
+  let authorship = Authorship::of(stored, maybe_importer);
   ActivityItem {
     id: format!("{prefix}:{}", stored.client_message_id.to_hex()),
     kind,
     conversation,
     message: ui_message_id(stored),
     maybe_thread: stored.maybe_thread_id,
-    actor: stored.sender_user_id,
-    at: stored.sent_at_ms,
+    actor: authorship.author,
+    at: authorship.sent_at_ms,
     excerpt: shorten(body),
     maybe_read_through: stored.maybe_server_id,
     is_unread: !read.is_read(stored, stored.maybe_thread_id),
@@ -607,6 +634,30 @@ mod tests {
     }
   }
 
+  #[test]
+  fn an_imported_mention_names_its_original_author_and_time() {
+    const IMPORTER: u64 = 9;
+    let mut stored = text(1, IMPORTER, 100, "hi @me", &[ME], None);
+    if let MessageContent::Text { meta, .. } = &mut stored.content {
+      meta.maybe_imported = Some(Box::new(crate::imported::ImportedOrigin {
+        source: crate::imported::ImportSource::Synology,
+        source_id: "1".into(),
+        author: crate::imported::ImportedAuthor::User { user_id: user(ANNA) },
+        sent_at_ms: 1_600_000_000_000,
+        maybe_edited_at_ms: None,
+        reactions: Vec::new(),
+        missing_files: Vec::new(),
+      }));
+    }
+    let feed = build_feed(
+      user(ME),
+      Some(user(IMPORTER)),
+      [(id_from_raw(50), ConversationReads::default(), vec![stored])],
+    );
+    assert_eq!(feed.items[0].actor, user(ANNA));
+    assert_eq!(feed.items[0].at, 1_600_000_000_000);
+  }
+
   /// The feed with the conversation read through message `read_through` (0: nothing read).
   fn feed(read_through: u64, messages: Vec<StoredMessage>) -> ActivityFeed {
     let reads = ConversationReads {
@@ -617,7 +668,7 @@ mod tests {
   }
 
   fn feed_with(reads: ConversationReads, messages: Vec<StoredMessage>) -> ActivityFeed {
-    build_feed(user(ME), [(id_from_raw(50), reads, messages)])
+    build_feed(user(ME), None, [(id_from_raw(50), reads, messages)])
   }
 
   fn kinds(feed: &ActivityFeed) -> Vec<ActivityKind> {

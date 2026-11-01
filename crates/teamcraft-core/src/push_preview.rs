@@ -17,6 +17,7 @@ use teamcraft_proto::{
 use crate::api::ServerApi;
 use crate::client::decrypt_content;
 use crate::error::CoreError;
+use crate::people_names::shown_name;
 use crate::records;
 use crate::store::{LocalStore, MessageContent, MessageFilter, Table};
 
@@ -123,7 +124,7 @@ pub async fn push_preview<A: ServerApi>(
   let maybe_conversation_name = maybe_conversation.as_ref().and_then(conversation_name);
   let maybe_sender_name = match wake_up.maybe_sender_id {
     Some(sender) => records::get_json::<UserSummary>(store, Table::Users, &sender.to_string())?
-      .map(|user| user.display_name)
+      .map(|user| shown_name(&user))
       .or_else(|| participant_name(maybe_conversation.as_ref(), sender)),
     None => None,
   };
@@ -388,11 +389,7 @@ fn conversation_name(conversation: &ConversationResponse) -> Option<String> {
   if let Some(name) = &conversation.maybe_name {
     return Some(name.clone());
   }
-  let names: Vec<&str> = conversation
-    .participants
-    .iter()
-    .map(|user| user.display_name.as_str())
-    .collect();
+  let names: Vec<String> = conversation.participants.iter().map(shown_name).collect();
   (!names.is_empty()).then(|| names.join(", "))
 }
 
@@ -404,7 +401,7 @@ fn participant_name(
     .participants
     .iter()
     .find(|participant| participant.id == user)
-    .map(|participant| participant.display_name.clone())
+    .map(shown_name)
 }
 
 fn truncate(text: &str) -> String {

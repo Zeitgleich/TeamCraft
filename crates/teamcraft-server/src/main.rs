@@ -610,6 +610,11 @@ fn spawn_account_housekeeping(state: AppState) {
         Ok(closed) => info!(closed, "closed expired admin join requests"),
         Err(error) => warn!(%error, "closing expired admin join requests failed"),
       }
+      match admin::delete_leftover_direct_conversations(&state).await {
+        Ok(0) => {},
+        Ok(deleted) => info!(deleted, "deleted direct messages left with deleted accounts"),
+        Err(error) => warn!(%error, "deleting direct messages of deleted accounts failed"),
+      }
       match admin::prune_deleted_conversations(&state, now).await {
         Ok(0) => {},
         Ok(pruned) => info!(pruned, "forgot old deleted direct messages"),

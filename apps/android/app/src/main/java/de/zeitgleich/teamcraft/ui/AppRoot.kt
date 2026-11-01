@@ -107,6 +107,7 @@ fun AppRoot(
         maybeSsoIcon = maybeSsoIcon,
         serverHost = maybeServer?.address?.host.orEmpty(),
         maybeError = current.maybeError,
+        maybeErrorCode = current.maybeErrorCode,
         isBusy = isBusy,
         onSso = { scope.launch { viewModel.loginIntent()?.let(onLogin) } },
         onLocal = viewModel::signInLocal,

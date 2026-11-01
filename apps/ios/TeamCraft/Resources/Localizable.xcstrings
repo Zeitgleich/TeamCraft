@@ -6009,6 +6009,70 @@
         }
       }
     },
+    "sign_in_provider_denied": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Your account isn't allowed to use TeamCraft. Ask your admin for access, or sign in with another account."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Dein Konto darf TeamCraft nicht nutzen. Bitte deinen Admin um Zugriff oder melde dich mit einem anderen Konto an."
+          }
+        }
+      }
+    },
+    "sign_in_provider_misconfigured %@": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Sign-in is set up wrongly on your organization's side. Tell your admin (error: %@)."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Die Anmeldung deiner Organisation ist falsch eingerichtet. Sag deinem Admin Bescheid (Fehler: %@)."
+          }
+        }
+      }
+    },
+    "sign_in_provider_already_signed_in": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "The sign-in page had already been used. Close other sign-in windows, then sign in again."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Die Anmeldeseite war schon benutzt. Schließe andere Anmeldefenster und melde dich erneut an."
+          }
+        }
+      }
+    },
+    "sign_in_provider_refused %@": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Your organization's sign-in refused (error: %@). Try again, or tell your admin."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Die Anmeldung deiner Organisation hat abgelehnt (Fehler: %@). Versuche es erneut oder sag deinem Admin Bescheid."
+          }
+        }
+      }
+    },
     "sign_in_hint": {
       "localizations": {
         "en": {
@@ -9245,6 +9309,38 @@
           "stringUnit": {
             "state": "translated",
             "value": "Richtest du ein neues Handy ein? Wähle dort „Meine anderen Geräte fragen“ oder lass es den Code scannen, den ein Computer unter „Neues Gerät verknüpfen“ zeigt."
+          }
+        }
+      }
+    },
+    "conversation_loading": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Loading the conversation…"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Unterhaltung wird geladen …"
+          }
+        }
+      }
+    },
+    "messages_loading": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Loading messages…"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Nachrichten werden geladen …"
           }
         }
       }

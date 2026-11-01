@@ -529,9 +529,10 @@ pub fn ImageCropDialog(
             <div class="crop-previews" role="group" aria-label=move || i18n.t("crop-preview")>
               {previews}
             </div>
-            {move || message().map(|text| view! { <p class="field-error" role="alert">{text}</p> })}
           </div>
           <footer class="modal-foot">
+            // Next to "Apply", where it stays in view however far the body scrolled (forms.md).
+            {move || message().map(|text| view! { <p class="field-error crop-error" role="alert">{text}</p> })}
             <span class="grow"></span>
             <button type="button" class="btn" prop:disabled=busy on:click=move |_| cancel()>
               {move || i18n.t("cancel")}

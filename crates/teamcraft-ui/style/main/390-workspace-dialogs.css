@@ -67,3 +67,7 @@
 @media (prefers-reduced-motion: reduce) { .switch-row input[role="switch"]::after { transition: none; } }
 .switch-text { display: flex; flex-direction: column; gap: 2px; }
 
+
+/* New user group: each field keeps its message directly below it (forms.md). */
+.group-create .inline-form { align-items: flex-start; }
+.group-create-field { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 4px; }

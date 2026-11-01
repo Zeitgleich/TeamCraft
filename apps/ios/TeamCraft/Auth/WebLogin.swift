@@ -1,5 +1,6 @@
 import AuthenticationServices
 import Foundation
+import OSLog
 import UIKit
 
 /// The browser half of the OIDC login: authorization code with PKCE in an
@@ -9,8 +10,15 @@ import UIKit
 /// instead of silently reusing a browser session, so the user sees which account they sign in
 /// with and can switch. Otherwise the browser's single sign-on works. The last account is
 /// prefilled (`login_hint`).
+///
+/// The provider's `already_logged_in` (the browser re-sent a login that had already finished) gets
+/// one new authorization request with a fresh state and PKCE verifier and the same `prompt`, so
+/// the login page shows again (issue #1063). A second one is the user's to see.
 @MainActor
 final class WebLogin: NSObject, ASWebAuthenticationPresentationContextProviding {
+  static let maxRetries = 1
+  private static let log = Logger(subsystem: "de.zeitgleich.teamcraft", category: "sign-in")
+
   private let environment: AppEnvironment
   private var maybeSession: ASWebAuthenticationSession?
 
@@ -23,16 +31,30 @@ final class WebLogin: NSObject, ASWebAuthenticationPresentationContextProviding 
   func login(server: StoredServer, maybeLoginPageAlwaysShown: Bool? = nil) async throws -> OidcSession {
     guard let oidc = OidcClient(server: server, environment: environment) else { throw OidcError.discoveryFailed }
     let endpoints = try await oidc.discover()
-    let pkce = Pkce.generate()
-    let state = Pkce.randomState()
     let isLoginPageShown = maybeLoginPageAlwaysShown ?? server.isLoginPageAlwaysShown
     let parameters = LoginParameters(
       server: server, isLoginPageShown: isLoginPageShown, locale: Self.appLanguage)
-    let url = Self.authorizationURL(
-      endpoints: endpoints, client: oidc, pkce: pkce, state: state, login: parameters)
-    let callback = try await present(url, isEphemeral: isLoginPageShown)
-    let code = try Self.authorizationCode(from: callback, expectedState: state)
-    return try await oidc.exchange(code: code, verifier: pkce.verifier, endpoints: endpoints)
+    var retries = 0
+    while true {
+      let pkce = Pkce.generate()
+      let state = Pkce.randomState()
+      let url = Self.authorizationURL(
+        endpoints: endpoints, client: oidc, pkce: pkce, state: state, login: parameters)
+      let callback = try await present(url, isEphemeral: isLoginPageShown)
+      do {
+        let code = try Self.authorizationCode(from: callback, expectedState: state)
+        return try await oidc.exchange(code: code, verifier: pkce.verifier, endpoints: endpoints)
+      } catch OidcError.providerRefused(let code) where Self.isRetried(code: code, retries: retries) {
+        Self.log.warning("the identity provider refused the sign-in (\(code, privacy: .public)), trying again")
+        retries += 1
+      }
+    }
+  }
+
+  /// Whether a sign-in the provider refused with `code` after `retries` automatic retries starts
+  /// again by itself: only `already_logged_in`, and only once.
+  static func isRetried(code: String, retries: Int) -> Bool {
+    authorizationErrorKind(code: code) == .alreadySignedIn && retries < maxRetries
   }
 
   nonisolated func presentationAnchor(for session: ASWebAuthenticationSession) -> ASPresentationAnchor {
@@ -92,6 +114,9 @@ final class WebLogin: NSObject, ASWebAuthenticationPresentationContextProviding 
     let items = URLComponents(url: callback, resolvingAgainstBaseURL: false)?.queryItems ?? []
     func value(_ name: String) -> String? { items.first { $0.name == name }?.value }
     guard value("state") == expectedState else { throw OidcError.stateMismatch }
+    if let error = value("error") {
+      throw OidcError.providerRefused(code: shownAuthorizationErrorCode(code: error))
+    }
     guard let code = value("code"), !code.isEmpty else { throw OidcError.invalidResponse }
     return code
   }

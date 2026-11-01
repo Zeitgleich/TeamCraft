@@ -30,6 +30,12 @@ data class MessageNotificationSpec(
   val messageCount: Int,
   val whenMs: Long,
   val alerting: NotificationAlerting,
+  /**
+   * The newest message is still a placeholder ("New message", not decrypted yet): shown on the
+   * phone only. Watch and band bridges skip local-only notifications, so they show the message
+   * first once it has its text ([NotificationAlerting.REFRESH]), never "New message".
+   */
+  val isLocalOnly: Boolean,
   /** Conversation shortcut and LocusId (the shade's conversation section, bubbles, Wear OS). */
   val maybeShortcut: ShortcutSpec?,
   /** Reply (with remote input), mark as read and mute; empty when the notification may not act. */
@@ -60,6 +66,13 @@ enum class NotificationAlerting {
 
   /** An update of what is shown: replaces it without alerting again (`setOnlyAlertOnce`). */
   SILENT,
+
+  /**
+   * A placeholder ("New message", posted local-only) filled in with the text: silent on the phone,
+   * but without `setOnlyAlertOnce`, because watch and band bridges (Garmin, Mi Band apps) skip
+   * updates that carry it; so they show the message as new.
+   */
+  REFRESH,
 }
 
 enum class MessageAction {
@@ -149,6 +162,7 @@ object MessageNotificationSpecs {
       messageCount = received.size,
       whenMs = newest.sentAtMs,
       alerting = if (isAlerting) NotificationAlerting.ALERT else NotificationAlerting.SILENT,
+      isLocalOnly = newest.isPlaceholder,
       maybeShortcut = shortcut,
       actions = if (privacy.offersActions) listOf(MessageAction.REPLY, MessageAction.MARK_READ, MessageAction.MUTE) else emptyList(),
       maybeReplyThreadId = newest.maybeThreadId,
@@ -183,6 +197,24 @@ object MessageNotificationSpecs {
       publicTitle = if (names.isEmpty()) labels.appName else title,
       publicText = text,
     )
+  }
+
+  /**
+   * How a conversation's notification is posted again: alerting for a new message, else as a silent
+   * update, but as [NotificationAlerting.REFRESH] when a placeholder line got its text, so watches
+   * and bands that skip silent updates show the message instead of "New message".
+   */
+  fun alerting(
+    isAlerting: Boolean,
+    maybePrevious: ConversationNotification?,
+    entry: ConversationNotification,
+  ): NotificationAlerting {
+    val placeholdersBefore = maybePrevious?.lines.orEmpty().count { it.isPlaceholder }
+    return when {
+      isAlerting -> NotificationAlerting.ALERT
+      entry.lines.count { it.isPlaceholder } < placeholdersBefore -> NotificationAlerting.REFRESH
+      else -> NotificationAlerting.SILENT
+    }
   }
 
   private fun newMessages(count: Int, labels: NotificationText.Labels): String =

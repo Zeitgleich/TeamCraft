@@ -15,12 +15,15 @@ use crate::auth::guest::GuestAuth;
 use crate::auth::{AppConfig, Authenticator};
 use crate::components::guest_meeting::GuestSession;
 use crate::components::login::AuthFrame;
+use crate::form_errors::{FieldError, FieldErrors, FormErrors};
 use crate::i18n::use_i18n;
 use crate::meetings::{GuestClient, GuestLink, MeetingError};
 use crate::reactive::{SetIfAlive, pause, use_interval};
 use crate::remote_backend;
 
 /// How often the lobby is asked whether the guest was admitted.
+const FORM_ID: &str = "guest-join-form";
+const NAME_ID: &str = "guest-name";
 const POLL_MS: u64 = 2000;
 /// How long the page waits for its client core to open before it gives up.
 const CORE_PATIENCE: Duration = Duration::from_secs(20);
@@ -66,6 +69,15 @@ pub fn GuestJoinPage(link: GuestLink) -> impl IntoView {
   let client = GuestClient::new(config.clone());
   let phase = RwSignal::new(GuestPhase::AskName);
   let name = RwSignal::new(String::new());
+  let errors = FormErrors::new();
+  let name_errors = move || {
+    let mut found = FieldErrors::new();
+    if name.with(|name| name.trim().is_empty()) {
+      found.push(NAME_ID, i18n.t("form-error-name"));
+    }
+    found
+  };
+  Effect::new(move |_| errors.follow(name_errors()));
   let meeting = link.meeting;
   let link = StoredValue::new(link);
   let joined = StoredValue::new_local(None::<Joined>);
@@ -78,7 +90,9 @@ pub fn GuestJoinPage(link: GuestLink) -> impl IntoView {
     let client = client.clone();
     Rc::new(move |ev: leptos::ev::SubmitEvent| {
       ev.prevent_default();
-      if name.get_untracked().trim().is_empty() {
+      let found = untrack(name_errors);
+      if !found.is_empty() {
+        errors.refuse(FORM_ID, found);
         return;
       }
       let parts = link.get_value();
@@ -184,18 +198,22 @@ pub fn GuestJoinPage(link: GuestLink) -> impl IntoView {
             GuestPhase::AskName | GuestPhase::Joining => {
               let is_joining = phase.get() == GuestPhase::Joining;
               view! {
-                <form class="auth-form" on:submit=move |ev| join.with_value(|join| join(ev))>
+                <form id=FORM_ID class="auth-form" on:submit=move |ev| join.with_value(|join| join(ev))>
                   <h1>{move || i18n.t("guest-title")}</h1>
                   <p class="muted-text">{move || i18n.t("guest-subtitle")}</p>
-                  <label for="guest-name">{move || i18n.t("guest-name")}</label>
+                  <label for=NAME_ID>{move || i18n.t("guest-name")}</label>
                   <input
-                    id="guest-name"
+                    id=NAME_ID
                     class="input"
                     autocomplete="name"
                     data-autofocus
+                    aria-required="true"
+                    aria-invalid=errors.invalid(NAME_ID)
+                    aria-describedby=errors.described(NAME_ID)
                     prop:value=move || name.get()
                     on:input=move |ev| name.set(event_target_value(&ev))
                   />
+                  <FieldError errors=errors field=NAME_ID />
                   <div class="auth-actions">
                     <button type="submit" class="btn btn-primary" prop:disabled=is_joining>
                       {move || i18n.t("guest-join")}

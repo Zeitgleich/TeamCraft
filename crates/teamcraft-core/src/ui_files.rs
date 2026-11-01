@@ -4,7 +4,7 @@ use teamcraft_client_api::actions::{
   FileFailure, FileInfo, FileSource, FileTransfer, MediaAnchor, MediaPage, OutgoingFile, PixelSize,
   ShareLink, ShareLinkOptions,
 };
-use teamcraft_client_api::model::{ConversationId, MessageId, ThreadId};
+use teamcraft_client_api::model::{ConversationId, MessageId, ThreadId, UserId};
 use teamcraft_proto::{AttachmentId, Base64Bytes};
 
 use crate::client::files::{
@@ -13,19 +13,26 @@ use crate::client::files::{
   transfer_state,
 };
 use crate::error::CoreError;
+use crate::imported::Authorship;
 use crate::records;
 use crate::store::{
   AttachmentRef, ImageDimensions, LocalStore, MediaRange, MessageContent, MessageMeta, StoredMessage, Table,
 };
 use crate::transfers::Transfers;
-use crate::ui_backend::{CoreChatBackend, CoreCommand, RedactedText, ui_message_id};
+use crate::ui_backend::{CoreChatBackend, CoreCommand, RedactedText, imported_author_view, ui_message_id};
 
 impl<S: LocalStore> CoreChatBackend<S> {
-  /// Files attached to a message, with where their bytes are.
-  pub(crate) fn files_of(&self, stored: &StoredMessage) -> Vec<FileInfo> {
+  /// Files attached to a message, with where their bytes are; `maybe_importer` is
+  /// [`Self::importer`], read once by callers that go through many messages.
+  pub(crate) fn files_of(&self, stored: &StoredMessage, maybe_importer: Option<UserId>) -> Vec<FileInfo> {
     let message = ui_message_id(stored);
     let conversation = stored.conversation_id;
-    let (maybe_sender, maybe_sent_at) = (Some(stored.sender_user_id), Some(stored.sent_at_ms));
+    // The author and time the message list shows, the original ones of an imported message.
+    let authorship = Authorship::of(stored, maybe_importer);
+    let (maybe_sender, maybe_sent_at) = (authorship.maybe_account(), Some(authorship.sent_at_ms));
+    let maybe_imported_author = authorship
+      .maybe_origin
+      .map(|origin| imported_author_view(&origin.author));
     if let Some(upload) = self.read(pending_upload(
       self.store_ref(),
       conversation,
@@ -49,6 +56,7 @@ impl<S: LocalStore> CoreChatBackend<S> {
           transfer: upload_transfer(file, self.transfers()),
           maybe_sender,
           maybe_sent_at,
+          maybe_imported_author: maybe_imported_author.clone(),
           maybe_dimensions: file.maybe_dimensions.map(|size| PixelSize {
             width: size.width,
             height: size.height,
@@ -79,6 +87,7 @@ impl<S: LocalStore> CoreChatBackend<S> {
         },
         maybe_sender,
         maybe_sent_at,
+        maybe_imported_author: maybe_imported_author.clone(),
         maybe_dimensions: None,
         maybe_duration_ms: file.maybe_duration_ms,
         maybe_content_sha256: None,
@@ -122,6 +131,7 @@ impl<S: LocalStore> CoreChatBackend<S> {
         },
         maybe_sender,
         maybe_sent_at,
+        maybe_imported_author: maybe_imported_author.clone(),
         maybe_dimensions: attachment.maybe_dimensions.map(|size| PixelSize {
           width: size.width,
           height: size.height,
@@ -188,7 +198,11 @@ impl<S: LocalStore> CoreChatBackend<S> {
   pub(crate) fn ui_conversation_files(&self, conversation: ConversationId) -> Vec<FileInfo> {
     let mut messages = self.all_messages(conversation);
     messages.reverse();
-    messages.iter().flat_map(|stored| self.files_of(stored)).collect()
+    let maybe_importer = self.importer();
+    messages
+      .iter()
+      .flat_map(|stored| self.files_of(stored, maybe_importer))
+      .collect()
   }
 
   /// A page of at most `max_messages` messages with pictures or videos at `anchor`, newest first
@@ -251,10 +265,11 @@ impl<S: LocalStore> CoreChatBackend<S> {
         (page, has_older, false)
       },
     };
+    let maybe_importer = self.importer();
     MediaPage {
       files: newest_first
         .iter()
-        .flat_map(|stored| self.files_of(stored))
+        .flat_map(|stored| self.files_of(stored, maybe_importer))
         .collect(),
       has_older,
       has_newer,

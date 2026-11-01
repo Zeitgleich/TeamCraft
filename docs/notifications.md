@@ -367,6 +367,22 @@ reads "New message from Alice" or "3 new messages from Alice, Bob". The lock scr
 it) names who wrote but never the text: "New message from Alice" under the sender's or conversation's
 name, and the summary's names the conversations. With "nothing" it stays "New message".
 
+**Opening from a notification (issue #1065).** The core keeps what the newest notification of each
+conversation showed (`teamcraft_core::notified`: its name, sender and the message as far as it was
+read) in the local store, from the app's push handling and from the iOS extension alike. The preview
+never stores the message itself; only the sync does, in order. Opening that conversation reads the
+record (`notified_conversation`) with no round trip: the header shows the name, the screen the
+message and a loading line, until the store has the conversation and has caught up past the message
+(the record then goes). A conversation the store doesn't know yet never shows "?": without a record
+the header reads "Loading the conversation…". On iOS a tap opens such a conversation only when a
+record exists. On the network the focused conversation's members come before its content (#1015).
+
+**Watches and bands (Android).** A message the app couldn't read in time shows as "New message" and
+is filled in by a retry. That placeholder is posted local-only, so watch and band bridges (Wear OS,
+Garmin, Mi Band apps) don't mirror it. When the text arrives, the notification is posted again,
+bridged and without `setOnlyAlertOnce`, because bridges skip updates that carry it. It stays silent
+on the phone, so the band shows the message, never "New message".
+
 **iOS.** `call` arrives as a mutable alert through the notification service extension; without the
 filtering entitlement it shows as a time-sensitive "incoming call" alert with answer and decline, with
 it the extension hands it to CallKit (`NSE_NOTIFICATION_FILTERING` in `Base.xcconfig`, together with

@@ -45,8 +45,9 @@ use crate::client::bookmarks_key;
 use crate::client::workspace_admin::{ChannelOptions, StoredRoster};
 use crate::clock::Clock;
 use crate::error::CoreError;
-use crate::imported::{ImportAdditions, ImportSource, ImportedAuthor, ImportedOrigin};
+use crate::imported::{Authorship, ImportAdditions, ImportSource, ImportedAuthor, ImportedOrigin};
 use crate::notify_rules::{MentionPreferences, load_mention_preferences};
+use crate::people_names::shown_name;
 use crate::records::{self, Draft};
 use crate::store::{
   BookmarkItem, ConversationEvent, LocalStore, MessageContent, MessageEdge, MessageFilter, StoredMessage,
@@ -587,7 +588,7 @@ impl<S: LocalStore> CoreChatBackend<S> {
     User {
       id: summary.id,
       username: summary.maybe_username.clone().unwrap_or_default(),
-      display_name: summary.display_name.clone(),
+      display_name: shown_name(summary),
       presence: maybe_presence.map_or(PresenceStatus::Offline, presence_status),
       maybe_custom_status: self.custom_status_of(summary.id),
       avatar_hue: hue(summary.id),
@@ -709,7 +710,7 @@ impl<S: LocalStore> CoreChatBackend<S> {
       let mut others: Vec<String> = member_ids
         .iter()
         .filter(|user| **user != self.me)
-        .filter_map(|user| users.get(user).map(|summary| summary.display_name.clone()))
+        .filter_map(|user| users.get(user).map(shown_name))
         .collect();
       if others.is_empty() {
         // The member list is not loaded yet (a sync catching up, issue #247): the conversation
@@ -718,7 +719,7 @@ impl<S: LocalStore> CoreChatBackend<S> {
           .participants
           .iter()
           .filter(|user| user.id != self.me)
-          .map(|user| user.display_name.clone())
+          .map(shown_name)
           .collect();
       }
       others.sort();
@@ -1001,30 +1002,14 @@ impl<S: LocalStore> CoreChatBackend<S> {
       | MessageContent::Notetaker { .. }
       | MessageContent::Unknown => String::new(),
     };
-    let (kind, mut author) = match &stored.content {
-      MessageContent::Event { event } => system_view(event, stored.sender_user_id),
-      _ => (MessageKind::User, stored.sender_user_id),
-    };
     // Shown with its original author and time only from the import account (e2ee.md §4.10).
-    let maybe_origin = crate::imported::trusted_origin(stored, relations.maybe_importer);
-    let maybe_imported = maybe_origin.map(|origin| {
-      let view = match &origin.author {
-        ImportedAuthor::User { user_id } => {
-          author = *user_id;
-          ImportedAuthorView::Person
-        },
-        ImportedAuthor::Named { name } => ImportedAuthorView::Named { name: name.clone() },
-        ImportedAuthor::Deleted | ImportedAuthor::Unknown => ImportedAuthorView::Deleted,
-      };
-      ImportedMark {
-        source: match origin.source {
-          ImportSource::Synology => ImportedFrom::SynologyChat,
-          ImportSource::Unknown => ImportedFrom::Other,
-        },
-        author: view,
-        importer: stored.sender_user_id,
-      }
-    });
+    let authorship = Authorship::of(stored, relations.maybe_importer);
+    let (kind, author) = match &stored.content {
+      MessageContent::Event { event } => system_view(event, stored.sender_user_id),
+      _ => (MessageKind::User, authorship.author),
+    };
+    let maybe_origin = authorship.maybe_origin;
+    let maybe_imported = maybe_origin.map(|origin| imported_mark(origin, stored.sender_user_id));
     let reply_count = stored.maybe_server_id.map_or(0, |server_id| {
       relations.reply_count(ThreadId::from_snowflake(server_id.snowflake()))
     });
@@ -1033,7 +1018,7 @@ impl<S: LocalStore> CoreChatBackend<S> {
       conversation: stored.conversation_id,
       author,
       kind,
-      sent_at: maybe_origin.map_or(stored.sent_at_ms, |origin| origin.sent_at_ms),
+      sent_at: authorship.sent_at_ms,
       body,
       is_edited: stored.is_edited || maybe_origin.is_some_and(|origin| origin.maybe_edited_at_ms.is_some()),
       reactions: with_imported_reactions(
@@ -2092,7 +2077,7 @@ impl<S: LocalStore> ChatBackend for CoreChatBackend<S> {
         user: member.user.id,
         is_guest: member.user.kind == UserKind::Guest,
         is_bot: member.user.kind == UserKind::Bot,
-        display_name: member.user.display_name,
+        display_name: shown_name(&member.user),
         role: member.role,
       })
       .collect();
@@ -2447,6 +2432,27 @@ fn reactions_of<'a>(
   by_emoji.into_values().collect()
 }
 
+/// How the list shows where an imported message came from; `importer` is its sender.
+fn imported_mark(origin: &ImportedOrigin, importer: UserId) -> ImportedMark {
+  ImportedMark {
+    source: match origin.source {
+      ImportSource::Synology => ImportedFrom::SynologyChat,
+      ImportSource::Unknown => ImportedFrom::Other,
+    },
+    author: imported_author_view(&origin.author),
+    importer,
+  }
+}
+
+/// Who wrote an imported message, as the views show it.
+pub(crate) fn imported_author_view(author: &ImportedAuthor) -> ImportedAuthorView {
+  match author {
+    ImportedAuthor::User { .. } => ImportedAuthorView::Person,
+    ImportedAuthor::Named { name } => ImportedAuthorView::Named { name: name.clone() },
+    ImportedAuthor::Deleted | ImportedAuthor::Unknown => ImportedAuthorView::Deleted,
+  }
+}
+
 /// Adds the reactions an imported message brought (e2ee.md §4.10) to the live ones: each author
 /// counts once per emoji, also one who reacted again here.
 fn with_imported_reactions(
@@ -2658,34 +2664,83 @@ mod tests {
       assert_eq!(server_ids(&tail), [103, 104, 105]);
     }
 
+    #[test]
+    fn hidden_rows_and_thread_replies_are_left_out_and_replies_sent_to_the_channel_kept() {
+      let (backend, conversation, store) = feed_with_store(3);
+      let reply = |n: i64, is_also_in_channel: bool| StoredMessage {
+        maybe_thread_id: Some(ThreadId::from_snowflake(id::<MessageId>(101).snowflake())),
+        content: MessageContent::Text {
+          body: format!("reply {n}"),
+          mentions: Vec::new(),
+          meta: crate::store::MessageMeta {
+            is_also_in_channel,
+            ..Default::default()
+          },
+        },
+        ..stored(conversation, n)
+      };
+      store.upsert_message(&reply(4, true)).unwrap();
+      store.upsert_message(&reply(5, false)).unwrap();
+      let reaction = StoredMessage {
+        content: MessageContent::Reaction {
+          target: stored(conversation, 3).client_message_id,
+          emoji: "+1".to_string(),
+          is_added: true,
+        },
+        ..stored(conversation, 6)
+      };
+      store.upsert_message(&reaction).unwrap();
+
+      assert_eq!(backend.message_count(conversation), 4);
+      let tail = backend.feed_tail(conversation, None, 2);
+      assert_eq!(server_ids(&tail), [103, 104], "the newest two feed rows");
+      let count = backend.message_count(conversation);
+      let page = backend.messages(conversation, count - 2, 2);
+      let paged: Vec<i64> = page.iter().map(|message| message.id.snowflake().get()).collect();
+      assert_eq!(paged, [103, 104], "count and page agree");
+    }
+
     fn feed_of(count: i64) -> (CoreChatBackend<std::sync::Arc<MemoryStore>>, ConversationId) {
+      let (backend, conversation, _) = feed_with_store(count);
+      (backend, conversation)
+    }
+
+    fn feed_with_store(
+      count: i64,
+    ) -> (
+      CoreChatBackend<std::sync::Arc<MemoryStore>>,
+      ConversationId,
+      std::sync::Arc<MemoryStore>,
+    ) {
       let store = std::sync::Arc::new(MemoryStore::new());
       let conversation = id::<ConversationId>(10);
       for n in 1..=count {
-        store
-          .upsert_message(&StoredMessage {
-            conversation_id: conversation,
-            client_message_id: ClientMessageId::from_bytes([u8::try_from(n).unwrap(); 16]),
-            maybe_server_id: Some(id(100 + n)),
-            sender_user_id: id(2),
-            maybe_thread_id: None,
-            sent_at_ms: n * 1_000,
-            content: MessageContent::Text {
-              body: format!("message {n}"),
-              mentions: Vec::new(),
-              meta: Default::default(),
-            },
-            is_edited: false,
-            edits: Vec::new(),
-            maybe_edit_id: None,
-            is_pinned: false,
-            maybe_verified_commit: None,
-            maybe_server_change: None,
-          })
-          .unwrap();
+        store.upsert_message(&stored(conversation, n)).unwrap();
       }
-      let backend = CoreChatBackend::new(store, id(1), Box::new(ManualClock::new(10_000)));
-      (backend, conversation)
+      let backend = CoreChatBackend::new(store.clone(), id(1), Box::new(ManualClock::new(10_000)));
+      (backend, conversation, store)
+    }
+
+    fn stored(conversation: ConversationId, n: i64) -> StoredMessage {
+      StoredMessage {
+        conversation_id: conversation,
+        client_message_id: ClientMessageId::from_bytes([u8::try_from(n).unwrap(); 16]),
+        maybe_server_id: Some(id(100 + n)),
+        sender_user_id: id(2),
+        maybe_thread_id: None,
+        sent_at_ms: n * 1_000,
+        content: MessageContent::Text {
+          body: format!("message {n}"),
+          mentions: Vec::new(),
+          meta: Default::default(),
+        },
+        is_edited: false,
+        edits: Vec::new(),
+        maybe_edit_id: None,
+        is_pinned: false,
+        maybe_verified_commit: None,
+        maybe_server_change: None,
+      }
     }
 
     fn anchor(server_id: i64, sent_at: TimestampMs) -> FeedAnchor {
@@ -2918,6 +2973,28 @@ mod tests {
     };
     let conversation = backend.to_conversation(&direct, &BTreeMap::new(), &MentionPreferences::default());
     assert_eq!(conversation.name, "Bob Example");
+
+    // A deleted account is named in the user's language, not by the server's placeholder (#1066).
+    crate::people_names::set_deleted_user_name(crate::people_names::TEST_DELETED_NAME.into());
+    let deleted = UserSummary {
+      is_deactivated: true,
+      is_deleted: true,
+      ..participant(3, "Deleted user")
+    };
+    let with_deleted = ConversationResponse {
+      id: id(11),
+      kind: ConversationKindProto::Group,
+      participants: vec![
+        participant(1, "Alice Example"),
+        participant(2, "Bob Example"),
+        deleted.clone(),
+      ],
+      ..direct
+    };
+    let conversation =
+      backend.to_conversation(&with_deleted, &BTreeMap::new(), &MentionPreferences::default());
+    assert_eq!(conversation.name, "Account removed, Bob Example");
+    assert_eq!(backend.to_user(&deleted).display_name, "Account removed");
   }
 
   #[test]
@@ -3272,6 +3349,108 @@ mod tests {
       assert_eq!(backend.message_count(id(10)), 2);
     }
 
+    mod outside_the_list {
+      use teamcraft_client_api::model::ImportedAuthorView;
+      use teamcraft_proto::{AttachmentId, Base64Bytes};
+
+      use super::*;
+      use crate::client::{forward_content, imported_author_name, reply_ref};
+      use crate::imported::Authorship;
+      use crate::store::AttachmentRef;
+
+      #[test]
+      fn the_lightbox_and_files_show_the_original_author_and_time() {
+        let backend = backend_with_importer(Some(IMPORTER));
+        let stored = with_picture(imported_message(
+          IMPORTER,
+          ImportedAuthor::User { user_id: id(2) },
+          Vec::new(),
+        ));
+        let files = backend.files_of(&stored, backend.importer());
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0].maybe_sender, Some(id(2)));
+        assert_eq!(files[0].maybe_sent_at, Some(1_600_000_000_000));
+        assert_eq!(files[0].maybe_imported_author, Some(ImportedAuthorView::Person));
+      }
+
+      #[test]
+      fn a_bots_file_names_no_account() {
+        let backend = backend_with_importer(Some(IMPORTER));
+        let stored = with_picture(imported_message(
+          IMPORTER,
+          ImportedAuthor::Named {
+            name: "Monitor".into(),
+          },
+          Vec::new(),
+        ));
+        let file = backend.files_of(&stored, backend.importer()).remove(0);
+        assert_eq!(file.maybe_sender, None);
+        assert_eq!(
+          file.maybe_imported_author,
+          Some(ImportedAuthorView::Named {
+            name: "Monitor".into()
+          })
+        );
+      }
+
+      #[test]
+      fn a_forged_origin_keeps_the_sender_and_its_time() {
+        let backend = backend_with_importer(Some(IMPORTER));
+        let forged = with_picture(imported_message(
+          3,
+          ImportedAuthor::User { user_id: id(2) },
+          Vec::new(),
+        ));
+        let file = backend.files_of(&forged, backend.importer()).remove(0);
+        assert_eq!(
+          (file.maybe_sender, file.maybe_sent_at),
+          (Some(id(3)), Some(5_000))
+        );
+        assert_eq!(file.maybe_imported_author, None);
+      }
+
+      #[test]
+      fn replies_and_forwards_quote_the_original_author_and_time() {
+        let stored = imported_message(IMPORTER, ImportedAuthor::User { user_id: id(2) }, Vec::new());
+        assert_eq!(reply_ref(&stored, Some(id(IMPORTER))).author, id(2));
+        let authorship = Authorship::of(&stored, Some(id(IMPORTER)));
+        let Some(MessageContent::Text { meta, .. }) =
+          forward_content(&authorship, &stored, "Original".into(), None, "")
+        else {
+          panic!("a forward");
+        };
+        assert_eq!(meta.maybe_forwarded.unwrap().sent_at_ms, 1_600_000_000_000);
+        let bot = imported_message(
+          IMPORTER,
+          ImportedAuthor::Named {
+            name: "Monitor".into(),
+          },
+          Vec::new(),
+        );
+        assert_eq!(
+          imported_author_name(&Authorship::of(&bot, Some(id(IMPORTER)))),
+          "Monitor"
+        );
+      }
+
+      fn with_picture(mut stored: StoredMessage) -> StoredMessage {
+        if let MessageContent::Text { meta, .. } = &mut stored.content {
+          meta.attachments.push(AttachmentRef {
+            attachment_id: AttachmentId::from_snowflake(Snowflake::new(7).unwrap()),
+            key: Base64Bytes::new(Vec::new()),
+            ciphertext_sha256: Base64Bytes::new(Vec::new()),
+            file_name: "screenshot.png".into(),
+            media_type: "image/png".into(),
+            size_bytes: 1,
+            maybe_thumbnail: None,
+            maybe_dimensions: None,
+            maybe_duration_ms: None,
+          });
+        }
+        stored
+      }
+    }
+
     fn backend_with_importer(maybe_importer: Option<i64>) -> CoreChatBackend<MemoryStore> {
       let backend = CoreChatBackend::new(MemoryStore::new(), id(1), Box::new(ManualClock::new(0)));
       let mut state = WorkspaceState::default();
@@ -3301,7 +3480,7 @@ mod tests {
         content: MessageContent::Text {
           body: "old news".into(),
           mentions: Vec::new(),
-          meta: MessageMeta {
+          meta: crate::store::MessageMeta {
             maybe_imported: Some(Box::new(ImportedOrigin {
               source: ImportSource::Synology,
               source_id: "1".into(),

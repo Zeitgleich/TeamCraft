@@ -273,6 +273,78 @@ async fn direct_messages_are_created_once_per_pair() {
   test_db.drop_database().await;
 }
 
+/// A DM goes with a deleted participant even when an earlier removal from all chats took their
+/// membership (issue #1066); the import account, a member but no participant, takes no DM with it.
+#[tokio::test]
+async fn dms_go_with_their_deleted_participant_not_with_other_members() {
+  let Some(test_db) = TestDatabase::create().await else {
+    return;
+  };
+  let db = &test_db.db;
+  let ids = SnowflakeGenerator::new(1).unwrap();
+  let mut users = Vec::new();
+  for (subject, name) in [("a", "Alice"), ("b", "Bob"), ("i", "Importer")] {
+    let user = db
+      .upsert_oidc_user(&identity(subject, name), ids.next_id().unwrap())
+      .await
+      .unwrap();
+    users.push(user.id);
+  }
+  let [alice, bob, importer] = users[..] else {
+    unreachable!()
+  };
+  let participants = [alice, bob];
+  let new_dm = NewConversation {
+    id: ids.next_id().unwrap(),
+    maybe_space: None,
+    kind: ConversationKind::Dm,
+    maybe_name: None,
+    maybe_topic: None,
+    maybe_description: None,
+    visibility: ConversationVisibility::Private,
+    history_policy: HistoryPolicy::FromJoin,
+    maybe_category: None,
+    maybe_participants_key: Some(participants_key(&participants)),
+    is_integration: false,
+  };
+  let (dm, _) = db
+    .get_or_create_participants_conversation(&new_dm, &participants)
+    .await
+    .unwrap();
+  db.add_importer(dm, importer).await.unwrap();
+
+  assert!(
+    db.direct_conversations_deleted_with(importer)
+      .await
+      .unwrap()
+      .is_empty()
+  );
+  // Bob's deletion takes his memberships; the DM stays his, as deletions before #1066 left it.
+  db.delete_user(bob).await.unwrap();
+  assert_eq!(
+    db.deleted_users_with_direct_conversations(10).await.unwrap(),
+    vec![bob]
+  );
+  let leftover = db.direct_conversations_deleted_with(bob).await.unwrap();
+  assert_eq!(leftover.len(), 1);
+  assert_eq!(leftover[0].conversation, dm);
+  let mut remaining = leftover[0].remaining.clone();
+  remaining.sort_unstable();
+  assert_eq!(remaining, vec![alice, importer]);
+
+  db.delete_direct_conversation(dm, &leftover[0].remaining)
+    .await
+    .unwrap();
+  assert!(
+    db.deleted_users_with_direct_conversations(10)
+      .await
+      .unwrap()
+      .is_empty()
+  );
+  assert_eq!(db.deleted_conversations_of(alice).await.unwrap(), vec![dm]);
+  test_db.drop_database().await;
+}
+
 /// Two devices founding a group at once publish different information for epoch 0: the first stays
 /// (#504). Repeating it is fine, and later epochs replace each other.
 #[tokio::test]

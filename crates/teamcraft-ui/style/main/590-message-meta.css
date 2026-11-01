@@ -1,10 +1,16 @@
 /* The day of the top message while scrolled up (the dividers scroll away with their rows). */
 .floating-day {
+  /* The pinned day (#1046): a strip over the top of the feed that clips the pill as the next
+     day's divider pushes it out. Its padding is PINNED_DAY_TOP_PX in message_list.rs. */
   position: absolute;
-  top: 8px;
-  left: 50%;
+  top: 0;
+  left: 0;
+  right: 0;
   z-index: 5;
-  transform: translateX(-50%);
+  display: flex;
+  justify-content: center;
+  padding: 8px 0 6px;
+  overflow: hidden;
   color: var(--text-muted);
   font-size: var(--text-xs);
   letter-spacing: var(--tracking-xs);
@@ -15,9 +21,9 @@
 
 /* A translucent material over the text scrolling underneath; fades out once the feed rests. */
 .floating-day .date-pill {
-  background: color-mix(in srgb, var(--surface) 85%, transparent);
-  -webkit-backdrop-filter: blur(8px);
-  backdrop-filter: blur(8px);
+  background: color-mix(in srgb, var(--surface) 72%, transparent);
+  -webkit-backdrop-filter: saturate(180%) blur(12px);
+  backdrop-filter: saturate(180%) blur(12px);
   box-shadow: 0 1px 4px rgba(16, 24, 40, 0.12);
   pointer-events: auto;
 }

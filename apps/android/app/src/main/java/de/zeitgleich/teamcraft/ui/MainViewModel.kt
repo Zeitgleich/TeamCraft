@@ -22,7 +22,10 @@ import androidx.annotation.StringRes
 import androidx.compose.runtime.mutableStateMapOf
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
+import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.receiveAsFlow
 import kotlinx.coroutines.flow.getAndUpdate
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.distinctUntilChanged
@@ -32,6 +35,10 @@ import de.zeitgleich.teamcraft.BuildConfig
 import de.zeitgleich.teamcraft.R
 import de.zeitgleich.teamcraft.TeamCraftApplication
 import de.zeitgleich.teamcraft.auth.LocalLoginOutcome
+import de.zeitgleich.teamcraft.auth.SignInFailure
+import de.zeitgleich.teamcraft.auth.providerRefusal
+import de.zeitgleich.teamcraft.auth.signInFailure
+import de.zeitgleich.teamcraft.auth.signInFailureLog
 import de.zeitgleich.teamcraft.auth.isSsoOnly
 import de.zeitgleich.teamcraft.auth.localSignInErrorText
 import de.zeitgleich.teamcraft.calls.CallOptions
@@ -50,7 +57,6 @@ import de.zeitgleich.teamcraft.server.isRetryableWhenOnline
 import de.zeitgleich.teamcraft.server.isServerAllowed
 import de.zeitgleich.teamcraft.server.serverEntryErrorText
 import de.zeitgleich.teamcraft.server.transportErrorText
-import net.openid.appauth.AuthorizationException
 import uniffi.teamcraft_ffi.AccountState
 import uniffi.teamcraft_ffi.CheckedServer
 import uniffi.teamcraft_ffi.ConversationItem
@@ -60,6 +66,7 @@ import uniffi.teamcraft_ffi.LinkRequestItem
 import uniffi.teamcraft_ffi.LoginBrand
 import uniffi.teamcraft_ffi.MessageItem
 import uniffi.teamcraft_ffi.NotificationContent
+import uniffi.teamcraft_ffi.NotifiedConversation
 import uniffi.teamcraft_ffi.Presence
 import uniffi.teamcraft_ffi.PushDiagnosticsInfo
 import uniffi.teamcraft_ffi.PushService
@@ -88,7 +95,8 @@ sealed interface AppState {
 
   /** The server answered and passed the checks: show who it is before signing in. */
   data class ConfirmServer(val checked: CheckedServer) : AppState
-  data class SignedOut(@StringRes val maybeError: Int? = null) : AppState
+  /** [maybeErrorCode] is the identity provider's error code, for texts that name it. */
+  data class SignedOut(@StringRes val maybeError: Int? = null, val maybeErrorCode: String? = null) : AppState
   data class NeedsEnrollment(val hasExistingIdentity: Boolean, @StringRes val maybeError: Int? = null) : AppState
   /**
    * This phone waits to be linked (issue #998): it shows no code, the other device approves it from a
@@ -158,6 +166,13 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
   /** The organization fixed the server (managed configuration): no "Change server". */
   val isServerLocked: StateFlow<Boolean> = serverLocked
+
+  /** Whether the current sign-in already had its automatic retry; a user's new one resets it. */
+  private var hasRetriedAuthorization = false
+  private val loginRetries = Channel<Intent>(Channel.BUFFERED)
+
+  /** Browser intents of the automatic sign-in retry, for the activity to open (issue #1063). */
+  val loginRetryIntents: Flow<Intent> = loginRetries.receiveAsFlow()
 
   private val page = MutableStateFlow<SignInPageInfo?>(null)
 
@@ -260,15 +275,22 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
   }
 
   /**
-   * The browser intent for signing in; null (with the reason on the sign-in screen) when the
-   * identity provider can't be reached.
+   * The browser intent for a sign-in the user starts; null (with the reason on the sign-in screen)
+   * when the identity provider can't be reached.
    */
-  suspend fun loginIntent(): Intent? =
+  suspend fun loginIntent(): Intent? {
+    hasRetriedAuthorization = false
+    return authorizationIntent()
+  }
+
+  /** A new authorization request: AppAuth gives each a fresh state and PKCE verifier. */
+  private suspend fun authorizationIntent(): Intent? =
     try {
       graph.auth.loginIntent(page.value?.maybeLoginPageAlwaysShown)
     } catch (failure: Exception) {
-      Log.w(TAG, "sign-in could not start", failure)
-      state.value = AppState.SignedOut(signInError(failure) ?: R.string.sign_in_failed)
+      Log.w(TAG, signInFailureLog(failure, null), failure)
+      val shown = signInFailure(failure, null, hasRetried = true) as? SignInFailure.Shown
+      state.value = AppState.SignedOut(shown?.text ?: R.string.sign_in_failed)
       null
     }
 
@@ -293,14 +315,32 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
   }
 
+  /**
+   * The browser's answer. Failures of the sign-in itself stay on the sign-in screen with their
+   * reason, or start the one automatic retry (issue #1063); loading the account afterwards goes
+   * through the normal error texts.
+   */
   fun completeLogin(result: Intent?) = launchBusy {
-    state.value = try {
+    try {
       graph.auth.completeLogin(result)
-      loadAccountState()
     } catch (failure: Exception) {
-      Log.w(TAG, "sign-in failed", failure)
-      AppState.SignedOut(signInError(failure))
+      val maybeRefusal = providerRefusal(failure)
+      Log.w(TAG, signInFailureLog(failure, maybeRefusal), failure.takeIf { maybeRefusal == null })
+      when (val outcome = signInFailure(failure, maybeRefusal, hasRetriedAuthorization)) {
+        SignInFailure.Retry -> retryAuthorization()
+        SignInFailure.Cancelled -> state.value = AppState.SignedOut()
+        is SignInFailure.Shown -> state.value = AppState.SignedOut(outcome.text, outcome.maybeCode)
+      }
+      return@launchBusy
     }
+    state.value = loadAccountState()
+  }
+
+  /** Goes to the identity provider once more; the activity opens the browser. */
+  private suspend fun retryAuthorization() {
+    hasRetriedAuthorization = true
+    Log.i(TAG, "retrying the sign-in once with a new authorization request")
+    authorizationIntent()?.let { loginRetries.send(it) }
   }
 
   fun enroll(passphrase: String) = launchBusy {
@@ -446,6 +486,13 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
       conversation.id to ChatListEntry(preview, latest.id)
     }.toMap()
   }
+
+  /**
+   * What the newest notification showed of a conversation, while the store hasn't caught it up yet
+   * (issue #1065): its name and the notified message, so opening it never shows an empty screen.
+   */
+  suspend fun notifiedConversation(conversationId: String): NotifiedConversation? =
+    read { notifiedConversation(conversationId) }
 
   suspend fun messages(conversationId: String): List<MessageItem> =
     read { messages(conversationId, MESSAGE_PAGE.toUInt()) }?.map(::namedAuthor) ?: emptyList()
@@ -961,19 +1008,6 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     /** Plain HTTP to other hosts than the device itself only in development builds. */
     private val ALLOW_INSECURE_HTTP = BuildConfig.DEBUG
-
-    /** Why signing in failed, in words the user can act on; nothing when they cancelled it. */
-    @StringRes
-    fun signInError(failure: Exception): Int? = when {
-      failure is AuthorizationException && failure.code == AuthorizationException.GeneralErrors.USER_CANCELED_AUTH_FLOW.code -> null
-      failure is IllegalStateException && failure.message == "login cancelled" -> null
-      failure is AuthorizationException && failure.code == AuthorizationException.GeneralErrors.NETWORK_ERROR.code ->
-        R.string.sign_in_network
-      failure is java.io.IOException -> R.string.sign_in_network
-      failure is AuthorizationException && failure.type == AuthorizationException.TYPE_OAUTH_TOKEN_ERROR -> R.string.sign_in_rejected
-      failure is TeamCraftException.Network -> R.string.sign_in_network
-      else -> R.string.sign_in_failed
-    }
 
     @StringRes
     fun errorText(failure: TeamCraftException): Int = when (failure) {
