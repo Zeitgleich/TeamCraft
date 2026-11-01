@@ -1,5 +1,12 @@
 package de.zeitgleich.teamcraft.core
 
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
+import kotlinx.serialization.json.longOrNull
+import uniffi.teamcraft_ffi.LeaveChoice
+import uniffi.teamcraft_ffi.SpaceMenuItem
 import uniffi.teamcraft_ffi.TeamCraft
 
 /**
@@ -78,6 +85,31 @@ class ChatClient(
       WireJson.encodeToString(ConversationNotificationSettings.serializer(), settings),
     )
   }
+
+  /** The core's answer to whether the conversation's menu offers "Leave" (#1105). */
+  suspend fun leaveChoice(conversation: String): LeaveChoice = core().conversationLeaveChoice(conversation)
+
+  /** `{origin}/c/{id}`, or `null` where the server has no web address. */
+  fun conversationLink(origin: String, conversation: String): String? =
+    uniffi.teamcraft_ffi.conversationLink(origin, conversation)
+
+  suspend fun spaceMenu(space: String): SpaceMenuItem? = core().spaceMenu(space)
+
+  /** The space's mute time (`muted_until`), if it is muted ahead. */
+  suspend fun spaceMutedUntil(space: String, nowMs: Long): Long? =
+    spaceSettings(space)["muted_until"]?.jsonPrimitive?.longOrNull?.takeIf { it > nowMs }
+
+  /** Mutes the space until `maybeUntil` (`null` unmutes); the space's level stays as it is. */
+  suspend fun setSpaceMutedUntil(space: String, maybeUntil: Long?) {
+    val body = JsonObject(
+      spaceSettings(space).filterKeys { it != "muted_until" } +
+        (if (maybeUntil == null) emptyMap() else mapOf("muted_until" to JsonPrimitive(maybeUntil))),
+    )
+    api("PUT", "/spaces/$space/notification-settings", body.toString())
+  }
+
+  private suspend fun spaceSettings(space: String): JsonObject =
+    WireJson.parseToJsonElement(api("GET", "/spaces/$space/notification-settings")).jsonObject
 
   /** Quick DND (`manual = "dnd"`, until a time or open-ended) or back to automatic. */
   suspend fun setManualPresence(presence: ManualPresence) {

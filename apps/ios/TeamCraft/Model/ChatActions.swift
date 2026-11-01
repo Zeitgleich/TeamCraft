@@ -26,6 +26,8 @@ enum ChatAction {
   /// Stops one file of an own message that is still going up; the message goes without it.
   case cancelUpload(conversationId: String, messageId: String, fileId: String)
   case joinChannel(conversationId: String)
+  /// Leaves a channel (never a DM); the core sends it once the connection is back.
+  case leaveChannel(conversationId: String)
   case createChannel(spaceId: String, name: String)
   /// The direct conversation with a person; created when there is none yet.
   case openDm(userId: String)
@@ -90,6 +92,8 @@ enum ChatAction {
       object = ["action": "open_group_dm", "users": users]
     case .refreshReadReceipts(let conversation):
       object = ["action": "refresh_read_receipts", "conversation": conversation]
+    case .leaveChannel(let conversation):
+      object = ["action": "leave_channel", "conversation": conversation]
     case .markReactionsSeen(let conversation, let messages):
       object = ["action": "mark_reactions_seen", "conversation": conversation, "messages": messages]
     }

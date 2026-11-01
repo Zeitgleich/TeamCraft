@@ -140,6 +140,36 @@ pub enum ConversationKind {
   Integration,
 }
 
+/// Whether the menu of a channel or space offers "Leave" (#1105); the core's rule, so the apps
+/// don't re-implement it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
+pub enum LeaveChoice {
+  /// Not offered (DMs, group DMs).
+  Hidden,
+  Allowed,
+  /// The user is the last admin: the entry is disabled and says to hand the role on first.
+  LastAdmin,
+}
+
+impl From<teamcraft_client_api::entry_rules::LeaveChoice> for LeaveChoice {
+  fn from(choice: teamcraft_client_api::entry_rules::LeaveChoice) -> Self {
+    use teamcraft_client_api::entry_rules::LeaveChoice as Rule;
+    match choice {
+      Rule::Hidden => Self::Hidden,
+      Rule::Allowed => Self::Allowed,
+      Rule::LastAdmin => Self::LastAdmin,
+    }
+  }
+}
+
+/// What the menu of a space offers beyond what the conversation list already knows.
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
+pub struct SpaceMenuItem {
+  pub name: String,
+  pub has_unread: bool,
+  pub leave: LeaveChoice,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
 pub struct ConversationItem {
   pub id: String,
