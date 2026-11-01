@@ -35,6 +35,9 @@ enum ChatAction {
   case openGroupDm(userIds: [String])
   /// Reads again how far the others read: receipts sent while the app was offline never arrive.
   case refreshReadReceipts(conversationId: String)
+  /// The reactions to these own messages were on screen, or the user jumped to them: seen on
+  /// every device (issue #1009).
+  case markReactionsSeen(conversationId: String, messageIds: [String])
 
   /// The wire form.
   var json: String {
@@ -91,6 +94,8 @@ enum ChatAction {
       object = ["action": "refresh_read_receipts", "conversation": conversation]
     case .leaveChannel(let conversation):
       object = ["action": "leave_channel", "conversation": conversation]
+    case .markReactionsSeen(let conversation, let messages):
+      object = ["action": "mark_reactions_seen", "conversation": conversation, "messages": messages]
     }
     return jsonText(object)
   }
@@ -144,6 +149,8 @@ enum ChatQuery {
   case permalink(conversationId: String, messageId: String)
   /// The channels of a space the user is in or can join.
   case browseChannels(spaceId: String)
+  /// Others' reactions to the user's messages here that the user hasn't seen.
+  case unseenReactions(conversationId: String)
 
   var json: String {
     switch self {
@@ -161,6 +168,8 @@ enum ChatQuery {
       return jsonText(["kind": "permalink", "conversation": conversation, "message": message])
     case .browseChannels(let space):
       return jsonText(["kind": "browse_channels", "space": space])
+    case .unseenReactions(let conversation):
+      return jsonText(["kind": "unseen_reactions", "conversation": conversation])
     }
   }
 }

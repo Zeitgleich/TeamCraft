@@ -284,6 +284,10 @@ pub struct LimitsConfig {
   /// Unread counts look at this many of the newest unread messages per conversation; a count equal
   /// to it means "that many or more" (clients show "1000+").
   pub max_unread_counted: u32,
+  /// Reactions to a member's own messages remembered one by one as seen, per conversation; beyond
+  /// it the oldest count as seen together with everything before them (notifications.md,
+  /// "Reactions to my messages").
+  pub max_seen_reactions: usize,
   /// Unused key packages a device may have on the server.
   pub max_key_packages_per_device: usize,
   pub max_key_package_bytes: usize,
@@ -1400,6 +1404,7 @@ impl Default for LimitsConfig {
       max_profile_text_chars: 100,
       max_user_group_members: 5000,
       max_unread_counted: 1000,
+      max_seen_reactions: 200,
       max_key_packages_per_device: 200,
       max_key_package_bytes: 16 * 1024,
       max_key_packages_per_upload: 100,

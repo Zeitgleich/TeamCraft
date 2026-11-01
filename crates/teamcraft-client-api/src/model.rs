@@ -663,6 +663,17 @@ pub struct Reaction {
   pub reacted_by_me: bool,
 }
 
+/// Reactions of others to the user's own messages in a conversation that the user hasn't seen yet:
+/// the conversation view's "jump to reaction" button (notifications.md, "Reactions to my
+/// messages").
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UnseenReactions {
+  /// One per person, emoji and message.
+  pub count: usize,
+  /// The messages they react to, oldest first.
+  pub messages: Vec<MessageId>,
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Message {
   pub id: MessageId,

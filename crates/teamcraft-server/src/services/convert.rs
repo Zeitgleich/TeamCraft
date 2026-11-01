@@ -148,6 +148,7 @@ pub fn my_membership(membership: &Membership) -> MyMembership {
     maybe_last_read_message_id: membership.maybe_last_read_message_id,
     maybe_muted_until: membership.maybe_muted_until.map(unix_millis),
     is_notification_inherited: membership.is_notification_inherited,
+    reactions_seen: membership.reactions_seen.clone(),
   }
 }
 

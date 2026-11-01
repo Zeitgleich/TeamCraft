@@ -719,6 +719,7 @@ extension CallManager: CallListener {
   private static func reason(for end: CallEndReason?) -> CXCallEndedReason {
     switch end {
     case .failed, .serverLost: return .failed
+    case .deviceLimit: return .failed
     case .removedByHost, .endedByHost: return .remoteEnded
     default: return .remoteEnded
     }
@@ -728,6 +729,7 @@ extension CallManager: CallListener {
     switch end {
     case .failed: return "call_failed"
     case .serverLost: return "call_server_lost"
+    case .deviceLimit: return "call_device_limit"
     case .removedByHost: return "call_removed_by_host"
     case .endedByHost: return "call_ended_by_host"
     default: return nil

@@ -34,6 +34,27 @@ pub struct MyMembership {
   /// Level and mute time follow the space's setting (the member never chose their own).
   #[serde(default)]
   pub is_notification_inherited: bool,
+  /// The reactions to the member's own messages they saw (notifications.md, "Reactions to my
+  /// messages"). Missing from older servers: nothing seen.
+  #[serde(default, skip_serializing_if = "ReactionsSeen::is_empty")]
+  pub reactions_seen: ReactionsSeen,
+}
+
+/// Which reactions to their own messages a member saw, synced across their devices. Reactions are
+/// encrypted messages, so the server keeps message IDs only and can't tell which are reactions.
+/// It only grows: `through` never moves back, an ID once seen stays seen.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct ReactionsSeen {
+  /// Every message up to this ID counts as seen.
+  #[serde(
+    rename = "through_message_id",
+    default,
+    skip_serializing_if = "Option::is_none"
+  )]
+  pub maybe_through: Option<MessageId>,
+  /// Reaction messages after `through` seen one by one, ascending.
+  #[serde(default, skip_serializing_if = "Vec::is_empty")]
+  pub message_ids: Vec<MessageId>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
@@ -275,6 +296,52 @@ pub struct SetReadPositionRequest {
   pub message_id: MessageId,
 }
 
+/// `PUT /api/v1/conversations/{id}/reactions-seen`: reaction messages (to the caller's own messages)
+/// the caller saw; added to [`MyMembership::reactions_seen`]. At most
+/// [`MAX_REACTIONS_SEEN_PER_REQUEST`], all messages of the conversation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct MarkReactionsSeenRequest {
+  pub message_ids: Vec<MessageId>,
+}
+
+/// Reaction messages one [`MarkReactionsSeenRequest`] names at most.
+pub const MAX_REACTIONS_SEEN_PER_REQUEST: usize = 100;
+
+impl ReactionsSeen {
+  pub fn is_empty(&self) -> bool {
+    self.maybe_through.is_none() && self.message_ids.is_empty()
+  }
+
+  pub fn is_seen(&self, message: MessageId) -> bool {
+    self.maybe_through.is_some_and(|through| message <= through)
+      || self.message_ids.binary_search(&message).is_ok()
+  }
+
+  /// Adds seen messages and keeps at most `max_ids` of them one by one: beyond it `through` moves up
+  /// past the oldest ones, which then count as seen together with everything before them. Nothing
+  /// seen ever becomes unseen.
+  pub fn add(&mut self, seen: impl IntoIterator<Item = MessageId>, max_ids: usize) {
+    self.message_ids.extend(seen);
+    self.message_ids.sort_unstable();
+    self.message_ids.dedup();
+    let excess = self.message_ids.len().saturating_sub(max_ids);
+    if excess > 0 {
+      let dropped = self.message_ids[excess - 1];
+      self.maybe_through = self.maybe_through.max(Some(dropped));
+    }
+    let maybe_through = self.maybe_through;
+    self
+      .message_ids
+      .retain(|id| maybe_through.is_none_or(|through| *id > through));
+  }
+
+  /// Both states together, as [`Self::add`] keeps them (another device's state, a queued change).
+  pub fn merge(&mut self, other: &ReactionsSeen, max_ids: usize) {
+    self.maybe_through = self.maybe_through.max(other.maybe_through);
+    self.add(other.message_ids.iter().copied(), max_ids);
+  }
+}
+
 #[cfg(test)]
 mod tests {
   use super::*;
@@ -382,6 +449,63 @@ mod tests {
       maybe_importer_user_id: None,
       maybe_imported_through: None,
     }
+  }
+
+  mod reactions_seen {
+    use super::*;
+
+    #[test]
+    fn seen_messages_stay_seen_and_through_only_moves_up() {
+      let mut seen = ReactionsSeen::default();
+      seen.add([message_id(30), message_id(10), message_id(30)], 10);
+      assert_eq!(seen.message_ids, vec![message_id(10), message_id(30)]);
+      assert!(seen.is_seen(message_id(10)) && !seen.is_seen(message_id(20)));
+      let older = ReactionsSeen {
+        maybe_through: Some(message_id(5)),
+        message_ids: vec![message_id(20)],
+      };
+      seen.merge(&older, 10);
+      assert_eq!(seen.maybe_through, Some(message_id(5)));
+      assert!(seen.is_seen(message_id(20)) && seen.is_seen(message_id(30)));
+      let newer = ReactionsSeen {
+        maybe_through: Some(message_id(25)),
+        message_ids: Vec::new(),
+      };
+      seen.merge(&newer, 10);
+      seen.merge(&older, 10);
+      assert_eq!(seen.maybe_through, Some(message_id(25)));
+      assert_eq!(seen.message_ids, vec![message_id(30)]);
+    }
+
+    #[test]
+    fn beyond_the_cap_the_oldest_are_folded_into_through() {
+      let mut seen = ReactionsSeen::default();
+      seen.add((1..=5).map(message_id), 3);
+      assert_eq!(seen.maybe_through, Some(message_id(2)));
+      assert_eq!(
+        seen.message_ids,
+        vec![message_id(3), message_id(4), message_id(5)]
+      );
+    }
+
+    #[test]
+    fn the_wire_form_is_stable_and_older_servers_send_nothing() {
+      let seen = ReactionsSeen {
+        maybe_through: Some(message_id(7)),
+        message_ids: vec![message_id(9)],
+      };
+      assert_eq!(
+        serde_json::to_string(&seen).unwrap(),
+        r#"{"through_message_id":"7","message_ids":["9"]}"#
+      );
+      let membership: MyMembership =
+        serde_json::from_str(r#"{"role":"member","notification_level":"all","is_favorite":false}"#).unwrap();
+      assert!(membership.reactions_seen.is_empty());
+    }
+  }
+
+  fn message_id(raw: i64) -> MessageId {
+    MessageId::from_snowflake(Snowflake::new(raw).unwrap())
   }
 
   fn user_id(raw: i64) -> UserId {

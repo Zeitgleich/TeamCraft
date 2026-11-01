@@ -80,3 +80,17 @@ private fun continues(previous: Message, message: Message): Boolean =
     previous.maybeSystemEvent == null &&
     message.maybeSystemEvent == null &&
     message.sentAt - previous.sentAt in 0..GROUP_WINDOW_MS
+
+/**
+ * The messages among the rows on screen (`visible`, indices into `items`) whose reactions wait
+ * unseen (`waiting`), and not already `reported`: they are seen now (issue #1009).
+ */
+fun reactionsInView(items: List<FeedItem>, visible: List<Int>, waiting: List<String>, reported: Set<String>): List<String> =
+  visible
+    .mapNotNull { (items.getOrNull(it) as? FeedItem.Entry)?.message?.id }
+    .filter { it in waiting && it !in reported }
+    .distinct()
+
+/** Where the message is among the rows, or `null` while it isn't loaded. */
+fun rowOf(items: List<FeedItem>, messageId: String): Int? =
+  items.indexOfFirst { it is FeedItem.Entry && it.message.id == messageId }.takeIf { it >= 0 }

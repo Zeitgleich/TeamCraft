@@ -2,8 +2,9 @@ use serde_json::json;
 use teamcraft_db::{ConversationMember, MembershipChanges};
 use teamcraft_proto::{
   AddConversationMemberRequest, ChannelRole, ConversationId, ConversationMemberResponse,
-  ConversationVisibility, GatewayEvent, ListConversationMembersResponse, Permission, SetReadPositionRequest,
-  SpaceRole, SystemEventKind, UpdateConversationMemberRequest, UserId,
+  ConversationVisibility, GatewayEvent, ListConversationMembersResponse, MAX_REACTIONS_SEEN_PER_REQUEST,
+  MarkReactionsSeenRequest, Permission, SetReadPositionRequest, SpaceRole, SystemEventKind,
+  UpdateConversationMemberRequest, UserId,
 };
 use tracing::warn;
 
@@ -362,6 +363,47 @@ pub async fn set_read_position(
     request.message_id,
   )
   .await?;
+  Ok(())
+}
+
+/// Adds reaction messages the caller saw to their seen state (notifications.md, "Reactions to my
+/// messages"). The server can't tell reactions from other messages; it checks that every ID is a
+/// message of the conversation, and the state only grows.
+pub async fn mark_reactions_seen(
+  state: &AppState,
+  caller: &AuthenticatedUser,
+  id: ConversationId,
+  request: MarkReactionsSeenRequest,
+) -> Result<(), ApiError> {
+  let mut messages = request.message_ids;
+  if messages.is_empty() || messages.len() > MAX_REACTIONS_SEEN_PER_REQUEST {
+    return Err(ApiError::InvalidRequest(format!(
+      "name 1 to {MAX_REACTIONS_SEEN_PER_REQUEST} messages"
+    )));
+  }
+  messages.sort_unstable();
+  messages.dedup();
+  let access = load_conversation(state, caller, id).await?;
+  if !access.is_member() {
+    return Err(ApiError::Forbidden("not a member of this conversation".into()));
+  }
+  if state.database.count_messages_of(id, &messages).await? != messages.len() {
+    return Err(ApiError::InvalidRequest("unknown message".into()));
+  }
+  let max_ids = state.settings.get().limits.max_seen_reactions;
+  if state
+    .database
+    .add_reactions_seen(id, caller.user.id, &messages, max_ids)
+    .await?
+    .is_none()
+  {
+    return Err(ApiError::Forbidden("not a member of this conversation".into()));
+  }
+  // The user's other devices read the conversation again, with the new state.
+  state.hub.publish(
+    [caller.user.id],
+    &GatewayEvent::ConversationUpdate { conversation_id: id },
+  );
   Ok(())
 }
 

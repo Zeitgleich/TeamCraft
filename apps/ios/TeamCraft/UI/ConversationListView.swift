@@ -438,6 +438,11 @@ struct ConversationRow: View {
               .accessibilityLabel(Text("chat_muted"))
           }
           Spacer()
+          if let badge = rowBadge(
+            unreadCount: conversation.unreadCount, mentionCount: conversation.mentionCount, isMuted: conversation.isMuted)
+          {
+            RowCountBadge(badge: badge, isMuted: conversation.isMuted)
+          }
           if let preview = maybePreview {
             Text(listTime(preview.sentDate))
               .font(.caption)
@@ -450,11 +455,6 @@ struct ConversationRow: View {
             .foregroundStyle(isUnread ? Theme.text : Theme.textMuted)
             .lineLimit(1)
           Spacer()
-          if conversation.mentionCount > 0 {
-            CountBadge(count: conversation.mentionCount, tone: .mention)
-          } else if isUnread {
-            CountBadge(count: conversation.unreadCount, tone: conversation.badgeTone)
-          }
         }
       }
     }

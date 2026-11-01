@@ -472,6 +472,62 @@ mod channels {
     assert_eq!(view.body["my_membership"]["last_read_message_id"], message);
     app.stop().await;
   }
+
+  #[tokio::test]
+  async fn seen_reactions_only_grow_and_name_messages_of_the_conversation() {
+    let app = app!();
+    let (alice, carol) = (owner(), member("carol"));
+    let alice_device = register_device(&app, &alice).await;
+    let space = create_space(&app, &alice, "Team", "open").await;
+    app
+      .post(&carol, &format!("/spaces/{space}/join"), json!({}))
+      .await;
+    let channel = create_channel(&app, &alice, &space, "general", "public").await;
+    let elsewhere = create_channel(&app, &alice, &space, "elsewhere", "private").await;
+    app
+      .post(&carol, &format!("/conversations/{channel}/join"), json!({}))
+      .await;
+    let first = send(&app, &alice, &channel, &alice_device, 1).await;
+    let second = send(&app, &alice, &channel, &alice_device, 2).await;
+    let foreign = send(&app, &alice, &elsewhere, &alice_device, 3).await;
+    let path = format!("/conversations/{channel}/reactions-seen");
+
+    let seen = app.put(&carol, &path, json!({"message_ids": [second]})).await;
+    assert_eq!(seen.status, StatusCode::NO_CONTENT, "{}", seen.body);
+    let again = app
+      .put(&carol, &path, json!({"message_ids": [first, second]}))
+      .await;
+    assert_eq!(again.status, StatusCode::NO_CONTENT, "{}", again.body);
+    let view = app.get(&carol, &format!("/conversations/{channel}")).await;
+    assert_eq!(
+      view.body["my_membership"]["reactions_seen"]["message_ids"],
+      json!([first, second])
+    );
+
+    // Messages of another conversation, none or too many at once are refused; nothing changes.
+    for ids in [json!([foreign]), json!([]), json!(vec![first.clone(); 101])] {
+      let refused = app.put(&carol, &path, json!({ "message_ids": ids })).await;
+      assert_eq!(refused.status, StatusCode::BAD_REQUEST, "{}", refused.body);
+    }
+    let outsider = app
+      .put(
+        &carol,
+        &format!("/conversations/{elsewhere}/reactions-seen"),
+        json!({"message_ids": [foreign]}),
+      )
+      .await;
+    assert!(
+      matches!(outsider.status, StatusCode::FORBIDDEN | StatusCode::NOT_FOUND),
+      "{}",
+      outsider.status
+    );
+    let view = app.get(&carol, &format!("/conversations/{channel}")).await;
+    assert_eq!(
+      view.body["my_membership"]["reactions_seen"]["message_ids"],
+      json!([first, second])
+    );
+    app.stop().await;
+  }
 }
 
 mod retried_creation {

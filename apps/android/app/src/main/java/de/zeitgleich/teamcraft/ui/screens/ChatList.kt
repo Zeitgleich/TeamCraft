@@ -106,7 +106,6 @@ import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.unit.Dp
 import de.zeitgleich.teamcraft.ui.Section
-import de.zeitgleich.teamcraft.ui.BadgeTone
 import de.zeitgleich.teamcraft.ui.TabBadge
 import de.zeitgleich.teamcraft.ui.activityConversations
 import de.zeitgleich.teamcraft.ui.theme.Spacing
@@ -124,7 +123,6 @@ import de.zeitgleich.teamcraft.ui.channelSections
 import de.zeitgleich.teamcraft.ui.directSections
 import de.zeitgleich.teamcraft.ui.isDirect
 import de.zeitgleich.teamcraft.ui.listName
-import de.zeitgleich.teamcraft.ui.badgeTone
 import de.zeitgleich.teamcraft.ui.tabBadge
 import de.zeitgleich.teamcraft.ui.toggled
 import de.zeitgleich.teamcraft.ui.selectionActions
@@ -134,6 +132,9 @@ import uniffi.teamcraft_ffi.ConversationItem
 import uniffi.teamcraft_ffi.JoinRequestItem
 import uniffi.teamcraft_ffi.ConversationKind
 import uniffi.teamcraft_ffi.Presence
+import uniffi.teamcraft_ffi.RowBadge
+import uniffi.teamcraft_ffi.RowBadgeTone
+import uniffi.teamcraft_ffi.rowBadge
 
 /** Room below the last conversation so the New message button doesn't cover it. */
 private val FAB_CLEARANCE = 88.dp
@@ -910,6 +911,9 @@ private fun TitleLine(conversation: ConversationItem, maybeEntry: ChatListEntry?
         modifier = Modifier.padding(start = 4.dp).size(14.dp),
       )
     }
+    rowBadge(conversation.unreadCount, conversation.mentionCount, conversation.isMuted)?.let { badge ->
+      RowCount(badge, conversation.isMuted)
+    }
     maybeEntry?.let { entry ->
       Text(
         listTime(context, entry.preview.sentAt),
@@ -933,21 +937,6 @@ private fun PreviewLine(conversation: ConversationItem, maybeEntry: ChatListEntr
       style = MaterialTheme.typography.bodyMedium,
       color = if (isUnread) MaterialTheme.colorScheme.onSurface else MaterialTheme.colorScheme.onSurfaceVariant,
     )
-    if (conversation.mentionCount > 0u) {
-      val count = conversation.mentionCount.toInt()
-      CountPill(
-        "@$count",
-        BadgeTone.Mention,
-        pluralStringResource(R.plurals.chat_mentions, count, count),
-      )
-    } else if (isUnread) {
-      val count = conversation.unreadCount.toInt()
-      CountPill(
-        count.toString(),
-        conversation.badgeTone(),
-        pluralStringResource(R.plurals.chat_unread, count, count),
-      )
-    }
   }
 }
 
@@ -1052,22 +1041,30 @@ private fun presenceLabel(presence: Presence): Int = when (presence) {
 /** A stable hue per name, so people are recognizable at a glance. */
 private fun avatarColor(name: String): Color = Color.hsl(((name.hashCode() % 360 + 360) % 360).toFloat(), 0.45f, 0.45f)
 
+/**
+ * The unread number next to a conversation's name (#897): count and tone come from the shared rule
+ * (`rowBadge`), red for a conversation that notifies and for mentions, grey for a muted one. The
+ * minimum width keeps the name from shifting while the count changes.
+ */
 @Composable
-private fun CountPill(text: String, tone: BadgeTone, description: String) {
-  val (background, textColor) = when (tone) {
-    BadgeTone.Mention -> LocalTeamCraftColors.current.badge to LocalTeamCraftColors.current.chromeText
-    BadgeTone.Unread -> MaterialTheme.colorScheme.surfaceContainerHighest to MaterialTheme.colorScheme.onSurfaceVariant
-  }
-  Text(
-    text,
-    color = textColor,
-    style = MaterialTheme.typography.labelSmall,
+private fun RowCount(badge: RowBadge, isMuted: Boolean) {
+  val colors = LocalTeamCraftColors.current
+  val description = pluralStringResource(
+    // A red badge in a muted conversation counts only its mentions.
+    if (isMuted && badge.tone == RowBadgeTone.RED) R.plurals.chat_mentions else R.plurals.chat_unread,
+    badge.count.toInt(),
+    badge.count.toInt(),
+  )
+  Badge(
+    containerColor = if (badge.tone == RowBadgeTone.RED) colors.badge else MaterialTheme.colorScheme.surfaceContainerHighest,
+    contentColor = if (badge.tone == RowBadgeTone.RED) colors.chromeText else MaterialTheme.colorScheme.onSurfaceVariant,
     modifier = Modifier
       .padding(start = 8.dp)
-      .background(background, RoundedCornerShape(10.dp))
-      .padding(horizontal = 7.dp, vertical = 2.dp)
+      .widthIn(min = 24.dp)
       .semantics { contentDescription = description },
-  )
+  ) {
+    Text(badge.label, maxLines = 1, style = MaterialTheme.typography.labelSmall)
+  }
 }
 
 /** The sidebar's markers: `#` public, lock-like `◆` private, `@` direct. */
