@@ -697,6 +697,13 @@ and the importer adds them with the history when they do (it keeps running, `tea
 Pre-provisioned accounts are ordinary accounts: the identity provider sync deactivates them like
 any other.
 
+**Guests.** Guests otherwise see history only from their join on. In the channels, DMs and notes the
+import made, the import device shares the history with the guests the mapping names there too, while
+the policy's date runs (e2ee.md §4.10, "Guests in imported conversations"). Nobody else shares
+history with a guest, and in a channel merged into, guests keep seeing it from their join on. So
+guests can stay guests at the identity provider during the import; somebody made a member for the
+import and switched back to guest later keeps what they got.
+
 **The import account in DMs.** Clients leave it out of a DM's name and member list and show the
 banner of e2ee.md §4.10 instead; elsewhere it is an ordinary admin account.
 
