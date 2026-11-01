@@ -109,7 +109,9 @@ mod scheduling {
     );
     assert_eq!(meeting["has_lobby"], true);
     assert_eq!(meeting["organizer_user_id"], alice_id.as_str());
-    assert_eq!(meeting["join_url"], format!("{BASE_URL}/meeting/{id}").as_str());
+    // The link names an unguessable token, not the meeting's ID (#987).
+    let token = link_token(meeting);
+    assert_ne!(token, id);
     let attendees = meeting["attendees"].as_array().unwrap();
     assert_eq!(attendees.len(), 2);
     assert!(attendees.iter().all(|a| a["rsvp"] == "needs_action"));
@@ -138,7 +140,7 @@ mod scheduling {
     assert!(ics.contains(&format!("UID:{id}@chat.example.com")), "{ics}");
     assert!(ics.contains("DTSTART:20300101T090000Z") && ics.contains("DTEND:20300101T100000Z"));
     assert!(ics.contains("SUMMARY:Sprint review"));
-    assert!(ics.contains(&format!("URL:{BASE_URL}/meeting/{id}")));
+    assert!(ics.contains(&format!("URL:{BASE_URL}/meeting/{token}")), "{ics}");
     assert!(ics.contains("mailto:gus@example.org") && ics.contains("mailto:bob@example.com"));
     assert!(
       ics.contains("ORGANIZER;CN=\"alice\":mailto:alice@example.com"),
@@ -813,7 +815,7 @@ mod invitations {
   }
 
   #[tokio::test]
-  async fn invitees_get_an_imip_request_and_externals_a_personal_link() {
+  async fn invitees_get_an_imip_request_with_the_meeting_link() {
     let (app, _, mailer) = mail_app!();
     let (alice, bob) = (owner(), member("bob"));
     let bob_id = user_id(&app, &bob).await;
@@ -851,18 +853,12 @@ mod invitations {
         mail.ics.contains("METHOD:REQUEST") && mail.ics.contains(&format!("UID:{id}@chat.example.com"))
       );
     }
-    // Members join with their account, externals with a personal link that carries a token.
-    assert!(
-      to_bob.text.contains(&format!("Join: {BASE_URL}/meeting/{id}\n")),
-      "{}",
-      to_bob.text
-    );
-    assert!(
-      to_gus.text.contains(&format!("{BASE_URL}/meeting/{id}#invite=")),
-      "{}",
-      to_gus.text
-    );
-    assert!(!to_bob.text.contains("#invite="));
+    // Everyone gets the meeting's one link (#987): members sign in on it, externals knock.
+    let join = format!("Join: {BASE_URL}/meeting/{}", link_token(&reply.body));
+    for mail in [to_bob, to_gus] {
+      assert!(mail.text.contains(&join), "{}", mail.text);
+      assert!(!mail.text.contains("#invite="), "{}", mail.text);
+    }
     app.stop().await;
   }
 
@@ -929,14 +925,15 @@ mod invitations {
     let link = |mail: &teamcraft_server::meetings::mailer::OutgoingMail| {
       mail
         .text
-        .split("#invite=")
-        .nth(1)
-        .map(|t| t.lines().next().unwrap().to_owned())
+        .lines()
+        .find_map(|line| line.strip_prefix("Join: "))
+        .map(str::to_owned)
     };
     let first_link = sent[..before]
       .iter()
       .find(|m| m.to_address == "keep@example.org")
       .and_then(link);
+    assert!(first_link.is_some(), "the invitation names the link");
     assert_eq!(first_link, link(find("keep@example.org")));
 
     let before_cancel = mailer.sent().len();
@@ -1250,6 +1247,15 @@ mod retried_creation {
     assert_eq!(first.body["id"], second.body["id"]);
     app.stop().await;
   }
+}
+
+/// The token of a meeting response's `join_url` (`<base>/meeting/<token>#v=<fingerprint>`).
+fn link_token(meeting: &Value) -> String {
+  let url = meeting["join_url"].as_str().expect("a join link");
+  let rest = url
+    .strip_prefix(&format!("{BASE_URL}/meeting/"))
+    .unwrap_or_else(|| panic!("a meeting link on the base: {url}"));
+  rest.split('#').next().unwrap_or_default().to_owned()
 }
 
 fn meeting_updates(events: &[teamcraft_proto::GatewayEvent]) -> Vec<String> {
