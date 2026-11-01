@@ -38,11 +38,21 @@ serde_json.workspace = true
 rand_core = { version = "0.6.4", features = ["getrandom"] }
 thiserror.workspace = true
 tracing.workspace = true
+# The system log subscriber (logcat, os_log) with its level filter (issue #1067).
+tracing-subscriber = { version = "0.3", default-features = false, features = ["registry", "fmt", "std"] }
 # The engine thread runs the (non-Send) core on a current-thread runtime; calls run on a
 # multi-thread runtime of their own.
 tokio = { workspace = true, features = ["rt", "rt-multi-thread", "sync", "time", "macros"] }
 # Kotlin (and later Swift) bindings from proc-macros; Mozilla's generator, used by Firefox mobile.
 uniffi = "0.32.2"
+
+[target.'cfg(target_os = "android")'.dependencies]
+# Core tracing to logcat (liblog through ndk-sys), the maintained tracing layer for it.
+paranoid-android = "0.2.2"
+
+[target.'cfg(target_os = "ios")'.dependencies]
+# Core tracing to os_log (Console.app, `log stream`), the maintained tracing layer for it.
+tracing-oslog = "0.3.0"
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["rt", "macros", "time", "net", "io-util"] }

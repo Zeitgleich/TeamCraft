@@ -99,6 +99,8 @@ struct CoreFactory {
 /// on the UniFFI version, so this reads the description (`Network(message: ...)`) instead.
 enum CoreFailure: Equatable {
   case network, signedOut, notEnrolled, wrongPassphrase, storage, recoveryPending
+  /// The key backup needs more memory than the device has, is from a newer version, or is damaged.
+  case backupOutOfMemory, backupTooNew, backupDamaged
   /// A move of the call into a meeting room didn't check out (docs/meetings.md): stay in the call.
   case callMoveRefused
   /// Device linking: the typed code is not the one on the new device (try again), or the last try failed.
@@ -117,6 +119,12 @@ enum CoreFailure: Equatable {
       self = .notEnrolled
     } else if name.hasPrefix("wrongpassphrase") {
       self = .wrongPassphrase
+    } else if name.hasPrefix("backupoutofmemory") {
+      self = .backupOutOfMemory
+    } else if name.hasPrefix("backuptoonew") {
+      self = .backupTooNew
+    } else if name.hasPrefix("backupdamaged") {
+      self = .backupDamaged
     } else if name.hasPrefix("storage") {
       self = .storage
     } else if name.hasPrefix("recoverypending") {
