@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE meeting_lobby SET is_by_link = false WHERE meeting_id = $1 AND state = 'waiting'",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int8"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "3054991f4517dfa6ab33e444f9f5717c6f916717a6c292118c376b3a5bddf925"
+}

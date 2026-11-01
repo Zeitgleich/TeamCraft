@@ -94,9 +94,10 @@ impl MeetingService {
     })
   }
 
-  /// The link members open to join; guests get personal links with a token.
-  pub fn join_url(&self, meeting: MeetingId) -> String {
-    format!("{}/meeting/{meeting}", self.base_url)
+  /// A meeting link on the service's base without its fragment: `handle` is the meeting's link
+  /// token (docs/meetings.md, "Links").
+  pub fn join_url(&self, handle: &str) -> String {
+    format!("{}/meeting/{handle}", self.base_url)
   }
 
   /// The iCalendar UID of a meeting.
@@ -139,11 +140,6 @@ impl MeetingService {
   /// Most guests one shared guest link lets into the lobby.
   pub fn max_shared_link_guests(&self) -> u32 {
     self.max_shared_link_guests
-  }
-
-  /// A guest join link (personal or shared): the token is in the fragment, which browsers never send to servers.
-  pub fn guest_join_url(&self, meeting: MeetingId, token: &str) -> String {
-    format!("{}#invite={token}", self.join_url(meeting))
   }
 
   /// Whether `presented` is the inbox handler's token (constant time); `None` if the endpoint is

@@ -1,24 +1,22 @@
-//! Meeting guests (e2ee.md §4.6, "Meeting guests", docs/meetings.md): the host side that checks a
-//! guest before their device joins the meeting chat's group, and the guest side that proves the
-//! link and anchors the organizer.
+//! Meeting guests (e2ee.md §4.6, "Meeting guests", docs/meetings.md): the organizer's side that
+//! lets a guest's own device into the meeting chat's group, and the guest's side that anchors the
+//! organizer.
 //!
-//! A guest link carries two values in its `#fragment`, which no server sees: a random secret made by
-//! the host's device that makes the link, and the organizer's identity key fingerprint. The guest
-//! proves the secret with a MAC over their user, identity key and name; the host's device checks it
-//! before it adds the guest, so the server can neither invent a guest nor swap a real guest's key.
-//! The guest accepts a group only if its founder carries the organizer's key from the link.
+//! A meeting link carries no secret (#987): `<base>/meeting/<token>#v=<fingerprint>`, the token
+//! only lets its holder knock, the fragment is the organizer's identity key fingerprint. The guest's
+//! page makes its own keys (an ephemeral device); an organizer's device adds that device to the
+//! group, which seals the group's keys to it in the welcome (a new epoch). The guest accepts a
+//! group only from a welcome sent by a device the organizer's key from the link certified.
 
-use base64::Engine;
-use base64::engine::general_purpose::URL_SAFE_NO_PAD;
-use rand_core::{OsRng, RngCore};
 use std::collections::BTreeMap;
 use teamcraft_crypto::backup::Argon2Settings;
 
-use teamcraft_crypto::guest_link::{GuestLinkSecret, key_code, key_code_matches};
+use rand_core::{OsRng, RngCore};
+use teamcraft_crypto::guest_link::key_code;
 use teamcraft_crypto::identity::IdentityPublicKey;
 use teamcraft_crypto::membership::IdentityDirectory;
 use teamcraft_crypto::secret::SecretBytes;
-use teamcraft_proto::{ConversationId, Id, MeetingId, UserId};
+use teamcraft_proto::{ConversationId, MeetingId, UserId};
 use zeroize::Zeroizing;
 
 use super::{Client, ClientSettings, EnrollmentOptions, EnrollmentSecret, PendingEnrollment};
@@ -29,15 +27,20 @@ use crate::error::{CoreError, GuestRefusal};
 use crate::records;
 use crate::store::{LocalStore, Table};
 
-const LINK_SECRET_PREFIX: &str = "guest-link-secret/";
-/// What the host's app appends to a guest link's `#fragment` (`k=<secret>&o=<fingerprint>`), kept
-/// for the UI to read once [`Client::prepare_guest_link`] made it.
+/// What a member's app appends to a meeting link's `#fragment` (`v=<fingerprint>`), kept for the
+/// UI to read once [`Client::prepare_guest_link`] made it.
 const LINK_FRAGMENT_PREFIX: &str = "guest-link-fragment/";
 const ORGANIZER_ANCHOR_PREFIX: &str = "guest-organizer-anchor/";
+/// The key code of a waiting guest's key as this device pinned it, for the lobby entry.
+const GUEST_KEY_CODE_PREFIX: &str = "guest-key-code/";
+/// The lobby setting of a meeting as the organizer chose it on this device (#987 review): only this
+/// record, never the server's `has_lobby`, lets the device admit guests of the link by itself.
+const LOBBY_RECORD_PREFIX: &str = "meeting-lobby-record/";
+/// The name of the organizer's fingerprint in a meeting link's fragment, and the name links of
+/// older apps used for it.
+pub const VERIFIER_KEY: &str = "v";
+pub const LEGACY_ORGANIZER_KEY: &str = "o";
 /// Marks the store of a guest's ephemeral device.
-/// The names of the values in a guest link's fragment, next to the server's `invite`.
-pub const LINK_SECRET_KEY: &str = "k";
-pub const ORGANIZER_KEY: &str = "o";
 const GUEST_DEVICE_KEY: &str = "guest-device";
 /// The guests this device let into meeting chats (a local record: the server's word about a user's
 /// kind is not the only thing that says somebody is a guest).
@@ -46,34 +49,6 @@ const ADMITTED_GUESTS_KEY: &str = "admitted-guests";
 /// end the host's app showed it. A guest still in the group by then is removed whatever the server
 /// lists (the server's removal event can be withheld).
 const GUEST_DEADLINES_PREFIX: &str = "guest-deadlines/";
-
-/// What a host's device puts into the fragment of a guest link next to the server's token.
-#[derive(Clone)]
-pub struct GuestLinkMaterial {
-  /// The link secret, base64url. Wiped on drop; never printed.
-  pub secret: Zeroizing<String>,
-  /// The organizer's identity key fingerprint (hex) as this device has it pinned.
-  pub organizer_fingerprint: String,
-}
-
-impl std::fmt::Debug for GuestLinkMaterial {
-  fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-    f.debug_struct("GuestLinkMaterial")
-      .field("secret", &"[redacted]")
-      .field("organizer_fingerprint", &self.organizer_fingerprint)
-      .finish()
-  }
-}
-
-/// What lets a host's device add an admitted guest.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum GuestAdmission {
-  /// The proof of the link secret the guest sent, checked with the secret this device holds.
-  Proof(Vec<u8>),
-  /// The host compared the guest's key code with the guest's screen and confirmed it. For a device
-  /// that did not make the link.
-  KeyCodeConfirmed(String),
-}
 
 impl PendingEnrollment {
   /// Enrolls the ephemeral device of a meeting guest: the normal enrollment (identity key, device
@@ -104,105 +79,59 @@ impl PendingEnrollment {
 }
 
 impl<A: ServerApi, S: LocalStore> Client<A, S> {
-  /// The secret and organizer fingerprint for a guest link to `meeting`. The secret is made on the
-  /// first call and kept for the meeting, so all guest links of this device check alike.
-  pub async fn guest_link_material(
-    &mut self,
-    conversation: ConversationId,
-    meeting: MeetingId,
-  ) -> Result<GuestLinkMaterial, CoreError> {
-    let response = self.api.conversation(conversation).await?;
-    let organizer = response
+  /// The fingerprint of the organizer's identity key as this device has it pinned: the `v` of the
+  /// meeting chat's link. Any member's device can give it.
+  pub async fn organizer_fingerprint(&mut self, conversation: ConversationId) -> Result<String, CoreError> {
+    let organizer = self
+      .api
+      .conversation(conversation)
+      .await?
       .maybe_organizer_user_id
       .ok_or(CoreError::NotAMeetingChat(conversation))?;
-    // Guests accept a welcome only from the organizer's devices, so only they make guest links.
-    if organizer != self.account.user_id {
-      return Err(CoreError::GuestRefused(GuestRefusal::NotOrganizer));
-    }
     let directory = self.pin_identities([organizer]).await?;
     let key = directory
       .pinned_identity(convert::user(organizer))
       .ok_or(CoreError::UnknownIdentity(organizer))?;
-    let secret = match self.link_secret(meeting)? {
-      Some(secret) => secret,
-      None => {
-        let secret = GuestLinkSecret::generate(&mut OsRng);
-        let encoded = Zeroizing::new(URL_SAFE_NO_PAD.encode(secret.expose_secret()));
-        records::put_json(
-          &self.store,
-          Table::SyncState,
-          &link_secret_key(meeting),
-          &*encoded,
-        )?;
-        secret
-      },
-    };
-    Ok(GuestLinkMaterial {
-      secret: Zeroizing::new(URL_SAFE_NO_PAD.encode(secret.expose_secret())),
-      organizer_fingerprint: key.fingerprint().to_string(),
-    })
+    Ok(key.fingerprint().to_string())
   }
 
-  /// Makes the secret and organizer fingerprint of a guest link to `meeting` and keeps them where
-  /// the UI reads them ([`guest_link_fragment`]).
+  /// Makes the fragment of the meeting link (`v=<fingerprint>`) and keeps it where the UI reads it
+  /// ([`guest_link_fragment`]).
   pub async fn prepare_guest_link(
     &mut self,
     conversation: ConversationId,
     meeting: MeetingId,
   ) -> Result<(), CoreError> {
-    let material = self.guest_link_material(conversation, meeting).await?;
-    let fragment = Zeroizing::new(format!(
-      "{LINK_SECRET_KEY}={}&{ORGANIZER_KEY}={}",
-      material.secret.as_str(),
-      material.organizer_fingerprint
-    ));
+    let fingerprint = self.organizer_fingerprint(conversation).await?;
     records::put_json(
       &self.store,
       Table::SyncState,
       &link_fragment_key(meeting),
-      &*fragment,
+      &format!("{VERIFIER_KEY}={fingerprint}"),
     )
   }
 
-  /// [`Self::let_guest_into_meeting_chat`] for a UI that has the guest's proof from the lobby entry
-  /// (or none).
-  pub async fn admit_guest(
-    &mut self,
-    conversation: ConversationId,
-    meeting: MeetingId,
-    guest: UserId,
-    display_name: &str,
-    maybe_proof: Option<Vec<u8>>,
-    access_ends_at_ms: i64,
-  ) -> Result<(), CoreError> {
-    let admission = GuestAdmission::Proof(maybe_proof.unwrap_or_default());
-    self
-      .let_guest_into_meeting_chat(
-        conversation,
-        meeting,
-        guest,
-        display_name,
-        &admission,
-        access_ends_at_ms,
-      )
-      .await
-  }
-
-  /// Lets an admitted guest's devices into the meeting chat's group, after the guest passed the
-  /// check of the link: the proof verifies against the identity key the server holds for them (and
-  /// that key is then pinned; a different one on the second look is refused), or the host confirmed
-  /// the key code. Always with history from the join on. `access_ends_at_ms` is when the guest's
-  /// access to the meeting ends (end plus grace, as the host's app shows it).
+  /// Lets an admitted guest's device into the meeting chat's group (organizer's devices only):
+  /// on the host's "admit", or by itself for a guest of the meeting link in a meeting without a
+  /// lobby. The identity key the server holds for the guest is pinned (a different one on a
+  /// second look is refused), the guest is noted as a guest of this chat until
+  /// `access_ends_at_ms` (end plus grace, as the host's app shows it), and the device is added
+  /// with a signed add, always with history from the join on: a new epoch whose welcome is sealed
+  /// to the guest's key package.
+  ///
+  /// `knock_fingerprint` is the fingerprint the guest's page reported with its device; the key the
+  /// server presents must have it. That binds the key to the knock, but the server relays both:
+  /// against a hostile server only comparing the key code with the guest's screen helps
+  /// ([`Self::prepare_guest_key_code`], e2ee.md §4.6).
   pub async fn let_guest_into_meeting_chat(
     &mut self,
     conversation: ConversationId,
-    meeting: MeetingId,
     guest: UserId,
-    display_name: &str,
-    admission: &GuestAdmission,
+    knock_fingerprint: &str,
     access_ends_at_ms: i64,
   ) -> Result<(), CoreError> {
     let organizer = self.api.conversation(conversation).await?.maybe_organizer_user_id;
+    // The guest accepts a welcome only from the organizer's devices (`v` in the link).
     if organizer != Some(self.account.user_id) {
       return Err(CoreError::GuestRefused(GuestRefusal::NotOrganizer));
     }
@@ -214,11 +143,16 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     let bytes = <[u8; 32]>::try_from(identity.public_key.as_slice())
       .map_err(|_| CoreError::Corrupt(format!("identity key of {guest} has the wrong size")))?;
     let key = IdentityPublicKey::from_bytes(bytes);
-    self.check_admission(meeting, guest, display_name, &key, admission)?;
-    // The key that was checked is the key that gets pinned.
     let directory = self.pin_identities([guest]).await?;
     if directory.pinned_identity(convert::user(guest)) != Some(key) {
       return Err(CoreError::GuestRefused(GuestRefusal::KeyChanged));
+    }
+    if !key
+      .fingerprint()
+      .to_string()
+      .eq_ignore_ascii_case(knock_fingerprint)
+    {
+      return Err(CoreError::GuestRefused(GuestRefusal::NotTheKnockingKey));
     }
     // Noted before the add: a guest is a guest here even if the server's user kind says otherwise,
     // and the guest is removed by `access_ends_at_ms` at the latest (e2ee.md §4.6).
@@ -226,25 +160,39 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     self.let_into_meeting_chat(conversation, guest).await
   }
 
-  /// The proof a guest sends the hosts: a MAC over their user, identity key and display name under
-  /// the link's secret (`secret` as in the link fragment).
-  pub fn guest_link_proof(
-    &self,
-    secret: &str,
-    meeting: MeetingId,
-    display_name: &str,
-  ) -> Result<Vec<u8>, CoreError> {
-    let secret = decode_secret(secret)?;
-    let proof = secret.prove(
-      meeting_number(meeting),
-      convert::user(self.account.user_id),
-      &self.account.identity_public_key(),
-      display_name,
-    );
-    Ok(proof.as_bytes().to_vec())
+  /// Pins a waiting guest's identity key as the server presents it and keeps its key code for the
+  /// lobby entry ([`guest_key_code`]): the host compares it with the guest's screen. Admitting later
+  /// adds only a guest with this very key (a swap is refused as a changed key).
+  pub async fn prepare_guest_key_code(&mut self, guest: UserId) -> Result<(), CoreError> {
+    let directory = self.pin_identities([guest]).await?;
+    let key = directory
+      .pinned_identity(convert::user(guest))
+      .ok_or(CoreError::GuestRefused(GuestRefusal::NotEnrolled))?;
+    records::put_json(
+      &self.store,
+      Table::SyncState,
+      &format!("{GUEST_KEY_CODE_PREFIX}{guest}"),
+      &key_code(&key),
+    )
   }
 
-  /// This guest's key code, for the host to compare when it can't check the proof.
+  /// Keeps the lobby setting the organizer chose for `meeting` on this device. Only this record
+  /// lets the device admit guests of the link by itself (when it says there is no lobby).
+  pub fn note_meeting_lobby(&self, meeting: MeetingId, has_lobby: bool) -> Result<(), CoreError> {
+    records::put_json(
+      &self.store,
+      Table::SyncState,
+      &format!("{LOBBY_RECORD_PREFIX}{meeting}"),
+      &has_lobby,
+    )
+  }
+
+  /// This device's identity key fingerprint (hex): what a guest's page reports with its device.
+  pub fn own_fingerprint(&self) -> String {
+    self.account.identity_public_key().fingerprint().to_string()
+  }
+
+  /// This guest's key code, shown on the guest's page for the host to compare.
   pub fn own_key_code(&self) -> String {
     key_code(&self.account.identity_public_key())
   }
@@ -379,63 +327,34 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     }
     Ok(())
   }
-
-  fn check_admission(
-    &self,
-    meeting: MeetingId,
-    guest: UserId,
-    display_name: &str,
-    key: &IdentityPublicKey,
-    admission: &GuestAdmission,
-  ) -> Result<(), CoreError> {
-    match admission {
-      GuestAdmission::Proof(proof) => {
-        if proof.is_empty() {
-          return Err(CoreError::GuestRefused(GuestRefusal::NoProof));
-        }
-        let secret = self
-          .link_secret(meeting)?
-          .ok_or(CoreError::GuestRefused(GuestRefusal::NoLinkSecret))?;
-        secret
-          .verify(
-            meeting_number(meeting),
-            convert::user(guest),
-            key,
-            display_name,
-            proof,
-          )
-          .map_err(|_| CoreError::GuestRefused(GuestRefusal::BadProof))
-      },
-      GuestAdmission::KeyCodeConfirmed(code) => {
-        if key_code_matches(key, code) {
-          Ok(())
-        } else {
-          Err(CoreError::GuestRefused(GuestRefusal::KeyCodeMismatch))
-        }
-      },
-    }
-  }
-
-  fn link_secret(&self, meeting: MeetingId) -> Result<Option<GuestLinkSecret>, CoreError> {
-    let maybe_encoded: Option<String> =
-      records::get_json(&self.store, Table::SyncState, &link_secret_key(meeting))?;
-    maybe_encoded.map(|encoded| decode_secret(&encoded)).transpose()
-  }
 }
 
-fn decode_secret(encoded: &str) -> Result<GuestLinkSecret, CoreError> {
-  let bytes = URL_SAFE_NO_PAD
-    .decode(encoded)
-    .map_err(|_| CoreError::GuestRefused(GuestRefusal::NoLinkSecret))?;
-  GuestLinkSecret::from_bytes(&bytes).map_err(|_| CoreError::GuestRefused(GuestRefusal::NoLinkSecret))
+/// The key code of a waiting guest's key as this device pinned it, once
+/// [`Client::prepare_guest_key_code`] made it.
+pub fn guest_key_code<S: LocalStore>(store: &S, guest: UserId) -> Option<String> {
+  records::get_json(
+    store,
+    Table::SyncState,
+    &format!("{GUEST_KEY_CODE_PREFIX}{guest}"),
+  )
+  .ok()
+  .flatten()
 }
 
-fn meeting_number(meeting: MeetingId) -> u64 {
-  // Snowflake IDs are never negative (`Id` refuses them).
-  u64::try_from(meeting.snowflake().get()).unwrap_or_default()
+/// Whether the organizer chose "no lobby" for `meeting` on this device: the only case in which the
+/// device admits guests of the link by itself. Unknown means no.
+pub fn is_open_by_own_record<S: LocalStore>(store: &S, meeting: MeetingId) -> bool {
+  records::get_json::<bool>(
+    store,
+    Table::SyncState,
+    &format!("{LOBBY_RECORD_PREFIX}{meeting}"),
+  )
+  .ok()
+  .flatten()
+    == Some(false)
 }
 
-/// The fragment a host's app appends to a guest link, if [`Client::prepare_guest_link`] made it.
+/// The fragment a member's app appends to the meeting link, if [`Client::prepare_guest_link`] made it.
 pub fn guest_link_fragment<S: LocalStore>(store: &S, meeting: MeetingId) -> Option<String> {
   records::get_json(store, Table::SyncState, &link_fragment_key(meeting))
     .ok()
@@ -448,10 +367,6 @@ fn link_fragment_key(meeting: MeetingId) -> String {
 
 fn deadlines_key(conversation: ConversationId) -> String {
   format!("{GUEST_DEADLINES_PREFIX}{conversation}")
-}
-
-fn link_secret_key(meeting: MeetingId) -> String {
-  format!("{LINK_SECRET_PREFIX}{meeting}")
 }
 
 fn organizer_anchor_key(conversation: ConversationId) -> String {

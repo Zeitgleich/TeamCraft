@@ -9,6 +9,9 @@ use std::sync::Arc;
 
 use chrono::{Datelike, TimeZone, Utc};
 use chrono_tz::Tz;
+use rand_core::OsRng;
+use teamcraft_crypto::identity::IdentityPublicKey;
+use teamcraft_crypto::meeting_link::MeetingLinkToken;
 use teamcraft_db::{
   AttendeeDiff, AttendeeKey, MeetingChanges, NewAttendee, NewConversation, NewMeeting, StoredAttendee,
   StoredMeeting,
@@ -233,8 +236,11 @@ pub async fn list_meetings(
   );
   let mut meetings = Vec::with_capacity(stored.len());
   let mut zones: HashMap<UserId, Tz> = HashMap::new();
+  // One query for the links of all listed meetings, one brand and key per organizer (#987 review).
+  let mut links = LinkCache::for_meetings(state, &stored).await?;
   for meeting in &stored {
-    let response = respond(state, service, meeting, Vec::new()).await?;
+    let join_url = links.link(state, service, meeting).await?;
+    let response = respond_with_link(state, meeting, Vec::new(), join_url).await?;
     let Some(recurrence) = response.maybe_recurrence.clone() else {
       meetings.push(response);
       continue;
@@ -584,6 +590,33 @@ pub async fn restore_meeting(
   })
 }
 
+/// Makes the meeting's link anew (organizer only), in one transaction: a new token, so the old link
+/// names nothing any more; the shared guest link and every unredeemed personal link of the meeting
+/// are revoked; guests still waiting lose the "came with the link" mark and wait for a click.
+/// Guests already let in stay. The invitees get an update with the new link.
+pub async fn renew_link(
+  state: &AppState,
+  caller: &AuthenticatedUser,
+  id: MeetingId,
+) -> Result<MeetingResponse, ApiError> {
+  let service = service_of(state)?;
+  let meeting = organizer_meeting(state, caller, id).await?;
+  let token = MeetingLinkToken::generate(&mut OsRng);
+  state.database.renew_meeting_link(id, token.as_str()).await?;
+  // The new link must reach the calendar, but a calendar that is down doesn't undo the new link.
+  if let Err(error) = sync_calendar(state, service, &meeting).await {
+    warn!(%error, meeting_id = %id, "updating the calendar event with the new link failed");
+  }
+  announce(state, &meeting).await?;
+  let attendees = state.database.list_attendees(id).await?;
+  let undelivered = if meeting.kind == MeetingKind::Scheduled.as_str() {
+    send_invitations(state, service, &meeting, MailKind::Update, &attendees, None).await?
+  } else {
+    Vec::new()
+  };
+  respond(state, service, &meeting, undelivered).await
+}
+
 /// Takes a cancelled meeting off everybody's lists (organizer only); its chat stays.
 pub async fn hide_meeting(
   state: &AppState,
@@ -811,7 +844,7 @@ async fn sync_calendar(
     return Ok(());
   }
   let brand = organizer_brand(state, meeting).await?;
-  let join_url = join_url_on(service, &brand, meeting.id);
+  let join_url = meeting_link(state, service, &brand, meeting).await?;
   let event = event_for(state, service, &brand, meeting, join_url).await?;
   let ics = ical::render_event(&event.data(), None);
   calendar
@@ -938,7 +971,8 @@ enum MailKind {
 }
 
 /// Sends the iMIP e-mail of `kind` to the attendees that have an address and returns the addresses
-/// it could not be sent to. External invitees get a personal join link; the others the member link.
+/// it could not be sent to. Everybody gets the meeting link, the same one "Copy link" gives
+/// (docs/meetings.md, "Links").
 /// With `maybe_occurrence` the mail is about the occurrence of the series starting then.
 async fn send_invitations(
   state: &AppState,
@@ -967,6 +1001,7 @@ async fn send_invitations(
   .await?;
   let organizer_name = names.get(&meeting.organizer).cloned().unwrap_or_default();
   let brand = organizer_brand(state, meeting).await?;
+  let join_url = meeting_link(state, service, &brand, meeting).await?;
   let mut undelivered = Vec::new();
   // The instance's mail identity is not for bulk mail: an organizer has an hourly budget. What
   // exceeds it counts as undelivered (the invitees still see the meeting in the app).
@@ -1001,10 +1036,6 @@ async fn send_invitations(
     else {
       continue;
     };
-    let join_url = match attendee.maybe_user {
-      Some(_) => join_url_on(service, &brand, meeting.id),
-      None => personal_join_url(state, service, &brand, meeting, &address).await?,
-    };
     let texts = &state.settings.get().meeting_mail.texts;
     let shown = match maybe_occurrence {
       Some(starts_at) => StoredMeeting {
@@ -1015,7 +1046,7 @@ async fn send_invitations(
       None => meeting.clone(),
     };
     let (subject, text, method, status) = compose(texts, &shown, kind, &organizer_name, &join_url);
-    let event = event_for(state, service, &brand, meeting, join_url).await?;
+    let event = event_for(state, service, &brand, meeting, join_url.clone()).await?;
     let mut data = event.data_with_status(status);
     if let Some(recurrence_id) = maybe_occurrence {
       data.starts_at = shown.starts_at;
@@ -1043,31 +1074,12 @@ async fn send_invitations(
   Ok(undelivered)
 }
 
-/// The personal link for an external invitee: one open invite per address and meeting.
-async fn personal_join_url(
-  state: &AppState,
-  service: &MeetingService,
-  brand: &Brand,
-  meeting: &StoredMeeting,
-  email: &str,
-) -> Result<String, ApiError> {
-  let invite = state
-    .database
-    .ensure_email_invite(meeting.id, email, state.next_id()?, meeting.organizer)
-    .await?;
-  let token = service
-    .tokens()
-    .sign_invite(invite, meeting.id)
-    .map_err(|error| ApiError::Internal(error.to_string()))?;
-  Ok(format!(
-    "{}#invite={token}",
-    join_url_on(service, brand, meeting.id)
-  ))
-}
-
 /// The brand meeting mail goes out as: the organizer's home brand (their e-mail domain), else the
 /// default brand.
-async fn organizer_brand(state: &AppState, meeting: &StoredMeeting) -> Result<Arc<Brand>, ApiError> {
+pub(super) async fn organizer_brand(
+  state: &AppState,
+  meeting: &StoredMeeting,
+) -> Result<Arc<Brand>, ApiError> {
   let emails = state.database.get_user_emails(&[meeting.organizer]).await?;
   let brands = state.brands.current();
   Ok(Arc::clone(
@@ -1077,14 +1089,112 @@ async fn organizer_brand(state: &AppState, meeting: &StoredMeeting) -> Result<Ar
   ))
 }
 
-/// The join link on the brand's own host, or the service's base when the brand has none.
-fn join_url_on(service: &MeetingService, brand: &Brand, meeting: MeetingId) -> String {
+/// The meeting's link on the organizer's brand's host (or the service's base when the brand has
+/// none): `<origin>/meeting/<token>#v=<fingerprint>`, the fingerprint of the organizer's identity
+/// key as this server holds it (e2ee.md §4.6, "Meeting guests"). Without an identity key the link
+/// has no fragment. Mails, the calendar event and the API's `join_url` all carry this link.
+pub(super) async fn meeting_link(
+  state: &AppState,
+  service: &MeetingService,
+  brand: &Brand,
+  meeting: &StoredMeeting,
+) -> Result<String, ApiError> {
+  let token = link_token(state, meeting.id).await?;
+  let maybe_fingerprint = organizer_fingerprint(state, meeting.organizer).await?;
+  Ok(compose_link(service, brand, &token, maybe_fingerprint.as_deref()))
+}
+
+fn compose_link(
+  service: &MeetingService,
+  brand: &Brand,
+  token: &str,
+  maybe_fingerprint: Option<&str>,
+) -> String {
   let origin = brand.origin();
-  if origin.is_empty() {
-    service.join_url(meeting)
+  let mut link = if origin.is_empty() {
+    service.join_url(token)
   } else {
-    format!("{origin}/meeting/{meeting}")
+    format!("{origin}/meeting/{token}")
+  };
+  if let Some(fingerprint) = maybe_fingerprint {
+    link.push_str("#v=");
+    link.push_str(fingerprint);
   }
+  link
+}
+
+/// The meeting's link token, made now for a meeting that has none (one from before #987).
+/// The links of many meetings: their tokens in one query, the brand and identity key fingerprint
+/// once per organizer.
+struct LinkCache {
+  tokens: HashMap<MeetingId, String>,
+  organizers: HashMap<UserId, (Arc<Brand>, Option<String>)>,
+}
+
+impl LinkCache {
+  async fn for_meetings(state: &AppState, meetings: &[StoredMeeting]) -> Result<Self, ApiError> {
+    let ids: Vec<MeetingId> = meetings.iter().map(|meeting| meeting.id).collect();
+    Ok(Self {
+      tokens: state.database.meeting_links(&ids).await?,
+      organizers: HashMap::new(),
+    })
+  }
+
+  async fn link(
+    &mut self,
+    state: &AppState,
+    service: &MeetingService,
+    meeting: &StoredMeeting,
+  ) -> Result<String, ApiError> {
+    let token = match self.tokens.get(&meeting.id) {
+      Some(token) => token.clone(),
+      None => link_token(state, meeting.id).await?,
+    };
+    let (brand, maybe_fingerprint) = match self.organizers.get(&meeting.organizer) {
+      Some(known) => known.clone(),
+      None => {
+        let brand = organizer_brand(state, meeting).await?;
+        let maybe_fingerprint = organizer_fingerprint(state, meeting.organizer).await?;
+        self
+          .organizers
+          .insert(meeting.organizer, (Arc::clone(&brand), maybe_fingerprint.clone()));
+        (brand, maybe_fingerprint)
+      },
+    };
+    Ok(compose_link(
+      service,
+      &brand,
+      &token,
+      maybe_fingerprint.as_deref(),
+    ))
+  }
+}
+
+pub(super) async fn link_token(state: &AppState, meeting: MeetingId) -> Result<String, ApiError> {
+  let candidate = MeetingLinkToken::generate(&mut OsRng);
+  Ok(
+    state
+      .database
+      .ensure_meeting_link(meeting, candidate.as_str())
+      .await?,
+  )
+}
+
+/// The hex fingerprint of the organizer's identity key, if they have one.
+pub(super) async fn organizer_fingerprint(
+  state: &AppState,
+  organizer: UserId,
+) -> Result<Option<String>, ApiError> {
+  let Some(key) = state.database.get_identity_key(organizer).await? else {
+    return Ok(None);
+  };
+  let Ok(bytes) = <[u8; 32]>::try_from(key.public_key.as_slice()) else {
+    warn!(user_id = %organizer, "an identity key has the wrong size");
+    return Ok(None);
+  };
+  Ok(Some(
+    IdentityPublicKey::from_bytes(bytes).fingerprint().to_string(),
+  ))
 }
 
 /// Subject, text, iMIP method and event status of a mail from the configured templates.
@@ -1538,6 +1648,17 @@ async fn respond(
   meeting: &StoredMeeting,
   undelivered_invitations: Vec<String>,
 ) -> Result<MeetingResponse, ApiError> {
+  let brand = organizer_brand(state, meeting).await?;
+  let join_url = meeting_link(state, service, &brand, meeting).await?;
+  respond_with_link(state, meeting, undelivered_invitations, join_url).await
+}
+
+async fn respond_with_link(
+  state: &AppState,
+  meeting: &StoredMeeting,
+  undelivered_invitations: Vec<String>,
+  join_url: String,
+) -> Result<MeetingResponse, ApiError> {
   let attendees = state.database.list_attendees(meeting.id).await?;
   let names = presented_attendee_names(state, &attendees).await?;
   Ok(MeetingResponse {
@@ -1551,7 +1672,7 @@ async fn respond(
     has_lobby: meeting.has_lobby,
     organizer_user_id: meeting.organizer,
     conversation_id: meeting.conversation,
-    join_url: service.join_url(meeting.id),
+    join_url,
     maybe_recurrence: meeting
       .maybe_recurrence_rule
       .as_deref()

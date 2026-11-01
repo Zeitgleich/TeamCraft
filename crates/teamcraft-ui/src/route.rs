@@ -5,8 +5,10 @@
 //! `history.rs` connects it to the address bar and `AppState`.
 //!
 //! Only public object IDs go into paths (security.md): never names, message text, search queries
-//! or tokens. The message paths match the permalinks (`teamcraft:/c/{c}/m/{m}[/t/{t}]`).
+//! or tokens, except a meeting link's token, which is the meeting's public handle and only lets
+//! its holder knock (e2ee.md §4.6). The message paths match the permalinks (`teamcraft:/c/{c}/m/{m}[/t/{t}]`).
 
+use teamcraft_crypto::meeting_link::{MEETING_LINK_TOKEN_LEN, is_meeting_link_token};
 use teamcraft_proto::MeetingId;
 
 use crate::admin::AdminSection;
@@ -54,7 +56,7 @@ pub enum Route {
   /// `/meeting/{meeting}`: the link of a meeting (docs/meetings.md). It opens the meeting, or asks
   /// the hosts to let the member in; the address bar then shows `/meetings`. A guest link is the
   /// same path with `#invite=` and never gets here (`app.rs` shows the guest page first).
-  Meeting(MeetingId),
+  Meeting(MeetingHandle),
   /// `/people`: people and user groups.
   People,
   Saved,
@@ -66,6 +68,56 @@ pub enum Route {
   Settings(SettingsPage),
   /// `/admin/{section}`: the administration console.
   Admin(AdminSection),
+}
+
+/// What a meeting link's path names: the meeting's link token (since #987) or, in links from
+/// before, the meeting's ID (docs/meetings.md, "Links").
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MeetingHandle {
+  Id(MeetingId),
+  Token(LinkToken),
+}
+
+/// A meeting link's token, kept inline so routes stay `Copy`. Not secret: the server knows it.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub struct LinkToken([u8; MEETING_LINK_TOKEN_LEN]);
+
+impl MeetingHandle {
+  /// The handle of a path segment: a canonical ID, else a well-formed token.
+  pub fn parse(segment: &str) -> Option<Self> {
+    id(segment)
+      .map(Self::Id)
+      .or_else(|| LinkToken::parse(segment).map(Self::Token))
+  }
+
+  pub fn path_segment(&self) -> String {
+    match self {
+      Self::Id(meeting) => meeting.to_string(),
+      Self::Token(token) => token.as_str().to_owned(),
+    }
+  }
+}
+
+impl LinkToken {
+  pub fn parse(text: &str) -> Option<Self> {
+    if !is_meeting_link_token(text) {
+      return None;
+    }
+    <[u8; MEETING_LINK_TOKEN_LEN]>::try_from(text.as_bytes())
+      .ok()
+      .map(Self)
+  }
+
+  pub fn as_str(&self) -> &str {
+    // Invariant: only ASCII base64url text gets in (`parse`).
+    std::str::from_utf8(&self.0).unwrap_or_default()
+  }
+}
+
+impl std::fmt::Debug for LinkToken {
+  fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    write!(f, "LinkToken({})", self.as_str())
+  }
 }
 
 impl Route {
@@ -93,7 +145,7 @@ impl Route {
       ["activity"] => Some(Self::Activity),
       ["calls"] => Some(Self::Calls),
       ["meetings"] => Some(Self::Meetings),
-      ["meeting", meeting] => id(meeting).map(Self::Meeting),
+      ["meeting", meeting] => MeetingHandle::parse(meeting).map(Self::Meeting),
       ["people"] => Some(Self::People),
       ["saved"] => Some(Self::Saved),
       ["files"] => Some(Self::Files),
@@ -151,7 +203,7 @@ impl Route {
       Self::Activity => "/activity".to_owned(),
       Self::Calls => "/calls".to_owned(),
       Self::Meetings => "/meetings".to_owned(),
-      Self::Meeting(meeting) => format!("/meeting/{meeting}"),
+      Self::Meeting(meeting) => format!("/meeting/{}", meeting.path_segment()),
       Self::People => "/people".to_owned(),
       Self::Saved => "/saved".to_owned(),
       Self::Files => "/files".to_owned(),
@@ -621,7 +673,10 @@ mod tests {
       Route::Activity,
       Route::Calls,
       Route::Meetings,
-      Route::Meeting(id_from_raw(MEETING)),
+      Route::Meeting(MeetingHandle::Id(id_from_raw(MEETING))),
+      Route::Meeting(MeetingHandle::Token(
+        LinkToken::parse("AbCdEfGhIjKlMnOpQrStUvWxYz012345").unwrap(),
+      )),
       Route::People,
       Route::Saved,
       Route::Files,

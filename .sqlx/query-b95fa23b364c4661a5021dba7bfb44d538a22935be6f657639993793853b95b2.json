@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT user_id, guest_proof FROM meeting_lobby WHERE meeting_id = $1 AND guest_proof IS NOT NULL",
+  "query": "SELECT user_id, knock_fingerprint AS \"fingerprint!\" FROM meeting_lobby\n         WHERE meeting_id = $1 AND knock_fingerprint IS NOT NULL",
   "describe": {
     "columns": [
       {
@@ -16,12 +16,12 @@
       },
       {
         "ordinal": 1,
-        "name": "guest_proof",
-        "type_info": "Bytea",
+        "name": "fingerprint!",
+        "type_info": "Text",
         "origin": {
           "Table": {
             "table": "meeting_lobby",
-            "name": "guest_proof"
+            "name": "knock_fingerprint"
           }
         }
       }
@@ -36,5 +36,5 @@
       true
     ]
   },
-  "hash": "8b048367e012ee1184b72ae558283d517a3948fa4b693c5f31fdca9a94ffea18"
+  "hash": "b95fa23b364c4661a5021dba7bfb44d538a22935be6f657639993793853b95b2"
 }

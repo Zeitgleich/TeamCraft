@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE meeting_invites SET revoked_at = now()\n         WHERE meeting_id = $1 AND revoked_at IS NULL AND (is_shared OR redeemed_at IS NULL)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int8"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "3a78970f4ef84ba531d2db614fa1deeb3cbc8b2e71146b9a3697acf9af763c9a"
+}

@@ -880,6 +880,12 @@ fn remember_login_hint(sign_in: &SignIn, hint: String) {
   }
 }
 
+/// Whether this browser has a member signed in (or did before a reload): a meeting link opened
+/// then goes to the member's app, not to the guest page.
+pub fn is_signed_in_here() -> bool {
+  local_get(SIGNED_IN_HINT_KEY).is_some() || session_get(LOCAL_SESSION_KEY).is_some()
+}
+
 fn local_get(key: &str) -> Option<String> {
   crate::settings::load_string(key)
 }

@@ -25,6 +25,8 @@ use crate::state::AppState;
 
 /// More entries than this trigger a sweep of idle buckets.
 const SWEEP_THRESHOLD: usize = 50_000;
+/// Routes whose path carries a meeting link's token.
+const MEETING_LINK_PREFIX: &str = "/api/v1/meetings/link/";
 const API_CSP: &str = "default-src 'none'; frame-ancestors 'none'";
 /// How long an address the import account authenticated from passes the per-address limit
 /// (admin.md §3.8); each of its requests renews it.
@@ -256,7 +258,9 @@ pub async fn guard(State(state): State<AppState>, request: Request, next: Next) 
     Ok(()) => next.run(request).await,
     Err(error) => error.into_response(),
   };
-  if response.status() == StatusCode::UNAUTHORIZED {
+  // Unknown meeting link tokens answer 404; guessing them counts like a failed sign-in.
+  let is_guessed_link = response.status() == StatusCode::NOT_FOUND && path.starts_with(MEETING_LINK_PREFIX);
+  if response.status() == StatusCode::UNAUTHORIZED || is_guessed_link {
     limits.record_auth_failure(&ip, Instant::now());
   }
   add_headers(response.headers_mut(), settings.hsts);

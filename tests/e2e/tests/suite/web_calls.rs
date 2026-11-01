@@ -18,7 +18,7 @@ use teamcraft_proto::VideoTrackKind;
 use crate::web::{Rig, WEB_ORIGIN, sign_in_as_alice, wait_for_element, wait_for_text};
 
 /// Fake devices that answer `getUserMedia` without a prompt.
-const MEDIA_ARGS: [&str; 3] = [
+pub(crate) const MEDIA_ARGS: [&str; 3] = [
   "--use-fake-device-for-media-stream",
   "--use-fake-ui-for-media-stream",
   "--autoplay-policy=no-user-gesture-required",
@@ -162,7 +162,7 @@ async fn the_web_client_and_a_native_client_share_a_call() {
 
 /// A self-signed certificate valid for ten days: certificate hash pins (the native clients) accept
 /// at most two weeks.
-fn sfu_identity() -> rcgen::CertifiedKey<rcgen::KeyPair> {
+pub(crate) fn sfu_identity() -> rcgen::CertifiedKey<rcgen::KeyPair> {
   let mut params =
     rcgen::CertificateParams::new(vec!["localhost".to_owned(), "::1".to_owned()]).expect("certificate names");
   let now = time::OffsetDateTime::now_utc();
@@ -176,7 +176,7 @@ fn sfu_identity() -> rcgen::CertifiedKey<rcgen::KeyPair> {
 }
 
 /// Everything the page logs, for the failure output.
-async fn console_log(page: &Page) -> Arc<Mutex<Vec<String>>> {
+pub(crate) async fn console_log(page: &Page) -> Arc<Mutex<Vec<String>>> {
   let log = Arc::new(Mutex::new(Vec::new()));
   let sink = log.clone();
   let mut events = page
@@ -216,7 +216,7 @@ async fn privacy_code_on(page: &Page) -> String {
 }
 
 /// Clicks through the DOM: at some window widths the header's tabs cover the call buttons (#365).
-async fn click_selector(page: &Page, selector: &str) {
+pub(crate) async fn click_selector(page: &Page, selector: &str) {
   wait_for_element(page, selector).await;
   page
     .evaluate(format!("document.querySelector({selector:?}).click()"))

@@ -520,20 +520,29 @@ impl<C: ChatBackend + 'static> ChatBackend for Hybrid<C> {
   fn let_guest_into_meeting_chat(
     &self,
     conversation: ConversationId,
-    meeting: teamcraft_proto::MeetingId,
     guest: UserId,
-    display_name: String,
-    maybe_proof: Option<Vec<u8>>,
+    knock_fingerprint: String,
     access_ends_at_ms: i64,
   ) {
-    self.chat.let_guest_into_meeting_chat(
-      conversation,
-      meeting,
-      guest,
-      display_name,
-      maybe_proof,
-      access_ends_at_ms,
-    );
+    self
+      .chat
+      .let_guest_into_meeting_chat(conversation, guest, knock_fingerprint, access_ends_at_ms);
+  }
+
+  fn prepare_guest_key_code(&self, guest: UserId) {
+    self.chat.prepare_guest_key_code(guest);
+  }
+
+  fn guest_key_code(&self, guest: UserId) -> Option<String> {
+    self.chat.guest_key_code(guest)
+  }
+
+  fn note_meeting_lobby(&self, meeting: teamcraft_proto::MeetingId, has_lobby: bool) {
+    self.chat.note_meeting_lobby(meeting, has_lobby);
+  }
+
+  fn is_open_by_own_record(&self, meeting: teamcraft_proto::MeetingId) -> bool {
+    self.chat.is_open_by_own_record(meeting)
   }
 
   fn discard_removal(&self, conversation: ConversationId, user: UserId) {

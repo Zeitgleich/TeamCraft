@@ -94,25 +94,24 @@ pub async fn wipe_guest_store() -> Result<(), String> {
   call("core_wipe_guest", &json!({})).await
 }
 
+/// This guest device's identity key fingerprint and key code (browser only).
+pub async fn own_key() -> Result<OwnKey, String> {
+  call("core_own_key", &json!({})).await
+}
+
+/// A guest device's key as its page reports and shows it.
+#[derive(Clone, Debug, serde::Deserialize)]
+pub struct OwnKey {
+  pub fingerprint: String,
+  pub code: String,
+}
+
 /// A guest keeps the organizer's identity key fingerprint from the link for the meeting chat: its
-/// group is only joined if that key is in it (browser only).
+/// group is only joined from a welcome of that key's devices (browser only).
 pub async fn guest_anchor(conversation: ConversationId, fingerprint: &str) -> Result<(), String> {
   call(
     "core_guest_anchor",
     &json!({ "conversation": conversation, "fingerprint": fingerprint }),
-  )
-  .await
-}
-
-/// A guest's proof that they hold the link's secret (browser only).
-pub async fn guest_proof(
-  secret: &str,
-  meeting: teamcraft_proto::MeetingId,
-  display_name: &str,
-) -> Result<Vec<u8>, String> {
-  call(
-    "core_guest_proof",
-    &json!({ "secret": secret, "meeting": meeting, "display_name": display_name }),
   )
   .await
 }
@@ -1045,20 +1044,38 @@ impl ChatBackend for RemoteChat {
   fn let_guest_into_meeting_chat(
     &self,
     conversation: ConversationId,
-    meeting: teamcraft_proto::MeetingId,
     guest: UserId,
-    display_name: String,
-    maybe_proof: Option<Vec<u8>>,
+    knock_fingerprint: String,
     access_ends_at_ms: i64,
   ) {
     self.act(ChatAction::LetGuestIntoMeetingChat {
       conversation,
-      meeting,
       guest,
-      display_name,
-      maybe_proof: maybe_proof.map(Into::into),
+      knock_fingerprint,
       access_ends_at_ms,
     });
+  }
+
+  fn prepare_guest_key_code(&self, guest: UserId) {
+    self.act(ChatAction::PrepareGuestKeyCode { guest });
+  }
+
+  fn guest_key_code(&self, guest: UserId) -> Option<String> {
+    match self.ask(ChatQuery::GuestKeyCode { guest }) {
+      Some(ChatAnswer::Link { maybe_link }) => maybe_link,
+      _ => None,
+    }
+  }
+
+  fn note_meeting_lobby(&self, meeting: teamcraft_proto::MeetingId, has_lobby: bool) {
+    self.act(ChatAction::NoteMeetingLobby { meeting, has_lobby });
+  }
+
+  fn is_open_by_own_record(&self, meeting: teamcraft_proto::MeetingId) -> bool {
+    matches!(
+      self.ask(ChatQuery::IsOpenByOwnRecord { meeting }),
+      Some(ChatAnswer::Flag { value: true })
+    )
   }
 
   fn discard_removal(&self, conversation: ConversationId, user: UserId) {

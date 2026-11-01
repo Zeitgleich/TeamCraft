@@ -1,6 +1,8 @@
-//! The page behind a personal meeting link (`/meeting/<id>#invite=<token>`): a guest enters a name,
-//! waits in the lobby until a host lets them in, then is in. No account, no sign-in. The token is in
-//! the URL fragment, which the browser never sends to a server.
+//! The page behind a meeting link (`/meeting/<token>#v=<fingerprint>`, a personal
+//! `#invite=<token>` link, or an old `/meeting/<id>#invite=<token>`) for somebody without an
+//! account: a guest enters a name, waits in the lobby until the organizer's device lets them in,
+//! then is in. No sign-in. The link holds no secret: the page makes the guest's keys itself
+//! (e2ee.md §4.6, "Meeting guests").
 
 use std::rc::Rc;
 use std::time::Duration;
@@ -8,6 +10,7 @@ use std::time::Duration;
 use leptos::prelude::*;
 use leptos::task::spawn_local;
 use teamcraft_client_api::remote::CoreStatus;
+use teamcraft_crypto::guest_link::code_of_fingerprint;
 use teamcraft_proto::{ConversationId, LobbyState, MeetingId, UserId};
 
 use crate::areas::{self, Place, lazy_area};
@@ -30,6 +33,8 @@ const CORE_PATIENCE: Duration = Duration::from_secs(20);
 const CORE_POLL: Duration = Duration::from_millis(300);
 /// The device name a guest's device shows in the member list.
 const DEVICE_NAME: &str = "Guest browser";
+/// The query a member's "sign in" adds to the meeting link, so the page shows the sign-in instead.
+pub const SIGN_IN_QUERY: &str = "sign-in";
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum GuestPhase {
@@ -45,10 +50,8 @@ enum GuestPhase {
 /// What went wrong, in terms the guest can act on.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum FailureKind {
-  /// The link was used, expired, cancelled or is not valid.
+  /// The link was used, expired, cancelled, made anew or is not valid.
   LinkUnusable,
-  /// The link has no key material: made by an older app, so the room could not be checked.
-  LinkIncomplete,
   /// The page could not set up its encryption.
   SetupFailed,
   Network,
@@ -58,6 +61,7 @@ enum FailureKind {
 #[derive(Clone)]
 struct Joined {
   guest_token: String,
+  meeting: MeetingId,
   conversation_id: ConversationId,
   auth: Rc<dyn Authenticator>,
 }
@@ -78,10 +82,22 @@ pub fn GuestJoinPage(link: GuestLink) -> impl IntoView {
     found
   };
   Effect::new(move |_| errors.follow(name_errors()));
-  let meeting = link.meeting;
+  // A member opens the same link; "sign in" shows them the sign-in, which comes back to it.
+  let sign_in_href = StoredValue::new(
+    web_sys::window()
+      .and_then(|window| window.location().pathname().ok())
+      .map(|path| format!("{path}?{SIGN_IN_QUERY}")),
+  );
+  let is_one_time = link.maybe_invite_token.is_some();
   let link = StoredValue::new(link);
   let joined = StoredValue::new_local(None::<Joined>);
   let is_device_ready = RwSignal::new(false);
+  // The codes the guest may compare out of band (#987 review): their own key's, which the hosts see
+  // on the lobby entry, and the organizer's from the link, which the organizer's app shows.
+  let codes = RwSignal::new(None::<(String, String)>);
+  let is_organizer_app_outdated = RwSignal::new(false);
+  // The fingerprint still to report with the knock, when the first report failed.
+  let unreported = StoredValue::new(None::<String>);
   crate::startup::first_view();
   // What an earlier guest page left in this browser (closed without "Leave") goes now.
   spawn_local(delete_stale_guest_store());
@@ -96,20 +112,14 @@ pub fn GuestJoinPage(link: GuestLink) -> impl IntoView {
         return;
       }
       let parts = link.get_value();
-      // A link without the key material can't be checked by anybody: the one-time link is not even
-      // used up (e2ee.md §4.6, "Meeting guests").
-      let (Some(secret), Some(organizer)) = (parts.maybe_secret, parts.maybe_organizer_fingerprint) else {
-        phase.set(GuestPhase::Failed(FailureKind::LinkIncomplete));
-        return;
-      };
       phase.set(GuestPhase::Joining);
-      // The link's secret and key stay in memory from here on, not in the address bar, the
-      // history or a bookmark made later.
+      // A one-time token stays in memory from here on, not in the address bar, the history or a
+      // bookmark made later.
       strip_link_fragment();
       let (client, config) = (client.clone(), config.clone());
       spawn_local(async move {
         let display_name = name.get_untracked().trim().to_owned();
-        let outcome = client.join(&parts.invite_token, &display_name).await;
+        let outcome = client.join(&parts, &display_name).await;
         let response = match outcome {
           Ok(response) => response,
           Err(error) => {
@@ -126,6 +136,7 @@ pub fn GuestJoinPage(link: GuestLink) -> impl IntoView {
         let is_gone = joined
           .try_set_value(Some(Joined {
             guest_token: response.guest_token.clone(),
+            meeting: response.meeting_id,
             conversation_id: response.conversation_id,
             auth: auth.clone(),
           }))
@@ -134,6 +145,10 @@ pub fn GuestJoinPage(link: GuestLink) -> impl IntoView {
           return;
         }
         phase.set_if_alive(GuestPhase::Waiting);
+        let organizer_fingerprint = parts
+          .maybe_organizer_fingerprint
+          .clone()
+          .or(response.maybe_organizer_fingerprint.clone());
         let setup = prepare_device(
           &client,
           &config,
@@ -141,14 +156,21 @@ pub fn GuestJoinPage(link: GuestLink) -> impl IntoView {
           &response.guest_token,
           response.user_id,
           response.conversation_id,
-          meeting,
-          &display_name,
-          &secret,
-          &organizer,
+          response.meeting_id,
+          // A link without `v` (mailed before #987) takes the server's word (e2ee.md §4.6).
+          organizer_fingerprint.as_deref(),
         )
         .await;
         match setup {
-          Ok(()) => is_device_ready.set_if_alive(true),
+          Ok((own_code, maybe_unreported)) => {
+            unreported.try_set_value(maybe_unreported);
+            let organizer_code = organizer_fingerprint
+              .as_deref()
+              .map(code_of_fingerprint)
+              .unwrap_or_default();
+            codes.set_if_alive(Some((own_code, organizer_code)));
+            is_device_ready.set_if_alive(true);
+          },
           Err(kind) => phase.set_if_alive(GuestPhase::Failed(kind)),
         }
       });
@@ -159,17 +181,30 @@ pub fn GuestJoinPage(link: GuestLink) -> impl IntoView {
     if phase.get_untracked() != GuestPhase::Waiting || !is_device_ready.get_untracked() {
       return;
     }
-    let Some(guest_token) =
-      joined.with_value(|joined| joined.as_ref().map(|joined| joined.guest_token.clone()))
-    else {
+    let Some((guest_token, meeting)) = joined.with_value(|joined| {
+      joined
+        .as_ref()
+        .map(|joined| (joined.guest_token.clone(), joined.meeting))
+    }) else {
       return;
     };
     let client = client.clone();
+    let maybe_fingerprint = unreported.get_value();
     spawn_local(async move {
+      if let Some(fingerprint) = maybe_fingerprint
+        && report_device(&client, meeting, &guest_token, &fingerprint).await
+      {
+        unreported.try_set_value(None);
+      }
       match client.lobby_state(meeting, &guest_token).await {
-        Ok(LobbyState::Admitted) => phase.set_if_alive(GuestPhase::Admitted),
-        Ok(LobbyState::Denied) => phase.set_if_alive(GuestPhase::Denied),
-        Ok(LobbyState::Waiting | LobbyState::Unknown(_)) => {},
+        Ok(answer) => {
+          is_organizer_app_outdated.set_if_alive(answer.is_organizer_app_outdated);
+          match answer.state {
+            LobbyState::Admitted => phase.set_if_alive(GuestPhase::Admitted),
+            LobbyState::Denied => phase.set_if_alive(GuestPhase::Denied),
+            LobbyState::Waiting | LobbyState::Unknown(_) => {},
+          }
+        },
         // A hiccup keeps waiting; a refused session ends it.
         Err(MeetingError::Refused { .. }) => {
           phase.set_if_alive(GuestPhase::Failed(FailureKind::LinkUnusable))
@@ -185,7 +220,7 @@ pub fn GuestJoinPage(link: GuestLink) -> impl IntoView {
         && let Some(joined) = joined.get_value()
       {
         let session = GuestSession {
-          meeting,
+          meeting: joined.meeting,
           conversation: joined.conversation_id,
           guest_token: joined.guest_token,
           auth: joined.auth,
@@ -219,6 +254,14 @@ pub fn GuestJoinPage(link: GuestLink) -> impl IntoView {
                       {move || i18n.t("guest-join")}
                     </button>
                   </div>
+                  {(!is_one_time)
+                    .then(|| sign_in_href.get_value())
+                    .flatten()
+                    .map(|href| view! {
+                      <p class="muted-text small">
+                        <a href=href>{move || i18n.t("guest-sign-in")}</a>
+                      </p>
+                    })}
                 </form>
               }
               .into_any()
@@ -230,7 +273,19 @@ pub fn GuestJoinPage(link: GuestLink) -> impl IntoView {
                   <span class="spinner" aria-hidden="true"></span>
                   <span>{move || i18n.t("guest-waiting")}</span>
                 </p>
+                {move || is_organizer_app_outdated.get().then(|| view! {
+                  <p role="alert">{move || i18n.t("guest-organizer-app-outdated")}</p>
+                })}
                 <p class="muted-text small">{move || i18n.t("guest-waiting-encryption")}</p>
+                {move || codes.get().map(|(own, organizer)| view! {
+                  <dl class="guest-codes">
+                    <dt>{move || i18n.t("guest-own-code")}</dt>
+                    <dd class="mono" translate="no">{own}</dd>
+                    <dt>{move || i18n.t("guest-organizer-code")}</dt>
+                    <dd class="mono" translate="no">{organizer}</dd>
+                  </dl>
+                  <p class="muted-text small">{move || i18n.t("guest-codes-hint")}</p>
+                })}
               }
               .into_any()
             },
@@ -244,7 +299,6 @@ pub fn GuestJoinPage(link: GuestLink) -> impl IntoView {
             GuestPhase::Failed(kind) => {
               let key = match kind {
                 FailureKind::LinkUnusable => "guest-link-unusable",
-                FailureKind::LinkIncomplete => "guest-link-incomplete",
                 FailureKind::SetupFailed => "guest-setup-failed",
                 FailureKind::Network => "guest-network",
               };
@@ -263,8 +317,10 @@ pub fn GuestJoinPage(link: GuestLink) -> impl IntoView {
 }
 
 /// Sets up the encryption of the guest's page while they wait: the client core opens and enrolls an
-/// ephemeral device (no passphrase, no backup), keeps the organizer's key from the link, and hands
-/// the hosts the proof that this guest holds the link (e2ee.md §4.6, "Meeting guests").
+/// ephemeral device (no passphrase, no backup; its keys are the guest's own), keeps the organizer's
+/// key from the link (or, for a link without one, the one the server names), and tells the
+/// hosts the device is ready, so an organizer's device can let it in (e2ee.md §4.6, "Meeting
+/// guests").
 #[allow(clippy::too_many_arguments)]
 async fn prepare_device(
   client: &GuestClient,
@@ -274,10 +330,8 @@ async fn prepare_device(
   user_id: UserId,
   conversation: ConversationId,
   meeting: MeetingId,
-  display_name: &str,
-  secret: &str,
-  organizer_fingerprint: &str,
-) -> Result<(), FailureKind> {
+  maybe_organizer_fingerprint: Option<&str>,
+) -> Result<(String, Option<String>), FailureKind> {
   configure_core(auth, config);
   let failed = |step: &str, error: String| {
     tracing::warn!(step, %error, "could not set up the guest's device");
@@ -301,22 +355,38 @@ async fn prepare_device(
       Err(error) => return Err(failed("core", error)),
     }
   }
-  remote_backend::guest_anchor(conversation, organizer_fingerprint)
+  // Without any fingerprint the device fails closed: it joins no group (e2ee.md §4.6).
+  if let Some(fingerprint) = maybe_organizer_fingerprint {
+    remote_backend::guest_anchor(conversation, fingerprint)
+      .await
+      .map_err(|error| failed("anchor", error))?;
+  }
+  let own = remote_backend::own_key()
     .await
-    .map_err(|error| failed("anchor", error))?;
-  let proof = remote_backend::guest_proof(secret, meeting, display_name)
-    .await
-    .map_err(|error| failed("proof", error))?;
-  client
-    .put_proof(meeting, guest_token, &proof)
-    .await
-    .map_err(|error| match error {
-      MeetingError::Auth(_) => FailureKind::Network,
-      other => failed("send proof", other.to_string()),
-    })
+    .map_err(|error| failed("own key", error))?;
+  // Reports the key's fingerprint with the knock; the organizer's device admits only that key. A
+  // failure keeps the guest waiting and is retried on the next poll, rather than failing the page.
+  let is_reported = report_device(client, meeting, guest_token, &own.fingerprint).await;
+  Ok((own.code, (!is_reported).then_some(own.fingerprint)))
 }
 
-/// Removes `#invite=…&k=…&o=…` from the address (history entry replaced, nothing reloads).
+/// Reports the guest's key fingerprint with the knock; whether the server took it.
+async fn report_device(
+  client: &GuestClient,
+  meeting: MeetingId,
+  guest_token: &str,
+  fingerprint: &str,
+) -> bool {
+  match client.device_ready(meeting, guest_token, fingerprint).await {
+    Ok(()) => true,
+    Err(error) => {
+      tracing::warn!(%error, "could not tell the hosts that the guest's device is ready");
+      false
+    },
+  }
+}
+
+/// Removes the fragment (`#invite=…&v=…`) from the address (history entry replaced, nothing reloads).
 fn strip_link_fragment() {
   let Some(window) = web_sys::window() else {
     return;

@@ -349,27 +349,16 @@ mod tests {
 /// Why a guest was not let into a meeting chat's group.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum GuestRefusal {
-  /// This device didn't make the guest link, so it has no secret to check the guest's proof with;
-  /// the host compares the key code instead.
-  #[error("this device holds no secret for the meeting's guest link")]
-  NoLinkSecret,
-  /// The guest sent no proof of the link secret.
-  #[error("the guest gave no proof that they hold the link")]
-  NoProof,
-  /// The proof doesn't match the guest's key and name: the server (or somebody without the link)
-  /// made this guest.
-  #[error("the guest's proof of the link does not match their key and name")]
-  BadProof,
-  /// The host's key code doesn't match the guest's identity key.
-  #[error("the key code does not match the guest's identity key")]
-  KeyCodeMismatch,
-  /// The server offers another identity key for the guest than the one that was checked.
+  /// The server offers another identity key for the guest than the one pinned before.
   #[error("the guest's identity key changed while they were let in")]
   KeyChanged,
-  /// Only the meeting organizer's devices make guest links and let guests into the encryption: a
-  /// guest accepts a welcome from nobody else.
+  /// Only the meeting organizer's devices let guests into the encryption: a guest accepts a
+  /// welcome from nobody else (the fingerprint in the link).
   #[error("only the organizer's devices can let guests in")]
   NotOrganizer,
+  /// The key the server presents for the guest is not the one their page reported with its device.
+  #[error("the guest's identity key is not the one their device reported")]
+  NotTheKnockingKey,
   /// The guest has not enrolled a device yet.
   #[error("the guest has no identity key yet")]
   NotEnrolled,

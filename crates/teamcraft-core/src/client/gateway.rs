@@ -592,11 +592,12 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       },
       GatewayEvent::KeyBagUpdate { .. } => Ok(()),
       // The UI reads the meetings itself (reminders, the meetings view); the mark tells it to now.
-      GatewayEvent::MeetingUpdate { .. } => {
+      // A knock too: the UI reads the lobbies with the list, and the organizer's device lets in
+      // guests of the meeting link by itself in meetings without a lobby (e2ee.md §4.6).
+      GatewayEvent::MeetingUpdate { .. } | GatewayEvent::LobbyJoin { .. } => {
         read_state::update_marks(&self.store, |marks| marks.meetings += 1)
       },
-      GatewayEvent::LobbyJoin { .. }
-      | GatewayEvent::GuestExpired { .. }
+      GatewayEvent::GuestExpired { .. }
       | GatewayEvent::OrgRecoveryUpdate { .. }
       | GatewayEvent::SystemEvent { .. }
       | GatewayEvent::UserGroupUpdate { .. }

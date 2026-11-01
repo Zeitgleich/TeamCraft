@@ -147,6 +147,24 @@
   text-align: center;
 }
 
+/* A waiting guest's key code and the organizer's, to compare out of band (#987). */
+.guest-codes {
+  display: grid;
+  grid-template-columns: auto auto;
+  justify-content: center;
+  gap: var(--space-1) var(--space-3);
+  margin: var(--space-4) 0 var(--space-2);
+}
+
+.guest-codes dt {
+  color: var(--text-muted);
+}
+
+.guest-codes dd {
+  margin: 0;
+  font-variant-numeric: tabular-nums;
+}
+
 /* The shared file's name on its download page. */
 .share-page-name {
   margin: var(--space-3) 0;

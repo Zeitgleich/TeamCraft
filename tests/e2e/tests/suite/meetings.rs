@@ -1,5 +1,5 @@
 //! Meetings: scheduling sends iMIP invitations (caught by Mailpit), an external guest joins with the
-//! personal link, waits in the lobby and is admitted.
+//! mailed meeting link, waits in the lobby and is admitted; a personal one-time link works once.
 
 use std::time::Duration;
 
@@ -43,7 +43,7 @@ async fn a_scheduled_meeting_invites_by_mail_and_an_external_guest_joins_through
   let meeting_id = meeting.id();
   let chat = meeting.body["conversation_id"].as_str().unwrap().to_owned();
 
-  // The invitation: an iMIP request with the calendar part and the personal join link.
+  // The invitation: an iMIP request with the calendar part and the meeting link (#987).
   let mail = mailpit.wait_for_mail_to(&guest_address, MAIL_TIMEOUT).await;
   assert_eq!(mail.subject, "Invitation: Customer call");
   assert!(mail.raw.contains("text/calendar"), "{}", mail.raw);
@@ -52,16 +52,16 @@ async fn a_scheduled_meeting_invites_by_mail_and_an_external_guest_joins_through
     "{}",
     mail.raw
   );
-  let invite_token = mail
+  let link_token = mail
     .text
-    .split("#invite=")
+    .split("/meeting/")
     .nth(1)
-    .and_then(|rest| rest.split_whitespace().next())
-    .unwrap_or_else(|| panic!("no personal link in the mail:\n{}", mail.text))
+    .and_then(|rest| rest.split(|c: char| c == '#' || c.is_whitespace()).next())
+    .unwrap_or_else(|| panic!("no meeting link in the mail:\n{}", mail.text))
     .to_owned();
   assert!(
-    mail.text.contains(&format!("/meeting/{meeting_id}")),
-    "{}",
+    !mail.text.contains(&format!("/meeting/{meeting_id}")),
+    "the meeting ID is no public handle: {}",
     mail.text
   );
 
@@ -77,28 +77,45 @@ async fn a_scheduled_meeting_invites_by_mail_and_an_external_guest_joins_through
     .await
     .expect(StatusCode::NO_CONTENT);
 
-  // The guest trades the one-time link for a session and waits in the lobby.
+  // The guest trades the link for a session and waits in the lobby.
   let joined = stack
     .request_with(
       None,
       Method::POST,
       "/meetings/join",
-      Some(json!({"invite_token": invite_token, "display_name": "Gus (customer)"})),
+      Some(json!({"link_token": link_token, "display_name": "Gus (customer)"})),
     )
     .await
     .expect(StatusCode::OK);
   assert_eq!(joined.body["lobby_state"], "waiting", "{}", joined.body);
   let guest_token = joined.body["guest_token"].as_str().unwrap().to_owned();
   let guest_id = joined.body["user_id"].as_str().unwrap().to_owned();
-  let reuse = stack
-    .request_with(
-      None,
-      Method::POST,
-      "/meetings/join",
-      Some(json!({"invite_token": invite_token, "display_name": "Somebody else"})),
+  // A personal one-time link works once.
+  let one_time = stack
+    .post(
+      &alice.tokens,
+      &format!("/meetings/{meeting_id}/guest-links"),
+      json!({}),
     )
-    .await;
-  assert!(!reuse.status.is_success(), "a link worked twice: {reuse:?}");
+    .await
+    .expect(StatusCode::CREATED);
+  let invite_token = one_time.body["join_url"]
+    .as_str()
+    .and_then(|url| url.split("#invite=").nth(1))
+    .and_then(|rest| rest.split('&').next())
+    .unwrap()
+    .to_owned();
+  for (name, should_work) in [("Ida", true), ("Somebody else", false)] {
+    let join = stack
+      .request_with(
+        None,
+        Method::POST,
+        "/meetings/join",
+        Some(json!({"invite_token": invite_token, "display_name": name})),
+      )
+      .await;
+    assert_eq!(join.status.is_success(), should_work, "{join:?}");
+  }
 
   // Until admitted the guest sees neither the chat nor the meeting.
   let before = stack
@@ -114,9 +131,12 @@ async fn a_scheduled_meeting_invites_by_mail_and_an_external_guest_joins_through
     .get(&alice.tokens, &format!("/meetings/{meeting_id}/lobby"))
     .await
     .expect(StatusCode::OK);
-  assert_eq!(
-    lobby.body["entries"][0]["user"]["id"],
-    guest_id.as_str(),
+  assert!(
+    lobby.body["entries"]
+      .as_array()
+      .unwrap()
+      .iter()
+      .any(|entry| entry["user"]["id"] == guest_id.as_str() && entry["is_by_link"] == true),
     "{}",
     lobby.body
   );

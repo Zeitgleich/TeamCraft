@@ -517,6 +517,8 @@ pub fn CallScreen(request: CallRequest) -> impl IntoView {
             <Show when=move || host_open.get() fallback=|| ()>
               <crate::components::meeting_controls::HostControls meeting=meeting conversation=request.conversation />
             </Show>
+            // Who waits to be let in, while the host is in the call (it shows only when somebody does).
+            <crate::components::meetings_view::Lobby meeting=meeting />
           </div>
         })
       }}

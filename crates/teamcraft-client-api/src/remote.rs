@@ -925,12 +925,16 @@ pub enum ChatAction {
   },
   LetGuestIntoMeetingChat {
     conversation: ConversationId,
-    meeting: teamcraft_proto::MeetingId,
     guest: UserId,
-    display_name: String,
-    #[serde(rename = "proof", default, skip_serializing_if = "Option::is_none")]
-    maybe_proof: Option<Base64Bytes>,
+    knock_fingerprint: String,
     access_ends_at_ms: i64,
+  },
+  PrepareGuestKeyCode {
+    guest: UserId,
+  },
+  NoteMeetingLobby {
+    meeting: teamcraft_proto::MeetingId,
+    has_lobby: bool,
   },
   SetBookmarks {
     conversation: ConversationId,
@@ -1234,19 +1238,12 @@ impl ChatAction {
       } => backend.prepare_guest_link(conversation, meeting),
       Self::LetGuestIntoMeetingChat {
         conversation,
-        meeting,
         guest,
-        display_name,
-        maybe_proof,
+        knock_fingerprint,
         access_ends_at_ms,
-      } => backend.let_guest_into_meeting_chat(
-        conversation,
-        meeting,
-        guest,
-        display_name,
-        maybe_proof.map(|proof| proof.as_slice().to_vec()),
-        access_ends_at_ms,
-      ),
+      } => backend.let_guest_into_meeting_chat(conversation, guest, knock_fingerprint, access_ends_at_ms),
+      Self::PrepareGuestKeyCode { guest } => backend.prepare_guest_key_code(guest),
+      Self::NoteMeetingLobby { meeting, has_lobby } => backend.note_meeting_lobby(meeting, has_lobby),
       Self::SetBookmarks {
         conversation,
         bookmarks,
@@ -1327,6 +1324,12 @@ pub enum ChatQuery {
   },
   /// The `#fragment` values of a guest link to the meeting, once the core made them.
   GuestLinkFragment {
+    meeting: teamcraft_proto::MeetingId,
+  },
+  GuestKeyCode {
+    guest: UserId,
+  },
+  IsOpenByOwnRecord {
     meeting: teamcraft_proto::MeetingId,
   },
   MembershipIssues {
@@ -1597,6 +1600,12 @@ impl ChatQuery {
       },
       Self::GuestLinkFragment { meeting } => ChatAnswer::Link {
         maybe_link: backend.guest_link_fragment(meeting),
+      },
+      Self::GuestKeyCode { guest } => ChatAnswer::Link {
+        maybe_link: backend.guest_key_code(guest),
+      },
+      Self::IsOpenByOwnRecord { meeting } => ChatAnswer::Flag {
+        value: backend.is_open_by_own_record(meeting),
       },
       Self::IsWaitingForDevice { conversation } => ChatAnswer::Flag {
         value: backend.is_waiting_for_device(conversation),

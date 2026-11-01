@@ -23,7 +23,7 @@ the change, and people taken off the list are removed from the group.
 | Meeting            | `scheduled` (planned, in the calendar, mailed) or `instant` ("Meet now", shared by link)         |
 | Meeting chat       | A conversation of kind `meeting` (no space). Organizer = admin, invited users = members          |
 | Invitee            | A TeamCraft user or an external person identified by e-mail; carries the answer (`rsvp`)         |
-| Meeting link       | `<base>/meeting/<id>` for members; no credential (see "Links")                                   |
+| Meeting link       | `<base>/meeting/<token>#v=<fingerprint>` for everybody; lets the holder knock (see "Links")       |
 | Invite (guest)     | A personal one-time join link for somebody without an account (`meeting_invites`)                |
 | Shared guest link  | One link per meeting for many guests (`meeting_invites.is_shared`); revocable, ends with it      |
 | Lobby              | Guests and knocking members wait until a host (organizer or chat admin) admits them              |
@@ -32,8 +32,8 @@ the change, and people taken off the list are removed from the group.
 
 1. **Schedule** (`POST /meetings`): chat and invitees are stored, the iCalendar event with the join
    link is written to the configured CalDAV calendar (the meeting is rolled back if the calendar
-   rejects it) and every invitee with an address gets an iMIP e-mail (REQUEST). External invitees get
-   a personal join link in it. With "Notetaker joins the calls" (the first entry of the people to
+   rejects it) and every invitee with an address gets an iMIP e-mail (REQUEST). The mail, the
+   calendar event (`URL`, `LOCATION`, description) and "Copy link" carry the same meeting link. With "Notetaker joins the calls" (the first entry of the people to
    invite, when the signed policy has the notetaker on and lets the organizer ask it in, e2ee.md
    §8.2) the notetaker's bot account is invited like a member, so it is in the chat's group before
    any call, and the organizer's device puts a standing `join` request into the chat after setting
@@ -69,39 +69,52 @@ the change, and people taken off the list are removed from the group.
    for a call moved into a meeting), also when the organizer starts it early. Their ringing ends
    with the ring timeout, not when the first of them joins. The organizer's app labels the button
    of a planned meeting "Start"; "Meet now" is the separate meeting with nobody invited.
-4. **Guests**: the personal link is `<base>/meeting/<id>#invite=<token>`; the token is in the
-   fragment, which browsers never send to servers. The web client sends it to
-   `POST /meetings/join` (no authentication) together with a display name and receives a guest
-   session token. The token is **one-time** (the database marks the invite redeemed) and only valid
-   until the meeting's end plus `guest_grace_secs`. The guest then exists as an ordinary guest user,
-   is put into the lobby, and the hosts get a `lobby_join` event. `POST .../lobby/{user}/admit`
-   makes the guest a member of the meeting chat (`membership_add` to the members, `lobby_decision` to
-   the guest); `deny` turns them away and ends their session. Guests always wait for a host, also when
-   the meeting has `has_lobby: false`: a guest can read and speak only once a host's device has added
-   theirs to the chat's encryption group (see "Guests in the browser").
-5. **Shared guest link** (`PUT /meetings/{id}/shared-guest-link`, hosts only): the same URL shape
-   and token as a personal link, but the invite it names is marked shared. Asking again returns the
-   same link. Every guest who redeems it gets a one-time invite of their own (`shared_invite_id`
-   names the link), so the rest is step 4, except that these guests **always** wait in the lobby,
-   also when the meeting has none. The link admits at most `max_shared_link_guests` guests (default
-   50), ends with the meeting (its end plus `guest_grace_secs`, or its cancellation) and a host can
-   revoke it (`DELETE`, idempotent): nobody new gets in with it, guests already waiting or admitted
-   stay. A link asked for after a revocation is a new one with a new URL. A guest's place is
-   taken before their account is made and given back if the account or the redemption fails, so
-   failed joins don't use up the link; a retried join after a lost answer does take a second place.
-   Anyone with the link can use it, so a link that got around can use up all places until a host
-   revokes it (the app says so next to the link).
-6. **Knocking** (`POST /meetings/{id}/lobby/me`): a member who opens the meeting link without being
-   in the meeting chat asks to be let in and waits in the lobby; the hosts get `lobby_join` (once
-   per knock: knocking again while waiting is no news) and admit or deny as for guests. Members in
-   the chat are answered `admitted` right away; a member admitted before who has left the chat
-   waits again. Members always wait for a host, also without `has_lobby`: meeting IDs are not
-   secret. For meetings that are over or cancelled, outsiders get the same 404 as for a meeting
-   that doesn't exist, so knocking doesn't tell them which IDs are meetings; members of the chat
-   get 409. Denying a member only refuses them (the decision is final for that meeting); their
-   account stays. The server sends `lobby_decision` to the knocking member too; the web client
-   doesn't act on it yet and asks `GET .../lobby/me` every few seconds while it waits and the page
-   is visible.
+4. **Guests** open the meeting link `<base>/meeting/<token>#v=<fingerprint>` (see "Links"). The
+   web client sends the token from the path to `POST /meetings/join` (no authentication) together
+   with a display name and receives a guest session token valid until the meeting's end plus
+   `guest_grace_secs`. The guest then exists as an ordinary guest user, is put into the lobby,
+   and the hosts get a `lobby_join` event; once the guest's page set up its device it says so
+   (`PUT .../lobby/me/device`) and the hosts get `lobby_join` again. `POST .../lobby/{user}/admit`
+   makes the guest a member of the meeting chat (`membership_add` to the members,
+   `lobby_decision` to the guest); `deny` turns them away and ends their session. A guest reads
+   and speaks only once an organizer's device added theirs to the chat's encryption group (see
+   "Guests in the browser"): on the host's "admit", or by itself when the organizer chose "no
+   lobby" on that device and the guest came with the meeting's token (the server's `has_lobby`
+   doesn't decide it; the organizer is told each time, with "Remove"). Each guest of the link
+   gets a one-time invite of their own (as for the shared guest link, step 5). Personal one-time links (`#invite=<token>`, a host's "One-time
+   link", and the links mailed to external invitees before #987) still work; their guests always
+   wait for a host's click.
+   The organizer sees who waits on the meeting's card and, while in the meeting's call, on the
+   call screen; a knock (`lobby_join`) reloads the lobby at once, without polling.
+5. **Shared guest link** (`PUT /meetings/{id}/shared-guest-link`, hosts only): since #987 this is
+   the meeting link itself. Every guest who uses it gets a one-time invite of their own
+   (`shared_invite_id` names the link), so the rest is step 4. The link lets at most
+   `max_shared_link_guests` guests (default 50) **in**: a place counts once its guest is admitted
+   and is free again when the guest is turned away, leaves or their access ends. At most as many
+   may wait at once, each for 15 minutes (the lobby timeout), so a leaked link fills the lobby
+   for a while, not the meeting. The link ends with the meeting (its end plus
+   `guest_grace_secs`, or its cancellation). A guest who reloads the page loses their ephemeral
+   device and knocks anew; the waiting place they leave behind is free after the lobby timeout. **Making the link anew** (`POST /meetings/{id}/link`, organizer only;
+   `DELETE .../shared-guest-link` does the same for older apps) does in one transaction: a new
+   token (the old link opens nothing any more, `404`), every shared and unredeemed personal link
+   of the meeting revoked, and guests still waiting no longer counted as "came with the link"
+   (they wait for a click). A join that raced the change is checked against the token again and
+   waits for a click too. Guests already admitted stay. Every invitee with an address gets an
+   updated invitation with the new link. Anyone with the link can knock, so a link that got around
+   can fill the lobby until the organizer makes it anew.
+6. **Knocking**: a member who opens the meeting link without being in the meeting chat asks to be
+   let in and waits in the lobby (`POST /meetings/link/{token}/knock` with the token, which answers
+   the meeting and the lobby state; `POST /meetings/{id}/lobby/me` for an old link with the ID);
+   the hosts get `lobby_join` (once per knock: knocking again while waiting is no news) and admit or
+   deny as for guests. Members in the chat are answered `admitted` right away; a member admitted
+   before who has left the chat waits again. A member with an old ID link always waits for a host,
+   also without `has_lobby`: meeting IDs are not secret. With the token in a meeting without a
+   lobby, the organizer's device admits the member by itself, as for guests. For meetings that are
+   over or cancelled, outsiders get the same 404 as for a meeting or token that doesn't exist, so
+   knocking doesn't tell them which IDs are meetings; members of the chat get 409. Denying a member
+   only refuses them (the decision is final for that meeting); their account stays. The server
+   sends `lobby_decision` to the knocking member too; the web client doesn't act on it yet and asks
+   `GET .../lobby/me` every few seconds while it waits and the page is visible.
 7. **A call becomes a meeting**: a DM never takes more people, so "Add people" in a DM or group DM
    call moves the call into a new meeting room instead. The adding user's app starts an instant
    meeting with the people in the call and the added ones as invitees (`POST /meetings/instant` with
@@ -179,22 +192,31 @@ that skips them by itself is a follow-up (v1.1).
 
 What a host copies and sends, and what each link lets the holder do:
 
-| Link                                      | Who it is for                | What it does                                       |
-|-------------------------------------------|------------------------------|----------------------------------------------------|
-| `<base>/meeting/<id>`                     | people in the organization   | Opens the meeting for its members; others knock    |
-| `<base>/meeting/<id>#invite=<token>`      | one guest without an account | One-time; lobby unless the meeting has none        |
-| the same, from the shared guest link      | any number of guests         | Reusable, revocable; always the lobby              |
+| Link                                         | Who it is for                       | What it does                                                    |
+|----------------------------------------------|-------------------------------------|-----------------------------------------------------------------|
+| `<base>/meeting/<token>#v=<fingerprint>`     | everybody: members and guests       | Opens the meeting for its members; others knock; a lobby decides |
+| `<base>/meeting/<token>#invite=<jwt>&v=<fp>` | one guest without an account        | One-time; always waits for a host's click                       |
+| `<base>/meeting/<id>` (and `#invite=…`)      | old links from before #987          | Still open the meeting, always through the lobby                |
 
-The web client shows the meetings screen for `/meeting/<id>` and then opens the meeting (pre-join
-screen) or knocks; a link with `#invite=` shows the guest page instead, before any sign-in. Members
-who are signed out come back to the link after signing in. The app offers "Copy link" on every
-meeting that is not over and in a dialog right after scheduling or "Meet now"; hosts copy the shared
-guest link or a new one-time link with one click each (the link is made and copied at once).
+The **token** is 32 base64url characters (192 random bits, e2ee.md §4.6, "Meeting guests"); the
+server resolves it to the meeting, and it is all the server needs. The **fragment** `v` is the
+fingerprint of the organizer's identity key: no secret, it lets a guest's page check that the
+device admitting it is the organizer's. Browsers never send the fragment to a server.
+`MeetingResponse.join_url` is the full link with the fingerprint of the key the server holds; the
+app copies it with the fingerprint the copying device has pinned. The invitation e-mails and the
+calendar event carry `join_url`. The organizer makes the link anew with "New link" (old links stop
+working, updated invitations go out).
+
+The web client shows the meetings screen for `/meeting/<token>` or `/meeting/<id>` when signed in
+and then opens the meeting (pre-join screen) or knocks. Signed out, the same link shows the guest
+page, with "Sign in" for members, who come back to the link after signing in. The app offers "Copy
+link" on every meeting that is not over and in a dialog right after scheduling or "Meet now"; hosts
+copy a one-time link with one click (the link is made and copied at once).
 
 Rate limits: `POST /meetings/join` counts against the per-address limit for requests without
-credentials (`security.rate_limits.public_requests_per_minute`) and failed redemptions (401)
-against `auth_failures_per_minute`; knocking and making links are writes of the member
-(`user_writes_per_minute`). The shared link's guest limit bounds what one leaked link can do.
+credentials (`security.rate_limits.public_requests_per_minute`) and failed redemptions and unknown
+tokens (401, 404) against `auth_failures_per_minute`; knocking and making links are writes of the
+member (`user_writes_per_minute`). The link's guest limit bounds what one leaked link can do.
 
 Guest sessions are HS256 tokens signed with `guest_token_secret`; every API call and gateway
 connection accepts them like an access token and treats the holder as a guest. Guests can't schedule
@@ -215,14 +237,14 @@ A guest's page keeps going after "You are in" (#446; design in e2ee.md §4.6, "M
    the guest's chats, the MLS and key routes of their own device, device registration, the lobby state
    of the meeting, `leave`, calls). Anything else answers 403. Guests only ever see conversations
    they are members of, which for a guest is the one meeting chat.
-4. **Link secret.** The link a host copies is `…#invite=<token>&k=<link secret>&o=<organizer's key
-   fingerprint>` (all in the fragment). The guest page proves with the secret that it holds the
-   link (`PUT .../lobby/me/proof`; the hosts read it from the lobby entry) and checks the
-   meeting's group against the fingerprint; the server stores the proof but can't make or check one
-   (e2ee.md §4.6, "Meeting guests"). Guest sessions are also ended by the server when the meeting's
-   access ends (end plus `guest_grace_secs`) or it is cancelled, by a sweep at least every ten
-   minutes. A guest sees the other attendees' names, never their e-mail addresses. A guest can't
-   replace their identity key.
+4. **Keys at admission.** The link carries no secret (e2ee.md §4.6, "Meeting guests"). The
+   guest's page makes its own keys (the ephemeral device), and an organizer's device seals the
+   meeting chat's keys to them when it adds the device: a new epoch, so nothing said before the
+   admission is readable. The page checks that the device that added it is the organizer's
+   (the fingerprint `v` from the link). Guest sessions are also ended by the server when the
+   meeting's access ends (end plus `guest_grace_secs`) or it is cancelled, by a sweep at least
+   every ten minutes. A guest sees the other attendees' names, never their e-mail addresses. A
+   guest can't replace their identity key.
 5. **Leaving.** `POST /meetings/{id}/leave` (guests only) ends the guest's session: their place in
    the lobby is closed, the account is deactivated (devices flagged removed, gateway connections
    closed, removed from the chat and the call) and the hosts' devices commit the removal from the
@@ -238,24 +260,34 @@ A guest's page keeps going after "You are in" (#446; design in e2ee.md §4.6, "M
 `components/guest_join.rs` and `guest_meeting.rs`; `auth/guest.rs` is the guest's session as an
 `Authenticator`, so the same client core and chat views run for a guest:
 
-1. The link must carry the secret and the organizer's key fingerprint (`#invite=…&k=…&o=…`); a link
-   without them is refused before the one-time link is used up ("ask for a new link").
+1. The page reads the token from the path and `v` from the fragment (`o` of older links). A
+   link without a fingerprint (one mailed before #987) still joins, anchored on the fingerprint
+   the server answers the join with, and waits for a host's click. Mailed links carry the `v` the
+   server writes, so a mail-only guest relies on the server for it (e2ee.md §4.6, "Where `v`
+   comes from"), and a first-visit guest runs the page the server serves.
 2. After joining, the page opens its client core with the guest token, enrolls the ephemeral device
-   (`EnrollRequest.is_guest`), keeps the fingerprint for the meeting chat, and sends the proof.
-3. Once a host admitted the guest (the host's app offers "Let in" when the lobby entry carries the
-   proof, and adds the guest's device with `LetGuestIntoMeetingChat`), the page shows the slim
-   meeting view: the meeting's name, the chat, "Join the call" and "Leave the meeting". The call is
-   the browser call engine; the guest's call key binding is signed by the guest's device.
+   (`EnrollRequest.is_guest`), keeps the fingerprint for the meeting chat, and reports its key's
+   fingerprint with the knock (retried on the next poll if that fails). It shows the guest's key
+   code and the organizer's code; the host's lobby entry shows the same guest code, the
+   organizer's app its own code, so they can compare out of band. If the organizer's app is too
+   old to let guests in by this flow, the page says it needs an update. While nobody of the meeting is there yet it shows "Waiting for the organizer to
+   let you in"; that is the normal case for a guest who comes early.
+3. Once an organizer's device let the guest in (on "Let in", which the host's app offers when the
+   guest's device is ready, or by itself without a lobby; `LetGuestIntoMeetingChat`), the page
+   shows the slim meeting view: the meeting's name, the chat, "Join the call" and "Leave the
+   meeting". The call is the browser call engine; the guest's call key binding is signed by the
+   guest's device.
 4. "Leave" calls `POST .../leave`, deletes the page's database (its keys and messages) and shows a
    goodbye. Closing the page without leaving keeps the encrypted data in the browser until the next
    guest page is opened here, which deletes it (or the guest clears site data); nothing reuses it.
 
-A host's app hands out a guest link only after its core made the link secret
-(`PrepareGuestLink`; the copy buttons wait for it), so the link always carries it.
+A member's app copies a link with the organizer's fingerprint as its core has it pinned
+(`PrepareGuestLink`, made once per meeting); until it has it, "Copy link" says "Verifying…" and
+copies nothing: a link with the server's fingerprint is never handed out from the app.
 
-Not done yet: reloading the page loses the guest's device (a one-time link is used up: the host
-sends a new one); the host's key-code fallback for a device that did not make the link has no
-dialog yet (the core supports it, the app shows the guest as waiting for its device); the size of
+Not done yet: reloading the page loses the guest's device (the guest knocks again as a new guest);
+only the organizer's devices let guests in (a co-host's "admit" waits for one of them; letting
+other member devices admit needs an organizer-signed list of admitters, a follow-up); the size of
 what a guest downloads is not measured yet (the guest entry path is the initial chunk; the
 chat and call chunks load after admission).
 
@@ -264,7 +296,7 @@ chat and call chunks load after admission).
 | Event            | To                          | When                                            |
 |------------------|-----------------------------|-------------------------------------------------|
 | `meeting_update` | organizer and invited users | created, changed, cancelled, answered           |
-| `lobby_join`     | hosts                       | a guest redeemed a link, or a member knocked    |
+| `lobby_join`     | hosts                       | a guest knocked or set up its device, a member knocked |
 | `lobby_decision` | the guest or member         | admitted or denied                              |
 | `call_move`      | members of the DM           | its call moved into a meeting room              |
 
@@ -293,6 +325,7 @@ fake calendar and mailer; one test sends through the real SMTP sender to Mailpit
   cancelling one), a holiday calendar, host controls (mute all, remove, lock, end for everyone) and
   meetings created in other CalDAV clients.
 - Per-organizer calendars (see above).
-- Meeting links: member clients reacting to `lobby_decision` instead of asking; revoking the shared
-  guest link also turning away the guests still waiting from it; the desktop app opening
-  `/meeting/<id>` links itself; hosts seeing how many guests a shared link let in.
+- Meeting links: member clients reacting to `lobby_decision` instead of asking; making the link
+  anew also turning away the guests still waiting from it; the desktop and mobile apps opening
+  `/meeting/…` links themselves; hosts seeing how many guests the link let in; a guest's reload
+  keeping their device and place.

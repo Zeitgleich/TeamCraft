@@ -277,23 +277,16 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       } => self.prepare_guest_link(conversation, meeting).await,
       CoreCommand::LetGuestIntoMeetingChat {
         conversation,
-        meeting,
         guest,
-        display_name,
-        maybe_proof,
+        knock_fingerprint,
         access_ends_at_ms,
       } => {
         self
-          .admit_guest(
-            conversation,
-            meeting,
-            guest,
-            &display_name,
-            maybe_proof,
-            access_ends_at_ms,
-          )
+          .let_guest_into_meeting_chat(conversation, guest, &knock_fingerprint, access_ends_at_ms)
           .await
       },
+      CoreCommand::PrepareGuestKeyCode { guest } => self.prepare_guest_key_code(guest).await,
+      CoreCommand::NoteMeetingLobby { meeting, has_lobby } => self.note_meeting_lobby(meeting, has_lobby),
       CoreCommand::DiscardRemoval { conversation, user } => self.discard_removal(conversation, user).await,
       CoreCommand::InviteToSpace {
         space,

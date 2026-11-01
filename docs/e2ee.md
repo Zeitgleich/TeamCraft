@@ -1077,51 +1077,111 @@ never by the server's member list:
     database an earlier page left behind (closed without leaving), as far as no other tab holds it
     open. Until then the encrypted data stays in the browser; nothing reuses it, since the session
     token is gone and the server deactivates the account when access ends. No push, no search index, no account data sync.
-  - *Link secrets.* The server signs the session tokens and decides admission, so by itself it
-    could admit a guest of its own and hand members that guest's key. A guest link therefore carries
-    two values in the `#fragment`, which no server sees: a random 256-bit **link secret** made by the
-    host's device that makes the link (kept in its sync state; the shared guest link keeps its secret
-    for as long as the link lives), and the **organizer's identity key fingerprint** as that host's
-    device has it pinned (`#invite=<token>&k=<secret>&o=<fingerprint>`). The server never gets either.
-  - *How members verify a guest without a directory account.* Nothing attests the guest's identity
-    key (§3.1 needs the identity provider), so the guest proves it holds the link instead: after
-    enrolling, the page sends `PUT /meetings/{id}/lobby/me/proof` with `HMAC-SHA256(link secret,
-    "TeamCraft-v1 guest link proof" ‖ meeting ID ‖ user ID ‖ identity public key ‖ display name)`.
-    The host's device that made the link fetches the guest's lobby entry
-    (`GET /meetings/{id}/lobby/{user}`) and the guest's identity key, recomputes the MAC and adds the
-    guest's device only if it matches, so the server can neither invent a guest nor swap a real
-    guest's key or name: it never learns the secret. The same holds in meetings without a lobby
-    (the server admits at once, but the device adds nobody without a valid proof). A host device
-    that doesn't hold the secret (another device of a co-host) adds a guest only after the host
-    compared the guest's **key code** (the first 64 bits of the identity key fingerprint, as
-    `1a2b-3c4d-5e6f-7a8b`, shown on the lobby entry and on the guest's screen) and confirmed it. A valid proof is a bearer proof of
-    the link: anybody with the link can be the guest, which is what a link is; the shared link's guest
-    limit and the lobby bound that. Members pin the identity key on first use, mark the user "Guest
-    (unverified)" in the chat, the member list and the call, and verify the certificate chain
-    (identity key → device key → MLS leaf) exactly as for members. An identity key change for a
-    pinned guest is refused like for anybody else (the server also refuses `replace` for guests).
-  - *How the guest verifies members.* The guest's client treats the members' identity keys like a
-    member's client does: attested ones (§3.1; the issuer and client come from the server info, the
-    JWKS from the identity provider directly) are pinned as attested, the rest on first use. The
-    guest's device is marked as a guest device when it enrolls, and a guest device accepts a group only from a
-    welcome sent by a device the organizer's identity key signed (the fingerprint in the link), so
-    only the organizer's devices make guest links and let guests in; a co-host's app refuses
-    ("only the organizer's devices can let guests in"). A guest device with no fingerprint (a link
-    of an older client) or offered a group by external commit joins nothing: it fails closed. The
-    check is about who added the guest, not about who is in the group (a group the server made
-    with devices of its own can hold the organizer's published key package) and not about where a
-    leaf sits in the tree, so a hostile server can't put keys of its own in for the people the
-    guest talks to. Remaining gap: the guest still pins the other members' keys on first use
-    where there is no attestation, and the member path (§4.6, "Whose group") still trusts the
-    server's naming of the organizer.
-  - *Admission.* A host's "admit" makes the guest a member on the server, and the host's device
-    then adds the guest's device as above (`let_guest_into_meeting_chat`: the proof or the
-    confirmed key code is checked first, then the key is pinned and the add is signed like any
-    addition), always with history from the join on. The guest's page enrolls its device and sends
-    its proof while it waits in the lobby, so the host's app offers "admit" once the lobby entry
-    carries the proof (or the key code is shown); a guest admitted without a device is not added
-    later unattended (§4.6, "Admission", above). The welcome reaches the guest through its normal
-    welcome queue, and the current key follows from a member as for any new member.
+  - *The meeting link* (#987). A meeting has one link for members and guests alike,
+    `<base>/meeting/<token>#v=<fingerprint>`, the same in "Copy link", the invitation e-mails and
+    the calendar event:
+    - The **token** in the path is 192 random bits from the server's operating system random source
+      (`teamcraft_crypto::meeting_link`), base64url, 32 characters. It replaces the meeting's
+      snowflake ID as its public handle: IDs are short and guessable, the token is not. The server
+      stores it and resolves it to the meeting. It is **no secret from the server and carries no
+      key**: it only lets its holder knock at the lobby. The organizer can make a new one
+      (`POST /meetings/{id}/link`); the old token then resolves to nothing, the meeting's shared
+      guest link is revoked with it, and the invitees get updated invitations.
+    - The **fragment** holds only `v`, the fingerprint of the organizer's identity key (§3, hex).
+      It is public data: nobody can decrypt anything with it. It tells the guest's page which
+      device may let it in (below). A member's app copies the link with the fingerprint of the
+      organizer's key as that device has it pinned; the e-mails and the calendar carry the
+      fingerprint of the key the server holds for the organizer, because the server sends them.
+      Browsers never send the fragment to a server.
+    - Links of older apps (`#invite=<token>&k=<secret>&o=<fingerprint>`) still work: `o` is read
+      as `v`, `k` is ignored. Personal links mailed before this change (`#invite=` alone, under the
+      meeting's snowflake ID) work too, but only through the lobby (below).
+  - *Knocking with a key of its own.* The guest's page trades the token for a guest session
+    (`POST /meetings/join` with the token and a display name; no authentication) and waits in the
+    lobby. Meanwhile it enrolls an **ephemeral device** as above: a fresh identity key, device
+    key and key packages, whose HPKE init keys are the public keys the guest knocks with. Once
+    they are published, the page reports its identity key's fingerprint with the knock
+    (`PUT /meetings/{id}/lobby/me/device`; the server checks that the guest has a device, keeps
+    the fingerprint with the lobby entry and sends `lobby_join` to the hosts, once). The link
+    holds no secret, so nothing in it reaches the member devices: the guest's keys are the
+    guest's own, made in the guest's browser.
+  - *Admission seals the keys to the guest.* An organizer's device admits: on the host's "admit"
+    in the lobby, or by itself when the organizer chose "no lobby" **on that device** (a record
+    the device keeps when the meeting is scheduled or edited there; the server's `has_lobby` and
+    `is_by_link` never decide it) and the guest knocked with the meeting's token. Each admission
+    by itself is shown to the organizer ("X joined with the meeting link", with "Remove"). The
+    device pins the guest's identity key as the server presents it, admits only if it has the
+    fingerprint reported with the knock, records the guest as a guest of this meeting with the
+    end of their access, and adds the guest's device to the meeting chat's group with a signed
+    add (§4.6), always with history from the join on. The commit starts a **new epoch**; the
+    welcome is HPKE-encrypted to the init key of the guest's key package (RFC 9420 §12.4.3.1), so
+    only the holder of that key can open it. The guest gets the secrets of that epoch and later
+    ones, never a content key of an earlier one (no history share, §4.3): what was said before
+    the admission stays unreadable. In the call the guest's device joins the meeting call's DAVE
+    group like any member's (§8): the commit that adds it is another new epoch, and the frames of
+    earlier epochs were encrypted under keys it never gets. A host's "admit" without an
+    organizer's device online makes the guest a member on the server only; the guest's page keeps
+    waiting ("waiting for the organizer") until an organizer's device adds the device. If no app
+    of the organizer was seen admitting by this flow (`PUT /meetings/admitter`, sent by apps since
+    #987), the guest's page says the organizer's app needs an update: an older app asks for a link
+    proof that guests no longer send and never lets them in.
+    Members pin the guest's identity key on first use, mark the user "Guest (unverified)" in the
+    chat, the member list and the call, and verify the certificate chain (identity key → device
+    key → MLS leaf) exactly as for members. An identity key change for a pinned guest is refused
+    like for anybody else (the server also refuses `replace` for guests).
+  - *Comparing codes.* The server relays both the guest's key and the fingerprint reported with
+    the knock, so binding one to the other stops a swap by anybody but the server, not by the
+    server itself. Two codes close that gap for whoever compares them out of band (a phone call,
+    the video once in, a chat elsewhere):
+    - the guest's **key code** (the first 64 bits of the identity key fingerprint, as
+      `1a2b-3c4d-5e6f-7a8b`): the guest's page shows its own; the host's lobby entry shows the
+      code of the key the host's device pinned for that guest, the very key an admission adds;
+    - the **organizer's code** (the same 64 bits of the organizer's fingerprint `v`): the guest's
+      page shows the code of the `v` it anchors on; the organizer's app shows the code of its own
+      key next to the guest links.
+    Without the comparison the guest is exactly what the name says: "Guest (unverified)".
+  - *How the guest verifies the admission.* The guest's device is marked as a guest device when
+    it enrolls, and it accepts a group only from a welcome whose committer is a device the
+    identity key with the fingerprint `v` certified, so only the organizer's devices let guests
+    in; a co-host's app refuses ("only the organizer's devices can let guests in"), and so does
+    the guest for a welcome from any other device: a **forged admission fails closed**. A guest
+    device offered a group by external commit joins nothing. The check is about who added the
+    guest, not about who is in the group (a group the server made with devices of its own can
+    hold the organizer's published key package) and not about where a leaf sits in the tree, so
+    a hostile server can't put keys of its own in for the people the guest talks to. The guest's
+    client treats the members' identity keys like a member's client does: attested ones (§3.1;
+    the issuer and client come from the server info, the JWKS from the identity provider
+    directly) are pinned as attested, the rest on first use. Remaining gap: the guest still pins
+    the other members' keys on first use where there is no attestation, and the member path
+    (§4.6, "Whose group") still trusts the server's naming of the organizer.
+  - *Where `v` comes from.* A link copied in a member's app carries the fingerprint of the
+    organizer's key as that device has it pinned; the app waits for it ("Verifying…") and never
+    hands out a link with the server's. The **invitation e-mails and the calendar event carry the
+    `v` the server writes from its database**, since the server sends them: a guest who has only
+    the mail has no authentication of the organizer against the server. A link without `v` (one
+    mailed before #987) anchors on the fingerprint the server answers the join with
+    (`JoinMeetingResponse.organizer_fingerprint`), which is the same trust. Only comparing the
+    organizer's code closes it. Without any fingerprint the guest's device joins nothing.
+  - *The page itself.* A guest opening the link for the first time runs the web client the
+    server serves: there is no installed app and no earlier service worker to check it against
+    (§9.3). A hostile server can serve a page that leaks what the guest sees. That holds for
+    every first visit of the web client; the codes don't change it.
+  - *Threat model.* "Compared" means the codes were compared out of band.
+
+    | Who                    | Can                                                                                                                                                                                                                                                                                                                                          | Can't                                                                                                                                                                                          |
+    |------------------------|----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+    | A malicious server     | Not compared: enroll a device of its own for a waiting guest (or invent a guest), and after the host's "admit" read the chat and the media from then on; with a mailed link, pose as the meeting to a mail-only guest. Without a lobby, the same with no click. Serve a leaking page to a first-visit guest. Withhold knocks and admissions. | Compared: swap the guest's key or the organizer's without the codes differing. Ever: read what was said before an admission; hide that a guest is in (shown "Guest (unverified)" to everybody) |
+    | Somebody with the mail | Knock, as the name they type                                                                                                                                                                                                                                                                                                                 | Decrypt anything: there is no key in the link; get past the lobby without a host's click (or, without a lobby, past being listed and announced); use the link after it was made anew           |
+    | A forged admission     | –                                                                                                                                                                                                                                                                                                                                            | Be accepted: the welcome's committer must carry the identity key of `v`                                                                                                                        |
+    | A removed guest        | Keep what they saw while in                                                                                                                                                                                                                                                                                                                  | Read anything later: the signed removal commit and the DAVE removal each start an epoch the guest has no keys for; the session token is ended                                                  |
+    | Somebody guessing      | –                                                                                                                                                                                                                                                                                                                                            | Find a meeting: 2^192 tokens; unknown tokens count against the per-address limit of failed sign-ins                                                                                            |
+
+    Compared with the link secret this replaces, a hostile server is no longer kept out by
+    something it can't know: without a comparison of codes it can put a device of its own in for
+    a guest the host lets in, and without a lobby it can let one in with no click (shown and
+    announced as a guest). That is the price of links that work from an e-mail the server sends
+    anyway; the codes and the lobby are the controls (the lobby is on by default in the schedule
+    dialog).
   - *Removal.* A guest's session ends when the guest leaves (`POST /meetings/{id}/leave`), is
     turned away, or the meeting's access ends: the server then deactivates the guest and reports
     the removal (`membership_remove`, `device_remove`). The sweep that ends sessions of guests whose
@@ -1153,10 +1213,6 @@ never by the server's member list:
     did not admit them can't give them signed authority (the roster rule), but can let them add
     further devices of users who are already members, which those users' identity keys have
     signed anyway.
-  - *Proof scope.* The proof binds meeting, user, identity key and display name, not the device or
-    an expiry: the host checks the guest's device against the signed device list, and the link is
-    only good for the meeting's lifetime plus the grace time. Binding the device ID would only
-    matter if a second guest device were allowed, which a guest session does not need.
   - *Calls.* The guest's call key binding (§8) is signed by the guest's device key; members verify
     it like any other and show the guest as unverified.
   - *Scope.* A guest session token is accepted only on the routes a guest needs (chat, key
@@ -2312,17 +2368,16 @@ calls are verified with no extra prompts, and the DAVE privacy code and per-memb
 remain available for out-of-band comparison. Meeting guests without an account get an ephemeral
 key and are shown as "Guest (unverified)".
 
-**Meeting links** (docs/meetings.md, "Links"). The meeting link `<base>/meeting/<id>` is no
-credential: meeting IDs are not secret. It lets in members already in the meeting chat; any other
-member who opens it knocks and waits in the lobby until a host admits them, also in meetings
-without a lobby. Guest links (personal one-time links and the meeting's shared guest link) carry a
-token signed by the server in the URL fragment, which browsers never send, so it stays out of server
-and proxy logs. A guest link only gets its holder into the lobby; the chat and the call are
-encrypted to them only after a host admitted them, like to any member added to a conversation
-(guests always from the join on, §4.3).
-Since the server signs the tokens and decides admission, it could let in a guest of its own; a host's
-device therefore adds a guest only with the proof of the link secret from the link's fragment (§4.6,
-"Meeting guests"), and guests stay "Guest (unverified)" for everybody.
+**Meeting links** (docs/meetings.md, "Links"; §4.6, "Meeting guests"). A meeting's link is
+`<base>/meeting/<token>#v=<organizer's key fingerprint>`: the token is random (192 bits) and only
+lets its holder knock at the lobby; the fragment is public data. Members already in the meeting
+chat are in; any other member knocks. Old links under the snowflake ID (`/meeting/<id>`) still
+open the meeting, but always through the lobby, also in meetings without one. Neither kind of link
+carries a key: the chat and the call are encrypted to a guest only after an organizer's device
+added the guest's own ephemeral device to the chat's group (a new epoch, the welcome sealed with
+HPKE to the guest's key package), and the guest's device then joins the call's DAVE group as a new
+member, another new epoch. Media of earlier epochs stays out of the guest's reach, and removing the
+guest starts an epoch without them in both groups. Guests stay "Guest (unverified)" for everybody.
 
 **Who signs in the browser.** The web client's call engine is a wasm module of its own
 (`teamcraft-web-calls`, loaded by the page; `teamcraft_client_api::page_calls`). It never holds the

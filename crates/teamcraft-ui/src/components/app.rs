@@ -89,8 +89,12 @@ pub fn App() -> impl IntoView {
 
 /// The guest page, the sign-in gate or (development) the demo shell.
 fn screen(settings: Settings) -> AnyView {
-  // A personal meeting link needs no sign-in: it gets its own page before anything else.
-  if let Some(link) = guest_link_from_location() {
+  // A meeting link needs no sign-in: it gets the guest page before anything else, unless a member
+  // is signed in here or asked to sign in (`?sign-in`). A personal one-time link is always a
+  // guest's.
+  if let Some(link) = guest_link_from_location()
+    && (link.maybe_invite_token.is_some() || !is_member_here())
+  {
     return view! { <GuestJoinPage link=link /> }.into_any();
   }
 
@@ -983,7 +987,16 @@ fn window_has_focus() -> bool {
     .is_some_and(|document| document.has_focus().unwrap_or(false))
 }
 
-/// The meeting and token when the page was opened from a personal meeting link.
+/// Whether the page belongs to a member: the desktop app, a browser with a member signed in, or a
+/// member who chose "sign in" on the guest page.
+fn is_member_here() -> bool {
+  let asks_sign_in = web_sys::window()
+    .and_then(|window| window.location().search().ok())
+    .is_some_and(|search| search.contains(crate::components::guest_join::SIGN_IN_QUERY));
+  tauri::is_available() || asks_sign_in || crate::auth::browser::is_signed_in_here()
+}
+
+/// The guest link when the page was opened from a meeting link.
 fn guest_link_from_location() -> Option<crate::meetings::GuestLink> {
   let location = web_sys::window()?.location();
   parse_guest_link(&location.pathname().ok()?, &location.hash().ok()?)
