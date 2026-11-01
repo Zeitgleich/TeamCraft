@@ -24,6 +24,8 @@ struct TeamCraftApp: App {
             lock.didBecomeActive()
             model.reportActivity(.foreground)
           case .background:
+            // First, before anything else runs: the background time for pending sends (#158).
+            model.sceneWillEnterBackground()
             lock.didEnterBackground()
             model.reportActivity(.background)
           default: break

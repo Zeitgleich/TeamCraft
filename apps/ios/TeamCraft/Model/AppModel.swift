@@ -123,6 +123,12 @@ enum AppPhase {
 final class AppModel {
   static let shared = AppModel()
   private static let signInLog = Logger(subsystem: "de.zeitgleich.teamcraft", category: "sign-in")
+  /// One wait for the cross-process lock; the extension holds it at most for its push budget.
+  private static let lockWaitSeconds: TimeInterval = 5
+  /// The longest a background flush waits, even if the system grants more time.
+  private static let maxBackgroundFlushSeconds: TimeInterval = 25
+  /// Background time kept for stopping the sync loop and closing the store after a flush.
+  private static let backgroundStopMarginSeconds: TimeInterval = 5
 
   private(set) var phase: AppPhase = .starting
   private(set) var isBusy = false
@@ -177,6 +183,10 @@ final class AppModel {
   @ObservationIgnored private let storeChanges = StoreChangeNotifier()
   @ObservationIgnored private var maybeCore: TeamCraft?
   @ObservationIgnored private var isSyncing = false
+  /// Background time held while what is pending goes out after the app left the foreground.
+  @ObservationIgnored private var backgroundTask = UIBackgroundTaskIdentifier.invalid
+  /// Counts the returns to the foreground: a background flush that outlasted one leaves syncing on.
+  @ObservationIgnored private var foregroundGeneration = 0
   @ObservationIgnored private var maybePushToken: String?
   @ObservationIgnored private var isPushUpkeepRunning = false
   @ObservationIgnored private var maybeLastPushAttempt: Date?
@@ -704,6 +714,11 @@ final class AppModel {
     return Dictionary(extras.map { ($0.message, $0) }, uniquingKeysWith: { first, _ in first })
   }
 
+  /// The composer text left unsent in the conversation or thread (empty: none).
+  func draft(conversationId: String, threadId: String?) async -> String {
+    await answer(.draft(conversationId: conversationId, maybeThreadId: threadId))?.maybeBody ?? ""
+  }
+
   /// Every file of the conversation, newest first as the core lists them.
   func files(conversationId: String) async -> [FileInfo] {
     await answer(.conversationFiles(conversationId: conversationId))?.files ?? []
@@ -777,6 +792,7 @@ final class AppModel {
   /// Foreground: this process syncs (it holds the cross-process lock, docs/e2ee.md §7).
   /// The screens show the local store at once; syncing catches up in the background.
   func sceneBecameActive() async {
+    foregroundGeneration += 1
     guard case .ready = phase else { return }
     // The time in the background doesn't count: the reconnect gets the whole grace period.
     connectionGrace.appReturned(now: .now)
@@ -787,7 +803,30 @@ final class AppModel {
     await pushUpkeep()
   }
 
+  /// Asks for background time as soon as the app leaves the foreground (Apple: before the work
+  /// starts, not at its end), so a send or upload under way finishes and the store is closed
+  /// cleanly instead of the app being suspended mid-write (issue #158). Call it synchronously from
+  /// the scene change; `sceneEnteredBackground` ends it.
+  func sceneWillEnterBackground() {
+    guard backgroundTask == .invalid else { return }
+    backgroundTask = UIApplication.shared.beginBackgroundTask(withName: "Send pending messages") { [weak self] in
+      // The time is up before the flush ended (it waits less than the time granted, so this is
+      // rare). The core can't be stopped synchronously; at least don't sleep holding the
+      // shared-container lock, which the system punishes with a kill (0xdead10cc).
+      self?.processLock.release()
+      self?.endBackgroundTask()
+    }
+  }
+
+  /// Sends what still waits for the server (outbox, uploads, queued actions) within the
+  /// background time, then stops syncing: from here on push wakes the app (robustness.md,
+  /// "Lifecycle"). What is left goes out on the next start; the core keeps it in the store.
   func sceneEnteredBackground() async {
+    let generation = foregroundGeneration
+    defer { endBackgroundTask() }
+    await flushPendingWork()
+    // Back in the foreground meanwhile: it keeps syncing.
+    guard generation == foregroundGeneration else { return }
     await stopSyncing()
     guard case .ready = phase else { return }
     if await segmentPrefetch() != .off { SegmentPrefetchTask.schedule() }
@@ -1270,13 +1309,52 @@ final class AppModel {
   }
 
   private func startSyncing() async {
-    guard !isSyncing, let core = try? core() else { return }
-    let lock = processLock
-    // The extension may be handling a push; wait a little, then go on (SQLite serializes writes).
-    let hasLock = await Task.detached { lock.acquire(timeout: 5) }.value
-    _ = hasLock
+    guard let core = try? core() else { return }
+    if isSyncing {
+      // The background time ran out while syncing, which gave the lock up: take it back.
+      if !processLock.isHeld { _ = await acquireProcessLock() }
+      return
+    }
+    // Never sync beside the extension: both would refresh the rotating refresh token, and the
+    // loser is signed out (docs/e2ee.md §7). It holds the lock at most for its push budget.
+    guard await acquireProcessLock() else { return }
     isSyncing = true
     try? await core.start()
+  }
+
+  /// Waits for the cross-process lock while the app is in the foreground; `false` once it left
+  /// (the next foreground tries again).
+  private func acquireProcessLock() async -> Bool {
+    let lock = processLock
+    while UIApplication.shared.applicationState != .background {
+      if await Task.detached(operation: { lock.acquire(timeout: Self.lockWaitSeconds) }).value { return true }
+      AppLog.setup.notice("waiting for the notification extension to release the store")
+    }
+    return false
+  }
+
+  /// Gives the sync loop the background time to send what is pending, leaving a margin to stop
+  /// syncing and close the store before it runs out.
+  private func flushPendingWork() async {
+    guard isSyncing, let core = try? core() else { return }
+    let remaining = UIApplication.shared.backgroundTimeRemaining
+    let budget = min(remaining, Self.maxBackgroundFlushSeconds) - Self.backgroundStopMarginSeconds
+    guard budget > 0 else { return }
+    do {
+      let left = try await core.flushPendingWork(maxWaitMs: UInt64(budget * 1000))
+      if !left.isEmpty {
+        AppLog.setup.notice(
+          "left for the next start: \(left.sends) sends, \(left.uploads) uploads, \(left.actions) actions")
+      }
+    } catch {
+      AppLog.failure("sending pending work in the background", error)
+    }
+  }
+
+  private func endBackgroundTask() {
+    guard backgroundTask != .invalid else { return }
+    UIApplication.shared.endBackgroundTask(backgroundTask)
+    backgroundTask = .invalid
   }
 
   private func stopSyncing() async {

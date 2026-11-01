@@ -42,6 +42,10 @@ jobs:
           languages: ${{ matrix.language }}
           build-mode: none
           queries: security-extended
+          # Agent skills and settings, partly third-party code copied as published; not shipped.
+          config: |
+            paths-ignore:
+              - .claude
       - uses: github/codeql-action/analyze@9b3254085494b55a0f7c4c2b3d2d52cc712ce370 # v4.39.1
         with:
           category: /language:${{ matrix.language }}

@@ -223,6 +223,9 @@ struct State {
   create_answers_to_lose: u32,
   /// Key package uploads still to be lost after the server stored them (a timeout).
   key_package_answers_to_lose: u32,
+  /// Message sends still to be lost after the server stored the message (a timeout, or the app
+  /// killed before the answer came).
+  send_answers_to_lose: u32,
   roster_log: Vec<WorkspaceLogEntryResponse>,
   policy_log: Vec<WorkspaceLogEntryResponse>,
   /// Larger attachments are refused like the server's `max_attachment_bytes`; `None`: no limit.
@@ -885,6 +888,11 @@ impl FakeServer {
   /// The next key package upload is stored, but the answer never reaches the client.
   pub fn lose_next_key_package_answer(&self) {
     self.lock().key_package_answers_to_lose += 1;
+  }
+
+  /// The next `count` messages sent are stored, but the answer never reaches the client.
+  pub fn lose_send_answers(&self, count: u32) {
+    self.lock().send_answers_to_lose = count;
   }
 
   /// A meeting's chat as the server creates it with the meeting (docs/meetings.md): the organizer
@@ -3196,6 +3204,10 @@ impl ServerApi for FakeServerApi {
             thread_id: thread,
           },
         );
+      }
+      if state.send_answers_to_lose > 0 {
+        state.send_answers_to_lose -= 1;
+        return Err(ApiError::Network("fake answer lost".into()));
       }
       Ok(message)
     })

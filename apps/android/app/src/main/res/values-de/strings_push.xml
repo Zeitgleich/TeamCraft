@@ -12,6 +12,7 @@
     <item quantity="other">%d Unterhaltungen</item>
   </plurals>
   <string name="push_fetching">Neue Nachrichten werden abgerufen …</string>
+  <string name="outbox_sending">Nachrichten werden gesendet …</string>
 
   <string name="call_incoming">Eingehender Anruf</string>
   <string name="call_answer">Annehmen</string>

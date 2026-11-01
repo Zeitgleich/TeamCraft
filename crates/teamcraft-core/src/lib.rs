@@ -23,6 +23,7 @@ pub mod mls_storage;
 pub mod notetaker;
 pub mod notified;
 pub mod notify_rules;
+pub mod pending_work;
 pub mod people_names;
 pub mod picked_files;
 pub mod platform;

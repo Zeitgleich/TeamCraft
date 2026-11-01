@@ -29,6 +29,7 @@ use teamcraft_core::clock::{Clock as _, SystemClock};
 use teamcraft_core::connection::{ConnectionStatus, NetworkChanges};
 use teamcraft_core::notified;
 use teamcraft_core::notify_rules::{load_mention_preferences, save_mention_preferences};
+use teamcraft_core::pending_work::PendingWork;
 use teamcraft_core::prefetch::{load_segment_prefetch, save_segment_prefetch};
 use teamcraft_core::push_guard;
 use teamcraft_core::push_preview::{
@@ -117,6 +118,14 @@ pub(crate) struct Engine {
   /// Applied to decrypted push texts (keywords, first name).
   mentions: MentionSettings,
   pub(crate) signals: SyncSignals,
+  /// Whether the app asked for syncing (foreground) and hasn't stopped it since.
+  is_syncing_for_app: bool,
+  /// Background drains under way (issue #158). The sync loop runs while the app syncs or any drain
+  /// waits; the app stopping hands it over to them, the last one ends it.
+  active_drains: usize,
+  /// The engine thread's own queue, for a drain to end itself without the caller (who may be
+  /// cancelled by the OS meanwhile). Weak, so the thread still ends once the app drops its handle.
+  maybe_jobs: Option<mpsc::WeakUnboundedSender<Job>>,
 }
 
 /// What the app's handle shares with every sync loop the engine starts.
@@ -238,6 +247,7 @@ pub(crate) fn spawn(start: &EngineStart) -> Result<mpsc::UnboundedSender<Job>, O
   let start = start.duplicate();
   let (ready, opened) = std::sync::mpsc::channel();
   let (jobs, mut queue) = mpsc::unbounded_channel::<Job>();
+  let own_jobs = jobs.downgrade();
   std::thread::Builder::new()
     .name("teamcraft-engine".into())
     .spawn(move || {
@@ -259,6 +269,7 @@ pub(crate) fn spawn(start: &EngineStart) -> Result<mpsc::UnboundedSender<Job>, O
             return;
           },
         };
+        engine.maybe_jobs = Some(own_jobs);
         let _ = ready.send(Ok(()));
         while let Some(job) = queue.recv().await {
           job(&mut engine).await;
@@ -434,6 +445,9 @@ impl Engine {
       calls: CallHub::default(),
       mentions,
       signals,
+      is_syncing_for_app: false,
+      active_drains: 0,
+      maybe_jobs: None,
     };
     // Records that don't decode, or a key bag its own key doesn't open, make the store unreadable
     // too.
@@ -765,6 +779,69 @@ impl Engine {
       // Not enrolled yet: the first connection identifies as active.
       ClientSlot::Missing => {},
     }
+  }
+
+  /// The app starts syncing (foreground); a loop a background drain started goes on as the app's.
+  pub(crate) async fn start_syncing(&mut self) -> Result<(), TeamCraftError> {
+    self.is_syncing_for_app = true;
+    self.start().await
+  }
+
+  /// The app stops syncing (background). While a drain waits the loop goes on for it, and the last
+  /// drain to end stops it.
+  pub(crate) async fn stop_syncing(&mut self) -> Result<(), TeamCraftError> {
+    self.is_syncing_for_app = false;
+    if self.active_drains > 0 {
+      return Ok(());
+    }
+    self.stop().await
+  }
+
+  /// Runs the sync loop until nothing waits for the server or `max_wait` has passed (issue #158),
+  /// then answers with what is still pending. A loop the app syncs with keeps running; otherwise
+  /// the loop stops at the end. The end runs on the engine thread whatever the caller does, so an
+  /// OS that cancels the caller's background work leaves no loop running.
+  pub(crate) async fn begin_drain(
+    &mut self,
+    max_wait: Duration,
+  ) -> Result<oneshot::Receiver<Result<PendingWork, TeamCraftError>>, TeamCraftError> {
+    self.start().await?;
+    self.active_drains += 1;
+    let (drained, is_drained) = futures_channel::oneshot::channel();
+    if let ClientSlot::Running { handle, .. } = &self.client {
+      // Refused only by a loop that ended abnormally: the wait ends at once then.
+      handle.send(RunnerCommand::Drain(drained));
+    }
+    let maybe_jobs = self.maybe_jobs.clone();
+    let (answer, answered) = oneshot::channel();
+    tokio::task::spawn_local(async move {
+      // Drained, out of time, or the loop stopped (the app went on or off meanwhile).
+      let _ = tokio::time::timeout(max_wait, is_drained).await;
+      let end: Job = Box::new(move |engine| {
+        Box::pin(async move {
+          // The caller may have been cancelled; the loop is stopped all the same.
+          let _ = answer.send(engine.end_drain().await);
+        })
+      });
+      // No queue: the app dropped its handle and the engine thread is ending; it stops the loop.
+      if let Some(jobs) = maybe_jobs.and_then(|jobs| jobs.upgrade()) {
+        let _ = jobs.send(end);
+      }
+    });
+    Ok(answered)
+  }
+
+  /// What still waits for the server: the outbox, uploads and queued actions.
+  pub(crate) fn pending_work(&self) -> Result<PendingWork, TeamCraftError> {
+    PendingWork::read(&self.store).map_err(TeamCraftError::from)
+  }
+
+  async fn end_drain(&mut self) -> Result<PendingWork, TeamCraftError> {
+    self.active_drains = self.active_drains.saturating_sub(1);
+    if self.active_drains == 0 && !self.is_syncing_for_app {
+      self.stop().await?;
+    }
+    self.pending_work()
   }
 
   pub(crate) async fn stop(&mut self) -> Result<(), TeamCraftError> {

@@ -6,12 +6,15 @@ import UniformTypeIdentifiers
 struct ChatPane: View {
   @Environment(AppModel.self) private var model
   @Environment(\.accessibilityReduceMotion) private var reduceMotion
+  @Environment(\.scenePhase) private var scenePhase
   let conversation: ConversationItem
   let threadId: String?
   let account: Account
 
   @State private var messages: [MessageItem] = []
   @State private var draft = ""
+  /// The stored draft was read; saving before that would overwrite it with the empty field.
+  @State private var isDraftLoaded = false
   @State private var maybeEditing: MessageItem?
   @State private var maybeThread: ThreadTarget?
   @State private var extras: [String: MessageExtras] = [:]
@@ -53,6 +56,8 @@ struct ChatPane: View {
   @FocusState private var isComposerFocused: Bool
 
   private static let quickReactions = ["👍", "❤️", "😂", "🎉", "😮", "🙏"]
+  /// How long typing pauses before the draft is saved.
+  private static let draftSaveDelay = Duration.milliseconds(800)
   /// The reaction a double tap toggles, as in most chat apps.
   private static let quickReaction = "👍"
 
@@ -65,6 +70,23 @@ struct ChatPane: View {
     .task {
       mentionNames = await model.mentionNames()
       displayNames = await model.displayNames()
+    }
+    // The composer lives in the core's drafts, so text typed before the app was killed is back
+    // (issue #158), also from the user's other devices.
+    .task(id: draftKey) {
+      isDraftLoaded = false
+      let stored = await model.draft(conversationId: conversation.id, threadId: threadId)
+      if draft.isEmpty { draft = stored }
+      isDraftLoaded = true
+    }
+    .task(id: draft) {
+      // Saved after a pause in typing; a new keystroke cancels the wait.
+      guard (try? await Task.sleep(for: Self.draftSaveDelay)) != nil else { return }
+      await saveDraft()
+    }
+    .onChange(of: scenePhase) { _, phase in
+      // Leaving the app saves at once: it may be suspended and killed before the pause is over.
+      if phase == .background { Task { await saveDraft() } }
     }
     .sheet(item: $maybeForwarding) { target in
       ForwardSheet(fromConversationId: conversation.id, messageId: target.message.id)
@@ -718,6 +740,14 @@ struct ChatPane: View {
         attachmentError = .unreadable
       }
     }
+  }
+
+  private var draftKey: String { "\(conversation.id)/\(threadId ?? "")" }
+
+  /// Keeps the composer text in the core; an edit of a sent message is no draft.
+  private func saveDraft() async {
+    guard isDraftLoaded, maybeEditing == nil else { return }
+    await model.perform(.setDraft(conversationId: conversation.id, maybeThreadId: threadId, body: draft))
   }
 
   private func cancelEditing() {

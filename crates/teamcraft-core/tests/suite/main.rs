@@ -10,6 +10,7 @@ mod account_data;
 mod activity;
 mod admin_add_policy;
 mod admin_joins;
+mod background_work;
 mod backgrounds;
 mod calls;
 mod catch_up;

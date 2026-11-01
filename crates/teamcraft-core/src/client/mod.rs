@@ -105,7 +105,7 @@ pub use missing_keys::{KeyCatchUp, key_catch_up};
 pub(crate) use notifications::registered_push_token;
 use openmls_rust_crypto::OpenMlsRustCrypto;
 pub use org_recovery::{SealedShare, recovery_request};
-pub use pending_actions::{PendingAction, PendingActionSettings, StatusChange};
+pub use pending_actions::{PendingAction, PendingActionSettings, StatusChange, pending_action_count};
 pub use pending_add::{UserAddWait, pending_user_additions};
 #[cfg(not(target_arch = "wasm32"))]
 pub use segments::SegmentPrefetch;

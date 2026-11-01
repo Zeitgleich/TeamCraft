@@ -9,6 +9,7 @@ use teamcraft_core::notified::{
   NotifiedContent, NotifiedConversation as NotifiedConversationCore, NotifiedMessage as NotifiedMessageCore,
 };
 use teamcraft_core::notify_rules::MentionPreferences;
+use teamcraft_core::pending_work::PendingWork;
 use teamcraft_core::prefetch::SegmentPrefetch;
 use teamcraft_core::push_guard::{PushDiagnostics, Suppression};
 use teamcraft_core::push_preview::{AttachmentKind, PreviewContent, PreviewGap, PushPreview};
@@ -259,6 +260,31 @@ pub enum PlaceholderItem {
 pub struct KeyCatchUpItem {
   pub caught_up: u32,
   pub total: u32,
+}
+
+/// What still waits for the server (issue #158): the app keeps background time while it isn't
+/// empty.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Record)]
+pub struct PendingWorkItem {
+  /// Messages in the outbox that will be sent again (not those the server refused for good).
+  pub sends: u32,
+  /// Messages whose files are still going up.
+  pub uploads: u32,
+  /// Read positions, pins, presence and the like.
+  pub actions: u32,
+  pub is_empty: bool,
+}
+
+impl From<PendingWork> for PendingWorkItem {
+  fn from(work: PendingWork) -> Self {
+    let count = |value: usize| u32::try_from(value).unwrap_or(u32::MAX);
+    Self {
+      sends: count(work.sends),
+      uploads: count(work.uploads),
+      actions: count(work.actions),
+      is_empty: work.is_empty(),
+    }
+  }
 }
 
 /// The newest messages of a conversation down to the oldest one a list holds, plus the next older
