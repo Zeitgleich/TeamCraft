@@ -28,6 +28,7 @@
   <string name="call_meeting_title">Anruf</string>
   <string name="call_move_offer">%1$s hat den Anruf in einen Meetingraum verschoben und %2$s hinzugefügt.</string>
   <string name="call_move_join">Meetingraum beitreten</string>
+  <string name="error_call_device_limit">Dein Konto ist bereits auf so vielen Geräten im Anruf, wie erlaubt sind. Verlasse den Anruf zuerst auf einem davon und tritt dann von diesem Gerät bei.</string>
   <string name="error_call_move_refused">Der Anruf wurde nicht verschoben: Der Meetingraum passt nicht zu dem, was in der Unterhaltung angekündigt wurde. Bleib in diesem Anruf oder tritt dem Meetingraum über die Liste bei, wenn du ihm vertraust.</string>
   <string name="channel_mention_confirm_title">Alle benachrichtigen?</string>
   <plurals name="channel_mention_confirm">

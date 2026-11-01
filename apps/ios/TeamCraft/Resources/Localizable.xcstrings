@@ -673,6 +673,22 @@
         }
       }
     },
+    "call_device_limit": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Your account is already in this call on as many devices as are allowed. Leave the call on one of them first, then join from this device."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Dein Konto ist bereits auf so vielen Geräten im Anruf, wie erlaubt sind. Verlasse den Anruf zuerst auf einem davon und tritt dann von diesem Gerät bei."
+          }
+        }
+      }
+    },
     "call_ended_by_host": {
       "localizations": {
         "en": {
