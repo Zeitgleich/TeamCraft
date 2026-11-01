@@ -76,19 +76,28 @@ use crate::retry::parse_retry_after;
 use crate::transfers::ByteCounter;
 use teamcraft_proto::{CreateDeviceLinkRequest, DeviceLinkRequest, ListDeviceLinksResponse};
 
-/// How long a TCP and TLS (or WebSocket) handshake may take.
+/// How long a TCP and TLS handshake may take.
 #[cfg(not(target_arch = "wasm32"))]
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
+/// How long opening the gateway WebSocket may take: TCP, a proxy's `CONNECT`, TLS and the upgrade
+/// are four round trips or more, each seconds long on a saturated link (issue #1064).
+#[cfg(not(target_arch = "wasm32"))]
+const WEBSOCKET_CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
 /// Keepalive probes and HTTP/2 pings on open connections, below the idle timeout of common proxies.
 #[cfg(not(target_arch = "wasm32"))]
 const KEEPALIVE_INTERVAL: Duration = Duration::from_secs(20);
 #[cfg(not(target_arch = "wasm32"))]
 const KEEPALIVE_RETRIES: u32 = 3;
-/// The whole of a JSON API call (not blob transfers, which may be slow on a slow link). On macOS,
-/// iOS and Windows a request on a connection that died mid-flight would otherwise hang until the OS
-/// gives up: keepalive only probes idle sockets and there is no `TCP_USER_TIMEOUT`.
+/// How long a JSON API call may wait for its answer to start: connecting, sending the request, the
+/// server's work and the first byte. On macOS, iOS and Windows a request on a connection that died
+/// mid-flight would otherwise hang until the OS gives up: keepalive only probes idle sockets and
+/// there is no `TCP_USER_TIMEOUT`. Per phase, not in total (issue #1064): a big answer on a slow
+/// link is slow, not dead, so its body only has to keep moving ([`API_READ_IDLE_TIMEOUT`]).
 #[cfg(not(target_arch = "wasm32"))]
-const API_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+const API_ANSWER_TIMEOUT: Duration = Duration::from_secs(45);
+/// How long the body of a JSON API answer may stop moving.
+#[cfg(not(target_arch = "wasm32"))]
+const API_READ_IDLE_TIMEOUT: Duration = Duration::from_secs(30);
 /// How long a blob upload may go without handing a byte to the connection (or, once all is handed
 /// over, without an answer) before it counts as dead. Generous: the socket's send buffer (up to a
 /// few MB) still drains after the last byte was handed over, slowly on a slow uplink.
@@ -195,13 +204,11 @@ impl<T: AccessTokenSource> HttpServerApi<T> {
       .http()
       .request(method, format!("{}/api/v1{path}", self.base_url))
       .bearer_auth(token);
-    #[cfg(not(target_arch = "wasm32"))]
-    let request = request.timeout(API_REQUEST_TIMEOUT);
     Ok(request)
   }
 
   async fn get<R: DeserializeOwned>(&self, path: &str) -> Result<R, ApiError> {
-    decode(send(self.request(Method::GET, path)?).await?).await
+    decode_api(send_api(self.request(Method::GET, path)?).await?).await
   }
 
   /// A user the server doesn't show the caller (404 with an error code) has published nothing, as
@@ -228,7 +235,7 @@ impl<T: AccessTokenSource> HttpServerApi<T> {
     body: &B,
   ) -> Result<R, ApiError> {
     self.before_change(&method).await;
-    decode(send(self.request(method, path)?.json(body)).await?).await
+    decode_api(send_api(self.request(method, path)?.json(body)).await?).await
   }
 
   async fn send_without_response<B: Serialize>(
@@ -242,7 +249,7 @@ impl<T: AccessTokenSource> HttpServerApi<T> {
     if let Some(body) = maybe_body {
       request = request.json(body);
     }
-    send(request).await.map(|_| ())
+    send_api(request).await.map(|_| ())
   }
 
   /// An authenticated request to `/api/v1{path}` with a JSON body, answered with the raw JSON
@@ -266,11 +273,8 @@ impl<T: AccessTokenSource> HttpServerApi<T> {
         .header(reqwest::header::CONTENT_TYPE, "application/json")
         .body(body);
     }
-    send(request)
-      .await?
-      .text()
-      .await
-      .map_err(|error| ApiError::Decode(error.to_string()))
+    let body = read_api_body(send_api(request).await?).await?;
+    String::from_utf8(body).map_err(|error| ApiError::Decode(error.to_string()))
   }
 
   fn gateway_url(&self) -> String {
@@ -1175,7 +1179,8 @@ impl<T: AccessTokenSource> ServerApi for HttpServerApi<T> {
 
   async fn complete_attachment(&self, attachment: AttachmentId) -> Result<AttachmentResponse, ApiError> {
     self.before_change(&Method::POST).await;
-    decode(send(self.request(Method::POST, &format!("/attachments/{attachment}/complete"))?).await?).await
+    decode_api(send_api(self.request(Method::POST, &format!("/attachments/{attachment}/complete"))?).await?)
+      .await
   }
 
   async fn create_multipart_attachment(
@@ -1486,9 +1491,7 @@ pub async fn change_web_push_subscription(
   let builder = http_client()
     .post(format!("{base_url}/api/v1/push/web/subscription-change"))
     .json(request);
-  #[cfg(not(target_arch = "wasm32"))]
-  let builder = builder.timeout(API_REQUEST_TIMEOUT);
-  send(builder).await.map(drop)
+  send_api(builder).await.map(drop)
 }
 
 /// The push gateway's base URL without trailing slash; device tokens go to it, so it must be
@@ -1936,9 +1939,12 @@ async fn connect_websocket(url: &str) -> Result<NativeSocket, ApiError> {
   // minutes.
   let parsed = url::Url::parse(url).map_err(|error| ApiError::Network(format!("{url}: {error}")))?;
   let maybe_proxy = super::proxy::tunnel_proxy_for(&parsed);
-  tokio::time::timeout(CONNECT_TIMEOUT, open_websocket(&parsed, maybe_proxy.as_ref()))
-    .await
-    .map_err(|_| ApiError::Network("WebSocket connection timed out".into()))?
+  tokio::time::timeout(
+    WEBSOCKET_CONNECT_TIMEOUT,
+    open_websocket(&parsed, maybe_proxy.as_ref()),
+  )
+  .await
+  .map_err(|_| ApiError::Network("WebSocket connection timed out".into()))?
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -2089,6 +2095,51 @@ fn found<R>(result: Result<R, ApiError>) -> Result<Option<R>, ApiError> {
     Err(error) if error.is_not_found() => Ok(None),
     Err(error) => Err(error),
   }
+}
+
+/// [`send`] for a JSON API call, within [`API_ANSWER_TIMEOUT`] (the browser's fetch has its own).
+async fn send_api(request: RequestBuilder) -> Result<Response, ApiError> {
+  #[cfg(not(target_arch = "wasm32"))]
+  return tokio::time::timeout(API_ANSWER_TIMEOUT, send(request))
+    .await
+    .map_err(|_| ApiError::Network(format!("no answer within {} s", API_ANSWER_TIMEOUT.as_secs())))?;
+  #[cfg(target_arch = "wasm32")]
+  send(request).await
+}
+
+/// The JSON of an API answer, read by [`read_api_body`].
+async fn decode_api<R: DeserializeOwned>(response: Response) -> Result<R, ApiError> {
+  let body = read_api_body(response).await?;
+  serde_json::from_slice(&body).map_err(|error| ApiError::Decode(error.to_string()))
+}
+
+/// An API answer's body; natively it fails once it stops moving for [`API_READ_IDLE_TIMEOUT`],
+/// however long it takes in total.
+async fn read_api_body(response: Response) -> Result<Vec<u8>, ApiError> {
+  #[cfg(not(target_arch = "wasm32"))]
+  {
+    let mut response = response;
+    let mut body = Vec::new();
+    loop {
+      match tokio::time::timeout(API_READ_IDLE_TIMEOUT, response.chunk()).await {
+        Ok(Ok(Some(chunk))) => body.extend_from_slice(&chunk),
+        Ok(Ok(None)) => return Ok(body),
+        Ok(Err(error)) => return Err(network_error(error)),
+        Err(_) => {
+          return Err(ApiError::Network(format!(
+            "the answer stopped for {} s",
+            API_READ_IDLE_TIMEOUT.as_secs()
+          )));
+        },
+      }
+    }
+  }
+  #[cfg(target_arch = "wasm32")]
+  response
+    .bytes()
+    .await
+    .map(|bytes| bytes.to_vec())
+    .map_err(network_error)
 }
 
 async fn decode<R: DeserializeOwned>(response: Response) -> Result<R, ApiError> {

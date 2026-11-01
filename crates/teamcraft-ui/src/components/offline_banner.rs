@@ -51,6 +51,8 @@ enum Notice {
   },
   /// The token was refused; says why when the server did (issue #667).
   SignInRequired(SignInReason),
+  /// Connected, but the server answers late: messages still go out, only slower (issue #1064).
+  Slow,
 }
 
 /// How much room a notice takes (#718).
@@ -152,9 +154,15 @@ fn ConnectionHint(notice: Notice) -> impl IntoView {
     Notice::DeviceOffline => "connection-hint-offline",
     Notice::Connecting => "connection-hint-connecting",
     Notice::Unreachable { .. } | Notice::SignInRequired(_) => "connection-hint-reconnecting",
+    Notice::Slow => "connection-hint-slow",
   };
   view! {
-    <div class="connection-hint" class:is-offline=notice == Notice::DeviceOffline role="status">
+    <div
+      class="connection-hint"
+      class:is-offline=notice == Notice::DeviceOffline
+      class:is-slow=notice == Notice::Slow
+      role="status"
+    >
       <span class="visually-hidden">{move || i18n.t(key)}</span>
     </div>
   }
@@ -167,6 +175,7 @@ fn ConnectionNotice(notice: Notice, maybe_session: Option<SessionControl>) -> im
   let text = move || match notice {
     Notice::DeviceOffline => i18n.t("offline-banner"),
     Notice::Connecting => i18n.t("connection-banner-connecting"),
+    Notice::Slow => i18n.t("connection-hint-slow"),
     Notice::Unreachable {
       retry_in_secs,
       maybe_interception,
@@ -208,7 +217,7 @@ fn ConnectionNotice(notice: Notice, maybe_session: Option<SessionControl>) -> im
       }
       .into_any(),
     ),
-    Notice::DeviceOffline | Notice::Connecting => None,
+    Notice::DeviceOffline | Notice::Connecting | Notice::Slow => None,
   };
   view! {
     <div class="connection-notice" role="status">
@@ -265,7 +274,7 @@ impl Unsettled {
       CoreConnection::Connecting | CoreConnection::Offline { .. } => {
         Some(self.maybe_since_ms.unwrap_or(now_ms))
       },
-      CoreConnection::Connected | CoreConnection::SignInRequired { .. } => None,
+      CoreConnection::Connected | CoreConnection::Slow | CoreConnection::SignInRequired { .. } => None,
     };
     Self { maybe_since_ms }
   }
@@ -297,8 +306,16 @@ fn notice_for(
   }
   match maybe_connection? {
     CoreConnection::Connected => None,
+    // Still connected: a quiet hint, no grace period needed (the core doesn't flip it back and forth).
+    CoreConnection::Slow => Some(Notice::Slow),
     CoreConnection::Connecting | CoreConnection::Offline { .. } if !unsettled.is_past_grace(now) => None,
     CoreConnection::Connecting => Some(Notice::Connecting),
+    // The attempt is due but hasn't started (the loop finishes other work first): "next attempt in
+    // 0 s" would read as stuck.
+    CoreConnection::Offline {
+      retry_at_ms,
+      maybe_interception: None,
+    } if retry_at_ms <= now => Some(Notice::Connecting),
     CoreConnection::Offline {
       retry_at_ms,
       maybe_interception,
@@ -326,6 +343,7 @@ fn prominence_of(notice: Notice, unsettled: Unsettled, now_ms: i64) -> Prominenc
       Prominence::Notice
     },
     Notice::DeviceOffline | Notice::Connecting | Notice::Unreachable { .. } => Prominence::Hint,
+    Notice::Slow => Prominence::Hint,
   }
 }
 
@@ -357,6 +375,16 @@ mod tests {
       None
     );
     assert_eq!(notice_for(true, None, Unsettled::default(), 0), None);
+  }
+
+  #[test]
+  fn a_slow_link_is_a_hint_not_unreachable() {
+    let notice = notice_for(true, Some(CoreConnection::Slow), Unsettled::default(), 0);
+    assert_eq!(notice, Some(Notice::Slow));
+    assert_eq!(
+      notice.map(|notice| prominence_of(notice, Unsettled::default(), 0)),
+      Some(Prominence::Hint)
+    );
   }
 
   #[test]
@@ -537,12 +565,10 @@ mod tests {
           maybe_interception: None
         })
       );
+      // Due but not started yet: connecting, not "next attempt in 0 s" (issue #1064).
       assert_eq!(
         notice_for(true, Some(OFFLINE), unsettled, 20_000),
-        Some(Notice::Unreachable {
-          retry_in_secs: 0,
-          maybe_interception: None
-        })
+        Some(Notice::Connecting)
       );
     }
 

@@ -38,8 +38,9 @@ const LIKELY_RESUMABLE_MS: i64 = 60_000;
 
 /// How long each step of the handshake (socket and `hello`, the answer to `resume` or `identify`)
 /// may take when the caller doesn't say: a server that accepts the socket and then stays silent must
-/// not hold the reconnect loop forever.
-pub const DEFAULT_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(15);
+/// not hold the reconnect loop forever. Generous: on a saturated link one round trip can take
+/// seconds, and an answer that comes late is still an answer (issue #1064).
+pub const DEFAULT_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// A gateway connection that finished its handshake.
 pub struct GatewayStart<G> {

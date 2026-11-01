@@ -33,6 +33,10 @@ pub enum ConnectionState {
   /// Opening the connection, running the handshake and, for a fresh session, the full sync.
   Connecting,
   Connected,
+  /// Connected, but heartbeats take long to be answered (a saturated or very slow link): requests
+  /// still complete, only later. The connection is kept; the shells say "slow", not "unreachable"
+  /// (issue #1064).
+  Slow,
   /// The last attempt failed or the connection was lost; the next attempt starts at `retry_at_ms`
   /// (Unix milliseconds), or at once when the network changes. `maybe_interception` names what
   /// answered instead of the server, if the last attempt found out (a captive portal, a TLS proxy).
@@ -51,6 +55,9 @@ pub enum ConnectionState {
 
 /// A tick this much earlier than the previous one means the wall clock was set back.
 const CLOCK_JUMP_BACK_MS: i64 = 1_000;
+/// The measured round trip counts up to this much: the time limits grow with it (twice the round
+/// trip on top of each), but a link that slow is as good as dead.
+const MAX_ROUND_TRIP_MS: i64 = 20_000;
 
 /// Timing of the supervisor. The defaults suit every shell.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -66,13 +73,16 @@ pub struct ConnectionSettings {
   /// over. A server that accepts and then drops every connection keeps backing off.
   pub stable_after: Duration,
   /// After a network change or a wake-up, an open connection must answer a heartbeat within this
-  /// long or it is replaced.
+  /// long, plus twice its measured round trip, or it is replaced.
   pub probe_timeout: Duration,
-  /// Any heartbeat must be answered within this long (any frame counts) or the connection is
-  /// replaced: a link that went dead silently (a dropped NAT entry, a dead Wi-Fi) is found one
-  /// heartbeat interval plus this after it died, instead of after two silent intervals. Long
-  /// enough for a lossy link's retransmissions.
+  /// Any heartbeat must be answered within this long, plus twice the measured round trip (any
+  /// frame counts), or the connection is replaced: a link that went dead silently (a dropped NAT
+  /// entry, a dead Wi-Fi) is found one heartbeat interval plus this after it died, instead of
+  /// after two silent intervals. Long enough for a lossy link's retransmissions.
   pub heartbeat_answer_timeout: Duration,
+  /// A heartbeat answered this late, or not answered by then, makes the state
+  /// [`ConnectionState::Slow`]; an answer in less than half of it makes it `Connected` again.
+  pub slow_round_trip: Duration,
   /// A gap this long between two ticks means the device slept or the tab was frozen.
   pub wake_gap: Duration,
   /// What is kept while a long sync or command runs ([`ConnectionSupervisor::keep_alive`]); beyond
@@ -106,11 +116,22 @@ pub struct ConnectionSupervisor<G> {
   connected_at_ms: i64,
   last_heard_ms: i64,
   last_heartbeat_ms: i64,
+  /// When the heartbeat whose answer measures the round trip went out.
+  maybe_timed_heartbeat_ms: Option<i64>,
+  /// The smoothed heartbeat round trip, kept across reconnects: the link usually stays as slow.
+  maybe_round_trip_ms: Option<i64>,
+  /// When a network change or wake-up last skipped the backoff; a network that keeps reporting
+  /// changes (Android dropping and regaining "validated" on a saturated link) gets it once per
+  /// [`ConnectionSettings::stable_after`], not a reconnect loop.
+  maybe_skipped_backoff_ms: Option<i64>,
   /// Set after a network change: the open connection must answer by then.
   maybe_probe_deadline_ms: Option<i64>,
   /// When the oldest heartbeat nothing has answered yet went out.
   maybe_unanswered_since_ms: Option<i64>,
   maybe_last_tick_ms: Option<i64>,
+  /// Work ran without a connection since the last tick ([`Self::keep_alive`]): a long gap until
+  /// this tick was the work, not a sleep.
+  has_worked_since_tick: bool,
   /// A fingerprint of the token the server refused, so it isn't offered again and again (each
   /// refusal counts against the address on the server).
   maybe_refused_token: Option<u64>,
@@ -129,6 +150,7 @@ impl Default for ConnectionSettings {
       stable_after: Duration::from_secs(30),
       probe_timeout: Duration::from_secs(3),
       heartbeat_answer_timeout: Duration::from_secs(10),
+      slow_round_trip: Duration::from_secs(3),
       wake_gap: Duration::from_secs(30),
       held_limits: HeldLimits::default(),
     }
@@ -195,9 +217,13 @@ impl<G: GatewayConnection> ConnectionSupervisor<G> {
       connected_at_ms: i64::MIN,
       last_heard_ms: i64::MIN,
       last_heartbeat_ms: i64::MIN,
+      maybe_timed_heartbeat_ms: None,
+      maybe_round_trip_ms: None,
+      maybe_skipped_backoff_ms: None,
       maybe_probe_deadline_ms: None,
       maybe_unanswered_since_ms: None,
       maybe_last_tick_ms: None,
+      has_worked_since_tick: false,
       maybe_refused_token: None,
       held: HeldFrames::default(),
       jitter: Jitter::new(OsRng.next_u64()),
@@ -250,7 +276,10 @@ impl<G: GatewayConnection> ConnectionSupervisor<G> {
       deadline = deadline.min(probe);
     }
     if let Some(sent) = self.maybe_unanswered_since_ms {
-      deadline = deadline.min(sent.saturating_add(millis(self.settings.heartbeat_answer_timeout)));
+      deadline = deadline.min(sent.saturating_add(self.answer_limit_ms()));
+      if self.state() == ConnectionState::Connected {
+        deadline = deadline.min(sent.saturating_add(millis(self.settings.slow_round_trip)));
+      }
     }
     Some(deadline)
   }
@@ -272,6 +301,9 @@ impl<G: GatewayConnection> ConnectionSupervisor<G> {
     };
     let result = client.start_gateway(timing).await;
     let now = client.now_ms();
+    // The attempt kept the loop busy, maybe for long on a slow link; that was no sleep, and taking
+    // it for one would skip the backoff after every slow failure (issue #1064).
+    self.maybe_last_tick_ms = Some(now);
     match result {
       Ok(start) => {
         tracing::info!(outcome = ?start.outcome, "gateway connected");
@@ -284,11 +316,18 @@ impl<G: GatewayConnection> ConnectionSupervisor<G> {
         self.connected_at_ms = now;
         self.last_heard_ms = now;
         self.last_heartbeat_ms = now;
-        self.maybe_last_tick_ms = Some(now);
+        self.maybe_timed_heartbeat_ms = None;
         self.maybe_probe_deadline_ms = None;
         self.maybe_unanswered_since_ms = None;
         self.maybe_refused_token = None;
-        self.set_state(ConnectionState::Connected);
+        let is_slow = self
+          .maybe_round_trip_ms
+          .is_some_and(|round_trip| round_trip >= millis(self.settings.slow_round_trip));
+        self.set_state(if is_slow {
+          ConnectionState::Slow
+        } else {
+          ConnectionState::Connected
+        });
         Some(start.outcome)
       },
       Err(error) if error.is_sign_in_required() => {
@@ -350,6 +389,9 @@ impl<G: GatewayConnection> ConnectionSupervisor<G> {
         self.maybe_probe_deadline_ms = None;
         self.maybe_unanswered_since_ms = None;
         let is_heartbeat_ack = matches!(frame, GatewayServerMessage::HeartbeatAck);
+        if is_heartbeat_ack && let Some(sent) = self.maybe_timed_heartbeat_ms.take() {
+          self.note_round_trip(now.saturating_sub(sent));
+        }
         // An event can start a long catch-up (a welcome, a membership change).
         let handled = self.keep_alive(now, client.handle_frame(frame)).await;
         self.note_kept_alive(client.now_ms());
@@ -380,9 +422,10 @@ impl<G: GatewayConnection> ConnectionSupervisor<G> {
       );
       self.shift_timers(now_ms.saturating_sub(last));
     }
-    let has_slept = self
-      .maybe_last_tick_ms
-      .is_some_and(|last| now_ms.saturating_sub(last) >= millis(self.settings.wake_gap));
+    let has_slept = !std::mem::take(&mut self.has_worked_since_tick)
+      && self
+        .maybe_last_tick_ms
+        .is_some_and(|last| now_ms.saturating_sub(last) >= millis(self.settings.wake_gap));
     self.maybe_last_tick_ms = Some(now_ms);
     if has_slept {
       tracing::info!("woke up after a pause, checking the gateway");
@@ -402,15 +445,17 @@ impl<G: GatewayConnection> ConnectionSupervisor<G> {
       self.lose(now_ms, &"no answer after a network change");
       // The network changed or the device woke up: the new connection is tried at once, not after
       // the backoff (the user is likely looking at the app right now).
-      self.next_attempt_ms = now_ms;
-      self.set_state(ConnectionState::Offline {
-        retry_at_ms: now_ms,
-        maybe_interception: None,
-      });
+      if self.may_skip_backoff(now_ms) {
+        self.next_attempt_ms = now_ms;
+        self.set_state(ConnectionState::Offline {
+          retry_at_ms: now_ms,
+          maybe_interception: None,
+        });
+      }
       return;
     }
     if let Some(sent) = self.maybe_unanswered_since_ms
-      && now_ms.saturating_sub(sent) >= millis(self.settings.heartbeat_answer_timeout)
+      && now_ms.saturating_sub(sent) >= self.answer_limit_ms()
     {
       self.lose(
         now_ms,
@@ -420,6 +465,14 @@ impl<G: GatewayConnection> ConnectionSupervisor<G> {
         ),
       );
       return;
+    }
+    if self.state() == ConnectionState::Connected
+      && self
+        .maybe_unanswered_since_ms
+        .is_some_and(|sent| now_ms.saturating_sub(sent) >= millis(self.settings.slow_round_trip))
+    {
+      tracing::info!("a heartbeat waits long for its answer; the link is slow");
+      self.set_state(ConnectionState::Slow);
     }
     let silent_ms = now_ms.saturating_sub(self.last_heard_ms);
     if silent_ms >= self.silence_limit_ms() {
@@ -440,7 +493,11 @@ impl<G: GatewayConnection> ConnectionSupervisor<G> {
   /// the next [`Self::on_tick`] or [`Self::on_frame`] counts the heartbeats sent meanwhile.
   pub async fn keep_alive<T>(&mut self, now_ms: i64, work: impl std::future::Future<Output = T>) -> T {
     let Some(connection) = self.maybe_gateway.as_mut() else {
-      return work.await;
+      let result = work.await;
+      // The work may have taken long (requests on a slow link); the next tick must not take that
+      // for a sleep and skip the backoff.
+      self.has_worked_since_tick = true;
+      return result;
     };
     let heartbeat_due = self.last_heartbeat_ms.saturating_add(millis(self.heartbeat));
     let first_in = Duration::from_millis(heartbeat_due.saturating_sub(now_ms).max(0).unsigned_abs());
@@ -473,16 +530,26 @@ impl<G: GatewayConnection> ConnectionSupervisor<G> {
   /// The network changed or the device woke up: an open connection has to prove it still works
   /// within [`ConnectionSettings::probe_timeout`], a missing one is tried again at once (also after
   /// a refused token: the app may have signed in again meanwhile).
+  /// A network that reports changes again and again gets the immediate attempt once per
+  /// [`ConnectionSettings::stable_after`]; after that the backoff runs on.
   pub async fn network_changed(&mut self, now_ms: i64) {
-    self.failures = 0;
     if self.maybe_gateway.is_some() {
-      self.maybe_probe_deadline_ms = Some(now_ms.saturating_add(millis(self.settings.probe_timeout)));
+      let slack = self.round_trip_slack_ms();
+      self.maybe_probe_deadline_ms = Some(
+        now_ms
+          .saturating_add(millis(self.settings.probe_timeout))
+          .saturating_add(slack),
+      );
       self.heartbeat_now(now_ms).await;
       return;
     }
     self.maybe_refused_token = None;
+    let was_signed_out = matches!(self.state(), ConnectionState::SignInRequired { .. });
+    if !self.may_skip_backoff(now_ms) && !was_signed_out {
+      return;
+    }
     self.next_attempt_ms = now_ms;
-    if matches!(self.state(), ConnectionState::SignInRequired { .. }) {
+    if was_signed_out {
       self.set_state(ConnectionState::Offline {
         retry_at_ms: now_ms,
         maybe_interception: None,
@@ -504,6 +571,45 @@ impl<G: GatewayConnection> ConnectionSupervisor<G> {
       self.maybe_probe_deadline_ms = None;
       self.maybe_unanswered_since_ms = None;
     }
+    if kept.heartbeats_sent > 0 || kept.was_heard {
+      // Answers held while the work ran arrive late at `on_frame`: they measure the work, not the
+      // link.
+      self.maybe_timed_heartbeat_ms = None;
+    }
+  }
+
+  /// Smooths a round trip like TCP's estimate, but follows a slower link at once: the limits must
+  /// grow before the next heartbeat, not after several.
+  fn note_round_trip(&mut self, sample_ms: i64) {
+    let sample_ms = sample_ms.clamp(0, MAX_ROUND_TRIP_MS);
+    let round_trip = match self.maybe_round_trip_ms {
+      Some(previous) if sample_ms < previous => (previous.saturating_mul(3) + sample_ms) / 4,
+      _ => sample_ms,
+    };
+    self.maybe_round_trip_ms = Some(round_trip);
+    let slow_ms = millis(self.settings.slow_round_trip);
+    if sample_ms >= slow_ms {
+      if self.state() != ConnectionState::Slow {
+        tracing::info!(round_trip_ms = sample_ms, "the link is slow");
+      }
+      self.set_state(ConnectionState::Slow);
+    } else if sample_ms < slow_ms / 2 {
+      self.set_state(ConnectionState::Connected);
+    }
+  }
+
+  /// Whether a network change or wake-up may skip the backoff now; records that it did.
+  fn may_skip_backoff(&mut self, now_ms: i64) -> bool {
+    let is_recent = self.maybe_skipped_backoff_ms.is_some_and(|skipped| {
+      now_ms.saturating_sub(skipped) < millis(self.settings.stable_after) && skipped <= now_ms
+    });
+    if is_recent {
+      tracing::debug!("another network change soon after the last; keeping the backoff");
+      return false;
+    }
+    self.maybe_skipped_backoff_ms = Some(now_ms);
+    self.failures = 0;
+    true
   }
 
   fn is_attempt_due<A: ServerApi, S: LocalStore>(&self, client: &Client<A, S>) -> bool {
@@ -517,6 +623,7 @@ impl<G: GatewayConnection> ConnectionSupervisor<G> {
   async fn heartbeat_now(&mut self, now_ms: i64) {
     self.last_heartbeat_ms = now_ms;
     self.maybe_unanswered_since_ms.get_or_insert(now_ms);
+    self.maybe_timed_heartbeat_ms.get_or_insert(now_ms);
     if !self.send(now_ms, &GatewayClientMessage::Heartbeat).await {
       tracing::debug!("heartbeat not sent");
     }
@@ -530,6 +637,7 @@ impl<G: GatewayConnection> ConnectionSupervisor<G> {
     self.held = HeldFrames::default();
     self.maybe_probe_deadline_ms = None;
     self.maybe_unanswered_since_ms = None;
+    self.maybe_timed_heartbeat_ms = None;
     if now_ms.saturating_sub(self.connected_at_ms) >= millis(self.settings.stable_after) {
       self.failures = 0;
     }
@@ -568,8 +676,15 @@ impl<G: GatewayConnection> ConnectionSupervisor<G> {
     shift(&mut self.connected_at_ms);
     shift(&mut self.last_heard_ms);
     shift(&mut self.last_heartbeat_ms);
-    if let Some(deadline) = self.maybe_probe_deadline_ms.as_mut() {
-      shift(deadline);
+    for maybe_at in [
+      &mut self.maybe_probe_deadline_ms,
+      &mut self.maybe_unanswered_since_ms,
+      &mut self.maybe_timed_heartbeat_ms,
+      &mut self.maybe_skipped_backoff_ms,
+    ] {
+      if let Some(at) = maybe_at.as_mut() {
+        shift(at);
+      }
     }
     if let ConnectionState::Offline {
       maybe_interception, ..
@@ -588,6 +703,18 @@ impl<G: GatewayConnection> ConnectionSupervisor<G> {
     millis(self.heartbeat)
       .saturating_mul(2)
       .saturating_add(millis(self.settings.probe_timeout))
+      .saturating_add(self.round_trip_slack_ms())
+  }
+
+  /// How long a heartbeat may wait for its answer.
+  fn answer_limit_ms(&self) -> i64 {
+    millis(self.settings.heartbeat_answer_timeout).saturating_add(self.round_trip_slack_ms())
+  }
+
+  /// What a slow link adds to each limit: twice its round trip, so a late answer is still an answer
+  /// (robustness.md, "Hostile networks").
+  fn round_trip_slack_ms(&self) -> i64 {
+    self.maybe_round_trip_ms.unwrap_or(0).saturating_mul(2)
   }
 
   fn set_state(&mut self, state: ConnectionState) {
@@ -607,6 +734,7 @@ impl From<ConnectionState> for teamcraft_client_api::remote::CoreConnection {
     match state {
       ConnectionState::Connecting => Self::Connecting,
       ConnectionState::Connected => Self::Connected,
+      ConnectionState::Slow => Self::Slow,
       ConnectionState::Offline {
         retry_at_ms,
         maybe_interception,

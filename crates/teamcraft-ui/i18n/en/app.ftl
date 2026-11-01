@@ -82,6 +82,7 @@ connection-banner-untrusted-certificate = The server's certificate isn't trusted
 connection-hint-offline = Offline
 connection-hint-connecting = Connecting…
 connection-hint-reconnecting = Reconnecting…
+connection-hint-slow = Slow connection
 connection-banner-retry = Try now
 connection-banner-sign-in = Your session has expired. Messages wait until you sign in again.
 connection-banner-sign-in-action = Sign in again

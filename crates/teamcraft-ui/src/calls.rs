@@ -649,7 +649,7 @@ pub fn selected_camera_is_rear(cameras: &[MediaDevice], selected_id: &str) -> bo
 /// grace period); otherwise this device's own connection broke.
 pub fn lost_call_failure(maybe_connection: Option<CoreConnection>) -> CallFailure {
   match maybe_connection {
-    Some(CoreConnection::Connected) => CallFailure::ServerLost,
+    Some(CoreConnection::Connected | CoreConnection::Slow) => CallFailure::ServerLost,
     _ => CallFailure::ConnectionLost,
   }
 }

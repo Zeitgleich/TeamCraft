@@ -107,6 +107,10 @@ pub struct FakeGateway {
   user: UserId,
   connection: u64,
   receiver: UnboundedReceiver<GatewayServerMessage>,
+  /// The frame on its way over a slow link ([`FakeServer::slow_down_gateways`]) and when it
+  /// arrives; kept here so a `receive` that is dropped and called again doesn't lose it.
+  #[cfg(not(target_arch = "wasm32"))]
+  maybe_late: Option<(GatewayServerMessage, tokio::time::Instant)>,
 }
 
 #[derive(Default)]
@@ -183,6 +187,8 @@ struct State {
   /// Connections that died without the client noticing: frames sent on them vanish and nothing
   /// arrives on them any more.
   frozen_connections: HashSet<u64>,
+  /// Users whose gateway frames arrive this late (a saturated link), one after the other.
+  gateway_latencies: HashMap<UserId, std::time::Duration>,
   /// Handshakes refused because the token was (as `set_signed_out`), to check a client stops trying.
   gateway_refusals: u64,
   /// Gateway connections opened so far.
@@ -524,6 +530,16 @@ impl FakeServer {
     } else {
       state.silent_gateway_users.remove(&user);
     }
+  }
+
+  /// Every gateway frame to this user arrives `latency` after the previous one was taken (a
+  /// saturated link: everything still arrives, only late); `None` makes the link fast again.
+  pub fn slow_down_gateways(&self, user: UserId, maybe_latency: Option<std::time::Duration>) {
+    let mut state = self.lock();
+    match maybe_latency {
+      Some(latency) => state.gateway_latencies.insert(user, latency),
+      None => state.gateway_latencies.remove(&user),
+    };
   }
 
   /// The open gateway connections of a user die silently (half-open TCP after a network change):
@@ -4882,6 +4898,8 @@ impl ServerApi for FakeServerApi {
       user: self.user,
       connection,
       receiver,
+      #[cfg(not(target_arch = "wasm32"))]
+      maybe_late: None,
     };
     // Before identify the connection has no session; keep the sender until it picks one.
     self.server.lock().sessions.insert(
@@ -5057,6 +5075,18 @@ impl GatewayConnection for FakeGateway {
   }
 
   async fn receive(&mut self) -> Option<Result<GatewayServerMessage, ApiError>> {
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+      let maybe_latency = self.server.lock().gateway_latencies.get(&self.user).copied();
+      if let Some(latency) = maybe_latency.filter(|_| self.maybe_late.is_none()) {
+        let frame = self.receiver.next().await?;
+        self.maybe_late = Some((frame, tokio::time::Instant::now() + latency));
+      }
+      if let Some((_, arrives)) = &self.maybe_late {
+        tokio::time::sleep_until(*arrives).await;
+        return self.maybe_late.take().map(|(frame, _)| Ok(frame));
+      }
+    }
     self.receiver.next().await.map(Ok)
   }
 }

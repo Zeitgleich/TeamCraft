@@ -20,6 +20,7 @@
   <string name="offline_banner">No connection. Messages are sent when you\'re back online.</string>
   <!-- The language these strings are in, as a BCP 47 tag: the app's language for the identity provider's login page (issue #448). -->
   <string name="app_language">en</string>
+  <string name="connection_slow">Slow connection. Messages still go out, but may take longer.</string>
   <string name="connection_unreachable">The server can\'t be reached. Messages wait until it is back. Next attempt in %1$d s.</string>
   <string name="connection_captive_portal">This network wants you to sign in first. Open a web page to sign in; messages wait. Next attempt in %1$d s.</string>
   <string name="connection_untrusted_certificate">The server\'s certificate isn\'t trusted. On a network that inspects encrypted traffic, use another network or ask your IT; if it happens everywhere, tell your administrator. Next attempt in %1$d s.</string>
