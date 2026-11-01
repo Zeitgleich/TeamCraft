@@ -26,6 +26,7 @@ use teamcraft_core::client::{
 };
 use teamcraft_core::clock::{Clock as _, SystemClock};
 use teamcraft_core::connection::{ConnectionStatus, NetworkChanges};
+use teamcraft_core::notified;
 use teamcraft_core::notify_rules::{load_mention_preferences, save_mention_preferences};
 use teamcraft_core::prefetch::{load_segment_prefetch, save_segment_prefetch};
 use teamcraft_core::push_guard;
@@ -49,9 +50,9 @@ use crate::calls::{CallHub, CallPreparation};
 use crate::error::TeamCraftError;
 use crate::types::{
   AccountState, AppConfig, ConversationItem, DirectPeer, LinkPlatform, LinkRequestItem, MentionSettings,
-  MessageItem, MessagePage, NotificationContent, NotificationContentSettings, Presence, PushDiagnosticsInfo,
-  PushNotification, PushService, SearchHitItem, SegmentPrefetchMode, SegmentPrefetchResult, StoreProblem,
-  TestPushResult, share_targets,
+  MessageItem, MessagePage, NotificationContent, NotificationContentSettings, NotifiedConversation, Presence,
+  PushDiagnosticsInfo, PushNotification, PushService, SearchHitItem, SegmentPrefetchMode,
+  SegmentPrefetchResult, StoreProblem, TestPushResult, share_targets,
 };
 use crate::{EventListener, TokenProvider};
 
@@ -1058,6 +1059,10 @@ impl Engine {
     let is_duplicate = push_guard::is_duplicate(store, &preview.wake_up)?;
     let maybe_suppression =
       push_guard::local_suppression(store, &preview.wake_up, now_ms, utc_offset_minutes)?;
+    // Opening the conversation from this notification shows what it showed (issue #1065).
+    if let Err(error) = notified::remember(store, &preview) {
+      tracing::debug!(%error, "notified message not kept");
+    }
     let mut notification: PushNotification = preview.into();
     notification.is_duplicate = is_duplicate;
     notification.maybe_suppression = maybe_suppression.map(Into::into);
@@ -1136,6 +1141,16 @@ impl Engine {
       }
     }
     Ok(preview)
+  }
+
+  /// What the newest notification showed of the conversation, while the store hasn't caught up
+  /// to it (see [`notified::notified_conversation`]).
+  pub(crate) fn notified_conversation(
+    &self,
+    conversation_id: &str,
+  ) -> Result<Option<NotifiedConversation>, TeamCraftError> {
+    let conversation: ConversationId = parse_id(conversation_id)?;
+    Ok(notified::notified_conversation(self.store.as_ref(), conversation)?.map(Into::into))
   }
 
   pub(crate) fn push_diagnostics(&self) -> Result<PushDiagnosticsInfo, TeamCraftError> {

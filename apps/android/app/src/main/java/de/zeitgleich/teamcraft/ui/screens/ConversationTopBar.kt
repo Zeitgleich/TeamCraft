@@ -35,6 +35,7 @@ import de.zeitgleich.teamcraft.core.User
 import de.zeitgleich.teamcraft.ui.UserAvatar
 import de.zeitgleich.teamcraft.ui.theme.LocalTeamCraftColors
 import de.zeitgleich.teamcraft.ui.theme.darkStatusBarBackdrop
+import uniffi.teamcraft_ffi.NotifiedConversation
 
 /**
  * The conversation's header (issue #704), like the desktop's: back, a round avatar (with the
@@ -46,6 +47,7 @@ import de.zeitgleich.teamcraft.ui.theme.darkStatusBarBackdrop
 fun ConversationTopBar(
   snapshot: ChatSnapshot?,
   maybeConversation: Conversation?,
+  maybeNotified: NotifiedConversation?,
   onBack: () -> Unit,
   actions: @Composable RowScope.() -> Unit,
 ) {
@@ -53,10 +55,12 @@ fun ConversationTopBar(
   val maybePeer = maybeConversation?.takeIf { it.kind == "Direct" }?.let { conversation ->
     conversation.memberIds.firstOrNull { it != snapshot?.me?.id }?.let { snapshot?.user(it) }
   }
-  val name = maybeConversation?.name.orEmpty()
+  // Not stored yet (opened from a notification, issue #1065): the name the notification showed.
+  val name = maybeConversation?.name ?: maybeNotified?.maybeName.orEmpty()
+  val maybeKind = maybeConversation?.kind ?: maybeNotified?.let { if (it.isDirect) "Direct" else null }
   val subtitle = when {
     maybePeer != null -> peerStatus(maybePeer)
-    maybeConversation == null -> ""
+    maybeConversation == null -> stringResource(R.string.conversation_loading)
     maybeConversation.topic.isNotBlank() -> maybeConversation.topic
     maybeConversation.memberIds.isNotEmpty() ->
       pluralStringResource(R.plurals.conversation_members, maybeConversation.memberIds.size, maybeConversation.memberIds.size)
@@ -65,7 +69,7 @@ fun ConversationTopBar(
   TopAppBar(
     title = {
       Row(verticalAlignment = Alignment.CenterVertically) {
-        HeaderAvatar(name, maybeConversation?.kind, maybePeer)
+        HeaderAvatar(name, maybeKind, maybePeer)
         Column(Modifier.padding(start = 12.dp)) {
           Text(
             name,
@@ -129,7 +133,8 @@ private fun HeaderAvatar(name: String, maybeKind: String?, maybePeer: User?) {
   val label = when (maybeKind) {
     "Public" -> "#"
     "Private" -> "◆"
-    else -> name.firstOrNull()?.uppercase() ?: "?"
+    // Without a name yet an empty circle, never a question mark.
+    else -> name.firstOrNull()?.uppercase().orEmpty()
   }
   val hue = (maybePeer?.avatarHue ?: name.hashCode()).mod(360).toFloat()
   Box {

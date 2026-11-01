@@ -8,6 +8,7 @@ use crate::common;
 use common::{Peer, settings, settle};
 use teamcraft_core::ClientSettings;
 use teamcraft_core::api::fake::{FakeServer, FakeServerApi};
+use teamcraft_core::notified::{self, NotifiedContent, notified_conversation};
 use teamcraft_core::push_preview::{
   PreviewContent, PreviewGap, PushSession, device_push_content, push_preview, save_device_push_content,
   save_push_session,
@@ -107,6 +108,47 @@ async fn preview_fetches_and_decrypts_a_message_the_app_has_not_seen() {
     stored_before
   );
   settle(&mut [&mut bob]).await;
+}
+
+/// Opening a conversation from its notification shows what the notification showed with the link
+/// gone (issue #1065): the name and the message come from the store, without a round trip, until
+/// the sync stores the message itself.
+#[tokio::test]
+async fn the_notified_conversation_opens_from_the_store_without_the_network() {
+  let (server, mut alice, mut bob, channel) = channel_with_two().await;
+  let message = alice_says(&mut alice, channel, "lunch at noon?").await;
+  let sealed = wake_up_for(&server, &bob, &alice, channel, message);
+  let preview = push_preview(bob.store.as_ref(), Some(&bob.api), &sealed)
+    .await
+    .unwrap();
+  notified::remember(bob.store.as_ref(), &preview).unwrap();
+
+  server.set_offline(bob.client.user_id(), true);
+  let notified = notified_conversation(bob.store.as_ref(), channel)
+    .unwrap()
+    .unwrap();
+  assert_eq!(notified.maybe_name.as_deref(), Some("planning"));
+  let shown = notified.maybe_message.unwrap();
+  assert_eq!(shown.message_id, message);
+  assert_eq!(shown.maybe_sender_name.as_deref(), Some("Alice"));
+  assert_eq!(
+    shown.content,
+    NotifiedContent::Text {
+      text: "lunch at noon?".into()
+    }
+  );
+
+  // The sync brought the message: the conversation shows it from the store, the record goes.
+  server.set_offline(bob.client.user_id(), false);
+  settle(&mut [&mut alice, &mut bob]).await;
+  assert!(
+    bob
+      .store
+      .message_by_server_id(channel, message)
+      .unwrap()
+      .is_some()
+  );
+  assert_eq!(notified_conversation(bob.store.as_ref(), channel).unwrap(), None);
 }
 
 /// A browser rotates its Web Push subscription (`pushsubscriptionchange`, e2ee.md §7): the new one

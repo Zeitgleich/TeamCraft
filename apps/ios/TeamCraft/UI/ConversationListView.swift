@@ -56,6 +56,10 @@ struct ConversationListView: View {
       if let conversation = conversations.first(where: { $0.id == selection }) {
         ChatPane(conversation: conversation, threadId: nil, account: account)
           .id(conversation.id)
+      } else if let selection {
+        // Opened from a notification before the sync brought it (issue #1065).
+        PendingConversationView(conversationId: selection)
+          .id(selection)
       } else {
         Text("no_conversation_selected").foregroundStyle(Theme.textMuted)
       }

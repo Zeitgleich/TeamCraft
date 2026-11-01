@@ -60,6 +60,7 @@ import uniffi.teamcraft_ffi.LinkRequestItem
 import uniffi.teamcraft_ffi.LoginBrand
 import uniffi.teamcraft_ffi.MessageItem
 import uniffi.teamcraft_ffi.NotificationContent
+import uniffi.teamcraft_ffi.NotifiedConversation
 import uniffi.teamcraft_ffi.Presence
 import uniffi.teamcraft_ffi.PushDiagnosticsInfo
 import uniffi.teamcraft_ffi.PushService
@@ -439,6 +440,13 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
       conversation.id to ChatListEntry(preview, latest.id)
     }.toMap()
   }
+
+  /**
+   * What the newest notification showed of a conversation, while the store hasn't caught it up yet
+   * (issue #1065): its name and the notified message, so opening it never shows an empty screen.
+   */
+  suspend fun notifiedConversation(conversationId: String): NotifiedConversation? =
+    read { notifiedConversation(conversationId) }
 
   suspend fun messages(conversationId: String): List<MessageItem> =
     read { messages(conversationId, MESSAGE_PAGE.toUInt()) }?.map(::namedAuthor) ?: emptyList()

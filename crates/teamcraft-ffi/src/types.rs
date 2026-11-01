@@ -5,12 +5,15 @@ use teamcraft_client_api::model::{self as view, ConversationKind as Conversation
 use teamcraft_core::UnreadableStore;
 use teamcraft_core::client::LinkRequestInfo;
 use teamcraft_core::device_activity::AppUse;
+use teamcraft_core::notified::{
+  NotifiedContent, NotifiedConversation as NotifiedConversationCore, NotifiedMessage as NotifiedMessageCore,
+};
 use teamcraft_core::notify_rules::MentionPreferences;
 use teamcraft_core::prefetch::SegmentPrefetch;
 use teamcraft_core::push_guard::{PushDiagnostics, Suppression};
 use teamcraft_core::push_preview::{AttachmentKind, PreviewContent, PreviewGap, PushPreview};
 use teamcraft_proto::{
-  DeviceLinkPlatform, PushContentMode, PushKind, PushProvider, TestPushOutcome as TestPushOutcomeProto,
+  DeviceLinkPlatform, Id, PushContentMode, PushKind, PushProvider, TestPushOutcome as TestPushOutcomeProto,
   TestPushResponse,
 };
 
@@ -432,6 +435,35 @@ pub struct PushNotification {
   pub maybe_suppression: Option<NotificationSuppression>,
 }
 
+/// What the newest notification showed of a conversation (issue #1065): opening it from the
+/// notification shows this while the device hasn't caught the conversation up yet, never an empty
+/// screen without a name.
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
+pub struct NotifiedConversation {
+  pub conversation_id: String,
+  /// Channel name, or the other participants of a DM.
+  pub maybe_name: Option<String>,
+  pub is_direct: bool,
+  /// The notified message, while the store doesn't have it yet.
+  pub maybe_message: Option<NotifiedMessage>,
+}
+
+/// The message a notification showed, as far as it could be read.
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
+pub struct NotifiedMessage {
+  pub message_id: String,
+  pub maybe_sender_id: Option<String>,
+  pub maybe_sender_name: Option<String>,
+  /// The decrypted text, if the message could be read.
+  pub maybe_text: Option<String>,
+  /// A file's name, if the message is a file.
+  pub maybe_file_name: Option<String>,
+  /// The thread it replies in: then it is not part of the conversation's own feed.
+  pub maybe_thread_id: Option<String>,
+  /// When it was sent (the server's clock, from the message ID).
+  pub sent_at_ms: i64,
+}
+
 /// Device-local mention preferences (as on desktop): the server routes push by explicit mentions,
 /// these are applied to the decrypted text on the device.
 #[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
@@ -622,6 +654,36 @@ impl From<PushPreview> for PushNotification {
       is_call: preview.wake_up.kind == PushKind::Call,
       is_silent: preview.is_silent,
       is_conversation_verified: preview.is_conversation_verified,
+    }
+  }
+}
+
+impl From<NotifiedConversationCore> for NotifiedConversation {
+  fn from(notified: NotifiedConversationCore) -> Self {
+    Self {
+      conversation_id: notified.conversation_id.to_string(),
+      maybe_name: notified.maybe_name,
+      is_direct: notified.is_direct,
+      maybe_message: notified.maybe_message.map(Into::into),
+    }
+  }
+}
+
+impl From<NotifiedMessageCore> for NotifiedMessage {
+  fn from(message: NotifiedMessageCore) -> Self {
+    let (maybe_text, maybe_file_name) = match message.content {
+      NotifiedContent::Text { text } => (Some(text), None),
+      NotifiedContent::File { file_name } => (None, Some(file_name)),
+      NotifiedContent::Unavailable => (None, None),
+    };
+    Self {
+      message_id: message.message_id.to_string(),
+      maybe_sender_id: message.maybe_sender_id.map(|id| id.to_string()),
+      maybe_sender_name: message.maybe_sender_name,
+      maybe_text,
+      maybe_file_name,
+      maybe_thread_id: message.maybe_thread_id.map(|id| id.to_string()),
+      sent_at_ms: message.message_id.snowflake().unix_millis(),
     }
   }
 }

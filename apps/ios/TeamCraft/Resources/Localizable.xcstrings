@@ -9184,6 +9184,38 @@
           }
         }
       }
+    },
+    "conversation_loading": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Loading the conversation…"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Unterhaltung wird geladen …"
+          }
+        }
+      }
+    },
+    "messages_loading": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Loading messages…"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Nachrichten werden geladen …"
+          }
+        }
+      }
     }
   },
   "version": "1.0"

@@ -518,6 +518,12 @@ final class AppModel {
     (try? await core().conversations()) ?? []
   }
 
+  /// What the newest notification showed of a conversation, while the store hasn't caught it up
+  /// yet (issue #1065): its name and the notified message.
+  func notifiedConversation(_ conversationId: String) async -> NotifiedConversation? {
+    (try? await core().notifiedConversation(conversationId: conversationId)) ?? nil
+  }
+
   func messages(conversationId: String, limit: UInt32 = 200) async -> [MessageItem] {
     ((try? await core().messages(conversationId: conversationId, limit: limit)) ?? []).map {
       $0.namingDeletedAuthor()
@@ -760,7 +766,9 @@ final class AppModel {
   /// A notification's tap or action (reply, mark as read, answer or decline a call).
   /// The conversation ID comes from the notification, which a forged push could fill: it is only
   /// acted on if the local store knows that conversation (the extension sets it from the decrypted
-  /// payload, and drops it when it decrypted nothing).
+  /// payload, and drops it when it decrypted nothing). A tap also opens a conversation the store
+  /// doesn't have yet when the core kept what a notification of it showed (issue #1065): the
+  /// screen shows that until the sync brings the conversation.
   /// Reply, mark-as-read and answer also need the extension's tag over the ID
   /// (`NotificationAuthenticator`): the server can show an alert without the extension, naming a
   /// conversation the user is in.
@@ -768,7 +776,12 @@ final class AppModel {
     notificationAction identifier: String, conversationId: String, tag: String?, replyText: String?,
     maybeThreadId: String? = nil, notificationId: String? = nil
   ) async {
-    guard let conversation = await conversations().first(where: { $0.id == conversationId }) else { return }
+    guard let conversation = await conversations().first(where: { $0.id == conversationId }) else {
+      if identifier == UNNotificationDefaultActionIdentifier, await notifiedConversation(conversationId) != nil {
+        openConversationId = conversationId
+      }
+      return
+    }
     let isAuthentic = NotificationAuthenticator().isValid(tag: tag, for: conversationId)
     switch identifier {
     case NotificationCategories.replyAction:
