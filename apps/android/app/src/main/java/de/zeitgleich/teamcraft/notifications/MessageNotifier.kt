@@ -78,14 +78,15 @@ class MessageNotifier(
       )
       val badge = notification.maybeBadge?.toInt() ?: shown.maybeBadge
       update(shown.copy(conversations = shown.conversations + (entry.conversationId to entry), maybeBadge = badge))
-      post(entry, isAlerting = isAlerting)
+      post(entry, MessageNotificationSpecs.alerting(isAlerting, previous, entry))
       postSummary()
     }
   }
 
   /**
    * A retry read a message that was shown as a placeholder ([PushRetry]): fills in its line under
-   * the same ID, silently. Does nothing when the notification is gone or already complete.
+   * the same ID, silently on the phone but mirrored again to watches and bands
+   * ([NotificationAlerting.REFRESH]). Does nothing when the notification is gone or already complete.
    */
   fun fillIn(notification: PushNotification) {
     val line = line(notification)
@@ -99,7 +100,7 @@ class MessageNotifier(
         lines = lines,
       )
       update(shown.copy(conversations = shown.conversations + (entry.conversationId to entry)))
-      post(entry, isAlerting = false)
+      post(entry, NotificationAlerting.REFRESH)
       postSummary()
     }
   }
@@ -131,7 +132,7 @@ class MessageNotifier(
       val line = NotificationLine(text = reply.toString(), sentAtMs = System.currentTimeMillis())
       val updated = entry.copy(lines = NotificationLines.merge(entry.lines, line))
       update(shown.copy(conversations = shown.conversations + (conversationId to updated)))
-      post(updated, isAlerting = false)
+      post(updated, NotificationAlerting.SILENT)
     }
   }
 
@@ -156,7 +157,7 @@ class MessageNotifier(
       } else {
         val updated = entry.copy(lines = lines)
         update(withBadge.copy(conversations = withBadge.conversations + (conversationId to updated)))
-        if (lines != entry.lines) post(updated, isAlerting = false)
+        if (lines != entry.lines) post(updated, NotificationAlerting.SILENT)
       }
       postSummary()
     }
@@ -180,7 +181,7 @@ class MessageNotifier(
   fun repostAll() {
     synchronized(lock) {
       val shown = shown()
-      shown.conversations.values.forEach { entry -> post(entry, isAlerting = false) }
+      shown.conversations.values.forEach { entry -> post(entry, NotificationAlerting.SILENT) }
       postSummary()
     }
   }
@@ -282,10 +283,13 @@ class MessageNotifier(
     store.write(shown)
   }
 
-  private fun post(entry: ConversationNotification, isAlerting: Boolean) {
+  private fun post(entry: ConversationNotification, alerting: NotificationAlerting) {
     if (!canPost()) return
     val privacy = MessagePrivacy.of(contentPrefs.content.value, isAppLockOn(), entry.isVerified)
-    val spec = MessageNotificationSpecs.conversation(entry, privacy, isAlerting, labels()) ?: return
+    val isAlerting = alerting == NotificationAlerting.ALERT
+    val spec = MessageNotificationSpecs.conversation(entry, privacy, isAlerting, labels())
+      ?.let { if (alerting == NotificationAlerting.REFRESH) it.copy(alerting = alerting) else it }
+      ?: return
     postSafely(entry.conversationId, MESSAGE_ID, build(spec))
     spec.maybeShortcut?.let(::pushShortcut)
     if (privacy.showsNames) fetchAvatars(entry)
@@ -302,10 +306,10 @@ class MessageNotifier(
       .setWhen(spec.whenMs)
       .setShowWhen(true)
       .setAutoCancel(true)
-      .setOnlyAlertOnce(!isAlerting)
+      .setOnlyAlertOnce(spec.alerting == NotificationAlerting.SILENT)
       .setSilent(!isAlerting)
-      // Bridged to watches (Wear OS, vendor apps): the default, stated so it stays.
-      .setLocalOnly(false)
+      // Bridged to watches (Wear OS, vendor apps) once it has the text: never "New message".
+      .setLocalOnly(spec.isLocalOnly)
       .setGroup(GROUP_MESSAGES)
       .setGroupAlertBehavior(NotificationCompat.GROUP_ALERT_CHILDREN)
       .setContentIntent(openIntent(spec.conversationId))
@@ -352,7 +356,7 @@ class MessageNotifier(
       scope.launch {
         if (!avatars.refresh(sender)) return@launch
         synchronized(lock) {
-          shown().conversations[entry.conversationId]?.let { current -> post(current, isAlerting = false) }
+          shown().conversations[entry.conversationId]?.let { current -> post(current, NotificationAlerting.SILENT) }
         }
       }
     }

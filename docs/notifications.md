@@ -367,6 +367,12 @@ reads "New message from Alice" or "3 new messages from Alice, Bob". The lock scr
 it) names who wrote but never the text: "New message from Alice" under the sender's or conversation's
 name, and the summary's names the conversations. With "nothing" it stays "New message".
 
+**Watches and bands (Android).** A message the app couldn't read in time shows as "New message" and
+is filled in by a retry. That placeholder is posted local-only, so watch and band bridges (Wear OS,
+Garmin, Mi Band apps) don't mirror it. When the text arrives, the notification is posted again,
+bridged and without `setOnlyAlertOnce`, because bridges skip updates that carry it. It stays silent
+on the phone, so the band shows the message, never "New message".
+
 **iOS.** `call` arrives as a mutable alert through the notification service extension; without the
 filtering entitlement it shows as a time-sensitive "incoming call" alert with answer and decline, with
 it the extension hands it to CallKit (`NSE_NOTIFICATION_FILTERING` in `Base.xcconfig`, together with
