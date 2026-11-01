@@ -61,7 +61,7 @@ extension AppModel {
 /// A space's notification settings (`GET/PUT /spaces/{id}/notification-settings`).
 enum SpaceMute {
   /// The settings with a new mute time (`nil`: unmuted); the level stays as it is.
-  static func body(current json: String, mutedUntil maybeDate: Date?) -> AppFailure? {
+  static func body(current json: String, mutedUntil maybeDate: Date?) -> String? {
     guard var object = (try? JSONSerialization.jsonObject(with: Data(json.utf8))) as? [String: Any] else {
       return nil
     }
