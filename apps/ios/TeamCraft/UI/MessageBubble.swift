@@ -523,10 +523,15 @@ struct DayPill: View {
   private var label: String {
     if Calendar.current.isDateInToday(date) { return String(localized: "day_today") }
     if Calendar.current.isDateInYesterday(date) { return String(localized: "day_yesterday") }
-    let isThisYear = Calendar.current.isDate(date, equalTo: .now, toGranularity: .year)
-    return isThisYear
-      ? date.formatted(.dateTime.weekday(.wide).day().month(.wide))
-      : date.formatted(.dateTime.weekday(.wide).day().month(.wide).year())
+    return Self.showsYear(date, now: .now)
+      ? date.formatted(.dateTime.weekday(.wide).day().month(.wide).year())
+      : date.formatted(.dateTime.weekday(.wide).day().month(.wide))
+  }
+
+  /// Whether a day's label names its year: only outside the current year (#1086). `now` is read
+  /// on every render, so the year appears after New Year's Eve without a timer.
+  static func showsYear(_ date: Date, now: Date, calendar: Calendar = .current) -> Bool {
+    !calendar.isDate(date, equalTo: now, toGranularity: .year)
   }
 }
 

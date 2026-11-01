@@ -63,6 +63,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -75,12 +76,14 @@ import androidx.compose.runtime.snapshots.Snapshot
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.lerp
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalHapticFeedback
@@ -117,6 +120,7 @@ import de.zeitgleich.teamcraft.core.Message
 import de.zeitgleich.teamcraft.core.MessageExtras
 import de.zeitgleich.teamcraft.core.ReplyPreview
 import de.zeitgleich.teamcraft.core.User
+import de.zeitgleich.teamcraft.ui.DividerOnScreen
 import de.zeitgleich.teamcraft.ui.FeedItem
 import de.zeitgleich.teamcraft.ui.FeedScrollAction
 import de.zeitgleich.teamcraft.ui.FeedScrollEvent
@@ -130,11 +134,13 @@ import de.zeitgleich.teamcraft.ui.Pictures
 import de.zeitgleich.teamcraft.ui.UserAvatar
 import de.zeitgleich.teamcraft.ui.THUMBNAIL_DECODE_PX
 import de.zeitgleich.teamcraft.ui.bubbleCorners
+import de.zeitgleich.teamcraft.ui.dayShowsYear
 import de.zeitgleich.teamcraft.ui.decideFeedScroll
 import de.zeitgleich.teamcraft.ui.feedItems
 import de.zeitgleich.teamcraft.ui.isNearBottom
 import de.zeitgleich.teamcraft.ui.localizedText
 import de.zeitgleich.teamcraft.ui.newerMessages
+import de.zeitgleich.teamcraft.ui.pinnedDay
 import de.zeitgleich.teamcraft.ui.rememberThumbnail
 import de.zeitgleich.teamcraft.ui.showsSenders
 import de.zeitgleich.teamcraft.ui.systemLine
@@ -158,6 +164,15 @@ private const val MAX_SHOWN_UNSEEN = 99
 
 /** How long the floating day pill stays after scrolling stopped. */
 private const val DAY_PILL_LINGER_MS = 1200L
+
+/** Where the pinned day's pill sits below the top of the feed. */
+private val DAY_PIN_TOP = 8.dp
+
+/** The vertical padding around a day divider's pill in its row. */
+private val DAY_DIVIDER_PADDING = 8.dp
+
+/** The pinned pill is a little translucent, so the text scrolling under it shows through. */
+private const val PINNED_PILL_ALPHA = 0.92f
 
 /** A bubble takes at most this share of the feed's width, and never more than [BUBBLE_MAX_WIDTH]. */
 private const val BUBBLE_WIDTH_SHARE = 0.8f
@@ -290,7 +305,7 @@ fun MessageFeed(
       // Rows of one kind reuse each other's layout when they scroll in.
       items(items, key = { it.key }, contentType = { it.contentType }) { item ->
         when (item) {
-          is FeedItem.Day -> DayPill(item.date, Modifier.fillMaxWidth().padding(vertical = 8.dp))
+          is FeedItem.Day -> DayPill(item.date, Modifier.fillMaxWidth().padding(vertical = DAY_DIVIDER_PADDING))
           FeedItem.Unread -> UnreadDivider()
           is FeedItem.Entry -> SwipeToReply(item.message, maybeOnReply) {
             MessageRow(
@@ -314,7 +329,7 @@ fun MessageFeed(
       // Above the oldest row: seen only when the reader is faster than the core.
       if (older.hasOlder && older.isLoading) item(key = OLDER_LOADING_KEY) { OlderLoadingRow() }
     }
-    FloatingDay(listState, items, Modifier.align(Alignment.TopCenter).padding(top = 8.dp))
+    FloatingDay(listState, items, Modifier.align(Alignment.TopCenter))
     AnimatedVisibility(
       visible = (showsJumpDown || scrollState.unseenCount > 0) && items.isNotEmpty(),
       enter = fadeIn(),
@@ -446,17 +461,34 @@ private fun JumpDownButton(unseenCount: Int, onClick: () -> Unit) {
 }
 
 /**
- * The day of the topmost message as a pill over the feed while it scrolls, so a long scroll always
- * says where in time it is; it fades out shortly after the scrolling stops.
+ * The day of the topmost message pinned over the feed while it scrolls (#1046), so a long scroll
+ * always says where in time it is; the next day's divider pushes it up and out ([pinnedDay]). It
+ * fades out shortly after the scrolling stops. Not a `stickyHeader`: in this reversed list a header
+ * would pin to the bottom, below the days it heads.
  */
 @Composable
 private fun FloatingDay(listState: LazyListState, items: List<FeedItem>, modifier: Modifier) {
-  val maybeDay by remember(items) {
+  val density = LocalDensity.current
+  val pinTop = with(density) { DAY_PIN_TOP.roundToPx() }
+  val dividerPadding = with(density) { DAY_DIVIDER_PADDING.roundToPx() }
+  var pillHeight by remember { mutableIntStateOf(0) }
+  // From the list's own layout pass: nothing is measured again per frame.
+  val maybePinned by remember(items) {
     derivedStateOf {
-      // Reversed list: the topmost visible row has the highest index.
-      listState.layoutInfo.visibleItemsInfo.lastOrNull()?.index?.let { items.dayAt(it) }
+      val layout = listState.layoutInfo
+      // Reversed list: offsets count from the bottom, and the topmost visible row has the highest index.
+      val height = layout.viewportSize.height
+      val dividers = layout.visibleItemsInfo.mapNotNull { info ->
+        (items.getOrNull(info.index) as? FeedItem.Day)?.let { DividerOnScreen(it.date, height - info.offset - info.size + dividerPadding) }
+      }
+      val topmostDay = layout.visibleItemsInfo.lastOrNull()?.index?.let { index ->
+        // A divider at the very top belongs to the rows below it; the day above is the older one.
+        if (items.getOrNull(index) is FeedItem.Day) items.dayAt(index + 1) else items.dayAt(index)
+      }
+      pinnedDay(dividers, topmostDay, pinTop, pillHeight)
     }
   }
+  val maybeDay by remember { derivedStateOf { maybePinned?.date } }
   var isShown by remember { mutableStateOf(false) }
   LaunchedEffect(listState.isScrollInProgress) {
     if (listState.isScrollInProgress) {
@@ -466,8 +498,23 @@ private fun FloatingDay(listState: LazyListState, items: List<FeedItem>, modifie
       isShown = false
     }
   }
-  AnimatedVisibility(visible = isShown && maybeDay != null, enter = fadeIn(), exit = fadeOut(), modifier = modifier) {
-    maybeDay?.let { DayPill(it, Modifier, isFloating = true) }
+  AnimatedVisibility(
+    visible = isShown && maybeDay != null,
+    enter = fadeIn(),
+    exit = fadeOut(),
+    modifier = modifier.fillMaxWidth().clipToBounds(),
+  ) {
+    maybeDay?.let { day ->
+      DayPill(
+        day,
+        Modifier
+          // Read while drawing only: the push moves the layer without composing again.
+          .graphicsLayer { translationY = (maybePinned?.push ?: 0).toFloat() }
+          .padding(top = DAY_PIN_TOP, bottom = 4.dp)
+          .onSizeChanged { pillHeight = it.height },
+        isFloating = true,
+      )
+    }
   }
 }
 
@@ -492,13 +539,13 @@ private fun DayPill(date: LocalDate, modifier: Modifier, isFloating: Boolean = f
     else -> {
       val millis = date.atStartOfDay(ZoneId.systemDefault()).toInstant().toEpochMilli()
       val flags = DateUtils.FORMAT_SHOW_DATE or DateUtils.FORMAT_SHOW_WEEKDAY or
-        if (date.year == today.year) DateUtils.FORMAT_NO_YEAR else DateUtils.FORMAT_SHOW_YEAR
+        if (dayShowsYear(date, today)) DateUtils.FORMAT_SHOW_YEAR else DateUtils.FORMAT_NO_YEAR
       DateUtils.formatDateTime(context, millis, flags)
     }
   }
   Box(modifier, contentAlignment = Alignment.Center) {
     Surface(
-      color = MaterialTheme.colorScheme.surfaceContainerHigh,
+      color = MaterialTheme.colorScheme.surfaceContainerHigh.copy(alpha = if (isFloating) PINNED_PILL_ALPHA else 1f),
       shape = CircleShape,
       shadowElevation = if (isFloating) 2.dp else 0.dp,
     ) {
