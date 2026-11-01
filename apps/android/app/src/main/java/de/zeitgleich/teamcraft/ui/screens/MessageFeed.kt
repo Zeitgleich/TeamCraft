@@ -130,6 +130,7 @@ import de.zeitgleich.teamcraft.ui.Pictures
 import de.zeitgleich.teamcraft.ui.UserAvatar
 import de.zeitgleich.teamcraft.ui.THUMBNAIL_DECODE_PX
 import de.zeitgleich.teamcraft.ui.bubbleCorners
+import de.zeitgleich.teamcraft.ui.dayShowsYear
 import de.zeitgleich.teamcraft.ui.decideFeedScroll
 import de.zeitgleich.teamcraft.ui.feedItems
 import de.zeitgleich.teamcraft.ui.isNearBottom
@@ -492,7 +493,7 @@ private fun DayPill(date: LocalDate, modifier: Modifier, isFloating: Boolean = f
     else -> {
       val millis = date.atStartOfDay(ZoneId.systemDefault()).toInstant().toEpochMilli()
       val flags = DateUtils.FORMAT_SHOW_DATE or DateUtils.FORMAT_SHOW_WEEKDAY or
-        if (date.year == today.year) DateUtils.FORMAT_NO_YEAR else DateUtils.FORMAT_SHOW_YEAR
+        if (dayShowsYear(date, today)) DateUtils.FORMAT_SHOW_YEAR else DateUtils.FORMAT_NO_YEAR
       DateUtils.formatDateTime(context, millis, flags)
     }
   }

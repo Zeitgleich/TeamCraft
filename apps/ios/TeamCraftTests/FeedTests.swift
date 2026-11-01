@@ -149,4 +149,19 @@ final class FeedTests: XCTestCase {
     clock.didEnterBackground(at: start.advanced(by: .seconds(100)))
     XCTAssertTrue(clock.shouldLock(at: start, isEnabled: true, lockAfter: .fifteenMinutes))
   }
+
+  func testOnlyDaysOutsideTheCurrentYearShowTheirYear() {
+    let now = utcDate(2026, 10, 22)
+    XCTAssertFalse(DayPill.showsYear(utcDate(2026, 1, 1), now: now, calendar: utc))
+    XCTAssertTrue(DayPill.showsYear(utcDate(2025, 12, 31), now: now, calendar: utc))
+    XCTAssertTrue(DayPill.showsYear(utcDate(2027, 1, 1), now: now, calendar: utc))
+    // New Year's Eve: the same day gains its year once the next year has begun.
+    let eve = utcDate(2026, 12, 31, hour: 23)
+    XCTAssertFalse(DayPill.showsYear(eve, now: eve, calendar: utc))
+    XCTAssertTrue(DayPill.showsYear(eve, now: utcDate(2027, 1, 1), calendar: utc))
+  }
+
+  private func utcDate(_ year: Int, _ month: Int, _ day: Int, hour: Int = 12) -> Date {
+    utc.date(from: DateComponents(year: year, month: month, day: day, hour: hour))!
+  }
 }
