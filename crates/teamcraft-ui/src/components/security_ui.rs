@@ -360,10 +360,12 @@ fn ApproveLinkDialog() -> impl IntoView {
                   inputmode="numeric"
                   data-autofocus
                   autocomplete="off"
+                  aria-invalid=error.is_some().then_some("true")
+                  aria-describedby=error.is_some().then_some("approve-link-short-error")
                   prop:value=move || typed.get()
                   on:input=move |ev| typed.set(event_target_value(&ev))
                 />
-                {error.map(|_| view! { <p class="field-error" role="alert">{move || i18n.t("approve-link-wrong")}</p> })}
+                {error.map(|_| view! { <p id="approve-link-short-error" class="field-error" role="alert">{move || i18n.t("approve-link-wrong")}</p> })}
                 <p class="no-content-note">
                   <Icon name=IconName::Alert />
                   <span>{move || i18n.t("approval-warning")}</span>

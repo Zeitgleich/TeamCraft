@@ -154,12 +154,13 @@ pub fn RecoveryKitSetup(
             autocapitalize="characters"
             spellcheck="false"
             maxlength="6"
-            aria-invalid=move || is_group_wrong().to_string()
+            aria-invalid=move || is_group_wrong().then_some("true")
+            aria-describedby=move || is_group_wrong().then_some("kit-confirm-group-error")
             prop:value=move || typed.get()
             on:input=move |ev| typed.set(event_target_value(&ev))
           />
           <Show when=is_group_wrong fallback=|| ()>
-            <p class="field-error" role="alert">{move || i18n.t_with("kit-confirm-wrong", &[("number", &group_number())])}</p>
+            <p id="kit-confirm-group-error" class="field-error" role="alert">{move || i18n.t_with("kit-confirm-wrong", &[("number", &group_number())])}</p>
           </Show>
         </div>
         <div class="kit-actions">
