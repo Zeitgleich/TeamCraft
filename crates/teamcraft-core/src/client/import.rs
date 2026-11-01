@@ -5,21 +5,22 @@
 use std::collections::BTreeSet;
 
 use rand_core::OsRng;
+use serde::{Deserialize, Serialize};
 use teamcraft_crypto::message::encrypt_message;
 use teamcraft_proto::{
-  Base64Bytes, ConversationId, ConversationResponse, HistoryPolicy, Id, ImportDmRequest,
-  ImportMemberStateRequest, ImportMessagesRequest, ImportedMessage, MessageId, ProvisionUsersRequest,
-  ProvisionedUser, ThreadId, UserId,
+  Base64Bytes, ConversationId, ConversationResponse, Id, ImportDmRequest, ImportMemberStateRequest,
+  ImportMessagesRequest, ImportedMessage, MessageId, ProvisionUsersRequest, ProvisionedUser, ThreadId,
+  UserId,
 };
 use zeroize::Zeroizing;
 
 use super::Client;
+use super::key_history::key_hex;
 use super::server_changes::Observed;
-use super::workspace::PendingChange;
 use crate::api::ServerApi;
 use crate::convert;
 use crate::error::CoreError;
-use crate::imported::{import_policy, imported_message_id};
+use crate::imported::imported_message_id;
 use crate::records;
 use crate::store::{LocalStore, MessageContent, Table};
 
@@ -35,51 +36,68 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
   /// Records the import grant of `conversation` (e2ee.md §4.10, "Guests in imported
   /// conversations"): the import made it, and the import's mapping names `users` as its members or
   /// participants, so this device may share its history with them even if they are guests. Adds to
-  /// what was recorded before. People of the grant whose addition waits here with history from the
-  /// join on (noted while they were guests, before this version) get the full history instead.
-  /// Only the import device acts on it, and only under the signed import policy.
+  /// what was recorded under the same policy date; under another one it starts afresh. Only the
+  /// import device acts on it, and only under the signed import policy.
   pub fn grant_imported_history(
     &mut self,
     conversation: ConversationId,
     users: &[UserId],
   ) -> Result<(), CoreError> {
     let key = import_grant_key(conversation);
-    let mut granted: BTreeSet<UserId> =
-      records::get_json(&self.store, Table::SyncState, &key)?.unwrap_or_default();
-    let before = granted.len();
-    granted.extend(users.iter().copied().filter(|user| *user != self.account.user_id));
-    if granted.len() != before {
-      records::put_json(&self.store, Table::SyncState, &key, &granted)?;
-    }
-    for user in &granted {
-      let pending_key = PendingChange::user_add_key(conversation, *user);
-      let Some(mut change) =
-        records::get_json::<PendingChange>(&self.store, Table::PendingChanges, &pending_key)?
-      else {
-        continue;
-      };
-      if let PendingChange::AddUser { history, .. } = &mut change
-        && *history == HistoryPolicy::FromJoin
-      {
-        *history = HistoryPolicy::Full;
-        records::put_json(&self.store, Table::PendingChanges, &pending_key, &change)?;
-      }
+    let maybe_joins_until_ms = self.workspace()?.policy.import.maybe_joins_until_ms;
+    let mut grant: ImportGrant = records::get_json(&self.store, Table::SyncState, &key)?
+      .filter(|grant: &ImportGrant| grant.maybe_joins_until_ms == maybe_joins_until_ms)
+      .unwrap_or(ImportGrant {
+        maybe_joins_until_ms,
+        users: BTreeSet::new(),
+      });
+    let before = grant.users.len();
+    grant
+      .users
+      .extend(users.iter().copied().filter(|user| *user != self.account.user_id));
+    if grant.users.len() != before {
+      records::put_json(&self.store, Table::SyncState, &key, &grant)?;
     }
     Ok(())
   }
 
+  /// Notes the keys of the import of `conversation`: those the ring holds now, once its history is
+  /// in (at [`Self::finish_import`], or for a conversation an earlier version finished, on the next
+  /// pass). A guest the import grant names gets these and nothing older than their join besides
+  /// (e2ee.md §4.10). Kept once noted.
+  pub fn note_import_keys(&mut self, conversation: ConversationId) -> Result<(), CoreError> {
+    let key = import_keys_key(conversation);
+    if records::get_json::<BTreeSet<String>>(&self.store, Table::SyncState, &key)?.is_some() {
+      return Ok(());
+    }
+    let keys: BTreeSet<String> = self
+      .account
+      .key_bag
+      .ring(convert::conversation(conversation))
+      .map(|ring| ring.keys().iter().map(|key| key_hex(key.id())).collect())
+      .unwrap_or_default();
+    records::put_json(&self.store, Table::SyncState, &key, &keys)?;
+    Ok(())
+  }
+
+  /// The keys noted by [`Self::note_import_keys`], as hex IDs; empty when none were.
+  pub(crate) fn import_keys(&self, conversation: ConversationId) -> Result<BTreeSet<String>, CoreError> {
+    Ok(records::get_json(&self.store, Table::SyncState, &import_keys_key(conversation))?.unwrap_or_default())
+  }
+
   /// Whether this device may share the history of `conversation` with `user` although the user
   /// is a guest: this account is the import account of the verified policy, whose date hasn't
-  /// passed by the later of this device's clock and the newest server time it saw, and the import
-  /// grant of the conversation names the user ([`Self::grant_imported_history`]).
+  /// passed, the verified workspace state is fresh (its roster younger than `workspace_max_age`)
+  /// and raised no alarm, both by the later of this device's clock and the newest server time it
+  /// saw, and the import grant of the conversation names the user under this very policy date
+  /// ([`Self::grant_imported_history`]).
   pub(crate) fn is_import_granted(
     &self,
     conversation: ConversationId,
     user: UserId,
   ) -> Result<bool, CoreError> {
-    let Some(policy) = import_policy(&self.store) else {
-      return Ok(false);
-    };
+    let state = self.workspace()?;
+    let policy = &state.policy.import;
     let newest_server_ms = self
       .sync
       .mls_cursors
@@ -87,12 +105,19 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       .map(|cursor| cursor.snowflake().unix_millis())
       .max()
       .unwrap_or(i64::MIN);
-    if !policy.allows(self.account.user_id, self.now_ms().max(newest_server_ms)) {
+    let now_ms = self.now_ms().max(newest_server_ms);
+    let max_age_ms = i64::try_from(self.settings.workspace_max_age.as_millis()).unwrap_or(i64::MAX);
+    if !policy.allows(self.account.user_id, now_ms)
+      || state.maybe_alarm.is_some()
+      || !state.is_roster_fresh(now_ms, max_age_ms)
+    {
       return Ok(false);
     }
-    let granted: Option<BTreeSet<UserId>> =
+    let maybe_grant: Option<ImportGrant> =
       records::get_json(&self.store, Table::SyncState, &import_grant_key(conversation))?;
-    Ok(granted.is_some_and(|granted| granted.contains(&user)))
+    Ok(maybe_grant.is_some_and(|grant| {
+      grant.maybe_joins_until_ms == policy.maybe_joins_until_ms && grant.users.contains(&user)
+    }))
   }
 
   /// Creates the accounts of `usernames` from the identity provider (admin.md §3.8).
@@ -203,9 +228,13 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     )
   }
 
-  /// Marks the conversation's import as finished, so its members load its history's start again.
-  pub async fn finish_import(&self, conversation: ConversationId) -> Result<(), CoreError> {
-    Ok(self.api.finish_import(conversation).await?)
+  /// Marks the conversation's import as finished, so its members load its history's start again,
+  /// notes the keys of the import ([`Self::note_import_keys`]) and, alone in the group, writes on
+  /// with a fresh key ([`Self::rotate_after_import`]).
+  pub async fn finish_import(&mut self, conversation: ConversationId) -> Result<(), CoreError> {
+    self.api.finish_import(conversation).await?;
+    self.note_import_keys(conversation)?;
+    self.rotate_after_import(conversation)
   }
 
   /// Leaves a conversation the import is done with, without a goodbye: a signed removal of this
@@ -216,6 +245,21 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     self.api.check_member_removal(conversation, me).await?;
     self.record_and_run_removal(conversation, me, None).await
   }
+}
+
+/// The import grant of a conversation ([`Client::grant_imported_history`]): the people the mapping
+/// names there, under the import policy's date when it was recorded. A later policy (another date,
+/// also a renewed one) starts a new grant, which only the import tool records again.
+#[derive(Debug, Serialize, Deserialize)]
+struct ImportGrant {
+  #[serde(rename = "joins_until_ms")]
+  maybe_joins_until_ms: Option<i64>,
+  users: BTreeSet<UserId>,
+}
+
+/// Where the keys of a conversation's import are kept ([`Client::note_import_keys`]).
+fn import_keys_key(conversation: ConversationId) -> String {
+  format!("import_keys/{conversation}")
 }
 
 /// Where the import grant of a conversation is kept ([`Client::grant_imported_history`]).

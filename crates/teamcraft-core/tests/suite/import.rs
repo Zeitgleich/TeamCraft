@@ -4,11 +4,14 @@
 // Test helpers outside `#[test]` functions panic on failure like the tests themselves.
 #![allow(clippy::unwrap_used)]
 
+use std::sync::Arc;
+
 use crate::common;
 
-use common::{Peer, settle};
+use common::{Peer, settings, settle};
 use teamcraft_core::api::fake::FakeServer;
 use teamcraft_core::client::import::ImportDraft;
+use teamcraft_core::clock::ManualClock;
 use teamcraft_core::imported::{ImportSource, ImportedAuthor, ImportedOrigin};
 use teamcraft_core::store::{LocalStore, MessageContent, MessageFilter, MessageMeta};
 use teamcraft_core::workspace::RosterRole;
@@ -449,11 +452,126 @@ mod guests {
     assert_eq!(guest.texts(dm), vec!["old", "still one group"]);
   }
 
+  #[tokio::test]
+  async fn the_import_account_leaves_a_guests_notes_and_a_dm_of_guests() {
+    let server = FakeServer::new();
+    let (_owner, mut importer) = import_policy(&server, Some(i64::MAX)).await;
+    let mut gus = Peer::enroll_as(server.add_guest("Gus"), "Gus").await;
+    let mut gil = Peer::enroll_as(server.add_guest("Gil"), "Gil").await;
+    let notes = import_dm(&mut importer, &[gus.client.user_id()]).await;
+    let dm = import_dm(&mut importer, &[gus.client.user_id(), gil.client.user_id()]).await;
+    settle(&mut [&mut importer, &mut gus, &mut gil]).await;
+
+    for conversation in [notes, dm] {
+      importer.client.leave_after_import(conversation).await.unwrap();
+    }
+    for _ in 0..2 {
+      settle(&mut [&mut importer, &mut gus, &mut gil]).await;
+      gus.client.apply_pending_changes().await.unwrap();
+      gil.client.apply_pending_changes().await.unwrap();
+    }
+    settle(&mut [&mut importer, &mut gus, &mut gil]).await;
+    assert_eq!(gus.client.group_users(notes).unwrap(), vec![gus.client.user_id()]);
+    let mut in_dm = gil.client.group_users(dm).unwrap();
+    in_dm.sort();
+    let mut expected = vec![gus.client.user_id(), gil.client.user_id()];
+    expected.sort();
+    assert_eq!(in_dm, expected, "the import account left the DM of guests");
+    gus.client.catch_up_messages(dm).await.unwrap();
+    gus.client.send_text(dm, None, "still one group").await.unwrap();
+    settle(&mut [&mut gus, &mut gil]).await;
+    gil.client.catch_up_messages(dm).await.unwrap();
+    assert_eq!(gil.texts(dm), vec!["old", "still one group"]);
+  }
+
+  #[tokio::test]
+  async fn a_late_guest_gets_the_import_but_not_what_members_wrote_before_their_join() {
+    let server = FakeServer::new();
+    let (mut owner, mut importer) = import_policy(&server, Some(i64::MAX)).await;
+    let late_api = server.add_guest("Lea");
+    let late_id = late_api.user_id();
+    let channel = imported_channel(&mut importer, &[owner.client.user_id(), late_id]).await;
+    add_full(&mut importer, channel, owner.client.user_id()).await;
+    add_full(&mut importer, channel, late_id).await;
+    settle(&mut [&mut owner, &mut importer]).await;
+    owner
+      .client
+      .send_text(channel, None, "live before Lea")
+      .await
+      .unwrap();
+    settle(&mut [&mut owner, &mut importer]).await;
+
+    let mut late = Peer::enroll_as(late_api, "Lea").await;
+    join_late(&mut importer, &mut late).await;
+    late.client.catch_up_messages(channel).await.unwrap();
+    assert_eq!(late.texts(channel), vec!["old"]);
+    owner.client.catch_up_messages(channel).await.unwrap();
+    assert_eq!(owner.texts(channel), vec!["old", "live before Lea"]);
+  }
+
+  #[tokio::test]
+  async fn a_renewed_policy_needs_the_grant_again() {
+    let server = FakeServer::new();
+    let (mut owner, mut importer) = import_policy(&server, Some(i64::MAX)).await;
+    let late_api = server.add_guest("Lea");
+    let late_id = late_api.user_id();
+    let channel = imported_channel(&mut importer, &[late_id]).await;
+    add_full(&mut importer, channel, late_id).await;
+    // The owners sign the import period again, with another date.
+    owner
+      .client
+      .publish_policy(WorkspacePolicy {
+        import: ImportPolicy {
+          maybe_importer: Some(importer.client.user_id()),
+          maybe_joins_until_ms: Some(i64::MAX - 1),
+        },
+        ..WorkspacePolicy::default()
+      })
+      .await
+      .unwrap();
+    settle(&mut [&mut owner, &mut importer]).await;
+    importer.client.full_sync().await.unwrap();
+
+    let mut late = Peer::enroll_as(late_api, "Lea").await;
+    join_late(&mut importer, &mut late).await;
+    late.client.catch_up_messages(channel).await.unwrap();
+    assert!(late.texts(channel).is_empty(), "{:?}", late.texts(channel));
+  }
+
+  #[tokio::test]
+  async fn a_stale_workspace_state_shares_no_history_with_a_guest() {
+    let server = FakeServer::new();
+    let mut owner = Peer::enroll(&server, "Owner").await;
+    let clock = Arc::new(ManualClock::new(1_800_000_000_000));
+    let mut importer = Peer::enroll_on_clock(
+      server.add_user("Import"),
+      "Import",
+      settings(),
+      Box::new(clock.clone()),
+    )
+    .await;
+    let mut guest = Peer::enroll_as(server.add_guest("Gus"), "Gus").await;
+    sign_import_policy(&mut owner, &mut importer, Some(i64::MAX)).await;
+    let channel = imported_channel(&mut importer, &[guest.client.user_id()]).await;
+    // Nothing newer from the owners for longer than `workspace_max_age`: maybe withheld.
+    clock.advance(31 * 24 * 60 * 60 * 1000);
+    add_full(&mut importer, channel, guest.client.user_id()).await;
+    settle(&mut [&mut owner, &mut importer, &mut guest]).await;
+    guest.client.catch_up_messages(channel).await.unwrap();
+    assert!(guest.texts(channel).is_empty(), "{:?}", guest.texts(channel));
+  }
+
   /// An owner and the import account, with the signed roster and the import policy
   /// (`joins_until_ms`; `None`: no policy at all).
   async fn import_policy(server: &FakeServer, maybe_until: Option<i64>) -> (Peer, Peer) {
     let mut owner = Peer::enroll(server, "Owner").await;
-    let importer = Peer::enroll(server, "Import").await;
+    let mut importer = Peer::enroll(server, "Import").await;
+    sign_import_policy(&mut owner, &mut importer, maybe_until).await;
+    (owner, importer)
+  }
+
+  /// The signed roster (`owner` owner, `importer` admin) and the import policy naming `importer`.
+  async fn sign_import_policy(owner: &mut Peer, importer: &mut Peer, maybe_until: Option<i64>) {
     let (owner_id, importer_id) = (owner.client.user_id(), importer.client.user_id());
     owner
       .client
@@ -473,10 +591,8 @@ mod guests {
         .await
         .unwrap();
     }
-    let mut importer = importer;
-    settle(&mut [&mut owner, &mut importer]).await;
+    settle(&mut [&mut *owner, &mut *importer]).await;
     importer.client.full_sync().await.unwrap();
-    (owner, importer)
   }
 
   /// A channel the import made, with one imported message, and the grant for `granted`.
@@ -493,6 +609,29 @@ mod guests {
       .unwrap();
     importer.client.finish_import(channel).await.unwrap();
     channel
+  }
+
+  /// A DM (or one person's notes) the import made for `participants`, with one imported message.
+  async fn import_dm(importer: &mut Peer, participants: &[UserId]) -> ConversationId {
+    let response = importer
+      .client
+      .open_import_dm(participants.to_vec())
+      .await
+      .unwrap();
+    let dm = response.id;
+    importer.client.grant_imported_history(dm, participants).unwrap();
+    importer
+      .client
+      .set_up_import_dm(response, participants)
+      .await
+      .unwrap();
+    importer
+      .client
+      .send_imported(dm, &[draft("1", "old", ImportedAuthor::Deleted, OLD_MS)])
+      .await
+      .unwrap();
+    importer.client.finish_import(dm).await.unwrap();
+    dm
   }
 
   async fn add_full(adder: &mut Peer, channel: ConversationId, user: UserId) {

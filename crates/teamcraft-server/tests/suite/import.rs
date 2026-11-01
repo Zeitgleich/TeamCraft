@@ -475,10 +475,23 @@ mod guests {
     let (importer, device, channel, _carol) = channel_with_live_message(&app).await;
     let ids = import(&app, &importer, &channel, &device, &[(2, OLD_MS)]).await;
     let alice = owner();
+    // Before the import of the channel is finished, the import account adds like anybody.
+    let early = guest("early");
+    let early_id = user_id(&app, &early).await;
     let space = app.get(&alice, &format!("/conversations/{channel}")).await.body["space_id"]
       .as_str()
       .unwrap()
       .to_owned();
+    add_space_member(&app, &alice, &space, &early_id, "guest").await;
+    add_channel_member(&app, &importer, &channel, &early_id).await;
+    let finished = app
+      .post(
+        &importer,
+        &format!("/admin/import/conversations/{channel}/finish"),
+        json!({}),
+      )
+      .await;
+    assert!(finished.status.is_success(), "{}", finished.body);
     let (gus, gil) = (guest("gus"), guest("gil"));
     for (who, adder) in [(&gus, &importer), (&gil, &alice)] {
       let id = user_id(&app, who).await;
@@ -493,6 +506,19 @@ mod guests {
       "the import account added gus"
     );
     assert!(!listed(list(&app, &gil, &channel).await), "alice added gil");
+    assert!(
+      !listed(list(&app, &early, &channel).await),
+      "added before the import was finished"
+    );
+
+    // The mark goes with the membership.
+    let gus_id = user_id(&app, &gus).await;
+    let removed = app
+      .delete(&alice, &format!("/conversations/{channel}/members/{gus_id}"))
+      .await;
+    assert!(removed.status.is_success(), "{}", removed.body);
+    add_channel_member(&app, &alice, &channel, &gus_id).await;
+    assert!(!listed(list(&app, &gus, &channel).await), "added again by alice");
 
     // Once the import period is over, the import account's additions are ordinary ones.
     let importer_id = user_id(&app, &importer).await;

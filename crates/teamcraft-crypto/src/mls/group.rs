@@ -935,8 +935,8 @@ impl ConversationGroup {
     authority: &impl MembershipAuthority,
   ) -> Result<(MembershipUpdate, Option<ChangeId>), MlsError> {
     let proposed = self.verify_commit_contents(staged, sender_index, directory)?;
-    self.check_guest_commit(sender_index, &proposed, directory)?;
     if let Some(request) = authenticated_data.strip_prefix(REJOIN_AAD_MAGIC) {
+      self.check_guest_commit(sender_index, &proposed, None, directory)?;
       let verified = SignedRejoinRequest::from_bytes(request)?.verify(directory)?;
       let (_, member) = self.check_verified_rejoin(&verified)?;
       let added: Vec<GroupMember> = proposed.added.iter().map(GroupMember::from).collect();
@@ -958,13 +958,20 @@ impl ConversationGroup {
       if !proposed.removed.is_empty() {
         return Err(MlsError::MissingSignedChange);
       }
+      self.check_guest_commit(sender_index, &proposed, None, directory)?;
       self.check_device_additions(&proposed)?;
       (None, None)
     } else {
       let signed = SignedMembershipChange::from_bytes(authenticated_data)?;
       let verified = signed.verify(directory, authority)?;
       self.check_change_matches(verified.change(), &proposed)?;
-      (Some(verified.change().clone()), Some(verified.actor().user_id()))
+      let actor = verified.actor().user_id();
+      let maybe_self_leave = match verified.change().action() {
+        MembershipAction::RemoveUser { user_id } if *user_id == actor => Some(actor),
+        _ => None,
+      };
+      self.check_guest_commit(sender_index, &proposed, maybe_self_leave, directory)?;
+      (Some(verified.change().clone()), Some(actor))
     };
     let update = MembershipUpdate {
       maybe_change,
@@ -1228,10 +1235,14 @@ impl ConversationGroup {
 
   /// A guest's commit may add or remove the guest's own devices and nothing else (e2ee.md §4.6,
   /// "Meeting guests"): no signed change and no role makes a guest a member who manages others.
+  /// One exception: somebody's verified signed leave (`maybe_self_leave`, the user who signed
+  /// their own removal), which only takes that user out. Without it a guest left alone with them
+  /// (a guest's notes the import account leaves) could never see them go (#1074).
   fn check_guest_commit(
     &self,
     sender_index: LeafNodeIndex,
     proposed: &ProposedMembership,
+    maybe_self_leave: Option<UserId>,
     directory: &impl IdentityDirectory,
   ) -> Result<(), MlsError> {
     let sender = self
@@ -1242,9 +1253,12 @@ impl ConversationGroup {
     if !directory.is_guest(sender) {
       return Ok(());
     }
+    let is_signed_leave = maybe_self_leave.is_some_and(|leaver| {
+      proposed.added.is_empty() && proposed.removed.iter().all(|member| member.user_id == leaver)
+    });
     let touches_others = proposed.added.iter().any(|device| device.user_id() != sender)
       || proposed.removed.iter().any(|member| member.user_id != sender);
-    if touches_others {
+    if touches_others && !is_signed_leave {
       return Err(MlsError::GuestOverreach);
     }
     Ok(())

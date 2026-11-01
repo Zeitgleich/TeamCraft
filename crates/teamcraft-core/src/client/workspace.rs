@@ -233,6 +233,10 @@ pub(crate) enum SharedKeys {
   HistoryFor { user_id: UserId, added_epoch: u64 },
   /// The current key only (history from the join on).
   CurrentKey,
+  /// The current key, and the keys of the import sealed to the new member's devices: a guest the
+  /// import grant names, added from the join on (e2ee.md §4.10, "Guests in imported
+  /// conversations"). `added_epoch` as for [`Self::HistoryFor`].
+  ImportHistoryFor { user_id: UserId, added_epoch: u64 },
   /// To a device added back, sealed to it: the keys of the epochs it was a member in (e2ee.md
   /// §4.6).
   MissedKeys { user_id: UserId, device_id: DeviceId },

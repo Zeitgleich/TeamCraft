@@ -153,6 +153,9 @@ impl<'a, A: ServerApi, S: LocalStore> Importer<'a, A, S> {
     for item in &plan.items {
       if let Some(conversation) = self.progress.conversation(&item.key())? {
         self.grant_history(item, conversation)?;
+        if self.progress.is_done(&item.key(), Step::Finished)? {
+          self.client.note_import_keys(conversation)?;
+        }
       }
     }
     self.keep_gateway().await;

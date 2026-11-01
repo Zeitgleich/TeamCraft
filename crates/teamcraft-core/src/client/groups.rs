@@ -979,7 +979,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     user: UserId,
     requested: HistoryShare,
   ) -> Result<HistoryShare, CoreError> {
-    let history = self.own_history(conversation, user, requested).await?;
+    let history = self.effective_history(user, requested).await?;
     self
       .commit_change(
         conversation,
@@ -1526,7 +1526,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       // The history choice is settled before signing: every member rotates (or not) by it.
       ChangeSource::Own(MembershipAction::AddUser { user_id, history }) => {
         let history = self
-          .own_history(conversation, convert::user_from_crypto(user_id)?, history)
+          .effective_history(convert::user_from_crypto(user_id)?, history)
           .await?;
         ChangeSource::Own(MembershipAction::AddUser { user_id, history })
       },
@@ -1543,8 +1543,9 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       // server's membership removal ends the group here.
       return Ok(());
     }
-    if let ChangeSource::Delegated(_) = &source
+    if let ChangeSource::Delegated(signed) = &source
       && self.is_seen_as_guest().await?
+      && !self.may_commit_as_guest(conversation, signed, action)?
     {
       // The members refuse a guest's commit that changes anybody else (e2ee.md §4.6, "What a
       // guest may commit"): committing it here would split the group. They commit it.
@@ -1554,7 +1555,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     if let MembershipAction::AddUser { user_id, history } = action
       && history
         != self
-          .allowed_history(conversation, &source, user_id, history)
+          .effective_history(convert::user_from_crypto(user_id)?, history)
           .await?
     {
       // An admin signed full history for a guest; that isn't shared (e2ee.md §4.3).
@@ -1895,9 +1896,18 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       })),
       Some(MembershipAction::AddUser {
         history: HistoryShare::FromJoin,
-        ..
+        user_id,
       }) => {
         self.rotate_to_epoch_key(conversation)?;
+        let user = convert::user_from_crypto(*user_id)?;
+        // The import device seals the import's keys to a guest its import grant names, whose
+        // addition it committed (e2ee.md §4.10, "Guests in imported conversations").
+        if self.is_import_granted(conversation, user)? {
+          return Ok(Some(SharedKeys::ImportHistoryFor {
+            user_id: user,
+            added_epoch: self.group_or_error(conversation)?.epoch(),
+          }));
+        }
         Ok(Some(SharedKeys::CurrentKey))
       },
       // Every remaining member derives the new key from the removal commit (e2ee.md §4.2).
@@ -1978,6 +1988,16 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
           handed,
         )
       },
+      SharedKeys::ImportHistoryFor { user_id, added_epoch } => {
+        let handed = self
+          .hand_over_key(conversation, false)?
+          .ok_or(CoreError::NoContentKey(conversation))?;
+        let bundle =
+          ContentKeyBundle::epoch_key(convert::conversation(conversation), handed.key().duplicate());
+        self.send_bundle(conversation, &bundle, None).await?;
+        self.adopt_handed_over_key(conversation, &handed)?;
+        return self.send_import_history(conversation, user_id, added_epoch).await;
+      },
       SharedKeys::MissedKeys { user_id, device_id } => {
         return self.send_missed_keys(conversation, user_id, device_id).await;
       },
@@ -2003,6 +2023,49 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       return Ok(());
     }
     let keys = self.ring_keys(conversation);
+    self.seal_history_to(conversation, user, added_epoch, &keys).await
+  }
+
+  /// Seals the keys of the import ([`Self::import_keys`]) to each of `user`'s devices in the group:
+  /// a guest the import grant names, added from the join on in `added_epoch` (e2ee.md §4.10,
+  /// "Guests in imported conversations"). Like [`Self::send_history`], nothing goes out unless the
+  /// user stayed a member since.
+  pub(super) async fn send_import_history(
+    &mut self,
+    conversation: ConversationId,
+    user: UserId,
+    added_epoch: u64,
+  ) -> Result<(), CoreError> {
+    if !self.stayed_member_since(conversation, user, added_epoch)? {
+      tracing::info!(conversation_id = %conversation, "dropped an import history share: the member left since the addition");
+      return Ok(());
+    }
+    let keys = self.import_history_keys(conversation)?;
+    tracing::info!(conversation_id = %conversation, keys = keys.len(), "sharing the imported history with a guest the import grant names");
+    self.seal_history_to(conversation, user, added_epoch, &keys).await
+  }
+
+  /// The keys of the ring that [`Self::note_import_keys`] noted as the import's.
+  fn import_history_keys(&self, conversation: ConversationId) -> Result<Vec<ContentKey>, CoreError> {
+    let imported = self.import_keys(conversation)?;
+    Ok(
+      self
+        .ring_keys(conversation)
+        .into_iter()
+        .filter(|key| imported.contains(&super::key_history::key_hex(key.id())))
+        .collect(),
+    )
+  }
+
+  /// Seals `keys` to each of `user`'s verified devices in the group, as the history of their
+  /// addition in `added_epoch`.
+  async fn seal_history_to(
+    &mut self,
+    conversation: ConversationId,
+    user: UserId,
+    added_epoch: u64,
+    keys: &[ContentKey],
+  ) -> Result<(), CoreError> {
     if keys.is_empty() {
       return Ok(());
     }
@@ -2030,7 +2093,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       guarded.push((recipient, guard));
     }
     for (recipient, guard) in &guarded {
-      self.seal_keys_to(conversation, &keys, recipient, guard).await?;
+      self.seal_keys_to(conversation, keys, recipient, guard).await?;
     }
     Ok(())
   }
@@ -2103,7 +2166,16 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       tracing::info!(conversation_id = %conversation, device_id = %device, "sharing the history of its full-history addition with a device added back");
       (self.ring_keys(conversation), SealedShare::AdditionHistory)
     } else {
-      (self.missed_keys(conversation, member)?, SealedShare::MissedKeys)
+      let mut keys = self.missed_keys(conversation, member)?;
+      if self.is_import_granted(conversation, user)? {
+        // A guest the import grant names gets the import's keys back too (e2ee.md §4.10).
+        for key in self.import_history_keys(conversation)? {
+          if !keys.iter().any(|known| known.id() == key.id()) {
+            keys.push(key);
+          }
+        }
+      }
+      (keys, SealedShare::MissedKeys)
     };
     if keys.is_empty() {
       return Ok(());
@@ -2132,7 +2204,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     if !self.is_owed_full_history(conversation, member)? {
       return Ok(false);
     }
-    match self.own_history(conversation, user, HistoryShare::Full).await {
+    match self.effective_history(user, HistoryShare::Full).await {
       Ok(history) => Ok(history == HistoryShare::Full),
       Err(error) if error.is_transient() => Err(error),
       Err(error) => {
@@ -2279,6 +2351,29 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       self.update_account_data(|data, _| data.note_removed_sender(&key, at_ms))?;
     }
     Ok(())
+  }
+
+  /// After the import of `conversation` was finished: while this device is alone in the group (a
+  /// new channel), it switches to a fresh key, which the members it adds then get. What they write
+  /// is never under a key of the import ([`Self::note_import_keys`]), which a guest the import grant
+  /// names gets later (e2ee.md §4.10). Where others are in the group already (a DM, somebody's
+  /// notes), they are the conversation's own participants.
+  pub(crate) fn rotate_after_import(&mut self, conversation: ConversationId) -> Result<(), CoreError> {
+    if !self.has_group(conversation)? {
+      return Ok(());
+    }
+    let me = self.own_member();
+    let group = self.group_or_error(conversation)?;
+    if group.members()?.iter().any(|member| *member != me) {
+      return Ok(());
+    }
+    let epoch = group.epoch();
+    let fresh = ContentKey::generate(&mut OsRng);
+    let ring = self.account.key_bag.ring_mut(convert::conversation(conversation));
+    ring.insert(fresh.duplicate())?;
+    ring.set_current(fresh.id())?;
+    self.persist_keys()?;
+    self.note_key_epochs(conversation, &[fresh.id()], epoch)
   }
 
   /// Switches to the content key of the group's current epoch (after a removal or a "from join"
@@ -2875,43 +2970,8 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     self.implicit_history(user)
   }
 
-  /// The history this device may share with `user` in `conversation` of `requested`, for its own
-  /// addition or a share of its own: [`Self::effective_history`], except that the import device
-  /// shares the history of a conversation it imported with the guests its import grant names
-  /// (e2ee.md §4.10, "Guests in imported conversations").
-  pub(crate) async fn own_history(
-    &mut self,
-    conversation: ConversationId,
-    user: UserId,
-    requested: HistoryShare,
-  ) -> Result<HistoryShare, CoreError> {
-    let history = self.effective_history(user, requested).await?;
-    if history != requested && self.is_import_granted(conversation, user)? {
-      tracing::info!(conversation_id = %conversation, "sharing the imported history with a guest the import grant names");
-      return Ok(requested);
-    }
-    Ok(history)
-  }
-
-  /// The history a change of `source` may share with the user it adds: [`Self::own_history`] for
-  /// this device's own change, [`Self::effective_history`] for one somebody else signed (the
-  /// import exception is never taken for another's change).
-  async fn allowed_history(
-    &mut self,
-    conversation: ConversationId,
-    source: &ChangeSource,
-    user_id: teamcraft_crypto::ids::UserId,
-    requested: HistoryShare,
-  ) -> Result<HistoryShare, CoreError> {
-    let user = convert::user_from_crypto(user_id)?;
-    match source {
-      ChangeSource::Own(_) => self.own_history(conversation, user, requested).await,
-      ChangeSource::Delegated(_) => self.effective_history(user, requested).await,
-    }
-  }
-
   /// Guests only ever see history from their join on (e2ee.md §4.3), whatever was asked for.
-  async fn effective_history(
+  pub(crate) async fn effective_history(
     &mut self,
     user: UserId,
     requested: HistoryShare,
@@ -2934,6 +2994,34 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       None => self.api.user(user).await?,
     };
     Ok(summary.kind == teamcraft_proto::UserKind::Guest)
+  }
+
+  /// Whether this guest's device commits somebody else's signed `action` itself: only somebody's
+  /// own signed leave, and only while no member but guests is left to commit it (a guest's notes
+  /// the import account leaves, a group of guests). Members of this version accept that commit;
+  /// members of earlier versions refuse it, so wherever a member is in the group, the member
+  /// commits (#1074).
+  fn may_commit_as_guest(
+    &mut self,
+    conversation: ConversationId,
+    signed: &SignedMembershipChange,
+    action: MembershipAction,
+  ) -> Result<bool, CoreError> {
+    let MembershipAction::RemoveUser { user_id } = action else {
+      return Ok(false);
+    };
+    if user_id != signed.signer_user() {
+      return Ok(false);
+    }
+    let leaver = convert::user_from_crypto(user_id)?;
+    let me = self.account.user_id;
+    let others: Vec<UserId> = self
+      .group_users(conversation)?
+      .into_iter()
+      .filter(|user| *user != me && *user != leaver)
+      .collect();
+    let guests = self.guest_users(others.iter().copied())?;
+    Ok(others.iter().all(|user| guests.contains(user)))
   }
 
   /// Whether the other members treat this device's user as a guest ([`Self::guest_users`]): a

@@ -698,14 +698,18 @@ Pre-provisioned accounts are ordinary accounts: the identity provider sync deact
 any other.
 
 **Guests.** Guests otherwise see history only from their join on. In the channels, DMs and notes the
-import made, the import device shares the history with the guests the mapping names there too, while
-the policy's date runs (e2ee.md §4.10, "Guests in imported conversations"). Nobody else shares
-history with a guest, and in a channel merged into, guests keep seeing it from their join on. So
-guests can stay guests at the identity provider during the import; somebody made a member for the
-import and switched back to guest later keeps what they got. On the server, a member the import account adds while the
-policy's date runs is marked (`memberships.sees_imported_history`); such a guest lists the
-conversation's messages, files and lines from before their join like a member, other guests from
-their join on. Memberships an earlier import made are marked by the migration, from the audit log.
+import made or took over, the import device also gives the guests the mapping names there the keys
+of the import, while the policy's date runs and the workspace state is fresh (e2ee.md §4.10,
+"Guests in imported conversations"): they read the imported history and everything from their
+join on, not what members wrote in between. Nobody else shares history with a guest, and in a
+channel merged into, guests keep seeing it from their join on. So guests can stay guests at the
+identity provider during the import; somebody made a member for the import and switched back to
+guest later keeps what they got. On the server, a member the import account adds to a conversation
+whose import it finished, while the policy's date runs, is marked (`memberships.sees_imported_history`,
+gone with the membership); such a guest lists the conversation's messages, files and lines from
+before their join like a member, other guests from their join on. The migration marks memberships an
+earlier import made, from the audit log: additions by an account that imported, from its first
+import on, to conversations whose import was finished.
 
 **The import account in DMs.** Clients leave it out of a DM's name and member list and show the
 banner of e2ee.md §4.10 instead; elsewhere it is an ordinary admin account.

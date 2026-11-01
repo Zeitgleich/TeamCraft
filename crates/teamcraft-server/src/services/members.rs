@@ -131,9 +131,12 @@ pub async fn add_member(
     .database
     .add_conversation_member(id, user.id, role.clone())
     .await?;
-  if super::import::is_importing(state, caller.user.id) {
-    // The import account adds the people of what it imported: they see its history, also as
-    // guests (e2ee.md §4.10, "Guests in imported conversations").
+  if access.view.conversation.maybe_imported_through.is_some()
+    && super::import::is_importing(state, caller.user.id)
+  {
+    // The import account adds the people of a conversation it imported: they see its history,
+    // also as guests (e2ee.md §4.10, "Guests in imported conversations"). The mark goes with the
+    // membership: a removal deletes it, and an addition by anybody else doesn't set it.
     state.database.mark_imported_history_member(id, user.id).await?;
   }
   audit::record(
