@@ -186,6 +186,11 @@ impl VerifiedDeviceList {
     self.list.revoked.contains(&device)
   }
 
+  /// Whether the list names any revoked device.
+  pub fn has_revoked(&self) -> bool {
+    !self.list.revoked.is_empty()
+  }
+
   /// Whether the list names this device with exactly this key.
   pub fn is_active(&self, device: &VerifiedDevice) -> bool {
     device.user_id() == self.list.user_id

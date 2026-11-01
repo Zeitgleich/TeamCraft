@@ -20,6 +20,7 @@ use crate::store::{LocalStore, Table};
 const SELF_ADD_PREFIX: &str = "self_add/";
 
 /// Whether this device posted a self-add to a conversation.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum SelfAddState {
   None,
   /// Posted and noted; posted again when due.

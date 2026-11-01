@@ -207,6 +207,7 @@ impl PendingEnrollment {
       saved_mls: Default::default(),
       account,
       groups: HashMap::new(),
+      group_loads: 0,
       sync,
       typing: Default::default(),
       background_failures: Vec::new(),

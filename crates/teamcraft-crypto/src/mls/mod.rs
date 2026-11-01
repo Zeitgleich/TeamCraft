@@ -26,7 +26,7 @@ use tls_codec::{Deserialize as _, Serialize as _};
 pub use content_keys::{ContentKeyBundle, SealedContentKeys};
 pub use group::{
   ChangeHistory, CommitOutput, ConversationGroup, GroupEvent, MAX_CHANGE_AGE_EPOCHS, MembershipUpdate,
-  PendingCommit, StagedJoin, VerifiedWelcome,
+  PendingCommit, StagedJoin, StoredGroupState, VerifiedWelcome,
 };
 pub use rejoin::{RejoinRequest, SignedRejoinRequest, VerifiedRejoinRequest};
 pub use stored_key_packages::{StoredKeyPackage, delete_key_package, key_package_ref, stored_key_packages};

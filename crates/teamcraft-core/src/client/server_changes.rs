@@ -108,6 +108,10 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     after: &ConversationResponse,
     observed: Observed,
   ) -> Result<(), CoreError> {
+    // A full sync lists every conversation; one that stayed as it was costs no write (issue #714).
+    if maybe_before == Some(after) {
+      return Ok(());
+    }
     let key = after.id.to_string();
     let events = match maybe_before {
       Some(before) => changes(before, after, |space| self.space_name(space))?,

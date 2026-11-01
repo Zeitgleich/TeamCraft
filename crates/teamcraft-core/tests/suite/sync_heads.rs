@@ -4,7 +4,8 @@
 // Test helpers outside `#[test]` functions panic on failure like the tests themselves.
 #![allow(clippy::unwrap_used)]
 
-use crate::common::{Peer, settle};
+use crate::common::{Peer, clock, settings, settle};
+use teamcraft_core::Client;
 use teamcraft_core::api::fake::FakeServer;
 use teamcraft_core::store::{LocalStore, Table};
 use teamcraft_proto::{ConversationId, ListConversationMembersResponse};
@@ -39,6 +40,29 @@ async fn an_unchanged_workspace_costs_no_request_per_conversation() {
     server.rest_call_count(carol.client.user_id()) - before
   };
   assert_eq!(with_heads, small);
+}
+
+/// The app opens again on a workspace that didn't change: the sync loads no MLS group, whatever
+/// the number of conversations. Loading every group to look at it cost more than the rest of the
+/// sync together (300 channels: about 140 ms in a debug build, issue #714).
+#[tokio::test]
+async fn an_unchanged_workspace_loads_no_group_after_a_restart() {
+  for count in [2, CHANNELS] {
+    let (server, _alice, mut carol, _channels) = workspace_of(count).await;
+    carol.client.full_sync().await.unwrap();
+    carol.client = Client::open(carol.api.clone(), carol.store.clone(), clock(), settings())
+      .unwrap()
+      .unwrap();
+    let before = server.rest_call_count(carol.client.user_id());
+    carol.client.full_sync().await.unwrap();
+
+    assert_eq!(
+      carol.client.group_loads(),
+      0,
+      "{count} channels: groups loaded by a sync of an unchanged workspace"
+    );
+    assert!(server.rest_call_count(carol.client.user_id()) > before);
+  }
 }
 
 #[tokio::test]
