@@ -4033,6 +4033,46 @@
         }
       }
     },
+    "jump_to_reaction %lld": {
+      "localizations": {
+        "en": {
+          "variations": {
+            "plural": {
+              "one": {
+                "stringUnit": {
+                  "state": "translated",
+                  "value": "%lld new reaction to your messages, jump to it"
+                }
+              },
+              "other": {
+                "stringUnit": {
+                  "state": "translated",
+                  "value": "%lld new reactions to your messages, jump to the first"
+                }
+              }
+            }
+          }
+        },
+        "de": {
+          "variations": {
+            "plural": {
+              "one": {
+                "stringUnit": {
+                  "state": "translated",
+                  "value": "%lld neue Reaktion auf deine Nachrichten, dorthin springen"
+                }
+              },
+              "other": {
+                "stringUnit": {
+                  "state": "translated",
+                  "value": "%lld neue Reaktionen auf deine Nachrichten, zur ersten springen"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "link_compare": {
       "localizations": {
         "en": {
