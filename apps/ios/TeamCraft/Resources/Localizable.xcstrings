@@ -3577,6 +3577,118 @@
         }
       }
     },
+    "profile_name_change": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Change name"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Namen ändern"
+          }
+        }
+      }
+    },
+    "profile_name_empty": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Enter a name, or use the name from your sign-in."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Gib einen Namen ein oder verwende den Namen aus deiner Anmeldung."
+          }
+        }
+      }
+    },
+    "profile_name_invalid": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "The name can't contain control characters."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Der Name darf keine Steuerzeichen enthalten."
+          }
+        }
+      }
+    },
+    "profile_name_label": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Your name"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Dein Name"
+          }
+        }
+      }
+    },
+    "profile_name_rejected": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "The name was refused. It may be too long, or your organization no longer allows changing it."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Der Name wurde abgelehnt. Er ist vielleicht zu lang, oder deine Organisation erlaubt die Änderung nicht mehr."
+          }
+        }
+      }
+    },
+    "profile_name_reset": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Use name from sign-in"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Namen aus der Anmeldung verwenden"
+          }
+        }
+      }
+    },
+    "profile_name_save": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Save name"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Namen speichern"
+          }
+        }
+      }
+    },
     "store_damaged_title": {
       "localizations": {
         "en": {

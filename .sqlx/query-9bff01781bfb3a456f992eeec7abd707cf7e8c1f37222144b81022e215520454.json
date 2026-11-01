@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE users\n         SET idp_display_name = COALESCE(idp_display_name, display_name),\n             display_name_override = $2,\n             display_name = COALESCE($2, idp_display_name, display_name)\n         WHERE id = $1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "9bff01781bfb3a456f992eeec7abd707cf7e8c1f37222144b81022e215520454"
+}

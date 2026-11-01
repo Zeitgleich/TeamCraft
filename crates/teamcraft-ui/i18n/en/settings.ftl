@@ -589,3 +589,12 @@ settings-help-links = Help and legal
 settings-help-links-none = Your organization hasn't added any help links.
 settings-help-documentation = Documentation
 settings-help-support = Contact support
+
+profile-name-change = Change name
+profile-name-label = Your name
+profile-name-save = Save name
+profile-name-reset = Use name from sign-in
+profile-name-empty = Enter a name, or use the name from your sign-in.
+profile-name-invalid = The name can't contain control characters.
+profile-name-rejected = This name is too long or has characters that aren't allowed.
+profile-name-not-allowed = Your organization doesn't allow changing the name.

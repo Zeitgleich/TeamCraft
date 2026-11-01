@@ -44,6 +44,7 @@ import de.zeitgleich.teamcraft.auth.localSignInErrorText
 import de.zeitgleich.teamcraft.calls.CallOptions
 import de.zeitgleich.teamcraft.core.ChatClient
 import de.zeitgleich.teamcraft.core.ChatQueries
+import de.zeitgleich.teamcraft.core.OwnProfile
 import de.zeitgleich.teamcraft.core.PermalinkTarget
 import de.zeitgleich.teamcraft.core.PickedFile
 import de.zeitgleich.teamcraft.push.UnifiedPushBackend
@@ -605,6 +606,24 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
       errorText(failure)
     } catch (failure: IllegalStateException) {
       // Signed out meanwhile: the sign-in screen replaces the form.
+      R.string.error_signed_out
+    }
+
+  /**
+   * Saves the member's own name (`null`: the sign-in name). Answers the string to show at the field
+   * when it failed. A refusal of the server (too long, or the policy changed meanwhile) is worded
+   * for the name; no connection and the like are worded as everywhere.
+   */
+  @StringRes
+  suspend fun trySetDisplayName(profile: OwnProfile, maybeName: String?): Int? =
+    try {
+      chat.setDisplayName(profile, maybeName)
+      null
+    } catch (failure: TeamCraftException.Core) {
+      R.string.profile_name_rejected
+    } catch (failure: TeamCraftException) {
+      errorText(failure)
+    } catch (failure: IllegalStateException) {
       R.string.error_signed_out
     }
 

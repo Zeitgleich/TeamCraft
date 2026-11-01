@@ -65,6 +65,13 @@ class ChatClient(
   suspend fun api(method: String, path: String, maybeBody: String? = null): String =
     core().apiRequest(method, path, maybeBody)
 
+  suspend fun ownProfile(): OwnProfile = OwnProfile.parse(api("GET", "/me/profile"))
+
+  /** Saves [maybeName] as the member's name, or with `null` goes back to the sign-in name. */
+  suspend fun setDisplayName(profile: OwnProfile, maybeName: String?) {
+    api("PUT", "/me/profile", profile.updateBody(maybeName))
+  }
+
   suspend fun notificationSettings(): NotificationSettings =
     WireJson.decodeFromString(NotificationSettings.serializer(), api("GET", "/me/notification-settings"))
 

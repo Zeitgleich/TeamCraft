@@ -475,3 +475,115 @@ mod directory {
     assert!(policy.directory.shows_full_name && !policy.directory.shows_email);
   }
 }
+
+mod display_name_override {
+  use super::*;
+
+  async fn put_name(
+    app: &TestApp,
+    user: &TestUser,
+    maybe_name: Option<&str>,
+  ) -> teamcraft_server::testing::Reply {
+    let body = maybe_name.map_or_else(|| json!({}), |name| json!({"display_name": name}));
+    app.put(user, "/me/profile", body).await
+  }
+
+  async fn shown_name(app: &TestApp, viewer: &TestUser, user: &str) -> String {
+    let reply = app.get(viewer, &format!("/users/{user}")).await;
+    assert_eq!(reply.status, StatusCode::OK, "{}", reply.body);
+    reply.body["display_name"].as_str().unwrap().to_owned()
+  }
+
+  #[tokio::test]
+  async fn a_name_of_ones_own_is_trimmed_shown_to_everybody_and_cleared_by_an_empty_value() {
+    let app = app!();
+    let (carol, dave) = (member("carol"), member("dave"));
+    let carol_id = user_id(&app, &carol).await;
+    channel_with(&app, &[&carol, &dave]).await;
+
+    let before = app.get(&carol, "/me/profile").await;
+    assert_eq!(
+      before.body["can_override_display_name"], true,
+      "allowed by default"
+    );
+    assert!(before.body.get("display_name_override").is_none());
+
+    let set = put_name(&app, &carol, Some("  Ada L.  ")).await;
+    assert_eq!(set.status, StatusCode::OK, "{}", set.body);
+    assert_eq!(set.body["display_name_override"], "Ada L.");
+    assert_eq!(shown_name(&app, &dave, &carol_id).await, "Ada L.");
+
+    let cleared = put_name(&app, &carol, Some("   ")).await;
+    assert_eq!(cleared.status, StatusCode::OK, "{}", cleared.body);
+    assert!(cleared.body.get("display_name_override").is_none());
+    assert_eq!(
+      shown_name(&app, &dave, &carol_id).await,
+      "carol",
+      "the provider's name is back"
+    );
+    app.stop().await;
+  }
+
+  #[tokio::test]
+  async fn invalid_names_are_refused() {
+    let app = app!();
+    let carol = member("carol");
+    for name in ["x".repeat(81), "line\nbreak".to_owned(), "bell\u{7}".to_owned()] {
+      let reply = put_name(&app, &carol, Some(&name)).await;
+      assert_eq!(reply.status, StatusCode::BAD_REQUEST, "{name:?}: {}", reply.body);
+      assert_eq!(reply.body["error_code"], "invalid_request");
+    }
+    app.stop().await;
+  }
+
+  #[tokio::test]
+  async fn a_policy_that_forbids_names_refuses_new_ones_but_not_clearing_them() {
+    let app = app!();
+    let carol = member("carol");
+    let carol_id = user_id(&app, &carol).await;
+    assert_eq!(put_name(&app, &carol, Some("Ada")).await.status, StatusCode::OK);
+
+    publish_policy(&app, 1, |p| {
+      p["directory"]["allow_display_name_override"] = json!(false)
+    })
+    .await;
+    let profile = app.get(&carol, "/me/profile").await;
+    assert_eq!(profile.body["can_override_display_name"], false);
+
+    let refused = put_name(&app, &carol, Some("Grace")).await;
+    assert_eq!(refused.status, StatusCode::FORBIDDEN, "{}", refused.body);
+    assert_eq!(refused.body["error_code"], "display_name_override_not_allowed");
+    assert_eq!(shown_name(&app, &carol, &carol_id).await, "Ada");
+
+    // Saving the rest of the profile with the name unchanged still works.
+    let same = put_name(&app, &carol, Some("Ada")).await;
+    assert_eq!(same.status, StatusCode::OK, "{}", same.body);
+    // Clearing is always possible.
+    assert_eq!(put_name(&app, &carol, None).await.status, StatusCode::OK);
+    assert_eq!(shown_name(&app, &carol, &carol_id).await, "carol");
+    app.stop().await;
+  }
+
+  #[tokio::test]
+  async fn the_sign_in_sync_keeps_the_name_and_clearing_brings_back_the_newest_provider_name() {
+    let app = app!();
+    let carol = member("carol");
+    let carol_id = user_id(&app, &carol).await;
+    assert_eq!(put_name(&app, &carol, Some("Ada")).await.status, StatusCode::OK);
+
+    // The provider renames the person: same subject, new name in the token.
+    let mut renamed = carol.clone();
+    renamed.username = "carol-new".to_owned();
+    assert_eq!(
+      shown_name(&app, &renamed, &carol_id).await,
+      "Ada",
+      "the override survives the sync"
+    );
+    let profile = app.get(&renamed, "/me/profile").await;
+    assert_eq!(profile.body["display_name_override"], "Ada");
+
+    assert_eq!(put_name(&app, &renamed, None).await.status, StatusCode::OK);
+    assert_eq!(shown_name(&app, &renamed, &carol_id).await, "carol-new");
+    app.stop().await;
+  }
+}

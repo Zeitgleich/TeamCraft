@@ -298,7 +298,7 @@ impl Database {
            deleted_at = COALESCE(deleted_at, now()),
            deactivated_at = COALESCE(deactivated_at, now()),
            deactivation_reason = COALESCE(deactivation_reason, 'admin'),
-           username = NULL, email = NULL, display_name = $2, oidc_role = NULL, organization = NULL,
+           username = NULL, email = NULL, display_name = $2, idp_display_name = NULL, display_name_override = NULL, oidc_role = NULL, organization = NULL,
            last_seen_at = NULL, dnd_until = NULL, presence_pref = 'auto',
            oidc_issuer = CASE WHEN deleted_at IS NULL AND oidc_issuer IS NOT NULL
                               THEN 'deleted:' || id::text || ':' || oidc_issuer

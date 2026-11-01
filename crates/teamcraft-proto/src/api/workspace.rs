@@ -246,6 +246,14 @@ pub struct DirectoryPolicy {
   pub shows_full_name: bool,
   /// Show e-mail addresses to members in directory lookups (guests never see them).
   pub shows_email: bool,
+  /// Members may replace the name from the identity provider with their own (issue #408). Existing
+  /// overrides stay until their owner clears them. Allowed when the policy predates the setting.
+  #[serde(default = "default_true")]
+  pub allow_display_name_override: bool,
+}
+
+fn default_true() -> bool {
+  true
 }
 
 impl Default for DirectoryPolicy {
@@ -254,6 +262,7 @@ impl Default for DirectoryPolicy {
       display_name_format: DisplayNameFormat::AsProvided,
       shows_full_name: true,
       shows_email: false,
+      allow_display_name_override: true,
     }
   }
 }

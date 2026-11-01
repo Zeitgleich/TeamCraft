@@ -108,6 +108,9 @@ pub enum ApiError {
   /// changed recovery passphrase is refused (e2ee.md §6.5.8).
   #[error("the workspace policy allows only a recovery kit, no new recovery passphrase")]
   RecoveryPassphraseNotAllowed,
+  /// The signed policy does not let members replace the name from the identity provider.
+  #[error("the workspace policy does not allow changing the display name")]
+  DisplayNameOverrideNotAllowed,
   /// The request arrived on a host name no brand is configured for and `unknown_host = "reject"`.
   #[error("this host name is not served here")]
   UnknownHost,
@@ -309,6 +312,7 @@ impl ApiError {
       | Self::GuestDmNotAllowed
       | Self::ImportNotAllowed
       | Self::RecoveryPassphraseNotAllowed
+      | Self::DisplayNameOverrideNotAllowed
       | Self::MfaRequired => StatusCode::FORBIDDEN,
       Self::Auth(AuthError::KeysUnavailable(_)) => StatusCode::SERVICE_UNAVAILABLE,
       Self::NotFound { .. } => StatusCode::NOT_FOUND,
@@ -357,6 +361,7 @@ impl ApiError {
       Self::ShareUnavailable => ErrorCode::ShareUnavailable,
       Self::LocalAccountsDisabled => ErrorCode::LocalAccountsDisabled,
       Self::RecoveryPassphraseNotAllowed => ErrorCode::RecoveryPassphraseNotAllowed,
+      Self::DisplayNameOverrideNotAllowed => ErrorCode::DisplayNameOverrideNotAllowed,
       Self::UnknownHost => ErrorCode::UnknownHost,
       Self::Conflict(_) => ErrorCode::Conflict,
       Self::LastOwner => ErrorCode::LastOwner,
@@ -622,6 +627,11 @@ mod tests {
         ApiError::RecoveryPassphraseNotAllowed,
         StatusCode::FORBIDDEN,
         ErrorCode::RecoveryPassphraseNotAllowed,
+      ),
+      (
+        ApiError::DisplayNameOverrideNotAllowed,
+        StatusCode::FORBIDDEN,
+        ErrorCode::DisplayNameOverrideNotAllowed,
       ),
       (
         ApiError::NotSpaceMember,

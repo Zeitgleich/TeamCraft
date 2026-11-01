@@ -62,11 +62,13 @@ import de.zeitgleich.teamcraft.core.ChatActions
 import de.zeitgleich.teamcraft.core.ChatSnapshot
 import de.zeitgleich.teamcraft.core.CustomStatus
 import de.zeitgleich.teamcraft.core.KeyBackup
+import de.zeitgleich.teamcraft.core.OwnProfile
 import de.zeitgleich.teamcraft.security.ScreenPrefs
 import de.zeitgleich.teamcraft.ui.AppState
 import de.zeitgleich.teamcraft.ui.LinkConfirmation
 import de.zeitgleich.teamcraft.ui.MainViewModel
 import de.zeitgleich.teamcraft.ui.forms.deviceLinkCodeError
+import de.zeitgleich.teamcraft.ui.forms.displayNameError
 import de.zeitgleich.teamcraft.ui.forms.fieldError
 import de.zeitgleich.teamcraft.ui.forms.passphraseError
 import de.zeitgleich.teamcraft.ui.forms.requiredTextError
@@ -128,6 +130,7 @@ fun SettingsScreen(
 private fun SettingsHub(viewModel: MainViewModel, account: AppState.Ready, onOpen: (SettingsPage) -> Unit) {
   var presence by rememberSaveable { mutableStateOf(Presence.ONLINE) }
   Text(account.displayName, style = MaterialTheme.typography.titleLarge)
+  DisplayNameSection(viewModel)
   Heading(R.string.presence_title)
   FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
     for ((choice, label) in PRESENCE_CHOICES) {
@@ -362,6 +365,85 @@ private fun ApproveDevice(viewModel: MainViewModel) {
       }
       Text(stringResource(R.string.approve_new_phone_hint), style = MaterialTheme.typography.bodySmall)
     }
+  }
+}
+
+/**
+ * Changing the name under the picture, when the workspace policy lets people (issue #408): a
+ * button that opens a field, and "Use name from sign-in" while a name of one's own is set. The new
+ * name reaches everyone through the profile update event; this screen's name follows the same way.
+ */
+@Composable
+private fun DisplayNameSection(viewModel: MainViewModel) {
+  val scope = rememberCoroutineScope()
+  val changes by viewModel.changeCount.collectAsState()
+  var maybeProfile by remember { mutableStateOf<OwnProfile?>(null) }
+  LaunchedEffect(changes) { maybeProfile = viewModel.readChat { ownProfile() } }
+  val profile = maybeProfile?.takeIf { it.canOverrideDisplayName } ?: return
+  var isEditing by rememberSaveable { mutableStateOf(false) }
+  var name by rememberSaveable { mutableStateOf("") }
+  var hasTried by remember { mutableStateOf(false) }
+  var isSaving by remember { mutableStateOf(false) }
+  var maybeFailure by remember { mutableStateOf<Int?>(null) }
+  val nameFocus = remember { FocusRequester() }
+  val maybeError = displayNameError(name).takeIf { hasTried } ?: maybeFailure
+  fun save(maybeName: String?) {
+    isSaving = true
+    scope.launch {
+      maybeFailure = viewModel.trySetDisplayName(profile, maybeName)
+      if (maybeFailure == null) {
+        isEditing = false
+        hasTried = false
+      } else if (isEditing) {
+        nameFocus.requestFocus()
+      }
+      isSaving = false
+    }
+  }
+  val resetButton: @Composable () -> Unit = {
+    if (profile.maybeDisplayNameOverride != null) {
+      OutlinedButton(onClick = { save(null) }, enabled = !isSaving) {
+        Text(stringResource(R.string.profile_name_reset))
+      }
+    }
+  }
+  if (!isEditing) {
+    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+      OutlinedButton(onClick = {
+        name = profile.maybeDisplayNameOverride.orEmpty()
+        maybeFailure = null
+        isEditing = true
+      }) { Text(stringResource(R.string.profile_name_change)) }
+      resetButton()
+    }
+    return
+  }
+  OutlinedTextField(
+    value = name,
+    onValueChange = {
+      name = it
+      maybeFailure = null
+    },
+    label = { Text(stringResource(R.string.profile_name_label)) },
+    singleLine = true,
+    isError = maybeError != null,
+    supportingText = supportingText(maybeError),
+    modifier = Modifier.fillMaxWidth().focusRequester(nameFocus).fieldError(maybeError),
+  )
+  Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+    Button(
+      onClick = {
+        hasTried = true
+        if (displayNameError(name) != null) nameFocus.requestFocus() else save(name.trim())
+      },
+      enabled = !isSaving,
+    ) { Text(stringResource(R.string.profile_name_save)) }
+    OutlinedButton(onClick = {
+      isEditing = false
+      hasTried = false
+      maybeFailure = null
+    }, enabled = !isSaving) { Text(stringResource(R.string.cancel)) }
+    resetButton()
   }
 }
 
