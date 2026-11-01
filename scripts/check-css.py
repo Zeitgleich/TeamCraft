@@ -66,7 +66,7 @@ FIXED_FONT_SIZES = {
 # Selectors that may set `will-change`, with the reason: only elements that move under the user's
 # finger and go away with their overlay (docs/performance.md, "Desktop on Linux: memory").
 WILL_CHANGE = {
-    ".lightbox-image": "zoomed and panned per pointer move while the lightbox is open",
+    ".lightbox-stage.is-live .lightbox-image": "zoomed and panned per pointer move during a gesture; only then, so the settled zoom is painted sharp (#1089)",
     ".lightbox-track": "swiped between pictures while the lightbox is open",
     ".crop-image": "dragged and zoomed while the crop dialog is open",
     ":is(.popover, .emoji-picker, .modal, .toast, .sheet, .motion-ghost)": "short-lived overlays keep their layer while up, so the end of their motion doesn't snap (#514)",

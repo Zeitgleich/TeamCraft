@@ -699,6 +699,16 @@ mod tests {
     width: 800.0,
     height: 600.0,
   };
+  /// The lightbox's rules, checked for what keeps a zoomed picture sharp (#1089).
+  const STYLESHEET: &str = include_str!("../style/main/380-lightbox.css");
+
+  #[test]
+  fn the_picture_is_a_layer_only_while_a_gesture_moves_it() {
+    // A permanent layer is rasterised once at the fitted size and then enlarged as a bitmap.
+    assert!(!rule(".lightbox-image {").contains("will-change"));
+    assert!(rule(".lightbox-stage.is-live .lightbox-image {").contains("will-change: transform"));
+    assert!(!STYLESHEET.contains("image-rendering"));
+  }
 
   mod navigation {
     use super::*;
@@ -1300,5 +1310,12 @@ mod tests {
 
   fn id(message: i64) -> MessageId {
     message.to_string().parse().expect("valid id")
+  }
+
+  /// The declarations of the stylesheet's rule whose line starts with `selector`.
+  fn rule(selector: &str) -> &'static str {
+    let start = STYLESHEET.find(&format!("\n{selector}")).expect("the rule");
+    let rest = &STYLESHEET[start..];
+    &rest[..rest.find('}').expect("its end")]
   }
 }
