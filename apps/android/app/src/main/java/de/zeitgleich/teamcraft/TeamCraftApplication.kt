@@ -19,6 +19,7 @@ import de.zeitgleich.teamcraft.calls.CallController
 import de.zeitgleich.teamcraft.core.ActivityReports
 import de.zeitgleich.teamcraft.core.CoreRepository
 import de.zeitgleich.teamcraft.core.NetworkTrust
+import de.zeitgleich.teamcraft.core.OutboxWork
 import de.zeitgleich.teamcraft.notifications.AvatarCache
 import de.zeitgleich.teamcraft.notifications.JoinRequestNotifier
 import de.zeitgleich.teamcraft.notifications.JoinRequestWatcher
@@ -85,7 +86,7 @@ class TeamCraftApplication : Application() {
     graph.network.start()
     // Older versions staged uploads in the cache, never deleted; the core's staging folder replaced it.
     graph.scope.launch(Dispatchers.IO) { File(cacheDir, "outgoing").deleteRecursively() }
-    ProcessLifecycleOwner.get().lifecycle.addObserver(ForegroundSync(graph))
+    ProcessLifecycleOwner.get().lifecycle.addObserver(ForegroundSync(this, graph))
     ProcessLifecycleOwner.get().lifecycle.addObserver(ActivityReports(graph.core))
   }
 
@@ -94,9 +95,11 @@ class TeamCraftApplication : Application() {
    * Offline-first (issue #700): screens show the core's local store at once, whatever the
    * connection does; coming back only restarts the sync, and the banner's grace period with it.
    * Stopping waits [STOP_DELAY_MS], so a quick look at the camera or another app keeps the
-   * connection instead of tearing it down and reconnecting.
+   * connection instead of tearing it down and reconnecting. What still has to reach the server
+   * then (a send just before leaving, a file going up) is handed to [OutboxWork] (issue #158), also
+   * right away in case the process is killed within the delay.
    */
-  private class ForegroundSync(private val graph: AppGraph) : DefaultLifecycleObserver {
+  private class ForegroundSync(private val context: Context, private val graph: AppGraph) : DefaultLifecycleObserver {
     private var maybeStopping: Job? = null
     /** Start and stop one after the other: a stop already under way finishes before the start. */
     private val order = Mutex()
@@ -114,11 +117,19 @@ class TeamCraftApplication : Application() {
     override fun onStop(owner: LifecycleOwner) {
       maybeStopping?.cancel()
       maybeStopping = graph.scope.launch {
+        if (graph.auth.isSignedIn.value) scheduleOutbox()
         delay(STOP_DELAY_MS)
         order.withLock {
+          // A run of OutboxWork under way keeps the sync going until it is done; the core stops it then.
           if (graph.auth.isSignedIn.value) runCatching { graph.core.core().stop() }
         }
       }
+    }
+
+    /** Hands what is still pending to WorkManager; one run sends it all, now or once a network is back. */
+    private suspend fun scheduleOutbox() {
+      val isPending = runCatching { !graph.core.core().pendingWork().isEmpty }.getOrDefault(false)
+      if (isPending) OutboxWork.enqueue(context)
     }
 
     private suspend fun startSync() {

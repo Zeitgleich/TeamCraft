@@ -195,12 +195,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
 
   /// How many actions wait for the server (those of a newer version not counted).
   pub fn pending_action_count(&self) -> Result<usize, CoreError> {
-    Ok(
-      load_entries(&self.store)?
-        .iter()
-        .filter(|(_, queued)| queued.action != PendingAction::Unknown)
-        .count(),
-    )
+    pending_action_count(&self.store)
   }
 
   /// The custom status change still waiting for the server, if one is.
@@ -546,6 +541,17 @@ impl QueuedAction {
 
 /// Every readable entry, oldest first. A damaged entry is dropped with a log entry; it would never
 /// become readable.
+/// How many actions in `store` wait for the server (those of a newer version not counted); readable
+/// without a client, while a runner owns it.
+pub fn pending_action_count(store: &impl LocalStore) -> Result<usize, CoreError> {
+  Ok(
+    load_entries(store)?
+      .iter()
+      .filter(|(_, queued)| queued.action != PendingAction::Unknown)
+      .count(),
+  )
+}
+
 fn load_entries(store: &impl LocalStore) -> Result<Vec<(String, QueuedAction)>, CoreError> {
   let mut entries = Vec::new();
   for (key, bytes) in store.list(Table::PendingActions)? {

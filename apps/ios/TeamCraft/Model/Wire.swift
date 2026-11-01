@@ -205,6 +205,7 @@ struct ChatAnswer: Decodable, Sendable {
   let maybeLink: String?
   let channels: [BrowsableChannel]?
   let unseen: UnseenReactions?
+  let maybeBody: String?
 }
 
 /// Others' reactions to the user's own messages in a conversation that the user hasn't seen: the

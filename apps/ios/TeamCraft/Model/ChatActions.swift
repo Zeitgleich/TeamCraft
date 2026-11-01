@@ -36,6 +36,9 @@ enum ChatAction {
   /// The reactions to these own messages were on screen, or the user jumped to them: seen on
   /// every device (issue #1009).
   case markReactionsSeen(conversationId: String, messageIds: [String])
+  /// The composer's unsent text, kept by the core (synced to the user's devices) so it survives the
+  /// app being killed (issue #158). An empty body clears it.
+  case setDraft(conversationId: String, maybeThreadId: String?, body: String)
 
   /// The wire form.
   var json: String {
@@ -92,6 +95,11 @@ enum ChatAction {
       object = ["action": "refresh_read_receipts", "conversation": conversation]
     case .markReactionsSeen(let conversation, let messages):
       object = ["action": "mark_reactions_seen", "conversation": conversation, "messages": messages]
+    case .setDraft(let conversation, let maybeThread, let body):
+      object = [
+        "action": "set_draft", "conversation": conversation,
+        "maybe_thread": maybeThread.map { $0 as Any } ?? NSNull(), "body": body,
+      ]
     }
     return jsonText(object)
   }
@@ -147,6 +155,8 @@ enum ChatQuery {
   case browseChannels(spaceId: String)
   /// Others' reactions to the user's messages here that the user hasn't seen.
   case unseenReactions(conversationId: String)
+  /// The composer text left unsent here, from this or another device of the user.
+  case draft(conversationId: String, maybeThreadId: String?)
 
   var json: String {
     switch self {
@@ -166,6 +176,10 @@ enum ChatQuery {
       return jsonText(["kind": "browse_channels", "space": space])
     case .unseenReactions(let conversation):
       return jsonText(["kind": "unseen_reactions", "conversation": conversation])
+    case .draft(let conversation, let maybeThread):
+      return jsonText([
+        "kind": "draft", "conversation": conversation, "maybe_thread": maybeThread.map { $0 as Any } ?? NSNull(),
+      ])
     }
   }
 }

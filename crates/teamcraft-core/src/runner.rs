@@ -19,6 +19,7 @@ use crate::client::Client;
 use crate::client::files::BlobUpload;
 use crate::connection::{ConnectionSettings, ConnectionStatus, ConnectionSupervisor, NetworkChanges};
 use crate::downloads::{Downloads, Finished};
+use crate::pending_work::PendingWork;
 use crate::platform;
 use crate::store::LocalStore;
 #[cfg(feature = "ui")]
@@ -51,6 +52,8 @@ pub struct SyncRunner<A: ServerApi, S> {
   downloads: Downloads,
   /// The bytes the transfers in flight had moved when the app was last told.
   maybe_reported_bytes: Option<u64>,
+  /// Told once nothing waits for the server any longer ([`RunnerCommand::Drain`]).
+  drained: Vec<futures_channel::oneshot::Sender<()>>,
 }
 
 /// How often the app is told to read again while a file goes up or down, for its progress.
@@ -86,6 +89,10 @@ pub enum RunnerCommand {
   /// The device became active or idle (the app came to the foreground or went to the background,
   /// or the user touched it): told to the server now if connected, and on every new connection.
   SetActivity(DeviceActivity),
+  /// Answers once the outbox, the uploads and the queued actions are empty ([`PendingWork`]): a
+  /// mobile app keeps its background time until then (issue #158). Whoever asks bounds the wait;
+  /// a dropped receiver costs nothing.
+  Drain(futures_channel::oneshot::Sender<()>),
   /// Ends [`SyncRunner::run`], which hands the client back.
   Stop,
 }
@@ -139,6 +146,7 @@ impl<A: ServerApi, S: LocalStore> SyncRunner<A, S> {
       is_upload_due: true,
       downloads: Downloads::default(),
       maybe_reported_bytes: None,
+      drained: Vec::new(),
     };
     (runner, RunnerHandle { sender })
   }
@@ -189,6 +197,7 @@ impl<A: ServerApi, S: LocalStore> SyncRunner<A, S> {
         Wake::Tick => self.on_tick().await,
       }
       self.report_progress();
+      self.answer_drained();
     }
   }
 
@@ -257,6 +266,11 @@ impl<A: ServerApi, S: LocalStore> SyncRunner<A, S> {
   async fn on_command(&mut self, command: RunnerCommand) {
     match command {
       RunnerCommand::Flush => {},
+      RunnerCommand::Drain(drained) => {
+        self.drained.push(drained);
+        // Something may still wait for its retry time: try now rather than on the next tick.
+        self.is_upload_due = true;
+      },
       RunnerCommand::SetActivity(activity) => {
         self.client.set_device_activity(activity);
         self.report_activity().await;
@@ -433,6 +447,24 @@ impl<A: ServerApi, S: LocalStore> SyncRunner<A, S> {
     if moved != self.maybe_reported_bytes {
       self.maybe_reported_bytes = moved;
       self.changed();
+    }
+  }
+
+  /// Answers the [`RunnerCommand::Drain`] requests once nothing waits for the server.
+  fn answer_drained(&mut self) {
+    self.drained.retain(|drained| !drained.is_canceled());
+    if self.drained.is_empty() {
+      return;
+    }
+    match PendingWork::read(self.client.store()) {
+      Ok(pending) if pending.is_empty() => {
+        for drained in self.drained.drain(..) {
+          // The asker may have given up meanwhile; nothing to tell it then.
+          let _ = drained.send(());
+        }
+      },
+      Ok(_) => {},
+      Err(error) => tracing::debug!(%error, "pending work not read"),
     }
   }
 

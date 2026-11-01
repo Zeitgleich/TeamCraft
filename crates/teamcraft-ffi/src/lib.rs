@@ -22,7 +22,7 @@ mod video;
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock, PoisonError};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 pub use calls::{
   CallEndReason, CallListener, CallMoveInfo, CallPhase, CallSession, CallStateInfo, EncodedVideoListener,
@@ -58,9 +58,9 @@ pub use types::{
   ConversationKind, EmojiSuggestion, KeyCatchUpItem, LinkPlatform, LinkRequestItem, LoginBrand,
   MentionSettings, MessageItem, MessagePage, NetworkInterception, NetworkProxy, NotificationAttachmentKind,
   NotificationContent, NotificationContentSettings, NotificationGap, NotificationSuppression,
-  NotifiedConversation, NotifiedMessage, OrgRecoveryStart, PlaceholderItem, Presence, PushDiagnosticsInfo,
-  PushNotification, PushNotificationKind, PushService, ReactionItem, SearchHitItem, SegmentPrefetchMode,
-  SegmentPrefetchResult, StoreProblem, TestPushOutcome, TestPushResult,
+  NotifiedConversation, NotifiedMessage, OrgRecoveryStart, PendingWorkItem, PlaceholderItem, Presence,
+  PushDiagnosticsInfo, PushNotification, PushNotificationKind, PushService, ReactionItem, SearchHitItem,
+  SegmentPrefetchMode, SegmentPrefetchResult, StoreProblem, TestPushOutcome, TestPushResult,
 };
 
 pub use video::{CameraFrame, VideoFrameRgba};
@@ -359,15 +359,43 @@ impl TeamCraft {
   pub async fn start(&self) -> Result<(), TeamCraftError> {
     outcome(
       LifecycleStep::StartSync,
-      self.call(|engine| Box::pin(engine.start())).await,
+      self.call(|engine| Box::pin(engine.start_syncing())).await,
     )
   }
 
-  /// Stops syncing; the store stays open.
+  /// What still waits for the server: messages in the outbox, files going up and queued actions
+  /// (issue #158). The app reads it when it leaves the foreground: while anything is pending it
+  /// keeps background time ([`Self::flush_pending_work`]) or schedules work for when the network
+  /// is back.
+  pub async fn pending_work(&self) -> Result<PendingWorkItem, TeamCraftError> {
+    self
+      .call(|engine| Box::pin(async move { engine.pending_work() }))
+      .await
+      .map(PendingWorkItem::from)
+  }
+
+  /// Syncs until nothing waits for the server or `max_wait_ms` has passed, and answers with what is
+  /// still pending (issue #158): for the background time the OS grants after the app left the
+  /// foreground (an iOS background task, Android expedited work). The sync loop keeps running at the
+  /// end while the app syncs; otherwise it stops then, also when the caller was cancelled. Other
+  /// calls are answered meanwhile.
+  pub async fn flush_pending_work(&self, max_wait_ms: u64) -> Result<PendingWorkItem, TeamCraftError> {
+    let max_wait = Duration::from_millis(max_wait_ms);
+    let answered = self
+      .call(move |engine| Box::pin(engine.begin_drain(max_wait)))
+      .await?;
+    answered
+      .await
+      .map_err(|_| TeamCraftError::EngineStopped)?
+      .map(PendingWorkItem::from)
+  }
+
+  /// Stops syncing; the store stays open. A [`Self::flush_pending_work`] under way keeps the sync
+  /// loop until it ends.
   pub async fn stop(&self) -> Result<(), TeamCraftError> {
     outcome(
       LifecycleStep::StopSync,
-      self.call(|engine| Box::pin(engine.stop())).await,
+      self.call(|engine| Box::pin(engine.stop_syncing())).await,
     )
   }
 

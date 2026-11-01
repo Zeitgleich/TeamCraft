@@ -93,6 +93,8 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.core.content.FileProvider
 import androidx.core.graphics.PaintCompat
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.compose.LifecycleEventEffect
 import java.io.File
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -940,6 +942,10 @@ internal fun Composer(
     if (!isDraftLoaded) return@LaunchedEffect
     delay(DRAFT_SAVE_DELAY_MS)
     viewModel.act(ChatActions.setDraft(conversationId, maybeThread, text))
+  }
+  // Leaving the app saves at once: the process may be killed before the pause is over (#158).
+  LifecycleEventEffect(Lifecycle.Event.ON_STOP) {
+    if (isDraftLoaded) viewModel.act(ChatActions.setDraft(conversationId, maybeThread, text))
   }
   val maybeQuery = Mentions.activeQuery(text)
   val members = snapshot?.conversation(conversationId)?.memberIds?.mapNotNull { snapshot.user(it) } ?: emptyList()

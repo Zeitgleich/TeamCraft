@@ -13,6 +13,7 @@
     <item quantity="other">%d conversations</item>
   </plurals>
   <string name="push_fetching">Checking for new messages…</string>
+  <string name="outbox_sending">Sending messages…</string>
 
   <!-- Calls -->
   <string name="call_incoming">Incoming call</string>
