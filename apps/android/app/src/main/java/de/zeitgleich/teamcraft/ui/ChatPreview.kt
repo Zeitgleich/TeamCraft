@@ -24,6 +24,9 @@ sealed interface PreviewContent {
   /** No text left: the message was deleted (files carry their name as text). */
   data object Deleted : PreviewContent
   data object Event : PreviewContent
+
+  /** Not readable on this device yet (issue #888): [Message.maybePlaceholder]'s state. */
+  data class Placeholder(val state: String) : PreviewContent
 }
 
 /**
@@ -41,6 +44,7 @@ fun chatPreview(message: Message, myId: String, authorName: String, isOneToOne: 
   val text = oneLine(message.body)
   val content = when {
     isEvent -> PreviewContent.Event
+    message.maybePlaceholder != null -> PreviewContent.Placeholder(message.maybePlaceholder)
     text.isEmpty() -> PreviewContent.Deleted
     else -> PreviewContent.Text(text)
   }

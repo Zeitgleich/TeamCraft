@@ -24,6 +24,13 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     for conversation in self.cached_conversations()?.into_keys() {
       let messages = self.store.messages(conversation, MessageFilter::All)?;
       let announced = announced_months(&messages);
+      // A month with messages this device can't read isn't complete here (issue #888): another
+      // device publishes it, or this one once they are read.
+      let waiting: BTreeSet<String> = messages
+        .iter()
+        .filter(|message| message.maybe_unreadable.is_some())
+        .map(|message| month_of(message.sent_at_ms))
+        .collect();
       let mut by_month: BTreeMap<String, Vec<&StoredMessage>> = BTreeMap::new();
       for message in messages
         .iter()
@@ -35,7 +42,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
         by_month.entry(month_of(sent_at_ms)).or_default().push(message);
       }
       for (month, month_messages) in by_month {
-        if month >= current_month || announced.contains(&month) {
+        if month >= current_month || announced.contains(&month) || waiting.contains(&month) {
           continue;
         }
         let bundle = export_segment(month_messages.iter().copied())?;

@@ -14,8 +14,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use serde::{Deserialize, Serialize};
 use teamcraft_proto::{
-  ConversationHead, ConversationId, MessageId, MessageResponse, MlsMessageId, SpaceId, SyncHeadsResponse,
-  UserId,
+  ConversationHead, ConversationId, MessageId, MlsMessageId, SpaceId, SyncHeadsResponse, UserId,
 };
 
 use super::Client;
@@ -189,9 +188,16 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
   }
 
   /// The conversations with messages waiting for keys.
+  /// Read from the keys ("<conversation>/<client message ID>"), without the parked ciphertext.
   pub(super) fn parked_conversations(&self) -> Result<BTreeSet<ConversationId>, CoreError> {
-    let parked: Vec<MessageResponse> = records::list_json(&self.store, Table::Undecrypted)?;
-    Ok(parked.iter().map(|message| message.conversation_id).collect())
+    Ok(
+      self
+        .store
+        .list(Table::Undecrypted)?
+        .into_iter()
+        .filter_map(|(key, _)| key.split_once('/')?.0.parse().ok())
+        .collect(),
+    )
   }
 
   /// The member list just stored was read during this sync.

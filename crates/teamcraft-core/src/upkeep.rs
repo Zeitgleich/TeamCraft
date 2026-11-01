@@ -84,6 +84,12 @@ impl Upkeep {
         Ok(posted) => is_changed |= posted > 0,
         Err(error) => tracing::debug!(%error, "self-adds not posted again yet"),
       }
+      // Messages whose keys didn't come in time read "not available" (issue #888); a local read
+      // of one record per conversation that waits.
+      match client.settle_missing_keys() {
+        Ok(changed) => is_changed |= changed,
+        Err(error) => tracing::debug!(%error, "messages waiting for keys not checked"),
+      }
       // Devices registered by setups given up before this one finished (issue #415); a local read
       // while there are none.
       if let Err(error) = client.revoke_abandoned_devices().await {

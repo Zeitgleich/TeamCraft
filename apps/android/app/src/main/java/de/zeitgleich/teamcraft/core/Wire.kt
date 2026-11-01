@@ -114,6 +114,12 @@ data class Message(
   val reactions: List<Reaction> = emptyList(),
   @SerialName("reply_count") val replyCount: Int = 0,
   @SerialName("maybe_thread") val maybeThread: String? = null,
+  /**
+   * Set while this device can't read the message (issue #888): `"waiting"` (its key may still
+   * come), `"not_available"` (none is expected here) or `"failed"` (it didn't decrypt). [body] is
+   * empty then; the core replaces the row once it is readable.
+   */
+  @SerialName("placeholder") val maybePlaceholder: String? = null,
 ) {
   /** Outbox messages carry the pending bit in their ID until the server accepted them. */
   val isPending: Boolean get() = (id.toLongOrNull() ?: 0L) and PENDING_ID_BIT != 0L
@@ -192,7 +198,7 @@ data class MessageWindow(
   val start: Int,
   val total: Int,
   val messages: List<Message>,
-  /** Received but not readable on this device yet (keys not arrived); not in [messages]. */
+  /** Received but not readable on this device yet (keys not arrived); placeholders in [messages]. */
   val undecrypted: Int = 0,
 )
 
@@ -203,7 +209,7 @@ data class MessageTail(
   val messages: List<Message>,
   /** Older messages exist: the feed can page further back. */
   @SerialName("has_older") val hasOlder: Boolean,
-  /** Received but not readable on this device yet (keys not arrived); not in [messages]. */
+  /** Received but not readable on this device yet (keys not arrived); placeholders in [messages]. */
   val undecrypted: Int = 0,
 )
 

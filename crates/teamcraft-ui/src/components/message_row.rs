@@ -24,7 +24,7 @@ use crate::markdown;
 use crate::message_links::{as_permalink, own_hosts};
 use crate::model::{
   DeviceSetup, Id, ImportedAuthorView, ImportedFrom, ImportedMark, LogLevel, Message, MessageKind,
-  PresenceStatus, SystemEvent, User, UserId, is_pending, thread_id_of,
+  Placeholder, PresenceStatus, SystemEvent, User, UserId, is_pending, thread_id_of,
 };
 use crate::reactive::use_interval;
 use crate::state::{Overlay, use_app_state};
@@ -95,13 +95,85 @@ pub fn MessageRow(
     MessageKind::Change => workspace_text_line(workspace_text(&message)).into_any(),
     MessageKind::User => {
       let is_grouped = is_grouped(&message, maybe_prev.as_ref());
-      user_message(message, is_grouped, in_thread, motion).into_any()
+      match message.maybe_placeholder {
+        Some(placeholder) => placeholder_message(message, placeholder, is_grouped).into_any(),
+        None => user_message(message, is_grouped, in_thread, motion).into_any(),
+      }
     },
   };
   view! {
     {imported_until}
     {divider_view}
     {body}
+  }
+}
+
+/// A message this device can't read (issue #888): a bubble at the message's place with its
+/// author and time and a line saying why, without actions. The core replaces it by the message
+/// once its key arrives; the row keeps its ID, so the list doesn't move.
+fn placeholder_message(message: Message, placeholder: Placeholder, is_grouped: bool) -> impl IntoView {
+  let i18n = use_i18n();
+  let state = use_app_state();
+  let locale = i18n.locale().tag();
+  let author = shown_author(Some(message.author), None);
+  let author_name = author
+    .as_ref()
+    .map(|user| user.display_name.clone())
+    .unwrap_or_default();
+  let time = format_time(message.sent_at, locale);
+  let message_id = message.id;
+  let is_mine = message.author == state.me().id;
+  let (text_key, maybe_icon) = match placeholder {
+    Placeholder::Waiting => ("message-placeholder-waiting", Some(IconName::Clock)),
+    Placeholder::NotAvailable | Placeholder::Unknown => {
+      ("message-placeholder-not-available", Some(IconName::Lock))
+    },
+    Placeholder::Failed => ("message-placeholder-failed", Some(IconName::Alert)),
+  };
+  let text = i18n.t(text_key);
+  let aria_label = format!("{author_name}, {time}, {text}");
+  let gutter = match (is_grouped, author) {
+    (false, Some(user)) => view! { <Avatar user=user size=AvatarSize::Large /> }.into_any(),
+    _ => {
+      let time = time.clone();
+      view! { <time class="hover-time">{time}</time> }.into_any()
+    },
+  };
+  let header = (!is_grouped).then(|| {
+    view! {
+      <div class="msg-header">
+        <span class="msg-author" translate="no">{author_name.clone()}</span>
+      </div>
+    }
+  });
+  view! {
+    <div
+      class="msg msg-user msg-placeholder"
+      class:msg-grouped=is_grouped
+      class:msg-mine=is_mine
+      class:msg-highlight=move || state.highlighted.get() == Some(message_id)
+      tabindex="-1"
+      data-nav="row"
+      data-msg-id=message_id.to_string()
+      aria-label=aria_label
+    >
+      <div class="msg-gutter">{gutter}</div>
+      <div class="msg-main">
+        <div class="msg-bubble">
+          {header} <div class="msg-body">
+            <span class="placeholder-text">
+              {maybe_icon.map(|icon| view! { <span class="placeholder-icon" aria-hidden="true"><Icon name=icon /></span> })}
+              {text}
+            </span>
+            <span class="bubble-meta">
+              <time class="bubble-time" datetime=message.sent_at.to_string()>
+                {time}
+              </time>
+            </span>
+          </div>
+        </div>
+      </div>
+    </div>
   }
 }
 
@@ -1314,6 +1386,7 @@ mod tests {
       reply_count: 0,
       maybe_thread: None,
       maybe_imported: None,
+      maybe_placeholder: None,
     }
   }
 }

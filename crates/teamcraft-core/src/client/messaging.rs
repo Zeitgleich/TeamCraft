@@ -18,7 +18,9 @@ use crate::api::{ApiError, ServerApi};
 use crate::convert;
 use crate::error::CoreError;
 use crate::records::{self, OutboxEntry};
-use crate::store::{EditRecord, LocalStore, MessageContent, MessageEdge, Priority, StoredMessage, Table};
+use crate::store::{
+  EditRecord, LocalStore, MessageContent, MessageEdge, Priority, StoredMessage, Table, Unreadable,
+};
 
 /// Result of [`Client::flush_outbox`].
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -366,7 +368,9 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
   /// are parked and retried when keys arrive.
   pub(crate) fn receive_message(&mut self, message: MessageResponse) -> Result<(), CoreError> {
     let conversation = message.conversation_id;
-    if let Some(existing) = self.store.message(conversation, message.client_message_id)?
+    let maybe_existing = self.store.message(conversation, message.client_message_id)?;
+    if let Some(existing) = &maybe_existing
+      && existing.maybe_unreadable.is_none()
       && (existing.maybe_server_id.is_some() || existing.is_local_line())
     {
       // Already known (own message echoed back, or a duplicate delivery), or the ID of a line this
@@ -402,6 +406,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
           is_pinned: false,
           maybe_verified_commit: None,
           maybe_server_change: None,
+          maybe_unreadable: None,
         };
         if super::server_changes::is_announcement(&stored) {
           // An announcement of a change the server reports and the name it puts on a line reach
@@ -436,20 +441,108 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       Err(CoreError::Message(MessageError::UnknownKey(_)))
       | Err(CoreError::NoContentKey(_))
       | Err(CoreError::UnknownSender { .. }) => {
-        let key = undecrypted_key(&message);
-        // A retry of a message parked already (new keys arrived, but not its own) writes nothing:
-        // every epoch change retries all parked messages of the conversation (issue #1000).
-        if self.store.get(Table::Undecrypted, &key)?.is_some() {
-          return Ok(());
-        }
-        records::put_json(&self.store, Table::Undecrypted, &key, &message)
+        let now = self.now_ms();
+        self.park(
+          &message,
+          maybe_existing.as_ref(),
+          Unreadable::Waiting { since_ms: now },
+        )
+      },
+      // From a newer version: kept and tried again (after an update it opens), never a failure.
+      Err(CoreError::Message(MessageError::UnsupportedVersion(version))) => {
+        tracing::info!(conversation_id = %conversation, message_id = %message.id, version, "message of a newer version kept");
+        self.park(&message, maybe_existing.as_ref(), Unreadable::NotAvailable)
+      },
+      Err(error @ CoreError::Store(_)) => Err(error),
+      Err(
+        error @ CoreError::Message(
+          MessageError::DecryptionFailed | MessageError::SignerMismatch | MessageError::InvalidSignature,
+        ),
+      ) if is_signed(&message) => {
+        // Tampered or wrongly attributed ciphertext under a key this device has: its content is
+        // never shown (e2ee.md §4.4), only a placeholder saying it failed, and it isn't tried again.
+        tracing::warn!(conversation_id = %conversation, message_id = %message.id, %error, "message failed to decrypt");
+        self.note_failed(&message, maybe_existing.as_ref())
       },
       Err(error) => {
-        // Tampered or wrongly attributed ciphertext: never shown (e2ee.md §4.4).
+        // Malformed, unsigned (refused by the settings) or of another conversation: dropped as
+        // before, with no row that would claim more than the server's word.
         tracing::warn!(conversation_id = %conversation, message_id = %message.id, %error, "dropped undecryptable message");
         Ok(())
       },
     }
+  }
+
+  /// Keeps a message whose content key (or sender key) hasn't arrived for a retry, with a
+  /// placeholder at its place in the conversation (issue #888).
+  fn park(
+    &mut self,
+    message: &MessageResponse,
+    maybe_existing: Option<&StoredMessage>,
+    state: Unreadable,
+  ) -> Result<(), CoreError> {
+    let key = undecrypted_key(message);
+    let is_parked = self.store.get(Table::Undecrypted, &key)?.is_some();
+    // A retry of a message parked already (new keys arrived, but not its own) writes nothing:
+    // every epoch change retries all parked messages of the conversation (issue #1000). One
+    // parked by a version without placeholders gets its placeholder now.
+    if is_parked && maybe_existing.is_some() {
+      return Ok(());
+    }
+    crate::store::write_group(&self.store, || -> Result<(), CoreError> {
+      if !is_parked {
+        records::put_json(&self.store, Table::Undecrypted, &key, message)?;
+      }
+      if maybe_existing.is_none() {
+        self.store.upsert_message(&placeholder(message, state))?;
+        if let Unreadable::Waiting { since_ms } = state {
+          super::missing_keys::note_waiting(&self.store, message.conversation_id, since_ms)?;
+        }
+      }
+      Ok(())
+    })
+  }
+
+  /// Marks a message that can't be decrypted with the key it names: a placeholder that says so
+  /// takes its place (or that of a placeholder waiting for its key), and it is no longer retried.
+  fn note_failed(
+    &mut self,
+    message: &MessageResponse,
+    maybe_existing: Option<&StoredMessage>,
+  ) -> Result<(), CoreError> {
+    // Only the message the row and the parked copy stand for: a server re-delivering garbage under
+    // a waiting message's client ID must not discard the real ciphertext or mark it failed.
+    let key = undecrypted_key(message);
+    let maybe_parked: Option<MessageResponse> = records::get_json(&self.store, Table::Undecrypted, &key)?;
+    let is_same_parked = maybe_parked.as_ref().is_none_or(|parked| parked.id == message.id);
+    let is_same_row = match maybe_existing {
+      None => true,
+      Some(existing) => existing.maybe_unreadable.is_some() && existing.maybe_server_id == Some(message.id),
+    };
+    if !is_same_parked || !is_same_row {
+      tracing::warn!(conversation_id = %message.conversation_id, message_id = %message.id, "dropped a failing message that reuses another's client ID");
+      return Ok(());
+    }
+    // A bound on rows the server can make by sending garbage (configurable).
+    if maybe_existing.is_none()
+      && !super::missing_keys::take_failed_slot(
+        &self.store,
+        message.conversation_id,
+        self.settings.max_failed_placeholders,
+      )?
+    {
+      tracing::warn!(conversation_id = %message.conversation_id, message_id = %message.id, "too many failed messages; dropped without a placeholder");
+      return Ok(());
+    }
+    crate::store::write_group(&self.store, || -> Result<(), CoreError> {
+      self
+        .store
+        .upsert_message(&placeholder(message, Unreadable::Failed))?;
+      if maybe_parked.is_some() {
+        self.store.delete(Table::Undecrypted, &key)?;
+      }
+      Ok(())
+    })
   }
 
   /// Applies an edit or delete to its target. Only the target's author may change it; others' edits
@@ -458,13 +551,17 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
   pub(crate) fn retry_undecrypted(&mut self, conversation: ConversationId) -> Result<(), CoreError> {
     let parked: Vec<(String, MessageResponse)> =
       records::list_json_with_prefix(&self.store, Table::Undecrypted, &format!("{conversation}/"))?;
+    if parked.is_empty() {
+      return Ok(());
+    }
     self.receive_page(
       parked
         .into_iter()
         .map(|(_, message)| message)
         .filter(|message| message.conversation_id == conversation)
         .collect(),
-    )
+    )?;
+    self.refresh_key_wait(conversation)
   }
 
   /// Messages this device received but can't read yet.
@@ -590,7 +687,34 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
   }
 }
 
-fn undecrypted_key(message: &MessageResponse) -> String {
+/// Whether the message's ciphertext carries a sender signature. An unsigned one refused by the
+/// settings is no tampering.
+fn is_signed(message: &MessageResponse) -> bool {
+  EncryptedMessage::from_bytes(message.ciphertext.as_slice()).is_ok_and(|encrypted| encrypted.is_signed())
+}
+
+/// The row that stands for a message this device can't read: only what the server's envelope
+/// says (sender, time and thread), never content (issue #888).
+fn placeholder(message: &MessageResponse, unreadable: Unreadable) -> StoredMessage {
+  StoredMessage {
+    conversation_id: message.conversation_id,
+    client_message_id: message.client_message_id,
+    maybe_server_id: Some(message.id),
+    sender_user_id: message.sender_user_id,
+    maybe_thread_id: message.maybe_thread_id,
+    sent_at_ms: message.id.snowflake().unix_millis(),
+    content: MessageContent::Unknown,
+    is_edited: false,
+    edits: Vec::new(),
+    maybe_edit_id: None,
+    is_pinned: false,
+    maybe_verified_commit: None,
+    maybe_server_change: None,
+    maybe_unreadable: Some(unreadable),
+  }
+}
+
+pub(super) fn undecrypted_key(message: &MessageResponse) -> String {
   format!(
     "{}/{}",
     message.conversation_id,
@@ -707,7 +831,13 @@ fn apply_control_with(
     | MessageContent::Pin { target, .. } => *target,
     _ => return Ok(()),
   };
-  let Some(mut stored) = store.message(conversation, target)? else {
+  // A placeholder (issue #888) is no target yet: the control waits like one for a target not here,
+  // and applies when the target is decrypted (`apply_early_controls`). Applied to the placeholder,
+  // decrypting would overwrite it, bringing deleted text back and losing the edit or pin.
+  let Some(mut stored) = store
+    .message(conversation, target)?
+    .filter(|stored| stored.maybe_unreadable.is_none())
+  else {
     // History loads newest first, so edits, deletions and pins arrive before their target there.
     return keep_early_control(
       store,
@@ -877,6 +1007,323 @@ mod tests {
     }
   }
 
+  /// Review of #888 (H1): a delete, edit or pin of a message still a placeholder waits like one for
+  /// a target not here, and applies once the target is decrypted; applied to the placeholder,
+  /// decrypting would have overwritten it.
+  mod controls_before_their_target_decrypts {
+    use super::*;
+
+    #[test]
+    fn a_delete_stays_deleted() {
+      let (store, conversation, target, author) = placeholder_target();
+      apply_control_with(
+        &store,
+        conversation,
+        author,
+        &MessageContent::Delete { target },
+        200,
+        Some(id(200)),
+      )
+      .unwrap();
+      assert!(
+        store
+          .message(conversation, target)
+          .unwrap()
+          .unwrap()
+          .maybe_unreadable
+          .is_some()
+      );
+      let stored = decrypt(&store, conversation, target, author);
+      assert!(
+        matches!(stored.content, MessageContent::Deleted),
+        "{:?}",
+        stored.content
+      );
+    }
+
+    #[test]
+    fn an_edit_is_kept() {
+      let (store, conversation, target, author) = placeholder_target();
+      apply_control_with(
+        &store,
+        conversation,
+        author,
+        &edit(target, "v1"),
+        200,
+        Some(id(200)),
+      )
+      .unwrap();
+      let stored = decrypt(&store, conversation, target, author);
+      assert!(matches!(&stored.content, MessageContent::Text { body, .. } if body == "v1"));
+      assert_eq!(stored.maybe_edit_id, Some(id(200)));
+    }
+
+    #[test]
+    fn a_pin_is_kept() {
+      let (store, conversation, target, author) = placeholder_target();
+      let pin = MessageContent::Pin {
+        target,
+        is_pinned: true,
+      };
+      apply_control_with(&store, conversation, author, &pin, 200, Some(id(200))).unwrap();
+      assert!(decrypt(&store, conversation, target, author).is_pinned);
+    }
+
+    fn placeholder_target() -> (MemoryStore, ConversationId, ClientMessageId, UserId) {
+      let (conversation, target, author) = (id(10), ClientMessageId::from_bytes([1; 16]), id(3));
+      let store = MemoryStore::new();
+      let mut row = original(conversation, target, author);
+      row.content = MessageContent::Unknown;
+      row.maybe_unreadable = Some(Unreadable::Waiting { since_ms: 0 });
+      store.upsert_message(&row).unwrap();
+      (store, conversation, target, author)
+    }
+
+    /// What `receive_message` does once the target decrypts.
+    fn decrypt(
+      store: &MemoryStore,
+      conversation: ConversationId,
+      target: ClientMessageId,
+      author: UserId,
+    ) -> StoredMessage {
+      store
+        .upsert_message(&original(conversation, target, author))
+        .unwrap();
+      apply_early_controls(store, conversation, target).unwrap();
+      store.message(conversation, target).unwrap().unwrap()
+    }
+  }
+
+  /// A device's own client over the fake server, receiving envelopes built from a real message of
+  /// its own: with another client message ID it fails its signature, with the key ID changed its
+  /// key is unknown, with another version byte it is of a newer version.
+  #[cfg(not(target_arch = "wasm32"))]
+  mod placeholders {
+    use std::sync::Arc;
+
+    use super::*;
+    use crate::ClientSettings;
+    use crate::api::fake::{FakeServer, FakeServerApi};
+    use crate::clock::ManualClock;
+    use crate::store::MessageFilter;
+
+    type TestClient = Client<FakeServerApi, Arc<MemoryStore>>;
+
+    #[tokio::test]
+    async fn a_message_that_fails_its_signature_is_a_failed_placeholder() {
+      let (mut client, conversation, valid, _) = client_with_message(ClientSettings::default()).await;
+      let tampered = envelope(&valid, 2, 1_000, |_| {});
+      client.receive_message(tampered.clone()).unwrap();
+      assert_eq!(state(&client, &tampered), Some(Unreadable::Failed));
+      assert_eq!(client.undecrypted_count().unwrap(), 0, "not kept for a retry");
+      assert_eq!(
+        client
+          .store
+          .edge_server_id(conversation, MessageEdge::Newest)
+          .unwrap(),
+        Some(valid.id),
+        "no cursor moves on a placeholder"
+      );
+    }
+
+    #[tokio::test]
+    async fn garbage_under_a_waiting_message_s_client_id_changes_nothing() {
+      let (mut client, _, valid, _) = client_with_message(ClientSettings::default()).await;
+      let waiting = envelope(&valid, 2, 1_000, unknown_key);
+      client.receive_message(waiting.clone()).unwrap();
+      assert!(matches!(
+        state(&client, &waiting),
+        Some(Unreadable::Waiting { .. })
+      ));
+
+      // The server re-delivers garbage (a failing signature) under the same client message ID.
+      let forged = MessageResponse {
+        id: id(valid.id.snowflake().get() + 2_000),
+        ciphertext: envelope(&valid, 3, 0, |_| {}).ciphertext,
+        ..waiting.clone()
+      };
+      client.receive_message(forged).unwrap();
+      assert!(matches!(
+        state(&client, &waiting),
+        Some(Unreadable::Waiting { .. })
+      ));
+      let parked: Option<MessageResponse> =
+        records::get_json(&client.store, Table::Undecrypted, &undecrypted_key(&waiting)).unwrap();
+      assert_eq!(
+        parked.map(|parked| parked.id),
+        Some(waiting.id),
+        "the real ciphertext is kept"
+      );
+    }
+
+    #[tokio::test]
+    async fn a_message_of_a_newer_version_is_kept_and_not_called_failed() {
+      let (mut client, _, valid, _) = client_with_message(ClientSettings::default()).await;
+      let newer = envelope(&valid, 2, 1_000, |bytes| bytes[0] = 0x7f);
+      client.receive_message(newer.clone()).unwrap();
+      assert_eq!(state(&client, &newer), Some(Unreadable::NotAvailable));
+      assert_eq!(
+        client.undecrypted_count().unwrap(),
+        1,
+        "kept: an update may read it"
+      );
+    }
+
+    #[tokio::test]
+    async fn a_device_in_the_group_waits_until_the_long_wait_ran_out() {
+      let (mut client, conversation, valid, clock) = client_with_message(ClientSettings::default()).await;
+      assert!(client.has_group(conversation).unwrap());
+      let waiting = envelope(&valid, 2, 1_000, unknown_key);
+      client.receive_message(waiting.clone()).unwrap();
+
+      // An hour: the user's phone may just be off. Still waiting.
+      clock.advance(60 * 60 * 1000);
+      assert!(!client.settle_missing_keys().unwrap());
+      assert!(matches!(
+        state(&client, &waiting),
+        Some(Unreadable::Waiting { .. })
+      ));
+
+      clock.advance(3 * 24 * 60 * 60 * 1000);
+      assert!(client.settle_missing_keys().unwrap());
+      assert_eq!(state(&client, &waiting), Some(Unreadable::NotAvailable));
+      assert_eq!(crate::client::key_catch_up(&client.store).unwrap(), None);
+    }
+
+    #[tokio::test]
+    async fn failed_placeholders_and_parked_messages_are_bounded() {
+      let settings = ClientSettings {
+        max_failed_placeholders: 2,
+        max_parked_per_conversation: 1,
+        ..ClientSettings::default()
+      };
+      let (mut client, conversation, valid, clock) = client_with_message(settings).await;
+      for client_id in 2..6 {
+        client
+          .receive_message(envelope(&valid, client_id, i64::from(client_id) * 1_000, |_| {}))
+          .unwrap();
+      }
+      let failed = client
+        .store
+        .messages(conversation, MessageFilter::All)
+        .unwrap()
+        .into_iter()
+        .filter(|message| message.maybe_unreadable == Some(Unreadable::Failed))
+        .count();
+      assert_eq!(failed, 2);
+
+      for client_id in 10..13 {
+        client
+          .receive_message(envelope(
+            &valid,
+            client_id,
+            i64::from(client_id) * 1_000,
+            unknown_key,
+          ))
+          .unwrap();
+      }
+      clock.advance(4 * 24 * 60 * 60 * 1000);
+      client.settle_missing_keys().unwrap();
+      client.retry_undecrypted(conversation).unwrap();
+      assert_eq!(
+        client.undecrypted_count().unwrap(),
+        1,
+        "the oldest given up on go first"
+      );
+    }
+
+    #[tokio::test]
+    async fn a_month_with_a_placeholder_is_not_published_as_an_index_segment() {
+      let (mut readable, _, _, clock) = client_with_message(ClientSettings::default()).await;
+      clock.advance(40 * 24 * 60 * 60 * 1000);
+      assert_eq!(
+        readable.publish_index_segments().await.unwrap(),
+        1,
+        "a complete month is published"
+      );
+
+      let (mut holey, _, valid, clock) = client_with_message(ClientSettings::default()).await;
+      holey
+        .receive_message(envelope(&valid, 2, 1_000, unknown_key))
+        .unwrap();
+      clock.advance(40 * 24 * 60 * 60 * 1000);
+      assert_eq!(holey.publish_index_segments().await.unwrap(), 0);
+    }
+
+    async fn client_with_message(
+      settings: ClientSettings,
+    ) -> (TestClient, ConversationId, MessageResponse, Arc<ManualClock>) {
+      let server = FakeServer::new();
+      let api = server.add_user("Alice");
+      let clock = Arc::new(ManualClock::new(1_800_000_000_000));
+      let options = crate::EnrollmentOptions {
+        device_name: "test".into(),
+        secret: crate::EnrollmentSecret::Passphrase(teamcraft_crypto::secret::SecretBytes::new(
+          b"passphrase".to_vec(),
+        )),
+        argon2: teamcraft_crypto::backup::Argon2Settings {
+          memory_kib: 64,
+          iterations: 1,
+          parallelism: 1,
+        },
+        maybe_attestation: None,
+      };
+      let mut client = crate::PendingEnrollment::new()
+        .complete(
+          api.clone(),
+          Arc::new(MemoryStore::new()),
+          Box::new(clock.clone()),
+          settings,
+          options,
+        )
+        .await
+        .unwrap();
+      let space = api.list_spaces().await.unwrap().spaces[0].id;
+      let conversation = client.create_channel(space, "general").await.unwrap();
+      client.send_text(conversation, None, "hello").await.unwrap();
+      let valid = api
+        .list_messages(conversation, &teamcraft_proto::ListMessagesQuery::default())
+        .await
+        .unwrap()
+        .messages
+        .into_iter()
+        .max_by_key(|message| message.id)
+        .unwrap();
+      (client, conversation, valid, clock)
+    }
+
+    /// `valid` under another client message ID and a later server ID, its ciphertext changed by
+    /// `change`.
+    fn envelope(
+      valid: &MessageResponse,
+      client_id: u8,
+      later_by: i64,
+      change: impl FnOnce(&mut [u8]),
+    ) -> MessageResponse {
+      let mut bytes = valid.ciphertext.as_slice().to_vec();
+      change(bytes.as_mut_slice());
+      MessageResponse {
+        id: id(valid.id.snowflake().get() + later_by),
+        client_message_id: ClientMessageId::from_bytes([client_id; 16]),
+        ciphertext: Base64Bytes::new(bytes),
+        ..valid.clone()
+      }
+    }
+
+    /// The content key ID follows the version byte.
+    fn unknown_key(bytes: &mut [u8]) {
+      bytes[1] ^= 0xff;
+    }
+
+    fn state(client: &TestClient, message: &MessageResponse) -> Option<Unreadable> {
+      client
+        .store
+        .message(message.conversation_id, message.client_message_id)
+        .unwrap()
+        .and_then(|stored| stored.maybe_unreadable)
+    }
+  }
+
   fn edit(target: ClientMessageId, body: &str) -> MessageContent {
     MessageContent::Edit {
       target,
@@ -899,6 +1346,7 @@ mod tests {
       is_pinned: false,
       maybe_verified_commit: None,
       maybe_server_change: None,
+      maybe_unreadable: None,
     }
   }
 

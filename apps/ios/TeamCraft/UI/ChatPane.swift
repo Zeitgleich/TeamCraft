@@ -39,6 +39,7 @@ struct ChatPane: View {
   @State private var maybeFeed: (conversationId: String, feed: PagedFeed)?
   @State private var hasOlder = false
   @State private var isLoadingOlder = false
+  @State private var maybeKeyCatchUp: KeyCatchUpItem?
   /// The row at the top of the screen: SwiftUI keeps it in place when older rows are added above.
   @State private var maybeTopRowId: String?
   /// Others' reactions to the user's messages not seen yet: the heart button (issue #1009).
@@ -92,6 +93,20 @@ struct ChatPane: View {
       OfflineBanner()
       // Admins asking to join this channel, when the user owns it (admin.md §2.4.1).
       if threadId == nil { JoinRequestBanner(conversationId: conversation.id) }
+      // Messages here wait for their keys (a newly linked device, issue #888): they show as
+      // placeholders in the list; this says how far the waiting conversations have caught up.
+      if let progress = maybeKeyCatchUp, messages.contains(where: { $0.maybePlaceholder == .waiting }) {
+        Label {
+          Text("key_catch_up \(Int64(progress.caughtUp)) \(Int64(progress.total))")
+        } icon: {
+          Image(systemName: "key")
+        }
+        .font(.footnote)
+        .foregroundStyle(Theme.textMuted)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.horizontal)
+        .padding(.vertical, 6)
+      }
       messageList
         .environment(\.openPicture, OpenPictureAction { file in maybeViewing = PictureTarget(file: file) })
       if let line = typingText(typingNames) {
@@ -262,7 +277,9 @@ struct ChatPane: View {
   private static let bottomId = "bottom"
 
   /// One message with its gestures: double tap reacts, long press opens the menu. Each only where
-  /// the user's rights allow it (issue #758).
+  /// the user's rights allow it (issue #758). A placeholder of a message not readable yet (issue
+  /// #888) has none: there is nothing to reply to or act on until it is.
+  @ViewBuilder
   private func entryRow(_ entry: FeedEntry, look: BubbleLook, listWidth: CGFloat) -> some View {
     let message = entry.message
     let row = MessageRow(
@@ -272,6 +289,18 @@ struct ChatPane: View {
       displayNames: displayNames,
       canReact: conversation.canReact
     )
+    if message.maybePlaceholder != nil {
+      row
+        .padding(.top, entry.isContinuation ? 2 : 8)
+        .background(maybeHighlighted == message.id ? Theme.accentSoft : .clear)
+        .id(message.id)
+    } else {
+      actionableRow(row, entry: entry)
+    }
+  }
+
+  private func actionableRow(_ row: MessageRow, entry: FeedEntry) -> some View {
+    let message = entry.message
     let highlight: Color = maybeHighlighted == message.id ? Theme.accentSoft : .clear
     return SwipeToReply(isEnabled: threadId == nil && !message.isPending && conversation.canPost) {
       maybeReplying = message
@@ -706,6 +735,7 @@ struct ChatPane: View {
       hasOlder = page.hasOlder
     }
     if conversation.unreadCount > 0 { await model.markRead(conversationId: conversation.id) }
+    maybeKeyCatchUp = await model.keyCatchUp()
     if threadId == nil {
       unseenReactions = await model.unseenReactions(conversationId: conversation.id)
       reportSeenReactions()

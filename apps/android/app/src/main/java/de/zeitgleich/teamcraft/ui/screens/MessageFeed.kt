@@ -51,6 +51,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Done
 import androidx.compose.material.icons.filled.FavoriteBorder
 import androidx.compose.material.icons.filled.KeyboardArrowDown
+import androidx.compose.material.icons.outlined.Lock
 import androidx.compose.material3.Badge
 import androidx.compose.material3.BadgedBox
 import androidx.compose.material3.CircularProgressIndicator
@@ -90,6 +91,7 @@ import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalHapticFeedback
+import androidx.compose.ui.graphics.vector.rememberVectorPainter
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.res.pluralStringResource
 import androidx.compose.ui.res.stringResource
@@ -347,7 +349,8 @@ fun MessageFeed(
         when (item) {
           is FeedItem.Day -> DayPill(item.date, Modifier.fillMaxWidth().padding(vertical = DAY_DIVIDER_PADDING))
           FeedItem.Unread -> UnreadDivider()
-          is FeedItem.Entry -> SwipeToReply(item.message, maybeOnReply) {
+          // A placeholder (issue #888) has nothing to reply to or act on yet.
+          is FeedItem.Entry -> SwipeToReply(item.message, maybeOnReply.takeIf { item.message.maybePlaceholder == null }) {
             MessageRow(
               viewModel = viewModel,
               entry = item,
@@ -784,6 +787,8 @@ private fun MessageRow(
   }
   val alignment = if (isMine) Alignment.End else Alignment.Start
   val reactQuickly: () -> Unit = { viewModel.act(ChatActions.react(message.conversation, message.id, QUICK_REACTION)) }
+  // Not readable yet (issue #888): no reactions, replies or actions until it is.
+  val isPlaceholder = message.maybePlaceholder != null
   Column(
     Modifier
       .fillMaxWidth()
@@ -796,13 +801,14 @@ private fun MessageRow(
       .combinedClickable(
         onClick = {},
         // Without the right to react, a tap doesn't wait to tell a double tap apart either.
-        onDoubleClick = reactQuickly.takeIf { canReact },
+        onDoubleClick = reactQuickly.takeIf { canReact && !isPlaceholder },
         onLongClick = {
           haptics.performHapticFeedback(HapticFeedbackType.LongPress)
           onLongPress()
-        },
+        }.takeIf { !isPlaceholder },
       )
       .semantics {
+        if (isPlaceholder) return@semantics
         customActions = listOfNotNull(
           maybeOnReply?.let { reply -> CustomAccessibilityAction(replyLabel) { reply(message); true } },
           CustomAccessibilityAction(reactLabel) { reactQuickly(); true }.takeIf { canReact },
@@ -898,6 +904,7 @@ private fun Bubble(
       }
       Column(textPadding.padding(top = BUBBLE_TEXT_PADDING_V - BUBBLE_MEDIA_PADDING)) {
         when {
+          message.maybePlaceholder != null -> PlaceholderLine(message.maybePlaceholder, colors)
           isDeleted -> Text(
             stringResource(R.string.message_deleted),
             style = MaterialTheme.typography.bodyLarge,
@@ -916,6 +923,24 @@ private fun Bubble(
         Footer(message, maybeExtras, colors, isMine)
       }
     }
+  }
+}
+
+/**
+ * What a placeholder bubble says (issue #888): waiting with a clock, not available with a lock,
+ * failed with a warning. The clock is still: a row may wait for days, and nothing animates while
+ * the app idles.
+ */
+@Composable
+private fun PlaceholderLine(placeholder: String, colors: BubbleColors) {
+  val (text, icon) = when (placeholder) {
+    "waiting" -> stringResource(R.string.message_placeholder_waiting) to painterResource(R.drawable.ic_schedule)
+    "failed" -> stringResource(R.string.message_placeholder_failed) to painterResource(R.drawable.ic_warning)
+    else -> stringResource(R.string.message_placeholder_not_available) to rememberVectorPainter(Icons.Outlined.Lock)
+  }
+  Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+    Icon(icon, contentDescription = null, tint = colors.muted, modifier = Modifier.size(16.dp))
+    Text(text, style = MaterialTheme.typography.bodyLarge, fontStyle = FontStyle.Italic, color = colors.muted)
   }
 }
 

@@ -49,10 +49,10 @@ use tokio::task::{JoinHandle, LocalSet};
 use crate::calls::{CallHub, CallPreparation};
 use crate::error::TeamCraftError;
 use crate::types::{
-  AccountState, AppConfig, ConversationItem, DirectPeer, LinkPlatform, LinkRequestItem, MentionSettings,
-  MessageItem, MessagePage, NotificationContent, NotificationContentSettings, NotifiedConversation, Presence,
-  PushDiagnosticsInfo, PushNotification, PushService, SearchHitItem, SegmentPrefetchMode,
-  SegmentPrefetchResult, StoreProblem, TestPushResult, share_targets,
+  AccountState, AppConfig, ConversationItem, DirectPeer, KeyCatchUpItem, LinkPlatform, LinkRequestItem,
+  MentionSettings, MessageItem, MessagePage, NotificationContent, NotificationContentSettings,
+  NotifiedConversation, Presence, PushDiagnosticsInfo, PushNotification, PushService, SearchHitItem,
+  SegmentPrefetchMode, SegmentPrefetchResult, StoreProblem, TestPushResult, share_targets,
 };
 use crate::{EventListener, TokenProvider};
 
@@ -819,6 +819,13 @@ impl Engine {
       })
       .collect();
     Ok(share_targets(items))
+  }
+
+  pub(crate) fn key_catch_up(&self) -> Result<Option<KeyCatchUpItem>, TeamCraftError> {
+    Ok(self.backend()?.key_catch_up().map(|progress| KeyCatchUpItem {
+      caught_up: u32::try_from(progress.caught_up).unwrap_or(u32::MAX),
+      total: u32::try_from(progress.total).unwrap_or(u32::MAX),
+    }))
   }
 
   pub(crate) fn messages(
