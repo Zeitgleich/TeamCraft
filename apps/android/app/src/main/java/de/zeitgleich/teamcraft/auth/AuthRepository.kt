@@ -153,7 +153,7 @@ class AuthRepository(
     val response = result?.let { AuthorizationResponse.fromIntent(it) }
     val error = result?.let { AuthorizationException.fromIntent(it) }
     val fresh = AuthState(response, error)
-    if (response == null) throw error ?: IllegalStateException("login cancelled")
+    if (response == null) throw error ?: IllegalStateException(LOGIN_CANCELLED)
     val tokens = suspendCancellableCoroutine { continuation ->
       session.service.performTokenRequest(response.createTokenExchangeRequest()) { tokenResponse, exception ->
         if (tokenResponse != null) {

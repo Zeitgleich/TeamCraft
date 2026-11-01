@@ -116,6 +116,7 @@ fun LoginScreen(
   maybeSsoIcon: Bitmap?,
   serverHost: String,
   @StringRes maybeError: Int?,
+  maybeErrorCode: String?,
   isBusy: Boolean,
   onSso: () -> Unit,
   onLocal: (email: String, password: String, maybeCode: String?) -> Unit,
@@ -129,7 +130,7 @@ fun LoginScreen(
       horizontalAlignment = Alignment.CenterHorizontally,
     ) {
       BrandHeader(maybeBrand, maybeLogo, maybeIcon, name)
-      maybeError?.let { SignInError(it) }
+      maybeError?.let { SignInError(it, maybeErrorCode) }
       if (maybePage == null) {
         val loading = stringResource(R.string.sign_in_loading)
         CircularProgressIndicator(Modifier.size(32.dp).semantics { contentDescription = loading })
@@ -394,9 +395,9 @@ private fun EncryptionNote() {
 
 /** An error, centred and read out by TalkBack as soon as it appears. */
 @Composable
-private fun SignInError(@StringRes text: Int) {
+private fun SignInError(@StringRes text: Int, maybeCode: String? = null) {
   Text(
-    stringResource(text),
+    maybeCode?.let { stringResource(text, it) } ?: stringResource(text),
     color = MaterialTheme.colorScheme.error,
     textAlign = TextAlign.Center,
     modifier = Modifier.fillMaxWidth().semantics { liveRegion = LiveRegionMode.Polite },
