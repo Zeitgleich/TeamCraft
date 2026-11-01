@@ -637,6 +637,38 @@ a jump to the message.
   Approve in the notification shares only what is posted from then on and says so; sharing the
   earlier history is a choice in Activity or the channel settings.
 
+## Reactions to my messages
+
+The conversation view shows a round button with a heart and a count above "jump to latest" while
+others' reactions to the user's own messages there wait unseen (issue #1009). A click goes to the
+oldest such message and lights it up. A reaction is seen once its message is in view of the watched
+feed (focused window, no call screen over it), or when the user jumps to it; the count goes down
+and the button goes away at zero.
+
+- What counts: one per person, emoji and message, for reactions of somebody else to a listed
+  message of the user (top-level, or a reply also sent to the conversation). Reactions toggle: the
+  newest reaction message of a person and emoji wins, so a reaction taken back before it was seen
+  no longer counts, and adding it again counts again.
+- The index: the core keeps the counted reactions per conversation in its store
+  (`unseen_reactions.rs`), written as reaction messages are stored, by the gateway and the
+  catch-up alike. Reading the count looks at the conversation's index entries, never its
+  messages, so it works offline and costs nothing per message. A reaction that arrives before the
+  message it reacts to (history pages arrive newest first) waits until that message arrives.
+- The seen state is part of the member's read state, synced across their devices:
+  `my_membership.reactions_seen` in the conversation, and
+  `PUT /conversations/{id}/reactions-seen` (`message_ids`, at most 100 per request) to add to it.
+  The server can't tell reactions from other messages (they are encrypted); it keeps message IDs:
+  `through_message_id` (everything up to it is seen) and the IDs seen one by one after it, at most
+  `limits.max_seen_reactions` (200); beyond it the oldest fold into `through`. The state only
+  grows: nothing seen becomes unseen, and every named ID must be a message of the conversation.
+  The user's other devices get `conversation_update` and read the conversation again. Marks set
+  while offline wait in the queue of pending actions; this device counts them down at once.
+- Reactions from before the feature that the user had read (up to the read position) count as
+  seen. Moving the read position doesn't see reactions: a reaction to an old message far above
+  arrives while the user reads at the bottom.
+- Limits: reactions to thread replies only in their thread are not counted (the thread has no
+  button). A device that hasn't loaded the history a reaction belongs to counts what it has.
+
 ## Call history
 
 `GET /calls/history` lists the calls of the conversations the caller belongs to, newest first. The

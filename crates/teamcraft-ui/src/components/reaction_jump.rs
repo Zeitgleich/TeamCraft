@@ -29,8 +29,8 @@ pub fn ReactionJump(
   let state = use_app_state();
   let i18n = use_i18n();
   let unseen = Memo::new(move |_| state.read(|backend| backend.unseen_reactions(conversation)));
-  // Marked already from here: a backend that answers later still lists them meanwhile, and they
-  // must not be sent again on every change.
+  // Marked already from here while they wait: a backend that answers later still lists them
+  // meanwhile, and they must not be sent again on every change.
   let marked = StoredValue::new(HashSet::<MessageId>::new());
   let mark = move |messages: Vec<MessageId>| {
     let fresh: Vec<MessageId> = marked
@@ -44,6 +44,8 @@ pub fn ReactionJump(
   // Reactions whose message is in view of the watched feed are seen.
   Effect::new(move |_| {
     let waiting = unseen.with(|unseen| unseen.messages.clone());
+    // A message that waits no more and gets a new reaction later waits again.
+    marked.update_value(|marked| marked.retain(|id| waiting.contains(id)));
     if waiting.is_empty() || !is_watched.get() {
       return;
     }
