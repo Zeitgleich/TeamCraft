@@ -63,7 +63,7 @@ use teamcraft_crypto::identity::{IdentityPublicKey, VerifiedDevice};
 use teamcraft_crypto::secret::SecretBytes;
 use teamcraft_proto::DeviceLinkPlatform;
 use teamcraft_proto::{
-  ConversationId, DeviceActivity, GatewayClientMessage, GatewayServerMessage, MeetingId, MessageId, UserId,
+  ConversationId, DeviceActivity, GatewayClientMessage, GatewayServerMessage, MessageId, UserId,
 };
 use wasm_bindgen::JsCast;
 
@@ -441,22 +441,6 @@ async fn serve(command: &str, args: Value) -> Result<Value, String> {
       })
       .await??;
       Ok(Value::Null)
-    },
-    "core_guest_proof" => {
-      let (secret, meeting, display_name) = (
-        field(&args, "secret")?,
-        field(&args, "meeting")?,
-        field(&args, "display_name")?,
-      );
-      to_value(
-        ask(|reply| Request::GuestProof {
-          secret,
-          meeting,
-          display_name,
-          reply,
-        })
-        .await??,
-      )
     },
     "core_snapshot" => to_value(ask(Request::Snapshot).await??),
     "core_snapshot_changes" => {
@@ -964,13 +948,6 @@ enum Request {
     conversation: ConversationId,
     fingerprint: String,
     reply: oneshot::Sender<Result<(), String>>,
-  },
-  /// A guest's proof that they hold the link, for the lobby.
-  GuestProof {
-    secret: String,
-    meeting: MeetingId,
-    display_name: String,
-    reply: oneshot::Sender<Result<Vec<u8>, String>>,
   },
   Snapshot(oneshot::Sender<Result<ChatSnapshot, String>>),
   /// What changed in the snapshot since the reader's cursor (issue #246).
@@ -1582,20 +1559,6 @@ impl Core {
         let result = match self.client.as_ref() {
           Some(client) => client
             .set_guest_organizer_anchor(conversation, &fingerprint)
-            .map_err(describe),
-          None => Err(not_set_up()),
-        };
-        drop(reply.send(result));
-      },
-      Request::GuestProof {
-        secret,
-        meeting,
-        display_name,
-        reply,
-      } => {
-        let result = match self.client.as_ref() {
-          Some(client) => client
-            .guest_link_proof(&secret, meeting, &display_name)
             .map_err(describe),
           None => Err(not_set_up()),
         };

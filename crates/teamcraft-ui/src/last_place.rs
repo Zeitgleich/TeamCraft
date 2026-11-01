@@ -157,7 +157,7 @@ mod tests {
       Route::Search,
       Route::Settings(SettingsPage::Sections),
       Route::Settings(SettingsPage::Section(SettingsTab::DEFAULT)),
-      Route::Meeting(id(5)),
+      Route::Meeting(crate::route::MeetingHandle::Id(id(5))),
     ] {
       assert_eq!(restorable(skipped), None, "{skipped:?}");
     }

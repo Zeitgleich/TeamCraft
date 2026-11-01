@@ -7,17 +7,19 @@
 //! nothing and can see nothing. Members who open the meeting's link without being in its chat knock
 //! the same way and wait in the same lobby.
 
+use teamcraft_crypto::meeting_link::is_meeting_link_token;
 use teamcraft_db::{LobbyRow, SharedInviteClaim, StoredMeeting, StoredMeetingInvite};
 use teamcraft_proto::{
-  Base64Bytes, CreateGuestLinkRequest, GatewayEvent, GuestLinkResponse, JoinMeetingRequest,
-  JoinMeetingResponse, ListLobbyResponse, LobbyEntry, LobbyState, LobbyStateResponse, MeetingId,
-  MeetingInviteId, MeetingStatus, PutGuestProofRequest, UserId, UserKind,
+  CreateGuestLinkRequest, GatewayEvent, GuestLinkResponse, JoinMeetingRequest, JoinMeetingResponse,
+  KnockByLinkResponse, ListLobbyResponse, LobbyEntry, LobbyState, LobbyStateResponse, MeetingId,
+  MeetingInviteId, MeetingStatus, UserId, UserKind,
 };
 use time::OffsetDateTime;
 
 use super::access::is_guest;
 use super::accounts;
 use super::convert::{unix_millis, user_summary};
+use super::meetings;
 use super::validate_name;
 use crate::auth::{AuthError, AuthenticatedUser};
 use crate::error::ApiError;
@@ -26,30 +28,26 @@ use crate::state::AppState;
 
 const MAX_NAME_CHARS: usize = 100;
 const MAX_LABEL_CHARS: usize = 100;
-/// A link proof is a MAC; real ones are 32 bytes.
-const MAX_PROOF_BYTES: usize = 128;
 /// Guests ended per sweep; a larger backlog is worked off over the next sweeps.
 const SWEEP_BATCH: i64 = 200;
 
-/// Trades a join link (personal or shared) for a guest session and puts the guest into the lobby
-/// (or straight into the meeting if it has no lobby and the link is personal). Needs no
-/// authentication: the token is the credential.
+/// Trades a meeting link (its token, or a personal link's one-time `#invite=` token) for a guest
+/// session and puts the guest into the lobby. Needs no authentication: the token is the
+/// credential, and all it gets the guest is a place in the lobby (docs/meetings.md, "Guests").
 pub async fn join_meeting(
   state: &AppState,
   request: JoinMeetingRequest,
 ) -> Result<JoinMeetingResponse, ApiError> {
   let service = service_of(state)?;
   let display_name = validate_name(&request.display_name, "display_name", MAX_NAME_CHARS)?;
-  let (link_id, meeting_id) = service
-    .tokens()
-    .verify_invite(&request.invite_token)
-    .map_err(|_| AuthError::InvalidToken("invalid join link".into()))?;
-  let link = state
-    .database
-    .get_meeting_invite(link_id)
-    .await?
-    .filter(|invite| invite.meeting == meeting_id)
-    .ok_or_else(|| AuthError::InvalidToken("invalid join link".into()))?;
+  let (link, is_by_link) = match (&request.maybe_invite_token, &request.maybe_link_token) {
+    (Some(invite_token), _) => (invite_of(state, service, invite_token).await?, false),
+    (None, Some(link_token)) => (shared_invite_of(state, link_token).await?, true),
+    (None, None) => {
+      return Err(ApiError::InvalidRequest("a join needs the link's token".into()));
+    },
+  };
+  let meeting_id = link.meeting;
   if link.is_revoked && !link.is_shared {
     return Err(AuthError::InvalidToken("the join link was revoked".into()).into());
   }
@@ -90,10 +88,15 @@ pub async fn join_meeting(
     .map_err(|error| ApiError::Internal(error.to_string()))?;
 
   let entry = state.database.enter_lobby(meeting_id, guest.user.id).await?;
-  // Guests always wait for a host, also in a meeting without a lobby: they can read and speak only
-  // once a host's device adds theirs to the chat's encryption group, which needs the host to see
-  // the guest's proof of the link first (e2ee.md §4.6, "Meeting guests"). `has_lobby` keeps its
-  // place in the meeting for older clients.
+  if is_by_link {
+    state
+      .database
+      .mark_lobby_by_link(meeting_id, guest.user.id)
+      .await?;
+  }
+  // Guests always wait in the lobby on the server: they can read and speak only once an
+  // organizer's device adds theirs to the chat's encryption group. Without a lobby that device
+  // does it by itself for guests of the meeting link (e2ee.md §4.6, "Meeting guests").
   announce_waiting(state, &meeting, &guest).await?;
   let lobby_state = LobbyState::from(entry.state);
   Ok(JoinMeetingResponse {
@@ -103,6 +106,7 @@ pub async fn join_meeting(
     conversation_id: meeting.conversation,
     user_id: guest.user.id,
     lobby_state,
+    maybe_organizer_fingerprint: meetings::organizer_fingerprint(state, meeting.organizer).await?,
   })
 }
 
@@ -129,15 +133,24 @@ pub async fn create_guest_link(
     .tokens()
     .sign_invite(invite, id)
     .map_err(|error| ApiError::Internal(error.to_string()))?;
+  // The meeting link's path with the one-time token in the fragment, next to the fingerprint.
+  let link = meeting_link_of(state, service, &meeting).await?;
+  let (path, maybe_fragment) = match link.split_once('#') {
+    Some((path, fragment)) => (path, Some(fragment)),
+    None => (link.as_str(), None),
+  };
+  let join_url = match maybe_fragment {
+    Some(fragment) => format!("{path}#invite={token}&{fragment}"),
+    None => format!("{path}#invite={token}"),
+  };
   Ok(GuestLinkResponse {
-    join_url: service.guest_join_url(id, &token),
+    join_url,
     expires_at: unix_millis(access_ends_at(service, &meeting)),
   })
 }
 
-/// The meeting's shared guest link, made on first use (host only). One link for many guests: each
-/// guest who opens it still waits in the lobby, and the link ends with the meeting or when a host
-/// revokes it. Asking again returns the same link.
+/// The meeting's shared guest link (host only): since #987 the meeting link itself. Each guest who
+/// opens it waits in the lobby, and it ends with the meeting or when the organizer makes it anew.
 pub async fn shared_guest_link(
   state: &AppState,
   caller: &AuthenticatedUser,
@@ -145,36 +158,46 @@ pub async fn shared_guest_link(
 ) -> Result<GuestLinkResponse, ApiError> {
   let service = service_of(state)?;
   let meeting = host_meeting(state, caller, id).await?;
-  let new_id: MeetingInviteId = state.next_id()?;
-  let link = state
-    .database
-    .ensure_shared_invite(id, new_id, caller.user.id)
-    .await?;
-  let token = service
-    .tokens()
-    .sign_invite(link, id)
-    .map_err(|error| ApiError::Internal(error.to_string()))?;
   Ok(GuestLinkResponse {
-    join_url: service.guest_join_url(id, &token),
+    join_url: meeting_link_of(state, service, &meeting).await?,
     expires_at: unix_millis(access_ends_at(service, &meeting)),
   })
 }
 
-/// Revokes the meeting's shared guest link (host only): nobody new gets in with it; guests already
-/// waiting or admitted stay. A link asked for afterwards is a new one. Revoking twice is fine.
-pub async fn revoke_shared_guest_link(
+/// A member opened the meeting link: the meeting its token names, and their place (as
+/// [`knock`]). A knock with the token counts as "by link": in a meeting without a lobby the
+/// organizer's device lets the member in by itself. Unknown tokens get "not found".
+pub async fn knock_by_link(
   state: &AppState,
   caller: &AuthenticatedUser,
-  id: MeetingId,
-) -> Result<(), ApiError> {
-  host_meeting(state, caller, id).await?;
-  state.database.revoke_shared_invite(id).await?;
-  Ok(())
+  token: &str,
+) -> Result<KnockByLinkResponse, ApiError> {
+  service_of(state)?;
+  if !is_meeting_link_token(token) {
+    return Err(ApiError::meeting_not_found());
+  }
+  let meeting_id = state
+    .database
+    .meeting_by_link(token)
+    .await?
+    .ok_or_else(ApiError::meeting_not_found)?;
+  let response = knock(state, caller, meeting_id).await?;
+  if response.state == LobbyState::Waiting {
+    state
+      .database
+      .mark_lobby_by_link(meeting_id, caller.user.id)
+      .await?;
+  }
+  Ok(KnockByLinkResponse {
+    meeting_id,
+    state: response.state,
+  })
 }
 
 /// A member with the meeting's link who is not in its chat asks to be let in and waits in the
 /// lobby like a guest; members already in the chat are in. Members always wait for a host, also in
-/// meetings without a lobby: meeting IDs are not secret, guest links are.
+/// meetings without a lobby, unless they came with the link's token ([`knock_by_link`]): meeting
+/// IDs are not secret.
 pub async fn knock(
   state: &AppState,
   caller: &AuthenticatedUser,
@@ -228,21 +251,29 @@ pub async fn list_lobby(
     .database
     .get_users(&waiting.iter().map(|row| row.user).collect::<Vec<_>>())
     .await?;
-  let mut proofs = state.database.guest_proofs(meeting.id).await?;
+  let by_link = state.database.lobby_by_link(meeting.id).await?;
+  let with_devices = state
+    .database
+    .users_with_active_devices(&waiting.iter().map(|row| row.user).collect::<Vec<_>>())
+    .await?;
   let entries = waiting
     .iter()
     .filter_map(|row| {
-      users
-        .iter()
-        .find(|user| user.id == row.user)
-        .map(|user| entry(state, user, row, proofs.remove(&row.user)))
+      users.iter().find(|user| user.id == row.user).map(|user| {
+        entry(
+          state,
+          user,
+          row,
+          by_link.contains(&row.user),
+          with_devices.contains(&row.user),
+        )
+      })
     })
     .collect();
   Ok(ListLobbyResponse { entries })
 }
 
-/// One guest's lobby entry with the proof they gave, also after they were let in (hosts only):
-/// the host's device checks the proof before it adds the guest's device.
+/// One guest's lobby entry, also after they were let in (hosts only).
 pub async fn lobby_entry(
   state: &AppState,
   caller: &AuthenticatedUser,
@@ -260,33 +291,50 @@ pub async fn lobby_entry(
     .get_user(guest)
     .await?
     .ok_or_else(ApiError::meeting_not_found)?;
-  let maybe_proof = state.database.guest_proofs(meeting.id).await?.remove(&guest);
-  Ok(entry(state, &user, &row, maybe_proof))
+  let is_by_link = state.database.lobby_by_link(meeting.id).await?.contains(&guest);
+  let has_device = state
+    .database
+    .users_with_active_devices(&[guest])
+    .await?
+    .contains(&guest);
+  Ok(entry(state, &user, &row, is_by_link, has_device))
 }
 
-/// A guest hands the hosts the proof that they hold the link's secret (once). The server can't
-/// check it: it never sees the secret, and so can't make a proof for a guest of its own either.
-pub async fn put_guest_proof(
+/// A waiting guest's page set up its device: the hosts are told again (`lobby_join`), so an
+/// organizer's device can add it now. `409` while the guest has no device or no longer waits.
+pub async fn guest_device_ready(
   state: &AppState,
   caller: &AuthenticatedUser,
   id: MeetingId,
-  request: PutGuestProofRequest,
 ) -> Result<(), ApiError> {
   service_of(state)?;
   if caller.user.kind != UserKind::Guest {
-    return Err(ApiError::Forbidden("only guests give a link proof".into()));
+    return Err(ApiError::Forbidden(
+      "only guests set up a device in the lobby".into(),
+    ));
   }
-  if request.proof.is_empty() || request.proof.len() > MAX_PROOF_BYTES {
-    return Err(ApiError::InvalidRequest("proof has an invalid size".into()));
+  let meeting = state
+    .database
+    .get_meeting(id)
+    .await?
+    .ok_or_else(ApiError::meeting_not_found)?;
+  let row = state
+    .database
+    .get_lobby_entry(id, caller.user.id)
+    .await?
+    .ok_or_else(ApiError::meeting_not_found)?;
+  if LobbyState::from(row.state) != LobbyState::Waiting {
+    return Err(ApiError::Conflict("the guest no longer waits".into()));
   }
   if !state
     .database
-    .set_guest_proof(id, caller.user.id, request.proof.as_slice())
+    .users_with_active_devices(&[caller.user.id])
     .await?
+    .contains(&caller.user.id)
   {
-    return Err(ApiError::Conflict("the proof was given already".into()));
+    return Err(ApiError::Conflict("the guest has no device yet".into()));
   }
-  Ok(())
+  announce_waiting(state, &meeting, caller).await
 }
 
 /// The caller's own place in the lobby (for guests that reconnect).
@@ -641,13 +689,74 @@ fn entry(
   state: &AppState,
   user: &teamcraft_db::User,
   row: &LobbyRow,
-  maybe_proof: Option<Vec<u8>>,
+  is_by_link: bool,
+  has_device: bool,
 ) -> LobbyEntry {
   LobbyEntry {
     user: user_summary(state, user),
     requested_at: unix_millis(row.requested_at),
-    maybe_proof: maybe_proof.map(Base64Bytes::new),
+    is_by_link,
+    has_device,
   }
+}
+
+/// The personal (or old shared) link a one-time `#invite=` token names, if it is still good.
+async fn invite_of(
+  state: &AppState,
+  service: &MeetingService,
+  invite_token: &str,
+) -> Result<StoredMeetingInvite, ApiError> {
+  let (link_id, meeting_id) = service
+    .tokens()
+    .verify_invite(invite_token)
+    .map_err(|_| AuthError::InvalidToken("invalid join link".into()))?;
+  Ok(
+    state
+      .database
+      .get_meeting_invite(link_id)
+      .await?
+      .filter(|invite| invite.meeting == meeting_id)
+      .ok_or_else(|| AuthError::InvalidToken("invalid join link".into()))?,
+  )
+}
+
+/// The shared invite behind a meeting link's token: every guest of the link gets a one-time invite
+/// of their own from it, within the link's guest limit. An unknown token is an invalid link.
+async fn shared_invite_of(state: &AppState, link_token: &str) -> Result<StoredMeetingInvite, ApiError> {
+  let invalid = || ApiError::from(AuthError::InvalidToken("invalid join link".into()));
+  if !is_meeting_link_token(link_token) {
+    return Err(invalid());
+  }
+  let meeting_id = state
+    .database
+    .meeting_by_link(link_token)
+    .await?
+    .ok_or_else(invalid)?;
+  let meeting = state
+    .database
+    .get_meeting(meeting_id)
+    .await?
+    .ok_or_else(invalid)?;
+  let new_id: MeetingInviteId = state.next_id()?;
+  let shared = state
+    .database
+    .ensure_shared_invite(meeting_id, new_id, meeting.organizer)
+    .await?;
+  state
+    .database
+    .get_meeting_invite(shared)
+    .await?
+    .ok_or_else(invalid)
+}
+
+/// The meeting's link as mails and the API carry it.
+async fn meeting_link_of(
+  state: &AppState,
+  service: &MeetingService,
+  meeting: &StoredMeeting,
+) -> Result<String, ApiError> {
+  let brand = meetings::organizer_brand(state, meeting).await?;
+  meetings::meeting_link(state, service, &brand, meeting).await
 }
 
 fn service_of(state: &AppState) -> Result<&MeetingService, ApiError> {

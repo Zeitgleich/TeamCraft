@@ -112,13 +112,22 @@ async fn credentials_and_ciphertext_do_not_appear_in_trace_level_logs() {
     )
     .await;
   assert_eq!(meeting.status, reqwest::StatusCode::CREATED, "{}", meeting.body);
-  let mail = mailer.sent().into_iter().next().unwrap();
-  let invite_token = mail
-    .text
+  // A personal one-time link: its token is a credential that must stay out of the logs.
+  let link = app
+    .post(
+      &alice,
+      &format!("/meetings/{}/guest-links", meeting.id()),
+      json!({}),
+    )
+    .await;
+  assert_eq!(link.status, reqwest::StatusCode::CREATED, "{}", link.body);
+  let invite_token = link.body["join_url"]
+    .as_str()
+    .unwrap()
     .split("#invite=")
     .nth(1)
     .unwrap()
-    .split_whitespace()
+    .split('&')
     .next()
     .unwrap()
     .to_owned();

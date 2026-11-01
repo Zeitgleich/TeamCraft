@@ -95,24 +95,11 @@ pub async fn wipe_guest_store() -> Result<(), String> {
 }
 
 /// A guest keeps the organizer's identity key fingerprint from the link for the meeting chat: its
-/// group is only joined if that key is in it (browser only).
+/// group is only joined from a welcome of that key's devices (browser only).
 pub async fn guest_anchor(conversation: ConversationId, fingerprint: &str) -> Result<(), String> {
   call(
     "core_guest_anchor",
     &json!({ "conversation": conversation, "fingerprint": fingerprint }),
-  )
-  .await
-}
-
-/// A guest's proof that they hold the link's secret (browser only).
-pub async fn guest_proof(
-  secret: &str,
-  meeting: teamcraft_proto::MeetingId,
-  display_name: &str,
-) -> Result<Vec<u8>, String> {
-  call(
-    "core_guest_proof",
-    &json!({ "secret": secret, "meeting": meeting, "display_name": display_name }),
   )
   .await
 }
@@ -1042,21 +1029,10 @@ impl ChatBackend for RemoteChat {
     }
   }
 
-  fn let_guest_into_meeting_chat(
-    &self,
-    conversation: ConversationId,
-    meeting: teamcraft_proto::MeetingId,
-    guest: UserId,
-    display_name: String,
-    maybe_proof: Option<Vec<u8>>,
-    access_ends_at_ms: i64,
-  ) {
+  fn let_guest_into_meeting_chat(&self, conversation: ConversationId, guest: UserId, access_ends_at_ms: i64) {
     self.act(ChatAction::LetGuestIntoMeetingChat {
       conversation,
-      meeting,
       guest,
-      display_name,
-      maybe_proof: maybe_proof.map(Into::into),
       access_ends_at_ms,
     });
   }

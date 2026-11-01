@@ -87,7 +87,7 @@ pub use group_health::{
   unconfirmed_removals,
 };
 pub use groups::{DmSetupStatus, dm_setup_status};
-pub use guest::{GuestAdmission, GuestLinkMaterial, guest_link_fragment};
+pub use guest::{LEGACY_ORGANIZER_KEY, VERIFIER_KEY, guest_link_fragment};
 pub use join_requests::is_open_private_channel;
 pub use linking::{
   LinkAnnouncement, LinkApproval, LinkCodeKind, LinkOffer, LinkReceipt, LinkRequestInfo, LinkRequestList,

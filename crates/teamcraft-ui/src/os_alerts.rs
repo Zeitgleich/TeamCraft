@@ -623,6 +623,15 @@ fn watch_meetings(state: AppState, i18n: I18n, hub: MeetingsHub) {
       watch.plan_next();
     });
   }
+  // Whoever knocked with the meeting link in a meeting without a lobby is let in by the
+  // organizer's device as soon as the lobbies show them (e2ee.md §4.6, "Meeting guests").
+  {
+    let started = StoredValue::new_local(std::collections::HashSet::new());
+    Effect::new(move |_| {
+      hub.lobbies.track();
+      crate::components::meetings_view::admit_link_arrivals(state, hub, started);
+    });
+  }
   // A meeting created, moved or cancelled elsewhere (gateway `meeting_update`), and a reconnect
   // (updates in between may be lost): read the list again now. This replaces a periodic refresh.
   {

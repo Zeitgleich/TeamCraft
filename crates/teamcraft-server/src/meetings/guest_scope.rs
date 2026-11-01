@@ -66,7 +66,7 @@ const READ_WRITE: &[&str] = &[
   // Only ever takes the guest's own devices out of the call.
   "/conversations/{conversation_id}/call/leave",
   "/meetings/{meeting_id}/leave",
-  "/meetings/{meeting_id}/lobby/me/proof",
+  "/meetings/{meeting_id}/lobby/me/device",
 ];
 
 /// Whether a guest session may call `method` on the route `matched_path` (axum's route pattern, as

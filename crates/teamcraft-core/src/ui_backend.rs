@@ -321,18 +321,15 @@ pub enum CoreCommand {
     conversation: ConversationId,
     user: UserId,
   },
-  /// A host's app is about to hand out a guest link: make its secret (`guest_link_fragment`).
+  /// The app is about to hand out a meeting link: make its fragment (`guest_link_fragment`).
   PrepareGuestLink {
     conversation: ConversationId,
     meeting: teamcraft_proto::MeetingId,
   },
-  /// A host admitted a guest: their device joins the chat's group if the link's proof checks out.
+  /// An organizer's device lets an admitted guest's device into the chat's group.
   LetGuestIntoMeetingChat {
     conversation: ConversationId,
-    meeting: teamcraft_proto::MeetingId,
     guest: UserId,
-    display_name: String,
-    maybe_proof: Option<Vec<u8>>,
     access_ends_at_ms: i64,
   },
   InviteToSpace {
@@ -1757,21 +1754,10 @@ impl<S: LocalStore> ChatBackend for CoreChatBackend<S> {
     crate::client::guest_link_fragment(self.store_ref(), meeting)
   }
 
-  fn let_guest_into_meeting_chat(
-    &self,
-    conversation: ConversationId,
-    meeting: teamcraft_proto::MeetingId,
-    guest: UserId,
-    display_name: String,
-    maybe_proof: Option<Vec<u8>>,
-    access_ends_at_ms: i64,
-  ) {
+  fn let_guest_into_meeting_chat(&self, conversation: ConversationId, guest: UserId, access_ends_at_ms: i64) {
     self.command(CoreCommand::LetGuestIntoMeetingChat {
       conversation,
-      meeting,
       guest,
-      display_name,
-      maybe_proof,
       access_ends_at_ms,
     });
   }

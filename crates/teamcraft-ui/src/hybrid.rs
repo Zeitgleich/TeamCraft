@@ -517,23 +517,10 @@ impl<C: ChatBackend + 'static> ChatBackend for Hybrid<C> {
     self.chat.guest_link_fragment(meeting)
   }
 
-  fn let_guest_into_meeting_chat(
-    &self,
-    conversation: ConversationId,
-    meeting: teamcraft_proto::MeetingId,
-    guest: UserId,
-    display_name: String,
-    maybe_proof: Option<Vec<u8>>,
-    access_ends_at_ms: i64,
-  ) {
-    self.chat.let_guest_into_meeting_chat(
-      conversation,
-      meeting,
-      guest,
-      display_name,
-      maybe_proof,
-      access_ends_at_ms,
-    );
+  fn let_guest_into_meeting_chat(&self, conversation: ConversationId, guest: UserId, access_ends_at_ms: i64) {
+    self
+      .chat
+      .let_guest_into_meeting_chat(conversation, guest, access_ends_at_ms);
   }
 
   fn discard_removal(&self, conversation: ConversationId, user: UserId) {

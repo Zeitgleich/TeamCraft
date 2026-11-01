@@ -1,6 +1,6 @@
 //! Meetings, their invitees and their chat conversation (PLAN.md §9).
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use teamcraft_proto::{
   ChannelRole, ConversationId, IdempotencyKey, MeetingAttendeeId, MeetingId, MeetingInviteId, UserId,
@@ -11,7 +11,7 @@ use crate::conversation::{NewConversation, insert_conversation, insert_membershi
 use crate::database::Database;
 use crate::error::DbError;
 use crate::idempotency::{Created, IdempotentKind, claim_key};
-use crate::ids::{from_db, from_db_opt, to_db};
+use crate::ids::{from_db, from_db_opt, to_db, to_db_all};
 
 /// A stored meeting. `kind`, `status` are the wire names (`scheduled`, `instant`; `scheduled`,
 /// `cancelled`, `ended`).
@@ -639,29 +639,6 @@ impl Database {
       .collect()
   }
 
-  /// The unredeemed invite for this e-mail address, or a new one with `new_id`.
-  pub async fn ensure_email_invite(
-    &self,
-    meeting: MeetingId,
-    email: &str,
-    new_id: MeetingInviteId,
-    created_by: UserId,
-  ) -> Result<MeetingInviteId, DbError> {
-    let id = sqlx::query_scalar!(
-      r#"INSERT INTO meeting_invites (id, meeting_id, email, created_by) VALUES ($1, $2, $3, $4)
-         ON CONFLICT (meeting_id, email) WHERE email IS NOT NULL AND redeemed_at IS NULL
-         DO UPDATE SET email = EXCLUDED.email
-         RETURNING id"#,
-      to_db(new_id),
-      to_db(meeting),
-      email,
-      to_db(created_by),
-    )
-    .fetch_one(self.pool())
-    .await?;
-    from_db(id)
-  }
-
   /// A link the host hands out by hand.
   pub async fn create_label_invite(
     &self,
@@ -906,40 +883,85 @@ impl Database {
       .collect()
   }
 
-  /// Stores a guest's proof of the link secret, once. `false` when there is none to set (the guest
-  /// has no lobby place) or one is stored already.
-  pub async fn set_guest_proof(
-    &self,
-    meeting: MeetingId,
-    user: UserId,
-    proof: &[u8],
-  ) -> Result<bool, DbError> {
-    let result = sqlx::query!(
-      "UPDATE meeting_lobby SET guest_proof = $3 WHERE meeting_id = $1 AND user_id = $2 AND guest_proof IS NULL",
+  /// The meeting's link token, stored as `candidate` if the meeting has none yet (meetings from
+  /// before #987 get theirs on first need).
+  pub async fn ensure_meeting_link(&self, meeting: MeetingId, candidate: &str) -> Result<String, DbError> {
+    // Read first: listing meetings asks for every link, and nearly all exist already.
+    if let Some(token) = self.meeting_links(&[meeting]).await?.remove(&meeting) {
+      return Ok(token);
+    }
+    sqlx::query!(
+      "INSERT INTO meeting_links (meeting_id, token) VALUES ($1, $2) ON CONFLICT (meeting_id) DO NOTHING",
       to_db(meeting),
-      to_db(user),
-      proof,
+      candidate,
     )
     .execute(self.pool())
     .await?;
-    Ok(result.rows_affected() == 1)
+    let row = sqlx::query!(
+      "SELECT token FROM meeting_links WHERE meeting_id = $1",
+      to_db(meeting),
+    )
+    .fetch_one(self.pool())
+    .await?;
+    Ok(row.token)
   }
 
-  /// The proofs guests of the meeting stored, by guest.
-  pub async fn guest_proofs(&self, meeting: MeetingId) -> Result<HashMap<UserId, Vec<u8>>, DbError> {
+  /// Gives the meeting a new link token; the old one names nothing from now on.
+  pub async fn replace_meeting_link(&self, meeting: MeetingId, token: &str) -> Result<(), DbError> {
+    sqlx::query!(
+      r#"INSERT INTO meeting_links (meeting_id, token) VALUES ($1, $2)
+         ON CONFLICT (meeting_id) DO UPDATE SET token = EXCLUDED.token, created_at = now()"#,
+      to_db(meeting),
+      token,
+    )
+    .execute(self.pool())
+    .await?;
+    Ok(())
+  }
+
+  /// The link tokens of the meetings that have one.
+  pub async fn meeting_links(&self, meetings: &[MeetingId]) -> Result<HashMap<MeetingId, String>, DbError> {
     let rows = sqlx::query!(
-      "SELECT user_id, guest_proof FROM meeting_lobby WHERE meeting_id = $1 AND guest_proof IS NOT NULL",
+      "SELECT meeting_id, token FROM meeting_links WHERE meeting_id = ANY($1)",
+      &to_db_all(meetings),
+    )
+    .fetch_all(self.pool())
+    .await?;
+    rows
+      .into_iter()
+      .map(|row| Ok((from_db(row.meeting_id)?, row.token)))
+      .collect()
+  }
+
+  /// The meeting a link token names, if any.
+  pub async fn meeting_by_link(&self, token: &str) -> Result<Option<MeetingId>, DbError> {
+    let row = sqlx::query!("SELECT meeting_id FROM meeting_links WHERE token = $1", token)
+      .fetch_optional(self.pool())
+      .await?;
+    row.map(|row| from_db(row.meeting_id)).transpose()
+  }
+
+  /// Notes that `user` knocked with the meeting link's token.
+  pub async fn mark_lobby_by_link(&self, meeting: MeetingId, user: UserId) -> Result<(), DbError> {
+    sqlx::query!(
+      "UPDATE meeting_lobby SET is_by_link = true WHERE meeting_id = $1 AND user_id = $2",
+      to_db(meeting),
+      to_db(user),
+    )
+    .execute(self.pool())
+    .await?;
+    Ok(())
+  }
+
+  /// The users of the meeting's lobby who knocked with its link's token.
+  pub async fn lobby_by_link(&self, meeting: MeetingId) -> Result<HashSet<UserId>, DbError> {
+    let rows = sqlx::query!(
+      "SELECT user_id FROM meeting_lobby WHERE meeting_id = $1 AND is_by_link",
       to_db(meeting),
     )
     .fetch_all(self.pool())
     .await?;
-    let mut proofs = HashMap::new();
-    for row in rows {
-      if let Some(proof) = row.guest_proof {
-        proofs.insert(from_db(row.user_id)?, proof);
-      }
-    }
-    Ok(proofs)
+    rows.into_iter().map(|row| from_db(row.user_id)).collect()
   }
 
   /// Guests waiting for a decision, longest waiting first.

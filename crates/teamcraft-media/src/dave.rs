@@ -536,6 +536,42 @@ mod tests {
     }
 
     #[test]
+    fn a_joiner_cannot_decrypt_frames_from_before_it_joined() {
+      // A meeting guest's device is added like Carol: its commit starts a new epoch, and the
+      // frames sent before were encrypted under keys the welcome never gives it (e2ee.md §4.6).
+      let gateway = DaveExternalSender::new().unwrap();
+      let mut alice = joined_participant(&gateway, ALICE);
+      let mut bob = joined_participant(&gateway, BOB);
+      let mut carol = joined_participant(&gateway, CAROL);
+      add_members(
+        &gateway,
+        &mut alice,
+        &mut [],
+        &mut [(BOB, &mut bob)],
+        &[ALICE, BOB],
+      );
+      let before = alice
+        .encrypt_frame(MediaKind::Audio, FrameCodec::Opus, OPUS_FRAME)
+        .unwrap()
+        .into_owned();
+
+      add_members(
+        &gateway,
+        &mut alice,
+        &mut [&mut bob],
+        &mut [(CAROL, &mut carol)],
+        &[ALICE, BOB, CAROL],
+      );
+
+      assert!(carol.decrypt_frame(ALICE, MediaKind::Audio, &before).is_err());
+      assert_eq!(
+        bob.decrypt_frame(ALICE, MediaKind::Audio, &before).unwrap(),
+        OPUS_FRAME
+      );
+      assert_round_trip(&mut alice, ALICE, &mut carol);
+    }
+
+    #[test]
     fn removed_participant_cannot_decrypt_new_epoch() {
       let gateway = DaveExternalSender::new().unwrap();
       let mut alice = joined_participant(&gateway, ALICE);

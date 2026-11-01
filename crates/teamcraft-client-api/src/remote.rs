@@ -925,11 +925,7 @@ pub enum ChatAction {
   },
   LetGuestIntoMeetingChat {
     conversation: ConversationId,
-    meeting: teamcraft_proto::MeetingId,
     guest: UserId,
-    display_name: String,
-    #[serde(rename = "proof", default, skip_serializing_if = "Option::is_none")]
-    maybe_proof: Option<Base64Bytes>,
     access_ends_at_ms: i64,
   },
   SetBookmarks {
@@ -1234,19 +1230,9 @@ impl ChatAction {
       } => backend.prepare_guest_link(conversation, meeting),
       Self::LetGuestIntoMeetingChat {
         conversation,
-        meeting,
         guest,
-        display_name,
-        maybe_proof,
         access_ends_at_ms,
-      } => backend.let_guest_into_meeting_chat(
-        conversation,
-        meeting,
-        guest,
-        display_name,
-        maybe_proof.map(|proof| proof.as_slice().to_vec()),
-        access_ends_at_ms,
-      ),
+      } => backend.let_guest_into_meeting_chat(conversation, guest, access_ends_at_ms),
       Self::SetBookmarks {
         conversation,
         bookmarks,

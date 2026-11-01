@@ -1,17 +1,18 @@
-//! Meeting guests: an ephemeral device joins the meeting chat's group after the host's device
-//! checked the link's proof; the guest only joins the organizer's group; guests manage nobody
-//! (e2ee.md §4.6, "Meeting guests").
+//! Meeting guests: a guest's own ephemeral device joins the meeting chat's group when an
+//! organizer's device lets it in; the guest only accepts a group from a device of the organizer the
+//! link names; nothing from before the admission is readable; guests manage nobody (e2ee.md §4.6,
+//! "Meeting guests").
 #![allow(clippy::unwrap_used)]
 
 use std::sync::Arc;
 
 use crate::common;
 
-use common::{Peer, link_device, settle};
+use common::{Peer, settle};
 use teamcraft_core::PendingEnrollment;
 use teamcraft_core::api::ServerApi;
 use teamcraft_core::api::fake::FakeServer;
-use teamcraft_core::client::{GuestAdmission, GuestLinkMaterial};
+use teamcraft_core::client::{VERIFIER_KEY, guest_link_fragment};
 use teamcraft_core::clock::ManualClock;
 use teamcraft_core::error::{CoreError, GuestRefusal};
 use teamcraft_core::store::MemoryStore;
@@ -29,12 +30,13 @@ struct Rig {
   guest: Peer,
   chat: ConversationId,
   meeting: MeetingId,
-  link: GuestLinkMaterial,
+  /// `v` of the meeting link: the organizer's fingerprint as Alice's device has it pinned.
+  fingerprint: String,
   clock: Arc<ManualClock>,
 }
 
 #[tokio::test]
-async fn a_guest_with_the_links_proof_is_let_in_and_reads_from_the_join_on() {
+async fn a_guest_let_in_by_the_organizer_reads_only_from_the_admission_on() {
   let mut rig = rig().await;
   rig
     .alice
@@ -44,21 +46,8 @@ async fn a_guest_with_the_links_proof_is_let_in_and_reads_from_the_join_on() {
     .unwrap();
   rig.guest_knows_the_link();
   rig.server_admits_the_guest().await;
-  let proof = rig.proof(&rig.link.secret);
 
-  rig
-    .alice
-    .client
-    .let_guest_into_meeting_chat(
-      rig.chat,
-      rig.meeting,
-      rig.guest_id(),
-      GUEST_NAME,
-      &GuestAdmission::Proof(proof),
-      ACCESS_ENDS_MS,
-    )
-    .await
-    .unwrap();
+  rig.organizer_lets_the_guest_in(ACCESS_ENDS_MS).await.unwrap();
   rig
     .alice
     .client
@@ -76,6 +65,7 @@ async fn a_guest_with_the_links_proof_is_let_in_and_reads_from_the_join_on() {
   settle(&mut [&mut rig.alice, &mut rig.guest]).await;
 
   assert!(rig.guest.client.has_group(rig.chat).unwrap());
+  // The welcome opens the admission's epoch only: what was said before stays unreadable.
   assert_eq!(
     rig.guest.texts(rig.chat),
     vec!["after the guest", "hello from the guest"]
@@ -87,182 +77,44 @@ async fn a_guest_with_the_links_proof_is_let_in_and_reads_from_the_join_on() {
 }
 
 #[tokio::test]
-async fn a_guest_the_server_made_up_is_not_let_in() {
-  let mut rig = rig().await;
-  rig.guest_knows_the_link();
-  rig.server_admits_the_guest().await;
-  // The server doesn't have the link's secret: its proof is made with a guess.
-  let guess = base64_url_of(&[7u8; 32]);
-  let forged = rig.proof(&guess);
+async fn the_link_carries_the_organizers_fingerprint_for_every_member() {
+  let rig = rig().await;
+  let mut bob = rig.member("Bob").await;
 
-  for admission in [GuestAdmission::Proof(forged), GuestAdmission::Proof(Vec::new())] {
-    let refused = rig
-      .alice
-      .client
-      .let_guest_into_meeting_chat(
-        rig.chat,
-        rig.meeting,
-        rig.guest_id(),
-        GUEST_NAME,
-        &admission,
-        ACCESS_ENDS_MS,
-      )
-      .await
-      .unwrap_err();
-    assert!(matches!(refused, CoreError::GuestRefused(_)), "{refused}");
-  }
-  // A guest whose name was changed on the way is not the one who proved.
-  let proof = rig.proof(&rig.link.secret);
-  let renamed = rig
-    .alice
+  bob
     .client
-    .let_guest_into_meeting_chat(
-      rig.chat,
-      rig.meeting,
-      rig.guest_id(),
-      "Somebody else",
-      &GuestAdmission::Proof(proof),
-      ACCESS_ENDS_MS,
-    )
-    .await
-    .unwrap_err();
-  assert!(
-    matches!(renamed, CoreError::GuestRefused(GuestRefusal::BadProof)),
-    "{renamed}"
-  );
-
-  rig.guest.client.full_sync().await.unwrap();
-  assert!(!rig.guest.client.has_group(rig.chat).unwrap());
-}
-
-#[tokio::test]
-async fn a_device_that_did_not_make_the_link_needs_the_hosts_key_code() {
-  let mut rig = rig().await;
-  rig.guest_knows_the_link();
-  rig.server_admits_the_guest().await;
-  let mut laptop = link_device(&mut rig.alice).await;
-  laptop.full_sync().await.unwrap();
-  let proof = rig.proof(&rig.link.secret);
-
-  let no_secret = laptop
-    .let_guest_into_meeting_chat(
-      rig.chat,
-      rig.meeting,
-      rig.guest_id(),
-      GUEST_NAME,
-      &GuestAdmission::Proof(proof),
-      ACCESS_ENDS_MS,
-    )
-    .await
-    .unwrap_err();
-  assert!(
-    matches!(no_secret, CoreError::GuestRefused(GuestRefusal::NoLinkSecret)),
-    "{no_secret}"
-  );
-
-  let wrong = laptop
-    .let_guest_into_meeting_chat(
-      rig.chat,
-      rig.meeting,
-      rig.guest_id(),
-      GUEST_NAME,
-      &GuestAdmission::KeyCodeConfirmed("0000-0000-0000-0000".into()),
-      ACCESS_ENDS_MS,
-    )
-    .await
-    .unwrap_err();
-  assert!(
-    matches!(wrong, CoreError::GuestRefused(GuestRefusal::KeyCodeMismatch)),
-    "{wrong}"
-  );
-
-  let code = rig.guest.client.own_key_code();
-  laptop
-    .let_guest_into_meeting_chat(
-      rig.chat,
-      rig.meeting,
-      rig.guest_id(),
-      GUEST_NAME,
-      &GuestAdmission::KeyCodeConfirmed(code),
-      ACCESS_ENDS_MS,
-    )
-    .await
-    .unwrap();
-  rig.guest.client.full_sync().await.unwrap();
-  assert!(rig.guest.client.has_group(rig.chat).unwrap());
-}
-
-#[tokio::test]
-async fn a_guest_device_without_a_link_anchor_joins_nothing() {
-  let mut rig = rig().await;
-  // No organizer key from a link: the guest's device fails closed, whatever group it is offered.
-  rig.server_admits_the_guest().await;
-  let proof = rig.proof(&rig.link.secret);
-  rig
-    .alice
-    .client
-    .let_guest_into_meeting_chat(
-      rig.chat,
-      rig.meeting,
-      rig.guest_id(),
-      GUEST_NAME,
-      &GuestAdmission::Proof(proof),
-      ACCESS_ENDS_MS,
-    )
+    .prepare_guest_link(rig.chat, rig.meeting)
     .await
     .unwrap();
 
-  rig.guest.client.full_sync().await.unwrap();
-
-  assert!(rig.guest.client.is_guest_device().unwrap());
-  assert!(!rig.guest.client.has_group(rig.chat).unwrap());
-}
-
-#[tokio::test]
-async fn a_guest_whose_access_ended_is_removed_even_if_the_server_says_nothing() {
-  let mut rig = rig().await;
-  rig.guest_knows_the_link();
-  rig.server_admits_the_guest().await;
-  let proof = rig.proof(&rig.link.secret);
-  let now = NOW_MS;
-  rig
-    .alice
-    .client
-    .let_guest_into_meeting_chat(
-      rig.chat,
-      rig.meeting,
-      rig.guest_id(),
-      GUEST_NAME,
-      &GuestAdmission::Proof(proof),
-      now + 1_000,
-    )
-    .await
-    .unwrap();
-  settle(&mut [&mut rig.alice, &mut rig.guest]).await;
+  let expected = format!("{VERIFIER_KEY}={}", rig.fingerprint);
   assert_eq!(
-    rig
-      .alice
-      .client
-      .verified_call_devices(rig.chat)
-      .await
-      .unwrap()
-      .len(),
-    2
+    guest_link_fragment(&bob.store, rig.meeting),
+    Some(expected.clone())
   );
+  assert_eq!(guest_link_fragment(&rig.alice.store, rig.meeting), Some(expected));
+  // No secret: the fragment is the fingerprint and nothing else.
+  assert_eq!(rig.fingerprint.len(), 64);
+}
 
-  // The meeting is over by Alice's clock; the server listed the guest all along.
-  rig.clock.advance(5_000);
-  rig.alice.client.full_sync().await.unwrap();
+#[tokio::test]
+async fn an_admission_by_a_device_the_link_does_not_name_is_refused() {
+  let mut rig = rig().await;
+  // The link names another key as the organizer's: Alice's welcome is a forged admission to it.
+  let other = "ab".repeat(32);
+  rig
+    .guest
+    .client
+    .set_guest_organizer_anchor(rig.chat, &other)
+    .unwrap();
+  rig.server_admits_the_guest().await;
+  rig.organizer_lets_the_guest_in(ACCESS_ENDS_MS).await.unwrap();
 
-  assert_eq!(
-    rig
-      .alice
-      .client
-      .verified_call_devices(rig.chat)
-      .await
-      .unwrap()
-      .len(),
-    1
+  rig.guest.client.full_sync().await.unwrap();
+
+  assert!(
+    !rig.guest.client.has_group(rig.chat).unwrap(),
+    "a welcome from a device the link's key didn't certify is not joined"
   );
 }
 
@@ -278,7 +130,7 @@ async fn a_group_the_server_made_holding_the_organizer_is_not_joined() {
   rig
     .guest
     .client
-    .set_guest_organizer_anchor(dm, &rig.link.organizer_fingerprint)
+    .set_guest_organizer_anchor(dm, &rig.fingerprint)
     .unwrap();
 
   rig.guest.client.full_sync().await.unwrap();
@@ -292,24 +144,16 @@ async fn a_group_the_server_made_holding_the_organizer_is_not_joined() {
 #[tokio::test]
 async fn only_the_organizers_devices_let_guests_in() {
   let rig = rig().await;
-  let mut cohost = Peer::enroll(&rig.server, "Cohost").await;
-  rig
-    .alice
-    .api
-    .add_member(
-      rig.chat,
-      &AddConversationMemberRequest {
-        user_id: cohost.client.user_id(),
-        maybe_role: None,
-      },
-    )
-    .await
-    .unwrap();
+  let mut cohost = rig.member("Cohost").await;
+  rig.guest_knows_the_link();
+  rig.server_admits_the_guest().await;
+
   let refused = cohost
     .client
-    .guest_link_material(rig.chat, rig.meeting)
+    .let_guest_into_meeting_chat(rig.chat, rig.guest_id(), ACCESS_ENDS_MS)
     .await
     .unwrap_err();
+
   assert!(
     matches!(refused, CoreError::GuestRefused(GuestRefusal::NotOrganizer)),
     "{refused}"
@@ -317,85 +161,74 @@ async fn only_the_organizers_devices_let_guests_in() {
 }
 
 #[tokio::test]
-async fn a_guest_only_joins_a_group_the_links_organizer_founded() {
+async fn a_guest_device_without_a_link_anchor_joins_nothing() {
   let mut rig = rig().await;
-  // The link names another key as the organizer's: the group Alice founded is not the one.
-  let other = "ab".repeat(32);
-  rig
-    .guest
-    .client
-    .set_guest_organizer_anchor(rig.chat, &other)
-    .unwrap();
+  // No organizer key: the guest's device fails closed, whatever group it is offered.
   rig.server_admits_the_guest().await;
-  let proof = rig.proof(&rig.link.secret);
-  rig
-    .alice
-    .client
-    .let_guest_into_meeting_chat(
-      rig.chat,
-      rig.meeting,
-      rig.guest_id(),
-      GUEST_NAME,
-      &GuestAdmission::Proof(proof),
-      ACCESS_ENDS_MS,
-    )
-    .await
-    .unwrap();
+  rig.organizer_lets_the_guest_in(ACCESS_ENDS_MS).await.unwrap();
 
   rig.guest.client.full_sync().await.unwrap();
 
-  assert!(
-    !rig.guest.client.has_group(rig.chat).unwrap(),
-    "a group founded by another key is not joined"
-  );
+  assert!(rig.guest.client.is_guest_device().unwrap());
+  assert!(!rig.guest.client.has_group(rig.chat).unwrap());
 }
 
 #[tokio::test]
-async fn a_guest_whose_session_ended_is_removed_from_the_group() {
+async fn a_guest_whose_access_ended_is_removed_even_if_the_server_says_nothing() {
   let mut rig = rig().await;
   rig.guest_knows_the_link();
   rig.server_admits_the_guest().await;
-  let proof = rig.proof(&rig.link.secret);
+  rig.organizer_lets_the_guest_in(NOW_MS + 1_000).await.unwrap();
+  settle(&mut [&mut rig.alice, &mut rig.guest]).await;
+  assert_eq!(rig.call_devices().await, 2);
+
+  // The meeting is over by Alice's clock; the server listed the guest all along.
+  rig.clock.advance(5_000);
+  rig.alice.client.full_sync().await.unwrap();
+
+  assert_eq!(rig.call_devices().await, 1);
+}
+
+#[tokio::test]
+async fn a_removed_guest_reads_nothing_sent_after_the_removal() {
+  let mut rig = rig().await;
+  rig.guest_knows_the_link();
+  rig.server_admits_the_guest().await;
+  rig.organizer_lets_the_guest_in(ACCESS_ENDS_MS).await.unwrap();
+  settle(&mut [&mut rig.alice, &mut rig.guest]).await;
+  rig.guest.client.full_sync().await.unwrap();
   rig
     .alice
     .client
-    .let_guest_into_meeting_chat(
-      rig.chat,
-      rig.meeting,
-      rig.guest_id(),
-      GUEST_NAME,
-      &GuestAdmission::Proof(proof),
-      ACCESS_ENDS_MS,
-    )
+    .send_text(rig.chat, None, "while the guest is in")
     .await
     .unwrap();
   settle(&mut [&mut rig.alice, &mut rig.guest]).await;
-  assert_eq!(
-    rig
-      .alice
-      .client
-      .verified_call_devices(rig.chat)
-      .await
-      .unwrap()
-      .len(),
-    2
-  );
+  assert_eq!(rig.call_devices().await, 2);
 
   // The server ends the guest's session (they left, or the meeting's access ended).
   rig.server.remove_member_as_admin(rig.chat, rig.guest_id());
   settle(&mut [&mut rig.alice]).await;
   rig.alice.client.full_sync().await.unwrap();
+  rig
+    .alice
+    .client
+    .send_text(rig.chat, None, "after the removal")
+    .await
+    .unwrap();
+  settle(&mut [&mut rig.alice, &mut rig.guest]).await;
 
   assert_eq!(
-    rig
-      .alice
-      .client
-      .verified_call_devices(rig.chat)
-      .await
-      .unwrap()
-      .len(),
+    rig.call_devices().await,
     1,
     "the guest's leaf is out of the group"
+  );
+  assert!(
+    !rig
+      .guest
+      .texts(rig.chat)
+      .contains(&"after the removal".to_owned()),
+    "the removal started an epoch the guest has no keys for"
   );
 }
 
@@ -404,24 +237,44 @@ impl Rig {
     self.guest.client.user_id()
   }
 
-  /// The guest read the organizer's key from the link.
+  /// The guest read the organizer's fingerprint from the link.
   fn guest_knows_the_link(&self) {
     self
       .guest
       .client
-      .set_guest_organizer_anchor(self.chat, &self.link.organizer_fingerprint)
+      .set_guest_organizer_anchor(self.chat, &self.fingerprint)
       .unwrap();
   }
 
   /// The server lets the guest into the chat (a host's "admit"), without any encryption group.
   async fn server_admits_the_guest(&self) {
+    self.add_to_chat(self.guest_id()).await;
+  }
+
+  /// Alice's device, the organizer's, lets the guest's device into the group.
+  async fn organizer_lets_the_guest_in(&mut self, access_ends_at_ms: i64) -> Result<(), CoreError> {
+    self
+      .alice
+      .client
+      .let_guest_into_meeting_chat(self.chat, self.guest_id(), access_ends_at_ms)
+      .await
+  }
+
+  /// A member of the meeting chat on the server, who isn't the organizer.
+  async fn member(&self, name: &str) -> Peer {
+    let peer = Peer::enroll(&self.server, name).await;
+    self.add_to_chat(peer.client.user_id()).await;
+    peer
+  }
+
+  async fn add_to_chat(&self, user: UserId) {
     self
       .alice
       .api
       .add_member(
         self.chat,
         &AddConversationMemberRequest {
-          user_id: self.guest_id(),
+          user_id: user,
           maybe_role: None,
         },
       )
@@ -429,12 +282,14 @@ impl Rig {
       .unwrap();
   }
 
-  fn proof(&self, secret: &str) -> Vec<u8> {
+  async fn call_devices(&mut self) -> usize {
     self
-      .guest
+      .alice
       .client
-      .guest_link_proof(secret, self.meeting, GUEST_NAME)
+      .verified_call_devices(self.chat)
+      .await
       .unwrap()
+      .len()
   }
 }
 
@@ -475,19 +330,19 @@ async fn rig() -> Rig {
   let chat = server.create_meeting_chat(alice.client.user_id(), &[]);
   alice.client.set_up_meeting_chat(chat, &[]).await.unwrap();
   let meeting: MeetingId = "7".parse().unwrap();
-  let link = alice.client.guest_link_material(chat, meeting).await.unwrap();
+  alice.client.prepare_guest_link(chat, meeting).await.unwrap();
+  let fingerprint = guest_link_fragment(&alice.store, meeting)
+    .unwrap()
+    .strip_prefix(&format!("{VERIFIER_KEY}="))
+    .unwrap()
+    .to_owned();
   Rig {
     server,
     alice,
     guest,
     chat,
     meeting,
-    link,
+    fingerprint,
     clock,
   }
-}
-
-fn base64_url_of(bytes: &[u8]) -> String {
-  use base64::Engine;
-  base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes)
 }

@@ -277,21 +277,11 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       } => self.prepare_guest_link(conversation, meeting).await,
       CoreCommand::LetGuestIntoMeetingChat {
         conversation,
-        meeting,
         guest,
-        display_name,
-        maybe_proof,
         access_ends_at_ms,
       } => {
         self
-          .admit_guest(
-            conversation,
-            meeting,
-            guest,
-            &display_name,
-            maybe_proof,
-            access_ends_at_ms,
-          )
+          .let_guest_into_meeting_chat(conversation, guest, access_ends_at_ms)
           .await
       },
       CoreCommand::DiscardRemoval { conversation, user } => self.discard_removal(conversation, user).await,

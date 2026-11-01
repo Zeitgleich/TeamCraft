@@ -7,8 +7,8 @@ use std::rc::Rc;
 use leptos::prelude::*;
 use teamcraft_proto::{
   CancelScope, CreateGuestLinkRequest, CreateInstantMeetingRequest, CreateMeetingRequest, ErrorBody,
-  ErrorCode, GuestLinkResponse, IdempotencyKey, JoinMeetingRequest, JoinMeetingResponse, ListLobbyResponse,
-  ListMeetingsResponse, LobbyEntry, LobbyState, LobbyStateResponse, MeetingControlAction,
+  ErrorCode, GuestLinkResponse, IdempotencyKey, JoinMeetingRequest, JoinMeetingResponse, KnockByLinkResponse,
+  ListLobbyResponse, ListMeetingsResponse, LobbyEntry, LobbyState, LobbyStateResponse, MeetingControlAction,
   MeetingControlRequest, MeetingId, MeetingInvitee, MeetingRecurrence, MeetingResponse, RecurrenceFrequency,
   RestoreMeetingRequest, RsvpStatus, SetRsvpRequest, UnixMillis, UpdateMeetingRequest, Weekday,
 };
@@ -20,6 +20,7 @@ use crate::feedback::{ActionFailure, FailureKind};
 use crate::meeting_reminders::ServerClock;
 use crate::model::{ConversationId, TimestampMs, UserId};
 use crate::reactive::SetIfAlive;
+use crate::route::MeetingHandle;
 
 /// HTTP status of a refused request for a meeting the caller is not in (or that doesn't exist).
 pub const STATUS_NOT_FOUND: u16 = 404;
@@ -37,8 +38,10 @@ const MAX_COUNT: u32 = 1_000;
 /// Prefix of the page of a meeting; the guest token follows in the fragment (`#invite=`).
 const MEETING_PATH_PREFIX: &str = "/meeting/";
 const INVITE_FRAGMENT_KEY: &str = "invite=";
-const SECRET_FRAGMENT_KEY: &str = "k=";
-const ORGANIZER_FRAGMENT_KEY: &str = "o=";
+/// The organizer's identity key fingerprint in a meeting link's fragment, and its name in links of
+/// older apps.
+const VERIFIER_FRAGMENT_KEY: &str = "v=";
+const LEGACY_ORGANIZER_FRAGMENT_KEY: &str = "o=";
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum MeetingError {
@@ -218,28 +221,27 @@ impl MeetingsClient {
       .await
   }
 
-  /// The meeting's shared guest link (one link for many guests, each waits in the lobby), made on
-  /// first use. Hosts only.
-  pub async fn shared_guest_link(&self, meeting: MeetingId) -> Result<GuestLinkResponse, MeetingError> {
+  /// Makes the meeting's link anew (organizer only): the old one stops working, invitees get the
+  /// new one.
+  pub async fn renew_link(&self, meeting: MeetingId) -> Result<MeetingResponse, MeetingError> {
     self
       .call(
-        ApiMethod::Put,
-        &format!("/api/v1/meetings/{meeting}/shared-guest-link"),
+        ApiMethod::Post,
+        &format!("/api/v1/meetings/{meeting}/link"),
         Some("{}".to_owned()),
       )
       .await
   }
 
-  /// Revokes the shared guest link: nobody new gets in with it.
-  pub async fn revoke_shared_guest_link(&self, meeting: MeetingId) -> Result<(), MeetingError> {
+  /// A member opened a meeting link with a token: the meeting, and whether they are in or knocked.
+  pub async fn knock_by_link(&self, token: &str) -> Result<KnockByLinkResponse, MeetingError> {
     self
-      .send(
-        ApiMethod::Delete,
-        &format!("/api/v1/meetings/{meeting}/shared-guest-link"),
+      .call(
+        ApiMethod::Post,
+        &format!("/api/v1/meetings/link/{token}/knock"),
         None,
       )
       .await
-      .map(|_| ())
   }
 
   /// Asks the hosts to let the caller into a meeting they opened by its link.
@@ -1106,21 +1108,22 @@ pub fn is_plausible_email(text: &str) -> bool {
 
 // ---- The guest side -----------------------------------------------------------------------------
 
-/// What a guest link holds: the meeting, the server's token, and the two values only the page sees
-/// (the fragment never reaches a server): the link secret and the organizer's key fingerprint.
+/// What a meeting link holds for a guest's page (docs/meetings.md, "Links"): the path's handle
+/// (the meeting link's token, or an old link's meeting ID), a personal link's one-time token, and
+/// the organizer's key fingerprint `v` from the fragment, which never reaches a server. No secret.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GuestLink {
-  pub meeting: MeetingId,
-  pub invite_token: String,
-  pub maybe_secret: Option<String>,
+  pub handle: MeetingHandle,
+  pub maybe_invite_token: Option<String>,
   pub maybe_organizer_fingerprint: Option<String>,
 }
 
-/// The meeting and token of a personal link (`/meeting/<id>#invite=<token>&k=<secret>&o=<key>`),
-/// if the page is one.
+/// The guest link of a page, if it is one: `/meeting/<token>[#v=<fingerprint>]`, a personal link
+/// with `#invite=<token>`, or an old `/meeting/<id>#invite=<token>`. An old link with the ID alone
+/// is a member's link, not a guest's.
 pub fn parse_guest_link(path: &str, fragment: &str) -> Option<GuestLink> {
-  let id_text = path.strip_prefix(MEETING_PATH_PREFIX)?.trim_end_matches('/');
-  let meeting = id_text.parse::<MeetingId>().ok()?;
+  let segment = path.strip_prefix(MEETING_PATH_PREFIX)?.trim_end_matches('/');
+  let handle = MeetingHandle::parse(segment)?;
   let fragment = fragment.trim_start_matches('#');
   let value = |key: &str| {
     fragment
@@ -1129,12 +1132,36 @@ pub fn parse_guest_link(path: &str, fragment: &str) -> Option<GuestLink> {
       .filter(|value| !value.is_empty())
       .map(str::to_owned)
   };
+  let maybe_invite_token = value(INVITE_FRAGMENT_KEY);
+  if matches!(handle, MeetingHandle::Id(_)) && maybe_invite_token.is_none() {
+    return None;
+  }
   Some(GuestLink {
-    meeting,
-    invite_token: value(INVITE_FRAGMENT_KEY)?,
-    maybe_secret: value(SECRET_FRAGMENT_KEY),
-    maybe_organizer_fingerprint: value(ORGANIZER_FRAGMENT_KEY),
+    handle,
+    maybe_invite_token,
+    maybe_organizer_fingerprint: value(VERIFIER_FRAGMENT_KEY)
+      .or_else(|| value(LEGACY_ORGANIZER_FRAGMENT_KEY)),
   })
+}
+
+/// `link` with `fragment` (`v=<fingerprint>`) as its verifier, replacing any `v` the server put
+/// there: the copying device's pinned key wins over the server's word.
+pub fn with_verifier(link: &str, fragment: &str) -> String {
+  let (path, maybe_rest) = match link.split_once('#') {
+    Some((path, rest)) => (path, Some(rest)),
+    None => (link, None),
+  };
+  let mut parts: Vec<&str> = maybe_rest
+    .into_iter()
+    .flat_map(|rest| rest.split('&'))
+    .filter(|part| {
+      !part.is_empty()
+        && !part.starts_with(VERIFIER_FRAGMENT_KEY)
+        && !part.starts_with(LEGACY_ORGANIZER_FRAGMENT_KEY)
+    })
+    .collect();
+  parts.push(fragment);
+  format!("{path}#{}", parts.join("&"))
 }
 
 /// Requests of a guest. They carry no member account: the link's token is traded for a session.
@@ -1150,11 +1177,16 @@ impl GuestClient {
 
   pub async fn join(
     &self,
-    invite_token: &str,
+    link: &GuestLink,
     display_name: &str,
   ) -> Result<JoinMeetingResponse, MeetingError> {
+    let maybe_link_token = match link.handle {
+      MeetingHandle::Token(token) => Some(token.as_str().to_owned()),
+      MeetingHandle::Id(_) => None,
+    };
     let body = to_json(&JoinMeetingRequest {
-      invite_token: invite_token.to_owned(),
+      maybe_invite_token: link.maybe_invite_token.clone(),
+      maybe_link_token,
       display_name: display_name.trim().to_owned(),
     })?;
     let response = self
@@ -1172,19 +1204,10 @@ impl GuestClient {
     Ok(state.state)
   }
 
-  /// The guest's proof that they hold the link (the hosts' devices check it before they let the
-  /// guest's device into the encryption).
-  pub async fn put_proof(
-    &self,
-    meeting: MeetingId,
-    guest_token: &str,
-    proof: &[u8],
-  ) -> Result<(), MeetingError> {
-    let body = to_json(&teamcraft_proto::PutGuestProofRequest {
-      proof: proof.to_vec().into(),
-    })?;
-    let path = format!("/api/v1/meetings/{meeting}/lobby/me/proof");
-    self.request("PUT", &path, Some(guest_token), Some(body)).await?;
+  /// Tells the hosts that the guest's device is set up, so an organizer's device can let it in.
+  pub async fn device_ready(&self, meeting: MeetingId, guest_token: &str) -> Result<(), MeetingError> {
+    let path = format!("/api/v1/meetings/{meeting}/lobby/me/device");
+    self.request("PUT", &path, Some(guest_token), None).await?;
     Ok(())
   }
 
@@ -1266,6 +1289,7 @@ fn to_json<T: serde::Serialize>(value: &T) -> Result<String, MeetingError> {
 mod tests {
   use super::*;
   use crate::model::id_from_raw;
+  use crate::route::LinkToken;
 
   const NOW: TimestampMs = 1_792_540_800_000;
 
@@ -1475,23 +1499,57 @@ mod tests {
     }
   }
 
+  const TOKEN: &str = "AbCdEfGhIjKlMnOpQrStUvWxYz012345";
+
   #[test]
-  fn guest_links_are_read_from_the_path_and_the_fragment() {
-    let link = parse_guest_link("/meeting/123456789", "#invite=abc.def").expect("link");
-    assert_eq!(link.meeting.to_string(), "123456789");
-    assert_eq!(link.invite_token, "abc.def");
+  fn meeting_links_are_read_from_the_path_and_the_fragment() {
+    let link = parse_guest_link(&format!("/meeting/{TOKEN}"), "#v=ab12").expect("link");
     assert_eq!(
-      (link.maybe_secret, link.maybe_organizer_fingerprint),
-      (None, None)
+      link.handle,
+      MeetingHandle::Token(LinkToken::parse(TOKEN).unwrap())
     );
-    let full = parse_guest_link("/meeting/123456789", "#invite=abc.def&k=s3cret&o=ab12").expect("link");
-    assert_eq!(full.maybe_secret.as_deref(), Some("s3cret"));
-    assert_eq!(full.maybe_organizer_fingerprint.as_deref(), Some("ab12"));
+    assert_eq!(link.maybe_invite_token, None);
+    assert_eq!(link.maybe_organizer_fingerprint.as_deref(), Some("ab12"));
+    // Without a fragment it is still a guest link: the guest waits in the lobby.
+    let bare = parse_guest_link(&format!("/meeting/{TOKEN}"), "").expect("link");
+    assert_eq!(bare.maybe_organizer_fingerprint, None);
+    let one_time = parse_guest_link(&format!("/meeting/{TOKEN}"), "#invite=abc.def&v=ab12").expect("link");
+    assert_eq!(
+      (
+        one_time.maybe_invite_token.as_deref(),
+        one_time.maybe_organizer_fingerprint.as_deref()
+      ),
+      (Some("abc.def"), Some("ab12"))
+    );
+  }
+
+  #[test]
+  fn old_links_with_the_id_are_guest_links_only_with_their_one_time_token() {
+    let old = parse_guest_link("/meeting/123456789", "#invite=abc.def").expect("link");
+    assert_eq!(old.handle, MeetingHandle::Id("123456789".parse().unwrap()));
+    assert_eq!(old.maybe_organizer_fingerprint, None);
+    // An older app's link: `o` is the fingerprint, the secret `k` is ignored.
+    let older = parse_guest_link("/meeting/123456789", "#invite=abc.def&k=s3cret&o=ab12").expect("link");
+    assert_eq!(older.maybe_organizer_fingerprint.as_deref(), Some("ab12"));
     assert!(parse_guest_link("/meeting/123456789", "").is_none());
     assert!(parse_guest_link("/meeting/123456789", "#invite=").is_none());
-    assert!(parse_guest_link("/meeting/not-a-number", "#invite=abc").is_none());
+    assert!(parse_guest_link("/meeting/not-a-token", "#invite=abc").is_none());
     assert!(parse_guest_link("/threads", "#invite=abc").is_none());
     assert!(parse_guest_link("/meeting/123456789/", "#x=1&invite=abc").is_some());
+  }
+
+  #[test]
+  fn the_copying_devices_fingerprint_replaces_the_servers() {
+    let base = format!("https://chat.example.com/meeting/{TOKEN}");
+    assert_eq!(with_verifier(&base, "v=11"), format!("{base}#v=11"));
+    assert_eq!(
+      with_verifier(&format!("{base}#v=22"), "v=11"),
+      format!("{base}#v=11")
+    );
+    assert_eq!(
+      with_verifier(&format!("{base}#invite=abc&v=22"), "v=11"),
+      format!("{base}#invite=abc&v=11")
+    );
   }
 
   #[test]

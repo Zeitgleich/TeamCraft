@@ -265,11 +265,17 @@ impl std::fmt::Debug for GuestLinkResponse {
   }
 }
 
-/// `POST /api/v1/meetings/join` (no authentication): trades a personal join link for a guest session.
+/// `POST /api/v1/meetings/join` (no authentication): trades a meeting link for a guest session.
+/// Exactly one of the two tokens is given: the meeting link's token from its path, or the one-time
+/// token of a personal link's `#invite=` fragment (which wins when a link has both).
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 pub struct JoinMeetingRequest {
-  /// The token from the link's `#invite=` fragment; usable once.
-  pub invite_token: String,
+  /// The token from a personal link's `#invite=` fragment; usable once.
+  #[serde(rename = "invite_token", default, skip_serializing_if = "Option::is_none")]
+  pub maybe_invite_token: Option<String>,
+  /// The token from the meeting link's path (`/meeting/<token>`).
+  #[serde(rename = "link_token", default, skip_serializing_if = "Option::is_none")]
+  pub maybe_link_token: Option<String>,
   /// How the guest is shown to the others ("Guest (unverified)" in clients).
   pub display_name: String,
 }
@@ -277,10 +283,25 @@ pub struct JoinMeetingRequest {
 impl std::fmt::Debug for JoinMeetingRequest {
   fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
     f.debug_struct("JoinMeetingRequest")
-      .field("invite_token", &"[redacted]")
+      .field(
+        "invite_token",
+        &self.maybe_invite_token.as_ref().map(|_| "[redacted]"),
+      )
+      .field(
+        "link_token",
+        &self.maybe_link_token.as_ref().map(|_| "[redacted]"),
+      )
       .field("display_name", &self.display_name)
       .finish()
   }
+}
+
+/// `POST /api/v1/meetings/link/{token}/knock`: a member opened a meeting link. The meeting it
+/// names, and where the member stands: in the chat already (`admitted`) or waiting in the lobby.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct KnockByLinkResponse {
+  pub meeting_id: MeetingId,
+  pub state: LobbyState,
 }
 
 /// A guest session: authenticate API and gateway with `guest_token` like with an access token.
@@ -294,6 +315,15 @@ pub struct JoinMeetingResponse {
   pub conversation_id: ConversationId,
   pub user_id: UserId,
   pub lobby_state: LobbyState,
+  /// The fingerprint of the organizer's identity key as the server holds it, the `v` of the
+  /// meeting's link. A guest's page takes it only for a link without `v` (one mailed before
+  /// #987): it is the server's word (e2ee.md §4.6, "Meeting guests").
+  #[serde(
+    rename = "organizer_fingerprint",
+    default,
+    skip_serializing_if = "Option::is_none"
+  )]
+  pub maybe_organizer_fingerprint: Option<String>,
 }
 
 impl std::fmt::Debug for JoinMeetingResponse {
@@ -311,16 +341,14 @@ impl std::fmt::Debug for JoinMeetingResponse {
 pub struct LobbyEntry {
   pub user: UserSummary,
   pub requested_at: UnixMillis,
-  /// The proof a guest gave that they hold the link's secret (`PUT .../lobby/me/proof`); hosts'
-  /// devices check it before they add the guest's device. Absent until the guest sent it.
-  #[serde(rename = "proof", default, skip_serializing_if = "Option::is_none")]
-  pub maybe_proof: Option<crate::Base64Bytes>,
-}
-
-/// `PUT /api/v1/meetings/{id}/lobby/me/proof`: a guest's proof of the link secret. Set once.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
-pub struct PutGuestProofRequest {
-  pub proof: crate::Base64Bytes,
+  /// The guest or member knocked with the meeting link's token (not an old link): in a meeting
+  /// without a lobby the organizer's device lets them in by itself.
+  #[serde(default)]
+  pub is_by_link: bool,
+  /// The user has a device the organizer's device can add to the chat's encryption group (a
+  /// guest's page sets one up while it waits).
+  #[serde(default)]
+  pub has_device: bool,
 }
 
 /// `GET /api/v1/meetings/{id}/lobby`: who waits for the host.

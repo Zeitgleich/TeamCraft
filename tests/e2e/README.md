@@ -32,7 +32,7 @@ Postgres, dropped afterwards), so tests are independent and run in parallel (abo
 | `devices.rs`            | Device linking through the rendezvous relay, the linked device joins the channel and decrypts new messages                                  |
 | `admin.rs`              | Admin deactivation (token refused, devices revoked, gateway closed, audit log) and reactivation; retention job (`max_messages`)             |
 | `bridge.rs`             | `teamcraft-bridge` process: Slack-style webhook and log lines land decrypted in an integration channel, bad input is refused                |
-| `meetings.rs`           | Scheduling sends iMIP invitations (caught by Mailpit), RSVP, an external guest joins with the one-time link, lobby, admission, cancellation |
+| `meetings.rs`           | Scheduling sends iMIP invitations (caught by Mailpit), RSVP, an external guest joins with the mailed link, lobby, admission, cancellation   |
 | `calls.rs`              | 1:1 DM call through the server's join tokens and the SFU: device-bound DAVE keys, both sides decode audio, equal privacy codes              |
 | `web_calls.rs`          | Browser and native client in one channel call: call module, DAVE keys signed by the page, audio and camera                                  |
 | `moderator.rs`          | Channel moderator role: removes members (keys rotate), can't manage roles, properties or the admin                                          |
