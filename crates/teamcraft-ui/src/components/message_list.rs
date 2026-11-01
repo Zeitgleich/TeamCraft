@@ -19,6 +19,7 @@ use crate::components::empty_state::{EmptyAction, EmptyState};
 use crate::components::icons::{Icon, IconName};
 use crate::components::message_row::MessageRow;
 use crate::components::message_toolbar::{MessageToolbar, ToolbarHost};
+use crate::components::reaction_jump::ReactionJump;
 use crate::components::skeleton::MessageSkeleton;
 use crate::feed_motion::{FeedMotion, Shown, newest_confirmed};
 use crate::i18n::{I18n, use_i18n};
@@ -128,6 +129,25 @@ pub fn compute_window(heights: &[f32], scroll_top: f64, viewport: f64) -> Window
     total,
     first_visible: first_visible.unwrap_or(heights.len().saturating_sub(1)),
   }
+}
+
+/// The rows that intersect the viewport (not the overscan around it). Walks only the window.
+pub fn visible_rows(heights: &[f32], window: &Window, scroll_top: f64, viewport: f64) -> Range<usize> {
+  let bottom_edge = scroll_top + viewport;
+  let mut offset = window.pad_top;
+  let mut maybe_start = None;
+  let end = window.end.min(heights.len());
+  for (index, height) in heights.iter().enumerate().take(end).skip(window.first) {
+    if offset >= bottom_edge {
+      return maybe_start.map_or(index..index, |start| start..index);
+    }
+    let bottom = offset + f64::from(*height);
+    if maybe_start.is_none() && bottom > scroll_top {
+      maybe_start = Some(index);
+    }
+    offset = bottom;
+  }
+  maybe_start.map_or(end..end, |start| start..end)
 }
 
 /// A day that begins among the rows around the viewport: the top of its row in the feed and the
@@ -599,7 +619,11 @@ pub fn MessageList(
     (window.first..window.end).collect::<Vec<usize>>()
   };
 
-  track_unread_divider(conversation, count, stick_to_bottom);
+  let is_watched = track_unread_divider(conversation, count, stick_to_bottom);
+  let visible = Memo::new(move |_| {
+    let window = window.get();
+    heights.with_value(|heights| visible_rows(heights, &window, scroll_top.get(), viewport.get()))
+  });
   let on_keydown = move |ev: web_sys::KeyboardEvent| {
     // Esc marks everything read and removes the "New messages" divider (#321), unless it is used
     // for something else (an editor, a menu, closing the side panel or a dialog).
@@ -698,6 +722,8 @@ pub fn MessageList(
         <div class="spacer" style:height=move || format!("{}px", window.get().pad_bottom)></div>
         <MessageToolbar host=toolbar />
       </div>
+      <div class="jump-stack">
+      <ReactionJump conversation=conversation visible=visible is_watched=is_watched />
       <Show when=move || !stick_to_bottom.get() fallback=|| ()>
         <button
           class="jump-latest"
@@ -715,6 +741,7 @@ pub fn MessageList(
           }}
         </button>
       </Show>
+      </div>
     </div>
   }
 }
@@ -762,7 +789,12 @@ fn remember_reading(
   crate::last_place::remember_reading(user, conversation, maybe_message);
 }
 
-fn track_unread_divider(conversation: ConversationId, count: Memo<usize>, is_at_bottom: RwSignal<bool>) {
+/// Returns whether the user watches the feed: the window is focused and no call screen covers it.
+fn track_unread_divider(
+  conversation: ConversationId,
+  count: Memo<usize>,
+  is_at_bottom: RwSignal<bool>,
+) -> Signal<bool> {
   let state = use_app_state();
   let is_focused = RwSignal::new(is_window_focused());
   // A call screen over the app hides the feed below it; the feed next to the call stays in sight.
@@ -856,6 +888,7 @@ fn track_unread_divider(conversation: ConversationId, count: Memo<usize>, is_at_
       Err(error) => tracing::debug!(?error, "no timer for the divider"),
     }
   });
+  is_watched
 }
 
 /// Marks the conversation read whenever something in it is unread while the user watches its newest
@@ -1262,6 +1295,18 @@ mod tests {
     assert_eq!(window.pad_bottom, 0.0);
     let empty = compute_window(&[], 0.0, 600.0);
     assert_eq!((empty.first, empty.end, empty.total), (0, 0, 0.0));
+  }
+
+  #[test]
+  fn visible_rows_are_those_in_the_viewport_without_the_overscan() {
+    let heights = vec![50.0_f32; 1000];
+    let window = compute_window(&heights, 10_025.0, 600.0);
+    // Row 200 is partly in view at the top, row 212 partly at the bottom.
+    assert_eq!(visible_rows(&heights, &window, 10_025.0, 600.0), 200..213);
+    let window = compute_window(&heights, 49_400.0, 600.0);
+    assert_eq!(visible_rows(&heights, &window, 49_400.0, 600.0), 988..1000);
+    let empty = compute_window(&[], 0.0, 600.0);
+    assert!(visible_rows(&[], &empty, 0.0, 600.0).is_empty());
   }
 
   mod following {

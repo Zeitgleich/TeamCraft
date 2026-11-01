@@ -1577,7 +1577,7 @@ impl AppState {
   }
 
   /// Lights up a message for a moment so the eye finds it after a jump.
-  fn highlight(&self, message: MessageId) {
+  pub fn highlight(&self, message: MessageId) {
     let state = *self;
     self.highlighted.set(Some(message));
     set_timeout(
