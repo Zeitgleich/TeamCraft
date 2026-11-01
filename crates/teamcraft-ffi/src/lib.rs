@@ -15,6 +15,7 @@ mod join_requests;
 mod logging;
 mod markup;
 mod media_viewer;
+mod row_badge;
 mod server_entry;
 mod types;
 mod video;
