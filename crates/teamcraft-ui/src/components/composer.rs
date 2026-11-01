@@ -22,6 +22,8 @@ use crate::components::sheet::MenuSurface;
 use crate::components::typing_indicator::should_notify_typing;
 use crate::composer_focus::{self, FocusSituation};
 use crate::editor_doc::{BlockFormat, InlineStyle};
+use crate::emoji_catalog::{self, SkinTone};
+use crate::emoji_support;
 use crate::groups::use_groups;
 use crate::i18n::use_i18n;
 use crate::keys::t_with_shortcuts;
@@ -91,7 +93,7 @@ const MAX_THUMBNAIL_READ_BYTES: u64 = 32 * 1024 * 1024;
 /// One line in the picker under the input.
 #[derive(Clone, Debug, PartialEq)]
 struct Suggestion {
-  /// What replaces the typed word (after the `@` or `/`).
+  /// What replaces the typed word: after the `@` or `/`, or the whole `:word` for an emoji.
   insert: String,
   label: String,
   detail: String,
@@ -105,6 +107,33 @@ const MAX_SUGGESTIONS: usize = 8;
 /// Whether `list` shows the same entries as `shown`, so the selected one stays selected.
 fn is_same_list(shown: &[Suggestion], list: &[Suggestion]) -> bool {
   shown.len() == list.len() && shown.iter().zip(list).all(|(a, b)| a.label == b.label)
+}
+
+/// Emoji whose shortcode or name starts with what was typed after `:`, best first, in the user's
+/// skin tone; only those the device's font draws.
+fn emoji_suggestions(query: &str, tone: SkinTone) -> Vec<Suggestion> {
+  let maybe_newest = emoji_support::newest_drawable();
+  emoji_catalog::search(query)
+    .into_iter()
+    .filter(|entry| emoji_support::can_draw(entry, maybe_newest))
+    .take(MAX_SUGGESTIONS)
+    .map(|entry| {
+      let emoji = if emoji_support::can_draw_skin_tones(entry, maybe_newest) {
+        entry.with_skin_tone(tone)
+      } else {
+        entry.emoji
+      };
+      Suggestion {
+        insert: emoji.to_owned(),
+        label: entry
+          .shortcode()
+          .map_or_else(|| emoji.to_owned(), |code| format!("{emoji} :{code}:")),
+        detail: String::new(),
+        person: None,
+        is_exact: false,
+      }
+    })
+    .collect()
 }
 
 /// People and groups whose name starts with, or contains, what was typed after `@`.
@@ -559,7 +588,7 @@ pub fn Composer(
     };
     // A command only at the very start of the message.
     let found = mention::trigger(&caret.before, caret.before.encode_utf16().count()).filter(|found| {
-      found.kind == TriggerKind::Mention
+      found.kind != TriggerKind::Command
         || (caret.window_start == 0 && composer_editor::is_first_text(&element, &caret.node))
     });
     let Some(found) = found else {
@@ -584,6 +613,7 @@ pub fn Composer(
         let groups = groups.map(|hub| hub.groups()).unwrap_or_default();
         mention_suggestions(&found.query, &people, &groups, &i18n.t("mention-channel"))
       },
+      TriggerKind::Emoji => emoji_suggestions(&found.query, state.settings.emoji_skin_tone.get_untracked()),
     };
     // The caret moving inside the same query (arrow keys, a click) keeps the selection (#690); a
     // new list starts at its first entry.
@@ -636,17 +666,16 @@ pub fn Composer(
     if let Some(caret) = composer_editor::caret_text(&element)
       && let Some(found) = mention::trigger(&caret.before, caret.before.encode_utf16().count())
     {
-      let marker = match found.kind {
-        TriggerKind::Mention => '@',
-        TriggerKind::Command => '/',
+      let replacement = match found.kind {
+        TriggerKind::Mention => format!("@{} ", chosen.insert),
+        TriggerKind::Command => format!("/{} ", chosen.insert),
+        TriggerKind::Emoji => {
+          state.settings.remember_emoji(&chosen.insert);
+          format!("{} ", chosen.insert)
+        },
       };
       let start = caret.window_start + found.start;
-      composer_editor::replace_in_text(
-        &caret.node,
-        start,
-        caret.offset,
-        &format!("{marker}{} ", chosen.insert),
-      );
+      composer_editor::replace_in_text(&caret.node, start, caret.offset, &replacement);
       after_edit();
     }
     suggestions.set(Vec::new());
@@ -1654,6 +1683,17 @@ fn add_read_file(attachments: RwSignal<Vec<PendingFile>>, file: PendingFile) -> 
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  #[test]
+  fn emoji_suggestions_insert_the_emoji_in_the_skin_tone() {
+    let found = emoji_suggestions("poo", SkinTone::Default);
+    assert_eq!(found.first().map(|item| item.insert.as_str()), Some("💩"));
+    assert_eq!(found.first().map(|item| item.label.as_str()), Some("💩 :hankey:"));
+    assert!(found.len() <= MAX_SUGGESTIONS);
+    let waves = emoji_suggestions("wave", SkinTone::Medium);
+    assert_eq!(waves.first().map(|item| item.insert.as_str()), Some("👋🏽"));
+    assert!(emoji_suggestions("nothing_like_this", SkinTone::Default).is_empty());
+  }
 
   #[test]
   fn a_file_read_after_the_composer_closed_is_handed_back_without_a_panic() {
