@@ -29,6 +29,9 @@
   <string name="action_mark_unread">Ab hier als ungelesen markieren</string>
   <string name="edit_history">Frühere Fassungen</string>
   <string name="message_deleted">Diese Nachricht wurde gelöscht.</string>
+  <string name="message_placeholder_waiting">Warte auf diese Nachricht</string>
+  <string name="message_placeholder_not_available">Auf diesem Gerät nicht verfügbar</string>
+  <string name="message_placeholder_failed">Diese Nachricht konnte nicht entschlüsselt werden</string>
   <string name="forwarded_from">Weitergeleitet von %1$s</string>
   <string name="replying_to">Antwort an %1$s</string>
   <string name="new_messages">Neue Nachrichten</string>
@@ -58,9 +61,9 @@
     <item quantity="one">Von %d Person bestätigt</item>
     <item quantity="other">Von %d Personen bestätigt</item>
   </plurals>
-  <plurals name="messages_undecrypted">
-    <item quantity="one">%1$d Nachricht kann auf diesem Gerät noch nicht gelesen werden. Sie erscheint, sobald ihre Schlüssel vom Gerät eines anderen Mitglieds ankommen.</item>
-    <item quantity="other">%1$d Nachrichten können auf diesem Gerät noch nicht gelesen werden. Sie erscheinen, sobald ihre Schlüssel vom Gerät eines anderen Mitglieds ankommen.</item>
+  <plurals name="key_catch_up_progress">
+    <item quantity="one">Schlüssel für ältere Nachrichten werden geholt: %1$d von %2$d Unterhaltung vollständig Nachrichten erscheinen, sobald eines deiner anderen Geräte oder ein Mitglied online ist.</item>
+    <item quantity="other">Schlüssel für ältere Nachrichten werden geholt: %1$d von %2$d Unterhaltungen vollständig Nachrichten erscheinen, sobald eines deiner anderen Geräte oder ein Mitglied online ist.</item>
   </plurals>
   <string name="message_edit_label">Nachricht</string>
   <string name="message_edit_empty">Eine Nachricht kann nicht leer sein. Lösche sie, um sie zu entfernen.</string>

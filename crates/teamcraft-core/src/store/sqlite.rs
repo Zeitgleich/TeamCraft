@@ -328,7 +328,12 @@ impl LocalStore for SqlCipherStore {
       .map_err(database_error)?;
     while let Some(row) = rows.next().map_err(database_error)? {
       let record: Vec<u8> = row.get(0).map_err(database_error)?;
-      if let Some(server_id) = decode_message(&record)?.maybe_server_id {
+      // Placeholders don't count (`LocalStore::edge_server_id`).
+      let message = decode_message(&record)?;
+      if let Some(server_id) = message
+        .maybe_server_id
+        .filter(|_| message.maybe_unreadable.is_none())
+      {
         return Ok(Some(server_id));
       }
     }
@@ -713,6 +718,7 @@ mod tests {
       is_pinned: false,
       maybe_verified_commit: None,
       maybe_server_change: None,
+      maybe_unreadable: None,
     };
     let archived = StoredMessage {
       client_message_id: ClientMessageId::from_bytes([2; 16]),

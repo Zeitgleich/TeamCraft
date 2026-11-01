@@ -176,6 +176,29 @@ pub struct StoredMessage {
   /// change can only name who made it ([`ServerChange::actor`]).
   #[serde(rename = "server_change", default, skip_serializing_if = "Option::is_none")]
   pub maybe_server_change: Option<ServerChange>,
+  /// Set while this device can't read the message: the row is a placeholder at the message's place
+  /// (issue #888) with only what the server's envelope says (sender, time, thread), and
+  /// [`Self::content`] is [`MessageContent::Unknown`]. Only this device sets it, never a message:
+  /// decrypting the message replaces the row.
+  #[serde(rename = "unreadable", default, skip_serializing_if = "Option::is_none")]
+  pub maybe_unreadable: Option<Unreadable>,
+}
+
+/// Why a stored message is a placeholder (issue #888, e2ee.md §5, "History on a new device").
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum Unreadable {
+  /// Its content key (or its sender device's signing key) hasn't arrived yet and may still come.
+  /// `since_ms`: when this device first parked it, on the local clock.
+  Waiting { since_ms: i64 },
+  /// No key came and none is expected: this device is in the group and waits for nothing, or the
+  /// wait ran out. Still decrypted if a key turns up after all.
+  NotAvailable,
+  /// The key is there, but the message doesn't open with it or isn't validly signed: never retried.
+  Failed,
+  /// A state of a newer version.
+  #[serde(other)]
+  Unknown,
 }
 
 /// Where a line about a change the server reports stands, and whom it names (issue #818).
@@ -666,7 +689,9 @@ pub trait LocalStore {
     None
   }
   /// The oldest or newest server message ID stored in `conversation`: the cursor of a catch-up, of
-  /// older history and of the read position. Asked on every catch-up of every conversation, so a
+  /// older history and of the read position. Placeholders don't count (issue #888): their IDs are
+  /// the server's unverified word, and one dated far ahead would move the cursor past messages
+  /// never fetched. Asked on every catch-up of every conversation, so a
   /// store with an index reads only the message at that end; the default scans.
   fn edge_server_id(
     &self,
@@ -676,6 +701,7 @@ pub trait LocalStore {
     let server_ids = self
       .messages(conversation, MessageFilter::All)?
       .into_iter()
+      .filter(|message| message.maybe_unreadable.is_none())
       .filter_map(|message| message.maybe_server_id);
     Ok(match edge {
       MessageEdge::Oldest => server_ids.min(),
@@ -1211,7 +1237,7 @@ pub(crate) mod tests {
     media_messages_are_paged_from_a_message_outwards(store);
     admin_joins_show_only_as_lines_from_commits(store);
     server_changes_show_only_as_lines(store);
-    edge_server_ids_skip_lines_and_pending_messages(store);
+    edge_server_ids_skip_lines_pending_messages_and_placeholders(store);
     prefixes_list_only_their_keys(store);
     a_place_holds_its_message_and_lines_and_pending_ones_their_own(store);
   }
@@ -1276,7 +1302,7 @@ pub(crate) mod tests {
     store.delete(Table::ReadReceipts, "7/c").unwrap();
   }
 
-  fn edge_server_ids_skip_lines_and_pending_messages(store: &impl LocalStore) {
+  fn edge_server_ids_skip_lines_pending_messages_and_placeholders(store: &impl LocalStore) {
     let conversation = id(41);
     assert_eq!(
       store.edge_server_id(conversation, MessageEdge::Newest).unwrap(),
@@ -1296,11 +1322,21 @@ pub(crate) mod tests {
       line
     };
     let pending = message(conversation, 5, None, None, 9_000);
+    // Placeholders (issue #888) at both ends: their IDs are the server's unverified word, and one
+    // dated far ahead must not move the catch-up cursor past messages never fetched.
+    let placeholder_at = |client: u8, at: i64| {
+      let mut placeholder = message(conversation, client, Some(at), None, at * 10);
+      placeholder.content = MessageContent::Unknown;
+      placeholder.maybe_unreadable = Some(Unreadable::Waiting { since_ms: 0 });
+      placeholder
+    };
     for stored in [
       &line_at(1, 50),
+      &placeholder_at(6, 10),
       &message(conversation, 2, Some(100), None, 1_000),
       &message(conversation, 3, Some(300), None, 3_000),
       &line_at(4, 500),
+      &placeholder_at(7, 1_000_000),
       &pending,
     ] {
       store.upsert_message(stored).unwrap();
@@ -1640,6 +1676,7 @@ pub(crate) mod tests {
       is_pinned: false,
       maybe_verified_commit: None,
       maybe_server_change: None,
+      maybe_unreadable: None,
     }
   }
 

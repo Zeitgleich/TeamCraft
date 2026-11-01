@@ -583,6 +583,12 @@ final class AppModel {
     (try? await core().notifiedConversation(conversationId: conversationId)) ?? nil
   }
 
+  /// How far conversations waiting for message keys have caught up (issue #888); `nil` while none
+  /// waits.
+  func keyCatchUp() async -> KeyCatchUpItem? {
+    (try? await core().keyCatchUp()) ?? nil
+  }
+
   func messages(conversationId: String, limit: UInt32 = 200) async -> [MessageItem] {
     ((try? await core().messages(conversationId: conversationId, limit: limit)) ?? []).map {
       $0.namingDeletedAuthor()

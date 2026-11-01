@@ -24,9 +24,9 @@ use teamcraft_client_api::live::LiveSnapshot;
 use teamcraft_client_api::model::{
   Bookmark, BookmarkKind, Conversation, ConversationId, ConversationKind, CustomStatus, DeviceSetup,
   ImportedAuthorView, ImportedFrom, ImportedMark, JoinableSpace, MembershipIssue, Message, MessageKind,
-  PENDING_ID_BIT, PendingInvite, PresenceStatus, Reaction, SidebarCategory, Space, SpaceId, SpaceMember,
-  SpaceRoster, SystemEvent, ThreadId, ThreadSummary, TimestampMs, TypingNow, UnseenReactions, User, UserId,
-  hue_from_hex,
+  PENDING_ID_BIT, PendingInvite, Placeholder, PresenceStatus, Reaction, SidebarCategory, Space, SpaceId,
+  SpaceMember, SpaceRoster, SystemEvent, ThreadId, ThreadSummary, TimestampMs, TypingNow, UnseenReactions,
+  User, UserId, hue_from_hex,
 };
 use teamcraft_proto::{
   AttachmentId, ClientMessageId, ConversationKind as ConversationKindProto, ConversationResponse,
@@ -52,7 +52,7 @@ use crate::people_names::shown_name;
 use crate::records::{self, Draft};
 use crate::store::{
   BookmarkItem, ConversationEvent, LocalStore, MessageContent, MessageEdge, MessageFilter, StoredMessage,
-  Table,
+  Table, Unreadable,
 };
 
 /// Requests from the UI that need the server; the sync task drains and runs them.
@@ -676,7 +676,9 @@ impl<S: LocalStore> CoreChatBackend<S> {
       }
       if !is_deleted(message) {
         counts.messages += 1;
-        counts.maybe_last_activity = counts.maybe_last_activity.max(Some(message.sent_at_ms));
+        if message.maybe_unreadable.is_none() {
+          counts.maybe_last_activity = counts.maybe_last_activity.max(Some(message.sent_at_ms));
+        }
       }
       if is_unread(message) {
         counts.unread.messages = counts.unread.messages.saturating_add(1);
@@ -967,6 +969,11 @@ impl<S: LocalStore> CoreChatBackend<S> {
     // the import account adding people: they are part of the import.
     let maybe_importer = self.importer();
     move |message: &StoredMessage| {
+      // Not readable yet: it may turn out to be a reaction or an edit, so it counts once it is
+      // decrypted (issue #888).
+      if message.maybe_unreadable.is_some() {
+        return false;
+      }
       if crate::imported::trusted_origin(message, maybe_importer).is_some()
         || crate::imported::is_import_line(message, maybe_importer)
       {
@@ -1046,6 +1053,7 @@ impl<S: LocalStore> CoreChatBackend<S> {
       reply_count: u32::try_from(reply_count).unwrap_or(u32::MAX),
       maybe_thread: stored.maybe_thread_id,
       maybe_imported,
+      maybe_placeholder: stored.maybe_unreadable.map(placeholder_view),
     }
   }
 
@@ -1298,7 +1306,7 @@ impl<S: LocalStore> ChatBackend for CoreChatBackend<S> {
           .map_err(CoreError::from),
       )
       .iter()
-      .filter(|message| !is_deleted(message))
+      .filter(|message| !is_deleted(message) && message.maybe_unreadable.is_none())
       .map(|message| message.sent_at_ms)
       .max()
   }
@@ -1659,6 +1667,16 @@ impl<S: LocalStore> ChatBackend for CoreChatBackend<S> {
 
   fn is_waiting_for_device(&self, conversation: ConversationId) -> bool {
     crate::client::is_waiting_for_device(&self.store, conversation).unwrap_or(false)
+  }
+
+  fn key_catch_up(&self) -> Option<teamcraft_client_api::model::KeyCatchUp> {
+    self
+      .read(crate::client::key_catch_up(&self.store))
+      .map(|progress| teamcraft_client_api::model::KeyCatchUp {
+        caught_up: progress.caught_up,
+        total: progress.total,
+        waiting: progress.waiting.into_iter().collect(),
+      })
   }
 
   fn membership_issues(&self, conversation: ConversationId) -> Vec<MembershipIssue> {
@@ -2418,9 +2436,11 @@ impl<'a> Relations<'a> {
       if let MessageContent::Reaction { target, .. } = &message.content {
         reactions.entry(*target).or_default().push(message);
       }
+      // A placeholder (issue #888) may turn out to be no reply at all: counted once readable.
       if let Some(thread) = message.maybe_thread_id
         && !message.is_hidden()
         && !is_deleted(message)
+        && message.maybe_unreadable.is_none()
       {
         *replies.entry(thread).or_default() += 1;
       }
@@ -2606,6 +2626,16 @@ pub(crate) fn ui_message_id(message: &StoredMessage) -> MessageId {
     .unwrap_or_else(|_| unreachable!("positive by construction"))
 }
 
+/// What the apps show for a message this device can't read (issue #888).
+fn placeholder_view(unreadable: Unreadable) -> Placeholder {
+  match unreadable {
+    Unreadable::Waiting { .. } => Placeholder::Waiting,
+    Unreadable::Failed => Placeholder::Failed,
+    // A state of a newer version: not shown as a wait without end.
+    Unreadable::NotAvailable | Unreadable::Unknown => Placeholder::NotAvailable,
+  }
+}
+
 fn presence_status(state: PresenceState) -> PresenceStatus {
   match state {
     PresenceState::Online => PresenceStatus::Online,
@@ -2657,6 +2687,7 @@ mod tests {
       is_pinned: false,
       maybe_verified_commit: None,
       maybe_server_change: None,
+      maybe_unreadable: None,
     };
     let body = MessageContent::Text {
       body: "hello".into(),
@@ -2748,6 +2779,27 @@ mod tests {
       (backend, conversation)
     }
 
+    /// Issue #888: a placeholder in a thread shows there, but the root's reply count leaves it out
+    /// until it is decrypted (it may turn out to be a reaction or an edit).
+    #[test]
+    fn thread_reply_counts_leave_placeholders_out() {
+      let (backend, conversation, store) = feed_with_store(1);
+      let thread = ThreadId::from_snowflake(id::<MessageId>(101).snowflake());
+      let mut reply = stored(conversation, 2);
+      reply.maybe_thread_id = Some(thread);
+      let mut placeholder = stored(conversation, 3);
+      placeholder.maybe_thread_id = Some(thread);
+      placeholder.content = MessageContent::Unknown;
+      placeholder.maybe_unreadable = Some(Unreadable::Waiting { since_ms: 0 });
+      store.upsert_message(&reply).unwrap();
+      store.upsert_message(&placeholder).unwrap();
+
+      assert_eq!(backend.messages(conversation, 0, 10)[0].reply_count, 1);
+      let rows = backend.thread(conversation, thread);
+      assert_eq!(rows.len(), 3, "root, reply and the placeholder");
+      assert_eq!(rows[2].maybe_placeholder, Some(Placeholder::Waiting));
+    }
+
     fn feed_with_store(
       count: i64,
     ) -> (
@@ -2783,6 +2835,7 @@ mod tests {
         is_pinned: false,
         maybe_verified_commit: None,
         maybe_server_change: None,
+        maybe_unreadable: None,
       }
     }
 
@@ -3542,6 +3595,7 @@ mod tests {
         is_pinned: false,
         maybe_verified_commit: None,
         maybe_server_change: None,
+        maybe_unreadable: None,
       }
     }
   }
@@ -3755,6 +3809,7 @@ mod tests {
           is_pinned: false,
           maybe_verified_commit: None,
           maybe_server_change: None,
+          maybe_unreadable: None,
         })
         .unwrap();
     }
@@ -3846,6 +3901,7 @@ mod tests {
             is_pinned: false,
             maybe_verified_commit: Some(id(commit)),
             maybe_server_change: None,
+            maybe_unreadable: None,
           })
           .unwrap();
       }
@@ -3958,6 +4014,7 @@ mod tests {
               seen_until: id(at - 1),
               actor,
             }),
+            maybe_unreadable: None,
           })
           .unwrap();
       }

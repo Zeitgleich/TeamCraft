@@ -15,6 +15,12 @@ history-forward = Vor
 ## Seitenleiste
 catching-up = Wird nachgeladen…
 catching-up-detail = Nachrichten aus der Zeit, in der du weg warst, werden noch geladen.
+key-catch-up = Schlüssel für ältere Nachrichten werden geholt
+key-catch-up-detail = Nachrichten erscheinen, sobald eines deiner anderen Geräte oder ein Mitglied online ist.
+key-catch-up-progress = { $count ->
+    [one] { $caught_up } von { $count } Unterhaltung vollständig
+   *[other] { $caught_up } von { $count } Unterhaltungen vollständig
+  }
 
 ## Nachrichten
 badge-bot = BOT

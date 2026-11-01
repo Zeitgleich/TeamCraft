@@ -34,8 +34,8 @@ use crate::calls::{
   CallPreview, CameraFallback, JoinMedia, OrgBackgroundRule, OrgBackgrounds, PreviewCamera,
 };
 use crate::model::{
-  Conversation, ConversationId, CustomStatus, DeviceId, MembershipIssue, Message, MessageId, PresenceStatus,
-  Space, SpaceId, ThreadId, ThreadSummary, TimestampMs, User, UserId,
+  Conversation, ConversationId, CustomStatus, DeviceId, KeyCatchUp, MembershipIssue, Message, MessageId,
+  PresenceStatus, Space, SpaceId, ThreadId, ThreadSummary, TimestampMs, User, UserId,
 };
 use crate::privacy::{LastSeenVisibility, PrivacySettings};
 use crate::search::{ParsedQuery, SavedSearch, SearchHit, SearchResults};
@@ -333,6 +333,12 @@ pub trait ChatBackend {
   /// the user or a colleague to let it in; history the key bag holds is readable meanwhile.
   fn is_waiting_for_device(&self, _conversation: ConversationId) -> bool {
     false
+  }
+  /// How far the conversations with messages waiting for keys have caught up (a newly linked
+  /// device, issue #888); `None` while nothing waits. Backends without end-to-end encryption have
+  /// none.
+  fn key_catch_up(&self) -> Option<KeyCatchUp> {
+    None
   }
   /// Removals and leaves on their way or failed, people left in the encryption group (for admins)
   /// and a server refusing the group, for the conversation's banners.

@@ -32,6 +32,7 @@ mod key_packages;
 mod linking;
 mod member_device;
 mod messaging;
+mod missing_keys;
 mod notes_refound;
 mod notifications;
 mod org_backgrounds;
@@ -100,6 +101,7 @@ pub use messaging::FlushReport;
 pub(crate) use messaging::{REMOVED_SENDER_GRACE_MS, decrypt_content};
 #[cfg(feature = "ui")]
 pub(crate) use messaging::{apply_control, bookmarks_key};
+pub use missing_keys::{KeyCatchUp, key_catch_up};
 pub(crate) use notifications::registered_push_token;
 use openmls_rust_crypto::OpenMlsRustCrypto;
 pub use org_recovery::{SealedShare, recovery_request};
@@ -260,6 +262,16 @@ pub struct ClientSettings {
   /// more counts as given up (issue #415): the key pair is dropped and the device it registered is
   /// revoked. Not while the keys of a link wait to be enrolled.
   pub unfinished_enrollment_expiry: std::time::Duration,
+  /// How long a message waits for its key before it reads "not available on this device" (issue
+  /// #888): never a wait without end. Until then a key may come whenever one of the user's devices
+  /// or a member comes online; one that comes later still fills it in.
+  pub missing_key_give_up: std::time::Duration,
+  /// Placeholders of messages that failed to decrypt kept per conversation; beyond it such
+  /// messages are dropped as before, so garbage from the server can't grow the store without end.
+  pub max_failed_placeholders: u32,
+  /// Parked messages kept per conversation for a retry; beyond it the oldest given up on ("not
+  /// available") are no longer kept (their rows stay).
+  pub max_parked_per_conversation: usize,
 }
 
 impl ClientSettings {
@@ -403,6 +415,11 @@ impl Default for ClientSettings {
       makes_thumbnails: true,
       // A day: a user who comes back to a failed setup soon picks up its registration.
       unfinished_enrollment_expiry: std::time::Duration::from_secs(24 * 60 * 60),
+      // Three days: a long weekend for the user's other devices and the members' to come online.
+      missing_key_give_up: std::time::Duration::from_secs(3 * 24 * 60 * 60),
+      max_failed_placeholders: 200,
+      // The history of a busy channel on a newly linked device fits.
+      max_parked_per_conversation: 20_000,
     }
   }
 }

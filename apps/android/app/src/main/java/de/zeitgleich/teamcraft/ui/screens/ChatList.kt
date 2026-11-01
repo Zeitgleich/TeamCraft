@@ -946,6 +946,13 @@ private fun previewText(preview: ChatPreview): String {
     is PreviewContent.Text -> content.text
     PreviewContent.Deleted -> stringResource(R.string.chat_preview_deleted)
     PreviewContent.Event -> stringResource(R.string.chat_preview_event)
+    is PreviewContent.Placeholder -> stringResource(
+      when (content.state) {
+        "waiting" -> R.string.message_placeholder_waiting
+        "failed" -> R.string.message_placeholder_failed
+        else -> R.string.message_placeholder_not_available
+      },
+    )
   }
   return when (val sender = preview.sender) {
     PreviewSender.None -> body

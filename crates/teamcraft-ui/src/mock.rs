@@ -845,6 +845,7 @@ impl ChatBackend for MockBackend {
       reply_count: 0,
       maybe_thread,
       maybe_imported: None,
+      maybe_placeholder: None,
     };
     match maybe_thread {
       Some(thread) => {
@@ -1192,6 +1193,7 @@ impl State {
         reply_count: 0,
         maybe_thread: None,
         maybe_imported: None,
+        maybe_placeholder: None,
       };
       if matches!(message.kind, MessageKind::User) {
         for _ in 0..rng.below(3) {
@@ -1235,6 +1237,7 @@ impl State {
               reply_count: 0,
               maybe_thread: Some(thread_id_of(id)),
               maybe_imported: None,
+              maybe_placeholder: None,
             });
           }
         }
@@ -1303,6 +1306,7 @@ fn log_line(conversation: ConversationId, index: usize, total: usize, now: Times
     reply_count: 0,
     maybe_thread: None,
     maybe_imported: None,
+    maybe_placeholder: None,
   }
 }
 

@@ -363,3 +363,26 @@
   font: var(--text-xs) / 16px var(--font-ui);
 }
 
+
+/* A message this device can't read yet (issue #888): a normal bubble, its line muted, with a
+   clock while its key may still come. No animation: rows can wait for days, and an endless one
+   would keep the idle app drawing (robustness.md, idle CPU). It fills in place when the key
+   arrives. */
+.msg-placeholder .placeholder-text {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--text-muted);
+  font-style: italic;
+}
+
+.msg-placeholder .placeholder-icon {
+  display: inline-flex;
+  flex: none;
+  opacity: 0.7;
+}
+
+.msg-placeholder .placeholder-icon svg {
+  width: 14px;
+  height: 14px;
+}

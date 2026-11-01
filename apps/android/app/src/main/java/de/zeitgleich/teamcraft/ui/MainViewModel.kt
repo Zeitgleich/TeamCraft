@@ -65,6 +65,7 @@ import uniffi.teamcraft_ffi.LeaveChoice
 import uniffi.teamcraft_ffi.LinkPlatform
 import uniffi.teamcraft_ffi.LinkRequestItem
 import uniffi.teamcraft_ffi.LoginBrand
+import uniffi.teamcraft_ffi.KeyCatchUpItem
 import uniffi.teamcraft_ffi.MessageItem
 import uniffi.teamcraft_ffi.NotificationContent
 import uniffi.teamcraft_ffi.NotifiedConversation
@@ -501,6 +502,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
    */
   suspend fun notifiedConversation(conversationId: String): NotifiedConversation? =
     read { notifiedConversation(conversationId) }
+
+  /** How far conversations waiting for message keys have caught up (issue #888); `null` while none waits. */
+  suspend fun keyCatchUp(): KeyCatchUpItem? = read { keyCatchUp() }
 
   suspend fun messages(conversationId: String): List<MessageItem> =
     read { messages(conversationId, MESSAGE_PAGE.toUInt()) }?.map(::namedAuthor) ?: emptyList()
