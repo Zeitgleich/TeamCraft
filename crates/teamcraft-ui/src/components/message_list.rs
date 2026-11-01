@@ -13,7 +13,7 @@ use wasm_bindgen::JsCast;
 use wasm_bindgen::closure::Closure;
 
 use crate::channel_access::ChannelAccess;
-use crate::clock::{format_date, now_ms};
+use crate::clock::{format_date, local_day, now_ms};
 use crate::components::date_jump::{DateJumpMenu, DateJumpPopover, DatePill};
 use crate::components::empty_state::{EmptyAction, EmptyState};
 use crate::components::icons::{Icon, IconName};
@@ -22,7 +22,7 @@ use crate::components::message_toolbar::{MessageToolbar, ToolbarHost};
 use crate::components::skeleton::MessageSkeleton;
 use crate::feed_motion::{FeedMotion, Shown, newest_confirmed};
 use crate::i18n::{I18n, use_i18n};
-use crate::model::{ConversationId, ConversationKind, Message, as_chat_message};
+use crate::model::{ConversationId, ConversationKind, Message, TimestampMs, as_chat_message};
 use crate::reactive::SetIfAlive;
 use crate::state::{AppState, Overlay, use_app_state};
 use crate::unread_divider::{DividerEvent, DwellClock, ReadMarkerGate};
@@ -45,6 +45,12 @@ const KEY_SCROLL_MS: i64 = 1_000;
 const ALIGN_PASSES: u8 = 6;
 /// How long the floating day stays after scrolling stops.
 const FLOATING_DAY_LINGER: Duration = Duration::from_millis(1_000);
+/// Where the pinned day's pill sits below the top of the feed (`.floating-day`, top padding).
+const PINNED_DAY_TOP_PX: f64 = 8.0;
+/// Where a day divider's pill sits in its row (`.date-divider`, top padding).
+const DIVIDER_PILL_TOP_PX: f64 = 14.0;
+/// The pinned pill's height until it was measured.
+const ESTIMATED_PILL_HEIGHT_PX: f64 = 22.0;
 /// Space kept above the "New messages" divider when a conversation opens there.
 const DIVIDER_CONTEXT_PX: f64 = 48.0;
 /// Heights differing by less than this are treated as equal, which ends the measure loop.
@@ -122,6 +128,31 @@ pub fn compute_window(heights: &[f32], scroll_top: f64, viewport: f64) -> Window
     total,
     first_visible: first_visible.unwrap_or(heights.len().saturating_sub(1)),
   }
+}
+
+/// A day that begins among the rows around the viewport: the top of its row in the feed and the
+/// time of its first message.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct DayStart {
+  pub top: f64,
+  pub sent_at: TimestampMs,
+}
+
+/// The day pinned over the feed at `scroll_top` and how far up the next day's divider pushes it
+/// (#1046), like the section headers of iOS. A day becomes the pinned one once its divider's pill
+/// has reached the pinned pill's place, so the two never show side by side; the divider below it
+/// keeps a gap of [`PINNED_DAY_TOP_PX`] while it pushes the old one out. `None` above the first
+/// day, whose own divider is still in view. `days` are in feed order and start with the day of
+/// the row above the viewport.
+pub fn pinned_day(days: &[DayStart], scroll_top: f64, pill_height: f64) -> Option<(TimestampMs, f64)> {
+  // A divider row starting above this line has its pill at or above the pinned one.
+  let slot = scroll_top + PINNED_DAY_TOP_PX - DIVIDER_PILL_TOP_PX;
+  let current = days.iter().take_while(|day| day.top <= slot).last()?;
+  let push = days.iter().find(|day| day.top > slot).map_or(0.0, |next| {
+    let divider_pill = next.top + DIVIDER_PILL_TOP_PX - scroll_top;
+    (divider_pill - 2.0 * PINNED_DAY_TOP_PX - pill_height).min(0.0)
+  });
+  Some((current.sent_at, push))
 }
 
 /// The rows to have loaded around `window`: [`PREFETCH_VIEWPORTS`] viewport heights above its first
@@ -449,17 +480,41 @@ pub fn MessageList(
       }
     });
   });
-  // While reading older messages, the day of the top message floats over the feed.
-  let floating_day = Memo::new(move |_| {
-    if stick_to_bottom.get() || is_log {
+  // While reading older messages, the day at the top stays pinned over the feed (#1046). Its
+  // place comes from the row heights the window was computed from: no layout reads per frame.
+  let days = Memo::new(move |_| {
+    layout_rev.track();
+    let window = window.get();
+    let start = window.first_visible.saturating_sub(1);
+    let messages =
+      state.read(|backend| backend.messages(conversation, start, window.end.saturating_sub(start)));
+    heights.with_value(|heights| day_starts(&messages, start, heights, &window))
+  });
+  let pill_height = RwSignal::new(ESTIMATED_PILL_HEIGHT_PX);
+  let pinned = Memo::new(move |_| {
+    if stick_to_bottom.get() {
       return None;
     }
-    let first = window.get().first_visible;
-    let locale = i18n.locale().tag();
-    state
-      .read(|backend| backend.messages(conversation, first, 1))
-      .first()
-      .map(|message| format_date(message.sent_at, locale))
+    days.with(|days| pinned_day(days, scroll_top.get(), pill_height.get()))
+  });
+  // Separate, so the label is only formatted again when the day changes, not on every push.
+  let pinned_at = Memo::new(move |_| pinned.get().map(|(sent_at, _)| sent_at));
+  let pinned_label = Memo::new(move |_| {
+    pinned_at
+      .get()
+      .map(|sent_at| format_date(sent_at, i18n.locale().tag()))
+  });
+  let pinned_push = move || pinned.get().map_or(0.0, |(_, push)| push);
+  let pinned_pill = NodeRef::<html::Div>::new();
+  // Measured once per day, after the new label was rendered (it wraps differently per language).
+  Effect::new(move |_| {
+    pinned_label.track();
+    if let Some(element) = pinned_pill.get_untracked() {
+      let height = element.get_bounding_client_rect().height();
+      if height > 0.0 && (height - pill_height.get_untracked()).abs() > f64::from(MEASURE_EPSILON) {
+        pill_height.set(height);
+      }
+    }
   });
   // The day pills open one menu per feed; the floating one fades out while the feed rests.
   let date_menu = DateJumpMenu(RwSignal::new(None));
@@ -580,10 +635,16 @@ pub fn MessageList(
   view! {
     <div class="message-list-wrap">
       {move || {
-        floating_day.get().map(|label| {
+        pinned_label.get().map(|label| {
           view! {
             <div class="floating-day" class:is-idle=move || !is_scrolling.get() && date_menu.0.get().is_none()>
-              <DatePill label=label />
+              <div
+                class="floating-day-pill"
+                node_ref=pinned_pill
+                style:transform=move || format!("translateY({}px)", pinned_push())
+              >
+                <DatePill label=label />
+              </div>
             </div>
           }
         })
@@ -1082,6 +1143,44 @@ fn RowSlot(
   }
 }
 
+/// The days that begin among `messages` (rows from `start` on), each with the top of its row, for
+/// [`pinned_day`]. The first message always opens one: the day carried in from above.
+fn day_starts(messages: &[Message], start: usize, heights: &[f32], window: &Window) -> Vec<DayStart> {
+  let mut days = Vec::new();
+  let mut maybe_prev_day = None;
+  for (offset, message) in messages.iter().enumerate() {
+    let day = local_day(message.sent_at);
+    if maybe_prev_day != Some(day) {
+      days.push(DayStart {
+        top: row_top(heights, window, start + offset),
+        sent_at: message.sent_at,
+      });
+    }
+    maybe_prev_day = Some(day);
+  }
+  days
+}
+
+/// The top of row `index` in the feed, counted from the window's first row; the rows around the
+/// viewport are few, so this walks only a handful of heights.
+fn row_top(heights: &[f32], window: &Window, index: usize) -> f64 {
+  let first = window.first.min(heights.len());
+  let index = index.min(heights.len());
+  if index >= first {
+    window.pad_top
+      + heights[first..index]
+        .iter()
+        .map(|height| f64::from(*height))
+        .sum::<f64>()
+  } else {
+    window.pad_top
+      - heights[index..first]
+        .iter()
+        .map(|height| f64::from(*height))
+        .sum::<f64>()
+  }
+}
+
 /// The newest message the server confirmed, from the end of the conversation.
 fn newest_confirmed_of(
   state: crate::state::AppState,
@@ -1239,6 +1338,57 @@ mod tests {
       let window = compute_window(&heights, 100_000.0, 800.0);
       let range = prefetch_range(&heights, &window, 800.0);
       assert!(window.first - range.start > 140, "{range:?} for {window:?}");
+    }
+  }
+
+  mod pinned {
+    use super::*;
+
+    const PILL: f64 = 22.0;
+    const FIRST: DayStart = DayStart { top: 0.0, sent_at: 1 };
+    const SECOND: DayStart = DayStart {
+      top: 1_000.0,
+      sent_at: 2,
+    };
+
+    #[test]
+    fn the_day_at_the_top_stays_in_place() {
+      assert_eq!(pinned_day(&[FIRST, SECOND], 500.0, PILL), Some((1, 0.0)));
+    }
+
+    #[test]
+    fn the_next_divider_pushes_it_up() {
+      // The divider's pill is 34 px below the top: 4 px into the pinned pill's place and gap.
+      assert_eq!(pinned_day(&[FIRST, SECOND], 980.0, PILL), Some((1, -4.0)));
+    }
+
+    #[test]
+    fn it_is_out_of_sight_when_the_next_day_takes_over() {
+      let swap = SECOND.top + DIVIDER_PILL_TOP_PX - PINNED_DAY_TOP_PX;
+      let (day, push) = pinned_day(&[FIRST, SECOND], swap - 0.1, PILL).expect("a day");
+      assert_eq!(day, 1);
+      assert!(PINNED_DAY_TOP_PX + push + PILL < 0.2, "still shows {push}");
+      assert_eq!(pinned_day(&[FIRST, SECOND], swap, PILL), Some((2, 0.0)));
+    }
+
+    #[test]
+    fn nothing_is_pinned_above_the_first_day() {
+      assert_eq!(pinned_day(&[FIRST], 0.0, PILL), None);
+      assert_eq!(pinned_day(&[], 300.0, PILL), None);
+    }
+
+    #[test]
+    fn row_tops_count_from_the_window_both_ways() {
+      let heights = vec![50.0_f32; 100];
+      let window = compute_window(&heights, 2_000.0, 600.0);
+      for index in [
+        0,
+        window.first.saturating_sub(1),
+        window.first,
+        window.first_visible + 3,
+      ] {
+        assert_eq!(row_top(&heights, &window, index), index as f64 * 50.0);
+      }
     }
   }
 
