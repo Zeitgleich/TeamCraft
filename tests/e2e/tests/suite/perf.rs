@@ -203,6 +203,9 @@ struct Report {
   return_long_task_total_ms: f64,
   return_longest_task_ms: f64,
   seconds_reload_to_channel_list: f64,
+  /// The reload's gateway connection from the socket until caught up, as the client measured it
+  /// (`gateway connection caught up`, issue #714); -1 when the client logged none.
+  reload_sync_ms: f64,
   /// From the channel list after the reload until the browser went quiet; the switches and the
   /// idle period are measured after that.
   seconds_reload_until_browser_settled: f64,
@@ -597,11 +600,21 @@ async fn measure(page: &Page, seeded: &Seeded, profile: &str, scale: Scale) -> R
   report.seconds_return_until_browser_settled = wait_until_browser_settled(profile).await.as_secs_f64();
 
   // Cold start of a signed-in client: reload until the channel list is back.
+  let lines_before_reload = catch_up_log.lock().unwrap().len();
   let started = Instant::now();
   page.evaluate("location.reload()").await.unwrap();
   wait_long_for_text(page, &seeded.first_space_channels[1].0).await;
   report.seconds_reload_to_channel_list = started.elapsed().as_secs_f64();
   wait_until_done(page).await;
+  report.reload_sync_ms = catch_up_log
+    .lock()
+    .unwrap()
+    .get(lines_before_reload..)
+    .unwrap_or_default()
+    .iter()
+    .rev()
+    .find_map(|(_, line)| caught_up_ms(line))
+    .unwrap_or(-1.0);
   report.seconds_reload_until_browser_settled = wait_until_browser_settled(profile).await.as_secs_f64();
   settle(page).await;
   report.pss_mib_after_start = mib(ProcessUsage::of_matching(profile).pss_bytes);
@@ -708,11 +721,12 @@ async fn busy_switches(page: &Page, channels: &[(String, String)]) -> Vec<f64> {
 /// The client's console lines about the catch-up and the gateway (phase timings, lost
 /// connections), with the seconds since `since`.
 async fn watch_catch_up_log(page: &Page, since: Instant) -> Arc<Mutex<Vec<(f64, String)>>> {
-  const WATCHED: [&str; 4] = [
+  const WATCHED: [&str; 5] = [
     "catch-up",
     "full sync",
     "gateway connection lost",
     "gateway connected",
+    "gateway connection caught up",
   ];
   let lines = Arc::new(Mutex::new(Vec::new()));
   let sink = lines.clone();
@@ -736,6 +750,16 @@ async fn watch_catch_up_log(page: &Page, since: Instant) -> Arc<Mutex<Vec<(f64, 
     }
   });
   lines
+}
+
+/// The `total_ms` of a `gateway connection caught up` line.
+fn caught_up_ms(line: &str) -> Option<f64> {
+  if !line.contains("gateway connection caught up") {
+    return None;
+  }
+  let (_, rest) = line.split_once("total_ms=")?;
+  let digits: String = rest.chars().take_while(char::is_ascii_digit).collect();
+  digits.parse().ok()
 }
 
 fn mib(bytes: u64) -> f64 {
@@ -1193,6 +1217,7 @@ impl Report {
         "seconds_reload_to_channel_list",
         self.seconds_reload_to_channel_list,
       ),
+      ("reload_sync_ms", self.reload_sync_ms),
       ("pss_mib_empty_browser", self.pss_mib_empty_browser),
       (
         "empty_browser_idle_cpu_percent",
@@ -1293,6 +1318,12 @@ impl Report {
   /// shared); the budgets in robustness.md are the targets.
   fn assert_budgets(&self) {
     assert!(self.seconds_reload_to_channel_list < 15.0, "{self:#?}");
+    // Issue #714: synced within 300 ms of opening; the bound leaves room for a shared machine.
+    assert!(
+      self.reload_sync_ms >= 0.0,
+      "the client logged no caught-up connection after the reload: {self:#?}"
+    );
+    assert!(self.reload_sync_ms < 3000.0, "{self:#?}");
     assert!(self.switch_ms_p95 < 1500.0, "{self:#?}");
     assert!(
       self.long_channel_rows_in_dom < 300.0,

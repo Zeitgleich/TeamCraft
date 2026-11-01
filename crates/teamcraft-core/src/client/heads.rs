@@ -13,6 +13,7 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use serde::{Deserialize, Serialize};
+use teamcraft_crypto::mls::StoredGroupState;
 use teamcraft_proto::{
   ConversationHead, ConversationId, MessageId, MlsMessageId, SpaceId, SyncHeadsResponse, UserId,
 };
@@ -171,12 +172,15 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     };
     let is_unchanged = seen.maybe_content.as_ref() == Some(&content_head(fresh))
       && seen.maybe_members_digest.as_deref() == Some(fresh.members_digest.as_str());
+    // The group's stored state, not the group: loading every group costs more than the rest of an
+    // unchanged sync.
+    let maybe_group = self.stored_group_state(conversation)?;
     if !is_unchanged
       || parked.contains(&conversation)
-      || !self.has_group(conversation)?
+      || maybe_group.is_none()
+      || maybe_group == Some(StoredGroupState::PendingCommit)
       || !self.is_history_loaded(conversation)?
       || self.is_unfinished_dm_founding(conversation)?
-      || self.has_pending_commit(conversation)?
       || self.has_requested_rejoin(conversation)?
       || self.is_marked_for_resync(conversation, ResyncPart::Content)?
       || self.unloaded_import(conversation)?.is_some()

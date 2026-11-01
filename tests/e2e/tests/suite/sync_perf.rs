@@ -19,7 +19,8 @@ use teamcraft_e2e::scenario::{channel_with, space_with};
 use teamcraft_e2e::{Peer, Stack};
 use teamcraft_proto::{ConversationId, GatewayServerMessage};
 
-/// Spaces and channels per space Alice shares with Carol.
+/// Spaces and channels per space Alice shares with Carol; `SYNC_PERF_SPACES` and
+/// `SYNC_PERF_CHANNELS_PER_SPACE` measure a larger workspace (docs/performance.md).
 const SPACES: usize = 3;
 const CHANNELS_PER_SPACE: usize = 8;
 /// Channels that get a message while Carol is away in the second scenario.
@@ -37,6 +38,8 @@ const MAX_UNCHANGED_REQUESTS: u64 = 18;
 async fn coming_back_costs_what_changed_not_the_workspace() {
   let Some(stack) = Stack::builder()
     .with_env("TEAMCRAFT_LOGGING__FILTER", "info,tower_http=debug")
+    // Seeding a large workspace is many requests in a short time.
+    .with_env("TEAMCRAFT_SECURITY__RATE_LIMITS__IS_ENABLED", "false")
     .start()
     .await
   else {
@@ -46,7 +49,9 @@ async fn coming_back_costs_what_changed_not_the_workspace() {
   let mut carol = Peer::enroll(&stack, "carol").await;
   let mut channels = Vec::new();
   let seeding = Instant::now();
-  for space_index in 0..SPACES {
+  let spaces = scale("SYNC_PERF_SPACES", SPACES);
+  let channels_per_space = scale("SYNC_PERF_CHANNELS_PER_SPACE", CHANNELS_PER_SPACE);
+  for space_index in 0..spaces {
     let space = space_with(
       &stack,
       &alice,
@@ -54,9 +59,12 @@ async fn coming_back_costs_what_changed_not_the_workspace() {
       &[(&carol, "member")],
     )
     .await;
-    for channel_index in 0..CHANNELS_PER_SPACE {
+    for channel_index in 0..channels_per_space {
       let name = format!("channel-{space_index}-{channel_index}");
       channels.push(channel_with(&mut alice, space, &name, &mut [&mut carol]).await);
+      // A large workspace takes longer to seed than the server waits for a heartbeat.
+      alice.heartbeat().await;
+      carol.heartbeat().await;
     }
   }
   for (index, channel) in channels.iter().enumerate() {
@@ -122,6 +130,13 @@ async fn coming_back_costs_what_changed_not_the_workspace() {
   }
   drop(relay);
   stack.stop().await;
+}
+
+fn scale(variable: &str, default: usize) -> usize {
+  std::env::var(variable)
+    .ok()
+    .and_then(|value| value.parse().ok())
+    .unwrap_or(default)
 }
 
 /// The three ways of coming back, measured one after the other.

@@ -171,8 +171,10 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     // DMs this device created whose group setup was cut short (issue #228).
     let mut maybe_first_error = self.repair_dm_setups().await.err();
     for response in self.cached_conversations()?.into_values() {
+      // The groups' stored state, not the groups: a sync checks every conversation (issue #714).
+      let is_group_stored = self.stored_group_state(response.id)?.is_some();
       if response.maybe_my_membership.is_some()
-        && !self.has_group(response.id)?
+        && !is_group_stored
         && self.has_requested_rejoin(response.id)?
       {
         // A welcome this device opened but couldn't join: it asked to be added back, and asks
@@ -195,8 +197,8 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
         if response.kind == ConversationKind::Meeting
           && response.maybe_my_membership.is_some()
           && !response.is_archived
-          && self.mls_epoch(response.id)? == Some(0)
           && !self.has_published_meeting_group_info(response.id)?
+          && self.mls_epoch(response.id)? == Some(0)
         {
           // A group of one (an instant meeting) carries no commit with its information yet; the
           // organizer's other devices need it to join. Asked for once: after the server has it,
@@ -217,7 +219,8 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
         }
         if response.maybe_my_membership.is_none()
           || response.is_archived
-          || self.has_group(response.id)?
+          // Again: the meeting's group may have just been joined above.
+          || self.stored_group_state(response.id)?.is_some()
           || self.has_dm_setup(response.id)?
         {
           continue;
@@ -235,11 +238,14 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       if !is_channel || response.maybe_my_membership.is_none() || response.is_archived {
         continue;
       }
-      if self.has_group(response.id)? {
-        self.forget_self_add(response.id)?;
+      let self_add = self.self_add_state(response.id)?;
+      if is_group_stored {
+        if self_add != SelfAddState::None {
+          self.forget_self_add(response.id)?;
+        }
         continue;
       }
-      match self.self_add_state(response.id)? {
+      match self_add {
         // `retry_due_self_adds` posts it again when no member let this device in.
         SelfAddState::Noted => continue,
         // An earlier version posted it once and never again (issue #907): due now, without a

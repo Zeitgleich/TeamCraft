@@ -3,9 +3,9 @@
 use std::collections::BTreeSet;
 
 use openmls::prelude::{
-  GroupEpoch, GroupId, KeyPackage, LeafNodeIndex, MlsGroup, MlsGroupJoinConfig, MlsMessageBodyIn,
-  MlsMessageIn, MlsMessageOut, ProcessedMessageContent, Proposal, Sender, StagedCommit, StagedWelcome,
-  WelcomeError,
+  GroupEpoch, GroupId, KeyPackage, LeafNodeIndex, MlsGroup, MlsGroupJoinConfig, MlsGroupState,
+  MlsMessageBodyIn, MlsMessageIn, MlsMessageOut, ProcessedMessageContent, Proposal, Sender, StagedCommit,
+  StagedWelcome, WelcomeError,
 };
 use openmls_traits::OpenMlsProvider;
 use openmls_traits::storage::StorageProvider as _;
@@ -47,6 +47,17 @@ pub struct ConversationGroup {
   /// Which users signed changes touched recently, and since when this device knows the group.
   history: ChangeHistory,
   maybe_pending: Option<PendingCommit>,
+}
+
+/// What the provider's storage says about a conversation's group without loading it
+/// ([`ConversationGroup::stored_state`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StoredGroupState {
+  Operational,
+  /// This device's commit waits for the server's answer.
+  PendingCommit,
+  /// This device was removed from the group.
+  Inactive,
 }
 
 /// This device's commit that waits for the server's answer, and what it does once merged. Persist
@@ -301,6 +312,24 @@ impl ConversationGroup {
         loaded.maybe_pending = maybe_pending;
       }
       loaded
+    }))
+  }
+
+  /// The state of the conversation's stored group, `None` without one: one small storage entry
+  /// instead of the whole group, for checks over many conversations (issue #714). The provider
+  /// writes a group's entries together, so a stored state means [`Self::load`] finds the group.
+  pub fn stored_state(
+    provider: &impl OpenMlsProvider,
+    conversation_id: ConversationId,
+  ) -> Result<Option<StoredGroupState>, MlsError> {
+    let maybe_state: Option<MlsGroupState> = provider
+      .storage()
+      .group_state(&group_id(conversation_id))
+      .map_err(|error| MlsError::openmls("reading the group state", error))?;
+    Ok(maybe_state.map(|state| match state {
+      MlsGroupState::PendingCommit(_) => StoredGroupState::PendingCommit,
+      MlsGroupState::Operational => StoredGroupState::Operational,
+      MlsGroupState::Inactive => StoredGroupState::Inactive,
     }))
   }
 

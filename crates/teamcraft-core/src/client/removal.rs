@@ -7,6 +7,9 @@
 //! gets too old to be committed; a refused server step is retried with a growing delay and shown
 //! as failed after `removal_attempts`.
 
+use std::collections::BTreeSet;
+
+use serde::{Deserialize, Serialize};
 use teamcraft_crypto::membership::MembershipAction;
 use teamcraft_crypto::mls::MAX_CHANGE_AGE_EPOCHS;
 use teamcraft_proto::{Base64Bytes, ConversationId, DeviceId, MlsMessageKind, PostMlsMessageRequest, UserId};
@@ -23,6 +26,16 @@ use crate::error::CoreError;
 use crate::records;
 use crate::retry::RetryPolicy;
 use crate::store::{ConversationEvent, LocalStore, MessageContent, Table};
+
+/// Which groups [`Client::finish_listed_revocations`] checked against which version of the own
+/// device list.
+const REVOCATIONS_CHECKED_KEY: &str = "revocations_checked";
+
+#[derive(Debug, Default, Serialize, Deserialize)]
+struct RevocationsChecked {
+  list_sequence: u64,
+  conversations: BTreeSet<ConversationId>,
+}
 
 impl<A: ServerApi, S: LocalStore> Client<A, S> {
   /// Removes `user` from the MLS group, then on the server. The epoch key of the removal commit
@@ -785,7 +798,9 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
   }
 
   /// After a full resync (the gateway events may be gone): finishes every revocation the signed
-  /// device list names whose device is still in one of this device's groups.
+  /// device list names whose device is still in one of this device's groups. Each group is looked
+  /// at once per version of the list (issue #714): a revoked device is never added again, so a
+  /// group checked against this list stays clean, and only groups joined since are read.
   pub(crate) async fn finish_listed_revocations(&mut self) -> Result<(), CoreError> {
     let me = self.account.user_id;
     let Some(list) = self
@@ -794,9 +809,28 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     else {
       return Ok(());
     };
-    let mut revoked = std::collections::BTreeSet::new();
-    for conversation in self.cached_conversations()?.into_keys() {
-      if !self.has_group(conversation)? {
+    if !list.has_revoked() {
+      return Ok(());
+    }
+    let mut checked: RevocationsChecked =
+      records::get_json(&self.store, Table::SyncState, REVOCATIONS_CHECKED_KEY)?.unwrap_or_default();
+    if checked.list_sequence != list.sequence() {
+      checked = RevocationsChecked {
+        list_sequence: list.sequence(),
+        conversations: BTreeSet::new(),
+      };
+    }
+    let conversations: BTreeSet<ConversationId> = self.cached_conversations()?.into_keys().collect();
+    checked
+      .conversations
+      .retain(|conversation| conversations.contains(conversation));
+    let unchecked: Vec<ConversationId> = conversations
+      .difference(&checked.conversations)
+      .copied()
+      .collect();
+    let mut revoked = BTreeSet::new();
+    for conversation in unchecked {
+      if self.stored_group_state(conversation)?.is_none() {
         continue;
       }
       for member in self.group_or_error(conversation)?.members()? {
@@ -808,11 +842,13 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
           revoked.insert(device);
         }
       }
+      checked.conversations.insert(conversation);
     }
     for device in revoked {
       self.finish_listed_revocation(device).await?;
     }
-    Ok(())
+    // Noted only once every revocation found is finished or queued: a failure reads them again.
+    records::put_json(&self.store, Table::SyncState, REVOCATIONS_CHECKED_KEY, &checked)
   }
 
   /// Removes `device`, which the verified list names revoked, from the groups this device shares

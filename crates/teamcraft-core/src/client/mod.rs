@@ -113,7 +113,7 @@ pub use self_add::is_waiting_for_admission;
 pub use sources::HistoryScan;
 pub use sync_trace::SyncPhase;
 use teamcraft_crypto::membership::ChangeId;
-use teamcraft_crypto::mls::{ChangeHistory, ConversationGroup, PendingCommit};
+use teamcraft_crypto::mls::{ChangeHistory, ConversationGroup, PendingCommit, StoredGroupState};
 use teamcraft_proto::{Base64Bytes, ConversationId, ConversationResponse, DeviceActivity, UserId};
 
 use crate::api::ServerApi;
@@ -292,6 +292,9 @@ pub struct Client<A, S> {
   saved_mls: mls_storage::SavedMlsStorage,
   account: Account,
   groups: HashMap<ConversationId, ConversationGroup>,
+  /// Groups loaded from the provider's storage since the client opened: a sync of an unchanged
+  /// workspace loads none (issue #714, `sync_heads` tests).
+  group_loads: u64,
   sync: SyncState,
   typing: crate::typing::TypingState,
   /// Refusals of earlier user actions found by a background flush, for the host to show
@@ -450,6 +453,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       saved_mls,
       account,
       groups: HashMap::new(),
+      group_loads: 0,
       sync,
       typing: Default::default(),
       background_failures: Vec::new(),
@@ -530,6 +534,24 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     Ok(self.group(conversation)?.is_some())
   }
 
+  /// How many MLS groups this client loaded from its storage since it opened. For tests.
+  #[doc(hidden)]
+  pub fn group_loads(&self) -> u64 {
+    self.group_loads
+  }
+
+  /// The state of the conversation's MLS group on this device without loading the group, `None`
+  /// without one: a check over every conversation stays cheap (issue #714).
+  pub(crate) fn stored_group_state(
+    &self,
+    conversation: ConversationId,
+  ) -> Result<Option<StoredGroupState>, CoreError> {
+    Ok(ConversationGroup::stored_state(
+      &self.provider,
+      convert::conversation(conversation),
+    )?)
+  }
+
   /// The epoch of the conversation's MLS group on this device; `None` without a group.
   pub fn mls_epoch(&mut self, conversation: ConversationId) -> Result<Option<u64>, CoreError> {
     Ok(self.group(conversation)?.map(|group| group.epoch()))
@@ -591,6 +613,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       )?
       .map(|bytes| PendingCommit::from_bytes(bytes.as_slice()))
       .transpose()?;
+      self.group_loads += 1;
       let maybe_group = ConversationGroup::load(
         &self.provider,
         convert::conversation(conversation),

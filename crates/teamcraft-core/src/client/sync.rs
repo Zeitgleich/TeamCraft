@@ -136,6 +136,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       ms = self.now_ms().saturating_sub(started_ms),
       "full sync: conversation list stored"
     );
+    self.trace_lap("conversation list");
     // Only what moved since the last sync (issue #714); everything when the server gave no heads.
     let parked = self.parked_conversations()?;
     let mut content_due = Vec::new();
@@ -157,6 +158,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       "full sync: reading what changed"
     );
     self.keep_listed_heads(conversations.iter().map(|conversation| conversation.id));
+    self.trace_lap("what is due");
     self.catch_up_conversations(&content_due, &members_due).await
   }
 
@@ -511,7 +513,16 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
   /// contact who left every shared conversation) stays cached for the names of old messages, but
   /// marked deactivated, so it is offered nowhere (issue #654).
   pub(crate) async fn refresh_user(&mut self, user: UserId) -> Result<(), CoreError> {
-    match self.api.user(user).await {
+    let read = self.api.user(user).await;
+    self.store_refreshed_user(user, read)
+  }
+
+  fn store_refreshed_user(
+    &mut self,
+    user: UserId,
+    read: Result<UserSummary, ApiError>,
+  ) -> Result<(), CoreError> {
+    match read {
       Ok(summary) => self.remember_user(&summary),
       Err(error) if error.is_not_found() => {
         let key = user.to_string();
@@ -528,7 +539,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
   }
 
   /// Cached people that neither a space member list (`listed`) nor a stored conversation member
-  /// list names are asked about one by one, at most [`MAX_UNLISTED_RECHECKS`] per sync and each
+  /// list names are asked about, all at once, at most [`MAX_UNLISTED_RECHECKS`] per sync and each
   /// at most once per [`UNLISTED_RECHECK_INTERVAL_MS`]: a deactivated account drops out of every
   /// list, and without this its old name stayed in the people lists forever (issue #654). A
   /// deactivated account is still asked about: it may be deleted later and then shows as "Deleted
@@ -538,28 +549,39 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     let now = self.now_ms();
     let mut rechecked: HashMap<UserId, i64> =
       records::get_json(&self.store, Table::SyncState, UNLISTED_RECHECKED_KEY)?.unwrap_or_default();
-    let member_lists: Vec<ListConversationMembersResponse> = records::list_json(&self.store, Table::Members)?;
-    let in_conversations: HashSet<UserId> = member_lists
-      .iter()
-      .flat_map(|list| list.members.iter().map(|member| member.user.id))
-      .collect();
     let cached: Vec<UserSummary> = records::list_json(&self.store, Table::Users)?;
-    let unlisted: Vec<UserId> = cached
+    let candidates: Vec<UserId> = cached
       .iter()
-      .filter(|user| !user.is_deleted && user.id != me)
+      .filter(|user| !user.is_deleted && user.id != me && !listed.contains(&user.id))
       .map(|user| user.id)
-      .filter(|user| !listed.contains(user) && !in_conversations.contains(user))
       .filter(|user| {
         rechecked
           .get(user)
           .is_none_or(|at| now.saturating_sub(*at) >= UNLISTED_RECHECK_INTERVAL_MS)
       })
+      .collect();
+    if candidates.is_empty() {
+      // Everyone is listed: the stored member lists aren't read (issue #714).
+      return Ok(());
+    }
+    let member_lists: Vec<ListConversationMembersResponse> = records::list_json(&self.store, Table::Members)?;
+    let in_conversations: HashSet<UserId> = member_lists
+      .iter()
+      .flat_map(|list| list.members.iter().map(|member| member.user.id))
+      .collect();
+    let unlisted: Vec<UserId> = candidates
+      .into_iter()
+      .filter(|user| !in_conversations.contains(user))
       .take(MAX_UNLISTED_RECHECKS)
       .collect();
     // Only people still cached are remembered, so the record stays as small as the cache.
-    rechecked.retain(|user, _| cached.iter().any(|known| known.id == *user));
-    for user in unlisted {
-      self.refresh_user(user).await?;
+    let cached_ids: HashSet<UserId> = cached.iter().map(|user| user.id).collect();
+    rechecked.retain(|user, _| cached_ids.contains(user));
+    // All at once: one round trip, not one per person (issue #714).
+    let api = &self.api;
+    let reads = join_all(unlisted.iter().map(|user| api.user(*user))).await;
+    for (user, read) in unlisted.into_iter().zip(reads) {
+      self.store_refreshed_user(user, read)?;
       rechecked.insert(user, now);
     }
     records::put_json(&self.store, Table::SyncState, UNLISTED_RECHECKED_KEY, &rechecked)

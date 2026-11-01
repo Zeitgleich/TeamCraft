@@ -912,6 +912,50 @@ The desktop and Android apps are measured against the same harness (`PERF_MOBILE
 session. Slack, Teams and Element were not measured: that needs their apps installed and accounts
 on their services.
 
+#### Coming back to 300 channels: no work per conversation (issue #714)
+
+The same test on a workspace like the one after an import: 10 spaces with 30 channels each
+(`SYNC_PERF_SPACES=10 SYNC_PERF_CHANNELS_PER_SPACE=30`, seeding takes about three minutes). Debug
+build, local machine, November 2026; "before" is `main` 454d92c with the same test.
+
+```sh
+E2E_REQUIRED=1 SYNC_PERF_SPACES=10 SYNC_PERF_CHANNELS_PER_SPACE=30 \
+  cargo test -p teamcraft-e2e --features e2e --test suite -- --nocapture sync_perf
+```
+
+| What, 300 channels                      | Requests | Before: local | Before: 30 ms RTT | After: local | After: 30 ms RTT | Budget   |
+|-----------------------------------------|----------|---------------|-------------------|--------------|------------------|----------|
+| Fresh session, unchanged workspace      | 16       | 314 ms        | 415 ms            | 155 ms       | 258 ms           | ≤ 300 ms |
+| Fresh session, three channels with news | 22       | 337 ms        | 468 ms            | 196 ms       | 319 ms           | -        |
+| Resume within the window                | 6        | 18 ms         | 80 ms             | 16 ms        | 81 ms            | ≤ 300 ms |
+
+The requests were already independent of the workspace (16 for 24 channels as for 300); the time
+was not. About 140 ms of it was local work with no request at all, and the phase trace showed it
+moving from step to step as each was fixed:
+
+- **Every MLS group was loaded to ask whether it exists.** A new client holds no group in memory;
+  the first step that asked `has_group` for every conversation (deciding what is due, then joining
+  missing groups, then the check for revoked devices) deserialized all 300 groups, about 0.45 ms
+  each in a debug build. These checks now read the group's state entry only
+  (`ConversationGroup::stored_state`: whether it exists and whether an own commit waits), and the
+  revocation check looks at each group once per version of the own device list, so after that
+  only groups joined since. `sync_heads::an_unchanged_workspace_loads_no_group_after_a_restart`
+  fails if a sync of an unchanged workspace loads any group again, at 2 channels as at 8.
+- **Unchanged conversation records were written again** at every fresh session; they are compared
+  first now. On the desktop's and the phones' SQLCipher file each was a write.
+- **People no list names** were asked about one after the other (up to 25 round trips, once a day
+  each), after reading every stored member list. They are asked at once now, and the member lists
+  are read only when somebody is left to ask.
+
+What is left at 300 channels, 30 ms away: socket and `hello` 33 ms, `ready` 35 ms, the first reads
+80 ms (the heads answer grows with the conversations: one row and one member digest each, about
+45 ms more than for 24 channels), local work about 60 ms (the device list check 15, joining
+missing groups 10, deciding what is due 9). Opening the store before the connection took about
+60 ms; it is outside the measured time and belongs to #778 (the stores loading lazily).
+
+`tests/e2e` `perf.rs` reads the same trace from the web client's console after the reload
+(`reload_sync_ms`) and fails above 3 s, a bound for the shared nightly machine.
+
 #### The MLS state per entry (issue #424)
 
 The MLS state of all groups was one record, rewritten after every change to any group: a catch-up
