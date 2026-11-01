@@ -67,6 +67,8 @@ struct ChatPreview: Equatable {
     case text(String)
     /// No text: a join or rename, or a deleted message (files carry their name as text).
     case noText
+    /// Not readable on this device yet (issue #888).
+    case placeholder(PlaceholderItem)
   }
 
   let sender: Sender
@@ -80,7 +82,7 @@ struct ChatPreview: Equatable {
 func chatPreview(_ message: MessageItem, myId: String, isOneToOne: Bool) -> ChatPreview {
   let text = oneLine(message.body)
   let sender: ChatPreview.Sender =
-    if text.isEmpty {
+    if text.isEmpty && message.maybePlaceholder == nil {
       .none
     } else if message.authorId == myId {
       .me
@@ -90,8 +92,13 @@ func chatPreview(_ message: MessageItem, myId: String, isOneToOne: Bool) -> Chat
       .other(message.authorName)
     }
   return ChatPreview(
-    sender: sender, content: text.isEmpty ? .noText : .text(text), sentDate: message.sentDate,
+    sender: sender, content: previewContent(message, text: text), sentDate: message.sentDate,
     messageId: message.id)
+}
+
+private func previewContent(_ message: MessageItem, text: String) -> ChatPreview.Content {
+  if let placeholder = message.maybePlaceholder { return .placeholder(placeholder) }
+  return text.isEmpty ? .noText : .text(text)
 }
 
 /// Text folded into one short line.

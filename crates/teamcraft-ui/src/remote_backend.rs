@@ -969,6 +969,13 @@ impl ChatBackend for RemoteChat {
     )
   }
 
+  fn key_catch_up(&self) -> Option<teamcraft_client_api::model::KeyCatchUp> {
+    match self.ask(ChatQuery::KeyCatchUp) {
+      Some(ChatAnswer::KeyCatchUp { maybe_progress }) => maybe_progress,
+      _ => None,
+    }
+  }
+
   fn membership_issues(
     &self,
     conversation: ConversationId,
@@ -2224,6 +2231,7 @@ mod tests {
           reply_count: 0,
           maybe_thread: None,
           maybe_imported: None,
+          maybe_placeholder: None,
         })
         .collect(),
     }

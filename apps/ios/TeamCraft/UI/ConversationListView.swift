@@ -328,6 +328,11 @@ struct ConversationRow: View {
     if let preview = maybePreview {
       switch (preview.sender, preview.content) {
       case (_, .noText): Text("chat_preview_event")
+      case (.none, .placeholder(let placeholder)): Text(PlaceholderLine.text(placeholder))
+      case (.me, .placeholder(let placeholder)):
+        Text("chat_preview_sender \(String(localized: "you")) \(PlaceholderLine.text(placeholder))")
+      case (.other(let name), .placeholder(let placeholder)):
+        Text("chat_preview_sender \(name) \(PlaceholderLine.text(placeholder))")
       case (.none, .text(let text)): Text(text)
       case (.me, .text(let text)): Text("chat_preview_sender \(String(localized: "you")) \(text)")
       case (.other(let name), .text(let text)): Text("chat_preview_sender \(name) \(text)")

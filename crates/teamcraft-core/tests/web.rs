@@ -274,6 +274,7 @@ fn message(conversation: i64, client: u8, text: &str) -> StoredMessage {
     is_pinned: false,
     maybe_verified_commit: None,
     maybe_server_change: None,
+    maybe_unreadable: None,
   }
 }
 

@@ -281,9 +281,12 @@ impl Notifier {
       return;
     }
     let start = count.saturating_sub(WATCH_WINDOW);
-    let window = backend.messages(conversation.id, start, WATCH_WINDOW);
+    // Placeholders of messages not readable yet notify nothing and aren't counted as seen: one
+    // that fills in later and is newer than everything seen notifies then, with its text, while
+    // older history that fills in on a newly linked device stays quiet (issue #888).
+    let window = readable(backend.messages(conversation.id, start, WATCH_WINDOW));
     let Some(newest) = window.last().map(|message| message.id) else {
-      // Still loading; try again on the next change.
+      // Still loading, or nothing readable yet; try again on the next change.
       return;
     };
     let maybe_previous = self.seen_message.borrow_mut().insert(conversation.id, newest);
@@ -319,8 +322,7 @@ impl Notifier {
     if (summary.reply_count as usize) <= previous {
       return;
     }
-    let thread = backend.thread(conversation.id, key.1);
-    let new_replies = thread.into_iter().skip(1 + previous);
+    let new_replies = new_replies(backend.thread(conversation.id, key.1), previous);
     for message in new_replies {
       found.push(Found {
         conversation: conversation.clone(),
@@ -366,6 +368,24 @@ impl ReadWatcher {
       .map(|(id, _)| *id)
       .collect()
   }
+}
+
+/// The replies of `thread` (its root first) after the `previous` ones already counted. The reply
+/// count leaves placeholders out (issue #888), so they are left out before counting.
+fn new_replies(thread: Vec<Message>, previous: usize) -> Vec<Message> {
+  readable(thread.into_iter().skip(1).collect())
+    .into_iter()
+    .skip(previous)
+    .collect()
+}
+
+/// The messages this device can read: a placeholder (issue #888) has no text to show and may turn
+/// out to be a reaction or an edit.
+fn readable(messages: Vec<Message>) -> Vec<Message> {
+  messages
+    .into_iter()
+    .filter(|message| message.maybe_placeholder.is_none())
+    .collect()
 }
 
 /// The messages of `window` (a conversation's newest, oldest first) to report: those after the
@@ -587,6 +607,23 @@ mod tests {
       assert_eq!(ids(new_messages(window, None, Some(id_from_raw(7)), 1)), [9]);
     }
 
+    #[test]
+    fn placeholders_notify_nothing_and_a_later_readable_message_does() {
+      let mut waiting = message(8);
+      waiting.maybe_placeholder = Some(crate::model::Placeholder::Waiting);
+      let window = readable(vec![message(6), message(7), waiting]);
+      assert_eq!(ids(new_messages(window, Some(id_from_raw(6)), None, 0)), [7]);
+    }
+
+    #[test]
+    fn thread_replies_after_a_placeholder_are_counted_without_it() {
+      let mut waiting = message(3);
+      waiting.maybe_placeholder = Some(crate::model::Placeholder::Waiting);
+      // Root 1, readable reply 2 seen before, a placeholder, then a new reply 4.
+      let thread = vec![message(1), message(2), waiting, message(4)];
+      assert_eq!(ids(new_replies(thread, 1)), [4]);
+    }
+
     fn ids(messages: Vec<Message>) -> Vec<u64> {
       messages.iter().map(|message| raw_id(message.id)).collect()
     }
@@ -604,6 +641,7 @@ mod tests {
         reply_count: 0,
         maybe_thread: None,
         maybe_imported: None,
+        maybe_placeholder: None,
       }
     }
   }

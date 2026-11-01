@@ -6337,6 +6337,54 @@
         }
       }
     },
+    "export_diagnostics_title": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Export diagnostics"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Diagnose exportieren"
+          }
+        }
+      }
+    },
+    "export_diagnostics_summary": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Share the app and system version and recent log lines with support. Nothing is sent until you pick an app."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Teilt App- und Systemversion sowie die letzten Protokollzeilen mit dem Support. Es wird nichts gesendet, bis du eine App auswählst."
+          }
+        }
+      }
+    },
+    "export_diagnostics_failed": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Could not export the diagnostics."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Die Diagnose konnte nicht exportiert werden."
+          }
+        }
+      }
+    },
     "sign_out": {
       "localizations": {
         "en": {
@@ -8573,6 +8621,70 @@
           "stringUnit": {
             "state": "translated",
             "value": "Diese Nachricht wurde gelöscht"
+          }
+        }
+      }
+    },
+    "message_placeholder_waiting": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Waiting for this message"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Warte auf diese Nachricht"
+          }
+        }
+      }
+    },
+    "message_placeholder_not_available": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Not available on this device"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Auf diesem Gerät nicht verfügbar"
+          }
+        }
+      }
+    },
+    "message_placeholder_failed": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "This message couldn't be decrypted"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Diese Nachricht konnte nicht entschlüsselt werden"
+          }
+        }
+      }
+    },
+    "key_catch_up %lld %lld": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Getting the keys for older messages. Conversations caught up: %1$lld of %2$lld. Messages fill in when one of your other devices or a member comes online."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Schlüssel für ältere Nachrichten werden geholt. Vollständige Unterhaltungen: %1$lld von %2$lld. Nachrichten erscheinen, sobald eines deiner anderen Geräte oder ein Mitglied online ist."
           }
         }
       }

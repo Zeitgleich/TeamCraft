@@ -183,6 +183,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
           seen_until,
           actor,
         }),
+        maybe_unreadable: None,
       });
     }
     Ok(lines)
@@ -723,6 +724,7 @@ mod tests {
         is_pinned: false,
         maybe_verified_commit: None,
         maybe_server_change: None,
+        maybe_unreadable: None,
       }
     }
 

@@ -26,4 +26,8 @@
   <string name="profile_name_empty">Enter a name, or use the name from your sign-in.</string>
   <string name="profile_name_invalid">The name can\'t contain control characters.</string>
   <string name="profile_name_rejected">The name was refused. It may be too long, or your organization no longer allows changing it.</string>
+  <string name="export_diagnostics">Export diagnostics</string>
+  <string name="export_diagnostics_summary">Share the app and system version and recent log lines with support. Nothing is sent until you pick an app.</string>
+  <string name="export_diagnostics_share_title">TeamCraft diagnostics</string>
+  <string name="export_diagnostics_failed">Could not export the diagnostics.</string>
 </resources>

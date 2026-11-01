@@ -415,3 +415,12 @@ loopback only: `-p 127.0.0.1:8088:8088`.
 - Channel membership of the bot is managed by members/admins, as for any user; the bridge never
   adds itself.
 - The bot list shows no last-activity time and bots have no picture yet.
+
+## Reading a log channel
+
+- **Opens at the newest line.** An integration channel never opens at the "New messages" divider or
+  where the reader left it; it starts at the bottom and follows new lines while the reader stays
+  there. Scrolling up pauses following and shows "Jump to latest", which resumes it.
+- **Quiet by default.** The channel list shows no unread number for an integration channel; mentions
+  still count. A member who sets the channel's own notification level to "all" gets the count like in
+  any channel. The rule lives in `teamcraft-core` (`shown_unread_messages`), so every client follows it.
