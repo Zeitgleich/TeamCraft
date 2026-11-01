@@ -14,8 +14,11 @@ struct LinkTypedCodeForm: View {
   let onCancel: () -> Void
 
   @State private var typed = ""
-  @State private var maybeError: LocalizedStringKey?
+  /// A missing or short code, or the other device's refusal; shown at the field.
+  @State private var maybeProblem: TextProblem?
   @State private var isWorking = false
+  @FocusState private var isFocused: Bool
+  @AccessibilityFocusState private var isAccessibilityFocused: Bool
 
   var body: some View {
     VStack(alignment: .leading, spacing: 8) {
@@ -24,11 +27,19 @@ struct LinkTypedCodeForm: View {
         .keyboardType(.numberPad)
         .autocorrectionDisabled()
         .font(.system(.title2, design: .monospaced))
-        .textFieldStyle(.roundedBorder)
+        .padding(8)
+        .background(Theme.surface)
+        .clipShape(RoundedRectangle(cornerRadius: 8))
+        .fieldEdge(isError: maybeProblem != nil, cornerRadius: 8)
+        .focused($isFocused)
+        .accessibilityFocused($isAccessibilityFocused)
+        .fieldError(maybeProblem?.message)
         .onSubmit { Task { await approve() } }
-      if let error = maybeError {
-        Text(error).font(.footnote).foregroundStyle(Theme.danger)
-      }
+        // Errors follow the input: typing takes the message away.
+        .onChange(of: typed) { _, newValue in
+          if !newValue.isEmpty { maybeProblem = nil }
+        }
+      FieldMessage(maybeError: maybeProblem?.message, maybeHint: "link_code_digits")
       HStack {
         Spacer()
         Button("cancel", action: onCancel)
@@ -36,24 +47,34 @@ struct LinkTypedCodeForm: View {
         Button("link_approve") { Task { await approve() } }
           .buttonStyle(.borderedProminent)
           .tint(Theme.accent)
-          .disabled(isWorking || LinkCode.digits(of: typed).isEmpty)
+          .disabled(isWorking)
       }
     }
   }
 
   private func approve() async {
-    guard !isWorking, !LinkCode.digits(of: typed).isEmpty else { return }
+    guard !isWorking else { return }
+    if let problem = LinkCode.problem(typed: typed) {
+      showAtField(problem)
+      return
+    }
     isWorking = true
-    maybeError = nil
+    maybeProblem = nil
     switch await model.confirmLink(typedCode: typed) {
     case .approved: onApproved()
     case .wrongCode:
       typed = ""
-      maybeError = "link_wrong_code"
+      showAtField(.rejected("link_wrong_code"))
     case .attemptEnded: onEnded()
-    case .failed(let failure): maybeError = failure.message
+    case .failed(let failure): showAtField(.refused(failure))
     }
     isWorking = false
+  }
+
+  private func showAtField(_ problem: TextProblem) {
+    maybeProblem = problem
+    isFocused = true
+    isAccessibilityFocused = true
   }
 }
 

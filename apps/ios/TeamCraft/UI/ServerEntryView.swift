@@ -8,6 +8,10 @@ struct ServerEntryView: View {
   let failure: ServerFailure?
 
   @State private var address: String
+  /// The failure is about the address as sent; once the user edits it, it no longer applies.
+  @State private var isFailureEdited = false
+  @FocusState private var isFocused: Bool
+  @AccessibilityFocusState private var isAccessibilityFocused: Bool
 
   init(address: String, failure: ServerFailure?) {
     self.failure = failure
@@ -28,38 +32,66 @@ struct ServerEntryView: View {
         Text(model.isServerLocked ? LocalizedStringKey("server_managed_hint") : LocalizedStringKey("server_entry_hint"))
           .multilineTextAlignment(.center)
           .foregroundStyle(Theme.textMuted)
-        TextField("server_entry_placeholder", text: $address)
-          .keyboardType(.URL)
-          .textContentType(.URL)
-          .textInputAutocapitalization(.never)
-          .autocorrectionDisabled()
-          .submitLabel(.continue)
-          .onSubmit(submit)
-          .disabled(model.isServerLocked || model.isBusy)
-          .padding(12)
-          .background(Theme.surface)
-          .clipShape(RoundedRectangle(cornerRadius: Theme.radius))
-          .overlay(RoundedRectangle(cornerRadius: Theme.radius).stroke(Theme.controlBorder))
-        if let failure {
-          Text(failure.message).foregroundStyle(Theme.danger).multilineTextAlignment(.center)
+        VStack(alignment: .leading, spacing: 6) {
+          Text("server_entry_label")
+            .font(.subheadline.weight(.semibold))
+            .accessibilityHidden(true)
+          TextField("server_entry_placeholder", text: $address)
+            .keyboardType(.URL)
+            .textContentType(.URL)
+            .textInputAutocapitalization(.never)
+            .autocorrectionDisabled()
+            .submitLabel(.continue)
+            .onSubmit(submit)
+            .disabled(model.isServerLocked || model.isBusy)
+            .focused($isFocused)
+            .accessibilityFocused($isAccessibilityFocused)
+            .accessibilityLabel(Text("server_entry_label"))
+            .fieldError(maybeError)
+            .padding(12)
+            .background(Theme.surface)
+            .clipShape(RoundedRectangle(cornerRadius: Theme.radius))
+            .fieldEdge(isError: maybeError != nil)
+            .onChange(of: address) { isFailureEdited = true }
+          FieldMessage(maybeError: maybeError)
         }
+        // Never silently disabled: an empty address is refused with its message at the field.
         Button(action: submit) {
           if model.isBusy { ProgressView() } else { Text("server_entry_continue") }
         }
         .buttonStyle(PrimaryButtonStyle())
-        .disabled(model.isBusy || address.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+        .disabled(model.isBusy)
       }
       .padding(24)
       .frame(maxWidth: 480)
       .frame(maxWidth: .infinity)
     }
     .scrollBounceBehavior(.basedOnSize)
+    // The server refused the address: the field takes the focus, so it can be fixed at once.
+    .onChange(of: model.isBusy) { _, isBusy in
+      if !isBusy, failure != nil { focusField() }
+    }
+    .onAppear {
+      if failure != nil { focusField() }
+    }
+  }
+
+  /// The failure while it still applies to the address shown; nothing while the check runs.
+  private var maybeError: LocalizedStringKey? {
+    isFailureEdited || model.isBusy ? nil : failure?.message
   }
 
   private func submit() {
     guard !model.isBusy else { return }
+    isFailureEdited = false
     let input = address
     Task { await model.checkServer(input) }
+  }
+
+  private func focusField() {
+    guard !model.isServerLocked else { return }
+    isFocused = true
+    isAccessibilityFocused = true
   }
 }
 

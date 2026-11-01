@@ -100,9 +100,7 @@ struct LocalSignInForm: Equatable {
   /// E-mail and password given, and a complete code when the server requires one (an optional code
   /// is sent only when complete).
   func canSubmit(requiresCode: Bool) -> Bool {
-    guard !trimmedEmail.isEmpty, !password.isEmpty else { return false }
-    if code.isEmpty { return !requiresCode }
-    return code.count == Self.codeLength
+    errors(requiresCode: requiresCode).isValid
   }
 
   /// The code to send; `nil` when none was entered.

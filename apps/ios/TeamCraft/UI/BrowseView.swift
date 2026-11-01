@@ -22,7 +22,6 @@ struct BrowseView: View {
   @State private var picked: [String] = []
   @State private var maybePendingDm: [String]?
   @State private var isCreating = false
-  @State private var newChannelName = ""
 
   var body: some View {
     NavigationStack {
@@ -45,10 +44,9 @@ struct BrowseView: View {
       .toolbar {
         ToolbarItem(placement: .cancellationAction) { Button("done") { dismiss() } }
       }
-      .alert("channel_create", isPresented: $isCreating) {
-        TextField("channel_name", text: $newChannelName)
-        Button("cancel", role: .cancel) {}
-        Button("channel_create") { createChannel() }
+      // A sheet, not an alert: an alert's text field can't show an error (forms.md).
+      .sheet(isPresented: $isCreating) {
+        NewChannelSheet(onCreate: createChannel)
       }
       .joinNoteAlert(model)
     }
@@ -212,16 +210,82 @@ struct BrowseView: View {
     Task { await model.perform(action) }
   }
 
-  private func createChannel() {
-    let name = newChannelName.trimmingCharacters(in: .whitespacesAndNewlines)
-    newChannelName = ""
-    guard let spaceId, !name.isEmpty else { return }
-    Task { await model.perform(.createChannel(spaceId: spaceId, name: name)) }
+  /// Creates the channel; nil when the core took it, else why not (shown at the name field).
+  private func createChannel(_ name: String) async -> AppFailure? {
+    guard let spaceId else { return .generic }
+    return await model.performReporting(.createChannel(spaceId: spaceId, name: name))
   }
 
   private func open(_ conversationId: String) {
     onOpen(conversationId)
     dismiss()
+  }
+}
+
+/// The name of a new channel. An empty name and the server's refusal (a taken name) are said at
+/// the field; the sheet stays open with the input until the channel exists.
+private struct NewChannelSheet: View {
+  @Environment(\.dismiss) private var dismiss
+  let onCreate: (String) async -> AppFailure?
+
+  @State private var name = ""
+  @State private var maybeProblem: TextProblem?
+  @State private var isCreating = false
+  @FocusState private var isFocused: Bool
+  @AccessibilityFocusState private var isAccessibilityFocused: Bool
+
+  var body: some View {
+    NavigationStack {
+      Form {
+        Section {
+          TextField("channel_name_placeholder", text: $name)
+            .textInputAutocapitalization(.never)
+            .autocorrectionDisabled()
+            .submitLabel(.done)
+            .focused($isFocused)
+            .accessibilityFocused($isAccessibilityFocused)
+            .accessibilityLabel(Text("channel_name"))
+            .fieldError(maybeProblem?.message)
+            .onSubmit { Task { await create() } }
+            .onChange(of: name) { maybeProblem = nil }
+          FieldMessage(maybeError: maybeProblem?.message)
+        } header: {
+          Text("channel_name")
+        }
+      }
+      .navigationTitle("channel_create")
+      .navigationBarTitleDisplayMode(.inline)
+      .toolbar {
+        ToolbarItem(placement: .cancellationAction) { Button("cancel") { dismiss() } }
+        ToolbarItem(placement: .confirmationAction) {
+          Button("channel_create_action") { Task { await create() } }
+            .disabled(isCreating)
+        }
+      }
+      .onAppear { isFocused = true }
+    }
+    .presentationDetents([.medium])
+  }
+
+  private func create() async {
+    guard !isCreating else { return }
+    if let problem = TextProblem.required(name, missing: "channel_name_missing") {
+      show(problem)
+      return
+    }
+    isCreating = true
+    if let failure = await onCreate(name.trimmingCharacters(in: .whitespacesAndNewlines)) {
+      show(.refused(failure))
+    } else {
+      dismiss()
+    }
+    isCreating = false
+  }
+
+  private func show(_ problem: TextProblem) {
+    maybeProblem = problem
+    isFocused = true
+    isAccessibilityFocused = true
   }
 }
 
