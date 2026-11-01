@@ -990,26 +990,44 @@ mod guests {
     assert!(carol.client.has_content_key(channel, &keys[0]));
   }
 
-  /// A record of an earlier version that noted every key of the ring, the live one included, is
-  /// not read: a guest gets the import and nothing members wrote.
+  /// A note of an earlier version, which held every key of the ring: a key only the import
+  /// device's messages are under is still shared with a guest the grant names, one a member wrote
+  /// under is not (e2ee.md §4.10, "Earlier versions").
   #[tokio::test]
-  async fn a_leftover_note_of_an_earlier_version_gives_a_guest_nothing_live() {
+  async fn a_leftover_note_of_an_earlier_version_shares_only_keys_no_member_wrote_under() {
     let server = FakeServer::new();
     let (mut owner, mut importer) = import_policy(&server, Some(i64::MAX)).await;
     let late_api = server.add_guest("Lea");
     let late_id = late_api.user_id();
-    let channel = imported_channel(&mut importer, &[owner.client.user_id(), late_id]).await;
-    add_full(&mut importer, channel, owner.client.user_id()).await;
+    let space = importer.space().await;
+    let channel = importer.client.create_channel(space, "History").await.unwrap();
+    importer
+      .client
+      .grant_imported_history(channel, &[owner.client.user_id(), late_id])
+      .unwrap();
+    // As an earlier version imported: under the channel's own key, then members joined.
+    importer
+      .client
+      .send_text(channel, None, "imported before")
+      .await
+      .unwrap();
+    add_with(
+      &mut importer,
+      channel,
+      owner.client.user_id(),
+      HistoryPolicy::FromJoin,
+    )
+    .await;
     settle(&mut [&mut owner, &mut importer]).await;
     owner.client.send_text(channel, None, "live").await.unwrap();
     settle(&mut [&mut owner, &mut importer]).await;
-    let mut noted: Vec<String> = live_keys_on_server(&owner, channel)
-      .await
+    let keys = live_keys_on_server(&owner, channel).await;
+    assert_eq!(keys.len(), 2, "the import's key and the members' key");
+    let (imported_key, live_key) = (keys[0].clone(), keys[1].clone());
+    let noted: Vec<String> = [&imported_key, &live_key]
       .iter()
-      .chain(import_keys_on_server(&owner, channel).await.iter())
       .map(|key| key.iter().map(|byte| format!("{byte:02x}")).collect())
       .collect();
-    noted.dedup();
     importer
       .store
       .put(
@@ -1018,13 +1036,20 @@ mod guests {
         &serde_json::to_vec(&noted).unwrap(),
       )
       .unwrap();
+
     // `serve`'s next pass, then Lea's waiting addition.
     importer.client.share_import_key(channel).await.unwrap();
     add_full(&mut importer, channel, late_id).await;
     let mut late = Peer::enroll_as(late_api, "Lea").await;
     join_late(&mut importer, &mut late).await;
+    assert!(late.client.has_content_key(channel, &imported_key));
+    assert!(!late.client.has_content_key(channel, &live_key));
     late.client.catch_up_messages(channel).await.unwrap();
-    assert_eq!(late.texts(channel), vec!["old"]);
+    assert!(
+      !late.texts(channel).contains(&"live".to_string()),
+      "{:?}",
+      late.texts(channel)
+    );
   }
 
   /// An owner and the import account, with the signed roster and the import policy

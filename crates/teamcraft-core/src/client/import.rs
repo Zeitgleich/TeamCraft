@@ -10,8 +10,8 @@ use teamcraft_crypto::content_key::{ContentKey, ContentKeyRing};
 use teamcraft_crypto::message::encrypt_message;
 use teamcraft_proto::{
   AdminSelfJoin, Base64Bytes, ConversationId, ConversationResponse, Id, ImportDmRequest,
-  ImportMemberStateRequest, ImportMessagesRequest, ImportedMessage, MessageId, ProvisionUsersRequest,
-  ProvisionedUser, ThreadId, UserId,
+  ImportMemberStateRequest, ImportMessagesRequest, ImportedMessage, ListMessagesQuery, MessageId,
+  ProvisionUsersRequest, ProvisionedUser, Snowflake, ThreadId, UserId,
 };
 use zeroize::Zeroizing;
 
@@ -24,6 +24,9 @@ use crate::error::CoreError;
 use crate::imported::imported_message_id;
 use crate::records;
 use crate::store::{LocalStore, MessageContent, Table};
+
+/// Messages per page when checking the keys an earlier version noted ([`Client::check_legacy_import_keys`]).
+const LEGACY_CHECK_PAGE_SIZE: u32 = 200;
 
 /// One message to import: its text with [`crate::store::MessageMeta::imported`] set, and the thread it answers.
 #[derive(Clone, Debug)]
@@ -82,18 +85,99 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
   }
 
   /// The keys of the import of `conversation`, as hex IDs: its import keys
-  /// ([`Self::import_content_key`]); empty before the first batch, and for history an earlier
-  /// version imported (it went out under keys members also wrote under, e2ee.md §4.10).
+  /// ([`Self::import_content_key`]) and the keys an earlier version noted that only this device's
+  /// messages are under ([`Self::check_legacy_import_keys`]).
   pub(crate) fn import_keys(&self, conversation: ConversationId) -> Result<BTreeSet<String>, CoreError> {
     let maybe_record: Option<ImportKey> =
       records::get_json(&self.store, Table::SyncState, &import_key_key(conversation))?;
     Ok(
       maybe_record
-        .map(|record| record.ids)
-        .unwrap_or_default()
-        .into_iter()
-        .collect(),
+        .map(|record| record.ids.into_iter().chain(record.legacy).collect())
+        .unwrap_or_default(),
     )
+  }
+
+  /// Checks the keys an earlier version noted for the import of `conversation` (#1078: every key
+  /// its ring held, live ones included) against the conversation's messages: a key stays one of
+  /// the import's only while no message of another device is under it (e2ee.md §4.10, "Earlier
+  /// versions"). The first call takes over the old note, keeping the keys the ring still holds;
+  /// each call then reads the messages after the newest one checked, so a key a member writes
+  /// under later drops out before it is shared again. A refused listing drops them all; a network
+  /// error is returned, and the keys are checked again next time. Nothing to do without a group.
+  pub(crate) async fn check_legacy_import_keys(
+    &mut self,
+    conversation: ConversationId,
+  ) -> Result<(), CoreError> {
+    if !self.has_group(conversation)? {
+      return Ok(());
+    }
+    let record_key = import_key_key(conversation);
+    let mut record: ImportKey =
+      records::get_json(&self.store, Table::SyncState, &record_key)?.unwrap_or_default();
+    let old_key = legacy_import_keys_key(conversation);
+    if let Some(noted) = records::get_json::<BTreeSet<String>>(&self.store, Table::SyncState, &old_key)? {
+      let held: BTreeSet<String> = self
+        .ring_keys_hex(conversation)
+        .into_iter()
+        .filter(|id| noted.contains(id))
+        .collect();
+      record.legacy.extend(held);
+      record.maybe_legacy_checked_through = None;
+      records::put_json(&self.store, Table::SyncState, &record_key, &record)?;
+      self.store.delete(Table::SyncState, &old_key)?;
+    }
+    if record.legacy.is_empty() {
+      return Ok(());
+    }
+    let before = record.legacy.len();
+    let mut maybe_after = record.maybe_legacy_checked_through;
+    loop {
+      let query = ListMessagesQuery {
+        maybe_before: None,
+        maybe_after: Some(maybe_after.unwrap_or(MessageId::from_snowflake(Snowflake::ZERO))),
+        maybe_limit: Some(LEGACY_CHECK_PAGE_SIZE),
+      };
+      let page = match self.api.list_messages(conversation, &query).await {
+        Ok(page) => page,
+        Err(error) if error.is_retry_later() => return Err(error.into()),
+        Err(error) => {
+          tracing::warn!(conversation_id = %conversation, keys = record.legacy.len(), %error, "can't check the keys an earlier version noted for the import; they are not shared");
+          record.legacy.clear();
+          break;
+        },
+      };
+      for message in &page.messages {
+        if message.sender_device_id != self.account.device_id {
+          let id: String = message
+            .content_key_id
+            .as_slice()
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect();
+          record.legacy.remove(&id);
+        }
+        maybe_after = maybe_after.max(Some(message.id));
+      }
+      if !page.has_more || page.messages.is_empty() || record.legacy.is_empty() {
+        break;
+      }
+    }
+    if record.legacy.len() < before {
+      tracing::warn!(conversation_id = %conversation, keys = before - record.legacy.len(), "keys an earlier version noted for the import have members' messages under them; they are not shared");
+    }
+    record.maybe_legacy_checked_through = maybe_after;
+    records::put_json(&self.store, Table::SyncState, &record_key, &record)?;
+    Ok(())
+  }
+
+  /// The IDs of the keys of the conversation's ring, as hex.
+  fn ring_keys_hex(&self, conversation: ConversationId) -> Vec<String> {
+    self
+      .account
+      .key_bag
+      .ring(convert::conversation(conversation))
+      .map(|ring| ring.keys().iter().map(|key| key_hex(key.id())).collect())
+      .unwrap_or_default()
   }
 
   /// Whether something other than the server names `user` as somebody who may read the import of
@@ -321,10 +405,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
   /// them. Before every batch, when the import is finished and on every later pass, so a device
   /// that joined since gets it too. Nothing to do without an import key or a group.
   pub async fn share_import_key(&mut self, conversation: ConversationId) -> Result<(), CoreError> {
-    // Earlier versions noted every key of the ring here (#1078); nothing reads it any more.
-    self
-      .store
-      .delete(Table::SyncState, &format!("import_keys/{conversation}"))?;
+    self.check_legacy_import_keys(conversation).await?;
     if !self.has_group(conversation)? {
       return Ok(());
     }
@@ -404,13 +485,24 @@ struct ImportKey {
   sealed_to: BTreeSet<String>,
   /// The group's epoch when the last key was made: in another one, the next batch takes a new key.
   epoch: u64,
+  /// Keys an earlier version noted for the import, as hex, under which no message of another
+  /// device was found so far ([`Client::check_legacy_import_keys`]).
+  #[serde(default)]
+  legacy: BTreeSet<String>,
+  /// The newest message checked for [`Self::legacy`].
+  #[serde(rename = "legacy_checked_through", default)]
+  maybe_legacy_checked_through: Option<MessageId>,
 }
 
-/// Where the import key of a conversation is kept ([`Client::import_content_key`]). Not the
-/// `import_keys/` of earlier versions, which noted every key the ring held at the end of the
-/// import, live ones included (#1078): those are no longer read.
+/// Where the import keys of a conversation are kept ([`Client::import_content_key`]).
 fn import_key_key(conversation: ConversationId) -> String {
   format!("import_key/{conversation}")
+}
+
+/// Where earlier versions noted every key of a conversation's ring at the end of its import (#1078),
+/// taken over by [`Client::check_legacy_import_keys`].
+fn legacy_import_keys_key(conversation: ConversationId) -> String {
+  format!("import_keys/{conversation}")
 }
 
 /// Where the readers of a merged channel's import are kept ([`Client::name_import_readers`]).

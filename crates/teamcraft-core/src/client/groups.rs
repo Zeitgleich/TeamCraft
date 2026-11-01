@@ -2040,6 +2040,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       tracing::info!(conversation_id = %conversation, "dropped an import history share: the member left since the addition");
       return Ok(());
     }
+    self.check_legacy_import_keys(conversation).await?;
     let keys = self.import_history_keys(conversation)?;
     tracing::info!(conversation_id = %conversation, keys = keys.len(), "sharing the imported history with a guest the import grant names");
     self.seal_history_to(conversation, user, added_epoch, &keys).await
@@ -2248,6 +2249,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       let mut keys = self.missed_keys(conversation, member)?;
       if self.is_import_granted(conversation, user)? {
         // A guest the import grant names gets the import's keys back too (e2ee.md §4.10).
+        self.check_legacy_import_keys(conversation).await?;
         for key in self.import_history_keys(conversation)? {
           if !keys.iter().any(|known| known.id() == key.id()) {
             keys.push(key);

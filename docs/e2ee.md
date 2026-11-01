@@ -1530,8 +1530,17 @@ like any other.
 - **A guest's share.** The import's keys a guest the grant names gets are the import keys, all of
   them, and no other key from before their join.
 - **Earlier versions.** History an earlier version imported (or the part of a conversation imported
-  before) is under keys members wrote under too. The keys those versions noted for it are not used
-  (and are deleted): a guest gets none of that history from the import device.
+  before) is under the conversation's ordinary keys, which those versions noted at the end of the
+  import, every key of the ring, live ones included. The import device keeps a noted key as one of
+  the import's only while no message of another device is under it: it reads the conversation's
+  messages from the server once, then on every pass and before it seals the keys to a guest only
+  the ones after the newest it checked, and drops a key as soon as a member's message is under it.
+  So in a new channel the import device wrote alone until it switched keys, all noted keys stay;
+  where members wrote during the import, only keys used for imported batches alone stay. A key it
+  can't check (the server refuses the listing) is dropped, with a warning naming the conversation
+  and the number of keys. Which messages exist is the server's word here: a server that withholds a
+  member's message from the import device and shows it to the guest gets it read, for history
+  imported before this version only.
 
 The import device seals the import's keys when it commits the guest's addition, when a waiting
 addition of its own finds the guest's device let in by somebody else meanwhile, and to a device of
