@@ -18,7 +18,7 @@ use teamcraft_core::store::{AttachmentRef, LocalStore, MessageContent, MessageMe
 use teamcraft_proto::{
   ChannelRole, ConversationId, CreateSpaceRequest, GatewayClientMessage, HistoryPolicy, Id, IdempotencyKey,
   ImportMemberStateRequest, JoinPolicy, MAX_IMPORT_BATCH, MessageId, ProvisionStatus, SpaceId,
-  UpdateConversationRequest, UserId,
+  UpdateConversationRequest, UserId, UserKind,
 };
 use tracing::{info, warn};
 
@@ -559,12 +559,12 @@ impl<'a, A: ServerApi, S: LocalStore> Importer<'a, A, S> {
       return Ok(());
     };
     let me = self.client.user_id();
-    let people: Vec<(UserId, bool)> = item
-      .members
-      .iter()
-      .filter(|user| **user != me)
-      .map(|user| (*user, false))
-      .collect();
+    let mut people: Vec<(UserId, bool)> = Vec::with_capacity(item.members.len());
+    for user in item.members.iter().filter(|user| **user != me) {
+      // A guest joins the space as a guest: the server refuses them any other role.
+      let kind = self.client.api().user(*user).await.map_err(CoreError::from)?.kind;
+      people.push((*user, kind == UserKind::Guest));
+    }
     self
       .client
       .add_people_to_channel(conversation, &people, HistoryPolicy::Full, true)

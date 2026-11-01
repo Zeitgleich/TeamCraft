@@ -401,6 +401,54 @@ mod guests {
     );
   }
 
+  #[tokio::test]
+  async fn a_guests_device_leaves_the_import_accounts_leave_to_the_members() {
+    let server = FakeServer::new();
+    let (mut owner, mut importer) = import_policy(&server, Some(i64::MAX)).await;
+    let mut guest = Peer::enroll_as(server.add_guest("Gus"), "Gus").await;
+    let participants = vec![owner.client.user_id(), guest.client.user_id()];
+    let response = importer
+      .client
+      .open_import_dm(participants.clone())
+      .await
+      .unwrap();
+    let dm = response.id;
+    importer.client.grant_imported_history(dm, &participants).unwrap();
+    importer
+      .client
+      .set_up_import_dm(response, &participants)
+      .await
+      .unwrap();
+    settle(&mut [&mut owner, &mut importer, &mut guest]).await;
+    importer
+      .client
+      .send_imported(dm, &[draft("1", "old", ImportedAuthor::Deleted, OLD_MS)])
+      .await
+      .unwrap();
+    importer.client.finish_import(dm).await.unwrap();
+
+    // The guest's device sees the signed leave first; only the owner's device may commit it.
+    importer.client.leave_after_import(dm).await.unwrap();
+    for _ in 0..2 {
+      settle(&mut [&mut importer, &mut guest]).await;
+      guest.client.apply_pending_changes().await.unwrap();
+      settle(&mut [&mut owner, &mut importer, &mut guest]).await;
+      owner.client.apply_pending_changes().await.unwrap();
+    }
+    settle(&mut [&mut owner, &mut importer, &mut guest]).await;
+    let mut in_group = owner.client.group_users(dm).unwrap();
+    in_group.sort();
+    let mut expected = participants.clone();
+    expected.sort();
+    assert_eq!(in_group, expected);
+    guest.client.full_sync().await.unwrap();
+    guest.client.catch_up_messages(dm).await.unwrap();
+    guest.client.send_text(dm, None, "still one group").await.unwrap();
+    settle(&mut [&mut owner, &mut guest]).await;
+    assert_eq!(owner.texts(dm), vec!["old", "still one group"]);
+    assert_eq!(guest.texts(dm), vec!["old", "still one group"]);
+  }
+
   /// An owner and the import account, with the signed roster and the import policy
   /// (`joins_until_ms`; `None`: no policy at all).
   async fn import_policy(server: &FakeServer, maybe_until: Option<i64>) -> (Peer, Peer) {

@@ -1543,6 +1543,14 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       // server's membership removal ends the group here.
       return Ok(());
     }
+    if let ChangeSource::Delegated(_) = &source
+      && self.is_seen_as_guest().await?
+    {
+      // The members refuse a guest's commit that changes anybody else (e2ee.md §4.6, "What a
+      // guest may commit"): committing it here would split the group. They commit it.
+      tracing::info!(conversation_id = %conversation, "left a signed change to the members: this user is a guest");
+      return Ok(());
+    }
     if let MembershipAction::AddUser { user_id, history } = action
       && history
         != self
@@ -2908,6 +2916,15 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     user: UserId,
     requested: HistoryShare,
   ) -> Result<HistoryShare, CoreError> {
+    Ok(if self.is_listed_guest(user).await? {
+      HistoryShare::FromJoin
+    } else {
+      requested
+    })
+  }
+
+  /// Whether the server lists `user` as a guest (the cached user, else the server's answer).
+  async fn is_listed_guest(&mut self, user: UserId) -> Result<bool, CoreError> {
     let summary = match records::get_json::<teamcraft_proto::UserSummary>(
       &self.store,
       Table::Users,
@@ -2916,11 +2933,24 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       Some(summary) => summary,
       None => self.api.user(user).await?,
     };
-    Ok(if summary.kind == teamcraft_proto::UserKind::Guest {
-      HistoryShare::FromJoin
-    } else {
-      requested
-    })
+    Ok(summary.kind == teamcraft_proto::UserKind::Guest)
+  }
+
+  /// Whether the other members treat this device's user as a guest ([`Self::guest_users`]): a
+  /// meeting guest's device, or a user the server lists as a guest whom the signed roster doesn't
+  /// vouch for. Its commits may change only its own devices; any other the members refuse.
+  async fn is_seen_as_guest(&mut self) -> Result<bool, CoreError> {
+    if self.is_guest_device()? {
+      return Ok(true);
+    }
+    let me = self.account.user_id;
+    let is_vouched = self
+      .workspace()?
+      .roster
+      .members
+      .iter()
+      .any(|member| member.user_id == me);
+    Ok(!is_vouched && self.is_listed_guest(me).await?)
   }
 
   /// This device fell out of the group: it asks the members, with a request it signs, to add it

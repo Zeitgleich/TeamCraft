@@ -1139,7 +1139,10 @@ never by the server's member list:
     in that time; the commit moves the group to an epoch it has no keys for.
   - *What a guest may commit, and who counts as a guest.* Members merge a commit made by a
     guest's device only if it concerns that guest's own devices, and a guest's signed change is
-    authorized only for their own removal. Who is a guest is not the server's word alone: in a
+    authorized only for their own removal. A guest's own device therefore leaves a signed change
+    of somebody else (an admin's removal, the import account's leave, §4.10) to the members and
+    doesn't commit it: the members would refuse its commit and the group would split (#1074).
+    Who is a guest is not the server's word alone: in a
     meeting chat everyone the signed roster doesn't vouch for is treated as a guest for signed
     changes; a device that admitted a guest records it and treats the user as a guest from then
     on; and a roster member or an organizer is never treated as a guest, whatever kind the server
@@ -1505,6 +1508,11 @@ devices (a waiting addition the guest's device joined meanwhile, a device added 
   of somebody else that the import device commits (a delegated change, §4.6) keeps "guests from the
   join on", and so does every other device: members' devices never share history with a guest,
   whoever signed the guest's addition.
+
+The server keeps the same line for the ciphertext it hands out: a guest lists messages,
+attachments and lines from before their join only in a conversation that shares its full history
+and only when the import account added them during the import period (a membership flag, admin.md
+§3.8); everybody else as before. It can't check the mapping; the import device does.
 
 On the wire nothing is new: the signed change says `Full`, as for any member. Members' devices merge
 it as before and note the full-history addition, but share nothing more with a guest because of it
