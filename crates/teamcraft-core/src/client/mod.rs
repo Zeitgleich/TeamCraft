@@ -25,6 +25,7 @@ mod groups;
 mod guest;
 mod heads;
 pub mod import;
+mod imported_history;
 mod join_requests;
 mod key_history;
 mod key_packages;
@@ -135,6 +136,9 @@ pub struct ClientSettings {
   pub key_package_retention: std::time::Duration,
   /// Messages per history page.
   pub history_page_size: u32,
+  /// Messages per page when reading back through imported history in the background (the
+  /// server caps it at its own page limit).
+  pub imported_page_size: u32,
   /// Attempts to land a commit when other members' commits win the epoch.
   pub max_commit_attempts: u32,
   /// Delay per rank before a member commits a colleague's new device, and between retries while
@@ -343,6 +347,9 @@ pub struct Client<A, S> {
   maybe_last_heard_ms: Option<i64>,
   /// Tests of mixed versions only ([`Client::check_membership_as_before_v1_0_9`]).
   is_checking_as_before_v1_0_9: bool,
+  /// Set once no conversation has imported history left to page through; a finished import
+  /// clears it ([`Client::page_imported_history`]).
+  is_imported_history_paged: bool,
 }
 
 impl Default for ClientSettings {
@@ -353,6 +360,7 @@ impl Default for ClientSettings {
       key_package_check_interval: std::time::Duration::from_secs(6 * 60 * 60),
       key_package_retention: std::time::Duration::from_secs(30 * 24 * 60 * 60),
       history_page_size: 50,
+      imported_page_size: 200,
       max_commit_attempts: 3,
       device_add_stagger: std::time::Duration::from_secs(10),
       device_add_attempts: 6,
@@ -451,6 +459,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       read_ahead: Default::default(),
       maybe_last_heard_ms: None,
       is_checking_as_before_v1_0_9: false,
+      is_imported_history_paged: false,
     };
     // A catch-up the app was closed during left its marks; the next one sets them again.
     catch_up::clear_marks(&client.store)?;

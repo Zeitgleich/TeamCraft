@@ -9,6 +9,7 @@ use std::sync::Arc;
 use crate::common;
 
 use common::{Peer, settings, settle};
+use teamcraft_core::ClientSettings;
 use teamcraft_core::api::fake::FakeServer;
 use teamcraft_core::client::import::ImportDraft;
 use teamcraft_core::clock::ManualClock;
@@ -381,6 +382,64 @@ mod existing {
     let mut expected = participants;
     expected.sort();
     assert_eq!(in_group, expected);
+  }
+
+  /// The feed shows only what the store holds. A device that had read the DM back to its
+  /// beginning got one page of the import when it finished; the rest is read in the background
+  /// until the oldest imported message is there. A store that already holds that one page (an
+  /// older version marked the import as loaded) carries on the same way.
+  #[tokio::test]
+  async fn a_device_that_read_an_existing_dm_to_its_beginning_reads_all_of_its_import() {
+    let server = FakeServer::new();
+    let paged = ClientSettings {
+      history_page_size: 2,
+      imported_page_size: 2,
+      ..settings()
+    };
+    let mut alice = Peer::enroll(&server, "Alice").await;
+    let mut importer = Peer::enroll(&server, "Import").await;
+    let mut bob = Peer::enroll_with_settings(&server, "Bob", paged).await;
+    sign_import_policy(&mut alice, &mut importer, AdminSelfJoin::Visible).await;
+    let dm = alice.client.open_dm(bob.client.user_id()).await.unwrap();
+    alice.client.send_text(dm, None, "live").await.unwrap();
+    settle(&mut [&mut alice, &mut bob, &mut importer]).await;
+    bob.client.catch_up_messages(dm).await.unwrap();
+    assert_eq!(
+      bob.client.load_older_messages(dm).await.unwrap(),
+      0,
+      "at the beginning"
+    );
+
+    let participants = vec![alice.client.user_id(), bob.client.user_id()];
+    assert!(!open_existing(&mut importer, &participants, dm).await);
+    importer.client.request_import_join(dm).await.unwrap();
+    settle(&mut [&mut bob, &mut importer]).await;
+    bob.client.apply_pending_changes().await.unwrap();
+    settle(&mut [&mut alice, &mut bob, &mut importer]).await;
+    let imported: Vec<String> = (0..7).map(|index| format!("old {index}")).collect();
+    let drafts: Vec<ImportDraft> = imported
+      .iter()
+      .enumerate()
+      .map(|(index, body)| {
+        let offset = i64::try_from(index).unwrap();
+        draft(&index.to_string(), body, ImportedAuthor::Deleted, OLD_MS + offset)
+      })
+      .collect();
+    importer.client.send_imported(dm, &drafts).await.unwrap();
+    importer.client.finish_import(dm).await.unwrap();
+    settle(&mut [&mut alice, &mut bob, &mut importer]).await;
+    assert_eq!(bob.texts(dm), vec!["old 5", "old 6", "live"], "one page at once");
+
+    let mut pages = 0;
+    while bob.client.page_imported_history().await.unwrap() > 0 {
+      pages += 1;
+      assert!(pages < 10, "paging ends");
+    }
+    let mut expected = imported;
+    expected.push("live".into());
+    assert_eq!(bob.texts(dm), expected);
+    // Done: nothing is read any more.
+    assert_eq!(bob.client.page_imported_history().await.unwrap(), 0);
   }
 
   /// The import's DM or notes of `participants`, which is `existing`; `true` if the import device

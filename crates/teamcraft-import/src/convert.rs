@@ -182,8 +182,12 @@ fn convert_line(line: &str, people: &People, out: &mut String, mentions: &mut Ve
       rest = &rest[used..];
       continue;
     }
-    if let Some((emoji, used)) = short_code(rest, out.chars().last()) {
-      out.push_str(emoji);
+    if let Some((code, used)) = short_code(rest, out.chars().last()) {
+      match code {
+        ShortCode::Emoji(emoji) => out.push_str(emoji),
+        // Kept whole, so its closing colon doesn't open the next code (`:unknown::grin:`).
+        ShortCode::Unknown => out.push_str(&rest[..used]),
+      }
       rest = &rest[used..];
       continue;
     }
@@ -241,10 +245,17 @@ fn link(rest: &str) -> Option<(String, usize)> {
   Some((text, end + 2))
 }
 
-/// `:name:` at the start of `rest` that is a known emoji, standing on its own (not inside a word
-/// or a time like `12:30:45`).
-fn short_code(rest: &str, maybe_before: Option<char>) -> Option<(&'static str, usize)> {
-  if maybe_before.is_some_and(|before| before.is_alphanumeric() || before == ':') {
+/// A `:name:` short code in the text.
+enum ShortCode {
+  Emoji(&'static str),
+  /// Shaped like one, but no emoji has the name: it stays text.
+  Unknown,
+}
+
+/// `:name:` at the start of `rest`, standing on its own (not inside a word or a time like
+/// `12:30:45`), and how many bytes it takes. Codes may follow each other (`:grin::thumbsup:`).
+fn short_code(rest: &str, maybe_before: Option<char>) -> Option<(ShortCode, usize)> {
+  if maybe_before.is_some_and(char::is_alphanumeric) {
     return None;
   }
   let inner = rest.strip_prefix(':')?;
@@ -262,7 +273,8 @@ fn short_code(rest: &str, maybe_before: Option<char>) -> Option<(&'static str, u
   if after.is_some_and(char::is_alphanumeric) {
     return None;
   }
-  emoji_of(name).map(|emoji| (emoji, end + 2))
+  let code = emoji_of(name).map_or(ShortCode::Unknown, ShortCode::Emoji);
+  Some((code, end + 2))
 }
 
 /// The emoji of a gemoji short code, also of the EmojiOne names Synology uses for some.
@@ -383,6 +395,20 @@ mod tests {
       ":no_such_emoji_here:"
     );
     assert_eq!(convert_text("@u:", &people).0, "@u:");
+  }
+
+  #[test]
+  fn adjacent_short_codes_each_become_emoji() {
+    let people = people();
+    assert_eq!(convert_text(":grin::thumbsup:", &people).0, "\u{1f601}\u{1f44d}");
+    assert_eq!(
+      convert_text("great :grin::no_such_emoji_here::thumbsup:", &people).0,
+      "great \u{1f601}:no_such_emoji_here:\u{1f44d}"
+    );
+    assert_eq!(
+      convert_text("`:grin::thumbsup:` and 12:30:00", &people).0,
+      "`:grin::thumbsup:` and 12:30:00"
+    );
   }
 
   #[test]

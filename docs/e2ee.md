@@ -1438,8 +1438,11 @@ ciphertext, in `MessageMeta::imported` (`ImportedOrigin`):
 - **No unread, no pushes.** The server counts no imported message as unread and sends no push and no
   `message_create` for it; when a conversation's import is finished it announces a
   `conversation_update` (with `imported_through`). Imported messages lie before everything a client
-  holds of the conversation, so paging back loads them like older history; a client that holds the
-  conversation loads one page of them on that update, or on its next sync when it missed the update.
+  holds of the conversation, and the feed shows only what the client holds: a client that holds the
+  conversation loads one page of them on that update (or on its next sync when it missed the
+  update), then reads the rest in the background, one page per upkeep tick, back to the beginning.
+  Where that stands is kept per conversation and import, so it resumes after a restart and a later
+  import is read again.
   Clients count no imported message as unread and don't show the import account adding people, nor
   a member letting one of them in once they set up the app: they were in the conversation in the
   old system. Read positions come from the old system (admin.md §3.8).
