@@ -90,10 +90,15 @@ class ConnectionNoticeTest {
       ConnectionNotice.Unreachable(retryInSeconds = 8, maybeInterception = null),
       connectionNotice(true, offline(retryAtMs = 17_500), unsettled, CONNECTION_GRACE_MS),
     )
-    assertEquals(
-      ConnectionNotice.Unreachable(retryInSeconds = 0, maybeInterception = null),
-      connectionNotice(true, offline(retryAtMs = 17_500), unsettled, 30_000),
-    )
+    // Due but not started yet: connecting, not "next attempt in 0 s".
+    assertEquals(ConnectionNotice.Connecting, connectionNotice(true, offline(retryAtMs = 17_500), unsettled, 30_000))
+  }
+
+  @Test
+  fun aSlowLinkSaysSlowAtOnceAndIsNotDown() {
+    assertEquals(ConnectionNotice.Slow, connectionNotice(true, ConnectionState.Slow, Unsettled(), 0))
+    assertEquals(false, isConnectionDown(true, ConnectionState.Slow))
+    assertEquals(ConnectionNotice.DeviceOffline, connectionNotice(false, ConnectionState.Slow, Unsettled(0), CONNECTION_GRACE_MS))
   }
 
   @Test

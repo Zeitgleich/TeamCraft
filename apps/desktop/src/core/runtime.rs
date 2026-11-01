@@ -466,8 +466,11 @@ impl CoreRuntime {
         // UI shows an internal error instead of a keystore problem. The local set runs what the
         // core starts beside its loop (a link receipt, issue #415) and drops it when the core ends.
         let tasks = LocalSet::new();
-        let outcome =
-          std::panic::catch_unwind(AssertUnwindSafe(|| tasks.block_on(&runtime, core.run(receiver))));
+        // On the heap: the loop's future holds every command's, too big for the thread's stack in
+        // a debug build.
+        let outcome = std::panic::catch_unwind(AssertUnwindSafe(|| {
+          tasks.block_on(&runtime, Box::pin(core.run(receiver)))
+        }));
         if let Err(payload) = outcome {
           tracing::error!(panic = %panic_text(payload.as_ref()), "the client core panicked and stopped");
         }

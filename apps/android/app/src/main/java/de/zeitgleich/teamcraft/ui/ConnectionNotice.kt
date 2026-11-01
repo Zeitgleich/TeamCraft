@@ -24,6 +24,9 @@ sealed interface ConnectionNotice {
 
   data object Connecting : ConnectionNotice
 
+  /** Connected, but the server answers late (a saturated link): messages still go out (issue #1064). */
+  data object Slow : ConnectionNotice
+
   /**
    * Online, but the server isn't reachable; the next attempt is in [retryInSeconds]. Names what
    * answered instead, if the core found out (a captive portal, a TLS-intercepting proxy).
@@ -60,10 +63,15 @@ fun isConnectionDown(isOnline: Boolean, maybeConnection: ConnectionState?): Bool
  */
 fun connectionNotice(isOnline: Boolean, maybeConnection: ConnectionState?, unsettled: Unsettled, nowMs: Long): ConnectionNotice? {
   if (maybeConnection is ConnectionState.SignInRequired) return ConnectionNotice.SignInRequired
+  // Connected, so no grace period: the core doesn't flip it back and forth.
+  if (isOnline && maybeConnection is ConnectionState.Slow) return ConnectionNotice.Slow
   if (!unsettled.isPastGrace(nowMs)) return null
   if (!isOnline) return ConnectionNotice.DeviceOffline
   return when (maybeConnection) {
     is ConnectionState.Connecting -> ConnectionNotice.Connecting
+    // The attempt is due but hasn't started yet: "next attempt in 0 s" would read as stuck.
+    is ConnectionState.Offline if maybeConnection.maybeInterception == null && maybeConnection.retryAtMs <= nowMs ->
+      ConnectionNotice.Connecting
     is ConnectionState.Offline -> ConnectionNotice.Unreachable(
       retryInSeconds = ((maybeConnection.retryAtMs - nowMs).coerceAtLeast(0) + 999) / 1000,
       maybeInterception = maybeConnection.maybeInterception,

@@ -377,6 +377,12 @@ message and a loading line, until the store has the conversation and has caught 
 the header reads "Loading the conversation…". On iOS a tap opens such a conversation only when a
 record exists. On the network the focused conversation's members come before its content (#1015).
 
+**Watches and bands (Android).** A message the app couldn't read in time shows as "New message" and
+is filled in by a retry. That placeholder is posted local-only, so watch and band bridges (Wear OS,
+Garmin, Mi Band apps) don't mirror it. When the text arrives, the notification is posted again,
+bridged and without `setOnlyAlertOnce`, because bridges skip updates that carry it. It stays silent
+on the phone, so the band shows the message, never "New message".
+
 **iOS.** `call` arrives as a mutable alert through the notification service extension; without the
 filtering entitlement it shows as a time-sensitive "incoming call" alert with answer and decline, with
 it the extension hands it to CallKit (`NSE_NOTIFICATION_FILTERING` in `Base.xcconfig`, together with

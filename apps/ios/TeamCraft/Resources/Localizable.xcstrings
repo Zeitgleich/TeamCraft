@@ -4705,6 +4705,22 @@
         }
       }
     },
+    "connection_slow": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Slow connection. Messages still go out, but may take longer."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Langsame Verbindung. Nachrichten gehen weiter raus, brauchen aber länger."
+          }
+        }
+      }
+    },
     "passphrase": {
       "localizations": {
         "en": {

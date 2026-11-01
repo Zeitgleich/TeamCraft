@@ -76,6 +76,9 @@ pub enum AppActivity {
 pub enum ConnectionState {
   Connecting,
   Connected,
+  /// Connected, but the server answers late (a saturated or very slow link): requests still
+  /// complete. The banner says "slow", not "unreachable".
+  Slow,
   /// Not connected; the next attempt starts at `retry_at_ms` (Unix milliseconds).
   /// `maybe_interception` names what answered instead of the server, if known.
   Offline {
@@ -900,6 +903,7 @@ impl From<teamcraft_core::connection::ConnectionState> for ConnectionState {
     match state {
       Core::Connecting => Self::Connecting,
       Core::Connected => Self::Connected,
+      Core::Slow => Self::Slow,
       Core::Offline {
         retry_at_ms,
         maybe_interception,

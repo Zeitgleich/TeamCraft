@@ -120,10 +120,11 @@ fun OfflineBanner(onSignInAgain: () -> Unit) {
       value = System.currentTimeMillis()
     }
   }
-  val (text, maybeAction) = when (val notice = connectionNotice(isOnline, maybeConnection, unsettled, now)) {
-    null -> return
+  val notice = connectionNotice(isOnline, maybeConnection, unsettled, now) ?: return
+  val (text, maybeAction) = when (notice) {
     ConnectionNotice.DeviceOffline -> stringResource(R.string.offline_banner) to null
     ConnectionNotice.Connecting -> stringResource(R.string.connection_connecting) to null
+    ConnectionNotice.Slow -> stringResource(R.string.connection_slow) to null
     is ConnectionNotice.Unreachable -> {
       val text = when (notice.maybeInterception) {
         NetworkInterception.CAPTIVE_PORTAL -> R.string.connection_captive_portal
@@ -136,8 +137,10 @@ fun OfflineBanner(onSignInAgain: () -> Unit) {
     ConnectionNotice.SignInRequired ->
       stringResource(R.string.connection_sign_in) to (stringResource(R.string.connection_sign_in_action) to onSignInAgain)
   }
+  // Slow is no failure: the neutral colour, not the error one.
+  val isSlow = notice == ConnectionNotice.Slow
   Surface(
-    color = MaterialTheme.colorScheme.errorContainer,
+    color = if (isSlow) MaterialTheme.colorScheme.secondaryContainer else MaterialTheme.colorScheme.errorContainer,
     modifier = Modifier.fillMaxWidth(),
   ) {
     Row(
@@ -147,7 +150,7 @@ fun OfflineBanner(onSignInAgain: () -> Unit) {
       Text(
         text,
         style = MaterialTheme.typography.labelMedium,
-        color = MaterialTheme.colorScheme.onErrorContainer,
+        color = if (isSlow) MaterialTheme.colorScheme.onSecondaryContainer else MaterialTheme.colorScheme.onErrorContainer,
         modifier = Modifier.weight(1f).padding(vertical = 6.dp),
       )
       maybeAction?.let { (label, action) ->

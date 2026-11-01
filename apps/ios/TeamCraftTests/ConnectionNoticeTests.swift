@@ -23,6 +23,20 @@ final class ConnectionNoticeTests: XCTestCase {
       .unreachable(retryInSeconds: 3, maybeInterception: nil))
   }
 
+  func testADueAttemptReadsAsConnecting() {
+    var grace = ConnectionGrace()
+    grace.observe(isDown: true, now: start)
+    let retryAtMs = Int64((start.timeIntervalSince1970 + 5) * 1000)
+    XCTAssertEqual(
+      notice(isOnline: true, .offline(retryAtMs: retryAtMs, maybeInterception: nil), grace, at: 12), .connecting)
+  }
+
+  func testASlowLinkSaysSlowAtOnceAndIsNotDown() {
+    XCTAssertEqual(notice(isOnline: true, .slow, ConnectionGrace(), at: 0), .slow)
+    XCTAssertFalse(ConnectionNotice.isDown(isOnline: true, connection: .slow))
+    XCTAssertTrue(ConnectionState.slow.isConnected)
+  }
+
   func testDeviceOfflineWinsAfterTheGracePeriod() {
     var grace = ConnectionGrace()
     grace.observe(isDown: true, now: start)

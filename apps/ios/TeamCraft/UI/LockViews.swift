@@ -130,10 +130,12 @@ struct OfflineBanner: View {
     if let notice = ConnectionNotice.current(
       isOnline: network.isOnline, connection: model.connection, grace: model.connectionGrace, now: now)
     {
+      // Slow is no failure: the neutral colour, not the danger one.
+      let tint = notice == .slow ? Color.secondary : Theme.danger
       HStack {
         text(of: notice)
           .font(.footnote)
-          .foregroundStyle(Theme.danger)
+          .foregroundStyle(tint)
           .frame(maxWidth: .infinity, alignment: .leading)
         switch notice {
         case .unreachable:
@@ -142,12 +144,12 @@ struct OfflineBanner: View {
         case .signInRequired:
           Button("connection_sign_in_action") { Task { await model.signOut() } }
             .font(.footnote.weight(.semibold))
-        case .deviceOffline, .connecting:
+        case .deviceOffline, .connecting, .slow:
           EmptyView()
         }
       }
       .padding(.horizontal).padding(.vertical, 6)
-      .background(Theme.danger.opacity(0.12))
+      .background(tint.opacity(0.12))
       .accessibilityElement(children: .combine)
     }
   }
@@ -158,6 +160,8 @@ struct OfflineBanner: View {
       return Text("offline_banner")
     case .connecting:
       return Text("connection_connecting")
+    case .slow:
+      return Text("connection_slow")
     case .unreachable(let seconds, let maybeInterception):
       switch maybeInterception {
       case .captivePortal: return Text("connection_captive_portal \(seconds)")

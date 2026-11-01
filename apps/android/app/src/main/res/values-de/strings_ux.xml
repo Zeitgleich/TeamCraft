@@ -19,6 +19,7 @@
   <string name="offline_banner">Keine Verbindung. Nachrichten werden gesendet, sobald du wieder online bist.</string>
   <!-- The language these strings are in, as a BCP 47 tag: the app's language for the identity provider's login page (issue #448). -->
   <string name="app_language">de</string>
+  <string name="connection_slow">Langsame Verbindung. Nachrichten gehen weiter raus, brauchen aber länger.</string>
   <string name="connection_unreachable">Der Server ist nicht erreichbar. Nachrichten warten, bis er wieder da ist. Nächster Versuch in %1$d s.</string>
   <string name="connection_captive_portal">Dieses Netzwerk verlangt zuerst eine Anmeldung. Öffne eine Webseite, um dich anzumelden; Nachrichten warten. Nächster Versuch in %1$d s.</string>
   <string name="connection_untrusted_certificate">Dem Zertifikat des Servers wird nicht vertraut. In einem Netzwerk, das verschlüsselten Verkehr prüft: Nutze ein anderes Netzwerk oder frag deine IT; passiert es überall, sag deiner Administration Bescheid. Nächster Versuch in %1$d s.</string>
