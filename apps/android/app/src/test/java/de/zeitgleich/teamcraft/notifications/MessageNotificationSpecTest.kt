@@ -51,6 +51,25 @@ class MessageNotificationSpecTest {
   }
 
   @Test
+  fun aPlaceholderStaysOnThePhoneUntilItHasItsText() {
+    val placeholder = line("1000", "Alice", "New message").copy(isPlaceholder = true)
+    assertTrue(spec(direct(placeholder)).isLocalOnly)
+    // Bands and watches get the conversation as soon as its newest message reads.
+    assertFalse(spec(direct(placeholder, line("2000", "Alice", "lunch?"))).isLocalOnly)
+    assertFalse(spec(direct(line("1000", "Alice", "lunch?"))).isLocalOnly)
+  }
+
+  @Test
+  fun aFilledInPlaceholderIsPostedForBridgesWithoutAlertingThePhone() {
+    val placeholder = direct(line("1000", "Alice", "New message").copy(isPlaceholder = true))
+    val filled = direct(line("1000", "Alice", "lunch?"))
+    assertEquals(NotificationAlerting.REFRESH, MessageNotificationSpecs.alerting(false, placeholder, filled))
+    assertEquals(NotificationAlerting.ALERT, MessageNotificationSpecs.alerting(true, placeholder, filled))
+    assertEquals(NotificationAlerting.SILENT, MessageNotificationSpecs.alerting(false, filled, filled))
+    assertEquals(NotificationAlerting.SILENT, MessageNotificationSpecs.alerting(false, null, filled))
+  }
+
+  @Test
   fun aDirectChatWithSeveralSendersIsAGroupConversation() {
     val spec = spec(direct(line("1000", "Alice", "hi"), line("2000", "Bob", "hey")))
     assertTrue(spec.maybeConversation!!.isGroupConversation)
