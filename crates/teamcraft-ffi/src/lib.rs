@@ -849,9 +849,9 @@ pub fn emoji_suggestions(query: String, limit: u32) -> Vec<EmojiSuggestion> {
   teamcraft_client_api::emoji_catalog::search(&query)
     .into_iter()
     .take(usize::try_from(limit).unwrap_or(usize::MAX))
-    .map(|emoji| EmojiSuggestion {
-      emoji: emoji.to_string(),
-      shortcode: teamcraft_client_api::emoji_catalog::shortcode(emoji)
+    .map(|entry| EmojiSuggestion {
+      emoji: entry.emoji.to_string(),
+      shortcode: teamcraft_client_api::emoji_catalog::shortcode(entry.emoji)
         .unwrap_or_default()
         .to_string(),
     })

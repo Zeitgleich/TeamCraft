@@ -45,6 +45,9 @@ expect_used = "warn"
 if_same_then_else = "allow"
 
 [workspace.dependencies]
+# The full Unicode emoji set with CLDR names, groups, skin tones and gemoji shortcodes: the
+# pickers' catalog (teamcraft-client-api) and the Synology importer's shortcodes.
+emojis = "0.9"
 # Internal crates
 teamcraft-proto = { path = "crates/teamcraft-proto" }
 teamcraft-db = { path = "crates/teamcraft-db" }

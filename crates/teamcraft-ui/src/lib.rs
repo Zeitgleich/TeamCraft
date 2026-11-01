@@ -34,6 +34,7 @@ pub mod delivery;
 pub mod diff;
 pub mod editor_doc;
 pub mod editor_lines;
+pub mod emoji_support;
 pub mod feed_motion;
 pub mod feedback;
 pub mod form_errors;

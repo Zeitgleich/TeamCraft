@@ -35,7 +35,7 @@ web-sys = { version = "0.3", features = [
   "Blob", "BlobPropertyBag", "ReadableStream", "Url", "DragEvent", "DataTransfer", "DataTransferItemList", "DataTransferItem", "ClipboardEvent", "Request", "RequestInit", "RequestMode", "RequestRedirect", "RequestCache", "Response", "Headers", "UrlSearchParams", "ResizeObserver", "DomRect",
   "BroadcastChannel", "MouseEvent", "StorageManager", "ServiceWorkerState", "VisibilityState", "NotificationOptions",
   "PointerEvent", "WheelEvent", "HtmlAnchorElement", "HtmlImageElement", "AddEventListenerOptions",
-  "HtmlCanvasElement", "CanvasRenderingContext2d", "HtmlMediaElement", "HtmlVideoElement", "Selection", "MediaStream",
+  "HtmlCanvasElement", "CanvasRenderingContext2d", "ImageData", "HtmlMediaElement", "HtmlVideoElement", "Selection", "MediaStream",
   "VisualViewport", "MutationObserver", "MutationObserverInit", "Performance", "TouchEvent", "TouchList", "Touch",
   "HtmlDocument", "DomParser", "SupportedType", "Range", "DocumentFragment", "Text", "CharacterData", "InputEvent", "TreeWalker",
   "ImageBitmap", "IntersectionObserver", "IntersectionObserverEntry", "TimeRanges", "HtmlButtonElement",

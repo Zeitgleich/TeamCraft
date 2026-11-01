@@ -29,3 +29,8 @@ oauth2 = { version = "5", default-features = false }
 # The ID token's claims are base64url JSON (login hint, src/oidc_login.rs).
 base64.workspace = true
 
+
+[dev-dependencies]
+# The source of the generated emoji catalog (src/emoji_catalog.tsv): a test writes it and checks
+# that it is current. Not linked into the clients.
+emojis.workspace = true
