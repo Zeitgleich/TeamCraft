@@ -80,7 +80,9 @@ async fn execute(parsed: args::Args) -> anyhow::Result<()> {
   }
   let options = RunOptions {
     deleted_name: inputs.language.deleted_name().to_owned(),
-    join_wait: teamcraft_import::run::DEFAULT_JOIN_WAIT,
+    join_wait: inputs
+      .maybe_join_wait
+      .unwrap_or(teamcraft_import::run::DEFAULT_JOIN_WAIT),
     maybe_max_file_bytes: inputs.maybe_max_file_bytes,
   };
   let mut importer = Importer::start(&mut client, &export, &mapping, &mut progress, options).await?;
