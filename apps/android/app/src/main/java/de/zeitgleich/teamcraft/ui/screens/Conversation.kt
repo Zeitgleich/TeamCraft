@@ -161,7 +161,6 @@ fun ConversationScreen(
   var firstUnread by remember { mutableStateOf<FirstUnread>(FirstUnread.Loading) }
   // Counts sends from this screen's composer: each one brings the newest message into view.
   var sentCount by remember { mutableIntStateOf(0) }
-  var undecrypted by remember { mutableStateOf(0) }
   var maybeKeyCatchUp by remember { mutableStateOf<KeyCatchUpItem?>(null) }
   // What the notification that opened it showed, until the store has it (issue #1065).
   var maybeNotified by remember(conversationId) { mutableStateOf<NotifiedConversation?>(null) }
@@ -182,7 +181,6 @@ fun ConversationScreen(
     val maybeTail = feed.reread()
     messages = maybeTail?.messages ?: emptyList()
     hasOlder = maybeTail?.hasOlder ?: false
-    undecrypted = maybeTail?.undecrypted ?: 0
     maybeKeyCatchUp = viewModel.keyCatchUp()
     // After the messages: once the store has the notified one, the core no longer names it.
     maybeNotified = viewModel.notifiedConversation(conversationId)
@@ -214,7 +212,7 @@ fun ConversationScreen(
     // Messages here wait for their keys (a newly linked device, issue #888): they show as
     // placeholders in the list; this says how far the waiting conversations have caught up.
     val keyCatchUp = maybeKeyCatchUp
-    if (undecrypted > 0 && keyCatchUp != null) {
+    if (keyCatchUp != null && messages.any { it.maybePlaceholder == "waiting" }) {
       val total = keyCatchUp.total.toInt()
       Text(
         pluralStringResource(R.plurals.key_catch_up_progress, total, keyCatchUp.caughtUp.toInt(), total),
@@ -247,7 +245,6 @@ fun ConversationScreen(
           feed.older()?.let { tail ->
             messages = tail.messages
             hasOlder = tail.hasOlder
-            undecrypted = tail.undecrypted
           }
           isLoadingOlder = false
         }

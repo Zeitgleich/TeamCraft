@@ -4,7 +4,7 @@ use teamcraft_crypto::key_bag::EncryptedKeyBag;
 
 use super::Client;
 use super::enroll::WrapsOnMerge;
-use teamcraft_proto::{Base64Bytes, UserId};
+use teamcraft_proto::{Base64Bytes, ConversationId, UserId};
 
 use crate::account_data::{AccountData, PinnedKey};
 use crate::api::ServerApi;
@@ -76,11 +76,6 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
         remote.wrapped_backup_keys.as_slice(),
         WrapsOnMerge::Adopt,
       )?;
-      // Keys the user's other devices learned: the messages waiting for them fill in now, not at
-      // the conversation's next catch-up (issue #888).
-      for conversation in self.parked_conversations()? {
-        self.retry_undecrypted(conversation)?;
-      }
     }
     self.share_trust_decisions()?;
     if self.sync.is_key_bag_dirty {
@@ -164,14 +159,19 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     if wraps == WrapsOnMerge::Adopt {
       self.store_wrapped_keys_blob(wrapped_keys)?;
     }
+    let mut gained = Vec::new();
     for ring in decrypted.conversations() {
       // A device that joined by external commit takes the current key from a member, not from
       // a key bag that may predate the last key switch (#178).
       let conversation = convert::conversation_from_crypto(ring.conversation_id())?;
       let is_waiting = super::member_device::is_waiting_for_current_key(&self.store, conversation)?;
       let local = self.account.key_bag.ring_mut(ring.conversation_id());
+      let known = local.len();
       for key in ring.keys() {
         local.insert(key.duplicate())?;
+      }
+      if local.len() > known {
+        gained.push(conversation);
       }
       if local.current().is_none()
         && !is_waiting
@@ -193,7 +193,21 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     }
     self.sync.key_bag_version = version;
     records::save_key_bag(&self.store, &self.account)?;
-    self.persist_sync()
+    self.persist_sync()?;
+    self.retry_with_new_keys(&gained);
+    Ok(())
+  }
+
+  /// Tries the parked messages of the conversations whose key ring gained keys in a merge, so
+  /// messages waiting for a key the user's other devices had fill in now, not at the conversation's
+  /// next catch-up (issue #888). Only those conversations, and only when something is parked there.
+  /// A failure is logged: the merge is stored, and the next catch-up tries again.
+  fn retry_with_new_keys(&mut self, conversations: &[ConversationId]) {
+    for conversation in conversations {
+      if let Err(error) = self.retry_undecrypted(*conversation) {
+        tracing::warn!(conversation_id = %conversation, %error, "parked messages not tried again after a key bag merge");
+      }
+    }
   }
 
   fn store_account_data(&mut self, data: &AccountData) -> Result<(), CoreError> {

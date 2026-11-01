@@ -187,7 +187,7 @@ fn KeyCatchUpNote(conversation: ConversationId) -> impl IntoView {
     state.read(|backend| {
       backend
         .key_catch_up()
-        .filter(|_| backend.undecrypted_count(conversation) > 0)
+        .filter(|progress| progress.waiting.contains(&conversation))
     })
   });
   move || {
@@ -199,6 +199,7 @@ fn KeyCatchUpNote(conversation: ConversationId) -> impl IntoView {
           <div class="key-banner-text">
             <strong>{i18n.t("key-catch-up")}</strong>
             <span>{i18n.t_count_with("key-catch-up-progress", progress.total, &[("caught_up", &caught_up)])}</span>
+            <span>{i18n.t("key-catch-up-detail")}</span>
           </div>
         </div>
       }

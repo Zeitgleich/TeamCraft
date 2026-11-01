@@ -16,6 +16,7 @@ history-forward = Forward
 catching-up = Catching up…
 catching-up-detail = Messages from while you were away are still loading.
 key-catch-up = Getting the keys for older messages
+key-catch-up-detail = Messages fill in when one of your other devices or a member comes online.
 key-catch-up-progress = { $count ->
     [one] { $caught_up } of { $count } conversation caught up
    *[other] { $caught_up } of { $count } conversations caught up

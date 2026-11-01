@@ -1798,28 +1798,45 @@ plaintext), so no message can make or fake one.
   open), but never content: the row says only "Waiting for this message". Once the key arrives the
   message is decrypted and its signature checked against the sender device (§4.4); the result
   replaces the row under the same client message ID. Content that fails is never shown.
-- **States.** *Waiting*: the key may still come. *Not available on this device*: the device is in
-  the group and waits there for nothing (no current-key wait, no pending addition) and the message
-  waited `missing_key_grace` (10 minutes, a few key bag merges), or it waited `missing_key_give_up`
-  (3 days) in any case; the upkeep decides this from a per-conversation record of the oldest wait,
-  without reading messages until one is due. It stays parked: a key that turns up later still fills
-  it in. *Failed*: the key is there but the message doesn't open with it or its signature is wrong;
-  it is no longer retried. The wait is counted on the local clock; a start ahead of now (a clock set
+- **States.** *Waiting*: the key may still come, whenever one of the user's other devices or a
+  member comes online; the device can't tell that it never will (the user's own phone may just be
+  off), so it keeps waiting for `missing_key_give_up` (3 days). *Not available on this device*: that
+  wait ran out (the upkeep decides it from a per-conversation record of the oldest wait, without
+  reading messages until one is due), or the message is of a newer version (it stays parked and opens
+  after an update). A key that turns up later still fills it in. History this device is not meant
+  to get (from-join, guests, "Share history" off) never reaches it: the server doesn't hand it out
+  (`sees_all_history`), so it makes no placeholders. *Failed*: the key is there, but the message
+  doesn't decrypt or its signature is wrong or names another signer; it is no longer retried.
+  Malformed, unsigned (refused by `accept_unsigned_messages`) or misdirected envelopes are dropped
+  as before, with no row. The wait is counted on the local clock; a start ahead of now (a clock set
   back) counts as long ago, so a wrong clock never makes a wait endless.
+- **Only the message itself.** A failure touches the row and the parked copy only when both are of
+  the same server message: garbage the server re-delivers under a waiting message's client ID is
+  dropped and doesn't discard the real ciphertext. Controls (edits, deletes, pins) whose target is
+  still a placeholder wait like those for a target not here yet and apply once it is decrypted.
+- **Not a cursor.** Placeholders don't count for the store's message edges (`edge_server_id`): the
+  catch-up cursor, older history, the read position and the notification fallback ignore them, so a
+  placeholder dated far ahead by the server can't make the device skip messages.
 - **Getting the keys.** No new request protocol: the device asks the members to add it and members
   hand it the current key (§4.6, "A further device joins on its own"), and the user's other devices
   upload their key bags. Parked messages are tried again after every epoch change, every sender key
-  learned and now also after every key bag merge, so a key from the user's other device fills the
-  rows at once. The apps show how far the conversations that had waiting messages have caught up
+  learned and now also after a key bag merge, for the conversations whose key ring gained keys in
+  it, so a key from the user's other device fills the rows at once. The apps show how far the conversations that had waiting messages have caught up
   ("3 of 5 conversations caught up"); it ends when none waits.
 - **Elsewhere.** A placeholder may turn out to be a reaction, an edit or a delete (the server can't
-  tell kinds apart, by design), so it counts as neither unread nor the conversation's latest
-  activity, notifies nothing, has no actions and isn't searched or put into an index segment until
-  it is decrypted. Desktop notifications count a placeholder as unseen, so one that fills in and is
+  tell kinds apart, by design), so it counts as neither unread, nor a thread reply, nor the
+  conversation's latest activity, notifies nothing, has no actions and isn't searched; a month with
+  any placeholder isn't published as an index segment by this device. Desktop notifications count a placeholder as unseen, so one that fills in and is
   newer than everything seen notifies then, with its text; older history filling in stays quiet.
   A control decrypted in place of a placeholder makes its row go, as it would have been hidden.
 - **Bounded.** A placeholder is one row like any message: the feed pages it like the others, and
-  filling it is one write of that row, with no work proportional to the conversation.
+  filling it is one write of that row, with no work proportional to the conversation. What the
+  server can make a device keep is bounded per conversation (configurable): failed placeholders
+  (`max_failed_placeholders`, 200; beyond it such messages are dropped as before) and parked
+  messages (`max_parked_per_conversation`, 20 000; beyond it the oldest given up on are no longer
+  kept for a retry, their rows stay).
+- **Older versions.** A version before this one treats a placeholder row as a known message and
+  doesn't replace it; it keeps the parked copy, so an update after a downgrade fills it in.
 
 ## 6. Backup and recovery
 

@@ -69,6 +69,20 @@ async fn a_message_waits_in_its_place_and_fills_in_when_its_key_arrives() {
 }
 
 #[tokio::test]
+async fn a_key_from_the_user_s_other_device_fills_in_at_the_key_bag_merge() {
+  let server = FakeServer::new();
+  let (mut phone, mut bob, mut laptop, channel, _clock) = laptop_missing_a_key(&server).await;
+  // The phone comes back and catches up; its key bag now holds the key.
+  phone.client.full_sync().await.unwrap();
+  settle(&mut [&mut phone, &mut bob]).await;
+  phone.client.upload_key_bag().await.unwrap();
+
+  // The laptop only merges the key bag: no catch-up of the conversation.
+  laptop.client.sync_account_data().await.unwrap();
+  assert!(laptop.texts(channel).contains(&"after the switch".to_string()));
+}
+
+#[tokio::test]
 async fn a_key_that_never_comes_ends_as_not_available_not_as_an_endless_wait() {
   let server = FakeServer::new();
   let (_phone, _bob, mut laptop, channel, clock) = laptop_missing_a_key(&server).await;

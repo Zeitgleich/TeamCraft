@@ -62,8 +62,8 @@
     <item quantity="other">Confirmed by %d people</item>
   </plurals>
   <plurals name="key_catch_up_progress">
-    <item quantity="one">Getting the keys for older messages: %1$d of %2$d conversation caught up</item>
-    <item quantity="other">Getting the keys for older messages: %1$d of %2$d conversations caught up</item>
+    <item quantity="one">Getting the keys for older messages: %1$d of %2$d conversation caught up Messages fill in when one of your other devices or a member comes online.</item>
+    <item quantity="other">Getting the keys for older messages: %1$d of %2$d conversations caught up Messages fill in when one of your other devices or a member comes online.</item>
   </plurals>
   <string name="message_edit_label">Message</string>
   <string name="message_edit_empty">A message can\'t be empty. To remove it, delete it.</string>

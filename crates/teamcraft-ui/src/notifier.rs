@@ -322,8 +322,7 @@ impl Notifier {
     if (summary.reply_count as usize) <= previous {
       return;
     }
-    let thread = backend.thread(conversation.id, key.1);
-    let new_replies = readable(thread.into_iter().skip(1 + previous).collect());
+    let new_replies = new_replies(backend.thread(conversation.id, key.1), previous);
     for message in new_replies {
       found.push(Found {
         conversation: conversation.clone(),
@@ -369,6 +368,15 @@ impl ReadWatcher {
       .map(|(id, _)| *id)
       .collect()
   }
+}
+
+/// The replies of `thread` (its root first) after the `previous` ones already counted. The reply
+/// count leaves placeholders out (issue #888), so they are left out before counting.
+fn new_replies(thread: Vec<Message>, previous: usize) -> Vec<Message> {
+  readable(thread.into_iter().skip(1).collect())
+    .into_iter()
+    .skip(previous)
+    .collect()
 }
 
 /// The messages this device can read: a placeholder (issue #888) has no text to show and may turn
@@ -605,6 +613,15 @@ mod tests {
       waiting.maybe_placeholder = Some(crate::model::Placeholder::Waiting);
       let window = readable(vec![message(6), message(7), waiting]);
       assert_eq!(ids(new_messages(window, Some(id_from_raw(6)), None, 0)), [7]);
+    }
+
+    #[test]
+    fn thread_replies_after_a_placeholder_are_counted_without_it() {
+      let mut waiting = message(3);
+      waiting.maybe_placeholder = Some(crate::model::Placeholder::Waiting);
+      // Root 1, readable reply 2 seen before, a placeholder, then a new reply 4.
+      let thread = vec![message(1), message(2), waiting, message(4)];
+      assert_eq!(ids(new_replies(thread, 1)), [4]);
     }
 
     fn ids(messages: Vec<Message>) -> Vec<u64> {

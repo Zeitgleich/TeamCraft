@@ -689,10 +689,13 @@ pub struct Message {
 /// How far the conversations with messages waiting for keys have caught up (issue #888): each is
 /// caught up once every message is readable or known to stay unavailable on this device. Shown as
 /// "3 of 5 conversations caught up" while `caught_up < total`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct KeyCatchUp {
   pub caught_up: usize,
   pub total: usize,
+  /// The conversations with messages still waiting (not those only given up on).
+  #[serde(default)]
+  pub waiting: Vec<ConversationId>,
 }
 
 /// Why a message shows as a placeholder (issue #888, e2ee.md §5, "History on a new device").
@@ -706,6 +709,9 @@ pub enum Placeholder {
   /// It didn't decrypt with the key it names (damaged or tampered): "This message couldn't be
   /// decrypted".
   Failed,
+  /// A state of a newer version: shown like [`Self::NotAvailable`].
+  #[serde(other)]
+  Unknown,
 }
 
 /// Where an imported message came from, and who wrote it when that is nobody with an account.

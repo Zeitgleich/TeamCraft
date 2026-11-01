@@ -125,7 +125,9 @@ fn placeholder_message(message: Message, placeholder: Placeholder, is_grouped: b
   let is_mine = message.author == state.me().id;
   let (text_key, maybe_icon) = match placeholder {
     Placeholder::Waiting => ("message-placeholder-waiting", Some(IconName::Clock)),
-    Placeholder::NotAvailable => ("message-placeholder-not-available", Some(IconName::Lock)),
+    Placeholder::NotAvailable | Placeholder::Unknown => {
+      ("message-placeholder-not-available", Some(IconName::Lock))
+    },
     Placeholder::Failed => ("message-placeholder-failed", Some(IconName::Alert)),
   };
   let text = i18n.t(text_key);

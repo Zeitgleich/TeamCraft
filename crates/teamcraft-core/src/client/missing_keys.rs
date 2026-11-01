@@ -4,7 +4,8 @@
 //! when the oldest started to wait, so the upkeep finds the ones whose wait ran out without
 //! reading any message; a waiting placeholder becomes "not available" then. The conversations of
 //! the current catch-up are kept too, for the progress the apps show ("3 of 5 conversations caught
-//! up").
+//! up"). Two bounds keep what the server can make this device store finite: failed placeholders
+//! per conversation, and parked messages per conversation (the oldest given up on go first).
 
 use std::collections::BTreeSet;
 
@@ -19,13 +20,16 @@ use crate::store::{LocalStore, Table, Unreadable};
 
 const KEY_WAIT_PREFIX: &str = "key_wait/";
 const CATCH_UP_KEY: &str = "key_catch_up";
+const FAILED_PREFIX: &str = "failed_placeholders/";
 
 /// How far the conversations that had messages waiting for keys have caught up: every message
 /// readable, or known to stay unavailable. Shown while `caught_up < total`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct KeyCatchUp {
   pub caught_up: usize,
   pub total: usize,
+  /// The conversations with messages still waiting.
+  pub waiting: BTreeSet<ConversationId>,
 }
 
 /// A conversation with placeholders waiting for keys, under `key_wait/<conversation>`.
@@ -55,7 +59,11 @@ pub fn key_catch_up(store: &impl LocalStore) -> Result<Option<KeyCatchUp>, CoreE
     .iter()
     .filter(|conversation| !waiting.contains(conversation))
     .count();
-  Ok((caught_up < total).then_some(KeyCatchUp { caught_up, total }))
+  Ok((caught_up < total).then_some(KeyCatchUp {
+    caught_up,
+    total,
+    waiting,
+  }))
 }
 
 /// Notes that a placeholder of `conversation` started to wait at `now_ms`.
@@ -83,12 +91,28 @@ pub(super) fn note_waiting(
   Ok(())
 }
 
+/// Counts a new failed placeholder of `conversation` against `max`: `false` (and nothing counted)
+/// once it has `max` of them.
+pub(super) fn take_failed_slot(
+  store: &impl LocalStore,
+  conversation: ConversationId,
+  max: u32,
+) -> Result<bool, CoreError> {
+  let key = format!("{FAILED_PREFIX}{conversation}");
+  let count: u32 = records::get_json(store, Table::SyncState, &key)?.unwrap_or(0);
+  if count >= max {
+    return Ok(false);
+  }
+  records::put_json(store, Table::SyncState, &key, &(count + 1))?;
+  Ok(true)
+}
+
 impl<A: ServerApi, S: LocalStore> Client<A, S> {
-  /// Turns placeholders whose wait ran out into "not available" (the upkeep calls it on its local
-  /// checks): after `missing_key_grace` once this device is in the group and waits for nothing
-  /// there, after `missing_key_give_up` in any case. Reads messages only of conversations with a
-  /// placeholder due, once. Ends the catch-up when nothing waits any more. Returns whether a
-  /// placeholder changed.
+  /// Turns placeholders whose wait ran out (`missing_key_give_up`) into "not available" (the upkeep
+  /// calls it on its local checks). Not sooner: this device can't tell that a key will never come,
+  /// as long as one of the user's other devices or a member may still bring it. Reads messages only
+  /// of conversations with a placeholder due, once. Ends the catch-up when nothing waits any more.
+  /// Returns whether a placeholder changed.
   pub fn settle_missing_keys(&mut self) -> Result<bool, CoreError> {
     let now = self.now_ms();
     let mut is_changed = false;
@@ -96,7 +120,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       let maybe_wait: Option<KeyWait> =
         records::get_json(&self.store, Table::SyncState, &key_wait_key(conversation))?;
       let Some(wait) = maybe_wait else { continue };
-      let wait_ms = self.missing_key_wait_ms(conversation)?;
+      let wait_ms = i64::try_from(self.settings.missing_key_give_up.as_millis()).unwrap_or(i64::MAX);
       if !has_waited(wait.oldest_since_ms, now, wait_ms) {
         continue;
       }
@@ -108,29 +132,35 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     Ok(is_changed)
   }
 
-  /// Corrects the conversation's wait record after its parked messages were tried again: gone when
-  /// none waits any more.
+  /// Corrects the conversation's wait record after its parked messages were tried again (gone when
+  /// none waits any more), and keeps at most `max_parked_per_conversation` parked: beyond it the
+  /// oldest given up on are no longer kept for a retry. Their rows stay "not available".
   pub(super) fn refresh_key_wait(&mut self, conversation: ConversationId) -> Result<(), CoreError> {
+    let parked = self.parked(conversation)?;
     let mut maybe_oldest: Option<i64> = None;
-    for message in self.parked(conversation)? {
-      if let Some(since_ms) = self.waiting_since(&message)? {
-        maybe_oldest = Some(maybe_oldest.map_or(since_ms, |oldest| oldest.min(since_ms)));
+    let mut given_up = Vec::new();
+    for message in &parked {
+      match self.unreadable(message)? {
+        Some(Unreadable::Waiting { since_ms }) => {
+          maybe_oldest = Some(maybe_oldest.map_or(since_ms, |oldest| oldest.min(since_ms)));
+        },
+        Some(Unreadable::NotAvailable) => given_up.push(message),
+        _ => {},
       }
     }
+    let excess = parked
+      .len()
+      .saturating_sub(self.settings.max_parked_per_conversation);
+    if excess > 0 {
+      given_up.sort_by_key(|message| message.id);
+      for message in given_up.into_iter().take(excess) {
+        self
+          .store
+          .delete(Table::Undecrypted, &super::messaging::undecrypted_key(message))?;
+      }
+      tracing::info!(conversation_id = %conversation, excess, "parked messages given up on no longer kept");
+    }
     store_key_wait(&self.store, conversation, maybe_oldest)
-  }
-
-  /// How long the conversation's placeholders wait: the grace while nothing more is expected,
-  /// the longest wait while this device isn't in the group yet or waits there for a key.
-  fn missing_key_wait_ms(&mut self, conversation: ConversationId) -> Result<i64, CoreError> {
-    let may_still_come = !self.has_group(conversation)?
-      || super::member_device::is_waiting_for_device(&self.store, conversation)?;
-    let wait = if may_still_come {
-      self.settings.missing_key_give_up
-    } else {
-      self.settings.missing_key_grace
-    };
-    Ok(i64::try_from(wait.as_millis()).unwrap_or(i64::MAX))
   }
 
   /// Marks the conversation's placeholders that waited `wait_ms` as not available.
@@ -173,14 +203,20 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
 
   /// When the parked message's placeholder started to wait, if it still does.
   fn waiting_since(&self, message: &MessageResponse) -> Result<Option<i64>, CoreError> {
+    Ok(match self.unreadable(message)? {
+      Some(Unreadable::Waiting { since_ms }) => Some(since_ms),
+      _ => None,
+    })
+  }
+
+  /// The state of the parked message's placeholder, if it has one for this very message.
+  fn unreadable(&self, message: &MessageResponse) -> Result<Option<Unreadable>, CoreError> {
     Ok(
       self
         .store
         .message(message.conversation_id, message.client_message_id)?
-        .and_then(|stored| match stored.maybe_unreadable {
-          Some(Unreadable::Waiting { since_ms }) => Some(since_ms),
-          _ => None,
-        }),
+        .filter(|stored| stored.maybe_server_id == Some(message.id))
+        .and_then(|stored| stored.maybe_unreadable),
     )
   }
 }
@@ -237,19 +273,17 @@ mod tests {
     note_waiting(&store, id(1), 100).unwrap();
     note_waiting(&store, id(2), 200).unwrap();
     assert_eq!(
-      key_catch_up(&store).unwrap(),
-      Some(KeyCatchUp {
-        caught_up: 0,
-        total: 2
-      })
+      key_catch_up(&store)
+        .unwrap()
+        .map(|progress| (progress.caught_up, progress.total)),
+      Some((0, 2))
     );
     store_key_wait(&store, id(1), None).unwrap();
     assert_eq!(
-      key_catch_up(&store).unwrap(),
-      Some(KeyCatchUp {
-        caught_up: 1,
-        total: 2
-      })
+      key_catch_up(&store)
+        .unwrap()
+        .map(|progress| (progress.caught_up, progress.total)),
+      Some((1, 2))
     );
     store_key_wait(&store, id(2), None).unwrap();
     assert_eq!(key_catch_up(&store).unwrap(), None, "all caught up");

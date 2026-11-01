@@ -1653,6 +1653,7 @@ impl<S: LocalStore> ChatBackend for CoreChatBackend<S> {
       .map(|progress| teamcraft_client_api::model::KeyCatchUp {
         caught_up: progress.caught_up,
         total: progress.total,
+        waiting: progress.waiting.into_iter().collect(),
       })
   }
 
@@ -2413,9 +2414,11 @@ impl<'a> Relations<'a> {
       if let MessageContent::Reaction { target, .. } = &message.content {
         reactions.entry(*target).or_default().push(message);
       }
+      // A placeholder (issue #888) may turn out to be no reply at all: counted once readable.
       if let Some(thread) = message.maybe_thread_id
         && !message.is_hidden()
         && !is_deleted(message)
+        && message.maybe_unreadable.is_none()
       {
         *replies.entry(thread).or_default() += 1;
       }
@@ -2752,6 +2755,27 @@ mod tests {
     fn feed_of(count: i64) -> (CoreChatBackend<std::sync::Arc<MemoryStore>>, ConversationId) {
       let (backend, conversation, _) = feed_with_store(count);
       (backend, conversation)
+    }
+
+    /// Issue #888: a placeholder in a thread shows there, but the root's reply count leaves it out
+    /// until it is decrypted (it may turn out to be a reaction or an edit).
+    #[test]
+    fn thread_reply_counts_leave_placeholders_out() {
+      let (backend, conversation, store) = feed_with_store(1);
+      let thread = ThreadId::from_snowflake(id::<MessageId>(101).snowflake());
+      let mut reply = stored(conversation, 2);
+      reply.maybe_thread_id = Some(thread);
+      let mut placeholder = stored(conversation, 3);
+      placeholder.maybe_thread_id = Some(thread);
+      placeholder.content = MessageContent::Unknown;
+      placeholder.maybe_unreadable = Some(Unreadable::Waiting { since_ms: 0 });
+      store.upsert_message(&reply).unwrap();
+      store.upsert_message(&placeholder).unwrap();
+
+      assert_eq!(backend.messages(conversation, 0, 10)[0].reply_count, 1);
+      let rows = backend.thread(conversation, thread);
+      assert_eq!(rows.len(), 3, "root, reply and the placeholder");
+      assert_eq!(rows[2].maybe_placeholder, Some(Placeholder::Waiting));
     }
 
     fn feed_with_store(

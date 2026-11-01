@@ -618,7 +618,7 @@ impl MessageItem {
       maybe_system_event: SystemEventItem::of(&message.kind),
       maybe_placeholder: message.maybe_placeholder.map(|placeholder| match placeholder {
         view::Placeholder::Waiting => PlaceholderItem::Waiting,
-        view::Placeholder::NotAvailable => PlaceholderItem::NotAvailable,
+        view::Placeholder::NotAvailable | view::Placeholder::Unknown => PlaceholderItem::NotAvailable,
         view::Placeholder::Failed => PlaceholderItem::Failed,
       }),
       reactions: message

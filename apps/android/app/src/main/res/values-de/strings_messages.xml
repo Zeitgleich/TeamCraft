@@ -62,8 +62,8 @@
     <item quantity="other">Von %d Personen bestätigt</item>
   </plurals>
   <plurals name="key_catch_up_progress">
-    <item quantity="one">Schlüssel für ältere Nachrichten werden geholt: %1$d von %2$d Unterhaltung vollständig</item>
-    <item quantity="other">Schlüssel für ältere Nachrichten werden geholt: %1$d von %2$d Unterhaltungen vollständig</item>
+    <item quantity="one">Schlüssel für ältere Nachrichten werden geholt: %1$d von %2$d Unterhaltung vollständig Nachrichten erscheinen, sobald eines deiner anderen Geräte oder ein Mitglied online ist.</item>
+    <item quantity="other">Schlüssel für ältere Nachrichten werden geholt: %1$d von %2$d Unterhaltungen vollständig Nachrichten erscheinen, sobald eines deiner anderen Geräte oder ein Mitglied online ist.</item>
   </plurals>
   <string name="message_edit_label">Nachricht</string>
   <string name="message_edit_empty">Eine Nachricht kann nicht leer sein. Lösche sie, um sie zu entfernen.</string>
