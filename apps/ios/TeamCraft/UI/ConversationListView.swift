@@ -24,6 +24,12 @@ struct ConversationListView: View {
   @State private var dmFilter = ""
   /// A mute from the long-press menu the server didn't take (#903).
   @State private var isMuteFailed = false
+  /// An entry-menu action the core or server refused (#1105, #322).
+  @State private var maybeActionFailure: AppFailure?
+  /// What the core says about leaving, per channel row and space header: the rule is the core's.
+  @State private var leaveChoices: [String: LeaveChoice] = [:]
+  @State private var spaceMenus: [String: SpaceMenuItem] = [:]
+  @State private var maybeLeaving: LeaveTarget?
 
   var body: some View {
     NavigationSplitView {
@@ -37,6 +43,15 @@ struct ConversationListView: View {
         }
         .navigationTitle("chats_title")
         .alert("dnd_save_failed", isPresented: $isMuteFailed) {}
+        .alert("entry_action_failed", isPresented: isActionFailureShown) {
+        } message: {
+          if let failure = maybeActionFailure { Text(failure.message) }
+        }
+        .confirmationDialog(leaveTitle, isPresented: isLeavingShown, titleVisibility: .visible) {
+          Button("entry_leave_confirm", role: .destructive) { confirmLeave() }
+        } message: {
+          Text(maybeLeaving?.isSpace == true ? "entry_leave_space_text" : "entry_leave_channel_text")
+        }
         .toolbar {
           ToolbarItem(placement: .topBarLeading) {
             Button { isShowingFilters = true } label: {
@@ -143,16 +158,24 @@ struct ConversationListView: View {
           }
         }
         ForEach(shownSections) { section in
-          Section(header: Text(title(of: section.title))) {
+          Section(
+            header: Text(title(of: section.title))
+              .contextMenu { spaceMenu(for: section) }
+              .task(id: section.id) { await loadSpaceMenu(for: section) }
+          ) {
             ForEach(section.conversations, id: \.id) { conversation in
               ConversationRow(conversation: conversation, maybePreview: previews[conversation.id])
                 .tag(conversation.id)
                 .swipeActions(edge: .leading) { readButton(for: conversation) }
                 .swipeActions(edge: .trailing) { favoriteButton(for: conversation) }
+                .task(id: conversation.id) { await loadLeaveChoice(for: conversation) }
                 .contextMenu {
                   readButton(for: conversation)
                   muteMenu(for: conversation)
+                  levelMenu(for: conversation)
                   favoriteButton(for: conversation)
+                  copyLinkButton(for: conversation)
+                  leaveButton(for: conversation)
                 }
             }
           }
@@ -250,6 +273,121 @@ struct ConversationListView: View {
   private func setMuted(_ conversation: ConversationItem, until maybeDate: Date?) {
     Task {
       if !(await model.setConversationMuted(conversation.id, until: maybeDate)) { isMuteFailed = true }
+    }
+  }
+
+  /// All messages, mentions only or nothing, besides the mute time (#1105).
+  private func levelMenu(for conversation: ConversationItem) -> some View {
+    Menu {
+      ForEach(NotifyLevel.allCases) { level in
+        Button(LocalizedStringKey(level.titleKey)) {
+          Task {
+            if !(await model.setConversationLevel(conversation.id, level: level.wire)) { isMuteFailed = true }
+          }
+        }
+      }
+    } label: {
+      Label("entry_notifications", systemImage: "bell.badge")
+    }
+  }
+
+  @ViewBuilder
+  private func copyLinkButton(for conversation: ConversationItem) -> some View {
+    if let link = model.shareLink(forConversation: conversation.id) {
+      Button("copy_link", systemImage: "link") { UIPasteboard.general.string = link }
+    }
+  }
+
+  /// Only where the core allows it; the last admin sees why it is off, before the tap.
+  @ViewBuilder
+  private func leaveButton(for conversation: ConversationItem) -> some View {
+    switch leaveChoices[conversation.id] ?? .hidden {
+    case .hidden:
+      EmptyView()
+    case .allowed:
+      Button("entry_leave_channel", systemImage: "rectangle.portrait.and.arrow.right", role: .destructive) {
+        maybeLeaving = .channel(id: conversation.id, name: conversation.name)
+      }
+    case .lastAdmin:
+      Button("entry_leave_last_channel_admin", systemImage: "rectangle.portrait.and.arrow.right") {}
+        .disabled(true)
+    }
+  }
+
+  private func loadLeaveChoice(for conversation: ConversationItem) async {
+    guard !conversation.isDirect else { return }
+    leaveChoices[conversation.id] = await model.conversationLeaveChoice(conversation.id)
+  }
+
+  /// Mute (its channels follow), mark all read and leave: the menu of a space's header.
+  @ViewBuilder
+  private func spaceMenu(for section: ConversationSection) -> some View {
+    if case .space(let name) = section.title, let spaceId = section.conversations.compactMap(\.maybeSpaceId).first {
+      let menu = spaceMenus[spaceId]
+      Menu {
+        Button("mute_end", systemImage: "bell") { setSpaceMuted(spaceId, until: nil) }
+        ForEach(MutePreset.allCases) { preset in
+          Button(preset.title) { setSpaceMuted(spaceId, until: preset.mutedUntil(now: Date(), calendar: .current)) }
+        }
+      } label: {
+        Label("entry_mute_space", systemImage: "bell.slash")
+      }
+      if menu?.hasUnread ?? section.conversations.contains(where: { $0.unreadCount > 0 || $0.mentionCount > 0 }) {
+        Button("entry_mark_all_read", systemImage: "envelope.open") {
+          Task { maybeActionFailure = await model.markSpaceRead(spaceId) }
+        }
+      }
+      switch menu?.leave ?? .hidden {
+      case .hidden:
+        EmptyView()
+      case .allowed:
+        Button("entry_leave_space", systemImage: "rectangle.portrait.and.arrow.right", role: .destructive) {
+          maybeLeaving = .space(id: spaceId, name: name)
+        }
+      case .lastAdmin:
+        Button("entry_leave_last_space_admin", systemImage: "rectangle.portrait.and.arrow.right") {}
+          .disabled(true)
+      }
+    }
+  }
+
+  private func loadSpaceMenu(for section: ConversationSection) async {
+    guard case .space = section.title, let spaceId = section.conversations.compactMap(\.maybeSpaceId).first else {
+      return
+    }
+    spaceMenus[spaceId] = await model.spaceMenu(spaceId)
+  }
+
+  private func setSpaceMuted(_ spaceId: String, until maybeDate: Date?) {
+    Task {
+      if !(await model.setSpaceMuted(spaceId, until: maybeDate)) { isMuteFailed = true }
+    }
+  }
+
+  private var isActionFailureShown: Binding<Bool> {
+    Binding(get: { maybeActionFailure != nil }, set: { _ in maybeActionFailure = nil })
+  }
+
+  private var isLeavingShown: Binding<Bool> {
+    Binding(get: { maybeLeaving != nil }, set: { if !$0 { maybeLeaving = nil } })
+  }
+
+  private var leaveTitle: LocalizedStringKey {
+    switch maybeLeaving {
+    case .channel(_, let name): return "entry_leave_channel_title \(name)"
+    case .space(_, let name): return "entry_leave_space_title \(name)"
+    case nil: return ""
+    }
+  }
+
+  private func confirmLeave() {
+    guard let target = maybeLeaving else { return }
+    maybeLeaving = nil
+    Task {
+      switch target {
+      case .channel(let id, _): maybeActionFailure = await model.leaveChannel(id)
+      case .space(let id, _): maybeActionFailure = await model.leaveSpace(id)
+      }
     }
   }
 
@@ -382,6 +520,33 @@ struct SearchResultsView: View {
         }
         .buttonStyle(.plain)
       }
+    }
+  }
+}
+
+/// What a leave confirmation is about.
+private enum LeaveTarget {
+  case channel(id: String, name: String)
+  case space(id: String, name: String)
+
+  var isSpace: Bool {
+    if case .space = self { return true }
+    return false
+  }
+}
+
+/// A conversation's notification level, as the server names it.
+private enum NotifyLevel: String, CaseIterable, Identifiable {
+  case all, mentions, none
+
+  var id: String { rawValue }
+  var wire: String { rawValue }
+
+  var titleKey: String {
+    switch self {
+    case .all: return "notify_all"
+    case .mentions: return "notify_mentions"
+    case .none: return "notify_none"
     }
   }
 }

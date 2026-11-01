@@ -208,6 +208,17 @@ fun ChatListScreen(
       actionsFor = { conversation, maybeEntry -> rowActions(viewModel, conversation, maybeEntry) },
       onOpen = { id -> if (selection.isEmpty()) onOpen(id) else selection = toggled(selection, id) },
       onLongPress = { id -> selection = toggled(selection, id) },
+      conversationMenu = { conversation, isOpen, onDismiss ->
+        ConversationEntryMenu(
+          viewModel = viewModel,
+          conversation = conversation,
+          isOpen = isOpen,
+          onDismiss = onDismiss,
+          onSelect = { selection = toggled(selection, conversation.id) },
+          onNotifications = { maybeNotifying = conversation.id },
+        )
+      },
+      spaceMenu = { spaceId, name, isOpen, onDismiss -> SpaceEntryMenu(viewModel, spaceId, name, isOpen, onDismiss) },
     ),
     maybeSelectionBar = if (selected.isEmpty()) {
       null
@@ -306,6 +317,10 @@ internal class ListState(
   val actionsFor: (ConversationItem, ChatListEntry?) -> RowActions,
   val onOpen: (String) -> Unit,
   val onLongPress: (String) -> Unit,
+  /** The long-press menu of a conversation: the conversation, whether it is open, how to close it. */
+  val conversationMenu: @Composable (ConversationItem, Boolean, () -> Unit) -> Unit = { _, _, _ -> },
+  /** The long-press menu of a space header: id, name, whether it is open, how to close it. */
+  val spaceMenu: @Composable (String, String, Boolean, () -> Unit) -> Unit = { _, _, _, _ -> },
 ) {
   val lastActivity: Map<String, Long> get() = previews.mapValues { it.value.preview.sentAt }
 }
@@ -396,7 +411,7 @@ private fun SpacesTab(conversations: List<ConversationItem>, list: ListState, on
 
 private fun LazyListScope.conversationRows(sections: List<Section>, list: ListState, hasHeader: Boolean = true) {
   for (section in sections) {
-    if (hasHeader) item(key = "section-${section.title}") { SectionHeader(section.title) }
+    if (hasHeader) item(key = "section-${section.title}") { SectionHeaderWithMenu(section, list) }
     items(section.conversations, key = { "${section.title}-${it.id}" }) { conversation ->
       SwipeableConversationRow(
         actions = list.actionsFor(conversation, list.previews[conversation.id]),
@@ -407,8 +422,36 @@ private fun LazyListScope.conversationRows(sections: List<Section>, list: ListSt
         isSelecting = list.selection.isNotEmpty(),
         onClick = { list.onOpen(conversation.id) },
         onLongPress = { list.onLongPress(conversation.id) },
+        menu = { isOpen, onDismiss -> list.conversationMenu(conversation, isOpen, onDismiss) },
       )
     }
+  }
+}
+
+/** A section's header; a space's also opens the space menu on a long-press (#1105). */
+@OptIn(ExperimentalFoundationApi::class)
+@Composable
+private fun SectionHeaderWithMenu(section: Section, list: ListState) {
+  val title = section.title
+  val maybeSpaceId = section.conversations.firstNotNullOfOrNull { it.maybeSpaceId }
+  if (title !is SectionTitle.Space || maybeSpaceId == null) {
+    SectionHeader(title)
+    return
+  }
+  val haptics = LocalHapticFeedback.current
+  var isOpen by remember { mutableStateOf(false) }
+  Box(
+    Modifier.fillMaxWidth().combinedClickable(
+      onClick = {},
+      onLongClickLabel = stringResource(R.string.entry_space_menu),
+      onLongClick = {
+        haptics.performHapticFeedback(HapticFeedbackType.LongPress)
+        isOpen = true
+      },
+    ),
+  ) {
+    SectionHeader(title)
+    list.spaceMenu(maybeSpaceId, title.name, isOpen) { isOpen = false }
   }
 }
 
@@ -702,9 +745,12 @@ private fun SwipeableConversationRow(
   isSelecting: Boolean,
   onClick: () -> Unit,
   onLongPress: () -> Unit,
+  menu: @Composable (Boolean, () -> Unit) -> Unit,
 ) {
   val haptics = LocalHapticFeedback.current
   val scope = rememberCoroutineScope()
+  // While rows are being selected, a long-press keeps toggling; otherwise it opens the menu.
+  var isMenuOpen by remember { mutableStateOf(false) }
   val state = rememberSwipeToDismissBoxState()
   SwipeToDismissBox(
     state = state,
@@ -722,7 +768,18 @@ private fun SwipeableConversationRow(
       scope.launch { state.reset() }
     },
   ) {
-    ConversationRow(conversation, maybeEntry, actions, isSelected, isChecked, onClick, onLongPress)
+    Box {
+      ConversationRow(
+        conversation,
+        maybeEntry,
+        actions,
+        isSelected,
+        isChecked,
+        onClick,
+        onLongPress = { if (isSelecting) onLongPress() else isMenuOpen = true },
+      )
+      menu(isMenuOpen) { isMenuOpen = false }
+    }
   }
 }
 

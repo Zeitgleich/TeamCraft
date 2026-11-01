@@ -19,6 +19,13 @@
   <string name="custom_status_emoji">Emoji</string>
   <string name="custom_status_text">Status</string>
   <string name="custom_status_missing">Gib einen Statustext ein.</string>
+  <string name="profile_name_change">Namen ändern</string>
+  <string name="profile_name_label">Dein Name</string>
+  <string name="profile_name_save">Namen speichern</string>
+  <string name="profile_name_reset">Namen aus der Anmeldung verwenden</string>
+  <string name="profile_name_empty">Gib einen Namen ein oder verwende den Namen aus deiner Anmeldung.</string>
+  <string name="profile_name_invalid">Der Name darf keine Steuerzeichen enthalten.</string>
+  <string name="profile_name_rejected">Der Name wurde abgelehnt. Er ist vielleicht zu lang, oder deine Organisation erlaubt die Änderung nicht mehr.</string>
   <string name="export_diagnostics">Diagnose exportieren</string>
   <string name="export_diagnostics_summary">Teilt App- und Systemversion sowie die letzten Protokollzeilen mit dem Support. Es wird nichts gesendet, bis du eine App auswählst.</string>
   <string name="export_diagnostics_share_title">TeamCraft-Diagnose</string>

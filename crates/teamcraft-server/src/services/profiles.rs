@@ -48,8 +48,11 @@ pub async fn put_my_profile(
   caller: &AuthenticatedUser,
   request: UpdateProfileRequest,
 ) -> Result<ProfileResponse, ApiError> {
-  let limit = state.settings.get().limits.max_profile_text_chars;
+  let limits = state.settings.get().limits.clone();
+  let limit = limits.max_profile_text_chars;
   let current = state.database.get_profile(caller.user.id).await?;
+  let maybe_name = clean_display_name(request.maybe_display_name, limits.max_display_name_chars)?;
+  let maybe_current_name = state.database.get_display_name_override(caller.user.id).await?;
   let profile = StoredProfile {
     maybe_title: clean_text(request.maybe_title, limit, "title")?,
     maybe_department: clean_text(request.maybe_department, limit, "department")?,
@@ -58,7 +61,21 @@ pub async fn put_my_profile(
     maybe_working_hours: request.maybe_working_hours.map(stored_hours).transpose()?,
     maybe_avatar: current.maybe_avatar,
   };
+  // Clearing is always allowed, and so is sending back the override already stored: only a new
+  // name is subject to the policy.
+  if maybe_name.is_some()
+    && maybe_name != maybe_current_name
+    && !state.policy.get().directory.allow_display_name_override
+  {
+    return Err(ApiError::DisplayNameOverrideNotAllowed);
+  }
   state.database.put_profile(caller.user.id, &profile).await?;
+  if maybe_name != maybe_current_name {
+    state
+      .database
+      .set_display_name_override(caller.user.id, maybe_name.as_deref())
+      .await?;
+  }
   publish_update(state, caller.user.id).await?;
   profile_of(state, caller.user.id).await
 }
@@ -184,6 +201,8 @@ async fn profile_of(state: &AppState, user: UserId) -> Result<ProfileResponse, A
     maybe_phone: profile.maybe_phone,
     maybe_time_zone: profile.maybe_time_zone,
     maybe_working_hours: profile.maybe_working_hours.map(wire_hours),
+    maybe_display_name_override: state.database.get_display_name_override(user).await?,
+    can_override_display_name: state.policy.get().directory.allow_display_name_override,
     has_avatar: profile.maybe_avatar.is_some(),
     maybe_avatar_version: profile
       .maybe_avatar
@@ -234,6 +253,11 @@ fn clean_text(maybe_text: Option<String>, max_chars: usize, field: &str) -> Resu
     return Err(ApiError::InvalidRequest(format!("invalid {field}")));
   }
   Ok(Some(text.to_owned()))
+}
+
+/// Trims; empty means "use the name from the identity provider"; control characters are refused.
+fn clean_display_name(maybe_name: Option<String>, max_chars: usize) -> Result<Option<String>, ApiError> {
+  clean_text(maybe_name, max_chars, "display name")
 }
 
 fn clean_phone(maybe_phone: Option<String>) -> Result<Option<String>, ApiError> {

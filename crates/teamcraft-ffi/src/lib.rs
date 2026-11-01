@@ -55,12 +55,12 @@ use teamcraft_media::openh264_library::{self, OpenH264Binary};
 use tokio::sync::{mpsc, oneshot};
 pub use types::{
   AccountState, AppActivity, AppConfig, BrandAccent, BrandLinks, ConnectionState, ConversationItem,
-  ConversationKind, EmojiSuggestion, KeyCatchUpItem, LinkPlatform, LinkRequestItem, LoginBrand,
+  ConversationKind, EmojiSuggestion, KeyCatchUpItem, LeaveChoice, LinkPlatform, LinkRequestItem, LoginBrand,
   MentionSettings, MessageItem, MessagePage, NetworkInterception, NetworkProxy, NotificationAttachmentKind,
   NotificationContent, NotificationContentSettings, NotificationGap, NotificationSuppression,
   NotifiedConversation, NotifiedMessage, OrgRecoveryStart, PendingWorkItem, PlaceholderItem, Presence,
   PushDiagnosticsInfo, PushNotification, PushNotificationKind, PushService, ReactionItem, SearchHitItem,
-  SegmentPrefetchMode, SegmentPrefetchResult, StoreProblem, TestPushOutcome, TestPushResult,
+  SegmentPrefetchMode, SegmentPrefetchResult, SpaceMenuItem, StoreProblem, TestPushOutcome, TestPushResult,
 };
 
 pub use video::{CameraFrame, VideoFrameRgba};
@@ -487,6 +487,37 @@ impl TeamCraft {
       .await
   }
 
+  /// Whether the conversation's long-press menu offers "Leave" (#1105).
+  pub async fn conversation_leave_choice(
+    &self,
+    conversation_id: String,
+  ) -> Result<LeaveChoice, TeamCraftError> {
+    self
+      .call(move |engine| Box::pin(async move { engine.conversation_leave_choice(&conversation_id) }))
+      .await
+  }
+
+  /// What a space's menu needs; `None` for a space the account isn't in.
+  pub async fn space_menu(&self, space_id: String) -> Result<Option<SpaceMenuItem>, TeamCraftError> {
+    self
+      .call(move |engine| Box::pin(async move { engine.space_menu(&space_id) }))
+      .await
+  }
+
+  /// Marks every unread channel of the space as read (queued offline like `mark_read`).
+  pub async fn mark_space_read(&self, space_id: String) -> Result<(), TeamCraftError> {
+    self
+      .call(move |engine| Box::pin(engine.mark_space_read(space_id)))
+      .await
+  }
+
+  /// Leaves the space and its channels; refused where its menu doesn't offer it.
+  pub async fn leave_space(&self, space_id: String) -> Result<(), TeamCraftError> {
+    self
+      .call(move |engine| Box::pin(engine.leave_space(space_id)))
+      .await
+  }
+
   pub async fn set_favorite(&self, conversation_id: String, is_favorite: bool) -> Result<(), TeamCraftError> {
     self
       .call(move |engine| Box::pin(engine.set_favorite(conversation_id, is_favorite)))
@@ -905,7 +936,6 @@ pub fn diagnostics_text(app_version: String, os_version: String) -> String {
   logging::diagnostics_text(&app_version, &os_version, &logging::recent_lines())
 }
 
-/// A fresh key for one user action that may be retried (`add_people_to_call`).
 /// The recent system-log lines (logcat, os_log), oldest first, for the diagnostics export
 /// (issue #1094). Bounded; carries what the system log carries, never secrets.
 #[uniffi::export]
@@ -913,6 +943,14 @@ pub fn recent_log_lines() -> Vec<String> {
   logging::recent_lines()
 }
 
+/// The address of a conversation to share (`{origin}/c/{id}`); `None` for an origin without a web
+/// address (#1105).
+#[uniffi::export]
+pub fn conversation_link(origin: String, conversation_id: String) -> Option<String> {
+  teamcraft_client_api::entry_rules::conversation_link(&origin, engine::parse_id(&conversation_id).ok()?)
+}
+
+/// A fresh key for one user action that may be retried (`add_people_to_call`).
 #[uniffi::export]
 pub fn new_request_key() -> String {
   teamcraft_proto::IdempotencyKey::random().to_hex()
@@ -1137,6 +1175,42 @@ mod tests {
 
   const ACCOUNT: &str = "alice";
   const KEY: [u8; 32] = [7; 32];
+
+  /// #1105: the apps get the core's leave rules and link, not their own copies.
+  mod entry_menu {
+    use super::*;
+
+    #[test]
+    fn the_leave_rule_reaches_the_apps_unchanged() {
+      use teamcraft_client_api::entry_rules::LeaveChoice as Rule;
+
+      assert_eq!(LeaveChoice::from(Rule::Hidden), LeaveChoice::Hidden);
+      assert_eq!(LeaveChoice::from(Rule::Allowed), LeaveChoice::Allowed);
+      assert_eq!(LeaveChoice::from(Rule::LastAdmin), LeaveChoice::LastAdmin);
+    }
+
+    #[test]
+    fn a_link_needs_a_web_origin_and_a_valid_id() {
+      assert_eq!(
+        conversation_link("https://chat.example.com/".into(), "42".into()).as_deref(),
+        Some("https://chat.example.com/c/42")
+      );
+      assert_eq!(conversation_link("tauri://localhost".into(), "42".into()), None);
+      assert_eq!(
+        conversation_link("https://chat.example.com".into(), "x".into()),
+        None
+      );
+    }
+
+    #[tokio::test]
+    async fn an_account_that_is_not_enrolled_has_no_menu() {
+      let directory = TestDir::new("menu-not-enrolled");
+      let core = open(&directory, KEY).unwrap();
+      assert!(core.conversation_leave_choice("1".into()).await.is_err());
+      assert!(core.space_menu("1".into()).await.is_err());
+      assert!(core.leave_space("1".into()).await.is_err());
+    }
+  }
 
   /// Issue #414: data this version can't read is an account state with a way out, not an error.
   mod store_recovery {

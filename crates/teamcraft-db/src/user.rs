@@ -79,12 +79,13 @@ impl Database {
     new_id: UserId,
   ) -> Result<SyncedUser, DbError> {
     let row = sqlx::query!(
-      r#"INSERT INTO users (id, oidc_issuer, oidc_subject, username, email, display_name, kind, oidc_role, organization)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $10)
+      r#"INSERT INTO users (id, oidc_issuer, oidc_subject, username, email, display_name, idp_display_name, kind, oidc_role, organization)
+         VALUES ($1, $2, $3, $4, $5, $6, $6, $7, $8, $10)
          ON CONFLICT (oidc_issuer, oidc_subject) DO UPDATE
            SET username = EXCLUDED.username,
                email = EXCLUDED.email,
-               display_name = EXCLUDED.display_name,
+               display_name = COALESCE(users.display_name_override, EXCLUDED.display_name),
+               idp_display_name = EXCLUDED.idp_display_name,
                kind = EXCLUDED.kind,
                oidc_role = EXCLUDED.oidc_role,
                organization = CASE WHEN $9 THEN EXCLUDED.organization ELSE users.organization END
@@ -134,7 +135,7 @@ impl Database {
     new_id: UserId,
   ) -> Result<SyncedUser, DbError> {
     let existing = sqlx::query!(
-      r#"SELECT id, username, email, display_name, kind, oidc_role, created_at, organization, deactivated_at IS NOT NULL AS "is_deactivated!", deleted_at IS NOT NULL AS "is_deleted!",
+      r#"SELECT id, username, email, display_name, COALESCE(idp_display_name, display_name) AS "idp_display_name!", kind, oidc_role, created_at, organization, deactivated_at IS NOT NULL AS "is_deactivated!", deleted_at IS NOT NULL AS "is_deleted!",
                 default_memberships_at IS NULL AS "is_awaiting_defaults!"
          FROM users WHERE oidc_issuer = $1 AND oidc_subject = $2"#,
       identity.issuer,
@@ -146,7 +147,8 @@ impl Database {
     if let Some(row) = existing {
       let is_unchanged = row.username.as_deref() == identity.maybe_username
         && row.email.as_deref() == identity.maybe_email
-        && row.display_name == identity.display_name
+        // The provider's name, not the shown one: an override is not a change to sync.
+        && row.idp_display_name == identity.display_name
         && row.kind == identity.kind.as_str()
         && row.oidc_role.as_deref() == identity.maybe_oidc_role
         && (!identity.should_sync_organization || row.organization.as_deref() == identity.maybe_organization);
@@ -178,6 +180,30 @@ impl Database {
       .fetch_optional(self.pool())
       .await?;
     Ok(row.map(|row| row.oidc_role))
+  }
+
+  /// The name the member chose instead of the provider's (`None`: the provider's name is shown).
+  pub async fn get_display_name_override(&self, id: UserId) -> Result<Option<String>, DbError> {
+    let row = sqlx::query!("SELECT display_name_override FROM users WHERE id = $1", to_db(id))
+      .fetch_optional(self.pool())
+      .await?;
+    Ok(row.and_then(|row| row.display_name_override))
+  }
+
+  /// Sets the member's own name, or with `None` clears it so the provider's name shows again.
+  pub async fn set_display_name_override(&self, id: UserId, maybe_name: Option<&str>) -> Result<(), DbError> {
+    sqlx::query!(
+      r#"UPDATE users
+         SET idp_display_name = COALESCE(idp_display_name, display_name),
+             display_name_override = $2,
+             display_name = COALESCE($2, idp_display_name, display_name)
+         WHERE id = $1"#,
+      to_db(id),
+      maybe_name,
+    )
+    .execute(self.pool())
+    .await?;
+    Ok(())
   }
 
   pub async fn get_user(&self, id: UserId) -> Result<Option<User>, DbError> {

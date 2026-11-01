@@ -44,6 +44,7 @@ import de.zeitgleich.teamcraft.auth.localSignInErrorText
 import de.zeitgleich.teamcraft.calls.CallOptions
 import de.zeitgleich.teamcraft.core.ChatClient
 import de.zeitgleich.teamcraft.core.ChatQueries
+import de.zeitgleich.teamcraft.core.OwnProfile
 import de.zeitgleich.teamcraft.core.PermalinkTarget
 import de.zeitgleich.teamcraft.core.PickedFile
 import de.zeitgleich.teamcraft.push.UnifiedPushBackend
@@ -61,6 +62,7 @@ import uniffi.teamcraft_ffi.AccountState
 import uniffi.teamcraft_ffi.CheckedServer
 import uniffi.teamcraft_ffi.ConversationItem
 import uniffi.teamcraft_ffi.ConversationKind
+import uniffi.teamcraft_ffi.LeaveChoice
 import uniffi.teamcraft_ffi.LinkPlatform
 import uniffi.teamcraft_ffi.LinkRequestItem
 import uniffi.teamcraft_ffi.LoginBrand
@@ -68,6 +70,7 @@ import uniffi.teamcraft_ffi.KeyCatchUpItem
 import uniffi.teamcraft_ffi.MessageItem
 import uniffi.teamcraft_ffi.NotificationContent
 import uniffi.teamcraft_ffi.NotifiedConversation
+import uniffi.teamcraft_ffi.SpaceMenuItem
 import uniffi.teamcraft_ffi.Presence
 import uniffi.teamcraft_ffi.PushDiagnosticsInfo
 import uniffi.teamcraft_ffi.PushService
@@ -537,6 +540,46 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     runCatching { graph.core.core().setPresence(presence) }
   }
 
+  /** `{origin}/c/{id}` of a conversation on the active server, if it has a web address (#1105). */
+  suspend fun conversationLink(conversationId: String): String? {
+    val origin = graph.servers.active()?.address?.origin ?: return null
+    return chat.conversationLink(origin, conversationId)
+  }
+
+  /** Whether the menu offers "Leave" for this conversation: the core's rule. */
+  suspend fun leaveChoice(conversationId: String): LeaveChoice =
+    readChat { leaveChoice(conversationId) } ?: LeaveChoice.HIDDEN
+
+  suspend fun spaceMenu(spaceId: String): SpaceMenuItem? = readChat { spaceMenu(spaceId) }
+
+  fun markSpaceRead(spaceId: String) = viewModelScope.launch {
+    reportFailure { graph.core.core().markSpaceRead(spaceId) }
+  }
+
+  fun leaveSpace(spaceId: String) = viewModelScope.launch {
+    reportFailure { graph.core.core().leaveSpace(spaceId) }
+  }
+
+  /** Mutes the space, or unmutes it with `null`; a failure shows as [lastFailure]. */
+  fun muteSpace(spaceId: String, maybeUntil: Long?) = viewModelScope.launch {
+    reportFailure { chat.setSpaceMutedUntil(spaceId, maybeUntil) }
+  }
+
+  suspend fun spaceMutedUntil(spaceId: String): Long? =
+    readChat { spaceMutedUntil(spaceId, System.currentTimeMillis()) }
+
+  private suspend fun reportFailure(block: suspend () -> Unit) {
+    try {
+      block()
+    } catch (failure: TeamCraftException) {
+      failures.value = errorText(failure)
+    } catch (failure: CancellationException) {
+      throw failure
+    } catch (failure: IllegalStateException) {
+      // Signed out meanwhile: no account to act for.
+    }
+  }
+
   /** Runs a `ChatAction` built with [ChatActions]; failures show as [lastFailure]. */
   fun act(action: String) = viewModelScope.launch {
     try {
@@ -563,6 +606,24 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
       errorText(failure)
     } catch (failure: IllegalStateException) {
       // Signed out meanwhile: the sign-in screen replaces the form.
+      R.string.error_signed_out
+    }
+
+  /**
+   * Saves the member's own name (`null`: the sign-in name). Answers the string to show at the field
+   * when it failed. A refusal of the server (too long, or the policy changed meanwhile) is worded
+   * for the name; no connection and the like are worded as everywhere.
+   */
+  @StringRes
+  suspend fun trySetDisplayName(profile: OwnProfile, maybeName: String?): Int? =
+    try {
+      chat.setDisplayName(profile, maybeName)
+      null
+    } catch (failure: TeamCraftException.Core) {
+      R.string.profile_name_rejected
+    } catch (failure: TeamCraftException) {
+      errorText(failure)
+    } catch (failure: IllegalStateException) {
       R.string.error_signed_out
     }
 

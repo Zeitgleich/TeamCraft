@@ -279,6 +279,9 @@ pub struct LimitsConfig {
   pub max_recovery_blob_bytes: usize,
   /// Longest title, department and similar profile text, in characters.
   pub max_profile_text_chars: usize,
+  /// Longest display name a member may set instead of the one from the identity provider, in
+  /// characters (issue #408).
+  pub max_display_name_chars: usize,
   /// Members of a user group.
   pub max_user_group_members: usize,
   /// Unread counts look at this many of the newest unread messages per conversation; a count equal
@@ -1402,6 +1405,7 @@ impl Default for LimitsConfig {
       org_recovery_request_ttl_secs: 86_400,
       max_recovery_blob_bytes: 8192,
       max_profile_text_chars: 100,
+      max_display_name_chars: 80,
       max_user_group_members: 5000,
       max_unread_counted: 1000,
       max_seen_reactions: 200,

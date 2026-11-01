@@ -78,6 +78,36 @@ fun ConversationNotificationsDialog(viewModel: MainViewModel, conversationId: St
   )
 }
 
+/** A space's mute time; its channels follow it unless they have their own setting (#1105). */
+@Composable
+fun SpaceMuteDialog(viewModel: MainViewModel, spaceId: String, name: String, onDismiss: () -> Unit) {
+  var maybeUntil by remember { mutableStateOf<Long?>(null) }
+  var isLoaded by remember { mutableStateOf(false) }
+  LaunchedEffect(spaceId) {
+    maybeUntil = viewModel.spaceMutedUntil(spaceId)
+    isLoaded = true
+  }
+  AlertDialog(
+    onDismissRequest = onDismiss,
+    title = { Text(stringResource(R.string.space_mute_title, name)) },
+    text = {
+      Column {
+        if (isLoaded) MutePresets(ConversationNotificationSettings(mutedUntil = maybeUntil)) { maybeUntil = it.mutedUntil }
+      }
+    },
+    confirmButton = {
+      TextButton(
+        enabled = isLoaded,
+        onClick = {
+          viewModel.muteSpace(spaceId, maybeUntil)
+          onDismiss()
+        },
+      ) { Text(stringResource(R.string.ok)) }
+    },
+    dismissButton = { TextButton(onClick = onDismiss) { Text(stringResource(R.string.cancel)) } },
+  )
+}
+
 /** Global notification preferences: when pushes come, read receipts, thread auto-follow. */
 @Composable
 fun NotificationSettingsSection(viewModel: MainViewModel) {
@@ -144,7 +174,7 @@ private fun ContentHint(text: String) {
 /** Mute until a preset time from now, or not at all; shows until when it is muted. */
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
-private fun MutePresets(current: ConversationNotificationSettings, onChange: (ConversationNotificationSettings) -> Unit) {
+internal fun MutePresets(current: ConversationNotificationSettings, onChange: (ConversationNotificationSettings) -> Unit) {
   val nowMs = remember { System.currentTimeMillis() }
   val maybeUntil = current.mutedUntil?.takeIf { it > nowMs }
   Text(stringResource(R.string.notify_mute), style = MaterialTheme.typography.titleSmall)

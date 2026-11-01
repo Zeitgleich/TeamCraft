@@ -249,6 +249,17 @@ enum ConversationMute {
     return jsonText(object)
   }
 
+  /// The settings with a new level (`all`, `mentions`, `none`); the mute time is kept, and the
+  /// conversation no longer follows its space. `nil` if `json` isn't an object.
+  static func body(current json: String, level: String) -> String? {
+    guard var object = (try? JSONSerialization.jsonObject(with: Data(json.utf8))) as? [String: Any] else {
+      return nil
+    }
+    object["level"] = level
+    object["is_inherited"] = false
+    return jsonText(object)
+  }
+
   /// When the conversation is muted until, if that is still ahead.
   static func mutedUntil(in json: String, now: Date) -> Date? {
     guard let object = (try? JSONSerialization.jsonObject(with: Data(json.utf8))) as? [String: Any],
