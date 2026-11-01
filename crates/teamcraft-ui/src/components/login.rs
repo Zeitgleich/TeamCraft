@@ -7,6 +7,7 @@ use leptos::prelude::*;
 use leptos::task::spawn_local;
 use teamcraft_client_api::brand::BrandView;
 use teamcraft_client_api::failure::{ActionFailure, FailureKind};
+use teamcraft_client_api::oidc_login::AuthorizationErrorKind;
 use teamcraft_client_api::remote::StoreProblem;
 use teamcraft_client_api::sign_in_page::SignInPage;
 use teamcraft_proto::{GetMeResponse, SignInMethod};
@@ -304,6 +305,29 @@ fn ProblemCard(
   }
 }
 
+/// The title and body of the identity provider's refusal (issue #1063). `already_logged_in` is
+/// only shown when the automatic retry got it again.
+fn provider_refusal_keys(kind: AuthorizationErrorKind) -> (Option<&'static str>, Option<&'static str>) {
+  match kind {
+    AuthorizationErrorKind::AccessDenied => (
+      Some("login-provider-denied-title"),
+      Some("login-provider-denied-body"),
+    ),
+    AuthorizationErrorKind::Misconfigured => (
+      Some("login-provider-misconfigured-title"),
+      Some("login-provider-misconfigured-body"),
+    ),
+    AuthorizationErrorKind::AlreadySignedIn => (
+      Some("login-provider-already-signed-in-title"),
+      Some("login-provider-already-signed-in-body"),
+    ),
+    AuthorizationErrorKind::Other => (
+      Some("login-provider-refused-title"),
+      Some("login-provider-refused-body"),
+    ),
+  }
+}
+
 #[component]
 fn LoginScreen(problem: Option<LoginProblem>, control: SessionControl) -> impl IntoView {
   let i18n = use_i18n();
@@ -325,6 +349,7 @@ fn LoginScreen(problem: Option<LoginProblem>, control: SessionControl) -> impl I
   );
   let detail = match &problem {
     Some(LoginProblem::Failed(text) | LoginProblem::CoreFailed(text)) => Some(text.clone()),
+    Some(LoginProblem::ProviderRefused { code, .. }) => Some(code.clone()),
     _ => None,
   };
   let (title_key, body_key) = match &problem {
@@ -337,6 +362,7 @@ fn LoginScreen(problem: Option<LoginProblem>, control: SessionControl) -> impl I
     },
     Some(LoginProblem::Cancelled) => (Some("login-cancelled-title"), Some("login-cancelled-body")),
     Some(LoginProblem::Failed(_)) => (Some("login-failed-title"), Some("login-failed-body")),
+    Some(LoginProblem::ProviderRefused { kind, .. }) => provider_refusal_keys(*kind),
     Some(LoginProblem::CoreFailed(_)) => (Some("login-core-failed-title"), Some("login-core-failed-body")),
     Some(LoginProblem::CoreStopped) => (Some("login-core-stopped-title"), Some("login-core-stopped-body")),
     Some(LoginProblem::StoreUnreadable(StoreProblem::NewerVersion)) => {

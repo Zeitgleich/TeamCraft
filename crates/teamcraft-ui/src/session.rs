@@ -8,6 +8,7 @@ use leptos::prelude::*;
 use leptos::task::spawn_local;
 use teamcraft_proto::{ErrorBody, ErrorCode, GetMeResponse};
 
+use teamcraft_client_api::oidc_login::AuthorizationErrorKind;
 use teamcraft_client_api::remote::{CoreStatus, EnrollRequest, EnrollSecret, StoreProblem};
 
 use crate::auth::tauri::{ServerCheck, ServerProblem, ServerView};
@@ -93,6 +94,12 @@ pub enum LoginProblem {
   /// The identity provider no longer accepts the stored sign-in (`invalid_grant`: its idle or
   /// session limit ran out, it was revoked): sign in again (issue #883).
   SessionExpired,
+  /// The identity provider refused the sign-in in its redirect (issue #1063): `kind` picks the
+  /// message, `code` is the provider's `error`, shown as the detail.
+  ProviderRefused {
+    kind: AuthorizationErrorKind,
+    code: String,
+  },
   Cancelled,
   /// Anything else; the text is meant for logs and a "details" line, not as the main message.
   Failed(String),
@@ -175,9 +182,12 @@ impl SessionControl {
         Err(AuthError::Denied(_)) => control
           .state
           .set_if_alive(SessionState::SignedOut(Some(LoginProblem::SessionExpired))),
-        Err(error) => control
-          .state
-          .set_if_alive(SessionState::SignedOut(Some(problem_from_auth(&error)))),
+        Err(error) => {
+          tracing::warn!(%error, "the stored sign-in could not be restored");
+          control
+            .state
+            .set_if_alive(SessionState::SignedOut(Some(problem_from_auth(&error))));
+        },
       }
     });
   }
@@ -277,9 +287,14 @@ impl SessionControl {
     spawn_local(async move {
       match control.authenticator().login(look).await {
         Ok(()) => control.load_account().await,
-        Err(error) => control
-          .state
-          .set_if_alive(SessionState::SignedOut(Some(problem_from_auth(&error)))),
+        Err(error) => {
+          if error != AuthError::Cancelled {
+            tracing::warn!(%error, "sign-in failed");
+          }
+          control
+            .state
+            .set_if_alive(SessionState::SignedOut(Some(problem_from_auth(&error))));
+        },
       }
     });
   }
@@ -536,6 +551,10 @@ fn problem_from_auth(error: &AuthError) -> LoginProblem {
   match error {
     AuthError::Cancelled => LoginProblem::Cancelled,
     AuthError::Network(_) => LoginProblem::ServerUnreachable,
+    AuthError::AuthorizationRefused(code) => LoginProblem::ProviderRefused {
+      kind: AuthorizationErrorKind::from_code(code),
+      code: code.clone(),
+    },
     other => LoginProblem::Failed(other.to_string()),
   }
 }
@@ -639,6 +658,13 @@ mod tests {
       LoginProblem::ServerUnreachable
     );
     assert_eq!(problem_from_auth(&AuthError::Cancelled), LoginProblem::Cancelled);
+    assert_eq!(
+      problem_from_auth(&AuthError::AuthorizationRefused("access_denied".into())),
+      LoginProblem::ProviderRefused {
+        kind: AuthorizationErrorKind::AccessDenied,
+        code: "access_denied".into(),
+      }
+    );
   }
 
   #[test]

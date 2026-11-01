@@ -17,5 +17,9 @@
   <string name="sign_in">Sign in</string>
   <string name="sign_in_hint">Sign in with your organization account to continue.</string>
   <string name="sign_in_failed">Sign-in failed. Please try again.</string>
+  <string name="sign_in_provider_denied">Your account isn\'t allowed to use TeamCraft. Ask your admin for access, or sign in with another account.</string>
+  <string name="sign_in_provider_misconfigured">Sign-in is set up wrongly on your organization\'s side. Tell your admin (error: %1$s).</string>
+  <string name="sign_in_provider_already_signed_in">The sign-in page had already been used. Close other sign-in tabs in your browser, then sign in again.</string>
+  <string name="sign_in_provider_refused">Your organization\'s sign-in refused (error: %1$s). Try again, or tell your admin.</string>
   <string name="sign_out">Sign out</string>
 </resources>

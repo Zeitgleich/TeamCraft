@@ -76,6 +76,8 @@ class MainActivity : FragmentActivity() {
         val state by viewModel.appState.collectAsState()
         val isSettingUp = state !is AppState.Ready
         LaunchedEffect(isSettingUp) { keepUprightWhileSettingUp(isSettingUp) }
+        // The automatic sign-in retry (issue #1063) opens the browser like the user's own sign-in.
+        LaunchedEffect(Unit) { viewModel.loginRetryIntents.collect { intent -> loginLauncher.launch(intent) } }
         Box(Modifier.fillMaxSize()) {
           if (isLocked.value) {
             LockScreen(onUnlock = ::unlock)

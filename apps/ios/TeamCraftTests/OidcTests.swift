@@ -90,8 +90,44 @@ final class OidcTests: XCTestCase {
     }
     let denied = URL(string: "de.zeitgleich.teamcraft:/oauth/callback?error=access_denied&state=s1")!
     XCTAssertThrowsError(try WebLogin.authorizationCode(from: denied, expectedState: "s1")) {
+      XCTAssertEqual($0 as? OidcError, .providerRefused(code: "access_denied"))
+    }
+    let crafted = URL(string: "de.zeitgleich.teamcraft:/oauth/callback?error=%3Cb%3E&state=s1")!
+    XCTAssertThrowsError(try WebLogin.authorizationCode(from: crafted, expectedState: "s1")) {
+      XCTAssertEqual($0 as? OidcError, .providerRefused(code: "unknown"))
+    }
+    let missing = URL(string: "de.zeitgleich.teamcraft:/oauth/callback?state=s1")!
+    XCTAssertThrowsError(try WebLogin.authorizationCode(from: missing, expectedState: "s1")) {
       XCTAssertEqual($0 as? OidcError, .invalidResponse)
     }
+  }
+
+  @MainActor
+  func testOnlyAlreadyLoggedInIsRetriedAndOnlyOnce() {
+    XCTAssertTrue(WebLogin.isRetried(code: "already_logged_in", retries: 0))
+    XCTAssertFalse(WebLogin.isRetried(code: "already_logged_in", retries: 1), "no loop")
+    XCTAssertFalse(WebLogin.isRetried(code: "access_denied", retries: 0))
+    var retries = 0
+    while WebLogin.isRetried(code: "already_logged_in", retries: retries) {
+      retries += 1
+      XCTAssertLessThanOrEqual(retries, WebLogin.maxRetries)
+    }
+    XCTAssertEqual(retries, 1)
+  }
+
+  @MainActor
+  func testProviderRefusalsHaveTheirMessage() {
+    XCTAssertNil(AppFailure.signIn(OidcError.cancelled))
+    XCTAssertEqual(AppFailure.signIn(OidcError.network("offline")), .network)
+    XCTAssertEqual(AppFailure.signIn(OidcError.providerRefused(code: "access_denied")), .providerDenied)
+    XCTAssertEqual(
+      AppFailure.signIn(OidcError.providerRefused(code: "already_logged_in")), .providerAlreadySignedIn)
+    XCTAssertEqual(
+      AppFailure.signIn(OidcError.providerRefused(code: "invalid_request")),
+      .providerMisconfigured(code: "invalid_request"))
+    XCTAssertEqual(
+      AppFailure.signIn(OidcError.providerRefused(code: "server_error")), .providerRefused(code: "server_error"))
+    XCTAssertEqual(AppFailure.signIn(OidcError.stateMismatch), .signInFailed)
   }
 
   func testIdTokenClaimsAreReadFromThePayload() {

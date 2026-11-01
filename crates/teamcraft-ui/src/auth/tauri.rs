@@ -6,6 +6,7 @@ use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
 use teamcraft_client_api::actions::FileInfo;
+use teamcraft_client_api::oidc_login::shown_error_code;
 use teamcraft_client_api::video_playback::VideoPlayback;
 use teamcraft_client_api::window_chrome::{TitleBar, TrayIconStyle, WindowAction, WindowChrome};
 use teamcraft_proto::{AvatarContentType, UserId};
@@ -266,6 +267,8 @@ fn map_kind(kind: &str, message: String) -> AuthError {
   match kind {
     "cancelled" => AuthError::Cancelled,
     "denied" => AuthError::Denied(message),
+    // The desktop shell sends the provider's cleaned `error` code as the message.
+    "authorization_refused" => AuthError::AuthorizationRefused(shown_error_code(&message)),
     "network" => AuthError::Network(message),
     "state_mismatch" => AuthError::StateMismatch,
     "not_signed_in" => AuthError::NotSignedIn,
@@ -1130,6 +1133,10 @@ mod tests {
   #[test]
   fn command_error_kinds_map_to_auth_errors() {
     assert_eq!(map_kind("cancelled", String::new()), AuthError::Cancelled);
+    assert_eq!(
+      map_kind("authorization_refused", "access_denied".into()),
+      AuthError::AuthorizationRefused("access_denied".into())
+    );
     assert_eq!(
       map_kind("network", "down".into()),
       AuthError::Network("down".into())

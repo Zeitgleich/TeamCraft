@@ -17,5 +17,9 @@
   <string name="sign_in">Anmelden</string>
   <string name="sign_in_hint">Melde dich mit deinem Organisationskonto an, um fortzufahren.</string>
   <string name="sign_in_failed">Die Anmeldung ist fehlgeschlagen. Bitte versuche es erneut.</string>
+  <string name="sign_in_provider_denied">Dein Konto darf TeamCraft nicht nutzen. Bitte deinen Admin um Zugriff oder melde dich mit einem anderen Konto an.</string>
+  <string name="sign_in_provider_misconfigured">Die Anmeldung deiner Organisation ist falsch eingerichtet. Sag deinem Admin Bescheid (Fehler: %1$s).</string>
+  <string name="sign_in_provider_already_signed_in">Die Anmeldeseite war schon benutzt. Schließe andere Anmelde-Tabs im Browser und melde dich erneut an.</string>
+  <string name="sign_in_provider_refused">Die Anmeldung deiner Organisation hat abgelehnt (Fehler: %1$s). Versuche es erneut oder sag deinem Admin Bescheid.</string>
   <string name="sign_out">Abmelden</string>
 </resources>

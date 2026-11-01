@@ -30,15 +30,16 @@ use std::time::Duration;
 use base64::Engine;
 use oauth2::basic::BasicErrorResponseType;
 use oauth2::{
-  AuthUrl, AuthorizationCode, ClientId, PkceCodeChallenge, PkceCodeVerifier, RedirectUrl, RefreshToken,
-  RequestTokenError, StandardErrorResponse, TokenResponse, TokenUrl,
+  AuthUrl, AuthorizationCode, ClientId, CsrfToken, PkceCodeChallenge, PkceCodeVerifier, RedirectUrl,
+  RefreshToken, RequestTokenError, StandardErrorResponse, TokenResponse, TokenUrl,
 };
 use secrecy::{ExposeSecret, SecretString};
 use serde::{Deserialize, Serialize};
+use tokio::net::TcpListener;
 use tokio::sync::{Mutex, Notify};
 
 use teamcraft_client_api::oidc_login::{
-  LoginRequest, OidcClient, OidcTokenResponse, authorization_url, oidc_client,
+  AuthorizationErrorKind, LoginRequest, OidcClient, OidcTokenResponse, authorization_url, oidc_client,
 };
 use teamcraft_client_api::remote::ApiMethod;
 use teamcraft_client_api::server_entry::{
@@ -139,6 +140,10 @@ pub enum AuthError {
   Cancelled,
   #[error("the identity provider refused the request: {0}")]
   Denied(String),
+  /// The identity provider answered the sign-in redirect with an `error` (RFC 6749 §4.1.2.1),
+  /// cleaned by `shown_error_code` (issue #1063).
+  #[error("the identity provider refused the sign-in: {0}")]
+  AuthorizationRefused(String),
   #[error("network error: {0}")]
   Network(String),
   #[error("unexpected response: {0}")]
@@ -189,6 +194,7 @@ impl AuthError {
     match self {
       Self::Cancelled => "cancelled",
       Self::Denied(_) => "denied",
+      Self::AuthorizationRefused(_) => "authorization_refused",
       Self::Network(_) => "network",
       Self::InvalidResponse(_) => "invalid_response",
       Self::StateMismatch => "state_mismatch",
@@ -423,27 +429,41 @@ impl<S: TokenStore> AuthService<S> {
   ) -> Result<SignedIn, AuthError> {
     let server = self.server()?;
     let discovery = self.discovery(&server).await?;
-    let (listener, redirect_uri) = loopback::bind().await?;
-    let client = self.client(&discovery, &redirect_uri, &server)?;
-    let (challenge, verifier) = PkceCodeChallenge::new_random_sha256();
-    let (url, state) = authorization_url(&client, &server.scopes, challenge, request);
-    // The discovery was checked; check the final URL again right before the OS opens it.
-    if !is_provider_endpoint(url.as_str(), HTTP_POLICY) {
-      return Err(AuthError::InvalidResponse(
-        "the sign-in address is not https".to_owned(),
-      ));
-    }
-    open_browser(url.as_str())
+    let (mut listener, mut attempt) = self.authorization(&discovery, &server, request).await?;
+    open_browser(attempt.url.as_str())
       .map_err(|error| AuthError::Unsupported(format!("could not open the browser: {error}")))?;
 
-    let wait = loopback::wait_for_redirect(listener, state.secret(), &redirect_uri, look);
-    let redirect = tokio::select! {
-      result = tokio::time::timeout(LOGIN_TIMEOUT, wait) => result.map_err(|_| AuthError::Cancelled)??,
-      () = self.cancel.notified() => return Err(AuthError::Cancelled),
+    let mut retries = 0;
+    let redirect = loop {
+      let wait = loopback::wait_for_redirect(listener, attempt.state.secret(), &attempt.redirect_uri, look);
+      let redirect = tokio::select! {
+        result = tokio::time::timeout(LOGIN_TIMEOUT, wait) => result.map_err(|_| AuthError::Cancelled)??,
+        () = self.cancel.notified() => return Err(AuthError::Cancelled),
+      };
+      let Some(code) = redirect.params.maybe_refusal() else {
+        break redirect;
+      };
+      let kind = AuthorizationErrorKind::from_code(&code);
+      if !kind.is_retried(retries) {
+        tracing::warn!(error_code = %code, ?kind, "the identity provider refused the sign-in");
+        break redirect;
+      }
+      // `already_logged_in` (issue #1063): the same tab goes to the provider again, with a fresh
+      // state and verifier and the same request, so `prompt=login` shows the login page again.
+      tracing::warn!(error_code = %code, ?kind, "the identity provider refused the sign-in, trying again");
+      retries += 1;
+      (listener, attempt) = match self.authorization(&discovery, &server, request).await {
+        Ok(next) => next,
+        Err(error) => {
+          redirect.answer(CallbackOutcome::Failed, look).await;
+          return Err(error);
+        },
+      };
+      redirect.send_to(attempt.url.as_str()).await;
     };
     // The browser waits for its page until the tokens are in: it then says what really happened.
     let outcome = self
-      .finish_login(&client, &server, redirect.params.code(), verifier)
+      .finish_login(&attempt.client, &server, redirect.params.code(), attempt.verifier)
       .await;
     redirect.answer(callback_outcome(&outcome), look).await;
     let signed_in = outcome?;
@@ -452,6 +472,34 @@ impl<S: TokenStore> AuthService<S> {
       tracing::warn!(%error, "could not forget the earlier local session");
     }
     Ok(signed_in)
+  }
+
+  /// A new authorization request: its loopback listener, a fresh `state` and PKCE verifier, and
+  /// the provider's URL to open.
+  async fn authorization(
+    &self,
+    discovery: &Discovery,
+    server: &DesktopConfig,
+    request: &LoginRequest<'_>,
+  ) -> Result<(TcpListener, Authorization), AuthError> {
+    let (listener, redirect_uri) = loopback::bind().await?;
+    let client = self.client(discovery, &redirect_uri, server)?;
+    let (challenge, verifier) = PkceCodeChallenge::new_random_sha256();
+    let (url, state) = authorization_url(&client, &server.scopes, challenge, request);
+    // The discovery was checked; check the final URL again right before the browser goes there.
+    if !is_provider_endpoint(url.as_str(), HTTP_POLICY) {
+      return Err(AuthError::InvalidResponse(
+        "the sign-in address is not https".to_owned(),
+      ));
+    }
+    let authorization = Authorization {
+      redirect_uri,
+      client,
+      verifier,
+      state,
+      url,
+    };
+    Ok((listener, authorization))
   }
 
   /// Exchanges the redirect's code for tokens and keeps them.
@@ -1105,11 +1153,22 @@ impl std::fmt::Debug for SignedIn {
   }
 }
 
+/// One authorization request of a browser sign-in, waiting for its redirect.
+struct Authorization {
+  redirect_uri: String,
+  client: OidcClient,
+  verifier: PkceCodeVerifier,
+  state: CsrfToken,
+  url: oauth2::url::Url,
+}
+
 /// What the browser tab says about a finished sign-in.
 fn callback_outcome<T>(outcome: &Result<T, AuthError>) -> CallbackOutcome {
   match outcome {
     Ok(_) => CallbackOutcome::SignedIn,
-    Err(AuthError::Denied(_) | AuthError::Cancelled) => CallbackOutcome::Refused,
+    Err(AuthError::Denied(_) | AuthError::AuthorizationRefused(_) | AuthError::Cancelled) => {
+      CallbackOutcome::Refused
+    },
     Err(AuthError::StateMismatch) => CallbackOutcome::StateMismatch,
     Err(_) => CallbackOutcome::Failed,
   }
@@ -1768,6 +1827,77 @@ mod tests {
           .await
           .unwrap()
       );
+    }
+
+    #[tokio::test]
+    async fn already_logged_in_is_retried_once_and_a_second_one_is_shown() {
+      let provider = FakeProvider::start().await;
+      provider.set(PROVIDER_UP);
+      let service = AuthService::new(Some(provider.config()), MemoryStore::default()).unwrap();
+      let request = LoginRequest {
+        is_login_page_shown: true,
+        ..LoginRequest::default()
+      };
+      let visits = Arc::new(AtomicUsize::new(0));
+      let counted = Arc::clone(&visits);
+      let outcome = service
+        .login(&SignInLook::default(), &request, move |url| {
+          tokio::spawn(refuse_every_request(url.to_owned(), counted));
+          Ok(())
+        })
+        .await;
+      assert!(
+        matches!(&outcome, Err(AuthError::AuthorizationRefused(code)) if code == "already_logged_in"),
+        "{outcome:?}"
+      );
+      assert_eq!(visits.load(Ordering::SeqCst), 2, "one retry, no loop");
+      assert_eq!(provider.token_requests(), 0);
+    }
+
+    /// A browser at a provider that answers every authorization request with
+    /// `already_logged_in`. It follows the app's redirect to the next request, which must keep
+    /// `prompt=login` and carry a new `state`.
+    async fn refuse_every_request(first_url: String, visits: Arc<AtomicUsize>) {
+      let mut maybe_url = Some(first_url);
+      let mut states: Vec<String> = Vec::new();
+      while let Some(url) = maybe_url {
+        visits.fetch_add(1, Ordering::SeqCst);
+        let query: std::collections::HashMap<String, String> = url::Url::parse(&url)
+          .unwrap()
+          .query_pairs()
+          .into_owned()
+          .collect();
+        assert_eq!(query["prompt"], "login");
+        assert!(!states.contains(&query["state"]), "a fresh state");
+        states.push(query["state"].clone());
+        let callback = format!(
+          "{}?error=already_logged_in&state={}",
+          query["redirect_uri"], query["state"]
+        );
+        maybe_url = redirect_target(&callback).await;
+      }
+    }
+
+    /// Sends the browser's GET to the app's loopback; the `Location` of a 303, if it answers one.
+    async fn redirect_target(url: &str) -> Option<String> {
+      let url = url::Url::parse(url).unwrap();
+      let host = format!("{}:{}", url.host_str().unwrap(), url.port().unwrap());
+      let mut socket = TcpStream::connect(&host).await.unwrap();
+      let request = format!(
+        "GET {}?{} HTTP/1.1\r\nHost: {host}\r\n\r\n",
+        url.path(),
+        url.query().unwrap_or_default()
+      );
+      socket.write_all(request.as_bytes()).await.unwrap();
+      let mut answer = String::new();
+      drop(socket.read_to_string(&mut answer).await);
+      if !answer.starts_with("HTTP/1.1 303") {
+        return None;
+      }
+      answer
+        .lines()
+        .find_map(|line| line.strip_prefix("Location: "))
+        .map(str::to_owned)
     }
 
     /// An identity provider on this computer: discovery, and a token endpoint whose answer the test

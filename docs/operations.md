@@ -316,6 +316,17 @@ in is unaffected: the apps renew their tokens without the browser, and the web c
 renewal after a reload never asks for the login page. Operators who prefer silent single sign-on
 turn it off (Admin → Settings → Sign-in page, `is_login_page_always_shown`).
 
+When the identity provider refuses a sign-in in its redirect (OAuth `error`, issue #1063), every
+app names the reason: `access_denied` says the account isn't allowed, `invalid_request`,
+`unauthorized_client`, `unsupported_response_type` and `invalid_scope` say the client is set up
+wrongly (tell the admin), and any other code is shown as it is. Keycloak's `already_logged_in`
+means the browser re-sent a login that had already finished (a resumed tab, a second submit, or a
+redirect that never reached the app): the app sends one new authorization request with a fresh
+`state` and PKCE verifier and the same `prompt`, so the login page shows again; never a silent
+sign-in with the browser's session. Only a second one is shown. Each failure is logged with its
+type and the provider's code (logcat tag of the app, the iOS log category `sign-in`, the desktop
+and web logs), never with tokens or the redirect's code.
+
 What the server announces, public and cacheable, at `GET /api/v1/server-info`:
 
 | Field                            | Source                                                                    |

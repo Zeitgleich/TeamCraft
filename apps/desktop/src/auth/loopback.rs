@@ -4,6 +4,7 @@
 
 use std::time::Duration;
 
+use teamcraft_client_api::oidc_login::shown_error_code;
 use teamcraft_client_api::sign_in_look::SignInLook;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
@@ -27,6 +28,8 @@ pub struct Redirect {
 #[derive(Debug, PartialEq, Eq)]
 pub struct CallbackParams {
   maybe_code: Option<String>,
+  /// The provider's `error` code, cleaned by `shown_error_code`. Its `error_description` is
+  /// free text in the provider's language, neither shown nor logged.
   maybe_error: Option<String>,
 }
 
@@ -37,18 +40,33 @@ impl Redirect {
     let (status, reason) = outcome.status();
     respond(&mut self.stream, status, reason, &page).await;
   }
+
+  /// Sends the browser on to `url` (the next authorization request of an automatic retry) in the
+  /// same tab, and closes the connection.
+  pub async fn send_to(mut self, url: &str) {
+    let response = format!(
+      "HTTP/1.1 303 See Other\r\nLocation: {url}\r\nContent-Length: 0\r\nCache-Control: no-store\r\n\
+       Referrer-Policy: no-referrer\r\nConnection: close\r\n\r\n"
+    );
+    write_response(&mut self.stream, &response).await;
+  }
 }
 
 impl CallbackParams {
   /// The authorization code, or the provider's refusal as an error.
   pub fn code(&self) -> Result<String, AuthError> {
     if let Some(error) = &self.maybe_error {
-      return Err(AuthError::Denied(error.clone()));
+      return Err(AuthError::AuthorizationRefused(error.clone()));
     }
     self
       .maybe_code
       .clone()
       .ok_or_else(|| AuthError::InvalidResponse("the redirect carried no code".to_owned()))
+  }
+
+  /// The provider's `error` code, when it refused the sign-in.
+  pub fn maybe_refusal(&self) -> Option<String> {
+    self.maybe_error.clone()
   }
 }
 
@@ -174,13 +192,12 @@ fn parse_request(request: &str, expected_host: &str, expected_state: &str) -> Pa
   if url.path() != CALLBACK_PATH {
     return Parsed::Ignore;
   }
-  let (mut code, mut state, mut error, mut description) = (None, None, None, None);
+  let (mut code, mut state, mut error) = (None, None, None);
   for (key, value) in url.query_pairs() {
     match key.as_ref() {
       "code" => code = Some(value.into_owned()),
       "state" => state = Some(value.into_owned()),
       "error" => error = Some(value.into_owned()),
-      "error_description" => description = Some(value.into_owned()),
       _ => {},
     }
   }
@@ -189,12 +206,15 @@ fn parse_request(request: &str, expected_host: &str, expected_state: &str) -> Pa
   }
   Parsed::Callback(CallbackParams {
     maybe_code: code,
-    maybe_error: error.map(|error| description.unwrap_or(error)),
+    maybe_error: error.map(|error| shown_error_code(&error)),
   })
 }
 
 async fn respond(stream: &mut TcpStream, status: u16, reason: &str, body: &str) {
-  let response = response(status, reason, body);
+  write_response(stream, &response(status, reason, body)).await;
+}
+
+async fn write_response(stream: &mut TcpStream, response: &str) {
   // The browser may already be gone, or stall; there is nobody to tell.
   let _ = tokio::time::timeout(WRITE_TIMEOUT, async {
     let _ = stream.write_all(response.as_bytes()).await;
@@ -274,7 +294,7 @@ mod tests {
   }
 
   #[test]
-  fn provider_errors_become_denied() {
+  fn provider_errors_become_refusals_with_their_code() {
     let parsed = parse_request(
       &get(
         "/callback?error=access_denied&error_description=No%20thanks&state=s1",
@@ -286,7 +306,8 @@ mod tests {
     let Parsed::Callback(params) = parsed else {
       unreachable!("state matches")
     };
-    assert!(matches!(params.code(), Err(AuthError::Denied(text)) if text == "No thanks"));
+    assert!(matches!(params.code(), Err(AuthError::AuthorizationRefused(code)) if code == "access_denied"));
+    assert_eq!(params.maybe_refusal().as_deref(), Some("access_denied"));
   }
 
   #[test]

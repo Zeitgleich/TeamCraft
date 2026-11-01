@@ -1,4 +1,5 @@
 import Foundation
+import OSLog
 import Observation
 import SwiftUI
 import UIKit
@@ -8,6 +9,9 @@ import UserNotifications
 enum AppFailure: Equatable {
   case network, signedOut, wrongPassphrase, storage, signInFailed, recoveryPending, callMoveRefused, generic
   case linkCodeInvalid, linkCodeForNewDevice, linkCodeForSignedInDevice, linkCodeExpired
+  /// The identity provider refused the sign-in (issue #1063); `code` is its cleaned `error`.
+  case providerDenied, providerAlreadySignedIn
+  case providerMisconfigured(code: String), providerRefused(code: String)
 
   init(_ failure: CoreFailure) {
     switch failure {
@@ -39,6 +43,27 @@ enum AppFailure: Equatable {
     case .linkCodeForNewDevice: return "link_code_for_new_device"
     case .linkCodeForSignedInDevice: return "link_code_for_signed_in_device"
     case .linkCodeExpired: return "link_code_expired"
+    case .providerDenied: return "sign_in_provider_denied"
+    case .providerAlreadySignedIn: return "sign_in_provider_already_signed_in"
+    case .providerMisconfigured(let code): return "sign_in_provider_misconfigured \(code)"
+    case .providerRefused(let code): return "sign_in_provider_refused \(code)"
+    }
+  }
+
+  /// What the sign-in screen says after a failed browser sign-in; `nil` when the user cancelled.
+  /// The one automatic retry of `already_logged_in` happened before (`WebLogin`).
+  static func signIn(_ error: Error) -> AppFailure? {
+    switch error {
+    case OidcError.cancelled: return nil
+    case OidcError.network: return .network
+    case OidcError.providerRefused(let code):
+      switch authorizationErrorKind(code: code) {
+      case .alreadySignedIn: return .providerAlreadySignedIn
+      case .accessDenied: return .providerDenied
+      case .misconfigured: return .providerMisconfigured(code: code)
+      case .other: return .providerRefused(code: code)
+      }
+    default: return .signInFailed
     }
   }
 }
@@ -88,6 +113,7 @@ enum AppPhase {
 @Observable
 final class AppModel {
   static let shared = AppModel()
+  private static let signInLog = Logger(subsystem: "de.zeitgleich.teamcraft", category: "sign-in")
 
   private(set) var phase: AppPhase = .starting
   private(set) var isBusy = false
@@ -250,19 +276,30 @@ final class AppModel {
       return
     }
     await busy {
+      let session: OidcSession
       do {
-        let session = try await login.login(
+        session = try await login.login(
           server: server, maybeLoginPageAlwaysShown: maybeSignInPage?.maybeLoginPageAlwaysShown)
-        try vault.save(session)
-        rememberLoginHint(session.loginHint, for: server)
-        container.activeAccount = session.subject
-        container.displayName = session.displayName
-        await refreshAccountState()
-      } catch OidcError.cancelled {
-        phase = .signedOut(nil)
       } catch {
-        phase = .signedOut(.signInFailed)
+        let maybeFailure = AppFailure.signIn(error)
+        if maybeFailure != nil {
+          // The error's case and the provider's cleaned code; it carries no token or redirect code.
+          Self.signInLog.warning("sign-in failed: \(String(describing: error), privacy: .public)")
+        }
+        phase = .signedOut(maybeFailure)
+        return
       }
+      do {
+        try vault.save(session)
+      } catch {
+        Self.signInLog.warning("the session could not be stored")
+        phase = .signedOut(.storage)
+        return
+      }
+      rememberLoginHint(session.loginHint, for: server)
+      container.activeAccount = session.subject
+      container.displayName = session.displayName
+      await refreshAccountState()
     }
   }
 
