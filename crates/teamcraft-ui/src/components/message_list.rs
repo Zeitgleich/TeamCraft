@@ -238,12 +238,16 @@ pub fn MessageList(
   let viewport = RwSignal::new(800.0_f64);
   // Bumped whenever `heights` changed, so the window is recomputed.
   let layout_rev = RwSignal::new(0_u64);
-  // Opened with unread messages: start at the "New messages" divider instead of the bottom.
-  let maybe_marker = state
-    .unread_marker
-    .get_untracked()
-    .filter(|marker| marker.conversation == conversation)
-    .map(|marker| marker.index);
+  // Opened with unread messages: start at the "New messages" divider instead of the bottom. A log
+  // opens at its newest line instead (#943), however much is unread.
+  let maybe_marker = opening_marker(
+    state
+      .unread_marker
+      .get_untracked()
+      .filter(|marker| marker.conversation == conversation)
+      .map(|marker| marker.index),
+    is_log,
+  );
   // A jump to a message (search, link, activity) asked before this feed existed wins over both.
   let maybe_jump = state
     .jump_to_index
@@ -257,8 +261,7 @@ pub fn MessageList(
     });
   }
   // Otherwise return to where the reader was when they left this conversation scrolled up.
-  let maybe_saved_anchor = maybe_marker
-    .is_none()
+  let maybe_saved_anchor = (maybe_marker.is_none() && !is_log)
     .then(|| {
       state
         .scroll_anchors
@@ -976,6 +979,11 @@ impl ScrollIntent {
   }
 }
 
+/// Where a feed starts at its unread divider: never in a log, which opens at its newest line (#943).
+fn opening_marker(maybe_marker: Option<usize>, is_log: bool) -> Option<usize> {
+  maybe_marker.filter(|_| !is_log)
+}
+
 /// What a scroll event means for following the newest message: back at the bottom follows it
 /// again, the user's own upward move stops following, anything else changes nothing. Any upward
 /// move counts: a slow touchpad scroll moves less than a pixel per event.
@@ -1274,6 +1282,19 @@ pub(crate) fn handle_list_keys(
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  #[test]
+  fn a_log_opens_at_the_newest_line_not_at_the_unread_divider() {
+    assert_eq!(opening_marker(Some(40), false), Some(40));
+    assert_eq!(opening_marker(Some(40), true), None);
+    assert_eq!(opening_marker(None, true), None);
+  }
+
+  #[test]
+  fn following_a_log_pauses_on_scrolling_up_and_resumes_at_the_bottom() {
+    assert_eq!(follow_after_scroll(60.0, 900.0, 950.0, true), Some(false));
+    assert_eq!(follow_after_scroll(0.0, 960.0, 900.0, false), Some(true));
+  }
 
   #[test]
   fn window_covers_viewport_plus_overscan() {

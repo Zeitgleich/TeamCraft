@@ -746,7 +746,7 @@ impl<S: LocalStore> CoreChatBackend<S> {
       name,
       topic: response.maybe_topic.clone().unwrap_or_default(),
       member_ids,
-      unread_count: unread.messages,
+      unread_count: shown_unread_messages(response, kind, unread.messages),
       mention_count: unread.mentions,
       is_favorite,
       is_muted: self.is_muted(response),
@@ -2314,6 +2314,21 @@ fn view_kind(response: &ConversationResponse) -> ConversationKind {
   }
 }
 
+/// The unread messages a sidebar entry shows. A log (integration) channel is quiet by default
+/// (issue #943): its lines never pile up as an unread number, mentions still count. Only a member
+/// who set the channel's level to "all" themselves gets the count, so the per-channel notification
+/// setting is the switch and a channel that follows its space or the default stays quiet.
+fn shown_unread_messages(response: &ConversationResponse, kind: ConversationKind, messages: u32) -> u32 {
+  let wants_every_message = response.maybe_my_membership.as_ref().is_some_and(|membership| {
+    !membership.is_notification_inherited && membership.notification_level == NotificationLevel::All
+  });
+  if kind == ConversationKind::Integration && !wants_every_message {
+    0
+  } else {
+    messages
+  }
+}
+
 /// Whether the user is in a channel of the space.
 fn has_channel_in(conversations: &[ConversationResponse], space: SpaceId) -> bool {
   conversations.iter().any(|conversation| {
@@ -3663,6 +3678,41 @@ mod tests {
       let counted = backend.to_conversation(&conversation, &users, &backend.mention_preferences());
       assert!(counted.is_muted);
       assert_eq!(counted.mention_count, 1);
+    }
+
+    #[test]
+    fn log_channels_are_quiet_unless_the_level_is_set_to_all() {
+      let (backend, mut conversation, users) = mention_fixture(&[
+        (2, "line one", &[]),
+        (2, "line two", &[]),
+        (2, "ping @alice", &[]),
+      ]);
+      conversation.is_integration = true;
+      let counted = |conversation: &ConversationResponse| {
+        backend.to_conversation(conversation, &users, &backend.mention_preferences())
+      };
+      // Never configured (follows the space or the default): quiet, the mention still counts.
+      let mut membership = test_membership();
+      membership.is_notification_inherited = true;
+      conversation.maybe_my_membership = Some(membership);
+      let quiet = counted(&conversation);
+      assert_eq!(quiet.kind, ConversationKind::Integration);
+      assert_eq!(quiet.unread_count, 0);
+      assert_eq!(quiet.mention_count, 1);
+      // Set to mentions on purpose: still quiet.
+      let mut membership = test_membership();
+      membership.notification_level = teamcraft_proto::NotificationLevel::Mentions;
+      conversation.maybe_my_membership = Some(membership);
+      assert_eq!(counted(&conversation).unread_count, 0);
+      // Explicitly "all": counts like any channel.
+      conversation.maybe_my_membership = Some(test_membership());
+      assert_eq!(counted(&conversation).unread_count, 3);
+      // A normal channel is unaffected.
+      conversation.is_integration = false;
+      let mut membership = test_membership();
+      membership.is_notification_inherited = true;
+      conversation.maybe_my_membership = Some(membership);
+      assert_eq!(counted(&conversation).unread_count, 3);
     }
 
     fn test_membership() -> teamcraft_proto::MyMembership {
