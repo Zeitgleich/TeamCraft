@@ -13,6 +13,13 @@ struct SettingsView: View {
   @State private var statusExpiry = StatusExpiryValue.never
   @State private var maybeStatusProblem: TextProblem?
   @State private var isSavingStatus = false
+  @State private var maybeProfileJSON: String?
+  @State private var isEditingName = false
+  @State private var nameText = ""
+  @State private var maybeNameProblem: TextProblem?
+  @State private var isSavingName = false
+  @FocusState private var isNameFocused: Bool
+  @AccessibilityFocusState private var isNameAccessibilityFocused: Bool
   @FocusState private var isStatusFocused: Bool
   @AccessibilityFocusState private var isStatusAccessibilityFocused: Bool
 
@@ -24,6 +31,9 @@ struct SettingsView: View {
             AvatarView(name: account.displayName, size: 44)
             Text(account.displayName).font(.headline)
           }
+        }
+        if let profile = maybeProfileJSON, OwnProfileDocument.canOverrideDisplayName(in: profile) {
+          displayNameSection(profile: profile)
         }
         Section("presence_title") {
           Picker("presence_title", selection: $presenceRaw) {
@@ -61,10 +71,74 @@ struct SettingsView: View {
       }
       .navigationTitle("settings_title")
       .navigationBarTitleDisplayMode(.inline)
+      // The name changes through the profile update event; the profile is read again with it.
+      .task(id: account.displayName) { maybeProfileJSON = await model.ownProfileJSON() }
       .toolbar {
         ToolbarItem(placement: .confirmationAction) { Button("done") { dismiss() } }
       }
     }
+  }
+
+  /// Changing the name under the picture, when the workspace policy lets people (issue #408).
+  private func displayNameSection(profile: String) -> some View {
+    Section {
+      if isEditingName {
+        VStack(alignment: .leading, spacing: 6) {
+          LabeledContent("profile_name_label") {
+            TextField("profile_name_label", text: $nameText)
+              .multilineTextAlignment(.trailing)
+              .textContentType(.name)
+              .focused($isNameFocused)
+              .accessibilityFocused($isNameAccessibilityFocused)
+              .fieldError(maybeNameProblem?.message)
+              .onChange(of: nameText) { maybeNameProblem = nil }
+          }
+          FieldMessage(maybeError: maybeNameProblem?.message)
+        }
+        Button("profile_name_save") { Task { await saveName(profile: profile, name: nameText) } }
+          .disabled(isSavingName)
+        Button("cancel", role: .cancel) {
+          isEditingName = false
+          maybeNameProblem = nil
+        }
+        .disabled(isSavingName)
+      } else {
+        Button("profile_name_change") {
+          nameText = OwnProfileDocument.displayNameOverride(in: profile) ?? account.displayName
+          maybeNameProblem = nil
+          isEditingName = true
+          isNameFocused = true
+        }
+      }
+      if OwnProfileDocument.displayNameOverride(in: profile) != nil {
+        Button("profile_name_reset") { Task { await saveName(profile: profile, name: nil) } }
+          .disabled(isSavingName)
+      }
+    }
+  }
+
+  /// A blank or invalid name is said at the field; so is the server's refusal, with the input kept.
+  private func saveName(profile: String, name maybeName: String?) async {
+    guard !isSavingName else { return }
+    if let name = maybeName, let problem = OwnProfileDocument.problem(typed: name) {
+      showNameProblem(problem)
+      return
+    }
+    isSavingName = true
+    let trimmed = maybeName?.trimmingCharacters(in: .whitespacesAndNewlines)
+    if let problem = await model.setDisplayName(profileJSON: profile, to: trimmed) {
+      if isEditingName { showNameProblem(problem) }
+    } else {
+      isEditingName = false
+      maybeProfileJSON = await model.ownProfileJSON()
+    }
+    isSavingName = false
+  }
+
+  private func showNameProblem(_ problem: TextProblem) {
+    maybeNameProblem = problem
+    isNameFocused = true
+    isNameAccessibilityFocused = true
   }
 
   private var customStatusSection: some View {

@@ -165,4 +165,23 @@ class WireTest {
     assertTrue(down.isCancellable)
     assertFalse(transfer("""{"state":"upload_stalled","reason":"network"}""").isStorageUnavailable)
   }
+
+  @Test
+  fun theOwnProfileKeepsItsFieldsWhenOnlyTheNameChanges() {
+    val profile = OwnProfile.parse(
+      """{"user_id":"1","title":"Lead","phone":"+49 30 1","has_avatar":true,"avatar_version":"7",
+          "display_name_override":"Ada","can_override_display_name":true}""",
+    )
+    assertTrue(profile.canOverrideDisplayName)
+    assertEquals("Ada", profile.maybeDisplayNameOverride)
+    assertEquals("""{"title":"Lead","phone":"+49 30 1","display_name":"Grace"}""", profile.updateBody("Grace"))
+    assertEquals("""{"title":"Lead","phone":"+49 30 1"}""", profile.updateBody(null))
+  }
+
+  @Test
+  fun anOlderServerOffersNoNameChange() {
+    val profile = OwnProfile.parse("""{"user_id":"1","has_avatar":false}""")
+    assertFalse(profile.canOverrideDisplayName)
+    assertEquals(null, profile.maybeDisplayNameOverride)
+  }
 }

@@ -88,3 +88,11 @@ const val MAX_CONFIRM_OVER = 99_999
 
 /** The count as typed, or null when it is no whole number from 0 to [MAX_CONFIRM_OVER]. */
 fun confirmOverCount(typed: String): Int? = typed.trim().toIntOrNull()?.takeIf { it in 0..MAX_CONFIRM_OVER }
+
+/** The display name as typed: not empty (the sign-in name has its own button) and no control characters. */
+@StringRes
+fun displayNameError(typed: String): Int? = when {
+  typed.isBlank() -> R.string.profile_name_empty
+  typed.any(Char::isISOControl) -> R.string.profile_name_invalid
+  else -> null
+}

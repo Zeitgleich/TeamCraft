@@ -580,6 +580,13 @@
   margin-top: var(--space-2);
 }
 
+.set-name-form {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  margin-top: var(--space-1);
+}
+
 .set-modal form.set-form,
 .set-modal form.set-subform {
   display: flex;

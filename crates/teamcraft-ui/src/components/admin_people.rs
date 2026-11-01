@@ -79,6 +79,13 @@ pub fn PeopleSection() -> impl IntoView {
           checked=Signal::derive(move || draft.get().directory.shows_email)
           on_change=move |value| policy.edit(|p| p.directory.shows_email = value)
         />
+        <CheckRow
+          name="allow_display_name_override"
+          label=Signal::derive(move || i18n.t("policy-name-override"))
+          hint=Signal::derive(move || i18n.t("policy-name-override-hint"))
+          checked=Signal::derive(move || draft.get().directory.allow_display_name_override)
+          on_change=move |value| policy.edit(|p| p.directory.allow_display_name_override = value)
+        />
       </fieldset>
 
       <fieldset class="policy-group" prop:disabled=move || policy.is_locked()>

@@ -95,6 +95,13 @@ class FieldErrorsTest {
     }
 
     @Test
+    fun aDisplayNameIsNeededAndHasNoControlCharacters() {
+      assertEquals(R.string.profile_name_empty, displayNameError("  "))
+      assertEquals(R.string.profile_name_invalid, displayNameError("Ada\u0007"))
+      assertNull(displayNameError("Ada L."))
+    }
+
+    @Test
     fun theConfirmCountIsAWholeNumberInRange() {
       assertNull(confirmOverCount(""))
       assertNull(confirmOverCount("100000"))

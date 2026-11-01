@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "INSERT INTO users (id, oidc_issuer, oidc_subject, username, email, display_name, kind, oidc_role, organization)\n         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $10)\n         ON CONFLICT (oidc_issuer, oidc_subject) DO UPDATE\n           SET username = EXCLUDED.username,\n               email = EXCLUDED.email,\n               display_name = EXCLUDED.display_name,\n               kind = EXCLUDED.kind,\n               oidc_role = EXCLUDED.oidc_role,\n               organization = CASE WHEN $9 THEN EXCLUDED.organization ELSE users.organization END\n         RETURNING id, username, display_name, kind, created_at, organization, deactivated_at IS NOT NULL AS \"is_deactivated!\", deleted_at IS NOT NULL AS \"is_deleted!\",\n                   default_memberships_at IS NULL AS \"is_awaiting_defaults!\"",
+  "query": "SELECT id, username, email, display_name, COALESCE(idp_display_name, display_name) AS \"idp_display_name!\", kind, oidc_role, created_at, organization, deactivated_at IS NOT NULL AS \"is_deactivated!\", deleted_at IS NOT NULL AS \"is_deleted!\",\n                default_memberships_at IS NULL AS \"is_awaiting_defaults!\"\n         FROM users WHERE oidc_issuer = $1 AND oidc_subject = $2",
   "describe": {
     "columns": [
       {
@@ -27,6 +27,17 @@
       },
       {
         "ordinal": 2,
+        "name": "email",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "users",
+            "name": "email"
+          }
+        }
+      },
+      {
+        "ordinal": 3,
         "name": "display_name",
         "type_info": "Text",
         "origin": {
@@ -37,7 +48,13 @@
         }
       },
       {
-        "ordinal": 3,
+        "ordinal": 4,
+        "name": "idp_display_name!",
+        "type_info": "Text",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 5,
         "name": "kind",
         "type_info": "Text",
         "origin": {
@@ -48,7 +65,18 @@
         }
       },
       {
-        "ordinal": 4,
+        "ordinal": 6,
+        "name": "oidc_role",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "users",
+            "name": "oidc_role"
+          }
+        }
+      },
+      {
+        "ordinal": 7,
         "name": "created_at",
         "type_info": "Timestamptz",
         "origin": {
@@ -59,7 +87,7 @@
         }
       },
       {
-        "ordinal": 5,
+        "ordinal": 8,
         "name": "organization",
         "type_info": "Text",
         "origin": {
@@ -70,19 +98,19 @@
         }
       },
       {
-        "ordinal": 6,
+        "ordinal": 9,
         "name": "is_deactivated!",
         "type_info": "Bool",
         "origin": "Expression"
       },
       {
-        "ordinal": 7,
+        "ordinal": 10,
         "name": "is_deleted!",
         "type_info": "Bool",
         "origin": "Expression"
       },
       {
-        "ordinal": 8,
+        "ordinal": 11,
         "name": "is_awaiting_defaults!",
         "type_info": "Bool",
         "origin": "Expression"
@@ -90,23 +118,18 @@
     ],
     "parameters": {
       "Left": [
-        "Int8",
         "Text",
-        "Text",
-        "Text",
-        "Text",
-        "Text",
-        "Text",
-        "Text",
-        "Bool",
         "Text"
       ]
     },
     "nullable": [
       false,
       true,
+      true,
       false,
+      null,
       false,
+      true,
       false,
       true,
       null,
@@ -114,5 +137,5 @@
       null
     ]
   },
-  "hash": "a1f3c1ab2761572d121ce71cdb2a46bad01a00835bccca19f130752f67bbdee4"
+  "hash": "fa8126ace8286f9c1ea8bb2006d4a84c20f7ab296928136f80a65ddc7b5937a3"
 }

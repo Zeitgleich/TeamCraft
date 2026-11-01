@@ -2,7 +2,7 @@
 //! see on the user's card (title, department, phone, time zone, working hours).
 
 use leptos::prelude::*;
-use teamcraft_proto::{AvatarContentType, ErrorCode, UpdateProfileRequest, WorkingHours};
+use teamcraft_proto::{AvatarContentType, ErrorCode, ProfileResponse, UpdateProfileRequest, WorkingHours};
 use wasm_bindgen::JsCast;
 
 use crate::clock::{local_time_zone, time_zone_names};
@@ -16,7 +16,7 @@ use crate::components::pending_button::PendingButton;
 use crate::components::profile_views::{Weekday, format_minutes, parse_minutes};
 use crate::components::settings_rows::{SettingRow, SettingsCard, SwitchRow, row_id};
 use crate::feedback::{ActionFailure, FailureKind, PendingAction};
-use crate::form_errors::focus_first_invalid;
+use crate::form_errors::{FieldError, FieldErrors, FormErrors, focus_first_invalid};
 use crate::i18n::use_i18n;
 use crate::image_crop::check_pick;
 use crate::prefs::EVERY_DAY;
@@ -26,6 +26,14 @@ use crate::state::use_app_state;
 
 const PROFILE_FORM_ID: &str = "profile-form";
 const HOURS_ERROR_ID: &str = "profile-hours-error";
+const NAME_FORM_ID: &str = "profile-name-form";
+const NAME_FIELD_ID: &str = "profile-name-field";
+/// Server refusals that belong to the name field: a name that is too long or has characters the
+/// server does not accept, and a policy that forbids changing it.
+const NAME_SERVER_FIELDS: [(ErrorCode, &str); 2] = [
+  (ErrorCode::InvalidRequest, NAME_FIELD_ID),
+  (ErrorCode::DisplayNameOverrideNotAllowed, NAME_FIELD_ID),
+];
 const DEFAULT_START: u16 = 9 * 60;
 const DEFAULT_END: u16 = 17 * 60;
 
@@ -134,7 +142,8 @@ fn ProfileHeader(maybe_hub: Option<ProfileHub>) -> impl IntoView {
         <Avatar user=me.clone() size=AvatarSize::Large />
       </div>
       <div class="set-profile-text">
-        <h3 class="set-profile-name" translate="no">{me.display_name.clone()}</h3>
+        <h3 class="set-profile-name" translate="no">{move || state.me().display_name}</h3>
+        {maybe_hub.map(|hub| view! { <DisplayNameEditor hub=hub /> })}
         <div class="set-profile-handle">
           <span class="mono" translate="no">{handle}</span>
           <button
@@ -147,7 +156,9 @@ fn ProfileHeader(maybe_hub: Option<ProfileHub>) -> impl IntoView {
             <Icon name=IconName::Copy />
           </button>
         </div>
-        <p class="set-row-hint">{move || i18n.t("settings-name-from-sign-in")}</p>
+        <Show when=move || !can_edit_name(maybe_hub.and_then(|hub| hub.profile(me_id)).as_ref()) fallback=|| ()>
+          <p class="set-row-hint">{move || i18n.t("settings-name-from-sign-in")}</p>
+        </Show>
         {maybe_hub.is_some().then(|| view! {
           <div class="set-profile-actions">
             <label class="btn btn-small" id=row_id("profile-avatar-change")>
@@ -168,6 +179,129 @@ fn ProfileHeader(maybe_hub: Option<ProfileHub>) -> impl IntoView {
     {move || picked.get().map(|file| view! {
       <ImageCropDialog file=file target=CropTarget::Avatar on_apply=apply_avatar on_cancel=cancel_crop />
     })}
+  }
+}
+
+/// Changes the name under the picture, when the workspace policy allows it (issue #408): a button
+/// that opens a field, and "Use name from sign-in" while a name of the user's own is set. Saved
+/// with the rest of the profile, which the update replaces as a whole.
+#[component]
+fn DisplayNameEditor(hub: ProfileHub) -> impl IntoView {
+  let state = use_app_state();
+  let i18n = use_i18n();
+  let me = state.me().id;
+  let is_editing = RwSignal::new(false);
+  let name = RwSignal::new(String::new());
+  let errors = FormErrors::new();
+  let saving = PendingAction::new();
+  let resetting = PendingAction::new();
+  let stored = move || hub.profile(me);
+  let is_overridden = move || {
+    stored()
+      .and_then(|profile| profile.maybe_display_name_override)
+      .is_some()
+  };
+  let field_errors = move || {
+    let mut found = FieldErrors::new();
+    if let Some(key) = name_error(&name.get()) {
+      found.push(NAME_FIELD_ID, i18n.t(key));
+    }
+    found
+  };
+  Effect::new(move |_| errors.follow(field_errors()));
+
+  let open = move |_| {
+    name.set(state.me().display_name);
+    errors.clear();
+    is_editing.set(true);
+    focus_element(NAME_FIELD_ID);
+  };
+  let close = move |_| {
+    is_editing.set(false);
+    errors.clear();
+  };
+  // Sends the profile as stored with only the name changed; `None` goes back to the sign-in name.
+  let send = move |maybe_name: Option<String>, action: PendingAction| {
+    let Some(profile) = stored() else { return };
+    let mut request = UpdateProfileRequest::from(&profile);
+    request.maybe_display_name = maybe_name;
+    action.spawn(async move {
+      match hub.save(request).await {
+        Ok(()) => {
+          is_editing.set_if_alive(false);
+          errors.clear();
+          Ok(())
+        },
+        Err(refusal) => {
+          let failure = refusal.to_failure();
+          let message = i18n.t(name_refusal_key(&failure));
+          // A refusal of the name goes to its field; the toast is for the rest.
+          if errors.refuse_server(NAME_FORM_ID, &failure, &NAME_SERVER_FIELDS, message) {
+            Ok(())
+          } else {
+            Err(failure)
+          }
+        },
+      }
+    });
+  };
+  let save = move |ev: leptos::ev::SubmitEvent| {
+    ev.prevent_default();
+    let found = untrack(field_errors);
+    if !found.is_empty() {
+      errors.refuse(NAME_FORM_ID, found);
+      return;
+    }
+    send(Some(name.get_untracked().trim().to_owned()), saving);
+  };
+
+  view! {
+    <Show when=move || can_edit_name(stored().as_ref()) fallback=|| ()>
+      <Show
+        when=move || is_editing.get()
+        fallback=move || view! {
+          <div class="set-profile-actions">
+            <button type="button" class="btn btn-small" on:click=open>
+              {move || i18n.t("profile-name-change")}
+            </button>
+            <Show when=is_overridden fallback=|| ()>
+              <PendingButton pending=resetting class="btn btn-small" on_click=move |_| send(None, resetting)>
+                {move || i18n.t("profile-name-reset")}
+              </PendingButton>
+            </Show>
+          </div>
+        }
+      >
+        <form id=NAME_FORM_ID class="set-name-form" on:submit=save>
+          <label class="set-row-label" for=NAME_FIELD_ID>{move || i18n.t("profile-name-label")}</label>
+          <input
+            id=NAME_FIELD_ID
+            class="input"
+            type="text"
+            autocomplete="name"
+            aria-invalid=errors.invalid(NAME_FIELD_ID)
+            aria-describedby=errors.described(NAME_FIELD_ID)
+            prop:value=move || name.get()
+            on:input=move |ev| {
+              errors.clear_field(NAME_FIELD_ID);
+              name.set(event_target_value(&ev));
+            }
+          />
+          <FieldError errors=errors field=NAME_FIELD_ID />
+          <div class="set-profile-actions">
+            <button type="submit" class="btn btn-small btn-primary" prop:disabled=move || saving.is_pending() aria-busy=move || saving.is_pending().then_some("true")>
+              {move || i18n.t("profile-name-save")}
+            </button>
+            <button type="button" class="btn btn-small" on:click=close>{move || i18n.t("cancel")}</button>
+            <Show when=is_overridden fallback=|| ()>
+              <PendingButton pending=resetting class="btn btn-small" on_click=move |_| send(None, resetting)>
+                {move || i18n.t("profile-name-reset")}
+              </PendingButton>
+            </Show>
+          </div>
+        </form>
+      </Show>
+    </Show>
   }
 }
 
@@ -246,6 +380,10 @@ fn ProfileDetails(hub: ProfileHub) -> impl IntoView {
     };
     is_hours_invalid.set(false);
     let request = UpdateProfileRequest {
+      // This form does not edit the name, and the update replaces everything: keep it.
+      maybe_display_name: hub
+        .profile(me)
+        .and_then(|profile| profile.maybe_display_name_override),
       maybe_title: non_empty(&title.get_untracked()),
       maybe_department: non_empty(&department.get_untracked()),
       maybe_phone: non_empty(&phone.get_untracked()),
@@ -387,6 +525,46 @@ fn working_hours(days: &[Weekday], start: &str, end: &str) -> Option<WorkingHour
   })
 }
 
+/// Whether the name under the picture can be changed: the profile has loaded and the workspace
+/// policy (as the server reports it) allows a name of one's own.
+fn can_edit_name(maybe_profile: Option<&ProfileResponse>) -> bool {
+  maybe_profile.is_some_and(|profile| profile.can_override_display_name)
+}
+
+/// The i18n key of what is wrong with the typed name, if anything. The server checks the length,
+/// which is a setting; this catches what is plain from the text.
+fn name_error(text: &str) -> Option<&'static str> {
+  let trimmed = text.trim();
+  if trimmed.is_empty() {
+    Some("profile-name-empty")
+  } else if trimmed.chars().any(char::is_control) {
+    Some("profile-name-invalid")
+  } else {
+    None
+  }
+}
+
+/// The message under the name field for a refusal of the server.
+fn name_refusal_key(failure: &ActionFailure) -> &'static str {
+  match &failure.kind {
+    FailureKind::Server(ErrorCode::DisplayNameOverrideNotAllowed) => "profile-name-not-allowed",
+    _ => "profile-name-rejected",
+  }
+}
+
+/// Moves the focus to the element with this id once the view has updated.
+fn focus_element(id: &'static str) {
+  request_animation_frame(move || {
+    if let Some(element) = web_sys::window()
+      .and_then(|window| window.document())
+      .and_then(|document| document.get_element_by_id(id))
+      .and_then(|element| element.dyn_into::<web_sys::HtmlElement>().ok())
+    {
+      drop(element.focus());
+    }
+  });
+}
+
 fn non_empty(text: &str) -> Option<String> {
   let trimmed = text.trim();
   (!trimmed.is_empty()).then(|| trimmed.to_owned())
@@ -395,6 +573,7 @@ fn non_empty(text: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
   use super::*;
+  use crate::model::id_from_raw;
 
   #[test]
   fn working_hours_need_a_day_and_an_end_after_the_start() {
@@ -403,6 +582,46 @@ mod tests {
     assert!(working_hours(&monday, "17:00", "09:00").is_none());
     assert!(working_hours(&[], "09:00", "17:00").is_none());
     assert!(working_hours(&monday, "9", "17:00").is_none());
+  }
+
+  #[test]
+  fn the_name_can_be_changed_only_when_the_policy_allows_it() {
+    let mut profile = ProfileResponse {
+      user_id: id_from_raw(1),
+      maybe_title: None,
+      maybe_department: None,
+      maybe_phone: None,
+      maybe_time_zone: None,
+      maybe_working_hours: None,
+      has_avatar: false,
+      maybe_display_name_override: None,
+      can_override_display_name: false,
+      maybe_avatar_version: None,
+    };
+    assert!(!can_edit_name(None), "nothing to edit before the profile loaded");
+    assert!(!can_edit_name(Some(&profile)), "the policy forbids it");
+    profile.can_override_display_name = true;
+    assert!(can_edit_name(Some(&profile)));
+  }
+
+  #[test]
+  fn a_typed_name_is_checked_before_it_is_sent() {
+    assert_eq!(name_error("  "), Some("profile-name-empty"));
+    assert_eq!(name_error("Ada\u{7}"), Some("profile-name-invalid"));
+    assert_eq!(name_error(" Ada L. "), None);
+  }
+
+  #[test]
+  fn a_policy_refusal_is_worded_differently_from_a_bad_name() {
+    let refused = |code| ActionFailure::new(FailureKind::Server(code), "refused");
+    assert_eq!(
+      name_refusal_key(&refused(ErrorCode::DisplayNameOverrideNotAllowed)),
+      "profile-name-not-allowed"
+    );
+    assert_eq!(
+      name_refusal_key(&refused(ErrorCode::InvalidRequest)),
+      "profile-name-rejected"
+    );
   }
 
   #[test]

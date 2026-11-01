@@ -19,4 +19,11 @@
   <string name="custom_status_emoji">Emoji</string>
   <string name="custom_status_text">Status</string>
   <string name="custom_status_missing">Enter a status text.</string>
+  <string name="profile_name_change">Change name</string>
+  <string name="profile_name_label">Your name</string>
+  <string name="profile_name_save">Save name</string>
+  <string name="profile_name_reset">Use name from sign-in</string>
+  <string name="profile_name_empty">Enter a name, or use the name from your sign-in.</string>
+  <string name="profile_name_invalid">The name can\'t contain control characters.</string>
+  <string name="profile_name_rejected">The name was refused. It may be too long, or your organization no longer allows changing it.</string>
 </resources>

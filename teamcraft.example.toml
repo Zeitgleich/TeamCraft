@@ -164,6 +164,8 @@ org_recovery_request_ttl_secs = 86400
 max_recovery_blob_bytes = 8192
 # Longest title, department and similar profile text, in characters.
 max_profile_text_chars = 100
+# Longest display name a member may set instead of the one from the identity provider, in characters.
+max_display_name_chars = 80
 # Most members of one user group.
 max_user_group_members = 5000
 # Unread counts look at this many of the newest unread messages per conversation; a count equal to it

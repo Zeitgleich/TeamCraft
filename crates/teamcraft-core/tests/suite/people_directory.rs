@@ -321,6 +321,31 @@ async fn a_renamed_person_shows_the_new_name_without_a_reload() {
 }
 
 #[tokio::test]
+async fn a_name_of_ones_own_and_going_back_to_the_sign_in_name_reach_others_without_a_reload() {
+  let server = FakeServer::new();
+  let mut alice = Peer::enroll(&server, "Alice").await;
+  let mut bob = Peer::enroll(&server, "Bob").await;
+  let bob_id = bob.client.user_id();
+  alice.client.open_dm(bob_id).await.unwrap();
+  settle(&mut [&mut alice, &mut bob]).await;
+
+  // The server tells everybody with the same `ProfileUpdate` whether the name is an override
+  // (issue #408) or the provider's.
+  server.rename_user(bob_id, "Bobby T.", "bob");
+  settle(&mut [&mut alice, &mut bob]).await;
+  assert_eq!(summary(&alice, bob_id).display_name, "Bobby T.");
+  assert_eq!(
+    summary(&bob, bob_id).display_name,
+    "Bobby T.",
+    "the person sees it too"
+  );
+
+  server.rename_user(bob_id, "Bob", "bob");
+  settle(&mut [&mut alice, &mut bob]).await;
+  assert_eq!(summary(&alice, bob_id).display_name, "Bob");
+}
+
+#[tokio::test]
 async fn a_deactivated_person_is_kept_for_old_messages_but_offered_nowhere() {
   let server = FakeServer::new();
   let mut alice = Peer::enroll(&server, "Alice").await;

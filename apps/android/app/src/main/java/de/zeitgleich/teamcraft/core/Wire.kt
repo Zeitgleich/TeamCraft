@@ -475,3 +475,30 @@ data class MeetingList(val meetings: List<Meeting> = emptyList())
 
 /** Reads one string field of a JSON object answer, for small replies. */
 fun JsonElement.stringField(name: String): String? = (jsonObject[name] as? JsonPrimitive)?.content
+
+/**
+ * The member's own profile (`/me/profile`), kept as the server sent it: the update replaces the
+ * whole profile, so a change to the name sends the other fields back as they are ([updateBody]).
+ */
+class OwnProfile(private val raw: JsonObject) {
+  /** The workspace policy lets people replace the name from the identity provider. */
+  val canOverrideDisplayName: Boolean
+    get() = (raw["can_override_display_name"] as? JsonPrimitive)?.content == "true"
+
+  /** The name the member chose, `null` while the sign-in name is shown. */
+  val maybeDisplayNameOverride: String?
+    get() = (raw["display_name_override"] as? JsonPrimitive)?.takeIf { it.isString }?.content
+
+  /** The body of `PUT /me/profile` with [maybeName] as the name (`null`: the sign-in name). */
+  fun updateBody(maybeName: String?): String {
+    val kept = raw.filterKeys { it in PROFILE_FIELDS }
+    val fields = maybeName?.let { kept + ("display_name" to JsonPrimitive(it)) } ?: kept
+    return JsonObject(fields).toString()
+  }
+
+  companion object {
+    private val PROFILE_FIELDS = setOf("title", "department", "phone", "time_zone", "working_hours")
+
+    fun parse(json: String): OwnProfile = OwnProfile(WireJson.parseToJsonElement(json).jsonObject)
+  }
+}

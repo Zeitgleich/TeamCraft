@@ -21,7 +21,7 @@ identity provider's roles. Policy versions are append-only; each save is a new v
 | Sessions              | require a second factor; maximum age; idle timeout                        | Server, at every request                                                                    |
 | Passwords             | shortest password of local accounts (8 to 128)                            | Server                                                                                      |
 | Guests                | allowed e-mail domains; DM scope; default expiry                          | Server                                                                                      |
-| Directory             | display name format; show full name; show e-mail to members               | Server, in every response that names a person                                               |
+| Directory             | display name format; full name; e-mail; own name allowed                  | Server, in every response that names a person                                               |
 | Statuses              | statuses on or off; custom statuses; away timeout; presets                | Server                                                                                      |
 | Threads               | threaded view on or off; follow threads people are mentioned in           | Server (threads off: replies are refused); the follow default is for people who never chose |
 | Push content          | generic, sender or full (default full)                                    | The receiving device, after opening the sealed payload                                      |
@@ -89,3 +89,11 @@ These are edited through the admin API by admins (not only owners) and are audit
 - **Instance:** read-only status of the media server (last contact, running calls), the push
   providers (Web Push, FCM, UnifiedPush, APNs: active, not configured, or not delivering yet) and
   storage (attachments and search index segments). Telephony is a placeholder.
+
+## Display names
+
+The name comes from the identity provider. With "Let members change their name" on (the default), a
+member can replace it in their profile (Settings, Account, "Change name"). The sign-in sync never
+overwrites that name, and "Use name from sign-in" gives the provider's current name back. Switching
+the setting off stops new names (`display_name_override_not_allowed`), but names already chosen stay until their owners clear them. The
+longest name is `limits.max_display_name_chars` (default 80).
