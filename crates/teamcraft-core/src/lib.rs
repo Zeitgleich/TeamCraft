@@ -64,6 +64,7 @@ mod ui_search;
 pub mod ui_snapshot;
 #[cfg(feature = "ui")]
 mod ui_workspace;
+pub mod unseen_reactions;
 pub mod upkeep;
 #[cfg(target_arch = "wasm32")]
 pub mod web_push;

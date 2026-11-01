@@ -50,6 +50,10 @@
     <item quantity="one">%s new</item>
     <item quantity="other">%s new</item>
   </plurals>
+  <plurals name="jump_to_reaction">
+    <item quantity="one">%d new reaction to your messages, jump to it</item>
+    <item quantity="other">%d new reactions to your messages, jump to the first</item>
+  </plurals>
   <string name="day_today">Today</string>
   <string name="day_yesterday">Yesterday</string>
   <!-- Accessibility action: toggles a reaction with the given emoji -->

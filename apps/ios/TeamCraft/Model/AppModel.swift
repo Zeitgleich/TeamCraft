@@ -684,6 +684,12 @@ final class AppModel {
     await answer(.maxUploadBytes)?.maybeBytes
   }
 
+  /// Others' reactions to the user's messages in the conversation not seen yet (offline from the
+  /// local store).
+  func unseenReactions(conversationId: String) async -> UnseenReactions {
+    await answer(.unseenReactions(conversationId: conversationId))?.unseen ?? UnseenReactions()
+  }
+
   /// Files, link previews and other extras of the given messages, by message id.
   func extras(conversationId: String, messageIds: [String]) async -> [String: MessageExtras] {
     guard !messageIds.isEmpty,

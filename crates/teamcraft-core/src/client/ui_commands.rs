@@ -136,6 +136,17 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
           })
           .await
       },
+      CoreCommand::MarkReactionsSeen {
+        conversation,
+        reactions,
+      } => {
+        self
+          .queue_action(PendingAction::ReactionsSeen {
+            conversation,
+            reactions,
+          })
+          .await
+      },
       CoreCommand::MarkThreadRead {
         conversation,
         thread,

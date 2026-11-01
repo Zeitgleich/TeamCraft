@@ -204,6 +204,15 @@ struct ChatAnswer: Decodable, Sendable {
   let users: [String]?
   let maybeLink: String?
   let channels: [BrowsableChannel]?
+  let unseen: UnseenReactions?
+}
+
+/// Others' reactions to the user's own messages in a conversation that the user hasn't seen: the
+/// heart button over the feed (notifications.md, "Reactions to my messages").
+struct UnseenReactions: Decodable, Equatable, Sendable {
+  var count: Int = 0
+  /// The messages they react to, oldest first.
+  var messages: [String] = []
 }
 
 /// The key backup part of the core's chat snapshot (issue #410): facts the settings put into words.

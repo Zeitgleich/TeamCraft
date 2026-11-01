@@ -177,6 +177,10 @@ jump-to-latest-new = { $count ->
     [one] 1 new message
    *[other] { $count } new messages
   }
+jump-to-reaction = { $count ->
+    [one] 1 new reaction to your messages, jump to it
+   *[other] { $count } new reactions to your messages, jump to the first
+  }
 action-react-with = React with { $emoji }
 emoji-picker-title = Emoji
 emoji-search = Search emoji

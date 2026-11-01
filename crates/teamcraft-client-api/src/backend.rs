@@ -430,6 +430,14 @@ pub trait ChatBackend {
   fn first_unread(&self, _conversation: ConversationId) -> Option<MessageId> {
     None
   }
+  /// Reactions of others to the user's own messages here that the user hasn't seen yet
+  /// (notifications.md, "Reactions to my messages"). Read from an index, not the messages.
+  fn unseen_reactions(&self, _conversation: ConversationId) -> crate::model::UnseenReactions {
+    crate::model::UnseenReactions::default()
+  }
+  /// The user saw the reactions to these messages (they were in view, or the user jumped to
+  /// them). Synced to the user's devices; never taken back.
+  fn mark_reactions_seen(&self, _conversation: ConversationId, _messages: Vec<MessageId>) {}
   /// The newest message the server stored in the conversation, reactions, edits and deletions
   /// included: where `mark_read` moves the read marker. Unlike the newest row it changes when a
   /// reaction arrives, which raises the unread count too (#641).

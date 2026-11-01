@@ -41,6 +41,13 @@ struct ChatPane: View {
   @State private var isLoadingOlder = false
   /// The row at the top of the screen: SwiftUI keeps it in place when older rows are added above.
   @State private var maybeTopRowId: String?
+  /// Others' reactions to the user's messages not seen yet: the heart button (issue #1009).
+  @State private var unseenReactions = UnseenReactions()
+  @State private var reactionMarks = ReactionMarks()
+  /// The message rows on screen, whose waiting reactions count as seen.
+  @State private var rowsOnScreen: Set<String> = []
+  /// The message the heart button goes to, until its row is loaded.
+  @State private var maybeReactionTarget: String?
   @AppStorage("share_typing") private var isSharingTyping = true
   @FocusState private var isComposerFocused: Bool
 
@@ -178,7 +185,10 @@ struct ChatPane: View {
                   entryRow(entry, look: look, listWidth: listWidth)
                     .onAppear {
                       if entry.id == pageBackTriggerId { Task { await loadOlder() } }
+                      rowsOnScreen.insert(entry.id)
+                      reportSeenReactions()
                     }
+                    .onDisappear { rowsOnScreen.remove(entry.id) }
                 }
               } header: {
                 DayPill(date: section.day)
@@ -201,15 +211,25 @@ struct ChatPane: View {
         .defaultScrollAnchor(.bottom)
         .scrollDismissesKeyboard(.interactively)
         .overlay(alignment: .bottomTrailing) {
-          if !isAtBottom {
-            JumpDownButton(count: newBelowCount) {
-              withAnimation(scrollAnimation) { proxy.scrollTo(Self.bottomId, anchor: .bottom) }
+          VStack(alignment: .trailing, spacing: 12) {
+            if threadId == nil, unseenReactions.count > 0, !unseenReactions.messages.isEmpty {
+              ReactionJumpButton(count: unseenReactions.count) { jumpToReaction(proxy) }
+                .transition(reduceMotion ? .opacity : .scale(scale: 0.9).combined(with: .opacity))
             }
-            .padding()
+            if !isAtBottom {
+              JumpDownButton(count: newBelowCount) {
+                withAnimation(scrollAnimation) { proxy.scrollTo(Self.bottomId, anchor: .bottom) }
+              }
+            }
           }
+          .padding()
+          .animation(reduceMotion ? nil : .spring(duration: 0.3, bounce: 0), value: unseenReactions.count > 0)
         }
         // A message link opened this conversation, or points into it: show the message.
-        .onChange(of: messages.map(\.id)) { _, _ in focusLinkedMessage(proxy) }
+        .onChange(of: messages.map(\.id)) { _, _ in
+          focusLinkedMessage(proxy)
+          focusReactionTarget(proxy)
+        }
         .onChange(of: model.focusMessageId) { _, _ in focusLinkedMessage(proxy) }
         .onChange(of: messages.last?.id) { _, last in
           guard last != nil, model.focusMessageId == nil, maybeHighlighted == nil else { return }
@@ -516,6 +536,40 @@ struct ChatPane: View {
     }
   }
 
+  /// The heart button: the oldest message with an unseen reaction, seen from now on, loaded if it
+  /// isn't yet and then shown like a linked message.
+  private func jumpToReaction(_ proxy: ScrollViewProxy) {
+    guard let oldest = unseenReactions.messages.first else { return }
+    if reactionMarks.jumped(to: oldest) {
+      Task { await model.perform(.markReactionsSeen(conversationId: conversation.id, messageIds: [oldest])) }
+    }
+    maybeReactionTarget = oldest
+    focusReactionTarget(proxy)
+  }
+
+  private func focusReactionTarget(_ proxy: ScrollViewProxy) {
+    guard let target = maybeReactionTarget else { return }
+    guard messages.contains(where: { $0.id == target }) else {
+      // Older than what is loaded: page back until it is, or give up at the start.
+      if hasOlder { Task { await loadOlder() } } else { maybeReactionTarget = nil }
+      return
+    }
+    maybeReactionTarget = nil
+    maybeHighlighted = target
+    withAnimation(scrollAnimation) { proxy.scrollTo(target, anchor: .center) }
+    Task {
+      try? await Task.sleep(for: .seconds(2.5))
+      if maybeHighlighted == target { withAnimation { maybeHighlighted = nil } }
+    }
+  }
+
+  /// Rows on screen whose reactions wait unseen are seen now.
+  private func reportSeenReactions() {
+    let seen = reactionMarks.seen(onScreen: rowsOnScreen, unseen: unseenReactions)
+    guard !seen.isEmpty else { return }
+    Task { await model.perform(.markReactionsSeen(conversationId: conversation.id, messageIds: seen)) }
+  }
+
   /// Forward, pin, save, link, unread from here and the edit history: what Android offers too.
   @ViewBuilder
   private func sharedMessageActions(for message: MessageItem) -> some View {
@@ -652,6 +706,10 @@ struct ChatPane: View {
       hasOlder = page.hasOlder
     }
     if conversation.unreadCount > 0 { await model.markRead(conversationId: conversation.id) }
+    if threadId == nil {
+      unseenReactions = await model.unseenReactions(conversationId: conversation.id)
+      reportSeenReactions()
+    }
     await reloadExtras()
   }
 
@@ -695,6 +753,29 @@ struct ChatPane: View {
 
 struct ThreadTarget: Hashable {
   let threadId: String
+}
+
+/// To the oldest message with others' reactions the user hasn't seen: a heart with their count,
+/// above the way down.
+struct ReactionJumpButton: View {
+  let count: Int
+  let action: () -> Void
+
+  var body: some View {
+    Button(action: action) {
+      Image(systemName: "heart")
+        .font(.body.weight(.semibold))
+        // 44 pt: the smallest touch target the Human Interface Guidelines allow.
+        .frame(width: 44, height: 44)
+        .background(.regularMaterial)
+        .clipShape(Circle())
+        .overlay(alignment: .topTrailing) {
+          CountBadge(count: UInt32(min(count, 999)), tone: .unread).offset(x: 6, y: -6)
+        }
+    }
+    .buttonStyle(.plain)
+    .accessibilityLabel(Text("jump_to_reaction \(count)"))
+  }
 }
 
 /// Back to the newest message, with how many arrived below.

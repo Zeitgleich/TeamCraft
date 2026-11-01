@@ -1,6 +1,6 @@
 //! Small actions that must reach the server even if the device is offline when the user takes them
-//! (issue #159): read positions, acknowledgements, the server's pin flag, the manual presence and
-//! the custom status.
+//! (issue #159): read positions, seen reactions, acknowledgements, the server's pin flag, the
+//! manual presence and the custom status.
 //!
 //! Each action is stored first and sent afterwards: right away, on every upkeep tick, and at the
 //! end of a full sync, until the server took it. The queue survives a restart (it lives in the
@@ -28,8 +28,9 @@ use std::time::Duration;
 use rand_core::{OsRng, RngCore};
 use serde::{Deserialize, Serialize};
 use teamcraft_proto::{
-  ClientMessageId, ConversationId, CustomStatus, MessageId, SetCustomStatusRequest, SetPresenceRequest,
-  SetReadPositionRequest, SetThreadReadRequest, ThreadId, UnixMillis,
+  ClientMessageId, ConversationId, CustomStatus, MAX_REACTIONS_SEEN_PER_REQUEST, MarkReactionsSeenRequest,
+  MessageId, SetCustomStatusRequest, SetPresenceRequest, SetReadPositionRequest, SetThreadReadRequest,
+  ThreadId, UnixMillis,
 };
 
 use super::Client;
@@ -38,6 +39,10 @@ use crate::error::CoreError;
 use crate::records;
 use crate::retry::{Jitter, JitterMode, RetryPolicy, retry_after};
 use crate::store::{LocalStore, Table};
+
+/// Seen reactions one queued entry keeps at most; beyond it the oldest go (they stay seen on this
+/// device, only the user's other devices don't learn of them).
+const MAX_QUEUED_REACTIONS: usize = 1000;
 
 /// An action waiting for the server.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -53,6 +58,11 @@ pub enum PendingAction {
     conversation: ConversationId,
     thread: ThreadId,
     message: MessageId,
+  },
+  /// The user saw these reactions to their own messages (reaction message IDs, ascending).
+  ReactionsSeen {
+    conversation: ConversationId,
+    reactions: Vec<MessageId>,
   },
   /// The user confirmed an urgent message.
   Acknowledge {
@@ -281,6 +291,32 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
         thread,
         message: message.max(*queued),
       },
+      // Seen reactions add up: what is queued and not sent yet stays.
+      (
+        Some(PendingAction::ReactionsSeen {
+          reactions: queued, ..
+        }),
+        PendingAction::ReactionsSeen {
+          conversation,
+          mut reactions,
+        },
+      ) => {
+        reactions.extend(queued.iter().copied());
+        PendingAction::ReactionsSeen {
+          conversation,
+          reactions: seen_reactions(reactions),
+        }
+      },
+      (
+        _,
+        PendingAction::ReactionsSeen {
+          conversation,
+          reactions,
+        },
+      ) => PendingAction::ReactionsSeen {
+        conversation,
+        reactions: seen_reactions(reactions),
+      },
       (_, action) => action,
     };
     let entries = load_entries(&self.store)?;
@@ -366,6 +402,10 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
         let request = SetThreadReadRequest { message_id: *message };
         self.api.set_thread_read(*conversation, *thread, &request).await
       },
+      PendingAction::ReactionsSeen {
+        conversation,
+        reactions,
+      } => self.send_reactions_seen(*conversation, reactions).await,
       PendingAction::Acknowledge {
         conversation,
         message,
@@ -414,6 +454,22 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     }
   }
 
+  /// In requests of [`MAX_REACTIONS_SEEN_PER_REQUEST`]; a retry sends the earlier ones again,
+  /// which changes nothing on the server.
+  async fn send_reactions_seen(
+    &self,
+    conversation: ConversationId,
+    reactions: &[MessageId],
+  ) -> Result<(), ApiError> {
+    for chunk in reactions.chunks(MAX_REACTIONS_SEEN_PER_REQUEST) {
+      let request = MarkReactionsSeenRequest {
+        message_ids: chunk.to_vec(),
+      };
+      self.api.mark_reactions_seen(conversation, &request).await?;
+    }
+    Ok(())
+  }
+
   /// What follows a refused action: the custom status shown at once goes back to the server's.
   /// Failures here are not the action's: logged only.
   async fn after_refused(&mut self, action: &PendingAction) {
@@ -444,6 +500,7 @@ impl PendingAction {
       Self::ThreadReadPosition {
         conversation, thread, ..
       } => format!("thread_read/{conversation}/{thread}"),
+      Self::ReactionsSeen { conversation, .. } => format!("reactions_seen/{conversation}"),
       Self::Acknowledge {
         conversation,
         message,
@@ -462,6 +519,7 @@ impl PendingAction {
     match self {
       Self::ReadPosition { .. } => "read_position",
       Self::ThreadReadPosition { .. } => "thread_read_position",
+      Self::ReactionsSeen { .. } => "reactions_seen",
       Self::Acknowledge { .. } => "acknowledge",
       Self::ServerPin { .. } => "server_pin",
       Self::Presence { .. } => "presence",
@@ -469,6 +527,15 @@ impl PendingAction {
       Self::Unknown => "unknown",
     }
   }
+}
+
+/// Distinct and ascending, the newest [`MAX_QUEUED_REACTIONS`].
+fn seen_reactions(mut reactions: Vec<MessageId>) -> Vec<MessageId> {
+  reactions.sort_unstable();
+  reactions.dedup();
+  let excess = reactions.len().saturating_sub(MAX_QUEUED_REACTIONS);
+  reactions.drain(..excess);
+  reactions
 }
 
 impl QueuedAction {
