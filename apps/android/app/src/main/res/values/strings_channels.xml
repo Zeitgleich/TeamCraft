@@ -60,4 +60,16 @@
   <string name="event_moved_unnamed_unattributed">This channel was moved to another space</string>
   <string name="channel_name_label">Channel name</string>
   <string name="channel_name_missing">Enter a name for the channel.</string>
+  <string name="entry_select">Select</string>
+  <string name="entry_copy_link">Copy link</string>
+  <string name="entry_mute_space">Mute space</string>
+  <string name="entry_mark_all_read">Mark all as read</string>
+  <string name="entry_leave_space">Leave space</string>
+  <string name="entry_leave_last_channel_admin">Make someone else channel admin first.</string>
+  <string name="entry_leave_last_space_admin">Make someone else space admin first.</string>
+  <string name="entry_space_menu">Space menu</string>
+  <string name="space_mute_title">Mute %1$s</string>
+  <string name="space_leave_title">Leave %1$s?</string>
+  <string name="space_leave_text">You also leave all of its channels.</string>
+  <string name="space_leave_confirm">Leave</string>
 </resources>

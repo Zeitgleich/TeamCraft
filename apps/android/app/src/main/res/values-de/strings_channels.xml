@@ -60,4 +60,16 @@
   <string name="event_moved_unnamed_unattributed">Dieser Kanal wurde in einen anderen Bereich verschoben</string>
   <string name="channel_name_label">Name des Channels</string>
   <string name="channel_name_missing">Gib einen Namen für den Channel ein.</string>
+  <string name="entry_select">Auswählen</string>
+  <string name="entry_copy_link">Link kopieren</string>
+  <string name="entry_mute_space">Space stummschalten</string>
+  <string name="entry_mark_all_read">Alle als gelesen markieren</string>
+  <string name="entry_leave_space">Space verlassen</string>
+  <string name="entry_leave_last_channel_admin">Ernenne zuerst jemand anderen zum Kanal-Admin.</string>
+  <string name="entry_leave_last_space_admin">Ernenne zuerst jemand anderen zum Space-Admin.</string>
+  <string name="entry_space_menu">Space-Menü</string>
+  <string name="space_mute_title">%1$s stummschalten</string>
+  <string name="space_leave_title">%1$s verlassen?</string>
+  <string name="space_leave_text">Du verlässt damit auch alle Kanäle darin.</string>
+  <string name="space_leave_confirm">Verlassen</string>
 </resources>

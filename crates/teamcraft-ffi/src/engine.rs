@@ -12,9 +12,10 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use teamcraft_client_api::backend::{ChatBackend, SearchBackend};
+use teamcraft_client_api::entry_rules::{channel_leave, space_leave};
 use teamcraft_client_api::model::{
-  Conversation as ConversationView, ConversationKind as ConversationKindView, Message as MessageView, UserId,
-  is_pending,
+  Conversation as ConversationView, ConversationKind as ConversationKindView, Message as MessageView,
+  SpaceRole, SpaceRoster, UserId, is_pending,
 };
 use teamcraft_client_api::notify::{MentionRules, is_mentioned};
 use teamcraft_client_api::search::parse_query;
@@ -49,10 +50,10 @@ use tokio::task::{JoinHandle, LocalSet};
 use crate::calls::{CallHub, CallPreparation};
 use crate::error::TeamCraftError;
 use crate::types::{
-  AccountState, AppConfig, ConversationItem, DirectPeer, LinkPlatform, LinkRequestItem, MentionSettings,
-  MessageItem, MessagePage, NotificationContent, NotificationContentSettings, NotifiedConversation, Presence,
-  PushDiagnosticsInfo, PushNotification, PushService, SearchHitItem, SegmentPrefetchMode,
-  SegmentPrefetchResult, StoreProblem, TestPushResult, share_targets,
+  AccountState, AppConfig, ConversationItem, DirectPeer, LeaveChoice, LinkPlatform, LinkRequestItem,
+  MentionSettings, MessageItem, MessagePage, NotificationContent, NotificationContentSettings,
+  NotifiedConversation, Presence, PushDiagnosticsInfo, PushNotification, PushService, SearchHitItem,
+  SegmentPrefetchMode, SegmentPrefetchResult, SpaceMenuItem, StoreProblem, TestPushResult, share_targets,
 };
 use crate::{EventListener, TokenProvider};
 
@@ -885,6 +886,79 @@ impl Engine {
 
   pub(crate) async fn mark_read(&mut self, conversation_id: String) -> Result<(), TeamCraftError> {
     self.backend()?.mark_read(parse_id(&conversation_id)?);
+    self.dispatch_commands().await
+  }
+
+  /// Whether the conversation's menu offers "Leave" (#1105). Channel roles are read afresh while
+  /// they are not known, so a later ask has the last-admin answer.
+  pub(crate) fn conversation_leave_choice(
+    &self,
+    conversation_id: &str,
+  ) -> Result<LeaveChoice, TeamCraftError> {
+    let backend = self.backend()?;
+    let id = parse_id(conversation_id)?;
+    let Some(conversation) = backend.conversation(id) else {
+      return Ok(LeaveChoice::Hidden);
+    };
+    let roles = backend.channel_roles(id);
+    if roles.is_empty() {
+      backend.refresh_channel_roles(id);
+    }
+    Ok(channel_leave(&conversation, backend.me().id, &roles).into())
+  }
+
+  pub(crate) fn space_menu(&self, space_id: &str) -> Result<Option<SpaceMenuItem>, TeamCraftError> {
+    let backend = self.backend()?;
+    let id = parse_id(space_id)?;
+    let Some(space) = backend.spaces().into_iter().find(|space| space.id == id) else {
+      return Ok(None);
+    };
+    let is_admin = space.maybe_my_role == Some(SpaceRole::SpaceAdmin);
+    let roster = if is_admin {
+      let roster = backend.space_members(id);
+      if matches!(roster, SpaceRoster::Loading) {
+        backend.refresh_space_roster(id);
+      }
+      roster
+    } else {
+      SpaceRoster::Loading
+    };
+    let has_unread = backend
+      .space_conversations(id)
+      .iter()
+      .any(|conversation| conversation.unread_count > 0 || conversation.mention_count > 0);
+    Ok(Some(SpaceMenuItem {
+      name: space.name,
+      has_unread,
+      leave: space_leave(space.maybe_my_role.as_ref(), backend.me().id, &roster).into(),
+    }))
+  }
+
+  pub(crate) async fn mark_space_read(&mut self, space_id: String) -> Result<(), TeamCraftError> {
+    let backend = self.backend()?;
+    for conversation in backend.space_conversations(parse_id(&space_id)?) {
+      if conversation.unread_count > 0 || conversation.mention_count > 0 {
+        backend.mark_read(conversation.id);
+      }
+    }
+    self.dispatch_commands().await
+  }
+
+  /// Leaves the space and its channels, only where [`Self::space_menu`] offers it: the server's
+  /// last-admin refusal is told before the call, not after.
+  pub(crate) async fn leave_space(&mut self, space_id: String) -> Result<(), TeamCraftError> {
+    let Some(menu) = self.space_menu(&space_id)? else {
+      return Err(TeamCraftError::InvalidInput(format!(
+        "not a space of this account: {space_id}"
+      )));
+    };
+    if menu.leave != LeaveChoice::Allowed {
+      return Err(TeamCraftError::InvalidInput(
+        "leaving this space is not allowed".to_owned(),
+      ));
+    }
+    let backend = self.backend()?;
+    backend.remove_space_member(parse_id(&space_id)?, backend.me().id);
     self.dispatch_commands().await
   }
 
