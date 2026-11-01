@@ -184,6 +184,13 @@ while the import runs: under owner approval members' apps refuse the import acco
 the run warns. A conversation that waited is picked up by the next run once somebody let the import
 account in; each run asks again.
 
+In a channel merged into, the imported history is readable for the members the mapping names there
+(who aren't guests) and for owners and admins, not for other members of the channel (e2ee.md §4.10,
+"The import key"): put everybody who should read it into the mapping.
+History imported before version 1.0.16
+is shared with guests by `serve` only under keys no member wrote under (e2ee.md §4.10, "Earlier
+versions").
+
 The state directory holds the tool's device keys (encrypted, the key in `store.key`): keep it, back it
 up, and never run two imports with the same state at once.
 
@@ -200,7 +207,8 @@ Guests of the identity provider get the imported history of the channels, DMs an
 made, and everything from their join on (e2ee.md §4.10, "Guests in imported conversations"); in a
 channel merged into they see it from their join on. They can stay guests for the import. Somebody
 made a member for an earlier import and switched back to guest keeps what they got; their waiting
-additions get the imported history too, once `serve` of this version runs. Renewing the import
+additions get the imported history too, once `serve` of this version runs; history imported before
+1.0.16 only as far as no member wrote under its keys. Renewing the import
 period (a new date) needs `serve` to run again, which records the guests anew.
 
 It reconnects on its own and leaves each conversation once everybody is in. `teamcraft-import

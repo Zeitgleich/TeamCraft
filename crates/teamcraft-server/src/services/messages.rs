@@ -131,19 +131,23 @@ pub async fn send_message(
         message: response.clone(),
       },
     );
-    tokio::spawn(crate::push::routing::notify_message(
-      state.clone(),
-      crate::push::routing::NewMessageEvent {
-        conversation,
-        kind: access.view.conversation.kind.clone(),
-        message: outcome.message.id,
-        sender: caller.user.id,
-        mentioned: outcome.message.mentioned_user_ids.clone(),
-        maybe_thread: outcome.message.maybe_thread_id,
-        is_urgent: outcome.message.is_urgent,
-        is_integration: access.view.conversation.is_integration,
-      },
-    ));
+    // The import account's announcements (people it added, a channel it archived) are part of
+    // the import: synced quietly like the imported messages, never pushed (e2ee.md §4.10).
+    if !super::import::is_importing(state, caller.user.id) {
+      tokio::spawn(crate::push::routing::notify_message(
+        state.clone(),
+        crate::push::routing::NewMessageEvent {
+          conversation,
+          kind: access.view.conversation.kind.clone(),
+          message: outcome.message.id,
+          sender: caller.user.id,
+          mentioned: outcome.message.mentioned_user_ids.clone(),
+          maybe_thread: outcome.message.maybe_thread_id,
+          is_urgent: outcome.message.is_urgent,
+          is_integration: access.view.conversation.is_integration,
+        },
+      ));
+    }
     // Sending is the surest sign the user is there (gateway.md, "Presence"). A failure here
     // doesn't fail the send: the message is stored and delivered.
     if let Err(error) = presence::note_user_action(state, caller.user.id, request.device_id).await {

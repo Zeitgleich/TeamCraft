@@ -559,6 +559,12 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     if self.joined_after_this_device(conversation, sender)? {
       return Ok(());
     }
+    // The import account's device seals its import key (e2ee.md §4.10), which says nothing about
+    // the epoch keys the device missed.
+    let maybe_importer = self.workspace()?.policy.import.maybe_importer;
+    if maybe_importer.is_some_and(|importer| convert::user(importer) == sender.user_id) {
+      return Ok(());
+    }
     let device = convert::device_from_crypto(recipient.device_id)?;
     self.store.delete(
       Table::PendingChanges,
@@ -675,7 +681,7 @@ fn full_history_user(update: &MembershipUpdate) -> Option<UserIdCrypto> {
   }
 }
 
-fn member_key(member: GroupMember) -> Result<String, CoreError> {
+pub(crate) fn member_key(member: GroupMember) -> Result<String, CoreError> {
   let user: UserId = convert::user_from_crypto(member.user_id)?;
   let device: DeviceId = convert::device_from_crypto(member.device_id)?;
   Ok(format!("{user}/{device}"))

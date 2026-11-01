@@ -149,12 +149,14 @@ impl<'a, A: ServerApi, S: LocalStore> Importer<'a, A, S> {
   /// meanwhile, then leaving every conversation where nobody is missing any more.
   pub async fn tend(&mut self, plan: &Plan) -> Result<(), RunError> {
     // Also for conversations a run before this version imported: their waiting additions of
-    // guests get the history (e2ee.md §4.10, "Guests in imported conversations").
+    // guests get the history (e2ee.md §4.10, "Guests in imported conversations"), as far as it is
+    // under an import key.
     for item in &plan.items {
       if let Some(conversation) = self.progress.conversation(&item.key())? {
         self.grant_history(item, conversation)?;
-        if self.progress.is_done(&item.key(), Step::Finished)? {
-          self.client.note_import_keys(conversation)?;
+        // Devices that joined after the last batch get the import key (e2ee.md §4.10).
+        if !self.progress.is_done(&item.key(), Step::Left)? {
+          self.client.share_import_key(conversation).await?;
         }
       }
     }
@@ -297,13 +299,18 @@ impl<'a, A: ServerApi, S: LocalStore> Importer<'a, A, S> {
 
   /// Notes on the import device that the import made `conversation` and whom the mapping names in
   /// it, so they get its history also as guests (e2ee.md §4.10, "Guests in imported
-  /// conversations"). Not for a channel merged into: the import changes no members there.
+  /// conversations"). Not for a channel merged into: the import changes no members there; its
+  /// mapped members are named as readers of the import instead.
   fn grant_history(&mut self, item: &Item, conversation: ConversationId) -> Result<(), RunError> {
     let people: Vec<UserId> = match &item.target {
       Target::NewChannel { .. } => item.members.clone(),
       Target::Dm { participants } => participants.to_vec(),
       Target::Notes { user } => vec![*user],
-      Target::ExistingChannel { .. } => return Ok(()),
+      Target::ExistingChannel { .. } => {
+        // No grant, but the mapped members who aren't guests get the import key.
+        self.client.name_import_readers(conversation, &item.members)?;
+        return Ok(());
+      },
     };
     self.client.grant_imported_history(conversation, &people)?;
     Ok(())
