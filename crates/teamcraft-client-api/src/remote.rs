@@ -420,8 +420,8 @@ pub struct MessageWindow {
   /// Length of the whole feed at the time of reading.
   pub total: usize,
   pub messages: Vec<Message>,
-  /// Messages of the conversation this device received but can't read yet (keys not arrived):
-  /// not in the feed, so a conversation of only such messages would look empty without it.
+  /// Messages of the conversation this device received but can't read yet (keys not arrived, or
+  /// not available here): in the feed as placeholders ([`Message::maybe_placeholder`], issue #888).
   #[serde(default)]
   pub undecrypted: usize,
 }
@@ -1322,6 +1322,8 @@ pub enum ChatQuery {
   IsWaitingForDevice {
     conversation: ConversationId,
   },
+  /// [`ChatBackend::key_catch_up`].
+  KeyCatchUp,
   /// The `#fragment` values of a guest link to the meeting, once the core made them.
   GuestLinkFragment {
     meeting: teamcraft_proto::MeetingId,
@@ -1435,6 +1437,9 @@ pub enum ChatQuery {
 pub enum ChatAnswer {
   Typing {
     typing: Vec<crate::model::TypingNow>,
+  },
+  KeyCatchUp {
+    maybe_progress: Option<crate::model::KeyCatchUp>,
   },
   CallMoveOffer {
     maybe_offer: Option<CallMoveOffer>,
@@ -1609,6 +1614,9 @@ impl ChatQuery {
       },
       Self::IsWaitingForDevice { conversation } => ChatAnswer::Flag {
         value: backend.is_waiting_for_device(conversation),
+      },
+      Self::KeyCatchUp => ChatAnswer::KeyCatchUp {
+        maybe_progress: backend.key_catch_up(),
       },
       Self::MembershipIssues { conversation } => ChatAnswer::MembershipIssues {
         issues: backend.membership_issues(conversation),

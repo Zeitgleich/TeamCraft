@@ -54,12 +54,12 @@ use teamcraft_media::openh264_library::{self, OpenH264Binary};
 use tokio::sync::{mpsc, oneshot};
 pub use types::{
   AccountState, AppActivity, AppConfig, BrandAccent, BrandLinks, ConnectionState, ConversationItem,
-  ConversationKind, EmojiSuggestion, LinkPlatform, LinkRequestItem, LoginBrand, MentionSettings, MessageItem,
-  MessagePage, NetworkInterception, NetworkProxy, NotificationAttachmentKind, NotificationContent,
-  NotificationContentSettings, NotificationGap, NotificationSuppression, NotifiedConversation,
-  NotifiedMessage, OrgRecoveryStart, Presence, PushDiagnosticsInfo, PushNotification, PushNotificationKind,
-  PushService, ReactionItem, SearchHitItem, SegmentPrefetchMode, SegmentPrefetchResult, StoreProblem,
-  TestPushOutcome, TestPushResult,
+  ConversationKind, EmojiSuggestion, KeyCatchUpItem, LinkPlatform, LinkRequestItem, LoginBrand,
+  MentionSettings, MessageItem, MessagePage, NetworkInterception, NetworkProxy, NotificationAttachmentKind,
+  NotificationContent, NotificationContentSettings, NotificationGap, NotificationSuppression,
+  NotifiedConversation, NotifiedMessage, OrgRecoveryStart, PlaceholderItem, Presence, PushDiagnosticsInfo,
+  PushNotification, PushNotificationKind, PushService, ReactionItem, SearchHitItem, SegmentPrefetchMode,
+  SegmentPrefetchResult, StoreProblem, TestPushOutcome, TestPushResult,
 };
 
 pub use video::{CameraFrame, VideoFrameRgba};
@@ -382,6 +382,14 @@ impl TeamCraft {
   pub async fn share_targets(&self) -> Result<Vec<ConversationItem>, TeamCraftError> {
     self
       .call(|engine| Box::pin(async move { engine.share_targets() }))
+      .await
+  }
+
+  /// How far conversations with messages waiting for keys have caught up (a newly linked device,
+  /// issue #888); `None` while nothing waits. Read again after each change notification.
+  pub async fn key_catch_up(&self) -> Result<Option<KeyCatchUpItem>, TeamCraftError> {
+    self
+      .call(|engine| Box::pin(async move { engine.key_catch_up() }))
       .await
   }
 

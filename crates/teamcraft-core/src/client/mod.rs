@@ -32,6 +32,7 @@ mod key_packages;
 mod linking;
 mod member_device;
 mod messaging;
+mod missing_keys;
 mod notes_refound;
 mod notifications;
 mod org_backgrounds;
@@ -100,6 +101,7 @@ pub use messaging::FlushReport;
 pub(crate) use messaging::{REMOVED_SENDER_GRACE_MS, decrypt_content};
 #[cfg(feature = "ui")]
 pub(crate) use messaging::{apply_control, bookmarks_key};
+pub use missing_keys::{KeyCatchUp, key_catch_up};
 pub(crate) use notifications::registered_push_token;
 use openmls_rust_crypto::OpenMlsRustCrypto;
 pub use org_recovery::{SealedShare, recovery_request};
@@ -260,6 +262,14 @@ pub struct ClientSettings {
   /// more counts as given up (issue #415): the key pair is dropped and the device it registered is
   /// revoked. Not while the keys of a link wait to be enrolled.
   pub unfinished_enrollment_expiry: std::time::Duration,
+  /// How long a message waits for its key before it reads "not available on this device", once
+  /// this device is in the conversation's group and waits for nothing there (issue #888): keys
+  /// from the user's other devices (the key bag) arrive within it.
+  pub missing_key_grace: std::time::Duration,
+  /// How long a message waits for its key at most, also while this device waits to be let into
+  /// the group: then it reads "not available" too, never a wait without end. A key that comes
+  /// later still fills it in.
+  pub missing_key_give_up: std::time::Duration,
 }
 
 impl ClientSettings {
@@ -403,6 +413,10 @@ impl Default for ClientSettings {
       makes_thumbnails: true,
       // A day: a user who comes back to a failed setup soon picks up its registration.
       unfinished_enrollment_expiry: std::time::Duration::from_secs(24 * 60 * 60),
+      // Ten minutes: a few account syncs, each of which merges the key bag.
+      missing_key_grace: std::time::Duration::from_secs(10 * 60),
+      // Three days: a long weekend for the other members' devices to come online.
+      missing_key_give_up: std::time::Duration::from_secs(3 * 24 * 60 * 60),
     }
   }
 }

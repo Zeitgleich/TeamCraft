@@ -128,7 +128,11 @@ struct MessageBubble: View {
       if !images.isEmpty && !isDeleted {
         media.padding(.top, hasHeader ? 4 : 0)
       }
-      if isDeleted {
+      if let placeholder = message.maybePlaceholder {
+        PlaceholderLine(placeholder: placeholder)
+          .padding(.horizontal, bubbleTextInset)
+          .padding(.top, 3)
+      } else if isDeleted {
         Text("message_deleted")
           .font(.body.italic())
           .foregroundStyle(.secondary)
@@ -215,6 +219,44 @@ struct MessageBubble: View {
     return MarkupColors(
       link: Theme.accent, mention: Theme.accent, mentionMe: Theme.mentionText,
       mentionMeBackground: Theme.mentionBackground, codeBackground: Theme.text.opacity(0.08))
+  }
+}
+
+/// What a placeholder bubble says (issue #888): waiting with a clock, not available with a lock,
+/// failed with a warning. The clock is still: a row may wait for days, and nothing animates while
+/// the app idles.
+struct PlaceholderLine: View {
+  let placeholder: PlaceholderItem
+
+  var body: some View {
+    Label {
+      Text(text).font(.body.italic())
+    } icon: {
+      Image(systemName: symbol).font(.footnote)
+    }
+    .foregroundStyle(.secondary)
+  }
+
+  private var text: String { Self.text(placeholder) }
+
+  static func text(_ placeholder: PlaceholderItem) -> String {
+    String(localized: resource(placeholder))
+  }
+
+  static func resource(_ placeholder: PlaceholderItem) -> String.LocalizationValue {
+    switch placeholder {
+    case .waiting: "message_placeholder_waiting"
+    case .notAvailable: "message_placeholder_not_available"
+    case .failed: "message_placeholder_failed"
+    }
+  }
+
+  private var symbol: String {
+    switch placeholder {
+    case .waiting: "clock"
+    case .notAvailable: "lock"
+    case .failed: "exclamationmark.triangle"
+    }
   }
 }
 

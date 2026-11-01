@@ -29,6 +29,9 @@
   <string name="action_mark_unread">Mark unread from here</string>
   <string name="edit_history">Earlier versions</string>
   <string name="message_deleted">This message was deleted.</string>
+  <string name="message_placeholder_waiting">Waiting for this message</string>
+  <string name="message_placeholder_not_available">Not available on this device</string>
+  <string name="message_placeholder_failed">This message couldn\'t be decrypted</string>
   <string name="forwarded_from">Forwarded from %1$s</string>
   <string name="replying_to">Replying to %1$s</string>
   <string name="new_messages">New messages</string>
@@ -58,9 +61,9 @@
     <item quantity="one">Confirmed by %d person</item>
     <item quantity="other">Confirmed by %d people</item>
   </plurals>
-  <plurals name="messages_undecrypted">
-    <item quantity="one">%1$d message can\'t be read on this device yet. It appears once its keys arrive from another member\'s device.</item>
-    <item quantity="other">%1$d messages can\'t be read on this device yet. They appear once their keys arrive from another member\'s device.</item>
+  <plurals name="key_catch_up_progress">
+    <item quantity="one">Getting the keys for older messages: %1$d of %2$d conversation caught up</item>
+    <item quantity="other">Getting the keys for older messages: %1$d of %2$d conversations caught up</item>
   </plurals>
   <string name="message_edit_label">Message</string>
   <string name="message_edit_empty">A message can\'t be empty. To remove it, delete it.</string>

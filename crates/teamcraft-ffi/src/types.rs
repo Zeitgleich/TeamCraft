@@ -206,6 +206,29 @@ pub struct MessageItem {
   /// message's extras (`maybe_workspace_event`). Defaulted, so items the apps build need no change.
   #[uniffi(default = None)]
   pub maybe_system_event: Option<SystemEventItem>,
+  /// Set while this device can't read the message (issue #888): the app shows a bubble with the
+  /// placeholder's text instead of `body` (empty then). It fills in place once readable.
+  /// Defaulted, so items the apps build need no change.
+  #[uniffi(default = None)]
+  pub maybe_placeholder: Option<PlaceholderItem>,
+}
+
+/// Why a message shows as a placeholder ([`MessageItem::maybe_placeholder`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
+pub enum PlaceholderItem {
+  /// "Waiting for this message", with a subtle pending mark: its key may still come.
+  Waiting,
+  /// "Not available on this device": no key is expected here.
+  NotAvailable,
+  /// "This message couldn't be decrypted".
+  Failed,
+}
+
+/// How far conversations with messages waiting for keys have caught up (issue #888).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Record)]
+pub struct KeyCatchUpItem {
+  pub caught_up: u32,
+  pub total: u32,
 }
 
 /// The newest messages of a conversation down to the oldest one a list holds, plus the next older
@@ -593,6 +616,11 @@ impl MessageItem {
       reply_count: message.reply_count,
       maybe_thread_id: message.maybe_thread.map(|thread| thread.to_string()),
       maybe_system_event: SystemEventItem::of(&message.kind),
+      maybe_placeholder: message.maybe_placeholder.map(|placeholder| match placeholder {
+        view::Placeholder::Waiting => PlaceholderItem::Waiting,
+        view::Placeholder::NotAvailable => PlaceholderItem::NotAvailable,
+        view::Placeholder::Failed => PlaceholderItem::Failed,
+      }),
       reactions: message
         .reactions
         .iter()
@@ -1039,6 +1067,7 @@ mod tests {
         reply_count: 0,
         maybe_thread: None,
         maybe_imported: None,
+        maybe_placeholder: None,
       }
     }
   }
@@ -1227,6 +1256,7 @@ mod tests {
       reply_count: 0,
       maybe_thread: None,
       maybe_imported: None,
+      maybe_placeholder: None,
     }
   }
 

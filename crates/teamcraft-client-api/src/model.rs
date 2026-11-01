@@ -680,6 +680,32 @@ pub struct Message {
   /// original author when they have an account, `sent_at` the original time.
   #[serde(rename = "imported", default, skip_serializing_if = "Option::is_none")]
   pub maybe_imported: Option<ImportedMark>,
+  /// Set while this device can't read the message (issue #888): a placeholder with the
+  /// envelope's sender, time and thread, and an empty `body`. It fills in place once readable.
+  #[serde(rename = "placeholder", default, skip_serializing_if = "Option::is_none")]
+  pub maybe_placeholder: Option<Placeholder>,
+}
+
+/// How far the conversations with messages waiting for keys have caught up (issue #888): each is
+/// caught up once every message is readable or known to stay unavailable on this device. Shown as
+/// "3 of 5 conversations caught up" while `caught_up < total`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct KeyCatchUp {
+  pub caught_up: usize,
+  pub total: usize,
+}
+
+/// Why a message shows as a placeholder (issue #888, e2ee.md §5, "History on a new device").
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Placeholder {
+  /// Its key hasn't arrived on this device yet and may still come: "Waiting for this message".
+  Waiting,
+  /// No key is expected on this device: "Not available on this device".
+  NotAvailable,
+  /// It didn't decrypt with the key it names (damaged or tampered): "This message couldn't be
+  /// decrypted".
+  Failed,
 }
 
 /// Where an imported message came from, and who wrote it when that is nobody with an account.
@@ -888,6 +914,7 @@ mod tests {
         reply_count: 0,
         maybe_thread: None,
         maybe_imported: None,
+        maybe_placeholder: None,
       })
     };
     assert_eq!(line("[ERROR] disk full").kind, MessageKind::Log(LogLevel::Error));
@@ -913,6 +940,7 @@ mod tests {
       reply_count: 0,
       maybe_thread: None,
       maybe_imported: None,
+      maybe_placeholder: None,
     };
     as_chat_message(&mut message);
     assert_eq!(

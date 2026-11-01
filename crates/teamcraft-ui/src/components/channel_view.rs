@@ -106,6 +106,7 @@ pub fn ChannelView(conversation: ConversationId) -> impl IntoView {
         <KeyChangeBanner conversation=conversation />
         <DeviceAccessBanner conversation=conversation />
         <CatchingUpNote info=info />
+        <KeyCatchUpNote conversation=conversation />
         <MembershipIssueBanners conversation=conversation info=info />
         <HuddleBar conversation=conversation />
         <BookmarksBar conversation=conversation info=info />
@@ -169,6 +170,35 @@ fn CatchingUpNote(info: Memo<Option<Conversation>>) -> impl IntoView {
           <div class="key-banner-text">
             <strong>{move || i18n.t("catching-up")}</strong>
             <span>{move || i18n.t("catching-up-detail")}</span>
+          </div>
+        </div>
+      }
+    })
+  }
+}
+
+/// Messages of this conversation wait for their keys (a newly linked device, issue #888): how far
+/// the conversations that wait have caught up. Gone once this one waits no more.
+#[component]
+fn KeyCatchUpNote(conversation: ConversationId) -> impl IntoView {
+  let state = use_app_state();
+  let i18n = use_i18n();
+  let progress = Memo::new(move |_| {
+    state.read(|backend| {
+      backend
+        .key_catch_up()
+        .filter(|_| backend.undecrypted_count(conversation) > 0)
+    })
+  });
+  move || {
+    progress.get().map(|progress| {
+      let caught_up = progress.caught_up.to_string();
+      view! {
+        <div class="key-banner key-catch-up-note" role="status">
+          <Icon name=IconName::Key />
+          <div class="key-banner-text">
+            <strong>{i18n.t("key-catch-up")}</strong>
+            <span>{i18n.t_count_with("key-catch-up-progress", progress.total, &[("caught_up", &caught_up)])}</span>
           </div>
         </div>
       }

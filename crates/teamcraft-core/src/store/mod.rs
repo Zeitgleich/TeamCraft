@@ -176,6 +176,29 @@ pub struct StoredMessage {
   /// change can only name who made it ([`ServerChange::actor`]).
   #[serde(rename = "server_change", default, skip_serializing_if = "Option::is_none")]
   pub maybe_server_change: Option<ServerChange>,
+  /// Set while this device can't read the message: the row is a placeholder at the message's place
+  /// (issue #888) with only what the server's envelope says (sender, time, thread), and
+  /// [`Self::content`] is [`MessageContent::Unknown`]. Only this device sets it, never a message:
+  /// decrypting the message replaces the row.
+  #[serde(rename = "unreadable", default, skip_serializing_if = "Option::is_none")]
+  pub maybe_unreadable: Option<Unreadable>,
+}
+
+/// Why a stored message is a placeholder (issue #888, e2ee.md §5, "History on a new device").
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum Unreadable {
+  /// Its content key (or its sender device's signing key) hasn't arrived yet and may still come.
+  /// `since_ms`: when this device first parked it, on the local clock.
+  Waiting { since_ms: i64 },
+  /// No key came and none is expected: this device is in the group and waits for nothing, or the
+  /// wait ran out. Still decrypted if a key turns up after all.
+  NotAvailable,
+  /// The key is there, but the message doesn't open with it or isn't validly signed: never retried.
+  Failed,
+  /// A state of a newer version.
+  #[serde(other)]
+  Unknown,
 }
 
 /// Where a line about a change the server reports stands, and whom it names (issue #818).
@@ -1640,6 +1663,7 @@ pub(crate) mod tests {
       is_pinned: false,
       maybe_verified_commit: None,
       maybe_server_change: None,
+      maybe_unreadable: None,
     }
   }
 

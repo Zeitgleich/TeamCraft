@@ -19,6 +19,23 @@ the server only relays encrypted data.
 The code contains a one-time key. Enter it only in your own TeamCraft app, never on a web page or
 in a chat.
 
+## Older messages on the new device
+
+The new device shows every conversation complete from the start: each message in its place, with its
+sender and time. A message whose key has not reached the new device yet shows as a bubble reading
+**Waiting for this message** with a small clock. It fills in where it is once the key arrives, usually
+when your other device or a colleague's device comes online. Above such a conversation a line says how
+far your conversations have caught up ("3 of 5 conversations caught up").
+
+- **Not available on this device:** no key is expected any more, for example when none of your
+  devices could read the message, or the wait ran out. If a key turns up later after all, the message
+  still fills in.
+- **This message couldn't be decrypted:** the message is damaged or was changed on its way. Its
+  content is never shown.
+
+Messages that are not readable yet don't count as unread, don't notify and aren't found by search
+until they are.
+
 ## If you did not link a device
 
 When somebody signs in to your account on a new device, your other devices may ask

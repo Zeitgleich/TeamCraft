@@ -15,6 +15,11 @@ history-forward = Forward
 ## Sidebar
 catching-up = Catching up…
 catching-up-detail = Messages from while you were away are still loading.
+key-catch-up = Getting the keys for older messages
+key-catch-up-progress = { $count ->
+    [one] { $caught_up } of { $count } conversation caught up
+   *[other] { $caught_up } of { $count } conversations caught up
+  }
 
 ## Messages
 badge-bot = BOT

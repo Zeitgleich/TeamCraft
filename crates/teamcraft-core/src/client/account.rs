@@ -76,6 +76,11 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
         remote.wrapped_backup_keys.as_slice(),
         WrapsOnMerge::Adopt,
       )?;
+      // Keys the user's other devices learned: the messages waiting for them fill in now, not at
+      // the conversation's next catch-up (issue #888).
+      for conversation in self.parked_conversations()? {
+        self.retry_undecrypted(conversation)?;
+      }
     }
     self.share_trust_decisions()?;
     if self.sync.is_key_bag_dirty {

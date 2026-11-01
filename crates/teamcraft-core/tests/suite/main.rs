@@ -29,6 +29,7 @@ mod first_add_back;
 mod guest_meetings;
 mod import;
 mod key_packages;
+mod key_placeholders;
 mod link_previews;
 mod linking;
 mod live_permissions;

@@ -129,6 +129,7 @@ import de.zeitgleich.teamcraft.ui.sensitiveClip
 import de.zeitgleich.teamcraft.ui.requestsIn
 import uniffi.teamcraft_ffi.ConnectionState
 import uniffi.teamcraft_ffi.JoinRequestItem
+import uniffi.teamcraft_ffi.KeyCatchUpItem
 import uniffi.teamcraft_ffi.NotifiedConversation
 import uniffi.teamcraft_ffi.emojiConvert
 import uniffi.teamcraft_ffi.emojiSuggestions
@@ -161,6 +162,7 @@ fun ConversationScreen(
   // Counts sends from this screen's composer: each one brings the newest message into view.
   var sentCount by remember { mutableIntStateOf(0) }
   var undecrypted by remember { mutableStateOf(0) }
+  var maybeKeyCatchUp by remember { mutableStateOf<KeyCatchUpItem?>(null) }
   // What the notification that opened it showed, until the store has it (issue #1065).
   var maybeNotified by remember(conversationId) { mutableStateOf<NotifiedConversation?>(null) }
   val feed = remember(conversationId) {
@@ -181,6 +183,7 @@ fun ConversationScreen(
     messages = maybeTail?.messages ?: emptyList()
     hasOlder = maybeTail?.hasOlder ?: false
     undecrypted = maybeTail?.undecrypted ?: 0
+    maybeKeyCatchUp = viewModel.keyCatchUp()
     // After the messages: once the store has the notified one, the core no longer names it.
     maybeNotified = viewModel.notifiedConversation(conversationId)
     extras = viewModel.readChat { extras(conversationId, messages.map { it.id }) } ?: emptyMap()
@@ -208,10 +211,13 @@ fun ConversationScreen(
   ) {
     if (pinned.isNotEmpty()) PinnedBanner(pinned.last())
     JoinRequestBanner(joinRequests, viewModel.joinRequests)
-    // Received but not readable here yet: without this the conversation would just look empty.
-    if (undecrypted > 0) {
+    // Messages here wait for their keys (a newly linked device, issue #888): they show as
+    // placeholders in the list; this says how far the waiting conversations have caught up.
+    val keyCatchUp = maybeKeyCatchUp
+    if (undecrypted > 0 && keyCatchUp != null) {
+      val total = keyCatchUp.total.toInt()
       Text(
-        pluralStringResource(R.plurals.messages_undecrypted, undecrypted, undecrypted),
+        pluralStringResource(R.plurals.key_catch_up_progress, total, keyCatchUp.caughtUp.toInt(), total),
         style = MaterialTheme.typography.bodySmall,
         color = MaterialTheme.colorScheme.onSurfaceVariant,
         modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),

@@ -1782,6 +1782,45 @@ Implemented as (`teamcraft-crypto::rendezvous`, `teamcraft-core` linking):
   groups on its own (§4.6, "A further device joins on its own"); where it can't yet, an existing
   member adds it when it comes online. It reads the history the key bag opens at once.
 
+### 5.1 History on a new device (issue #888)
+
+A new device shows each conversation complete from the start, in the server's order, also where it
+can't read messages yet. A message whose content key (or whose sender device's signing key) hasn't
+arrived is parked as before and stands in the conversation as a **placeholder**: a row at the
+message's place built only from the envelope the server already sees (§4.4): sender user, server
+message ID (order and time), client message ID and thread ID. Nothing new leaves the device and
+nothing new is asked of the server: no plaintext length, kind or file name. The placeholder is a
+local record only this device writes (`StoredMessage::maybe_unreadable`, never part of a message's
+plaintext), so no message can make or fake one.
+
+- **Unverified until read.** The sender, time and thread of a placeholder are the server's word.
+  A server can put placeholders in a conversation (as it could always send ciphertext nobody can
+  open), but never content: the row says only "Waiting for this message". Once the key arrives the
+  message is decrypted and its signature checked against the sender device (§4.4); the result
+  replaces the row under the same client message ID. Content that fails is never shown.
+- **States.** *Waiting*: the key may still come. *Not available on this device*: the device is in
+  the group and waits there for nothing (no current-key wait, no pending addition) and the message
+  waited `missing_key_grace` (10 minutes, a few key bag merges), or it waited `missing_key_give_up`
+  (3 days) in any case; the upkeep decides this from a per-conversation record of the oldest wait,
+  without reading messages until one is due. It stays parked: a key that turns up later still fills
+  it in. *Failed*: the key is there but the message doesn't open with it or its signature is wrong;
+  it is no longer retried. The wait is counted on the local clock; a start ahead of now (a clock set
+  back) counts as long ago, so a wrong clock never makes a wait endless.
+- **Getting the keys.** No new request protocol: the device asks the members to add it and members
+  hand it the current key (§4.6, "A further device joins on its own"), and the user's other devices
+  upload their key bags. Parked messages are tried again after every epoch change, every sender key
+  learned and now also after every key bag merge, so a key from the user's other device fills the
+  rows at once. The apps show how far the conversations that had waiting messages have caught up
+  ("3 of 5 conversations caught up"); it ends when none waits.
+- **Elsewhere.** A placeholder may turn out to be a reaction, an edit or a delete (the server can't
+  tell kinds apart, by design), so it counts as neither unread nor the conversation's latest
+  activity, notifies nothing, has no actions and isn't searched or put into an index segment until
+  it is decrypted. Desktop notifications count a placeholder as unseen, so one that fills in and is
+  newer than everything seen notifies then, with its text; older history filling in stays quiet.
+  A control decrypted in place of a placeholder makes its row go, as it would have been hidden.
+- **Bounded.** A placeholder is one row like any message: the feed pages it like the others, and
+  filling it is one write of that row, with no work proportional to the conversation.
+
 ## 6. Backup and recovery
 
 The **key bag** (identity key, all content keys, settings) is encrypted with a random backup key and

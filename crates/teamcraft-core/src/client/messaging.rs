@@ -18,7 +18,9 @@ use crate::api::{ApiError, ServerApi};
 use crate::convert;
 use crate::error::CoreError;
 use crate::records::{self, OutboxEntry};
-use crate::store::{EditRecord, LocalStore, MessageContent, MessageEdge, Priority, StoredMessage, Table};
+use crate::store::{
+  EditRecord, LocalStore, MessageContent, MessageEdge, Priority, StoredMessage, Table, Unreadable,
+};
 
 /// Result of [`Client::flush_outbox`].
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -366,7 +368,9 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
   /// are parked and retried when keys arrive.
   pub(crate) fn receive_message(&mut self, message: MessageResponse) -> Result<(), CoreError> {
     let conversation = message.conversation_id;
-    if let Some(existing) = self.store.message(conversation, message.client_message_id)?
+    let maybe_existing = self.store.message(conversation, message.client_message_id)?;
+    if let Some(existing) = &maybe_existing
+      && existing.maybe_unreadable.is_none()
       && (existing.maybe_server_id.is_some() || existing.is_local_line())
     {
       // Already known (own message echoed back, or a duplicate delivery), or the ID of a line this
@@ -402,6 +406,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
           is_pinned: false,
           maybe_verified_commit: None,
           maybe_server_change: None,
+          maybe_unreadable: None,
         };
         if super::server_changes::is_announcement(&stored) {
           // An announcement of a change the server reports and the name it puts on a line reach
@@ -434,21 +439,68 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       },
       Err(CoreError::Message(MessageError::UnknownKey(_)))
       | Err(CoreError::NoContentKey(_))
-      | Err(CoreError::UnknownSender { .. }) => {
-        let key = undecrypted_key(&message);
-        // A retry of a message parked already (new keys arrived, but not its own) writes nothing:
-        // every epoch change retries all parked messages of the conversation (issue #1000).
-        if self.store.get(Table::Undecrypted, &key)?.is_some() {
-          return Ok(());
-        }
-        records::put_json(&self.store, Table::Undecrypted, &key, &message)
+      | Err(CoreError::UnknownSender { .. }) => self.park(&message, maybe_existing.as_ref()),
+      Err(error @ CoreError::Store(_)) => Err(error),
+      Err(error @ (CoreError::Message(_) | CoreError::ContentKey(_))) => {
+        // Tampered, wrongly attributed or wrongly keyed ciphertext: its content is never shown
+        // (e2ee.md §4.4), only a placeholder saying it failed, and it isn't tried again.
+        tracing::warn!(conversation_id = %conversation, message_id = %message.id, %error, "message failed to decrypt");
+        self.note_failed(&message, maybe_existing.as_ref())
       },
       Err(error) => {
-        // Tampered or wrongly attributed ciphertext: never shown (e2ee.md §4.4).
         tracing::warn!(conversation_id = %conversation, message_id = %message.id, %error, "dropped undecryptable message");
         Ok(())
       },
     }
+  }
+
+  /// Keeps a message whose content key (or sender key) hasn't arrived for a retry, with a
+  /// placeholder at its place in the conversation (issue #888).
+  fn park(
+    &mut self,
+    message: &MessageResponse,
+    maybe_existing: Option<&StoredMessage>,
+  ) -> Result<(), CoreError> {
+    let key = undecrypted_key(message);
+    let is_parked = self.store.get(Table::Undecrypted, &key)?.is_some();
+    // A retry of a message parked already (new keys arrived, but not its own) writes nothing:
+    // every epoch change retries all parked messages of the conversation (issue #1000). One
+    // parked by a version without placeholders gets its placeholder now.
+    if is_parked && maybe_existing.is_some() {
+      return Ok(());
+    }
+    let now = self.now_ms();
+    crate::store::write_group(&self.store, || -> Result<(), CoreError> {
+      if !is_parked {
+        records::put_json(&self.store, Table::Undecrypted, &key, message)?;
+      }
+      if maybe_existing.is_none() {
+        self
+          .store
+          .upsert_message(&placeholder(message, Unreadable::Waiting { since_ms: now }))?;
+        super::missing_keys::note_waiting(&self.store, message.conversation_id, now)?;
+      }
+      Ok(())
+    })
+  }
+
+  /// Marks a message that can't be decrypted with the key it names: a placeholder that says so
+  /// takes its place (or that of a placeholder waiting for its key), and it is no longer retried.
+  fn note_failed(
+    &mut self,
+    message: &MessageResponse,
+    maybe_existing: Option<&StoredMessage>,
+  ) -> Result<(), CoreError> {
+    let is_placeholder_or_none = maybe_existing.is_none_or(|existing| existing.maybe_unreadable.is_some());
+    crate::store::write_group(&self.store, || -> Result<(), CoreError> {
+      if is_placeholder_or_none {
+        self
+          .store
+          .upsert_message(&placeholder(message, Unreadable::Failed))?;
+      }
+      self.store.delete(Table::Undecrypted, &undecrypted_key(message))?;
+      Ok(())
+    })
   }
 
   /// Applies an edit or delete to its target. Only the target's author may change it; others' edits
@@ -457,13 +509,17 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
   pub(crate) fn retry_undecrypted(&mut self, conversation: ConversationId) -> Result<(), CoreError> {
     let parked: Vec<(String, MessageResponse)> =
       records::list_json_with_prefix(&self.store, Table::Undecrypted, &format!("{conversation}/"))?;
+    if parked.is_empty() {
+      return Ok(());
+    }
     self.receive_page(
       parked
         .into_iter()
         .map(|(_, message)| message)
         .filter(|message| message.conversation_id == conversation)
         .collect(),
-    )
+    )?;
+    self.refresh_key_wait(conversation)
   }
 
   /// Messages this device received but can't read yet.
@@ -589,7 +645,28 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
   }
 }
 
-fn undecrypted_key(message: &MessageResponse) -> String {
+/// The row that stands for a message this device can't read: only what the server's envelope
+/// says (sender, time and thread), never content (issue #888).
+fn placeholder(message: &MessageResponse, unreadable: Unreadable) -> StoredMessage {
+  StoredMessage {
+    conversation_id: message.conversation_id,
+    client_message_id: message.client_message_id,
+    maybe_server_id: Some(message.id),
+    sender_user_id: message.sender_user_id,
+    maybe_thread_id: message.maybe_thread_id,
+    sent_at_ms: message.id.snowflake().unix_millis(),
+    content: MessageContent::Unknown,
+    is_edited: false,
+    edits: Vec::new(),
+    maybe_edit_id: None,
+    is_pinned: false,
+    maybe_verified_commit: None,
+    maybe_server_change: None,
+    maybe_unreadable: Some(unreadable),
+  }
+}
+
+pub(super) fn undecrypted_key(message: &MessageResponse) -> String {
   format!(
     "{}/{}",
     message.conversation_id,
@@ -898,6 +975,7 @@ mod tests {
       is_pinned: false,
       maybe_verified_commit: None,
       maybe_server_change: None,
+      maybe_unreadable: None,
     }
   }
 
