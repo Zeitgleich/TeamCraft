@@ -7,6 +7,9 @@ import android.view.WindowManager
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.clickable
 import androidx.compose.material3.ListItem
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Share
+import androidx.compose.material3.Icon
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
@@ -150,6 +153,13 @@ private fun SettingsHub(viewModel: MainViewModel, account: AppState.Ready, onOpe
       )
     }
   }
+  val context = LocalContext.current
+  ListItem(
+    headlineContent = { Text(stringResource(R.string.export_diagnostics)) },
+    supportingContent = { Text(stringResource(R.string.export_diagnostics_summary)) },
+    leadingContent = { Icon(Icons.Filled.Share, contentDescription = null) },
+    modifier = Modifier.clickable { exportDiagnostics(context) },
+  )
   HorizontalDivider()
   OutlinedButton(onClick = viewModel::signOut, modifier = Modifier.fillMaxWidth()) {
     Text(stringResource(R.string.sign_out))

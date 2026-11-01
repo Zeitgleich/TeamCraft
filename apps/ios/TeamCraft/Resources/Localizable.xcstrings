@@ -6225,6 +6225,54 @@
         }
       }
     },
+    "export_diagnostics_title": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Export diagnostics"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Diagnose exportieren"
+          }
+        }
+      }
+    },
+    "export_diagnostics_summary": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Share the app and system version and recent log lines with support. Nothing is sent until you pick an app."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Teilt App- und Systemversion sowie die letzten Protokollzeilen mit dem Support. Es wird nichts gesendet, bis du eine App auswählst."
+          }
+        }
+      }
+    },
+    "export_diagnostics_failed": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Could not export the diagnostics."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Die Diagnose konnte nicht exportiert werden."
+          }
+        }
+      }
+    },
     "sign_out": {
       "localizations": {
         "en": {

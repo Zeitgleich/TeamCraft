@@ -19,4 +19,8 @@
   <string name="custom_status_emoji">Emoji</string>
   <string name="custom_status_text">Status</string>
   <string name="custom_status_missing">Gib einen Statustext ein.</string>
+  <string name="export_diagnostics">Diagnose exportieren</string>
+  <string name="export_diagnostics_summary">Teilt App- und Systemversion sowie die letzten Protokollzeilen mit dem Support. Es wird nichts gesendet, bis du eine App auswählst.</string>
+  <string name="export_diagnostics_share_title">TeamCraft-Diagnose</string>
+  <string name="export_diagnostics_failed">Die Diagnose konnte nicht exportiert werden.</string>
 </resources>

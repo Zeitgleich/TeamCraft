@@ -863,7 +863,20 @@ impl TeamCraft {
   }
 }
 
+/// The text file the diagnostics export shares: versions, then `recent_log_lines()`.
+#[uniffi::export]
+pub fn diagnostics_text(app_version: String, os_version: String) -> String {
+  logging::diagnostics_text(&app_version, &os_version, &logging::recent_lines())
+}
+
 /// A fresh key for one user action that may be retried (`add_people_to_call`).
+/// The recent system-log lines (logcat, os_log), oldest first, for the diagnostics export
+/// (issue #1094). Bounded; carries what the system log carries, never secrets.
+#[uniffi::export]
+pub fn recent_log_lines() -> Vec<String> {
+  logging::recent_lines()
+}
+
 #[uniffi::export]
 pub fn new_request_key() -> String {
   teamcraft_proto::IdempotencyKey::random().to_hex()
