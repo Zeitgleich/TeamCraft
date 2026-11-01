@@ -69,8 +69,8 @@ struct ChatPane: View {
     // Receipts sent while this device was offline never arrive as events: they are read when the
     // conversation opens and whenever the connection comes back (#769). Channels have none, so the
     // core doesn't ask for theirs.
-    .task(id: model.connection == .connected) {
-      guard threadId == nil, model.connection == .connected else { return }
+    .task(id: model.connection?.isConnected == true) {
+      guard threadId == nil, model.connection?.isConnected == true else { return }
       await model.perform(.refreshReadReceipts(conversationId: conversation.id))
     }
     .onAppear { model.visibleConversationId = conversation.id }

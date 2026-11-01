@@ -8,6 +8,8 @@ enum ConnectionNotice: Equatable {
   /// The device itself has no network path.
   case deviceOffline
   case connecting
+  /// Connected, but the server answers late (a saturated link): messages still go out (#1064).
+  case slow
   /// Online, but the server isn't reachable; the next attempt is in this many seconds. Names what
   /// answered instead, if the core found out (a captive portal, a TLS-intercepting proxy).
   case unreachable(retryInSeconds: Int, maybeInterception: NetworkInterception?)
@@ -20,6 +22,8 @@ enum ConnectionNotice: Equatable {
     -> ConnectionNotice?
   {
     if case .signInRequired = maybeConnection { return .signInRequired }
+    // Connected, so no grace period: the core doesn't flip it back and forth.
+    if isOnline, case .slow = maybeConnection { return .slow }
     guard grace.isPastGrace(now: now) else { return nil }
     if !isOnline { return .deviceOffline }
     switch maybeConnection {
@@ -27,8 +31,10 @@ enum ConnectionNotice: Equatable {
       return .connecting
     case .offline(let retryAtMs, let maybeInterception):
       let seconds = max(0, Int((Double(retryAtMs) / 1000 - now.timeIntervalSince1970).rounded(.up)))
+      // Due but not started yet: "next attempt in 0 s" would read as stuck.
+      if seconds == 0, maybeInterception == nil { return .connecting }
       return .unreachable(retryInSeconds: seconds, maybeInterception: maybeInterception)
-    case .connected, .signInRequired, nil:
+    case .connected, .slow, .signInRequired, nil:
       return nil
     }
   }
@@ -40,7 +46,17 @@ enum ConnectionNotice: Equatable {
     if !isOnline { return true }
     switch maybeConnection {
     case .connecting, .offline: return true
-    case .connected, .signInRequired, nil: return false
+    case .connected, .slow, .signInRequired, nil: return false
+    }
+  }
+}
+
+extension ConnectionState {
+  /// Connected, also on a slow link: what needs the server can go ahead.
+  var isConnected: Bool {
+    switch self {
+    case .connected, .slow: return true
+    case .connecting, .offline, .signInRequired: return false
     }
   }
 }

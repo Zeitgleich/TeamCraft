@@ -1,5 +1,5 @@
 //! The connection supervisor against the fake gateway, on tokio's paused clock: dead connections,
-//! stalled handshakes, network changes, wake-ups, refused tokens and backoff.
+//! stalled handshakes, slow links, network changes, wake-ups, refused tokens and backoff.
 // Test helpers outside `#[test]` functions panic on failure like the tests themselves.
 #![allow(clippy::unwrap_used)]
 
@@ -47,9 +47,61 @@ async fn a_stalled_handshake_times_out_and_is_retried() {
   rig
     .drive(|rig| async move {
       // The socket opens but `hello` never comes: the attempt must fail, not hang.
-      rig.wait_for(is_offline, Duration::from_secs(16)).await;
+      rig.wait_for(is_offline, Duration::from_secs(31)).await;
       rig.server.set_gateway_silent(rig.user, false);
       rig.wait_for(is_connected, Duration::from_secs(35)).await;
+    })
+    .await;
+}
+
+/// Attempts that fail slowly (a silent server, a handshake on a saturated link) keep the loop busy
+/// for the whole handshake timeout. That is no sleep: the pauses between them keep growing instead
+/// of starting over at once (issue #1064, "next attempt in 0 s").
+#[tokio::test(start_paused = true)]
+async fn attempts_that_fail_slowly_still_back_off() {
+  let rig = Rig::start("Liam").await;
+  rig.server.set_gateway_silent(rig.user, true);
+  rig
+    .drive(|rig| async move {
+      let mut pauses = Vec::new();
+      for _ in 0..4 {
+        rig.wait_for(is_offline, Duration::from_secs(40)).await;
+        let failed = Instant::now();
+        rig.wait_for(is_connecting, Duration::from_secs(40)).await;
+        pauses.push(failed.elapsed());
+      }
+      // 1, 2, 4, 8 s with equal jitter: the fourth pause is at least 4 s.
+      assert!(pauses[3] >= Duration::from_secs(4), "{pauses:?}");
+    })
+    .await;
+}
+
+/// A saturated link (issue #1064): every frame arrives seconds late, but it arrives. The
+/// connection stays, the state says "slow" instead of "unreachable", and network changes (Android
+/// reports one on every return to the foreground) don't drop it.
+#[tokio::test(start_paused = true)]
+async fn a_slow_link_keeps_its_connection_and_says_it_is_slow() {
+  let rig = Rig::start("Kim").await;
+  rig
+    .drive(|rig| async move {
+      rig.wait_for(is_connected, Duration::from_secs(5)).await;
+      rig
+        .server
+        .slow_down_gateways(rig.user, Some(Duration::from_secs(6)));
+      // The next heartbeat (at most 25 s away) waits 6 s for its answer.
+      rig.wait_for(is_slow, Duration::from_secs(35)).await;
+      for _ in 0..4 {
+        rig.network.notify();
+        rig.stay(is_slow, Duration::from_secs(40)).await;
+      }
+      assert_eq!(
+        rig.server.gateway_connect_count(),
+        1,
+        "the connection was replaced"
+      );
+      rig.server.slow_down_gateways(rig.user, None);
+      // The next quick answer ends it.
+      rig.wait_for(is_connected, Duration::from_secs(40)).await;
     })
     .await;
 }
@@ -416,6 +468,20 @@ impl Steer {
 }
 
 impl Steer {
+  /// Checks the state matches throughout `duration`.
+  async fn stay(&self, matches: impl Fn(ConnectionState) -> bool, duration: Duration) {
+    let started = Instant::now();
+    while started.elapsed() < duration {
+      assert!(
+        matches(self.status.get()),
+        "{:?} after {:?}",
+        self.status.get(),
+        started.elapsed()
+      );
+      tokio::time::sleep(POLL).await;
+    }
+  }
+
   /// Waits until the `count`th gateway connection is up, at most `limit`.
   async fn wait_for_new_connection(&self, count: u64, limit: Duration) {
     let started = Instant::now();
@@ -432,6 +498,14 @@ impl Steer {
 
 fn is_connected(state: ConnectionState) -> bool {
   state == ConnectionState::Connected
+}
+
+fn is_slow(state: ConnectionState) -> bool {
+  state == ConnectionState::Slow
+}
+
+fn is_connecting(state: ConnectionState) -> bool {
+  state == ConnectionState::Connecting
 }
 
 fn is_offline(state: ConnectionState) -> bool {

@@ -843,9 +843,9 @@ final class AppModel {
   private func storeDidChange() {
     changeCount += 1
     calls.storeDidChange()
-    let wasConnected = connection == .connected
+    let wasConnected = connection?.isConnected == true
     setConnection(maybeCore?.connectionState())
-    if connection == .connected && !wasConnected {
+    if connection?.isConnected == true && !wasConnected {
       Task { [weak self] in await self?.pushUpkeep() }
     }
     Task { [weak self] in await self?.refreshLinkRequests() }
@@ -1211,7 +1211,7 @@ final class AppModel {
   /// hold up every read of the local store until the request gives up) and at most once a day
   /// otherwise; a failed attempt waits `PushUpkeepSchedule.retryPause`, not the next reconnect.
   private func pushUpkeep() async {
-    guard case .ready = phase, connection == .connected, !isPushUpkeepRunning, let token = maybePushToken else {
+    guard case .ready = phase, connection?.isConnected == true, !isPushUpkeepRunning, let token = maybePushToken else {
       return
     }
     let defaults = UserDefaults.standard

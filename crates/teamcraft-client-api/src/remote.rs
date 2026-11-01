@@ -492,6 +492,8 @@ pub enum StoreProblem {
 pub enum CoreConnection {
   Connecting,
   Connected,
+  /// Connected, but the server answers late (a saturated or very slow link).
+  Slow,
   /// Not connected; the next attempt starts at `retry_at_ms` (Unix milliseconds).
   Offline {
     retry_at_ms: i64,

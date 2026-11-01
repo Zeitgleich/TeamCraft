@@ -184,7 +184,7 @@ fun ConversationScreen(
   // conversation opens and whenever the connection comes back (#769). Channels have none, so the
   // core doesn't ask for theirs; a failure stays quiet, the next connection asks again.
   val maybeConnection by TeamCraftApplication.graph(LocalContext.current).core.connectionState.collectAsState()
-  val isConnected = maybeConnection is ConnectionState.Connected
+  val isConnected = maybeConnection is ConnectionState.Connected || maybeConnection is ConnectionState.Slow
   LaunchedEffect(conversationId, isConnected) {
     if (isConnected) viewModel.readChat { act(ChatActions.refreshReadReceipts(conversationId)) }
   }

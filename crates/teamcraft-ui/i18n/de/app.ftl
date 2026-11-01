@@ -82,6 +82,7 @@ connection-banner-untrusted-certificate = Dem Zertifikat des Servers wird nicht 
 connection-hint-offline = Offline
 connection-hint-connecting = Verbinden…
 connection-hint-reconnecting = Neu verbinden…
+connection-hint-slow = Langsame Verbindung
 connection-banner-retry = Jetzt versuchen
 connection-banner-sign-in = Deine Sitzung ist abgelaufen. Nachrichten warten, bis du dich wieder anmeldest.
 connection-banner-sign-in-action = Erneut anmelden

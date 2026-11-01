@@ -640,7 +640,7 @@ async fn run_call(
 /// connected, the call server went away; otherwise this device's own connection broke.
 fn lost_call_reason(chat: CoreConnectionState) -> CallEndReason {
   match chat {
-    CoreConnectionState::Connected => CallEndReason::ServerLost,
+    CoreConnectionState::Connected | CoreConnectionState::Slow => CallEndReason::ServerLost,
     _ => CallEndReason::Failed,
   }
 }

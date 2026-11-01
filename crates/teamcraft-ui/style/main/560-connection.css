@@ -38,6 +38,11 @@
   display: none;
 }
 
+/* Slow but connected: a resting line, nothing is being retried. */
+.connection-hint.is-slow::after {
+  display: none;
+}
+
 /* The title bar is the window's top edge: the banners are below it, the line at its foot. */
 :root[data-titlebar="custom"] .connection-hint {
   top: calc(var(--topbar-h) - 2px);
