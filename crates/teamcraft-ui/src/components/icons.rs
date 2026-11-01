@@ -99,6 +99,8 @@ pub enum IconName {
   Info,
   Play,
   Pause,
+  /// A door with an arrow out of it: leave a channel or a space.
+  Leave,
 }
 
 impl IconName {
@@ -155,6 +157,7 @@ impl IconName {
       Self::Info => "M12 21a9 9 0 1 0 0-18 9 9 0 0 0 0 18z M12 11v6 M12 7.5h.01",
       Self::Play => "M7 4l13 8-13 8z",
       Self::Pause => "M7 4h3v16H7z M14 4h3v16h-3z",
+      Self::Leave => "M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4 M16 17l5-5-5-5 M21 12H9",
       Self::Close => "M18 6 6 18M6 6l12 12",
       Self::Plus => "M12 5v14M5 12h14",
       Self::Bookmark => "M19 21l-7-5-7 5V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2z",

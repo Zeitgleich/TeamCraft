@@ -9,10 +9,12 @@ use crate::channel_access::{can_create_channel_in, can_invite_to, is_guest};
 use crate::components::avatar::PresenceDot;
 use crate::components::channel_glyph::ChannelGlyph;
 use crate::components::count_badge::{BadgeTone, CountBadge};
+use crate::components::entry_menu::EntryMenuTrigger;
 use crate::components::huddle_bar::CallPill;
 use crate::components::icons::{Icon, IconName};
 use crate::components::space_tile::SpaceTile;
 use crate::components::typing_indicator::{TypingDots, typing_text};
+use crate::entry_actions::MenuEntry;
 use crate::i18n::use_i18n;
 use crate::meetings::MeetingsHub;
 use crate::model::{Conversation, ConversationId, ConversationKind, PresenceStatus, SpaceId};
@@ -158,7 +160,22 @@ pub fn Sidebar() -> impl IntoView {
                 .get()
                 .map(|space| {
                   let name = space.name.clone();
-                  view! { <SpaceTile space=space /> <span>{name}</span> }
+                  // The head names the space: a right click or long-press on it has the space's menu.
+                  let menu = EntryMenuTrigger::new(MenuEntry::Space(space.id));
+                  view! {
+                    <span
+                      class="space-name-entry"
+                      class:is-pressing=move || menu.is_pressing()
+                      on:pointerdown=move |ev| menu.on_pointerdown(&ev)
+                      on:pointermove=move |ev| menu.on_pointermove(&ev)
+                      on:pointerup=move |_| menu.on_pointerup()
+                      on:pointercancel=move |_| menu.on_pointerup()
+                      on:contextmenu=move |ev| menu.on_contextmenu(&ev)
+                    >
+                      <SpaceTile space=space />
+                      <span>{name}</span>
+                    </span>
+                  }
                 })
                 .into_any()
             }
@@ -523,6 +540,7 @@ fn SpaceGroupSection(
     Memo::new(move |_| conversations.with(|list| list.iter().map(|conv| conv.mention_count).sum::<u32>()));
   let list_id = format!("sb-space-{space_id}");
   let phase = RwSignal::new(SectionPhase::Still);
+  let space_menu = EntryMenuTrigger::new(MenuEntry::Space(space));
   let is_muted = {
     let space_id = space_id.clone();
     Memo::new(move |_| {
@@ -553,8 +571,16 @@ fn SpaceGroupSection(
       <div class="sb-section-head sb-space-head">
         <button
           class="sb-space-toggle"
+          class:is-pressing=move || space_menu.is_pressing()
           aria-expanded=move || (!is_collapsed()).to_string()
           aria-controls=list_id.clone()
+          on:pointerdown=move |ev| space_menu.on_pointerdown(&ev)
+          on:pointermove=move |ev| space_menu.on_pointermove(&ev)
+          on:pointerup=move |_| space_menu.on_pointerup()
+          on:pointercancel=move |_| space_menu.on_pointerup()
+          on:contextmenu=move |ev| space_menu.on_contextmenu(&ev)
+          on:keydown=move |ev| space_menu.on_keydown(&ev)
+          on:click:capture=move |ev| space_menu.on_click_capture(&ev)
           on:click=move |_| {
             collapsed.update(|set| {
               if set.remove(&space) {
@@ -907,6 +933,7 @@ pub fn SidebarItem(#[prop(into)] conversation: Signal<Conversation>) -> impl Int
       .get()
       .is_some_and(|peer| state.read(|backend| backend.is_in_call(peer)))
   });
+  let menu = EntryMenuTrigger::new(MenuEntry::Conversation(id));
   // "typing…" in a DM, "Alice is typing…" elsewhere (#882); replies in threads don't count.
   let typing = typing_text(id, None, kind == ConversationKind::Direct);
   let label = move || {
@@ -950,9 +977,17 @@ pub fn SidebarItem(#[prop(into)] conversation: Signal<Conversation>) -> impl Int
       class:unread=move || is_unread.get()
       class:muted=move || is_muted.get()
       class:catching-up=move || is_catching_up.get()
+      class:is-pressing=move || menu.is_pressing()
       data-conversation=id.to_string()
       aria-current=move || is_current().then_some("page")
       aria-label=label
+      on:pointerdown=move |ev| menu.on_pointerdown(&ev)
+      on:pointermove=move |ev| menu.on_pointermove(&ev)
+      on:pointerup=move |_| menu.on_pointerup()
+      on:pointercancel=move |_| menu.on_pointerup()
+      on:contextmenu=move |ev| menu.on_contextmenu(&ev)
+      on:keydown=move |ev| menu.on_keydown(&ev)
+      on:click:capture=move |ev| menu.on_click_capture(&ev)
       on:click=move |_| state.open_conversation(id)
     >
       {leading} <span class="sb-name" translate="no">

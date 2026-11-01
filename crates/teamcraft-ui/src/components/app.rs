@@ -152,6 +152,9 @@ pub fn Shell(backend: Rc<dyn Backend>, settings: Settings) -> impl IntoView {
   provide_context(RwSignal::new(
     None::<crate::components::attachment_menu::AttachmentMenuTarget>,
   ));
+  provide_context(RwSignal::new(
+    None::<crate::components::entry_menu::EntryMenuTarget>,
+  ));
   if tauri::is_available() {
     report_webview_downloads(state, i18n);
   }
@@ -335,6 +338,7 @@ pub fn Shell(backend: Rc<dyn Backend>, settings: Settings) -> impl IntoView {
       </Show>
       <crate::components::link_menu::LinkMenu />
       <crate::components::attachment_menu::AttachmentMenu />
+      <crate::components::entry_menu::EntryMenu />
       {move || match state.call.phase.get() {
         CallPhase::PreJoin => {
           state.call.maybe_request.get().map(|request| lazy_area(Place::Screen, move || areas::call_prejoin(request)))

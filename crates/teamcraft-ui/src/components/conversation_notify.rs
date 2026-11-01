@@ -1,13 +1,14 @@
 //! The bell of a conversation's header: how this conversation notifies, and for how long it is
 //! muted. Both are the per-conversation settings of Settings > Notifications, so the two places
-//! always agree (and `notify_sync` carries them to the other devices).
+//! always agree (and `notify_sync` carries them to the other devices). The sidebar's entry menu
+//! (#903) offers the same choices for a conversation and for a whole space.
 
 use leptos::prelude::*;
 
 use crate::components::icons::{Icon, IconName};
 use crate::components::sheet::MenuSurface;
 use crate::i18n::use_i18n;
-use crate::model::ConversationId;
+use crate::model::{ConversationId, SpaceId};
 use crate::prefs::{ConversationNotify, MuteFor, NotifyLevel};
 use crate::state::{AppState, use_app_state};
 
@@ -44,40 +45,57 @@ pub fn ConversationBell(conversation: ConversationId) -> impl IntoView {
           label=Signal::derive(move || i18n.t("conversation-bell"))
           on_close=Callback::new(move |()| is_open.set(false))
         >
-          <p class="menu-heading">{move || i18n.t("notif-level-col")}</p>
-          <LevelItem conversation=conversation maybe_level=None />
-          {NotifyLevel::ALL
-            .into_iter()
-            .map(|level| view! { <LevelItem conversation=conversation maybe_level=Some(level) /> })
-            .collect_view()}
-          <p class="menu-heading">{move || i18n.t("notif-mute-col")}</p>
-          {MuteFor::ALL
-            .into_iter()
-            .map(|mute| view! { <MuteItem conversation=conversation mute=mute /> })
-            .collect_view()}
+          <NotifyChoices target=NotifyTarget::Conversation(conversation) />
         </MenuSurface>
       </Show>
     </div>
   }
 }
 
+/// What a notification choice applies to: a conversation, or a space whose channels follow it
+/// unless they have a setting of their own.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NotifyTarget {
+  Conversation(ConversationId),
+  Space(SpaceId),
+}
+
+/// The notification levels, then the mute durations, each a radio group of menu items.
+#[component]
+pub fn NotifyChoices(target: NotifyTarget) -> impl IntoView {
+  let i18n = use_i18n();
+  view! {
+    <p class="menu-heading">{move || i18n.t("notif-level-col")}</p>
+    <LevelItem target=target maybe_level=None />
+    {NotifyLevel::ALL
+      .into_iter()
+      .map(|level| view! { <LevelItem target=target maybe_level=Some(level) /> })
+      .collect_view()}
+    <p class="menu-heading">{move || i18n.t("notif-mute-col")}</p>
+    {MuteFor::ALL
+      .into_iter()
+      .map(|mute| view! { <MuteItem target=target mute=mute /> })
+      .collect_view()}
+  }
+}
+
 /// One notification level; `None` follows the global level.
 #[component]
-fn LevelItem(conversation: ConversationId, maybe_level: Option<NotifyLevel>) -> impl IntoView {
+fn LevelItem(target: NotifyTarget, maybe_level: Option<NotifyLevel>) -> impl IntoView {
   let state = use_app_state();
   let i18n = use_i18n();
   let label_key = match maybe_level {
     None => "notif-level-default".to_owned(),
     Some(level) => format!("notify-level-{}", level.slug()),
   };
-  let is_checked = move || entry_of(state, conversation).maybe_level == maybe_level;
+  let is_checked = move || entry_of(state, target).maybe_level == maybe_level;
   view! {
     <button
       type="button"
       class="menu-item"
       role="menuitemradio"
       aria-checked=move || is_checked().to_string()
-      on:click=move |_| update_entry(state, conversation, |entry| entry.maybe_level = maybe_level)
+      on:click=move |_| update_entry(state, target, |entry| entry.maybe_level = maybe_level)
     >
       <span class="menu-label">{move || i18n.t(&label_key)}</span>
       {move || is_checked().then(|| view! { <Icon name=IconName::Check /> })}
@@ -87,17 +105,17 @@ fn LevelItem(conversation: ConversationId, maybe_level: Option<NotifyLevel>) -> 
 
 /// One mute duration.
 #[component]
-fn MuteItem(conversation: ConversationId, mute: MuteFor) -> impl IntoView {
+fn MuteItem(target: NotifyTarget, mute: MuteFor) -> impl IntoView {
   let state = use_app_state();
   let i18n = use_i18n();
-  let is_checked = move || entry_of(state, conversation).mute == mute;
+  let is_checked = move || entry_of(state, target).mute == mute;
   view! {
     <button
       type="button"
       class="menu-item"
       role="menuitemradio"
       aria-checked=move || is_checked().to_string()
-      on:click=move |_| update_entry(state, conversation, |entry| entry.mute = mute)
+      on:click=move |_| update_entry(state, target, |entry| entry.mute = mute)
     >
       <span class="menu-label">{move || i18n.t(&format!("notif-mute-{}", mute.slug()))}</span>
       {move || is_checked().then(|| view! { <Icon name=IconName::Check /> })}
@@ -105,18 +123,28 @@ fn MuteItem(conversation: ConversationId, mute: MuteFor) -> impl IntoView {
   }
 }
 
-fn entry_of(state: AppState, conversation: ConversationId) -> ConversationNotify {
-  state
-    .settings
-    .prefs
-    .with(|prefs| prefs.notifications.conversation(&conversation.to_string()))
+/// The target's own setting (a channel's inherited one is not its own).
+pub fn entry_of(state: AppState, target: NotifyTarget) -> ConversationNotify {
+  state.settings.prefs.with(|prefs| match target {
+    NotifyTarget::Conversation(conversation) => prefs.notifications.conversation(&conversation.to_string()),
+    NotifyTarget::Space(space) => prefs.notifications.space(&space.to_string()),
+  })
 }
 
-fn update_entry(state: AppState, conversation: ConversationId, change: impl FnOnce(&mut ConversationNotify)) {
-  let id = conversation.to_string();
-  state.settings.prefs.update(|prefs| {
-    let mut entry = prefs.notifications.conversation(&id);
-    change(&mut entry);
-    prefs.notifications.set_conversation(&id, entry);
+/// Changes the target's setting; `notify_sync` sends it to the server.
+pub fn update_entry(state: AppState, target: NotifyTarget, change: impl FnOnce(&mut ConversationNotify)) {
+  state.settings.prefs.update(|prefs| match target {
+    NotifyTarget::Conversation(conversation) => {
+      let id = conversation.to_string();
+      let mut entry = prefs.notifications.conversation(&id);
+      change(&mut entry);
+      prefs.notifications.set_conversation(&id, entry);
+    },
+    NotifyTarget::Space(space) => {
+      let id = space.to_string();
+      let mut entry = prefs.notifications.space(&id);
+      change(&mut entry);
+      prefs.notifications.set_space(&id, entry);
+    },
   });
 }

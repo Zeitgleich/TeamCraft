@@ -22,6 +22,8 @@ struct ConversationListView: View {
   @State private var tab: ChatTab = .home
   @State private var homeChip: HomeFilter = .all
   @State private var dmFilter = ""
+  /// A mute from the long-press menu the server didn't take (#903).
+  @State private var isMuteFailed = false
 
   var body: some View {
     NavigationSplitView {
@@ -34,6 +36,7 @@ struct ConversationListView: View {
           }
         }
         .navigationTitle("chats_title")
+        .alert("dnd_save_failed", isPresented: $isMuteFailed) {}
         .toolbar {
           ToolbarItem(placement: .topBarLeading) {
             Button { isShowingFilters = true } label: {
@@ -148,6 +151,7 @@ struct ConversationListView: View {
                 .swipeActions(edge: .trailing) { favoriteButton(for: conversation) }
                 .contextMenu {
                   readButton(for: conversation)
+                  muteMenu(for: conversation)
                   favoriteButton(for: conversation)
                 }
             }
@@ -226,6 +230,26 @@ struct ConversationListView: View {
         }
       }
       .tint(Theme.accent)
+    }
+  }
+
+  /// Mute for a while, or unmute: the same presets as the conversation's bell (#903).
+  private func muteMenu(for conversation: ConversationItem) -> some View {
+    Menu {
+      if conversation.isMuted {
+        Button("mute_end", systemImage: "bell") { setMuted(conversation, until: nil) }
+      }
+      ForEach(MutePreset.allCases) { preset in
+        Button(preset.title) { setMuted(conversation, until: preset.mutedUntil(now: Date(), calendar: .current)) }
+      }
+    } label: {
+      Label("mute_title", systemImage: conversation.isMuted ? "bell.slash" : "bell")
+    }
+  }
+
+  private func setMuted(_ conversation: ConversationItem, until maybeDate: Date?) {
+    Task {
+      if !(await model.setConversationMuted(conversation.id, until: maybeDate)) { isMuteFailed = true }
     }
   }
 

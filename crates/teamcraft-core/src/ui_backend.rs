@@ -1208,6 +1208,7 @@ impl<S: LocalStore> ChatBackend for CoreChatBackend<S> {
         can_manage_space: space.can_manage_space,
         // An older server leaves the hint out (taken as allowed); its guests still create nothing.
         can_create_channels: space.can_create_channels && space.maybe_my_role != Some(SpaceRole::Guest),
+        maybe_my_role: space.maybe_my_role.clone(),
       })
       .collect()
   }

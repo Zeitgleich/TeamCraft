@@ -198,3 +198,15 @@ setup-invite-hint = Bring your team along.
 notes-title = Notes
 notes-empty-title = Nothing noted yet
 notes-empty = Keep ideas, links and files here. Only your own devices can read them.
+
+## The menu of a sidebar entry: a channel, chat or space (right click, long-press, menu key)
+entry-menu-notifications = Notifications
+entry-menu-unmute = Unmute
+entry-menu-mark-read = Mark as read
+entry-menu-leave-channel = Leave channel
+entry-menu-leave-last-channel-admin = Make someone else channel admin first.
+entry-menu-leave-space-ellipsis = Leave space…
+entry-menu-leave-space = Leave space
+entry-menu-leave-space-confirm = Leave { $name }? You also leave all of its channels.
+entry-menu-leave-last-space-admin = Make someone else space admin first.
+entry-menu-settings = Settings…
