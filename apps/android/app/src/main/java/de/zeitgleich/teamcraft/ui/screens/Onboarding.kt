@@ -26,6 +26,7 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import kotlinx.coroutines.launch
 import androidx.compose.runtime.mutableStateOf
@@ -35,6 +36,8 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.res.stringResource
@@ -53,8 +56,14 @@ import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import de.zeitgleich.teamcraft.R
 import de.zeitgleich.teamcraft.ui.AppState
-
-private const val MIN_PASSPHRASE_LENGTH = 12
+import de.zeitgleich.teamcraft.ui.forms.MIN_PASSPHRASE_LENGTH
+import de.zeitgleich.teamcraft.ui.forms.NewPassphraseField
+import de.zeitgleich.teamcraft.ui.forms.fieldError
+import de.zeitgleich.teamcraft.ui.forms.focusFirst
+import de.zeitgleich.teamcraft.ui.forms.isPassphraseRefusal
+import de.zeitgleich.teamcraft.ui.forms.newPassphraseErrors
+import de.zeitgleich.teamcraft.ui.forms.passphraseError
+import de.zeitgleich.teamcraft.ui.forms.supportingText
 
 internal const val LOGO_WIDTH_FRACTION = 0.6f
 internal val LOGO_MAX_HEIGHT = 96.dp
@@ -93,28 +102,74 @@ fun EnrollScreen(
 private fun NewKeysScreen(@StringRes maybeError: Int?, isBusy: Boolean, onEnroll: (String) -> Unit) {
   var passphrase by remember { mutableStateOf("") }
   var repeated by remember { mutableStateOf("") }
-  val maybeProblem = when {
-    passphrase.length < MIN_PASSPHRASE_LENGTH -> R.string.passphrase_too_short
-    passphrase != repeated -> R.string.passphrases_differ
-    else -> null
-  }
   Centered {
     Title(R.string.enroll_title)
     Text(stringResource(R.string.enroll_new_hint), style = MaterialTheme.typography.bodyMedium)
-    PassphraseField(passphrase, R.string.passphrase, onChange = { passphrase = it })
-    PassphraseField(repeated, R.string.passphrase_repeat, onChange = { repeated = it }) {
-      if (!isBusy && maybeProblem == null) onEnroll(passphrase)
-    }
-    Text(
-      stringResource(R.string.passphrase_rule, MIN_PASSPHRASE_LENGTH),
-      style = MaterialTheme.typography.bodySmall,
-      color = MaterialTheme.colorScheme.onSurfaceVariant,
-      modifier = Modifier.fillMaxWidth(),
+    NewPassphraseFields(
+      passphrase,
+      repeated,
+      onChange = { first, second ->
+        passphrase = first
+        repeated = second
+      },
+      maybeError = maybeError,
+      isBusy = isBusy,
+      submitLabel = R.string.enroll_button,
+      onSubmit = onEnroll,
     )
-    val shownError = maybeError ?: maybeProblem.takeIf { passphrase.isNotEmpty() && repeated.isNotEmpty() }
-    shownError?.let { ErrorLine(it) }
-    WorkingButton(R.string.enroll_button, isBusy, isEnabled = maybeProblem == null) { onEnroll(passphrase) }
   }
+}
+
+/**
+ * A new passphrase, its repetition and the submit button. A refused submit shows every error at
+ * its field and focuses the first; afterwards the errors follow the input. [maybeError] is the
+ * server's or the device's failure, which belongs to no field: it sits next to the button.
+ */
+@Composable
+private fun NewPassphraseFields(
+  passphrase: String,
+  repeated: String,
+  onChange: (String, String) -> Unit,
+  @StringRes maybeError: Int?,
+  isBusy: Boolean,
+  @StringRes submitLabel: Int,
+  onSubmit: (String) -> Unit,
+) {
+  var isSubmitted by remember { mutableStateOf(false) }
+  val requesters = remember { NewPassphraseField.entries.associateWith { FocusRequester() } }
+  val errors = newPassphraseErrors(passphrase, repeated)
+  val shown = errors.takeIf { isSubmitted }
+  val submit: () -> Unit = {
+    isSubmitted = true
+    if (!errors.isValid) {
+      errors.focusFirst(requesters)
+    } else if (!isBusy) {
+      onSubmit(passphrase)
+    }
+  }
+  PassphraseField(
+    passphrase,
+    R.string.passphrase,
+    onChange = { onChange(it, repeated) },
+    maybeError = shown?.get(NewPassphraseField.PASSPHRASE),
+    focusRequester = requesters.getValue(NewPassphraseField.PASSPHRASE),
+  )
+  PassphraseField(
+    repeated,
+    R.string.passphrase_repeat,
+    onChange = { onChange(passphrase, it) },
+    maybeError = shown?.get(NewPassphraseField.REPEATED),
+    focusRequester = requesters.getValue(NewPassphraseField.REPEATED),
+    maybeOnDone = submit,
+  )
+  Text(
+    stringResource(R.string.passphrase_rule, MIN_PASSPHRASE_LENGTH),
+    style = MaterialTheme.typography.bodySmall,
+    color = MaterialTheme.colorScheme.onSurfaceVariant,
+    modifier = Modifier.fillMaxWidth(),
+  )
+  maybeError?.takeUnless { isBusy }?.let { ErrorLine(it) }
+  WorkingButton(submitLabel, isBusy, onClick = submit)
 }
 
 /**
@@ -130,6 +185,24 @@ private fun RestoreScreen(
   onOrgRecovery: () -> Unit,
 ) {
   var passphrase by remember { mutableStateOf("") }
+  var isSubmitted by remember { mutableStateOf(false) }
+  // A wrong passphrase is about the typed one: shown at the field until the user edits it.
+  var isErrorEdited by remember(maybeError) { mutableStateOf(false) }
+  val focus = remember { FocusRequester() }
+  val maybeRefusal = maybeError?.takeIf { isPassphraseRefusal(it) && !isErrorEdited && !isBusy }
+  val maybeFieldError = passphraseError(passphrase).takeIf { isSubmitted } ?: maybeRefusal
+  val submit: () -> Unit = {
+    isSubmitted = true
+    isErrorEdited = false
+    if (passphraseError(passphrase) != null) {
+      focus.requestFocus()
+    } else if (!isBusy) {
+      onRestore(passphrase)
+    }
+  }
+  LaunchedEffect(maybeError, isBusy) {
+    if (maybeRefusal != null) focus.requestFocus()
+  }
   Centered {
     Title(R.string.enroll_title)
     Text(stringResource(R.string.restore_link_hint), style = MaterialTheme.typography.bodyMedium)
@@ -138,16 +211,19 @@ private fun RestoreScreen(
     }
     HorizontalDivider(Modifier.padding(vertical = 8.dp))
     Text(stringResource(R.string.restore_passphrase_hint), style = MaterialTheme.typography.bodyMedium)
-    PassphraseField(passphrase, R.string.passphrase, onChange = { passphrase = it }) {
-      if (!isBusy && passphrase.length >= MIN_PASSPHRASE_LENGTH) onRestore(passphrase)
-    }
-    maybeError?.let { ErrorLine(it) }
-    WorkingButton(
-      R.string.recover_button,
-      isBusy,
-      isEnabled = passphrase.length >= MIN_PASSPHRASE_LENGTH,
-      isOutlined = true,
-    ) { onRestore(passphrase) }
+    PassphraseField(
+      passphrase,
+      R.string.passphrase,
+      onChange = {
+        passphrase = it
+        isErrorEdited = true
+      },
+      maybeError = maybeFieldError,
+      focusRequester = focus,
+      maybeOnDone = submit,
+    )
+    maybeError?.takeUnless { isPassphraseRefusal(it) || isBusy }?.let { ErrorLine(it) }
+    WorkingButton(R.string.recover_button, isBusy, isOutlined = true, onClick = submit)
     TextButton(onClick = onOrgRecovery, enabled = !isBusy) { Text(stringResource(R.string.org_recovery_instead)) }
   }
 }
@@ -158,6 +234,8 @@ private fun PassphraseField(
   value: String,
   @StringRes label: Int,
   onChange: (String) -> Unit,
+  @StringRes maybeError: Int?,
+  focusRequester: FocusRequester,
   maybeOnDone: (() -> Unit)? = null,
 ) {
   var isVisible by rememberSaveable { mutableStateOf(false) }
@@ -170,6 +248,8 @@ private fun PassphraseField(
     keyboardOptions = PASSPHRASE_KEYBOARD.copy(imeAction = if (maybeOnDone == null) ImeAction.Next else ImeAction.Done),
     keyboardActions = KeyboardActions(onDone = { maybeOnDone?.invoke() }),
     singleLine = true,
+    isError = maybeError != null,
+    supportingText = supportingText(maybeError),
     trailingIcon = {
       IconButton(onClick = { isVisible = !isVisible }) {
         Icon(
@@ -178,7 +258,7 @@ private fun PassphraseField(
         )
       }
     },
-    modifier = Modifier.fillMaxWidth(),
+    modifier = Modifier.fillMaxWidth().focusRequester(focusRequester).fieldError(maybeError),
   )
 }
 
@@ -187,7 +267,6 @@ private fun PassphraseField(
 private fun WorkingButton(
   @StringRes label: Int,
   isBusy: Boolean,
-  isEnabled: Boolean,
   isOutlined: Boolean = false,
   onClick: () -> Unit,
 ) {
@@ -206,9 +285,9 @@ private fun WorkingButton(
     onClick()
   }
   if (isOutlined) {
-    OutlinedButton(onClick = click, enabled = !isBusy && isEnabled, modifier = Modifier.fillMaxWidth()) { content() }
+    OutlinedButton(onClick = click, enabled = !isBusy, modifier = Modifier.fillMaxWidth()) { content() }
   } else {
-    Button(onClick = click, enabled = !isBusy && isEnabled, modifier = Modifier.fillMaxWidth()) { content() }
+    Button(onClick = click, enabled = !isBusy, modifier = Modifier.fillMaxWidth()) { content() }
   }
 }
 
@@ -324,17 +403,24 @@ fun OrgRecoveryScreen(
 ) {
   var passphrase by remember { mutableStateOf("") }
   var repeated by remember { mutableStateOf("") }
-  val isValid = passphrase.length >= MIN_PASSPHRASE_LENGTH && passphrase == repeated
   Centered {
     Title(R.string.org_recovery_title)
     Text(stringResource(R.string.org_recovery_hint), style = MaterialTheme.typography.bodyMedium)
     // Read aloud to an admin; not selectable, so it stays out of clipboard histories.
     Text(code, fontFamily = FontFamily.Monospace, style = MaterialTheme.typography.titleMedium)
     Text(stringResource(R.string.org_recovery_new_passphrase), style = MaterialTheme.typography.bodyMedium)
-    PassphraseField(passphrase, R.string.passphrase, onChange = { passphrase = it })
-    PassphraseField(repeated, R.string.passphrase_repeat, onChange = { repeated = it })
-    maybeError?.let { ErrorLine(it) }
-    WorkingButton(R.string.org_recovery_finish, isBusy, isEnabled = isValid) { onFinish(passphrase) }
+    NewPassphraseFields(
+      passphrase,
+      repeated,
+      onChange = { first, second ->
+        passphrase = first
+        repeated = second
+      },
+      maybeError = maybeError,
+      isBusy = isBusy,
+      submitLabel = R.string.org_recovery_finish,
+      onSubmit = onFinish,
+    )
     OutlinedButton(onClick = onCancel, enabled = !isBusy) { Text(stringResource(R.string.cancel)) }
   }
 }

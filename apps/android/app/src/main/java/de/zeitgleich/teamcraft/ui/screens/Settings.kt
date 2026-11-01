@@ -17,6 +17,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
 import androidx.compose.material3.FilterChip
@@ -40,9 +41,12 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Dialog
@@ -59,6 +63,11 @@ import de.zeitgleich.teamcraft.security.ScreenPrefs
 import de.zeitgleich.teamcraft.ui.AppState
 import de.zeitgleich.teamcraft.ui.LinkConfirmation
 import de.zeitgleich.teamcraft.ui.MainViewModel
+import de.zeitgleich.teamcraft.ui.forms.deviceLinkCodeError
+import de.zeitgleich.teamcraft.ui.forms.fieldError
+import de.zeitgleich.teamcraft.ui.forms.passphraseError
+import de.zeitgleich.teamcraft.ui.forms.requiredTextError
+import de.zeitgleich.teamcraft.ui.forms.supportingText
 import uniffi.teamcraft_ffi.Presence
 import uniffi.teamcraft_ffi.PushService
 import uniffi.teamcraft_ffi.TeamCraftException
@@ -239,15 +248,24 @@ private fun ApproveDevice(viewModel: MainViewModel) {
   var isDone by rememberSaveable { mutableStateOf(false) }
   var maybeFailure by rememberSaveable { mutableStateOf<Int?>(null) }
   var isScanning by rememberSaveable { mutableStateOf(false) }
+  var hasTriedStart by remember { mutableStateOf(false) }
+  var isStarting by remember { mutableStateOf(false) }
+  var isConfirming by remember { mutableStateOf(false) }
+  val codeFocus = remember { FocusRequester() }
+  // The server's refusal of the link code goes to the code field (forms.md), a missing code too.
+  val maybeCodeError = deviceLinkCodeError(code).takeIf { hasTriedStart } ?: maybeFailure
   val approve: (String) -> Unit = { linkCode ->
     maybeFailure = null
+    isStarting = true
     scope.launch {
       viewModel.approveLink(linkCode)
         .onSuccess { isTyping = true }
         .onFailure { failure ->
           // Says what to do, e.g. that a computer's "Link a phone" code belongs on the new phone.
           maybeFailure = (failure as? TeamCraftException)?.let(MainViewModel::errorText) ?: R.string.error_generic
+          codeFocus.requestFocus()
         }
+      isStarting = false
     }
   }
   if (isScanning) {
@@ -274,7 +292,9 @@ private fun ApproveDevice(viewModel: MainViewModel) {
     isDone -> Text(stringResource(R.string.approve_done))
     isTyping -> LinkCodeStep(
       maybeError = maybeError,
+      isConfirming = isConfirming,
       onApprove = { typed ->
+        isConfirming = true
         scope.launch {
           when (viewModel.confirmLink(typed)) {
             LinkConfirmation.CONFIRMED -> {
@@ -286,71 +306,112 @@ private fun ApproveDevice(viewModel: MainViewModel) {
               // The new device has to start again: back to the first step.
               isTyping = false
               code = ""
+              hasTriedStart = false
               maybeFailure = null
               maybeError = R.string.approve_attempt_ended
             }
             LinkConfirmation.FAILED -> maybeError = R.string.error_generic
           }
+          isConfirming = false
         }
       },
       onCancel = {
         isTyping = false
         maybeError = null
         code = ""
+        hasTriedStart = false
       },
     )
     else -> {
       Text(stringResource(R.string.approve_hint), style = MaterialTheme.typography.bodySmall)
+      // The previous attempt ended on the new device: says so above the fresh start.
+      maybeError?.let { ErrorLine(it) }
       OutlinedTextField(
         value = code,
-        onValueChange = { code = it },
+        onValueChange = {
+          code = it
+          maybeFailure = null
+        },
         label = { Text(stringResource(R.string.approve_code)) },
         singleLine = true,
-        modifier = Modifier.fillMaxWidth(),
+        isError = maybeCodeError != null,
+        supportingText = supportingText(maybeCodeError),
+        modifier = Modifier.fillMaxWidth().focusRequester(codeFocus).fieldError(maybeCodeError),
       )
       // A new computer shows a QR code: scanning it is the usual way, typing its code the fallback.
       Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
         Button(onClick = {
           maybeError = null
           isScanning = true
-        }) { Text(stringResource(R.string.link_scan_qr)) }
+        }, enabled = !isStarting) { Text(stringResource(R.string.link_scan_qr)) }
         OutlinedButton(onClick = {
           maybeError = null
-          approve(code)
-        }, enabled = code.isNotBlank()) { Text(stringResource(R.string.approve_start)) }
+          hasTriedStart = true
+          if (deviceLinkCodeError(code) != null) codeFocus.requestFocus() else approve(code)
+        }, enabled = !isStarting) { Text(stringResource(R.string.approve_start)) }
       }
       Text(stringResource(R.string.approve_new_phone_hint), style = MaterialTheme.typography.bodySmall)
-      maybeError?.let { Text(stringResource(it), color = MaterialTheme.colorScheme.error) }
     }
   }
-  maybeFailure?.let { Text(stringResource(it), color = MaterialTheme.colorScheme.error) }
 }
 
 /** An emoji and text shown next to the user's name, cleared after the chosen time. */
 @Composable
 private fun CustomStatusSection(viewModel: MainViewModel) {
+  val scope = rememberCoroutineScope()
   var emoji by rememberSaveable { mutableStateOf("") }
   var text by rememberSaveable { mutableStateOf("") }
+  var hasTried by remember { mutableStateOf(false) }
+  var isSaving by remember { mutableStateOf(false) }
+  var maybeFailure by remember { mutableStateOf<Int?>(null) }
+  val textFocus = remember { FocusRequester() }
+  val maybeTextError = requiredTextError(text, R.string.custom_status_missing).takeIf { hasTried } ?: maybeFailure
   Heading(R.string.custom_status_title)
   Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-    OutlinedTextField(value = emoji, onValueChange = { emoji = it.take(4) }, singleLine = true, modifier = Modifier.width(72.dp))
+    OutlinedTextField(
+      value = emoji,
+      onValueChange = { emoji = it.take(4) },
+      label = { Text(stringResource(R.string.custom_status_emoji)) },
+      singleLine = true,
+      modifier = Modifier.width(96.dp),
+    )
     OutlinedTextField(
       value = text,
-      onValueChange = { text = it },
+      onValueChange = {
+        text = it
+        maybeFailure = null
+      },
+      label = { Text(stringResource(R.string.custom_status_text)) },
       singleLine = true,
       placeholder = { Text(stringResource(R.string.custom_status_hint)) },
-      modifier = Modifier.weight(1f),
+      isError = maybeTextError != null,
+      supportingText = supportingText(maybeTextError),
+      modifier = Modifier.weight(1f).focusRequester(textFocus).fieldError(maybeTextError),
     )
   }
   Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
     Button(
-      onClick = { viewModel.act(ChatActions.setCustomStatus(CustomStatus(emoji, text.trim(), "Today"))) },
-      enabled = text.isNotBlank(),
+      onClick = {
+        hasTried = true
+        if (text.isBlank()) {
+          textFocus.requestFocus()
+        } else {
+          isSaving = true
+          scope.launch {
+            maybeFailure = viewModel.tryAct(ChatActions.setCustomStatus(CustomStatus(emoji, text.trim(), "Today")))
+            if (maybeFailure != null) textFocus.requestFocus()
+            isSaving = false
+          }
+        }
+      },
+      enabled = !isSaving,
     ) { Text(stringResource(R.string.custom_status_set)) }
     OutlinedButton(onClick = {
       text = ""
+      hasTried = false
+      maybeFailure = null
       viewModel.act(ChatActions.setCustomStatus(null))
-    }) { Text(stringResource(R.string.custom_status_clear)) }
+    }, enabled = !isSaving) { Text(stringResource(R.string.custom_status_clear)) }
   }
 }
 
@@ -373,31 +434,57 @@ private fun KeyChanges(viewModel: MainViewModel) {
   }
 }
 
+/**
+ * A new recovery passphrase for the key backup. Too short, or refused by the core (the backup
+ * couldn't be re-encrypted or uploaded), is said at the field; the field keeps the input then.
+ */
 @Composable
 private fun ChangePassphrase(viewModel: MainViewModel) {
+  val scope = rememberCoroutineScope()
   var passphrase by remember { mutableStateOf("") }
   var isDone by rememberSaveable { mutableStateOf(false) }
+  var hasTried by remember { mutableStateOf(false) }
+  var isSaving by remember { mutableStateOf(false) }
+  var maybeFailure by remember { mutableStateOf<Int?>(null) }
+  val focus = remember { FocusRequester() }
+  val maybeError = passphraseError(passphrase).takeIf { hasTried } ?: maybeFailure
+  val submit: () -> Unit = {
+    hasTried = true
+    if (passphraseError(passphrase) != null) {
+      focus.requestFocus()
+    } else if (!isSaving) {
+      isSaving = true
+      scope.launch {
+        maybeFailure = viewModel.tryAct(ChatActions.changePassphrase(passphrase))
+        if (maybeFailure == null) {
+          passphrase = ""
+          hasTried = false
+          isDone = true
+        } else {
+          focus.requestFocus()
+        }
+        isSaving = false
+      }
+    }
+  }
   Heading(R.string.change_passphrase_title)
   OutlinedTextField(
     value = passphrase,
     onValueChange = {
       passphrase = it
       isDone = false
+      maybeFailure = null
     },
     label = { Text(stringResource(R.string.passphrase)) },
     singleLine = true,
     visualTransformation = PasswordVisualTransformation(),
-    keyboardOptions = PASSPHRASE_KEYBOARD,
-    modifier = Modifier.fillMaxWidth(),
+    keyboardOptions = PASSPHRASE_KEYBOARD.copy(imeAction = ImeAction.Done),
+    keyboardActions = KeyboardActions(onDone = { submit() }),
+    isError = maybeError != null,
+    supportingText = supportingText(maybeError, R.string.passphrase_rule_short),
+    modifier = Modifier.fillMaxWidth().focusRequester(focus).fieldError(maybeError),
   )
-  Button(
-    onClick = {
-      viewModel.act(ChatActions.changePassphrase(passphrase))
-      passphrase = ""
-      isDone = true
-    },
-    enabled = passphrase.length >= MIN_PASSPHRASE_LENGTH,
-  ) { Text(stringResource(R.string.change_passphrase_button)) }
+  Button(onClick = submit, enabled = !isSaving) { Text(stringResource(R.string.change_passphrase_button)) }
   if (isDone) Text(stringResource(R.string.change_passphrase_done), style = MaterialTheme.typography.bodySmall)
 }
 
@@ -412,9 +499,6 @@ private val PRESENCE_CHOICES = listOf(
   Presence.DO_NOT_DISTURB to R.string.presence_dnd,
   Presence.OFFLINE to R.string.presence_offline,
 )
-
-/** Same floor as the enrollment screen. */
-private const val MIN_PASSPHRASE_LENGTH = 12
 
 /** No screenshots or app-switcher thumbnails; applies the next time a screen opens. */
 @Composable

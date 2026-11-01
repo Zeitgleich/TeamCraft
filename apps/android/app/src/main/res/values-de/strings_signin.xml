@@ -22,4 +22,8 @@
   <string name="sign_in_provider_already_signed_in">Die Anmeldeseite war schon benutzt. Schließe andere Anmelde-Tabs im Browser und melde dich erneut an.</string>
   <string name="sign_in_provider_refused">Die Anmeldung deiner Organisation hat abgelehnt (Fehler: %1$s). Versuche es erneut oder sag deinem Admin Bescheid.</string>
   <string name="sign_out">Abmelden</string>
+  <string name="local_email_missing">Gib deine E-Mail-Adresse ein.</string>
+  <string name="local_password_missing">Gib dein Passwort ein.</string>
+  <string name="local_code_missing">Gib den Code aus deiner Authenticator-App ein.</string>
+  <string name="local_code_incomplete">Gib alle Ziffern des Codes ein: 6 bis 8.</string>
 </resources>

@@ -44,4 +44,8 @@
   <string name="link_code_for_signed_in_device">This code comes from a new device: scan it with a device that is already signed in.</string>
   <string name="link_code_expired">The code ran out. Show a new code and try again.</string>
   <string name="approve_new_phone_hint">Setting up a new phone? Choose Ask my other devices on it, or let it scan the code a computer shows under Link a new device.</string>
+  <string name="approve_code_missing">Enter the code shown on the new device.</string>
+  <string name="approve_code_incomplete">Enter all 6 digits shown on the new device.</string>
+  <string name="approve_code_digits">6 digits</string>
+  <string name="approve_link_code_missing">Enter the link code, or scan the QR code instead.</string>
 </resources>

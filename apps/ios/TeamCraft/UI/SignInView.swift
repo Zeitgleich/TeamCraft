@@ -8,17 +8,23 @@ struct SignInView: View {
   @Environment(AppModel.self) private var model
   let failure: AppFailure?
 
+  @Environment(\.accessibilityReduceMotion) private var reduceMotion
   @State private var form = LocalSignInForm()
   @State private var maybeBusyMethod: SignInOption?
-  @FocusState private var maybeFocus: Field?
+  /// A submit was refused or sent: from then on the fields' errors show and follow the input.
+  @State private var hasTried = false
+  @FocusState private var maybeFocus: SignInField?
+  @AccessibilityFocusState private var maybeAccessibilityFocus: SignInField?
   @ScaledMetric(relativeTo: .headline) private var ssoIconSize: CGFloat = 22
-
-  private enum Field: Hashable {
-    case email, password, code
-  }
 
   var body: some View {
     let brand = model.brand
+    ScrollViewReader { proxy in
+      content(brand, proxy: proxy)
+    }
+  }
+
+  private func content(_ brand: BrandStore, proxy: ScrollViewProxy) -> some View {
     ScrollView {
       VStack(spacing: 24) {
         header(brand)
@@ -26,7 +32,7 @@ struct SignInView: View {
           Text(failure.message).foregroundStyle(Theme.danger).multilineTextAlignment(.center)
         }
         if let page = model.maybeSignInPage {
-          methods(page)
+          methods(page, proxy: proxy)
           help(page)
         } else {
           ProgressView()
@@ -79,7 +85,7 @@ struct SignInView: View {
   }
 
   @ViewBuilder
-  private func methods(_ page: SignInPageInfo) -> some View {
+  private func methods(_ page: SignInPageInfo, proxy: ScrollViewProxy) -> some View {
     let sections = SignInSection.layout(methods: page.methods)
     // SSO is the prominent button when offered; otherwise the local form's button is.
     let isLocalProminent = !sections.contains(.sso)
@@ -87,7 +93,7 @@ struct SignInView: View {
       switch section {
       case .sso: ssoButton(page)
       case .divider: OrDivider()
-      case .local: localForm(requiresCode: page.localRequiresCode, isProminent: isLocalProminent)
+      case .local: localForm(requiresCode: page.localRequiresCode, isProminent: isLocalProminent, proxy: proxy)
       }
     }
   }
@@ -114,81 +120,118 @@ struct SignInView: View {
     .disabled(model.isBusy)
   }
 
-  private func localForm(requiresCode: Bool, isProminent: Bool) -> some View {
-    VStack(spacing: 12) {
-      TextField("sign_in_email", text: $form.email)
-        .textContentType(.username)
-        .keyboardType(.emailAddress)
-        .textInputAutocapitalization(.never)
-        .autocorrectionDisabled()
-        .submitLabel(.next)
-        .focused($maybeFocus, equals: .email)
-        .onSubmit { maybeFocus = .password }
-        .signInField()
-      HStack(spacing: 8) {
-        Group {
-          if form.isPasswordVisible {
-            TextField("sign_in_password", text: $form.password)
-          } else {
-            SecureField("sign_in_password", text: $form.password)
-          }
-        }
-        .textContentType(.password)
-        .textInputAutocapitalization(.never)
-        .autocorrectionDisabled()
-        .submitLabel(requiresCode ? .next : .go)
-        .focused($maybeFocus, equals: .password)
-        .onSubmit {
-          if requiresCode {
-            maybeFocus = .code
-          } else {
-            submitLocal(requiresCode: requiresCode)
-          }
-        }
-        Button {
-          form.isPasswordVisible.toggle()
-          maybeFocus = .password
-        } label: {
-          Image(systemName: form.isPasswordVisible ? "eye.slash" : "eye")
-            .frame(minWidth: 32, minHeight: 32)
-        }
-        .buttonStyle(.borderless)
-        .foregroundStyle(Theme.textMuted)
-        .accessibilityLabel(
-          Text(
-            form.isPasswordVisible
-              ? LocalizedStringKey("sign_in_hide_password") : LocalizedStringKey("sign_in_show_password")))
+  private func localForm(
+    requiresCode: Bool, isProminent: Bool, proxy: ScrollViewProxy
+  ) -> some View {
+    let errors = shownErrors(requiresCode: requiresCode)
+    let submit = { submitLocal(requiresCode: requiresCode, proxy: proxy) }
+    return VStack(spacing: 12) {
+      VStack(spacing: 6) {
+        TextField("sign_in_email", text: $form.email)
+          .textContentType(.username)
+          .keyboardType(.emailAddress)
+          .textInputAutocapitalization(.never)
+          .autocorrectionDisabled()
+          .submitLabel(.next)
+          .focused($maybeFocus, equals: .email)
+          .accessibilityFocused($maybeAccessibilityFocus, equals: .email)
+          .fieldError(errors[.email]?.message)
+          .onSubmit { maybeFocus = .password }
+          .onChange(of: form.email) { form.maybeFailure = nil }
+          .signInField(isError: errors[.email] != nil)
+        FieldMessage(maybeError: errors[.email]?.message)
       }
-      .signInField()
-      // Shown from the start: the server never says whether an account has a code (no oracle).
-      TextField(
-        requiresCode ? LocalizedStringKey("sign_in_code_required") : LocalizedStringKey("sign_in_code_optional"),
-        text: $form.code
-      )
-      .textContentType(.oneTimeCode)
-      .keyboardType(.numberPad)
-      .font(.body.monospacedDigit())
-      .focused($maybeFocus, equals: .code)
-      .onChange(of: form.code) { _, newValue in
-        let clean = LocalSignInForm.sanitizedCode(newValue)
-        if clean != newValue { form.code = clean }
+      .id(SignInField.email)
+      VStack(spacing: 6) {
+        HStack(spacing: 8) {
+          Group {
+            if form.isPasswordVisible {
+              TextField("sign_in_password", text: $form.password)
+            } else {
+              SecureField("sign_in_password", text: $form.password)
+            }
+          }
+          .textContentType(.password)
+          .textInputAutocapitalization(.never)
+          .autocorrectionDisabled()
+          .submitLabel(requiresCode ? .next : .go)
+          .focused($maybeFocus, equals: .password)
+          .accessibilityFocused($maybeAccessibilityFocus, equals: .password)
+          .fieldError(errors[.password]?.message)
+          .onSubmit {
+            if requiresCode {
+              maybeFocus = .code
+            } else {
+              submit()
+            }
+          }
+          Button {
+            form.isPasswordVisible.toggle()
+            maybeFocus = .password
+          } label: {
+            Image(systemName: form.isPasswordVisible ? "eye.slash" : "eye")
+              .frame(minWidth: 32, minHeight: 32)
+          }
+          .buttonStyle(.borderless)
+          .foregroundStyle(Theme.textMuted)
+          .accessibilityLabel(
+            Text(
+              form.isPasswordVisible
+                ? LocalizedStringKey("sign_in_hide_password") : LocalizedStringKey("sign_in_show_password")))
+        }
+        .signInField(isError: errors[.password] != nil)
+        // A refusal empties the password; typing a new one takes the refusal away.
+        .onChange(of: form.password) { _, password in
+          if !password.isEmpty { form.maybeFailure = nil }
+        }
+        FieldMessage(maybeError: errors[.password]?.message)
       }
-      .signInField()
-      if let failure = form.maybeFailure {
+      .id(SignInField.password)
+      VStack(spacing: 6) {
+        // Shown from the start: the server never says whether an account has a code (no oracle).
+        TextField(
+          requiresCode ? LocalizedStringKey("sign_in_code_required") : LocalizedStringKey("sign_in_code_optional"),
+          text: $form.code
+        )
+        .textContentType(.oneTimeCode)
+        .keyboardType(.numberPad)
+        .font(.body.monospacedDigit())
+        .focused($maybeFocus, equals: .code)
+        .accessibilityFocused($maybeAccessibilityFocus, equals: .code)
+        .fieldError(errors[.code]?.message)
+        .onChange(of: form.code) { _, newValue in
+          let clean = LocalSignInForm.sanitizedCode(newValue)
+          if clean != newValue { form.code = clean }
+          if !clean.isEmpty { form.maybeFailure = nil }
+        }
+        .signInField(isError: errors[.code] != nil)
+        FieldMessage(maybeError: errors[.code]?.message)
+      }
+      .id(SignInField.code)
+      // A failure that belongs to no field (offline, local accounts off) sits next to the button.
+      if let failure = form.maybeFailure, failure.maybeField == nil {
         Text(failure.message)
           .foregroundStyle(Theme.danger)
           .multilineTextAlignment(.center)
       }
-      SignInActionButton(isProminent: isProminent, action: { submitLocal(requiresCode: requiresCode) }) {
+      SignInActionButton(isProminent: isProminent, action: submit) {
         if maybeBusyMethod == .local {
           ProgressView().tint(isProminent ? Theme.onAccent : Theme.accent)
         } else {
           Text("sign_in")
         }
       }
-      .disabled(model.isBusy || !form.canSubmit(requiresCode: requiresCode))
+      .disabled(model.isBusy)
     }
     .disabled(model.isBusy)
+  }
+
+  /// The form's own errors once a submit was tried, with the server's refusal at its field.
+  private func shownErrors(requiresCode: Bool) -> FieldErrors<SignInField, SignInProblem> {
+    let own: FieldErrors<SignInField, SignInProblem> =
+      hasTried ? form.errors(requiresCode: requiresCode) : FieldErrors()
+    guard let failure = form.maybeFailure, let field = failure.maybeField else { return own }
+    return own.with(.refused(failure), at: field)
   }
 
   @ViewBuilder
@@ -233,20 +276,32 @@ struct SignInView: View {
     }
   }
 
-  private func submitLocal(requiresCode: Bool) {
-    guard !model.isBusy, form.canSubmit(requiresCode: requiresCode) else { return }
+  private func submitLocal(requiresCode: Bool, proxy: ScrollViewProxy) {
+    guard !model.isBusy else { return }
+    hasTried = true
+    form.maybeFailure = nil
+    if let first = form.errors(requiresCode: requiresCode).maybeFirst {
+      focus(first, proxy: proxy)
+      return
+    }
     let email = form.trimmedEmail
     let password = form.password
     let maybeCode = form.maybeCode
-    form.maybeFailure = nil
     maybeBusyMethod = .local
     Task {
       let maybeFailure = await model.signInLocal(email: email, password: password, maybeCode: maybeCode)
       maybeBusyMethod = nil
       guard let failure = maybeFailure else { return }
       form.apply(failure)
-      if failure == .wrongCredentials { maybeFocus = .password }
+      if let field = failure.maybeField { focus(field, proxy: proxy) }
     }
+  }
+
+  /// The field takes keyboard and VoiceOver focus and scrolls to the middle (forms.md).
+  private func focus(_ field: SignInField, proxy: ScrollViewProxy) {
+    maybeFocus = field
+    maybeAccessibilityFocus = field
+    scrollToMiddle(field, in: proxy, reduceMotion: reduceMotion)
   }
 }
 
@@ -301,12 +356,13 @@ private struct OrDivider: View {
 }
 
 extension View {
-  /// A text field on the sign-in screen: padded, on the surface color, with a visible edge.
-  fileprivate func signInField() -> some View {
+  /// A text field on the sign-in screen: padded, on the surface color, with a visible edge (red
+  /// while the field has an error).
+  fileprivate func signInField(isError: Bool) -> some View {
     padding(12)
       .background(Theme.surface)
       .clipShape(RoundedRectangle(cornerRadius: Theme.radius))
-      .overlay(RoundedRectangle(cornerRadius: Theme.radius).stroke(Theme.controlBorder))
+      .fieldEdge(isError: isError)
   }
 }
 

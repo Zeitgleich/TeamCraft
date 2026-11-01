@@ -62,4 +62,6 @@
     <item quantity="one">%1$d message can\'t be read on this device yet. It appears once its keys arrive from another member\'s device.</item>
     <item quantity="other">%1$d messages can\'t be read on this device yet. They appear once their keys arrive from another member\'s device.</item>
   </plurals>
+  <string name="message_edit_label">Message</string>
+  <string name="message_edit_empty">A message can\'t be empty. To remove it, delete it.</string>
 </resources>

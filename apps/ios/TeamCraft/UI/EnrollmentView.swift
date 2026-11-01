@@ -5,53 +5,79 @@ import SwiftUI
 /// passphrase or the organization's admins.
 struct EnrollmentView: View {
   @Environment(AppModel.self) private var model
+  @Environment(\.accessibilityReduceMotion) private var reduceMotion
   let hasExistingIdentity: Bool
   let failure: AppFailure?
 
   @State private var passphrase = ""
   @State private var repeated = ""
+  /// A submit was refused or sent: from then on the fields' errors show and follow the input.
+  @State private var hasTried = false
+  /// A wrong passphrase is about the one typed; once the user edits it, it no longer applies.
+  @State private var isFailureEdited = false
+  @FocusState private var maybeFocus: NewPassphraseField?
+  @AccessibilityFocusState private var maybeAccessibilityFocus: NewPassphraseField?
 
   var body: some View {
-    ScrollView {
-      VStack(alignment: .leading, spacing: Theme.spacing) {
-        Text("enroll_title").font(.title.bold()).accessibilityAddTraits(.isHeader)
-        if hasExistingIdentity { restore } else { newKeys }
-        Button("sign_out", role: .destructive) { Task { await model.signOut() } }
-          .padding(.top, 16)
+    ScrollViewReader { proxy in
+      ScrollView {
+        VStack(alignment: .leading, spacing: Theme.spacing) {
+          Text("enroll_title").font(.title.bold()).accessibilityAddTraits(.isHeader)
+          if hasExistingIdentity { restore(proxy) } else { newKeys(proxy) }
+          Button("sign_out", role: .destructive) { Task { await model.signOut() } }
+            .padding(.top, 16)
+        }
+        .padding(24)
       }
-      .padding(24)
+      // The core refused the passphrase: the field takes the focus, so it can be retyped.
+      .onChange(of: model.isBusy) { _, isBusy in
+        if !isBusy, failure == .wrongPassphrase { focus(.passphrase, proxy: proxy) }
+      }
     }
   }
 
   @ViewBuilder
-  private var newKeys: some View {
+  private func newKeys(_ proxy: ScrollViewProxy) -> some View {
+    let errors = shownNewErrors
     Text("enroll_new_hint").foregroundStyle(Theme.textMuted)
-    PassphraseField(title: "passphrase", text: $passphrase, contentType: .newPassword)
-    PassphraseField(title: "passphrase_repeat", text: $repeated, contentType: .newPassword) { submit() }
+    PassphraseField(
+      title: "passphrase", text: $passphrase, contentType: .newPassword, field: .passphrase,
+      maybeError: errors[.passphrase]?.message, focus: $maybeFocus,
+      accessibilityFocus: $maybeAccessibilityFocus)
+    PassphraseField(
+      title: "passphrase_repeat", text: $repeated, contentType: .newPassword, field: .repeated,
+      maybeError: errors[.repeated]?.message, focus: $maybeFocus,
+      accessibilityFocus: $maybeAccessibilityFocus
+    ) { submit(proxy) }
     Text("passphrase_rule \(PassphraseRules.minimumLength)").font(.footnote).foregroundStyle(Theme.textMuted)
-    if let problemText {
-      Text(problemText).font(.footnote).foregroundStyle(Theme.danger)
-    }
-    if let failure { Text(failure.message).foregroundStyle(Theme.danger) }
-    Button { submit() } label: { busyLabel("enroll_button") }
+    // The device's or the server's failure belongs to no field: it sits next to the button.
+    if let failure, !model.isBusy { Text(failure.message).foregroundStyle(Theme.danger) }
+    Button { submit(proxy) } label: { busyLabel("enroll_button") }
       .buttonStyle(PrimaryButtonStyle())
-      .disabled(!isValid || model.isBusy)
+      .disabled(model.isBusy)
   }
 
   @ViewBuilder
-  private var restore: some View {
+  private func restore(_ proxy: ScrollViewProxy) -> some View {
+    let maybeError = shownRestoreError
     Text("restore_link_hint").foregroundStyle(Theme.textMuted)
     Button("link_instead") { model.startLinking() }
       .buttonStyle(PrimaryButtonStyle())
       .disabled(model.isBusy)
     Divider().padding(.vertical, 8)
     Text("restore_passphrase_hint").foregroundStyle(Theme.textMuted)
-    PassphraseField(title: "passphrase", text: $passphrase, contentType: .password) { submit() }
-    if let failure { Text(failure.message).foregroundStyle(Theme.danger) }
-    Button { submit() } label: { busyLabel("recover_button") }
+    PassphraseField(
+      title: "passphrase", text: $passphrase, contentType: .password, field: .passphrase,
+      maybeError: maybeError?.message, focus: $maybeFocus, accessibilityFocus: $maybeAccessibilityFocus
+    ) { submit(proxy) }
+    .onChange(of: passphrase) { isFailureEdited = true }
+    if let failure, failure != .wrongPassphrase, !model.isBusy {
+      Text(failure.message).foregroundStyle(Theme.danger)
+    }
+    Button { submit(proxy) } label: { busyLabel("recover_button") }
       .buttonStyle(.bordered)
       .frame(maxWidth: .infinity)
-      .disabled(!isValid || model.isBusy)
+      .disabled(model.isBusy)
     Button("recover_with_admins") { Task { await model.startRecovery() } }
       .disabled(model.isBusy)
   }
@@ -69,67 +95,97 @@ struct EnrollmentView: View {
     }
   }
 
-  private func submit() {
-    guard isValid, !model.isBusy else { return }
+  private var shownNewErrors: FieldErrors<NewPassphraseField, PassphraseProblem> {
+    hasTried ? PassphraseRules.errors(passphrase: passphrase, repeated: repeated) : FieldErrors()
+  }
+
+  /// The passphrase's own problem once tried, else the core's "wrong passphrase" until edited.
+  private var shownRestoreError: PassphraseProblem? {
+    if hasTried, let problem = PassphraseRules.problem(passphrase: passphrase) { return problem }
+    guard failure == .wrongPassphrase, !isFailureEdited, !model.isBusy else { return nil }
+    return .wrong
+  }
+
+  private func submit(_ proxy: ScrollViewProxy) {
+    guard !model.isBusy else { return }
+    hasTried = true
+    let maybeFirst: NewPassphraseField? =
+      hasExistingIdentity
+      ? (PassphraseRules.problem(passphrase: passphrase) == nil ? nil : .passphrase)
+      : PassphraseRules.errors(passphrase: passphrase, repeated: repeated).maybeFirst
+    if let maybeFirst {
+      focus(maybeFirst, proxy: proxy)
+      return
+    }
+    isFailureEdited = false
     Task { await model.enroll(passphrase: passphrase) }
   }
 
-  private var isValid: Bool {
-    hasExistingIdentity
-      ? !passphrase.isEmpty : PassphraseRules.problem(passphrase: passphrase, repeated: repeated) == nil
-  }
-
-  private var problemText: LocalizedStringKey? {
-    guard !hasExistingIdentity, !passphrase.isEmpty else { return nil }
-    switch PassphraseRules.problem(passphrase: passphrase, repeated: repeated) {
-    case .tooShort: return "passphrase_too_short"
-    case .mismatch: return repeated.isEmpty ? nil : "passphrases_differ"
-    case nil: return nil
-    }
+  private func focus(_ field: NewPassphraseField, proxy: ScrollViewProxy) {
+    maybeFocus = field
+    maybeAccessibilityFocus = field
+    scrollToMiddle(field, in: proxy, reduceMotion: reduceMotion)
   }
 }
 
-/// A passphrase field with a show/hide button. The last field of a form submits on Return.
-struct PassphraseField: View {
+/// A passphrase field with a show/hide button, its error below it (forms.md). The last field of a
+/// form submits on Return.
+struct PassphraseField<Field: Hashable>: View {
   let title: LocalizedStringKey
   @Binding var text: String
   let contentType: UITextContentType
+  let field: Field
+  let maybeError: LocalizedStringKey?
+  let focus: FocusState<Field?>.Binding
+  let accessibilityFocus: AccessibilityFocusState<Field?>.Binding
   let maybeOnSubmit: (() -> Void)?
 
   @State private var isVisible = false
 
   init(
-    title: LocalizedStringKey, text: Binding<String>, contentType: UITextContentType,
-    onSubmit: (() -> Void)? = nil
+    title: LocalizedStringKey, text: Binding<String>, contentType: UITextContentType, field: Field,
+    maybeError: LocalizedStringKey?, focus: FocusState<Field?>.Binding,
+    accessibilityFocus: AccessibilityFocusState<Field?>.Binding, onSubmit: (() -> Void)? = nil
   ) {
     self.title = title
     _text = text
     self.contentType = contentType
+    self.field = field
+    self.maybeError = maybeError
+    self.focus = focus
+    self.accessibilityFocus = accessibilityFocus
     maybeOnSubmit = onSubmit
   }
 
   var body: some View {
-    HStack {
-      Group {
-        if isVisible { TextField(title, text: $text) } else { SecureField(title, text: $text) }
+    VStack(alignment: .leading, spacing: 6) {
+      HStack {
+        Group {
+          if isVisible { TextField(title, text: $text) } else { SecureField(title, text: $text) }
+        }
+        .textContentType(contentType)
+        .textInputAutocapitalization(.never)
+        .autocorrectionDisabled()
+        .submitLabel(maybeOnSubmit == nil ? .next : .done)
+        .focused(focus, equals: field)
+        .accessibilityFocused(accessibilityFocus, equals: field)
+        .fieldError(maybeError)
+        .onSubmit { maybeOnSubmit?() }
+        Button {
+          isVisible.toggle()
+        } label: {
+          Image(systemName: isVisible ? "eye.slash" : "eye")
+            .frame(minWidth: 44, minHeight: 44)
+        }
+        .buttonStyle(.plain)
+        .foregroundStyle(Theme.textMuted)
+        .accessibilityLabel(Text(isVisible ? "passphrase_hide" : "passphrase_show"))
       }
-      .textContentType(contentType)
-      .textInputAutocapitalization(.never)
-      .autocorrectionDisabled()
-      .submitLabel(maybeOnSubmit == nil ? .next : .done)
-      .onSubmit { maybeOnSubmit?() }
-      Button {
-        isVisible.toggle()
-      } label: {
-        Image(systemName: isVisible ? "eye.slash" : "eye")
-          .frame(minWidth: 44, minHeight: 44)
-      }
-      .buttonStyle(.plain)
-      .foregroundStyle(Theme.textMuted)
-      .accessibilityLabel(Text(isVisible ? "passphrase_hide" : "passphrase_show"))
+      .padding(.leading, 8)
+      .fieldEdge(isError: maybeError != nil, cornerRadius: 6)
+      FieldMessage(maybeError: maybeError)
     }
-    .padding(.leading, 8)
-    .overlay(RoundedRectangle(cornerRadius: 6).stroke(Theme.controlBorder))
+    .id(field)
   }
 }
 
@@ -204,33 +260,60 @@ struct LinkThisDeviceView: View {
 /// new passphrase (e2ee.md §6.3.1).
 struct OrgRecoveryView: View {
   @Environment(AppModel.self) private var model
+  @Environment(\.accessibilityReduceMotion) private var reduceMotion
   let progress: RecoveryProgress
   let failure: AppFailure?
 
   @State private var passphrase = ""
   @State private var repeated = ""
+  @State private var hasTried = false
+  @FocusState private var maybeFocus: NewPassphraseField?
+  @AccessibilityFocusState private var maybeAccessibilityFocus: NewPassphraseField?
 
   var body: some View {
-    ScrollView {
-      VStack(alignment: .leading, spacing: Theme.spacing) {
-        Text("recovery_title").font(.title.bold()).accessibilityAddTraits(.isHeader)
-        Text("recovery_hint").foregroundStyle(Theme.textMuted)
-        Text(progress.verificationCode)
-          .font(.system(.title, design: .monospaced).bold())
-          .frame(maxWidth: .infinity)
-          .padding()
-          .background(Theme.surface)
-          .clipShape(RoundedRectangle(cornerRadius: Theme.radius))
-        Text("recovery_new_passphrase").foregroundStyle(Theme.textMuted)
-        PassphraseField(title: "passphrase", text: $passphrase, contentType: .newPassword)
-        PassphraseField(title: "passphrase_repeat", text: $repeated, contentType: .newPassword)
-        if let failure { Text(failure.message).foregroundStyle(Theme.danger) }
-        Button("recovery_finish") { Task { await model.finishRecovery(newPassphrase: passphrase) } }
-          .buttonStyle(PrimaryButtonStyle())
-          .disabled(PassphraseRules.problem(passphrase: passphrase, repeated: repeated) != nil || model.isBusy)
-        Button("cancel") { model.cancelRecovery() }
+    let errors: FieldErrors<NewPassphraseField, PassphraseProblem> =
+      hasTried ? PassphraseRules.errors(passphrase: passphrase, repeated: repeated) : FieldErrors()
+    ScrollViewReader { proxy in
+      ScrollView {
+        VStack(alignment: .leading, spacing: Theme.spacing) {
+          Text("recovery_title").font(.title.bold()).accessibilityAddTraits(.isHeader)
+          Text("recovery_hint").foregroundStyle(Theme.textMuted)
+          Text(progress.verificationCode)
+            .font(.system(.title, design: .monospaced).bold())
+            .frame(maxWidth: .infinity)
+            .padding()
+            .background(Theme.surface)
+            .clipShape(RoundedRectangle(cornerRadius: Theme.radius))
+          Text("recovery_new_passphrase").foregroundStyle(Theme.textMuted)
+          PassphraseField(
+            title: "passphrase", text: $passphrase, contentType: .newPassword, field: .passphrase,
+            maybeError: errors[.passphrase]?.message, focus: $maybeFocus,
+            accessibilityFocus: $maybeAccessibilityFocus)
+          PassphraseField(
+            title: "passphrase_repeat", text: $repeated, contentType: .newPassword, field: .repeated,
+            maybeError: errors[.repeated]?.message, focus: $maybeFocus,
+            accessibilityFocus: $maybeAccessibilityFocus
+          ) { finish(proxy) }
+          if let failure, !model.isBusy { Text(failure.message).foregroundStyle(Theme.danger) }
+          Button("recovery_finish") { finish(proxy) }
+            .buttonStyle(PrimaryButtonStyle())
+            .disabled(model.isBusy)
+          Button("cancel") { model.cancelRecovery() }
+        }
+        .padding(24)
       }
-      .padding(24)
     }
+  }
+
+  private func finish(_ proxy: ScrollViewProxy) {
+    guard !model.isBusy else { return }
+    hasTried = true
+    if let first = PassphraseRules.errors(passphrase: passphrase, repeated: repeated).maybeFirst {
+      maybeFocus = first
+      maybeAccessibilityFocus = first
+      scrollToMiddle(first, in: proxy, reduceMotion: reduceMotion)
+      return
+    }
+    Task { await model.finishRecovery(newPassphrase: passphrase) }
   }
 }

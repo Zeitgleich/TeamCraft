@@ -11,6 +11,10 @@ struct SettingsView: View {
   @State private var statusEmoji = ""
   @State private var statusText = ""
   @State private var statusExpiry = StatusExpiryValue.never
+  @State private var maybeStatusProblem: TextProblem?
+  @State private var isSavingStatus = false
+  @FocusState private var isStatusFocused: Bool
+  @AccessibilityFocusState private var isStatusAccessibilityFocused: Bool
 
   var body: some View {
     NavigationStack {
@@ -65,22 +69,55 @@ struct SettingsView: View {
 
   private var customStatusSection: some View {
     Section("custom_status_title") {
-      TextField("custom_status_emoji", text: $statusEmoji)
-      TextField("custom_status_text", text: $statusText)
+      LabeledContent("custom_status_emoji_label") {
+        TextField("custom_status_emoji", text: $statusEmoji)
+          .multilineTextAlignment(.trailing)
+      }
+      VStack(alignment: .leading, spacing: 6) {
+        LabeledContent("custom_status_text_label") {
+          TextField("custom_status_text", text: $statusText)
+            .multilineTextAlignment(.trailing)
+            .focused($isStatusFocused)
+            .accessibilityFocused($isStatusAccessibilityFocused)
+            .fieldError(maybeStatusProblem?.message)
+            .onChange(of: statusText) { maybeStatusProblem = nil }
+        }
+        FieldMessage(maybeError: maybeStatusProblem?.message)
+      }
       Picker("custom_status_expiry", selection: $statusExpiry) {
         ForEach(StatusExpiryValue.allCases) { expiry in Text(expiry.title).tag(expiry) }
       }
-      Button("custom_status_save") {
-        let status = CustomStatusValue(emoji: statusEmoji, text: statusText, expiry: statusExpiry)
-        Task { await model.perform(.setCustomStatus(status)) }
-      }
-      .disabled(statusEmoji.isEmpty && statusText.isEmpty)
+      Button("custom_status_save") { Task { await saveStatus() } }
+        .disabled(isSavingStatus)
       Button("custom_status_clear", role: .destructive) {
         statusEmoji = ""
         statusText = ""
+        maybeStatusProblem = nil
         Task { await model.perform(.setCustomStatus(nil)) }
       }
+      .disabled(isSavingStatus)
     }
+  }
+
+  /// An empty status is said at the text field; so is the core's refusal, with the input kept.
+  private func saveStatus() async {
+    guard !isSavingStatus else { return }
+    if statusEmoji.isEmpty, let problem = TextProblem.required(statusText, missing: "custom_status_missing") {
+      showStatusProblem(problem)
+      return
+    }
+    isSavingStatus = true
+    let status = CustomStatusValue(emoji: statusEmoji, text: statusText, expiry: statusExpiry)
+    if let failure = await model.performReporting(.setCustomStatus(status)) {
+      showStatusProblem(.refused(failure))
+    }
+    isSavingStatus = false
+  }
+
+  private func showStatusProblem(_ problem: TextProblem) {
+    maybeStatusProblem = problem
+    isStatusFocused = true
+    isStatusAccessibilityFocused = true
   }
 }
 
@@ -303,27 +340,40 @@ struct ApproveLinkView: View {
 
   @State private var code = ""
   @State private var step = Step.enterCode
-  @State private var maybeError: LocalizedStringKey?
+  /// Why the last attempt ended (on the new device); not about the code typed here.
+  @State private var maybeNotice: LocalizedStringKey?
+  /// A missing code or the server's refusal of it, shown at the code field.
+  @State private var maybeProblem: TextProblem?
   @State private var isWorking = false
   @State private var isScanning = false
+  @FocusState private var isCodeFocused: Bool
+  @AccessibilityFocusState private var isCodeAccessibilityFocused: Bool
 
   var body: some View {
     Form {
       switch step {
       case .enterCode:
         Section {
+          if let notice = maybeNotice {
+            Text(notice).font(.footnote).foregroundStyle(Theme.danger)
+          }
           Text("approve_hint").foregroundStyle(Theme.textMuted)
           Button("approve_scan", systemImage: "qrcode.viewfinder") { isScanning = true }
+            .disabled(isWorking)
           Text("approve_new_phone_hint").font(.footnote).foregroundStyle(Theme.textMuted)
-          TextField("approve_code", text: $code, axis: .vertical)
-            .textInputAutocapitalization(.never)
-            .autocorrectionDisabled()
-            .font(.system(.body, design: .monospaced))
-          Button("approve_start") { Task { await approve(code) } }
-            .disabled(isWorking || code.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-          if let error = maybeError {
-            Text(error).font(.footnote).foregroundStyle(Theme.danger)
+          VStack(alignment: .leading, spacing: 6) {
+            TextField("approve_code", text: $code, axis: .vertical)
+              .textInputAutocapitalization(.never)
+              .autocorrectionDisabled()
+              .font(.system(.body, design: .monospaced))
+              .focused($isCodeFocused)
+              .accessibilityFocused($isCodeAccessibilityFocused)
+              .fieldError(maybeProblem?.message)
+              .onChange(of: code) { maybeProblem = nil }
+            FieldMessage(maybeError: maybeProblem?.message)
           }
+          Button("approve_start") { Task { await approveTyped() } }
+            .disabled(isWorking)
         }
       case .typeCode:
         Section {
@@ -354,23 +404,41 @@ struct ApproveLinkView: View {
     }
   }
 
-  /// Joins the new device whose code was scanned or typed; the typed-code step follows.
+  /// A typed code: an empty field is said at the field, not sent.
+  private func approveTyped() async {
+    if let problem = TextProblem.required(code, missing: "approve_code_missing") {
+      showAtField(problem)
+      return
+    }
+    await approve(code)
+  }
+
+  /// Joins the new device whose code was scanned or typed; the typed-code step follows. The
+  /// server's refusal of the code (expired, for the other device) goes to the code field.
   private func approve(_ text: String) async {
     guard !isWorking else { return }
     isWorking = true
-    maybeError = nil
+    maybeNotice = nil
+    maybeProblem = nil
     do {
       try await model.approveLink(code: text)
       step = .typeCode
     } catch {
-      maybeError = AppFailure(CoreFailure(error)).message
+      showAtField(.refused(AppFailure(CoreFailure(error))))
     }
     isWorking = false
   }
 
+  private func showAtField(_ problem: TextProblem) {
+    maybeProblem = problem
+    isCodeFocused = true
+    isCodeAccessibilityFocused = true
+  }
+
   private func restart(with maybeMessage: LocalizedStringKey?) {
     code = ""
-    maybeError = maybeMessage
+    maybeProblem = nil
+    maybeNotice = maybeMessage
     step = .enterCode
   }
 }
@@ -384,6 +452,9 @@ struct NotificationRulesView: View {
   @State private var rules = MentionSettings(isFirstNameMention: true, doChannelMentionsNotify: true, keywords: [])
   @State private var isLoaded = false
   @State private var newKeyword = ""
+  @State private var maybeKeywordProblem: TextProblem?
+  @FocusState private var isKeywordFocused: Bool
+  @AccessibilityFocusState private var isKeywordAccessibilityFocused: Bool
 
   var body: some View {
     Form {
@@ -396,13 +467,20 @@ struct NotificationRulesView: View {
       Section("rules_keywords") {
         ForEach(rules.keywords, id: \.self) { keyword in Text(keyword) }
           .onDelete { offsets in rules.keywords.remove(atOffsets: offsets) }
-        HStack {
-          TextField("rules_keyword_hint", text: $newKeyword)
-            .textInputAutocapitalization(.never)
-            .autocorrectionDisabled()
-            .onSubmit(addKeyword)
-          Button("rules_keyword_add", action: addKeyword)
-            .disabled(newKeyword.trimmingCharacters(in: .whitespaces).isEmpty)
+        VStack(alignment: .leading, spacing: 6) {
+          HStack {
+            TextField("rules_keyword_hint", text: $newKeyword)
+              .textInputAutocapitalization(.never)
+              .autocorrectionDisabled()
+              .focused($isKeywordFocused)
+              .accessibilityFocused($isKeywordAccessibilityFocused)
+              .accessibilityLabel(Text("rules_keyword_label"))
+              .fieldError(maybeKeywordProblem?.message)
+              .onSubmit(addKeyword)
+              .onChange(of: newKeyword) { maybeKeywordProblem = nil }
+            Button("rules_keyword_add", action: addKeyword)
+          }
+          FieldMessage(maybeError: maybeKeywordProblem?.message)
         }
       }
     }
@@ -417,11 +495,15 @@ struct NotificationRulesView: View {
     }
   }
 
+  /// Adds the typed keyword; an empty one or one already in the list is said at the field.
   private func addKeyword() {
-    let keyword = newKeyword.trimmingCharacters(in: .whitespacesAndNewlines)
+    if let problem = keywordProblem(newKeyword, existing: rules.keywords) {
+      maybeKeywordProblem = problem
+      isKeywordFocused = true
+      isKeywordAccessibilityFocused = true
+      return
+    }
+    rules.keywords.append(newKeyword.trimmingCharacters(in: .whitespacesAndNewlines))
     newKeyword = ""
-    guard !keyword.isEmpty, !rules.keywords.contains(where: { $0.caseInsensitiveCompare(keyword) == .orderedSame })
-    else { return }
-    rules.keywords.append(keyword)
   }
 }

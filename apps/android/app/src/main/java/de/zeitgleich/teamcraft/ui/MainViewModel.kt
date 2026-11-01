@@ -117,7 +117,13 @@ sealed interface AppState {
 }
 
 /** The approval of a new device the user is in; the code to type is on the new device only. */
-data class LinkReview(val deviceName: String?, @StringRes val maybeError: Int? = null, val isDone: Boolean = false)
+data class LinkReview(
+  val deviceName: String?,
+  @StringRes val maybeError: Int? = null,
+  val isDone: Boolean = false,
+  /** The typed code is being checked: the confirm button waits. */
+  val isConfirming: Boolean = false,
+)
 
 /** What typing the new device's code did. */
 enum class LinkConfirmation { CONFIRMED, WRONG_CODE, ATTEMPT_ENDED, FAILED }
@@ -540,6 +546,22 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
   }
 
+  /**
+   * Runs [action] for a form and returns why it failed (null on success), so the form shows the
+   * refusal at its field and stays open with the input (forms.md, "Submitting").
+   */
+  @StringRes
+  suspend fun tryAct(action: String): Int? =
+    try {
+      chat.act(action)
+      null
+    } catch (failure: TeamCraftException) {
+      errorText(failure)
+    } catch (failure: IllegalStateException) {
+      // Signed out meanwhile: the sign-in screen replaces the form.
+      R.string.error_signed_out
+    }
+
   /** Shows a message once, like a failed action. */
   fun showFailure(@StringRes message: Int) {
     failures.value = message
@@ -721,7 +743,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
   /** Sends the typed code of a reviewed request; a wrong code stays on the step for another try. */
   fun confirmLinkReview(typedCode: String) = viewModelScope.launch {
-    val current = review.value ?: return@launch
+    val current = review.value?.copy(isConfirming = true) ?: return@launch
+    review.value = current
     val confirmation = confirmLink(typedCode)
     // Closing the review while the new device's receipt is awaited cancels the wait (issue #415):
     // a review the user closed (or replaced) meanwhile stays closed, without an error.
@@ -731,7 +754,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
       LinkConfirmation.WRONG_CODE -> current.copy(maybeError = R.string.approve_code_wrong)
       LinkConfirmation.ATTEMPT_ENDED -> current.copy(maybeError = R.string.approve_attempt_ended, isDone = false)
       LinkConfirmation.FAILED -> current.copy(maybeError = R.string.error_generic)
-    }
+    }.copy(isConfirming = false)
   }
 
   /** The user left the reviewed approval (or closed its confirmation). */

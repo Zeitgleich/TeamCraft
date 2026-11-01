@@ -223,10 +223,11 @@ fun BrowseScreen(viewModel: MainViewModel, onOpen: (String) -> Unit, onBack: () 
   if (isCreating && maybeSpace != null) {
     TextDialog(
       title = R.string.channel_create,
+      label = R.string.channel_name_label,
+      whenEmpty = R.string.channel_name_missing,
       initial = "",
       onConfirm = { name ->
-        viewModel.act(ChatActions.createChannel(maybeSpace.id, name.trim()))
-        isCreating = false
+        viewModel.tryAct(ChatActions.createChannel(maybeSpace.id, name.trim())).also { if (it == null) isCreating = false }
       },
       onDismiss = { isCreating = false },
     )

@@ -16,4 +16,7 @@
   <string name="custom_status_hint">What are you up to?</string>
   <string name="custom_status_set">Set until tonight</string>
   <string name="custom_status_clear">Clear</string>
+  <string name="custom_status_emoji">Emoji</string>
+  <string name="custom_status_text">Status</string>
+  <string name="custom_status_missing">Enter a status text.</string>
 </resources>

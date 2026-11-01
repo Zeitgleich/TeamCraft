@@ -1,5 +1,6 @@
 package de.zeitgleich.teamcraft.ui.screens
 
+import androidx.annotation.StringRes
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.semantics.contentDescription
 import android.content.ClipboardManager
@@ -95,6 +96,9 @@ import androidx.core.graphics.PaintCompat
 import java.io.File
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import de.zeitgleich.teamcraft.ui.forms.fieldError
+import de.zeitgleich.teamcraft.ui.forms.requiredTextError
+import de.zeitgleich.teamcraft.ui.forms.supportingText
 import de.zeitgleich.teamcraft.R
 import de.zeitgleich.teamcraft.TeamCraftApplication
 import de.zeitgleich.teamcraft.calls.CallOptions
@@ -743,10 +747,11 @@ private fun MessageActions(
   if (isEditing) {
     TextDialog(
       title = R.string.action_edit,
+      label = R.string.message_edit_label,
+      whenEmpty = R.string.message_edit_empty,
       initial = message.body,
       onConfirm = { body ->
-        viewModel.act(ChatActions.edit(conversationId, message.id, body))
-        onDismiss()
+        viewModel.tryAct(ChatActions.edit(conversationId, message.id, body)).also { if (it == null) onDismiss() }
       },
       onDismiss = { isEditing = false },
     )
@@ -783,14 +788,58 @@ private fun SheetItem(label: Int, onClick: () -> Unit) {
   )
 }
 
+/**
+ * A dialog that asks for one text (a channel name, an edited message). An empty text and the
+ * server's refusal ([onConfirm] returns its message, null on success) are shown at the field; the
+ * dialog stays open with the input until the change went through.
+ */
 @Composable
-fun TextDialog(title: Int, initial: String, onConfirm: (String) -> Unit, onDismiss: () -> Unit) {
+fun TextDialog(
+  @StringRes title: Int,
+  @StringRes label: Int,
+  @StringRes whenEmpty: Int,
+  initial: String,
+  onConfirm: suspend (String) -> Int?,
+  onDismiss: () -> Unit,
+) {
+  val scope = rememberCoroutineScope()
   var text by remember { mutableStateOf(initial) }
+  var hasTried by remember { mutableStateOf(false) }
+  var isSaving by remember { mutableStateOf(false) }
+  var maybeFailure by remember { mutableStateOf<Int?>(null) }
+  val focus = remember { FocusRequester() }
+  val maybeError = requiredTextError(text, whenEmpty).takeIf { hasTried } ?: maybeFailure
+  val confirm: () -> Unit = {
+    hasTried = true
+    if (text.isBlank()) {
+      focus.requestFocus()
+    } else if (!isSaving) {
+      isSaving = true
+      scope.launch {
+        maybeFailure = onConfirm(text)
+        if (maybeFailure != null) focus.requestFocus()
+        isSaving = false
+      }
+    }
+  }
+  LaunchedEffect(Unit) { focus.requestFocus() }
   AlertDialog(
     onDismissRequest = onDismiss,
     title = { Text(stringResource(title)) },
-    text = { OutlinedTextField(value = text, onValueChange = { text = it }) },
-    confirmButton = { TextButton(onClick = { onConfirm(text) }, enabled = text.isNotBlank()) { Text(stringResource(R.string.ok)) } },
+    text = {
+      OutlinedTextField(
+        value = text,
+        onValueChange = {
+          text = it
+          maybeFailure = null
+        },
+        label = { Text(stringResource(label)) },
+        isError = maybeError != null,
+        supportingText = supportingText(maybeError),
+        modifier = Modifier.fillMaxWidth().focusRequester(focus).fieldError(maybeError),
+      )
+    },
+    confirmButton = { TextButton(onClick = confirm, enabled = !isSaving) { Text(stringResource(R.string.ok)) } },
     dismissButton = { TextButton(onClick = onDismiss) { Text(stringResource(R.string.cancel)) } },
   )
 }

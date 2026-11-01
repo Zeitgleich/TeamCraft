@@ -44,4 +44,8 @@
   <string name="link_code_for_signed_in_device">Dieser Code kommt von einem neuen Gerät: Scanne ihn mit einem Gerät, auf dem du schon angemeldet bist.</string>
   <string name="link_code_expired">Der Code ist abgelaufen. Lass einen neuen Code anzeigen und versuche es erneut.</string>
   <string name="approve_new_phone_hint">Richtest du ein neues Handy ein? Wähle dort „Meine anderen Geräte fragen“ oder lass es den Code scannen, den ein Computer unter „Neues Gerät verknüpfen“ zeigt.</string>
+  <string name="approve_code_missing">Gib den Code ein, den das neue Gerät zeigt.</string>
+  <string name="approve_code_incomplete">Gib alle 6 Ziffern ein, die das neue Gerät zeigt.</string>
+  <string name="approve_code_digits">6 Ziffern</string>
+  <string name="approve_link_code_missing">Gib den Verknüpfungscode ein oder scanne stattdessen den QR-Code.</string>
 </resources>

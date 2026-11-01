@@ -660,6 +660,17 @@ final class AppModel {
     }
   }
 
+  /// Like `perform`, but says why the core refused the action (nil when it was taken), so a form
+  /// shows the refusal at its field and keeps the input (forms.md, "Submitting").
+  func performReporting(_ action: ChatAction) async -> AppFailure? {
+    do {
+      try await core().act(actionJson: action.json)
+      return nil
+    } catch {
+      return AppFailure(CoreFailure(error))
+    }
+  }
+
   // MARK: Files
 
   /// Importer for picked files, with the server's upload limit if the core knows it.

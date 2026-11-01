@@ -36,4 +36,7 @@
   <string name="org_recovery_new_passphrase">Wähle eine neue Wiederherstellungs-Passphrase für deine Schlüsselsicherung:</string>
   <string name="org_recovery_finish">Wiederherstellung abschließen</string>
   <string name="org_recovery_pending">Die Admins haben noch nicht zugestimmt. Versuche es gleich noch einmal.</string>
+  <string name="passphrase_missing">Gib eine Passphrase ein.</string>
+  <string name="passphrase_repeat_missing">Gib die Passphrase noch einmal ein.</string>
+  <string name="passphrase_rule_short">Mindestens 12 Zeichen.</string>
 </resources>

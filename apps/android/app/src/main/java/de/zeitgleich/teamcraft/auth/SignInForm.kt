@@ -2,6 +2,7 @@ package de.zeitgleich.teamcraft.auth
 
 import androidx.annotation.StringRes
 import de.zeitgleich.teamcraft.R
+import de.zeitgleich.teamcraft.ui.forms.FieldErrors
 import uniffi.teamcraft_ffi.SignInOption
 
 /** Authenticator apps show six digits; some eight. */
@@ -61,14 +62,32 @@ fun localSignInErrorText(outcome: LocalLoginOutcome): Int? = when (outcome) {
 /** A one-time code as typed: digits only, at most [MAX_CODE_DIGITS]. */
 fun cleanTotpCode(input: String): String = input.filter { it in '0'..'9' }.take(MAX_CODE_DIGITS)
 
+/** The fields of the local form, top to bottom. */
+enum class SignInField { EMAIL, PASSWORD, CODE }
+
 /**
- * Whether the local form can be sent: an e-mail and a password, and a complete code when the
- * server requires one (an optional code is either empty or complete). The server decides the rest.
+ * Why the local form can't be sent yet, at each field: an e-mail and a password, and a complete
+ * code when the server requires one (an optional code is either empty or complete). The server
+ * decides the rest.
  */
-fun isLocalFormComplete(email: String, password: String, code: String, isCodeRequired: Boolean): Boolean {
-  val isCodeOk = if (code.isEmpty()) !isCodeRequired else isTotpCodeComplete(code)
-  return email.isNotBlank() && password.isNotEmpty() && isCodeOk
-}
+fun localFormErrors(email: String, password: String, code: String, isCodeRequired: Boolean): FieldErrors<SignInField> =
+  FieldErrors.of(
+    SignInField.EMAIL to if (email.isBlank()) R.string.local_email_missing else null,
+    SignInField.PASSWORD to if (password.isEmpty()) R.string.local_password_missing else null,
+    SignInField.CODE to when {
+      code.isEmpty() -> if (isCodeRequired) R.string.local_code_missing else null
+      !isTotpCodeComplete(code) -> R.string.local_code_incomplete
+      else -> null
+    },
+  )
+
+/**
+ * The field a failed local sign-in belongs to, or null when it belongs to none (the server is
+ * down, the account disabled). A wrong e-mail, password or code share one text, so no hint which
+ * accounts exist; it goes to the password, the field the user most likely retypes.
+ */
+fun localSignInErrorField(@StringRes error: Int): SignInField? =
+  if (error == R.string.local_sign_in_rejected) SignInField.PASSWORD else null
 
 /** The code to send: `null` when none was typed. */
 fun totpCodeToSend(code: String): String? = code.takeIf { it.isNotEmpty() }

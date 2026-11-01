@@ -58,4 +58,6 @@
   <string name="event_public_unattributed">Dieser Kanal wurde öffentlich gemacht</string>
   <string name="event_moved_unattributed">Dieser Kanal wurde in %1$s verschoben</string>
   <string name="event_moved_unnamed_unattributed">Dieser Kanal wurde in einen anderen Bereich verschoben</string>
+  <string name="channel_name_label">Name des Channels</string>
+  <string name="channel_name_missing">Gib einen Namen für den Channel ein.</string>
 </resources>

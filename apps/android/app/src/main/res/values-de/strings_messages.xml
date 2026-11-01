@@ -62,4 +62,6 @@
     <item quantity="one">%1$d Nachricht kann auf diesem Gerät noch nicht gelesen werden. Sie erscheint, sobald ihre Schlüssel vom Gerät eines anderen Mitglieds ankommen.</item>
     <item quantity="other">%1$d Nachrichten können auf diesem Gerät noch nicht gelesen werden. Sie erscheinen, sobald ihre Schlüssel vom Gerät eines anderen Mitglieds ankommen.</item>
   </plurals>
+  <string name="message_edit_label">Nachricht</string>
+  <string name="message_edit_empty">Eine Nachricht kann nicht leer sein. Lösche sie, um sie zu entfernen.</string>
 </resources>

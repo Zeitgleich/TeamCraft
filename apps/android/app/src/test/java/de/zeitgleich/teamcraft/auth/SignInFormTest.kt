@@ -47,25 +47,36 @@ class SignInFormTest {
 
   class Form {
     @Test
-    fun emailAndPasswordAreNeeded() {
-      assertFalse(isLocalFormComplete("", "secret", "", isCodeRequired = false))
-      assertFalse(isLocalFormComplete("  ", "secret", "", isCodeRequired = false))
-      assertFalse(isLocalFormComplete("user@example.com", "", "", isCodeRequired = false))
-      assertTrue(isLocalFormComplete("user@example.com", "secret", "", isCodeRequired = false))
+    fun aCompleteFormHasNoErrors() {
+      assertTrue(localFormErrors("user@example.com", "secret", "", isCodeRequired = false).isValid)
+      assertTrue(localFormErrors("user@example.com", "secret", "123456", isCodeRequired = true).isValid)
+      assertTrue(localFormErrors("user@example.com", "secret", "12345678", isCodeRequired = true).isValid)
     }
 
     @Test
-    fun aRequiredCodeMustBeComplete() {
-      assertFalse(isLocalFormComplete("user@example.com", "secret", "", isCodeRequired = true))
-      assertFalse(isLocalFormComplete("user@example.com", "secret", "12345", isCodeRequired = true))
-      assertTrue(isLocalFormComplete("user@example.com", "secret", "123456", isCodeRequired = true))
-      assertTrue(isLocalFormComplete("user@example.com", "secret", "12345678", isCodeRequired = true))
+    fun everyMissingFieldIsNamedAtOnceAndTheFirstIsFocused() {
+      val errors = localFormErrors("  ", "", "", isCodeRequired = true)
+      assertEquals(R.string.local_email_missing, errors[SignInField.EMAIL])
+      assertEquals(R.string.local_password_missing, errors[SignInField.PASSWORD])
+      assertEquals(R.string.local_code_missing, errors[SignInField.CODE])
+      assertEquals(SignInField.EMAIL, errors.maybeFirst)
+    }
+
+    @Test
+    fun theFirstInvalidFieldFollowsTheFormsOrder() {
+      val errors = localFormErrors("user@example.com", "", "123", isCodeRequired = false)
+      assertNull(errors[SignInField.EMAIL])
+      assertEquals(SignInField.PASSWORD, errors.maybeFirst)
+      assertEquals(R.string.local_code_incomplete, errors[SignInField.CODE])
     }
 
     @Test
     fun anOptionalCodeIsEmptyOrComplete() {
-      assertFalse(isLocalFormComplete("user@example.com", "secret", "123", isCodeRequired = false))
-      assertTrue(isLocalFormComplete("user@example.com", "secret", "123456", isCodeRequired = false))
+      assertNull(localFormErrors("user@example.com", "secret", "", isCodeRequired = false)[SignInField.CODE])
+      assertEquals(
+        R.string.local_code_incomplete,
+        localFormErrors("user@example.com", "secret", "12345", isCodeRequired = true)[SignInField.CODE],
+      )
       assertNull(totpCodeToSend(""))
       assertEquals("123456", totpCodeToSend("123456"))
     }
@@ -88,6 +99,23 @@ class SignInFormTest {
       assertEquals(R.string.server_error_unavailable, localSignInErrorText(LocalLoginOutcome.Unavailable))
       assertEquals(R.string.server_error_captive_portal, localSignInErrorText(LocalLoginOutcome.Intercepted))
       assertEquals(R.string.sign_in_failed, localSignInErrorText(LocalLoginOutcome.Failed))
+    }
+
+    @Test
+    fun aRejectedSignInGoesToThePasswordOthersToNoField() {
+      assertEquals(SignInField.PASSWORD, localSignInErrorField(R.string.local_sign_in_rejected))
+      for (text in listOf(R.string.local_sign_in_disabled, R.string.local_sign_in_rate_limited, R.string.server_error_unavailable)) {
+        assertNull(localSignInErrorField(text))
+      }
+    }
+
+    @Test
+    fun theRefusalIsShownAtItsFieldBesideTheFormsOwnErrors() {
+      val errors = localFormErrors("", "secret", "", isCodeRequired = false)
+        .withServerError(SignInField.PASSWORD, R.string.local_sign_in_rejected)
+      assertEquals(R.string.local_email_missing, errors[SignInField.EMAIL])
+      assertEquals(R.string.local_sign_in_rejected, errors[SignInField.PASSWORD])
+      assertFalse(errors.isValid)
     }
   }
 }

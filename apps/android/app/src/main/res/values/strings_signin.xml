@@ -22,4 +22,8 @@
   <string name="sign_in_provider_already_signed_in">The sign-in page had already been used. Close other sign-in tabs in your browser, then sign in again.</string>
   <string name="sign_in_provider_refused">Your organization\'s sign-in refused (error: %1$s). Try again, or tell your admin.</string>
   <string name="sign_out">Sign out</string>
+  <string name="local_email_missing">Enter your e-mail address.</string>
+  <string name="local_password_missing">Enter your password.</string>
+  <string name="local_code_missing">Enter the code from your authenticator app.</string>
+  <string name="local_code_incomplete">Enter all digits of the code: 6 to 8.</string>
 </resources>
