@@ -98,6 +98,12 @@ impl Upkeep {
     if let Err(error) = client.apply_pending_changes().await {
       tracing::debug!(%error, "pending membership changes not applied yet");
     }
+    // Imported history before what this device held: one page per tick until it is all here, so
+    // the loop stays responsive; nothing is read once it is.
+    match client.page_imported_history().await {
+      Ok(loaded) => is_changed |= loaded > 0,
+      Err(error) => tracing::debug!(%error, "imported history not read further yet"),
+    }
     let is_flushed = match self.uploads {
       UploadMode::Inline => flush(client).await,
       UploadMode::Host => flush_sends(client).await,

@@ -302,12 +302,13 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
   }
 
   /// History imported into a conversation this device already held (e2ee.md §4.10) lies before
-  /// everything it has; paging back finds it, but a short conversation gives the user nothing to
-  /// page back from. So once per finished import a page of it is loaded.
+  /// everything it has. Once per finished import a page of it is loaded at once, so it shows
+  /// right away; the rest follows in the background ([`Self::page_imported_history`]).
   async fn load_imported_history(&mut self, conversation: ConversationId) -> Result<usize, CoreError> {
     let Some(through) = self.unloaded_import(conversation)? else {
       return Ok(0);
     };
+    self.is_imported_history_paged = false;
     let is_held = self
       .store
       .edge_server_id(conversation, MessageEdge::Oldest)?
@@ -352,7 +353,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
   /// write on its own is a commit with its syncs; a catch-up after a long absence read pages of
   /// them one commit at a time (issue #972). Receiving is idempotent, so a crash that drops the
   /// group only means the page is read again.
-  fn receive_page(&mut self, messages: Vec<MessageResponse>) -> Result<(), CoreError> {
+  pub(super) fn receive_page(&mut self, messages: Vec<MessageResponse>) -> Result<(), CoreError> {
     self.atomically(|client| {
       for message in messages {
         client.receive_message(message)?;
