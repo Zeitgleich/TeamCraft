@@ -94,6 +94,18 @@ pub async fn wipe_guest_store() -> Result<(), String> {
   call("core_wipe_guest", &json!({})).await
 }
 
+/// This guest device's identity key fingerprint and key code (browser only).
+pub async fn own_key() -> Result<OwnKey, String> {
+  call("core_own_key", &json!({})).await
+}
+
+/// A guest device's key as its page reports and shows it.
+#[derive(Clone, Debug, serde::Deserialize)]
+pub struct OwnKey {
+  pub fingerprint: String,
+  pub code: String,
+}
+
 /// A guest keeps the organizer's identity key fingerprint from the link for the meeting chat: its
 /// group is only joined from a welcome of that key's devices (browser only).
 pub async fn guest_anchor(conversation: ConversationId, fingerprint: &str) -> Result<(), String> {
@@ -1029,12 +1041,41 @@ impl ChatBackend for RemoteChat {
     }
   }
 
-  fn let_guest_into_meeting_chat(&self, conversation: ConversationId, guest: UserId, access_ends_at_ms: i64) {
+  fn let_guest_into_meeting_chat(
+    &self,
+    conversation: ConversationId,
+    guest: UserId,
+    knock_fingerprint: String,
+    access_ends_at_ms: i64,
+  ) {
     self.act(ChatAction::LetGuestIntoMeetingChat {
       conversation,
       guest,
+      knock_fingerprint,
       access_ends_at_ms,
     });
+  }
+
+  fn prepare_guest_key_code(&self, guest: UserId) {
+    self.act(ChatAction::PrepareGuestKeyCode { guest });
+  }
+
+  fn guest_key_code(&self, guest: UserId) -> Option<String> {
+    match self.ask(ChatQuery::GuestKeyCode { guest }) {
+      Some(ChatAnswer::Link { maybe_link }) => maybe_link,
+      _ => None,
+    }
+  }
+
+  fn note_meeting_lobby(&self, meeting: teamcraft_proto::MeetingId, has_lobby: bool) {
+    self.act(ChatAction::NoteMeetingLobby { meeting, has_lobby });
+  }
+
+  fn is_open_by_own_record(&self, meeting: teamcraft_proto::MeetingId) -> bool {
+    matches!(
+      self.ask(ChatQuery::IsOpenByOwnRecord { meeting }),
+      Some(ChatAnswer::Flag { value: true })
+    )
   }
 
   fn discard_removal(&self, conversation: ConversationId, user: UserId) {

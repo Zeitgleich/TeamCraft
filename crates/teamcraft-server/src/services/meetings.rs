@@ -236,8 +236,11 @@ pub async fn list_meetings(
   );
   let mut meetings = Vec::with_capacity(stored.len());
   let mut zones: HashMap<UserId, Tz> = HashMap::new();
+  // One query for the links of all listed meetings, one brand and key per organizer (#987 review).
+  let mut links = LinkCache::for_meetings(state, &stored).await?;
   for meeting in &stored {
-    let response = respond(state, service, meeting, Vec::new()).await?;
+    let join_url = links.link(state, service, meeting).await?;
+    let response = respond_with_link(state, meeting, Vec::new(), join_url).await?;
     let Some(recurrence) = response.maybe_recurrence.clone() else {
       meetings.push(response);
       continue;
@@ -587,9 +590,10 @@ pub async fn restore_meeting(
   })
 }
 
-/// Makes the meeting's link anew (organizer only): a new token, so the old link names nothing any
-/// more; the shared guest link's invite goes with it, so its old `#invite=` links stop too. Guests
-/// already waiting or admitted stay. The invitees get an update with the new link.
+/// Makes the meeting's link anew (organizer only), in one transaction: a new token, so the old link
+/// names nothing any more; the shared guest link and every unredeemed personal link of the meeting
+/// are revoked; guests still waiting lose the "came with the link" mark and wait for a click.
+/// Guests already let in stay. The invitees get an update with the new link.
 pub async fn renew_link(
   state: &AppState,
   caller: &AuthenticatedUser,
@@ -598,8 +602,7 @@ pub async fn renew_link(
   let service = service_of(state)?;
   let meeting = organizer_meeting(state, caller, id).await?;
   let token = MeetingLinkToken::generate(&mut OsRng);
-  state.database.replace_meeting_link(id, token.as_str()).await?;
-  state.database.revoke_shared_invite(id).await?;
+  state.database.renew_meeting_link(id, token.as_str()).await?;
   // The new link must reach the calendar, but a calendar that is down doesn't undo the new link.
   if let Err(error) = sync_calendar(state, service, &meeting).await {
     warn!(%error, meeting_id = %id, "updating the calendar event with the new link failed");
@@ -1097,20 +1100,76 @@ pub(super) async fn meeting_link(
   meeting: &StoredMeeting,
 ) -> Result<String, ApiError> {
   let token = link_token(state, meeting.id).await?;
+  let maybe_fingerprint = organizer_fingerprint(state, meeting.organizer).await?;
+  Ok(compose_link(service, brand, &token, maybe_fingerprint.as_deref()))
+}
+
+fn compose_link(
+  service: &MeetingService,
+  brand: &Brand,
+  token: &str,
+  maybe_fingerprint: Option<&str>,
+) -> String {
   let origin = brand.origin();
   let mut link = if origin.is_empty() {
-    service.join_url(&token)
+    service.join_url(token)
   } else {
     format!("{origin}/meeting/{token}")
   };
-  if let Some(fingerprint) = organizer_fingerprint(state, meeting.organizer).await? {
+  if let Some(fingerprint) = maybe_fingerprint {
     link.push_str("#v=");
-    link.push_str(&fingerprint);
+    link.push_str(fingerprint);
   }
-  Ok(link)
+  link
 }
 
 /// The meeting's link token, made now for a meeting that has none (one from before #987).
+/// The links of many meetings: their tokens in one query, the brand and identity key fingerprint
+/// once per organizer.
+struct LinkCache {
+  tokens: HashMap<MeetingId, String>,
+  organizers: HashMap<UserId, (Arc<Brand>, Option<String>)>,
+}
+
+impl LinkCache {
+  async fn for_meetings(state: &AppState, meetings: &[StoredMeeting]) -> Result<Self, ApiError> {
+    let ids: Vec<MeetingId> = meetings.iter().map(|meeting| meeting.id).collect();
+    Ok(Self {
+      tokens: state.database.meeting_links(&ids).await?,
+      organizers: HashMap::new(),
+    })
+  }
+
+  async fn link(
+    &mut self,
+    state: &AppState,
+    service: &MeetingService,
+    meeting: &StoredMeeting,
+  ) -> Result<String, ApiError> {
+    let token = match self.tokens.get(&meeting.id) {
+      Some(token) => token.clone(),
+      None => link_token(state, meeting.id).await?,
+    };
+    let (brand, maybe_fingerprint) = match self.organizers.get(&meeting.organizer) {
+      Some(known) => known.clone(),
+      None => {
+        let brand = organizer_brand(state, meeting).await?;
+        let maybe_fingerprint = organizer_fingerprint(state, meeting.organizer).await?;
+        self
+          .organizers
+          .insert(meeting.organizer, (Arc::clone(&brand), maybe_fingerprint.clone()));
+        (brand, maybe_fingerprint)
+      },
+    };
+    Ok(compose_link(
+      service,
+      &brand,
+      &token,
+      maybe_fingerprint.as_deref(),
+    ))
+  }
+}
+
 pub(super) async fn link_token(state: &AppState, meeting: MeetingId) -> Result<String, ApiError> {
   let candidate = MeetingLinkToken::generate(&mut OsRng);
   Ok(
@@ -1589,10 +1648,19 @@ async fn respond(
   meeting: &StoredMeeting,
   undelivered_invitations: Vec<String>,
 ) -> Result<MeetingResponse, ApiError> {
-  let attendees = state.database.list_attendees(meeting.id).await?;
-  let names = presented_attendee_names(state, &attendees).await?;
   let brand = organizer_brand(state, meeting).await?;
   let join_url = meeting_link(state, service, &brand, meeting).await?;
+  respond_with_link(state, meeting, undelivered_invitations, join_url).await
+}
+
+async fn respond_with_link(
+  state: &AppState,
+  meeting: &StoredMeeting,
+  undelivered_invitations: Vec<String>,
+  join_url: String,
+) -> Result<MeetingResponse, ApiError> {
+  let attendees = state.database.list_attendees(meeting.id).await?;
+  let names = presented_attendee_names(state, &attendees).await?;
   Ok(MeetingResponse {
     id: meeting.id,
     title: meeting.title.clone(),

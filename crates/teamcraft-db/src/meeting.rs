@@ -728,6 +728,7 @@ impl Database {
     id: MeetingInviteId,
     label: &str,
     max_guests: u32,
+    waiting_since: OffsetDateTime,
   ) -> Result<SharedInviteClaim, DbError> {
     let mut tx = self.pool().begin().await?;
     let Some(link) = sqlx::query!(
@@ -740,13 +741,25 @@ impl Database {
     else {
       return Ok(SharedInviteClaim::Revoked);
     };
-    let handed_out = sqlx::query_scalar!(
-      r#"SELECT count(*) AS "count!" FROM meeting_invites WHERE shared_invite_id = $1"#,
+    // A place counts once its guest is let in (#987 review): waiting guests and claims not yet
+    // redeemed have a bound of their own, so a leaked link can't fill the meeting, only the lobby,
+    // until the organizer makes the link anew. Turned away, left and ended guests count nowhere.
+    let places = sqlx::query!(
+      r#"SELECT
+           count(*) FILTER (WHERE l.state = 'admitted' AND u.deactivated_at IS NULL) AS "admitted!",
+           count(*) FILTER (WHERE (i.guest_user_id IS NULL AND i.created_at > $2)
+                             OR (l.state = 'waiting' AND l.requested_at > $2
+                                 AND u.deactivated_at IS NULL)) AS "waiting!"
+         FROM meeting_invites i
+         LEFT JOIN meeting_lobby l ON l.meeting_id = i.meeting_id AND l.user_id = i.guest_user_id
+         LEFT JOIN users u ON u.id = i.guest_user_id
+         WHERE i.shared_invite_id = $1"#,
       to_db(shared),
+      waiting_since,
     )
     .fetch_one(&mut *tx)
     .await?;
-    if handed_out >= i64::from(max_guests) {
+    if places.admitted >= i64::from(max_guests) || places.waiting >= i64::from(max_guests) {
       return Ok(SharedInviteClaim::Full);
     }
     sqlx::query!(
@@ -906,16 +919,34 @@ impl Database {
     Ok(row.token)
   }
 
-  /// Gives the meeting a new link token; the old one names nothing from now on.
-  pub async fn replace_meeting_link(&self, meeting: MeetingId, token: &str) -> Result<(), DbError> {
+  /// Gives the meeting a new link token in one transaction (#987 review): the old token names
+  /// nothing from now on, every live shared link and unredeemed personal invite of the meeting is
+  /// revoked, and guests still waiting lose the "came with the link" mark, so they wait for a
+  /// host's click like guests of old links.
+  pub async fn renew_meeting_link(&self, meeting: MeetingId, token: &str) -> Result<(), DbError> {
+    let mut tx = self.pool().begin().await?;
     sqlx::query!(
       r#"INSERT INTO meeting_links (meeting_id, token) VALUES ($1, $2)
          ON CONFLICT (meeting_id) DO UPDATE SET token = EXCLUDED.token, created_at = now()"#,
       to_db(meeting),
       token,
     )
-    .execute(self.pool())
+    .execute(&mut *tx)
     .await?;
+    sqlx::query!(
+      r#"UPDATE meeting_invites SET revoked_at = now()
+         WHERE meeting_id = $1 AND revoked_at IS NULL AND (is_shared OR redeemed_at IS NULL)"#,
+      to_db(meeting),
+    )
+    .execute(&mut *tx)
+    .await?;
+    sqlx::query!(
+      "UPDATE meeting_lobby SET is_by_link = false WHERE meeting_id = $1 AND state = 'waiting'",
+      to_db(meeting),
+    )
+    .execute(&mut *tx)
+    .await?;
+    tx.commit().await?;
     Ok(())
   }
 
@@ -941,12 +972,18 @@ impl Database {
     row.map(|row| from_db(row.meeting_id)).transpose()
   }
 
-  /// Notes that `user` knocked with the meeting link's token.
-  pub async fn mark_lobby_by_link(&self, meeting: MeetingId, user: UserId) -> Result<(), DbError> {
+  /// Notes whether `user` knocked with the meeting link's token (current at the time).
+  pub async fn mark_lobby_by_link(
+    &self,
+    meeting: MeetingId,
+    user: UserId,
+    is_by_link: bool,
+  ) -> Result<(), DbError> {
     sqlx::query!(
-      "UPDATE meeting_lobby SET is_by_link = true WHERE meeting_id = $1 AND user_id = $2",
+      "UPDATE meeting_lobby SET is_by_link = $3 WHERE meeting_id = $1 AND user_id = $2",
       to_db(meeting),
       to_db(user),
+      is_by_link,
     )
     .execute(self.pool())
     .await?;
@@ -962,6 +999,88 @@ impl Database {
     .fetch_all(self.pool())
     .await?;
     rows.into_iter().map(|row| from_db(row.user_id)).collect()
+  }
+
+  /// Notes the identity key fingerprint a waiting guest's page reports with its device, once.
+  /// `true` the first time (the hosts are told then); `false` when it was reported before or the
+  /// guest no longer waits.
+  pub async fn set_knock_fingerprint(
+    &self,
+    meeting: MeetingId,
+    user: UserId,
+    fingerprint: &str,
+  ) -> Result<bool, DbError> {
+    let result = sqlx::query!(
+      r#"UPDATE meeting_lobby SET knock_fingerprint = $3, device_announced_at = now()
+         WHERE meeting_id = $1 AND user_id = $2 AND state = 'waiting' AND device_announced_at IS NULL"#,
+      to_db(meeting),
+      to_db(user),
+      fingerprint,
+    )
+    .execute(self.pool())
+    .await?;
+    Ok(result.rows_affected() == 1)
+  }
+
+  /// The fingerprints guests of the meeting reported with their devices, by guest.
+  pub async fn knock_fingerprints(&self, meeting: MeetingId) -> Result<HashMap<UserId, String>, DbError> {
+    let rows = sqlx::query!(
+      r#"SELECT user_id, knock_fingerprint AS "fingerprint!" FROM meeting_lobby
+         WHERE meeting_id = $1 AND knock_fingerprint IS NOT NULL"#,
+      to_db(meeting),
+    )
+    .fetch_all(self.pool())
+    .await?;
+    rows
+      .into_iter()
+      .map(|row| Ok((from_db(row.user_id)?, row.fingerprint)))
+      .collect()
+  }
+
+  /// How many guests of the shared link `guest` came with are let in now; `None` when the guest
+  /// came with no shared link (a personal invite has its own single place).
+  pub async fn admitted_of_guests_link(
+    &self,
+    meeting: MeetingId,
+    guest: UserId,
+  ) -> Result<Option<i64>, DbError> {
+    let row = sqlx::query!(
+      r#"SELECT (SELECT count(*) FROM meeting_invites j
+                 JOIN meeting_lobby l ON l.meeting_id = j.meeting_id AND l.user_id = j.guest_user_id
+                 JOIN users u ON u.id = l.user_id
+                 WHERE j.shared_invite_id = i.shared_invite_id AND l.state = 'admitted'
+                   AND u.deactivated_at IS NULL) AS "admitted!"
+         FROM meeting_invites i
+         WHERE i.meeting_id = $1 AND i.guest_user_id = $2 AND i.shared_invite_id IS NOT NULL"#,
+      to_db(meeting),
+      to_db(guest),
+    )
+    .fetch_optional(self.pool())
+    .await?;
+    Ok(row.map(|row| row.admitted))
+  }
+
+  /// Notes that `user`'s app lets guests in by the flow without a link secret (#987).
+  pub async fn mark_guest_admitter(&self, user: UserId) -> Result<(), DbError> {
+    sqlx::query!(
+      r#"INSERT INTO guest_admitters (user_id) VALUES ($1)
+         ON CONFLICT (user_id) DO UPDATE SET seen_at = now()"#,
+      to_db(user),
+    )
+    .execute(self.pool())
+    .await?;
+    Ok(())
+  }
+
+  /// Whether `user`'s app was seen letting guests in by the flow without a link secret.
+  pub async fn is_guest_admitter(&self, user: UserId) -> Result<bool, DbError> {
+    let row = sqlx::query!(
+      "SELECT 1 AS one FROM guest_admitters WHERE user_id = $1",
+      to_db(user)
+    )
+    .fetch_optional(self.pool())
+    .await?;
+    Ok(row.is_some())
   }
 
   /// Guests waiting for a decision, longest waiting first.

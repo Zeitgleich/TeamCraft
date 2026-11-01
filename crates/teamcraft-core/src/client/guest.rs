@@ -31,6 +31,11 @@ use crate::store::{LocalStore, Table};
 /// UI to read once [`Client::prepare_guest_link`] made it.
 const LINK_FRAGMENT_PREFIX: &str = "guest-link-fragment/";
 const ORGANIZER_ANCHOR_PREFIX: &str = "guest-organizer-anchor/";
+/// The key code of a waiting guest's key as this device pinned it, for the lobby entry.
+const GUEST_KEY_CODE_PREFIX: &str = "guest-key-code/";
+/// The lobby setting of a meeting as the organizer chose it on this device (#987 review): only this
+/// record, never the server's `has_lobby`, lets the device admit guests of the link by itself.
+const LOBBY_RECORD_PREFIX: &str = "meeting-lobby-record/";
 /// The name of the organizer's fingerprint in a meeting link's fragment, and the name links of
 /// older apps used for it.
 pub const VERIFIER_KEY: &str = "v";
@@ -113,10 +118,16 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
   /// `access_ends_at_ms` (end plus grace, as the host's app shows it), and the device is added
   /// with a signed add, always with history from the join on: a new epoch whose welcome is sealed
   /// to the guest's key package.
+  ///
+  /// `knock_fingerprint` is the fingerprint the guest's page reported with its device; the key the
+  /// server presents must have it. That binds the key to the knock, but the server relays both:
+  /// against a hostile server only comparing the key code with the guest's screen helps
+  /// ([`Self::prepare_guest_key_code`], e2ee.md §4.6).
   pub async fn let_guest_into_meeting_chat(
     &mut self,
     conversation: ConversationId,
     guest: UserId,
+    knock_fingerprint: &str,
     access_ends_at_ms: i64,
   ) -> Result<(), CoreError> {
     let organizer = self.api.conversation(conversation).await?.maybe_organizer_user_id;
@@ -136,13 +147,52 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     if directory.pinned_identity(convert::user(guest)) != Some(key) {
       return Err(CoreError::GuestRefused(GuestRefusal::KeyChanged));
     }
+    if !key
+      .fingerprint()
+      .to_string()
+      .eq_ignore_ascii_case(knock_fingerprint)
+    {
+      return Err(CoreError::GuestRefused(GuestRefusal::NotTheKnockingKey));
+    }
     // Noted before the add: a guest is a guest here even if the server's user kind says otherwise,
     // and the guest is removed by `access_ends_at_ms` at the latest (e2ee.md §4.6).
     self.note_admitted_guest(conversation, guest, access_ends_at_ms)?;
     self.let_into_meeting_chat(conversation, guest).await
   }
 
-  /// This guest's key code, for the host to compare when it can't check the proof.
+  /// Pins a waiting guest's identity key as the server presents it and keeps its key code for the
+  /// lobby entry ([`guest_key_code`]): the host compares it with the guest's screen. Admitting later
+  /// adds only a guest with this very key (a swap is refused as a changed key).
+  pub async fn prepare_guest_key_code(&mut self, guest: UserId) -> Result<(), CoreError> {
+    let directory = self.pin_identities([guest]).await?;
+    let key = directory
+      .pinned_identity(convert::user(guest))
+      .ok_or(CoreError::GuestRefused(GuestRefusal::NotEnrolled))?;
+    records::put_json(
+      &self.store,
+      Table::SyncState,
+      &format!("{GUEST_KEY_CODE_PREFIX}{guest}"),
+      &key_code(&key),
+    )
+  }
+
+  /// Keeps the lobby setting the organizer chose for `meeting` on this device. Only this record
+  /// lets the device admit guests of the link by itself (when it says there is no lobby).
+  pub fn note_meeting_lobby(&self, meeting: MeetingId, has_lobby: bool) -> Result<(), CoreError> {
+    records::put_json(
+      &self.store,
+      Table::SyncState,
+      &format!("{LOBBY_RECORD_PREFIX}{meeting}"),
+      &has_lobby,
+    )
+  }
+
+  /// This device's identity key fingerprint (hex): what a guest's page reports with its device.
+  pub fn own_fingerprint(&self) -> String {
+    self.account.identity_public_key().fingerprint().to_string()
+  }
+
+  /// This guest's key code, shown on the guest's page for the host to compare.
   pub fn own_key_code(&self) -> String {
     key_code(&self.account.identity_public_key())
   }
@@ -277,6 +327,31 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     }
     Ok(())
   }
+}
+
+/// The key code of a waiting guest's key as this device pinned it, once
+/// [`Client::prepare_guest_key_code`] made it.
+pub fn guest_key_code<S: LocalStore>(store: &S, guest: UserId) -> Option<String> {
+  records::get_json(
+    store,
+    Table::SyncState,
+    &format!("{GUEST_KEY_CODE_PREFIX}{guest}"),
+  )
+  .ok()
+  .flatten()
+}
+
+/// Whether the organizer chose "no lobby" for `meeting` on this device: the only case in which the
+/// device admits guests of the link by itself. Unknown means no.
+pub fn is_open_by_own_record<S: LocalStore>(store: &S, meeting: MeetingId) -> bool {
+  records::get_json::<bool>(
+    store,
+    Table::SyncState,
+    &format!("{LOBBY_RECORD_PREFIX}{meeting}"),
+  )
+  .ok()
+  .flatten()
+    == Some(false)
 }
 
 /// The fragment a member's app appends to the meeting link, if [`Client::prepare_guest_link`] made it.

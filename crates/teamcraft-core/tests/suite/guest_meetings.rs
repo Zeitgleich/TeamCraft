@@ -12,7 +12,7 @@ use common::{Peer, settle};
 use teamcraft_core::PendingEnrollment;
 use teamcraft_core::api::ServerApi;
 use teamcraft_core::api::fake::FakeServer;
-use teamcraft_core::client::{VERIFIER_KEY, guest_link_fragment};
+use teamcraft_core::client::{VERIFIER_KEY, guest_key_code, guest_link_fragment, is_open_by_own_record};
 use teamcraft_core::clock::ManualClock;
 use teamcraft_core::error::{CoreError, GuestRefusal};
 use teamcraft_core::store::MemoryStore;
@@ -150,7 +150,12 @@ async fn only_the_organizers_devices_let_guests_in() {
 
   let refused = cohost
     .client
-    .let_guest_into_meeting_chat(rig.chat, rig.guest_id(), ACCESS_ENDS_MS)
+    .let_guest_into_meeting_chat(
+      rig.chat,
+      rig.guest_id(),
+      &rig.guest.client.own_fingerprint(),
+      ACCESS_ENDS_MS,
+    )
     .await
     .unwrap_err();
 
@@ -171,6 +176,60 @@ async fn a_guest_device_without_a_link_anchor_joins_nothing() {
 
   assert!(rig.guest.client.is_guest_device().unwrap());
   assert!(!rig.guest.client.has_group(rig.chat).unwrap());
+}
+
+#[tokio::test]
+async fn a_key_the_server_swaps_after_the_host_saw_its_code_is_refused() {
+  let mut rig = rig().await;
+  rig.guest_knows_the_link();
+  rig.server_admits_the_guest().await;
+  // The host's lobby entry shows the code of the key the guest's page reported.
+  let guest = rig.guest_id();
+  rig.alice.client.prepare_guest_key_code(guest).await.unwrap();
+  let shown = guest_key_code(&rig.alice.store, guest).unwrap();
+  assert_eq!(shown, rig.guest.client.own_key_code());
+
+  // The server swaps in a key of its own before the host clicks "admit".
+  rig.server.replace_identity_key(guest, vec![9; 32]);
+  let refused = rig.organizer_lets_the_guest_in(ACCESS_ENDS_MS).await.unwrap_err();
+
+  assert!(
+    matches!(refused, CoreError::GuestRefused(GuestRefusal::KeyChanged)),
+    "{refused}"
+  );
+  rig.guest.client.full_sync().await.unwrap();
+  assert!(!rig.guest.client.has_group(rig.chat).unwrap());
+}
+
+#[tokio::test]
+async fn a_key_that_is_not_the_one_the_guest_reported_is_refused() {
+  let mut rig = rig().await;
+  rig.guest_knows_the_link();
+  rig.server_admits_the_guest().await;
+  let other = "cd".repeat(32);
+
+  let refused = rig
+    .alice
+    .client
+    .let_guest_into_meeting_chat(rig.chat, rig.guest_id(), &other, ACCESS_ENDS_MS)
+    .await
+    .unwrap_err();
+
+  assert!(
+    matches!(refused, CoreError::GuestRefused(GuestRefusal::NotTheKnockingKey)),
+    "{refused}"
+  );
+}
+
+#[tokio::test]
+async fn only_the_organizers_own_record_opens_a_meeting() {
+  let rig = rig().await;
+  // Nothing recorded (the server's `has_lobby` is no record): no admission by itself.
+  assert!(!is_open_by_own_record(&rig.alice.store, rig.meeting));
+  rig.alice.client.note_meeting_lobby(rig.meeting, true).unwrap();
+  assert!(!is_open_by_own_record(&rig.alice.store, rig.meeting));
+  rig.alice.client.note_meeting_lobby(rig.meeting, false).unwrap();
+  assert!(is_open_by_own_record(&rig.alice.store, rig.meeting));
 }
 
 #[tokio::test]
@@ -256,7 +315,12 @@ impl Rig {
     self
       .alice
       .client
-      .let_guest_into_meeting_chat(self.chat, self.guest_id(), access_ends_at_ms)
+      .let_guest_into_meeting_chat(
+        self.chat,
+        self.guest_id(),
+        &self.guest.client.own_fingerprint(),
+        access_ends_at_ms,
+      )
       .await
   }
 

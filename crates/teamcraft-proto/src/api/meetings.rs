@@ -349,6 +349,21 @@ pub struct LobbyEntry {
   /// guest's page sets one up while it waits).
   #[serde(default)]
   pub has_device: bool,
+  /// The identity key fingerprint the guest's page reported with its device (hex). The organizer's
+  /// device adds the guest only if the key it pins has this fingerprint, and shows its key code.
+  #[serde(
+    rename = "knock_fingerprint",
+    default,
+    skip_serializing_if = "Option::is_none"
+  )]
+  pub maybe_knock_fingerprint: Option<String>,
+}
+
+/// `PUT /api/v1/meetings/{id}/lobby/me/device`: a waiting guest's device is set up, with the
+/// fingerprint of its identity key (hex), which binds the key to this knock.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct GuestDeviceReadyRequest {
+  pub fingerprint: String,
 }
 
 /// `GET /api/v1/meetings/{id}/lobby`: who waits for the host.
@@ -361,6 +376,10 @@ pub struct ListLobbyResponse {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 pub struct LobbyStateResponse {
   pub state: LobbyState,
+  /// No app of the organizer was seen letting guests in without a link secret (#987): an organizer
+  /// on an older app can't let this guest in until it is updated.
+  #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+  pub is_organizer_app_outdated: bool,
 }
 
 /// Result of `POST /api/internal/v1/meetings/replies`.

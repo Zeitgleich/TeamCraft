@@ -392,13 +392,28 @@ pub trait ChatBackend {
     None
   }
   /// An organizer's device lets an admitted guest's device into the chat's group, until
-  /// `access_ends_at_ms` (e2ee.md §4.6, "Meeting guests").
+  /// `access_ends_at_ms`, if the key it pins has the fingerprint the guest's page reported
+  /// (e2ee.md §4.6, "Meeting guests").
   fn let_guest_into_meeting_chat(
     &self,
     _conversation: ConversationId,
     _guest: UserId,
+    _knock_fingerprint: String,
     _access_ends_at_ms: i64,
   ) {
+  }
+  /// Pins a waiting guest's key and makes its key code, which [`Self::guest_key_code`] returns.
+  fn prepare_guest_key_code(&self, _guest: UserId) {}
+  /// The key code of a waiting guest's key as this device pinned it, for the lobby entry.
+  fn guest_key_code(&self, _guest: UserId) -> Option<String> {
+    None
+  }
+  /// Keeps the lobby setting the organizer chose for a meeting on this device.
+  fn note_meeting_lobby(&self, _meeting: teamcraft_proto::MeetingId, _has_lobby: bool) {}
+  /// Whether the organizer chose "no lobby" for the meeting on this device: only then does it let
+  /// guests of the link in by itself.
+  fn is_open_by_own_record(&self, _meeting: teamcraft_proto::MeetingId) -> bool {
+    false
   }
   /// Unconfirmed removals in every conversation, for the admin console: an admin outside the
   /// group doesn't see the conversation.

@@ -330,7 +330,17 @@ pub enum CoreCommand {
   LetGuestIntoMeetingChat {
     conversation: ConversationId,
     guest: UserId,
+    knock_fingerprint: String,
     access_ends_at_ms: i64,
+  },
+  /// Pin a waiting guest's key and make its key code (`guest_key_code`).
+  PrepareGuestKeyCode {
+    guest: UserId,
+  },
+  /// The lobby setting the organizer chose for a meeting on this device.
+  NoteMeetingLobby {
+    meeting: teamcraft_proto::MeetingId,
+    has_lobby: bool,
   },
   InviteToSpace {
     space: SpaceId,
@@ -1754,12 +1764,35 @@ impl<S: LocalStore> ChatBackend for CoreChatBackend<S> {
     crate::client::guest_link_fragment(self.store_ref(), meeting)
   }
 
-  fn let_guest_into_meeting_chat(&self, conversation: ConversationId, guest: UserId, access_ends_at_ms: i64) {
+  fn let_guest_into_meeting_chat(
+    &self,
+    conversation: ConversationId,
+    guest: UserId,
+    knock_fingerprint: String,
+    access_ends_at_ms: i64,
+  ) {
     self.command(CoreCommand::LetGuestIntoMeetingChat {
       conversation,
       guest,
+      knock_fingerprint,
       access_ends_at_ms,
     });
+  }
+
+  fn prepare_guest_key_code(&self, guest: UserId) {
+    self.command(CoreCommand::PrepareGuestKeyCode { guest });
+  }
+
+  fn guest_key_code(&self, guest: UserId) -> Option<String> {
+    crate::client::guest_key_code(self.store_ref(), guest)
+  }
+
+  fn note_meeting_lobby(&self, meeting: teamcraft_proto::MeetingId, has_lobby: bool) {
+    self.command(CoreCommand::NoteMeetingLobby { meeting, has_lobby });
+  }
+
+  fn is_open_by_own_record(&self, meeting: teamcraft_proto::MeetingId) -> bool {
+    crate::client::is_open_by_own_record(self.store_ref(), meeting)
   }
 
   fn unconfirmed_removals(&self) -> Vec<(ConversationId, UserId)> {

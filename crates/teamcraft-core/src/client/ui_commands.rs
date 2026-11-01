@@ -278,12 +278,15 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       CoreCommand::LetGuestIntoMeetingChat {
         conversation,
         guest,
+        knock_fingerprint,
         access_ends_at_ms,
       } => {
         self
-          .let_guest_into_meeting_chat(conversation, guest, access_ends_at_ms)
+          .let_guest_into_meeting_chat(conversation, guest, &knock_fingerprint, access_ends_at_ms)
           .await
       },
+      CoreCommand::PrepareGuestKeyCode { guest } => self.prepare_guest_key_code(guest).await,
+      CoreCommand::NoteMeetingLobby { meeting, has_lobby } => self.note_meeting_lobby(meeting, has_lobby),
       CoreCommand::DiscardRemoval { conversation, user } => self.discard_removal(conversation, user).await,
       CoreCommand::InviteToSpace {
         space,

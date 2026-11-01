@@ -626,10 +626,16 @@ fn watch_meetings(state: AppState, i18n: I18n, hub: MeetingsHub) {
   // Whoever knocked with the meeting link in a meeting without a lobby is let in by the
   // organizer's device as soon as the lobbies show them (e2ee.md §4.6, "Meeting guests").
   {
+    // Guests of this user's meetings are told otherwise that the organizer's app needs an update.
+    leptos::task::spawn_local(async move {
+      if let Err(error) = hub.client().mark_admitter().await {
+        tracing::warn!(%error, "could not tell the server that this app lets guests in");
+      }
+    });
     let started = StoredValue::new_local(std::collections::HashSet::new());
     Effect::new(move |_| {
       hub.lobbies.track();
-      crate::components::meetings_view::admit_link_arrivals(state, hub, started);
+      crate::components::meetings_view::admit_link_arrivals(state, i18n, hub, started);
     });
   }
   // A meeting created, moved or cancelled elsewhere (gateway `meeting_update`), and a reconnect

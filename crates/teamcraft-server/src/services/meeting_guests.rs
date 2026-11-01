@@ -10,9 +10,9 @@
 use teamcraft_crypto::meeting_link::is_meeting_link_token;
 use teamcraft_db::{LobbyRow, SharedInviteClaim, StoredMeeting, StoredMeetingInvite};
 use teamcraft_proto::{
-  CreateGuestLinkRequest, GatewayEvent, GuestLinkResponse, JoinMeetingRequest, JoinMeetingResponse,
-  KnockByLinkResponse, ListLobbyResponse, LobbyEntry, LobbyState, LobbyStateResponse, MeetingId,
-  MeetingInviteId, MeetingStatus, UserId, UserKind,
+  CreateGuestLinkRequest, GatewayEvent, GuestDeviceReadyRequest, GuestLinkResponse, JoinMeetingRequest,
+  JoinMeetingResponse, KnockByLinkResponse, ListLobbyResponse, LobbyEntry, LobbyState, LobbyStateResponse,
+  MeetingId, MeetingInviteId, MeetingStatus, UserId, UserKind,
 };
 use time::OffsetDateTime;
 
@@ -28,6 +28,11 @@ use crate::state::AppState;
 
 const MAX_NAME_CHARS: usize = 100;
 const MAX_LABEL_CHARS: usize = 100;
+/// How long a waiting guest of the meeting link holds a lobby place: a guest who reloads or walks
+/// away doesn't keep one beyond this (#987 review, M3). Admitted guests hold theirs until they leave.
+const LOBBY_PLACE_TIMEOUT: time::Duration = time::Duration::minutes(15);
+/// An identity key fingerprint in hex: SHA-256.
+const FINGERPRINT_HEX_LEN: usize = 64;
 /// Guests ended per sweep; a larger backlog is worked off over the next sweeps.
 const SWEEP_BATCH: i64 = 200;
 
@@ -40,9 +45,12 @@ pub async fn join_meeting(
 ) -> Result<JoinMeetingResponse, ApiError> {
   let service = service_of(state)?;
   let display_name = validate_name(&request.display_name, "display_name", MAX_NAME_CHARS)?;
-  let (link, is_by_link) = match (&request.maybe_invite_token, &request.maybe_link_token) {
-    (Some(invite_token), _) => (invite_of(state, service, invite_token).await?, false),
-    (None, Some(link_token)) => (shared_invite_of(state, link_token).await?, true),
+  let (link, maybe_link_token) = match (&request.maybe_invite_token, &request.maybe_link_token) {
+    (Some(invite_token), _) => (invite_of(state, service, invite_token).await?, None),
+    (None, Some(link_token)) => (
+      shared_invite_of(state, link_token).await?,
+      Some(link_token.as_str()),
+    ),
     (None, None) => {
       return Err(ApiError::InvalidRequest("a join needs the link's token".into()));
     },
@@ -88,11 +96,19 @@ pub async fn join_meeting(
     .map_err(|error| ApiError::Internal(error.to_string()))?;
 
   let entry = state.database.enter_lobby(meeting_id, guest.user.id).await?;
-  if is_by_link {
+  if let Some(link_token) = maybe_link_token {
     state
       .database
-      .mark_lobby_by_link(meeting_id, guest.user.id)
+      .mark_lobby_by_link(meeting_id, guest.user.id, true)
       .await?;
+    // The organizer may have made the link anew while this join ran: then the guest came with a
+    // link that no longer works and waits for a click like the others (#987 review, M5).
+    if state.database.meeting_by_link(link_token).await? != Some(meeting_id) {
+      state
+        .database
+        .mark_lobby_by_link(meeting_id, guest.user.id, false)
+        .await?;
+    }
   }
   // Guests always wait in the lobby on the server: they can read and speak only once an
   // organizer's device adds theirs to the chat's encryption group. Without a lobby that device
@@ -185,7 +201,7 @@ pub async fn knock_by_link(
   if response.state == LobbyState::Waiting {
     state
       .database
-      .mark_lobby_by_link(meeting_id, caller.user.id)
+      .mark_lobby_by_link(meeting_id, caller.user.id, true)
       .await?;
   }
   Ok(KnockByLinkResponse {
@@ -222,6 +238,7 @@ pub async fn knock(
   match (is_member, is_live) {
     (true, true) => Ok(LobbyStateResponse {
       state: LobbyState::Admitted,
+      is_organizer_app_outdated: false,
     }),
     (true, false) => Err(ApiError::Conflict("the meeting is over or cancelled".into())),
     // Outsiders learn nothing about a meeting that is over: the same answer as for no meeting.
@@ -234,6 +251,7 @@ pub async fn knock(
       }
       Ok(LobbyStateResponse {
         state: LobbyState::from(entry.state),
+        is_organizer_app_outdated: false,
       })
     },
   }
@@ -252,6 +270,7 @@ pub async fn list_lobby(
     .get_users(&waiting.iter().map(|row| row.user).collect::<Vec<_>>())
     .await?;
   let by_link = state.database.lobby_by_link(meeting.id).await?;
+  let mut fingerprints = state.database.knock_fingerprints(meeting.id).await?;
   let with_devices = state
     .database
     .users_with_active_devices(&waiting.iter().map(|row| row.user).collect::<Vec<_>>())
@@ -266,6 +285,7 @@ pub async fn list_lobby(
           row,
           by_link.contains(&row.user),
           with_devices.contains(&row.user),
+          fingerprints.remove(&row.user),
         )
       })
     })
@@ -297,17 +317,37 @@ pub async fn lobby_entry(
     .users_with_active_devices(&[guest])
     .await?
     .contains(&guest);
-  Ok(entry(state, &user, &row, is_by_link, has_device))
+  let maybe_fingerprint = state
+    .database
+    .knock_fingerprints(meeting.id)
+    .await?
+    .remove(&guest);
+  Ok(entry(
+    state,
+    &user,
+    &row,
+    is_by_link,
+    has_device,
+    maybe_fingerprint,
+  ))
 }
 
-/// A waiting guest's page set up its device: the hosts are told again (`lobby_join`), so an
-/// organizer's device can add it now. `409` while the guest has no device; a guest who no longer
-/// waits (let in meanwhile, or turned away) needs nobody told, which is no error either.
+/// A waiting guest's page set up its device and reports its identity key fingerprint, which binds
+/// the key to this knock: the organizer's device adds the guest only with a key of this
+/// fingerprint. The hosts are told once (`lobby_join`); later reports change nothing. `409` while
+/// the guest has no device; a guest who no longer waits needs nobody told, which is no error.
 pub async fn guest_device_ready(
   state: &AppState,
   caller: &AuthenticatedUser,
   id: MeetingId,
+  request: GuestDeviceReadyRequest,
 ) -> Result<(), ApiError> {
+  let fingerprint = request.fingerprint.to_ascii_lowercase();
+  if fingerprint.len() != FINGERPRINT_HEX_LEN || !fingerprint.chars().all(|c| c.is_ascii_hexdigit()) {
+    return Err(ApiError::InvalidRequest(
+      "fingerprint must be 64 hex digits".into(),
+    ));
+  }
   service_of(state)?;
   if caller.user.kind != UserKind::Guest {
     return Err(ApiError::Forbidden(
@@ -335,7 +375,14 @@ pub async fn guest_device_ready(
   {
     return Err(ApiError::Conflict("the guest has no device yet".into()));
   }
-  announce_waiting(state, &meeting, caller).await
+  if state
+    .database
+    .set_knock_fingerprint(id, caller.user.id, &fingerprint)
+    .await?
+  {
+    announce_waiting(state, &meeting, caller).await?;
+  }
+  Ok(())
 }
 
 /// The caller's own place in the lobby (for guests that reconnect).
@@ -350,9 +397,34 @@ pub async fn my_lobby_state(
     .get_lobby_entry(id, caller.user.id)
     .await?
     .ok_or_else(ApiError::meeting_not_found)?;
+  let lobby_state = LobbyState::from(row.state);
+  // A guest waiting for an organizer whose app can't let them in yet is told so (#987 review, M4).
+  let is_organizer_app_outdated = if lobby_state == LobbyState::Waiting && caller.user.kind == UserKind::Guest
+  {
+    let meeting = state
+      .database
+      .get_meeting(id)
+      .await?
+      .ok_or_else(ApiError::meeting_not_found)?;
+    !state.database.is_guest_admitter(meeting.organizer).await?
+  } else {
+    false
+  };
   Ok(LobbyStateResponse {
-    state: LobbyState::from(row.state),
+    state: lobby_state,
+    is_organizer_app_outdated,
   })
+}
+
+/// The caller's app lets guests in by the flow without a link secret (#987): noted, so guests of
+/// their meetings aren't told the organizer's app needs an update.
+pub async fn mark_guest_admitter(state: &AppState, caller: &AuthenticatedUser) -> Result<(), ApiError> {
+  service_of(state)?;
+  if is_guest(caller) {
+    return Err(ApiError::Forbidden("guests let nobody in".into()));
+  }
+  state.database.mark_guest_admitter(caller.user.id).await?;
+  Ok(())
 }
 
 /// A guest leaves the meeting: their place in the lobby is closed and their account is
@@ -542,6 +614,12 @@ async fn admit_guest(
   guest: UserId,
   decided_by: UserId,
 ) -> Result<(), ApiError> {
+  // A place of the link counts once its guest is let in (#987 review, M3).
+  if let Some(admitted) = state.database.admitted_of_guests_link(meeting.id, guest).await?
+    && admitted >= i64::from(service_of(state)?.max_shared_link_guests())
+  {
+    return Err(ApiError::Conflict("the join link admits no more guests".into()));
+  }
   if !state
     .database
     .decide_lobby(meeting, guest, LobbyState::Admitted.as_str(), decided_by)
@@ -607,7 +685,13 @@ async fn invite_for_guest(
   let invite: MeetingInviteId = state.next_id()?;
   match state
     .database
-    .claim_shared_invite(link.id, invite, display_name, service.max_shared_link_guests())
+    .claim_shared_invite(
+      link.id,
+      invite,
+      display_name,
+      service.max_shared_link_guests(),
+      OffsetDateTime::now_utc() - LOBBY_PLACE_TIMEOUT,
+    )
     .await?
   {
     SharedInviteClaim::Claimed => Ok(invite),
@@ -692,12 +776,14 @@ fn entry(
   row: &LobbyRow,
   is_by_link: bool,
   has_device: bool,
+  maybe_knock_fingerprint: Option<String>,
 ) -> LobbyEntry {
   LobbyEntry {
     user: user_summary(state, user),
     requested_at: unix_millis(row.requested_at),
     is_by_link,
     has_device,
+    maybe_knock_fingerprint,
   }
 }
 

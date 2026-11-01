@@ -1,12 +1,12 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT count(*) AS \"count!\" FROM meeting_invites WHERE shared_invite_id = $1",
+  "query": "SELECT 1 AS one FROM guest_admitters WHERE user_id = $1",
   "describe": {
     "columns": [
       {
         "ordinal": 0,
-        "name": "count!",
-        "type_info": "Int8",
+        "name": "one",
+        "type_info": "Int4",
         "origin": "Expression"
       }
     ],
@@ -19,5 +19,5 @@
       null
     ]
   },
-  "hash": "a66e7a9eec8fcf14ee3357fa6727aa0085140124af6b44e441ea948a9d2acdc9"
+  "hash": "699705ca59fff4c84cabb2566048167c9c67b0672212881e2799a754d9c4b88b"
 }

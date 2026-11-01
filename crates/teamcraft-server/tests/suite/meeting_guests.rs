@@ -620,6 +620,12 @@ mod meeting_link {
       )
       .await;
     assert_eq!(mine.1["state"], "waiting");
+    // An old personal link of the meeting stops too (#987 review, M5).
+    let one_time = credential(&rig.one_time_link(&alice, &meeting).await);
+    app
+      .post(&alice, &format!("/meetings/{meeting}/link"), json!({}))
+      .await;
+    assert_eq!(rig.join(&one_time, "Max").await.0, StatusCode::UNAUTHORIZED);
     // A member with the old link knocks at nothing.
     let knock = app
       .post(&member("eve"), &format!("/meetings/link/{old}/knock"), json!({}))
@@ -634,6 +640,49 @@ mod meeting_link {
         .status,
       StatusCode::NOT_FOUND
     );
+    rig.app.stop().await;
+  }
+
+  #[tokio::test]
+  async fn a_new_link_makes_guests_still_waiting_wait_for_a_click() {
+    let rig = rig!();
+    let app = &rig.app;
+    let alice = owner();
+    let (meeting, _, token) = rig.meeting_with_guest(&alice, false).await;
+    let (_, gus) = rig.join(&token, "Gus").await;
+
+    app
+      .post(&alice, &format!("/meetings/{meeting}/link"), json!({}))
+      .await;
+
+    let lobby = app.get(&alice, &format!("/meetings/{meeting}/lobby")).await;
+    let entry = &lobby.body["entries"][0];
+    assert_eq!(entry["user"]["id"], gus["user_id"]);
+    assert_eq!(
+      entry["is_by_link"], false,
+      "no admission by itself with the old link"
+    );
+    rig.app.stop().await;
+  }
+
+  #[tokio::test]
+  async fn a_guest_hears_when_the_organizers_app_is_too_old_to_let_them_in() {
+    let rig = rig!();
+    let app = &rig.app;
+    let alice = owner();
+    let (meeting, _, token) = rig.meeting_with_guest(&alice, true).await;
+    let (_, gus) = rig.join(&token, "Gus").await;
+    let guest_token = gus["guest_token"].as_str().unwrap();
+    let path = format!("/meetings/{meeting}/lobby/me");
+
+    // No app of Alice's was seen letting guests in without a link secret: an older client.
+    let before = rig.request(Some(guest_token), Method::GET, &path, None).await;
+    assert_eq!(before.1["is_organizer_app_outdated"], true, "{}", before.1);
+    let marked = app.put(&alice, "/meetings/admitter", json!({})).await;
+    assert_eq!(marked.status, StatusCode::NO_CONTENT, "{}", marked.body);
+    let after = rig.request(Some(guest_token), Method::GET, &path, None).await;
+    assert_eq!(after.1["is_organizer_app_outdated"], Value::Null, "{}", after.1);
+    assert_eq!(after.1["state"], "waiting");
     rig.app.stop().await;
   }
 
@@ -779,13 +828,34 @@ mod shared_link {
     let (meeting, _, _) = rig.meeting_with_guest(&alice, true).await;
     let token = credential(&rig.shared_link(&alice, &meeting).await);
 
-    // `max_shared_link_guests` is 3 in this rig.
+    // `max_shared_link_guests` is 3 in this rig: three may wait, and three may be let in.
+    let mut joined = Vec::new();
     for name in ["One", "Two", "Three"] {
-      assert_eq!(rig.join(&token, name).await.0, StatusCode::OK, "{name}");
+      let (status, body) = rig.join(&token, name).await;
+      assert_eq!(status, StatusCode::OK, "{name}");
+      joined.push(body);
     }
     let fourth = rig.join(&token, "Four").await;
+    assert_eq!(fourth.0, StatusCode::CONFLICT, "the lobby is full: {}", fourth.1);
 
-    assert_eq!(fourth.0, StatusCode::CONFLICT, "{}", fourth.1);
+    // A place counts once its guest is let in; turning a guest away frees theirs (#987 review, M3).
+    rig.admit(&alice, &meeting, &joined[0]).await;
+    rig.admit(&alice, &meeting, &joined[1]).await;
+    let third = joined[2]["user_id"].as_str().unwrap();
+    let deny = rig
+      .app
+      .post(
+        &alice,
+        &format!("/meetings/{meeting}/lobby/{third}/deny"),
+        json!({}),
+      )
+      .await;
+    assert_eq!(deny.status, StatusCode::NO_CONTENT, "{}", deny.body);
+    let (status, late) = rig.join(&token, "Four").await;
+    assert_eq!(status, StatusCode::OK, "{late}");
+    rig.admit(&alice, &meeting, &late).await;
+    let fifth = rig.join(&token, "Five").await;
+    assert_eq!(fifth.0, StatusCode::CONFLICT, "three are in: {}", fifth.1);
     rig.app.stop().await;
   }
 
@@ -1199,7 +1269,7 @@ mod scope_and_leaving {
   }
 
   #[tokio::test]
-  async fn a_guests_device_tells_the_hosts_again_and_only_hosts_read_the_entry() {
+  async fn a_guests_device_tells_the_hosts_once_with_its_key_and_only_hosts_read_the_entry() {
     let rig = rig!();
     let app = &rig.app;
     let alice = owner();
@@ -1212,16 +1282,34 @@ mod scope_and_leaving {
     let mut alice_socket = ws::connect(app, &alice, &alice_device).await;
     ws::events(&mut alice_socket, Duration::from_millis(300)).await;
 
-    let too_early = rig
-      .request(Some(&guest_token), Method::PUT, &device_path, None)
-      .await;
-    assert_eq!(too_early.0, StatusCode::CONFLICT, "no device yet");
+    let fingerprint = "ab".repeat(32);
+    let report = |fingerprint: String| {
+      let (rig, token, path) = (&rig, guest_token.clone(), device_path.clone());
+      async move {
+        rig
+          .request(
+            Some(&token),
+            Method::PUT,
+            &path,
+            Some(json!({"fingerprint": fingerprint})),
+          )
+          .await
+          .0
+      }
+    };
+    assert_eq!(
+      report(fingerprint.clone()).await,
+      StatusCode::CONFLICT,
+      "no device yet"
+    );
     rig.guest_device(&guest_token).await;
-    let ready = rig
-      .request(Some(&guest_token), Method::PUT, &device_path, None)
+    assert_eq!(report("not hex".to_owned()).await, StatusCode::BAD_REQUEST);
+    assert_eq!(report(fingerprint.clone()).await, StatusCode::NO_CONTENT);
+    // Reporting again tells nobody and changes nothing (#987 review, L3).
+    assert_eq!(report("cd".repeat(32)).await, StatusCode::NO_CONTENT);
+    let member_put = app
+      .put(&alice, &device_path, json!({"fingerprint": fingerprint}))
       .await;
-    assert_eq!(ready.0, StatusCode::NO_CONTENT, "{}", ready.1);
-    let member_put = app.put(&alice, &device_path, json!({})).await;
     assert_eq!(member_put.status, StatusCode::FORBIDDEN);
 
     let heard = events_of(&ws::events(&mut alice_socket, QUIET).await, "lobby_join");
@@ -1238,6 +1326,7 @@ mod scope_and_leaving {
       ),
       (Some(true), Some(true))
     );
+    assert_eq!(entry.body["knock_fingerprint"], fingerprint.as_str());
     let (status, _) = rig
       .request(
         Some(&guest_token),

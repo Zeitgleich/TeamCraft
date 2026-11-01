@@ -60,6 +60,11 @@ pub enum ToastAction {
   OpenScreenSettings,
   /// Switches the call to the microphone or speakers plugged in during it (#986).
   UseAudioDevice,
+  /// Takes somebody the organizer's device let into a meeting by itself out again (#987 review).
+  RemoveFromMeeting {
+    conversation: ConversationId,
+    user: UserId,
+  },
 }
 
 impl ToastAction {
@@ -69,6 +74,7 @@ impl ToastAction {
       Self::ChooseCamera => "control-camera-choose",
       Self::OpenScreenSettings => "call-screen-settings-open",
       Self::UseAudioDevice => "call-audio-use",
+      Self::RemoveFromMeeting { .. } => "meetings-remove-joined",
     }
   }
 
@@ -1153,6 +1159,9 @@ impl AppState {
     match action {
       ToastAction::ChooseCamera => self.call.is_camera_menu_open.set(true),
       ToastAction::OpenScreenSettings => crate::external_links::open_screen_recording_settings(),
+      ToastAction::RemoveFromMeeting { conversation, user } => {
+        self.write(|backend| backend.remove_member(conversation, user));
+      },
       ToastAction::UseAudioDevice => {
         let Some(offer) = self.call.maybe_audio_offer.get_untracked() else {
           return;

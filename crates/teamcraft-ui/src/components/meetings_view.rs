@@ -7,6 +7,8 @@ use std::time::Duration;
 
 use leptos::prelude::*;
 use leptos::task::spawn_local;
+use teamcraft_client_api::failure::ActionFailure;
+use teamcraft_crypto::guest_link::code_of_fingerprint;
 use teamcraft_proto::{
   CancelScope, IdempotencyKey, LobbyEntry, LobbyState, MeetingId, MeetingResponse, MeetingStatus, RsvpStatus,
   UnixMillis, UpdateMeetingRequest,
@@ -33,9 +35,9 @@ use crate::meetings::{
   with_verifier,
 };
 use crate::model::{ConversationId, UserId};
-use crate::reactive::{SetIfAlive, pause, use_interval_while_visible};
+use crate::reactive::{SetIfAlive, UpdateIfAlive, pause, use_interval_while_visible};
 use crate::route::MeetingHandle;
-use crate::state::{AppState, Overlay, use_app_state};
+use crate::state::{AppState, Overlay, ToastAction, use_app_state};
 
 /// How often the list and the lobbies are reloaded while the screen is open and visible (guests
 /// waiting in a lobby show up without a reload; `meeting_update` events cover the rest).
@@ -239,10 +241,10 @@ fn MeetingCard(meeting: MeetingResponse) -> impl IntoView {
     .unwrap_or_default();
   let attendees = attendee_summary(&meeting, state.read(|backend| backend.users()));
   let join_url = meeting.join_url.clone();
-  // "Copy link" carries the organizer's fingerprint as this device has it pinned (e2ee.md §4.6);
-  // made now so the click can copy at once.
+  // "Copy link" carries the organizer's fingerprint as this device has it pinned (e2ee.md §4.6),
+  // never the server's; made once per meeting so the click can copy at once.
   if !over {
-    state.try_write(|backend| backend.prepare_guest_link(meeting.conversation_id, meeting.id));
+    verify_link(state, hub, meeting.conversation_id, meeting.id);
   }
   let shows_guest_links = RwSignal::new(false);
   let show_responses = RwSignal::new(false);
@@ -333,7 +335,7 @@ fn MeetingCard(meeting: MeetingResponse) -> impl IntoView {
               </button>
             }
           })}
-        {(!over).then(|| view! { <MeetingLinkButton meeting=id join_url=join_url.clone() /> })}
+        {(!over).then(|| view! { <MeetingLinkButton meeting=id conversation=conversation join_url=join_url.clone() /> })}
         {(!over && !is_host && rsvp.is_some())
           .then(|| {
             view! {
@@ -404,9 +406,10 @@ fn MeetingCard(meeting: MeetingResponse) -> impl IntoView {
   }
 }
 
-/// Guests waiting for admission into a meeting the user hosts.
+/// Guests waiting for admission into a meeting the user hosts: on the meeting's card and on the
+/// call screen while the host is in the meeting's call.
 #[component]
-fn Lobby(meeting: MeetingId) -> impl IntoView {
+pub fn Lobby(meeting: MeetingId) -> impl IntoView {
   let state = use_app_state();
   let i18n = use_i18n();
   let hub = expect_context::<MeetingsHub>();
@@ -429,6 +432,7 @@ fn Lobby(meeting: MeetingId) -> impl IntoView {
         .map(|item| (item.conversation_id, item.ends_at.0))
     });
     let is_guest_user = entry.user.kind == teamcraft_proto::UserKind::Guest;
+    let maybe_knock_fingerprint = entry.maybe_knock_fingerprint.clone();
     spawn_local(async move {
       let client = hub.client();
       let outcome = async move {
@@ -445,7 +449,14 @@ fn Lobby(meeting: MeetingId) -> impl IntoView {
       {
         // The host's own decision lets the admitted person's devices into the chat's encryption
         // (e2ee.md §4.6, "Meeting guests").
-        let_in(state, chat, guest, is_guest_user, ends_at);
+        let_in(
+          state,
+          chat,
+          guest,
+          is_guest_user,
+          maybe_knock_fingerprint,
+          ends_at,
+        );
       }
     });
   };
@@ -460,14 +471,30 @@ fn Lobby(meeting: MeetingId) -> impl IntoView {
               .into_iter()
               .map(|entry| {
                 let name = entry.user.display_name.clone();
-                // A guest's device is let in once their page set it up (e2ee.md §4.6, "Meeting guests").
-                let is_guest_unproven = entry.user.kind == teamcraft_proto::UserKind::Guest && !entry.has_device;
+                // A guest's device is let in once their page set it up and reported its key's
+                // fingerprint; the host may compare the key code with the guest's screen first
+                // (e2ee.md §4.6, "Meeting guests").
+                let is_guest = entry.user.kind == teamcraft_proto::UserKind::Guest;
+                let is_guest_unproven = is_guest && (!entry.has_device || entry.maybe_knock_fingerprint.is_none());
+                let guest_id = entry.user.id;
+                if is_guest && !is_guest_unproven {
+                  prepare_key_code(state, hub, guest_id);
+                }
                 let (admit_entry, deny_entry) = (entry.clone(), entry);
                 view! {
                   <li class="lobby-entry">
                     <span translate="no">{name}</span>
                     {is_guest_unproven.then(|| view! {
                       <span class="muted-text small">{move || i18n.t("meetings-guest-device-pending")}</span>
+                    })}
+                    {(is_guest && !is_guest_unproven).then(|| view! {
+                      <span class="muted-text small" title=move || i18n.t("meetings-guest-code-hint")>
+                        {move || i18n.t("meetings-guest-code")}
+                        " "
+                        <span class="mono" translate="no">
+                          {move || hub.key_codes.with(|codes| codes.get(&guest_id).cloned()).unwrap_or_else(|| i18n.t("meetings-verifying"))}
+                        </span>
+                      </span>
                     })}
                     <button
                       class="btn btn-primary"
@@ -532,10 +559,10 @@ fn LinkField(link: String, field_id: String, label_key: &'static str) -> impl In
   }
 }
 
-/// The organizer's extra links: a personal one-time link for one guest, and making the meeting's
-/// link anew (the old one stops working, invitees get the new one). The meeting link itself, which
-/// guests use too, is "Copy link". The one-time link stays in a field in case the browser refused
-/// the copy.
+/// The organizer's extra links and code: a personal one-time link for one guest, making the
+/// meeting's link anew (the old one stops working, invitees get the new one), and the organizer's
+/// code, which guests see on their page and may compare. The meeting link itself, which guests use
+/// too, is "Copy link". The one-time link stays in a field in case the browser refused the copy.
 #[component]
 fn GuestLinks(meeting: MeetingId, conversation: ConversationId) -> impl IntoView {
   let state = use_app_state();
@@ -544,6 +571,12 @@ fn GuestLinks(meeting: MeetingId, conversation: ConversationId) -> impl IntoView
   let me = state.me().id;
   let maybe_one_time = RwSignal::new(None::<String>);
   let (renewing, making) = (PendingAction::new(), PendingAction::new());
+  verify_link(state, hub, conversation, meeting);
+  let organizer_code = move || {
+    hub
+      .verified_links
+      .with(|links| links.get(&meeting).map(|fragment| fragment_code(fragment)))
+  };
 
   let renew = move |_| {
     let renewed = i18n.t("meetings-link-renewed");
@@ -567,7 +600,13 @@ fn GuestLinks(meeting: MeetingId, conversation: ConversationId) -> impl IntoView
         .guest_link(meeting, None)
         .await
         .map_err(|error| error.to_failure())?;
-      let join_url = with_device_verifier(state, conversation, meeting, link.join_url).await;
+      // Never with the server's fingerprint: without this device's own, no link (#987 review).
+      let Some(fragment) = verified_fragment(state, hub, conversation, meeting).await else {
+        return Err(ActionFailure::other(
+          "this device could not verify the meeting link".to_owned(),
+        ));
+      };
+      let join_url = with_verifier(&link.join_url, &fragment);
       copy_fetched(state, i18n, join_url.clone()).await;
       maybe_one_time.set_if_alive(Some(join_url));
       Ok(())
@@ -587,6 +626,13 @@ fn GuestLinks(meeting: MeetingId, conversation: ConversationId) -> impl IntoView
         </PendingButton>
       </div>
       <p class="muted-text small">{move || i18n.t("meetings-new-link-hint")}</p>
+      {move || organizer_code().map(|code| view! {
+        <p class="muted-text small">
+          {move || i18n.t("meetings-organizer-code")}
+          " "
+          <span class="mono" translate="no">{code}</span>
+        </p>
+      })}
       {move || {
         maybe_one_time.get().map(|link| {
           view! {
@@ -602,20 +648,27 @@ fn GuestLinks(meeting: MeetingId, conversation: ConversationId) -> impl IntoView
 }
 
 /// "Copy link" of a meeting: the server's link with the organizer's fingerprint as this device has
-/// it pinned, once the core made it (the card asks for it when it shows); until then the server's.
-/// The text is made inside the click, which browsers require for clipboard writes.
+/// it pinned. Until the core made that, the button waits ("Verifying…"): a link with the server's
+/// fingerprint is never copied (#987 review). The text is made inside the click, which browsers
+/// require for clipboard writes.
 #[component]
-fn MeetingLinkButton(meeting: MeetingId, join_url: String) -> impl IntoView {
+fn MeetingLinkButton(meeting: MeetingId, conversation: ConversationId, join_url: String) -> impl IntoView {
   let state = use_app_state();
   let i18n = use_i18n();
+  let hub = expect_context::<MeetingsHub>();
   let is_copied = RwSignal::new(false);
+  let maybe_fragment = move || hub.verified_links.with(|links| links.get(&meeting).cloned());
   let copy = move |_| {
-    let failed = i18n.t("action-copy-failed");
-    let link = match state.read(|backend| backend.guest_link_fragment(meeting)) {
-      Some(fragment) => with_verifier(&join_url, &fragment),
-      None => join_url.clone(),
+    let Some(fragment) = maybe_fragment() else {
+      // Still verifying, or it failed: try again.
+      hub.verifying.update_value(|verifying| {
+        verifying.remove(&meeting);
+      });
+      verify_link(state, hub, conversation, meeting);
+      return;
     };
-    let copying = copy_text(&link);
+    let failed = i18n.t("action-copy-failed");
+    let copying = copy_text(&with_verifier(&join_url, &fragment));
     spawn_local(async move {
       if copying.await {
         is_copied.set_if_alive(true);
@@ -625,33 +678,63 @@ fn MeetingLinkButton(meeting: MeetingId, join_url: String) -> impl IntoView {
     });
   };
   view! {
-    <button type="button" class="btn" on:click=copy>
+    <button type="button" class="btn" aria-disabled=move || maybe_fragment().is_none().to_string() on:click=copy>
       <Icon name=IconName::Copy />
       <span aria-live="polite">
-        {move || i18n.t(if is_copied.get() { "meetings-link-copied" } else { "meetings-copy-link" })}
+        {move || {
+          let key = match (maybe_fragment().is_some(), is_copied.get()) {
+            (false, _) => "meetings-verifying",
+            (true, true) => "meetings-link-copied",
+            (true, false) => "meetings-copy-link",
+          };
+          i18n.t(key)
+        }}
       </span>
     </button>
   }
 }
 
 /// Lets an admitted person's devices into the meeting chat's encryption group from this device:
-/// a guest's own device (organizer's devices only, until the end of their access), or a member's.
-fn let_in(state: AppState, chat: ConversationId, user: UserId, is_guest_user: bool, ends_at_ms: i64) {
+/// a guest's own device (organizer's devices only, with the key their page reported, until the end
+/// of their access), or a member's.
+fn let_in(
+  state: AppState,
+  chat: ConversationId,
+  user: UserId,
+  is_guest_user: bool,
+  maybe_knock_fingerprint: Option<String>,
+  ends_at_ms: i64,
+) {
   state.try_write(|backend| {
     if is_guest_user {
-      backend.let_guest_into_meeting_chat(chat, user, ends_at_ms + GUEST_ACCESS_GRACE_MS);
+      // Without a reported key there is nothing to admit; the lobby offers no "admit" then.
+      if let Some(fingerprint) = maybe_knock_fingerprint {
+        backend.let_guest_into_meeting_chat(chat, user, fingerprint, ends_at_ms + GUEST_ACCESS_GRACE_MS);
+      }
     } else {
       backend.let_into_meeting_chat(chat, user);
     }
   });
 }
 
-/// In a meeting without a lobby the organizer's device lets in by itself whoever knocked with the
-/// meeting link's token, once their device is set up; people with an old link wait for a click
-/// (e2ee.md §4.6, "Meeting guests"). Runs on every reload of the lobbies (a `lobby_join` event or
-/// a meeting change); `started` keeps one admission per person in flight.
+/// Whether the organizer's device lets a lobby entry in by itself: only when the organizer chose
+/// "no lobby" on this device (`is_open_by_own_record`; the server's `has_lobby` counts for nothing)
+/// and the person came with the meeting link, with a device whose key they reported.
+pub fn admits_by_itself(is_open_by_own_record: bool, entry: &LobbyEntry) -> bool {
+  let is_guest = entry.user.kind == teamcraft_proto::UserKind::Guest;
+  is_open_by_own_record
+    && entry.is_by_link
+    && entry.has_device
+    && (!is_guest || entry.maybe_knock_fingerprint.is_some())
+}
+
+/// In a meeting the organizer opened without a lobby, the organizer's device lets in by itself
+/// whoever knocked with the meeting link ([`admits_by_itself`]), and says so each time with a
+/// "Remove" button (e2ee.md §4.6, "Meeting guests"). Runs on every reload of the lobbies (a
+/// `lobby_join` event or a meeting change); `started` keeps one admission per person in flight.
 pub fn admit_link_arrivals(
   state: AppState,
+  i18n: I18n,
   hub: MeetingsHub,
   started: StoredValue<HashSet<(MeetingId, UserId)>, LocalStorage>,
 ) {
@@ -660,14 +743,15 @@ pub fn admit_link_arrivals(
     let Some((chat, ends_at)) = hub.meetings.with_untracked(|all| {
       all
         .iter()
-        .find(|item| item.id == meeting && item.organizer_user_id == me && !item.has_lobby)
+        .find(|item| item.id == meeting && item.organizer_user_id == me)
         .map(|item| (item.conversation_id, item.ends_at.0))
     }) else {
       continue;
     };
+    let is_open = state.read(|backend| backend.is_open_by_own_record(meeting));
     for entry in entries
       .into_iter()
-      .filter(|entry| entry.is_by_link && entry.has_device)
+      .filter(|entry| admits_by_itself(is_open, entry))
     {
       let user = entry.user.id;
       let is_new = started
@@ -677,9 +761,22 @@ pub fn admit_link_arrivals(
         continue;
       }
       let is_guest_user = entry.user.kind == teamcraft_proto::UserKind::Guest;
+      let joined = i18n.t_with("meetings-joined-by-link", &[("name", &entry.user.display_name)]);
+      let fingerprint = entry.maybe_knock_fingerprint.clone();
       spawn_local(async move {
         match hub.client().admit(meeting, user).await {
-          Ok(()) => let_in(state, chat, user, is_guest_user, ends_at),
+          Ok(()) => {
+            let_in(state, chat, user, is_guest_user, fingerprint, ends_at);
+            if state.is_alive() {
+              state.show_toast_with_action(
+                joined,
+                ToastAction::RemoveFromMeeting {
+                  conversation: chat,
+                  user,
+                },
+              );
+            }
+          },
           Err(error) => {
             tracing::warn!(%error, "could not let in somebody who came with the meeting link");
             // The next reload of the lobbies tries again.
@@ -694,31 +791,88 @@ pub fn admit_link_arrivals(
 /// How long after a meeting's end the server keeps a guest's session (`guest_grace_secs`, default
 /// two hours): the host's device removes the guest from the encryption group then at the latest.
 const GUEST_ACCESS_GRACE_MS: i64 = 2 * 60 * 60_000;
-/// How long the core gets to pin the organizer's key for a link's fragment.
-const VERIFIER_WAIT: Duration = Duration::from_secs(8);
-const VERIFIER_POLL: Duration = Duration::from_millis(100);
+/// How long the core gets to pin a key for a link's fragment or a guest's key code.
+const VERIFY_WAIT: Duration = Duration::from_secs(8);
+const VERIFY_POLL: Duration = Duration::from_millis(100);
 
-/// The server's link with the organizer's fingerprint as this device has it pinned in its
-/// `#fragment` (e2ee.md §4.6, "Meeting guests"). If the core can't make it in time, the server's
-/// link as it is: its fingerprint is the one the server holds.
-async fn with_device_verifier(
+/// Has the core make the meeting link's fragment from this device's pinned organizer key, once per
+/// meeting; it lands in `hub.verified_links`.
+fn verify_link(state: AppState, hub: MeetingsHub, conversation: ConversationId, meeting: MeetingId) {
+  let is_new = hub
+    .verifying
+    .try_update_value(|verifying| verifying.insert(meeting))
+    .unwrap_or(false);
+  if is_new {
+    spawn_local(async move {
+      verified_fragment(state, hub, conversation, meeting).await;
+    });
+  }
+}
+
+/// The meeting link's fragment as this device makes it (`v=<pinned fingerprint>`), waiting up to
+/// [`VERIFY_WAIT`] for the core; `None` if it can't (then no link is handed out).
+async fn verified_fragment(
   state: AppState,
+  hub: MeetingsHub,
   conversation: ConversationId,
   meeting: MeetingId,
-  join_url: String,
-) -> String {
+) -> Option<String> {
+  if let Some(fragment) = hub
+    .verified_links
+    .with_untracked(|links| links.get(&meeting).cloned())
+  {
+    return Some(fragment);
+  }
   state.try_write(|backend| backend.prepare_guest_link(conversation, meeting));
-  let polls = VERIFIER_WAIT.as_millis() / VERIFIER_POLL.as_millis();
+  let polls = VERIFY_WAIT.as_millis() / VERIFY_POLL.as_millis();
   for _ in 0..polls {
     if !state.is_alive() {
       break;
     }
     if let Some(fragment) = state.read(|backend| backend.guest_link_fragment(meeting)) {
-      return with_verifier(&join_url, &fragment);
+      hub.verified_links.update_if_alive(|links| {
+        links.insert(meeting, fragment.clone());
+      });
+      return Some(fragment);
     }
-    pause(VERIFIER_POLL).await;
+    pause(VERIFY_POLL).await;
   }
-  join_url
+  None
+}
+
+/// Has the core pin a waiting guest's key and make its key code, once per guest; it lands in
+/// `hub.key_codes` for the lobby entry.
+fn prepare_key_code(state: AppState, hub: MeetingsHub, guest: UserId) {
+  let is_new = hub
+    .coding
+    .try_update_value(|coding| coding.insert(guest))
+    .unwrap_or(false);
+  if !is_new {
+    return;
+  }
+  state.try_write(|backend| backend.prepare_guest_key_code(guest));
+  spawn_local(async move {
+    let polls = VERIFY_WAIT.as_millis() / VERIFY_POLL.as_millis();
+    for _ in 0..polls {
+      if !state.is_alive() {
+        return;
+      }
+      if let Some(code) = state.read(|backend| backend.guest_key_code(guest)) {
+        hub.key_codes.update_if_alive(|codes| {
+          codes.insert(guest, code);
+        });
+        return;
+      }
+      pause(VERIFY_POLL).await;
+    }
+    // A later lobby reload asks again.
+    hub.coding.try_update_value(|coding| coding.remove(&guest));
+  });
+}
+
+/// The organizer's code from a link fragment (`v=<fingerprint>`): what the guest's page shows.
+fn fragment_code(fragment: &str) -> String {
+  code_of_fingerprint(fragment.strip_prefix("v=").unwrap_or(fragment))
 }
 
 /// Copies a link that had to be fetched first and says so. The click that asked for it may be too
@@ -1214,6 +1368,10 @@ pub fn ScheduleMeetingDialog(
             let invitees = crate::meetings::invited_users(&request);
             // Gone only with the app; then the chat stays without encryption (nobody else founds it).
             state.try_write(|backend| backend.set_up_meeting_chat(meeting.conversation_id, invitees));
+            // The lobby setting as the organizer chose it here, never as the server reports it,
+            // decides whether this device lets guests of the link in by itself (#987 review).
+            let has_lobby = request.has_lobby;
+            state.try_write(|backend| backend.note_meeting_lobby(meeting.id, has_lobby));
             // Queued behind the chat's setup, so it goes into the group the notetaker is in.
             if has_notetaker {
               state.try_write(|backend| backend.request_notetaker(meeting.conversation_id, every_call()));
@@ -1666,6 +1824,9 @@ pub(crate) async fn save_meeting_edit(
     // drops the record when they still attend (the save did not happen).
     return false;
   };
+  if let Some(has_lobby) = request.maybe_has_lobby {
+    state.try_write(|backend| backend.note_meeting_lobby(saved.id, has_lobby));
+  }
   // From the saved meeting, which is what the server holds now.
   let (invitees, removed) = saved_change(&before, &saved);
   state.try_write(|backend| backend.update_meeting_chat_members(saved.conversation_id, invitees, removed));
@@ -1682,6 +1843,42 @@ fn suggested_start(now: i64) -> i64 {
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  #[test]
+  fn only_the_organizers_own_record_lets_the_device_admit_by_itself() {
+    let guest = lobby_entry("guest", true, true, Some(&"ab".repeat(32)));
+    // The server says "no lobby" and "came with the link": without the organizer's own record of
+    // "no lobby" nobody is let in unattended (#987 review).
+    assert!(!admits_by_itself(false, &guest));
+    assert!(admits_by_itself(true, &guest));
+    // An old link, a guest without a device or without a reported key: always a click.
+    assert!(!admits_by_itself(
+      true,
+      &lobby_entry("guest", false, true, Some(&"ab".repeat(32)))
+    ));
+    assert!(!admits_by_itself(
+      true,
+      &lobby_entry("guest", true, false, Some(&"ab".repeat(32)))
+    ));
+    assert!(!admits_by_itself(true, &lobby_entry("guest", true, true, None)));
+    assert!(admits_by_itself(true, &lobby_entry("member", true, true, None)));
+  }
+
+  fn lobby_entry(
+    kind: &str,
+    is_by_link: bool,
+    has_device: bool,
+    maybe_fingerprint: Option<&str>,
+  ) -> LobbyEntry {
+    serde_json::from_value(serde_json::json!({
+      "user": {"id": "77", "display_name": "Gus", "kind": kind},
+      "requested_at": 1,
+      "is_by_link": is_by_link,
+      "has_device": has_device,
+      "knock_fingerprint": maybe_fingerprint,
+    }))
+    .unwrap()
+  }
   use crate::model::id_from_raw;
 
   #[test]

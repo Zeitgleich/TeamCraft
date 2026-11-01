@@ -356,6 +356,9 @@ pub enum GuestRefusal {
   /// welcome from nobody else (the fingerprint in the link).
   #[error("only the organizer's devices can let guests in")]
   NotOrganizer,
+  /// The key the server presents for the guest is not the one their page reported with its device.
+  #[error("the guest's identity key is not the one their device reported")]
+  NotTheKnockingKey,
   /// The guest has not enrolled a device yet.
   #[error("the guest has no identity key yet")]
   NotEnrolled,

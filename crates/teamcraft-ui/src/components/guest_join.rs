@@ -10,6 +10,7 @@ use std::time::Duration;
 use leptos::prelude::*;
 use leptos::task::spawn_local;
 use teamcraft_client_api::remote::CoreStatus;
+use teamcraft_crypto::guest_link::code_of_fingerprint;
 use teamcraft_proto::{ConversationId, LobbyState, MeetingId, UserId};
 
 use crate::areas::{self, Place, lazy_area};
@@ -91,6 +92,12 @@ pub fn GuestJoinPage(link: GuestLink) -> impl IntoView {
   let link = StoredValue::new(link);
   let joined = StoredValue::new_local(None::<Joined>);
   let is_device_ready = RwSignal::new(false);
+  // The codes the guest may compare out of band (#987 review): their own key's, which the hosts see
+  // on the lobby entry, and the organizer's from the link, which the organizer's app shows.
+  let codes = RwSignal::new(None::<(String, String)>);
+  let is_organizer_app_outdated = RwSignal::new(false);
+  // The fingerprint still to report with the knock, when the first report failed.
+  let unreported = StoredValue::new(None::<String>);
   crate::startup::first_view();
   // What an earlier guest page left in this browser (closed without "Leave") goes now.
   spawn_local(delete_stale_guest_store());
@@ -138,6 +145,10 @@ pub fn GuestJoinPage(link: GuestLink) -> impl IntoView {
           return;
         }
         phase.set_if_alive(GuestPhase::Waiting);
+        let organizer_fingerprint = parts
+          .maybe_organizer_fingerprint
+          .clone()
+          .or(response.maybe_organizer_fingerprint.clone());
         let setup = prepare_device(
           &client,
           &config,
@@ -147,14 +158,19 @@ pub fn GuestJoinPage(link: GuestLink) -> impl IntoView {
           response.conversation_id,
           response.meeting_id,
           // A link without `v` (mailed before #987) takes the server's word (e2ee.md §4.6).
-          parts
-            .maybe_organizer_fingerprint
-            .as_deref()
-            .or(response.maybe_organizer_fingerprint.as_deref()),
+          organizer_fingerprint.as_deref(),
         )
         .await;
         match setup {
-          Ok(()) => is_device_ready.set_if_alive(true),
+          Ok((own_code, maybe_unreported)) => {
+            unreported.set_value(maybe_unreported);
+            let organizer_code = organizer_fingerprint
+              .as_deref()
+              .map(code_of_fingerprint)
+              .unwrap_or_default();
+            codes.set_if_alive(Some((own_code, organizer_code)));
+            is_device_ready.set_if_alive(true);
+          },
           Err(kind) => phase.set_if_alive(GuestPhase::Failed(kind)),
         }
       });
@@ -173,11 +189,22 @@ pub fn GuestJoinPage(link: GuestLink) -> impl IntoView {
       return;
     };
     let client = client.clone();
+    let maybe_fingerprint = unreported.get_value();
     spawn_local(async move {
+      if let Some(fingerprint) = maybe_fingerprint
+        && report_device(&client, meeting, &guest_token, &fingerprint).await
+      {
+        unreported.try_set_value(None);
+      }
       match client.lobby_state(meeting, &guest_token).await {
-        Ok(LobbyState::Admitted) => phase.set_if_alive(GuestPhase::Admitted),
-        Ok(LobbyState::Denied) => phase.set_if_alive(GuestPhase::Denied),
-        Ok(LobbyState::Waiting | LobbyState::Unknown(_)) => {},
+        Ok(answer) => {
+          is_organizer_app_outdated.set_if_alive(answer.is_organizer_app_outdated);
+          match answer.state {
+            LobbyState::Admitted => phase.set_if_alive(GuestPhase::Admitted),
+            LobbyState::Denied => phase.set_if_alive(GuestPhase::Denied),
+            LobbyState::Waiting | LobbyState::Unknown(_) => {},
+          }
+        },
         // A hiccup keeps waiting; a refused session ends it.
         Err(MeetingError::Refused { .. }) => {
           phase.set_if_alive(GuestPhase::Failed(FailureKind::LinkUnusable))
@@ -246,7 +273,19 @@ pub fn GuestJoinPage(link: GuestLink) -> impl IntoView {
                   <span class="spinner" aria-hidden="true"></span>
                   <span>{move || i18n.t("guest-waiting")}</span>
                 </p>
+                {move || is_organizer_app_outdated.get().then(|| view! {
+                  <p role="alert">{move || i18n.t("guest-organizer-app-outdated")}</p>
+                })}
                 <p class="muted-text small">{move || i18n.t("guest-waiting-encryption")}</p>
+                {move || codes.get().map(|(own, organizer)| view! {
+                  <dl class="guest-codes">
+                    <dt>{move || i18n.t("guest-own-code")}</dt>
+                    <dd class="mono" translate="no">{own}</dd>
+                    <dt>{move || i18n.t("guest-organizer-code")}</dt>
+                    <dd class="mono" translate="no">{organizer}</dd>
+                  </dl>
+                  <p class="muted-text small">{move || i18n.t("guest-codes-hint")}</p>
+                })}
               }
               .into_any()
             },
@@ -292,7 +331,7 @@ async fn prepare_device(
   conversation: ConversationId,
   meeting: MeetingId,
   maybe_organizer_fingerprint: Option<&str>,
-) -> Result<(), FailureKind> {
+) -> Result<(String, Option<String>), FailureKind> {
   configure_core(auth, config);
   let failed = |step: &str, error: String| {
     tracing::warn!(step, %error, "could not set up the guest's device");
@@ -322,12 +361,29 @@ async fn prepare_device(
       .await
       .map_err(|error| failed("anchor", error))?;
   }
-  // Only a nudge: the hosts also see the device on their next reload of the lobby, so a failure
-  // here keeps the guest waiting rather than failing the page.
-  if let Err(error) = client.device_ready(meeting, guest_token).await {
-    tracing::warn!(%error, "could not tell the hosts that the guest's device is ready");
+  let own = remote_backend::own_key()
+    .await
+    .map_err(|error| failed("own key", error))?;
+  // Reports the key's fingerprint with the knock; the organizer's device admits only that key. A
+  // failure keeps the guest waiting and is retried on the next poll, rather than failing the page.
+  let is_reported = report_device(client, meeting, guest_token, &own.fingerprint).await;
+  Ok((own.code, (!is_reported).then_some(own.fingerprint)))
+}
+
+/// Reports the guest's key fingerprint with the knock; whether the server took it.
+async fn report_device(
+  client: &GuestClient,
+  meeting: MeetingId,
+  guest_token: &str,
+  fingerprint: &str,
+) -> bool {
+  match client.device_ready(meeting, guest_token, fingerprint).await {
+    Ok(()) => true,
+    Err(error) => {
+      tracing::warn!(%error, "could not tell the hosts that the guest's device is ready");
+      false
+    },
   }
-  Ok(())
 }
 
 /// Removes the fragment (`#invite=…&v=…`) from the address (history entry replaced, nothing reloads).

@@ -926,7 +926,15 @@ pub enum ChatAction {
   LetGuestIntoMeetingChat {
     conversation: ConversationId,
     guest: UserId,
+    knock_fingerprint: String,
     access_ends_at_ms: i64,
+  },
+  PrepareGuestKeyCode {
+    guest: UserId,
+  },
+  NoteMeetingLobby {
+    meeting: teamcraft_proto::MeetingId,
+    has_lobby: bool,
   },
   SetBookmarks {
     conversation: ConversationId,
@@ -1231,8 +1239,11 @@ impl ChatAction {
       Self::LetGuestIntoMeetingChat {
         conversation,
         guest,
+        knock_fingerprint,
         access_ends_at_ms,
-      } => backend.let_guest_into_meeting_chat(conversation, guest, access_ends_at_ms),
+      } => backend.let_guest_into_meeting_chat(conversation, guest, knock_fingerprint, access_ends_at_ms),
+      Self::PrepareGuestKeyCode { guest } => backend.prepare_guest_key_code(guest),
+      Self::NoteMeetingLobby { meeting, has_lobby } => backend.note_meeting_lobby(meeting, has_lobby),
       Self::SetBookmarks {
         conversation,
         bookmarks,
@@ -1313,6 +1324,12 @@ pub enum ChatQuery {
   },
   /// The `#fragment` values of a guest link to the meeting, once the core made them.
   GuestLinkFragment {
+    meeting: teamcraft_proto::MeetingId,
+  },
+  GuestKeyCode {
+    guest: UserId,
+  },
+  IsOpenByOwnRecord {
     meeting: teamcraft_proto::MeetingId,
   },
   MembershipIssues {
@@ -1583,6 +1600,12 @@ impl ChatQuery {
       },
       Self::GuestLinkFragment { meeting } => ChatAnswer::Link {
         maybe_link: backend.guest_link_fragment(meeting),
+      },
+      Self::GuestKeyCode { guest } => ChatAnswer::Link {
+        maybe_link: backend.guest_key_code(guest),
+      },
+      Self::IsOpenByOwnRecord { meeting } => ChatAnswer::Flag {
+        value: backend.is_open_by_own_record(meeting),
       },
       Self::IsWaitingForDevice { conversation } => ChatAnswer::Flag {
         value: backend.is_waiting_for_device(conversation),

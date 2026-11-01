@@ -3,8 +3,6 @@
 //! band. Meeting links carry no secret (#987); the guest's keys are sealed to the guest's own
 //! device at admission.
 
-use subtle::ConstantTimeEq as _;
-
 use crate::identity::IdentityPublicKey;
 
 /// Hex digits of the key code: 64 bits, so finding an identity key with a chosen code costs 2^64
@@ -13,13 +11,20 @@ const KEY_CODE_HEX_DIGITS: usize = 16;
 /// Digits per group of the displayed code.
 const KEY_CODE_GROUP: usize = 4;
 
-/// The code of an identity key that a host compares with the guest's screen out of band: the first 64 bits of the key's fingerprint, in groups (`1a2b-3c4d-5e6f-7a8b`).
+/// The code of an identity key that a host compares with the guest's screen out of band: the
+/// first 64 bits of the key's fingerprint, in groups (`1a2b-3c4d-5e6f-7a8b`). The guest's page shows
+/// it, and so does the host's lobby entry for the key its device pinned.
 pub fn key_code(identity_key: &IdentityPublicKey) -> String {
-  let digits: Vec<char> = identity_key
-    .fingerprint()
-    .to_string()
+  code_of_fingerprint(&identity_key.fingerprint().to_string())
+}
+
+/// The same code from a fingerprint in hex, e.g. the organizer's `v` of a meeting link: the guest's
+/// page shows it, the organizer's app shows the code of its own key, and the two compare them.
+pub fn code_of_fingerprint(fingerprint_hex: &str) -> String {
+  let digits: Vec<char> = fingerprint_hex
     .chars()
     .filter(char::is_ascii_hexdigit)
+    .map(|c| c.to_ascii_lowercase())
     .take(KEY_CODE_HEX_DIGITS)
     .collect();
   digits
@@ -27,19 +32,6 @@ pub fn key_code(identity_key: &IdentityPublicKey) -> String {
     .map(|group| group.iter().collect::<String>())
     .collect::<Vec<_>>()
     .join("-")
-}
-
-/// Whether `typed` (any case, with or without the dashes and spaces) is the key code of the key.
-pub fn key_code_matches(identity_key: &IdentityPublicKey, typed: &str) -> bool {
-  let normalized = |code: &str| -> String {
-    code
-      .chars()
-      .filter(char::is_ascii_hexdigit)
-      .map(|c| c.to_ascii_lowercase())
-      .collect()
-  };
-  let (expected, given) = (normalized(&key_code(identity_key)), normalized(typed));
-  given.len() == KEY_CODE_HEX_DIGITS && expected.as_bytes().ct_eq(given.as_bytes()).into()
 }
 
 #[cfg(test)]
@@ -57,9 +49,6 @@ mod tests {
     assert_eq!(code.matches('-').count(), 3);
     let digits = code.replace('-', "");
     assert!(key.fingerprint().to_string().starts_with(&digits));
-    assert!(key_code_matches(&key, &code.to_uppercase()));
-    assert!(key_code_matches(&key, &digits));
-    assert!(!key_code_matches(&key, &code[..code.len() - 1]));
-    assert!(!key_code_matches(&key, "0000-0000-0000-0000"));
+    assert_eq!(code_of_fingerprint(&key.fingerprint().to_string()), code);
   }
 }

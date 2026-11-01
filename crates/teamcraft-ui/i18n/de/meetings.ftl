@@ -152,3 +152,13 @@ host-remove = Entfernen
 # Startseiten (Issue #585)
 meetings-live = Läuft
 meetings-empty-title = Keine Meetings geplant
+guest-own-code = Dein Code
+guest-organizer-code = Code der Organisatorin oder des Organisators
+guest-codes-hint = Wer sichergehen will, vergleicht: Die Organisatorin oder der Organisator sieht deinen Code neben deinem Namen, ihre oder seine App zeigt den eigenen Code. Weicht einer ab, ist jemand dazwischen: Verlasse das Meeting.
+guest-organizer-app-outdated = Die App der Organisatorin oder des Organisators braucht ein Update, um dich einzulassen. Sag Bescheid und lass diese Seite geöffnet.
+meetings-verifying = Wird geprüft …
+meetings-guest-code = Code
+meetings-guest-code-hint = Der Gast sieht denselben Code auf seinem Bildschirm. Vergleiche ihn, um sicherzugehen, dass niemand dazwischen ist.
+meetings-organizer-code = Dein Code für Gäste:
+meetings-joined-by-link = { $name } ist mit dem Meeting-Link beigetreten
+meetings-remove-joined = Entfernen

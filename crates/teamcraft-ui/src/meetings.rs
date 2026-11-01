@@ -2,6 +2,7 @@
 //! link, a name, the lobby). The server owns all of it (docs/meetings.md); this module is the REST
 //! client and the pure logic around it (form validation, link parsing), tested without a browser.
 
+use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
 use leptos::prelude::*;
@@ -233,6 +234,15 @@ impl MeetingsClient {
       .await
   }
 
+  /// Tells the server this app lets guests in without a link secret (#987), so guests of the
+  /// user's meetings aren't told the organizer's app needs an update.
+  pub async fn mark_admitter(&self) -> Result<(), MeetingError> {
+    self
+      .send(ApiMethod::Put, "/api/v1/meetings/admitter", Some("{}".to_owned()))
+      .await
+      .map(|_| ())
+  }
+
   /// A member opened a meeting link with a token: the meeting, and whether they are in or knocked.
   pub async fn knock_by_link(&self, token: &str) -> Result<KnockByLinkResponse, MeetingError> {
     self
@@ -332,6 +342,14 @@ pub struct MeetingsHub {
   pub maybe_created: RwSignal<Option<MeetingResponse>>,
   /// The server's clock as of the last list (meeting reminders run on it).
   pub clock: RwSignal<ServerClock>,
+  /// The meeting link fragments this device made (`v=<pinned fingerprint>`), per meeting.
+  pub verified_links: RwSignal<HashMap<MeetingId, String>>,
+  /// Meetings whose fragment is being made, so each is asked for once.
+  pub verifying: StoredValue<HashSet<MeetingId>, LocalStorage>,
+  /// Key codes of waiting guests' keys as this device pinned them.
+  pub key_codes: RwSignal<HashMap<UserId, String>>,
+  /// Guests whose key code is being made.
+  pub coding: StoredValue<HashSet<UserId>, LocalStorage>,
 }
 
 impl MeetingsHub {
@@ -344,6 +362,10 @@ impl MeetingsHub {
       is_loaded: RwSignal::new(false),
       maybe_created: RwSignal::new(None),
       clock: RwSignal::new(ServerClock::default()),
+      verified_links: RwSignal::new(HashMap::new()),
+      verifying: StoredValue::new_local(HashSet::new()),
+      key_codes: RwSignal::new(HashMap::new()),
+      coding: StoredValue::new_local(HashSet::new()),
     }
   }
 
@@ -1196,18 +1218,29 @@ impl GuestClient {
   }
 
   /// Where the guest stands: waiting, admitted or denied.
-  pub async fn lobby_state(&self, meeting: MeetingId, guest_token: &str) -> Result<LobbyState, MeetingError> {
+  pub async fn lobby_state(
+    &self,
+    meeting: MeetingId,
+    guest_token: &str,
+  ) -> Result<LobbyStateResponse, MeetingError> {
     let path = format!("/api/v1/meetings/{meeting}/lobby/me");
     let response = self.request("GET", &path, Some(guest_token), None).await?;
-    let state: LobbyStateResponse =
-      serde_json::from_str(&response.body).map_err(|error| MeetingError::Unreadable(error.to_string()))?;
-    Ok(state.state)
+    serde_json::from_str(&response.body).map_err(|error| MeetingError::Unreadable(error.to_string()))
   }
 
-  /// Tells the hosts that the guest's device is set up, so an organizer's device can let it in.
-  pub async fn device_ready(&self, meeting: MeetingId, guest_token: &str) -> Result<(), MeetingError> {
+  /// Tells the hosts that the guest's device is set up, with its identity key fingerprint, which
+  /// binds the key to this knock: an organizer's device admits only a key of this fingerprint.
+  pub async fn device_ready(
+    &self,
+    meeting: MeetingId,
+    guest_token: &str,
+    fingerprint: &str,
+  ) -> Result<(), MeetingError> {
+    let body = to_json(&teamcraft_proto::GuestDeviceReadyRequest {
+      fingerprint: fingerprint.to_owned(),
+    })?;
     let path = format!("/api/v1/meetings/{meeting}/lobby/me/device");
-    self.request("PUT", &path, Some(guest_token), None).await?;
+    self.request("PUT", &path, Some(guest_token), Some(body)).await?;
     Ok(())
   }
 

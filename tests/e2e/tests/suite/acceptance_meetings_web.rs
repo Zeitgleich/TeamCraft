@@ -136,7 +136,7 @@ async fn a_guest_joins_a_meeting_with_the_mailed_link_and_shares_its_call() {
       let entry = loop {
         let lobby = stack_ref.get(&tokens, &lobby_path).await.expect(StatusCode::OK);
         let entry = lobby.body["entries"][0].clone();
-        if entry["has_device"] == true {
+        if entry["has_device"] == true && entry["knock_fingerprint"].is_string() {
           break entry;
         }
         assert!(
@@ -149,6 +149,11 @@ async fn a_guest_joins_a_meeting_with_the_mailed_link_and_shares_its_call() {
       assert_eq!(entry["user"]["display_name"], "Gus (customer)");
       assert_eq!(entry["is_by_link"], true);
       let guest: UserId = entry["user"]["id"].as_str().unwrap().parse().unwrap();
+      let fingerprint = entry["knock_fingerprint"].as_str().unwrap().to_owned();
+      // The host's lobby entry shows the same key code as the guest's page.
+      alice_ref.client.prepare_guest_key_code(guest).await.unwrap();
+      let code = teamcraft_core::client::guest_key_code(alice_ref.store.as_ref(), guest).unwrap();
+      wait_for_text(&page, &code).await;
 
       // Admitting makes the guest a member; the organizer's device adds the guest's own device to
       // the chat's group (a new epoch, the welcome sealed to the guest's key package), and the
@@ -159,7 +164,7 @@ async fn a_guest_joins_a_meeting_with_the_mailed_link_and_shares_its_call() {
         .expect(StatusCode::NO_CONTENT);
       alice_ref
         .client
-        .let_guest_into_meeting_chat(chat, guest, ends_at + GUEST_ACCESS_GRACE_MS)
+        .let_guest_into_meeting_chat(chat, guest, &fingerprint, ends_at + GUEST_ACCESS_GRACE_MS)
         .await
         .unwrap();
       wait_for_text(&page, "Join the call").await;

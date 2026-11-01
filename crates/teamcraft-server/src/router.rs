@@ -55,8 +55,32 @@ pub fn router(state: AppState) -> Router {
       brand_resolver::resolve_brand,
     ))
     .layer(middleware::from_fn_with_state(state.clone(), security::guard))
-    .layer(TraceLayer::new_for_http())
+    .layer(
+      TraceLayer::new_for_http().make_span_with(|request: &axum::http::Request<_>| {
+        tracing::debug_span!(
+          "request",
+          method = %request.method(),
+          path = %logged_path(request.uri().path()),
+        )
+      }),
+    )
     .with_state(state)
+}
+
+/// The request path as logs show it: meeting link tokens (`/meeting/<token>`, the knock route)
+/// are left out, and so is the query (#987 review).
+fn logged_path(path: &str) -> String {
+  for prefix in ["/meeting/", "/api/v1/meetings/link/"] {
+    if let Some(rest) = path.strip_prefix(prefix) {
+      let tail = rest.split_once('/').map_or("", |(_, tail)| tail);
+      return if tail.is_empty() {
+        format!("{prefix}[redacted]")
+      } else {
+        format!("{prefix}[redacted]/{tail}")
+      };
+    }
+  }
+  path.to_owned()
 }
 
 /// Every route, with the OpenAPI document of the documented ones ([`openapi::openapi`]).
@@ -90,4 +114,23 @@ pub(crate) fn routes() -> OpenApiRouter<AppState> {
     .merge(threads::routes())
     .merge(user_groups::routes())
     .merge(workspace::routes())
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  #[test]
+  fn logged_paths_leave_meeting_link_tokens_out() {
+    let token = "AbCdEfGhIjKlMnOpQrStUvWxYz012345";
+    assert_eq!(logged_path(&format!("/meeting/{token}")), "/meeting/[redacted]");
+    assert_eq!(
+      logged_path(&format!("/api/v1/meetings/link/{token}/knock")),
+      "/api/v1/meetings/link/[redacted]/knock"
+    );
+    assert_eq!(
+      logged_path("/api/v1/meetings/7/lobby"),
+      "/api/v1/meetings/7/lobby"
+    );
+  }
 }

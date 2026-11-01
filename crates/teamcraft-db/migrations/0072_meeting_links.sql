@@ -11,3 +11,16 @@ CREATE TABLE meeting_links (
 -- Who knocked with the meeting link's token rather than an old link: in a meeting without a lobby
 -- the organizer's device lets them in by itself. Guests of old links always wait for a click.
 ALTER TABLE meeting_lobby ADD COLUMN is_by_link boolean NOT NULL DEFAULT false;
+
+-- The identity key fingerprint a waiting guest's page reported with its device (#987 review): the
+-- organizer's device adds the guest only if the key it pins has this fingerprint, and the hosts are
+-- told about the device once (`device_announced_at`).
+ALTER TABLE meeting_lobby ADD COLUMN knock_fingerprint text;
+ALTER TABLE meeting_lobby ADD COLUMN device_announced_at timestamptz;
+
+-- Users whose app lets guests in by the flow of #987 (no link secret): without one, a guest's page
+-- says the organizer's app needs an update instead of waiting forever.
+CREATE TABLE guest_admitters (
+  user_id  bigint      PRIMARY KEY REFERENCES users (id) ON DELETE CASCADE,
+  seen_at  timestamptz NOT NULL DEFAULT now()
+);
