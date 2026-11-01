@@ -108,3 +108,5 @@ hover-card-profile = Profil anzeigen
 directory-you = Du
 directory-empty-title = Niemand gefunden
 groups-empty-title = Noch keine Benutzergruppen
+groups-error-handle = Verwende Kleinbuchstaben, Ziffern, - oder _, mindestens zwei.
+groups-error-handle-taken = Dieses Handle verwendet schon eine Gruppe oder eine Person.

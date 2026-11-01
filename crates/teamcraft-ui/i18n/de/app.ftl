@@ -208,3 +208,6 @@ tab-end-call-use-here = Anruf beenden und hier verwenden
 tab-cancel = Abbrechen
 tab-close = Schließen
 tab-close-hint = Du kannst diesen Tab jetzt schließen.
+
+# Errors at a form field (forms.md)
+form-error-name = Gib einen Namen ein.

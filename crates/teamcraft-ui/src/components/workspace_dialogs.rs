@@ -17,7 +17,7 @@ use teamcraft_proto::{CategoryId, HistoryPolicy, IdempotencyKey, Permission};
 use wasm_bindgen::JsCast;
 
 use crate::channel_access::ChannelAccess;
-use crate::channel_policy::{ChannelPolicyHub, parse_retention};
+use crate::channel_policy::{ChannelPolicyHub, check_retention_field, parse_retention};
 use crate::components::avatar::{Avatar, AvatarSize};
 use crate::components::channel_integrations::ChannelIntegrations;
 use crate::components::composer_commands::left_text;
@@ -32,7 +32,8 @@ use crate::components::roster_banner::{current_standing, unsigned_reason};
 use crate::components::section_tabs::{Section, SectionTabs};
 use crate::components::space_tile::SpaceTile;
 use crate::feedback::{PendingAction, failure_message};
-use crate::i18n::use_i18n;
+use crate::form_errors::{FieldError, FieldErrors, FormErrors};
+use crate::i18n::{I18n, use_i18n};
 use crate::image_crop::check_pick;
 use crate::model::{
   ConversationId, ConversationKind, JoinPolicy, Space, SpaceId, SpaceMember, SpaceRole, SpaceRoster, User,
@@ -44,6 +45,10 @@ use crate::state::{Overlay, use_app_state};
 
 /// What the color picker shows for a space without a color of its own.
 const DEFAULT_SPACE_COLOR: &str = "#3b5fa0";
+const NEW_CATEGORY_ID: &str = "ss-new-category";
+const RETENTION_FORM_ID: &str = "cs-retention";
+const RETENTION_DAYS_ID: &str = "cs-retention-days";
+const RETENTION_MESSAGES_ID: &str = "cs-retention-messages";
 
 /// The color picker's state: untouched, a picked color, or back to the derived default.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -148,6 +153,15 @@ pub(crate) fn Dialog(
   }
 }
 
+/// The error of a required name field: none once it has text.
+fn name_errors(i18n: I18n, field_id: &'static str, name: &str) -> FieldErrors {
+  let mut found = FieldErrors::new();
+  if name.trim().is_empty() {
+    found.push(field_id, i18n.t("form-error-name"));
+  }
+  found
+}
+
 fn non_empty(text: &str) -> Option<String> {
   let trimmed = text.trim();
   (!trimmed.is_empty()).then(|| trimmed.to_owned())
@@ -160,11 +174,14 @@ pub fn NewSpaceDialog() -> impl IntoView {
   let name = RwSignal::new(String::new());
   let description = RwSignal::new(String::new());
   let is_open = RwSignal::new(true);
+  let errors = FormErrors::new();
+  Effect::new(move |_| errors.follow(name_errors(i18n, "space-name", &name.get())));
   // One key per opened dialog: every submit of it is the same user action.
   let key = IdempotencyKey::random();
   let submit = move |ev: leptos::ev::SubmitEvent| {
     ev.prevent_default();
     let Some(name) = non_empty(&name.get_untracked()) else {
+      errors.refuse("space-new-form", name_errors(i18n, "space-name", ""));
       return;
     };
     state.close_overlay();
@@ -177,9 +194,12 @@ pub fn NewSpaceDialog() -> impl IntoView {
   };
   view! {
     <Dialog title_key="space-new-title" class="modal-small">
-      <form on:submit=submit>
+      <form id="space-new-form" on:submit=submit>
         <label for="space-name">{move || i18n.t("space-name")}</label>
-        <input id="space-name" class="input" data-autofocus required maxlength="80" prop:value=move || name.get() on:input=move |ev| name.set(event_target_value(&ev)) />
+        <input id="space-name" class="input" data-autofocus aria-required="true" maxlength="80"
+          aria-invalid=errors.invalid("space-name") aria-describedby=errors.described("space-name")
+          prop:value=move || name.get() on:input=move |ev| name.set(event_target_value(&ev)) />
+        <FieldError errors=errors field="space-name" />
         <label for="space-description">{move || i18n.t("space-description")}</label>
         <textarea id="space-description" class="input" rows="2" prop:value=move || description.get() on:input=move |ev| description.set(event_target_value(&ev))></textarea>
         <label class="check-row">
@@ -189,7 +209,7 @@ pub fn NewSpaceDialog() -> impl IntoView {
         <footer class="modal-foot">
           <span class="grow"></span>
           <button type="button" class="btn" on:click=move |_| state.close_overlay()>{move || i18n.t("cancel")}</button>
-          <button type="submit" class="btn btn-primary" prop:disabled=move || name.get().trim().is_empty()>{move || i18n.t("create")}</button>
+          <button type="submit" class="btn btn-primary">{move || i18n.t("create")}</button>
         </footer>
       </form>
     </Dialog>
@@ -207,11 +227,14 @@ pub fn NewChannelDialog(space: SpaceId) -> impl IntoView {
   let category = RwSignal::new(String::new());
   let history = RwSignal::new(HistoryChoice::WorkspaceDefault);
   let categories = Memo::new(move |_| state.read(|backend| backend.categories(space)));
+  let errors = FormErrors::new();
+  Effect::new(move |_| errors.follow(name_errors(i18n, "channel-name", &name.get())));
   // One key per opened dialog: every submit of it is the same user action.
   let key = IdempotencyKey::random();
   let submit = move |ev: leptos::ev::SubmitEvent| {
     ev.prevent_default();
     let Some(name) = non_empty(&name.get_untracked()) else {
+      errors.refuse("channel-new-form", name_errors(i18n, "channel-name", ""));
       return;
     };
     let maybe_category = category
@@ -234,9 +257,12 @@ pub fn NewChannelDialog(space: SpaceId) -> impl IntoView {
   };
   view! {
     <Dialog title_key="channel-new-title" class="modal-small">
-      <form on:submit=submit>
+      <form id="channel-new-form" on:submit=submit>
         <label for="channel-name">{move || i18n.t("channel-name")}</label>
-        <input id="channel-name" class="input" data-autofocus required maxlength="80" prop:value=move || name.get() on:input=move |ev| name.set(event_target_value(&ev)) />
+        <input id="channel-name" class="input" data-autofocus aria-required="true" maxlength="80"
+          aria-invalid=errors.invalid("channel-name") aria-describedby=errors.described("channel-name")
+          prop:value=move || name.get() on:input=move |ev| name.set(event_target_value(&ev)) />
+        <FieldError errors=errors field="channel-name" />
         <label for="channel-topic">{move || i18n.t("channel-topic")}</label>
         <input id="channel-topic" class="input" maxlength="250" prop:value=move || topic.get() on:input=move |ev| topic.set(event_target_value(&ev)) />
         <label for="channel-kind">{move || i18n.t("channel-kind")}</label>
@@ -265,7 +291,7 @@ pub fn NewChannelDialog(space: SpaceId) -> impl IntoView {
         <footer class="modal-foot">
           <span class="grow"></span>
           <button type="button" class="btn" on:click=move |_| state.close_overlay()>{move || i18n.t("cancel")}</button>
-          <button type="submit" class="btn btn-primary" prop:disabled=move || name.get().trim().is_empty()>{move || i18n.t("create")}</button>
+          <button type="submit" class="btn btn-primary">{move || i18n.t("create")}</button>
         </footer>
       </form>
     </Dialog>
@@ -1151,8 +1177,23 @@ fn ChannelRetention(conversation: ConversationId, can_edit: Signal<bool>) -> imp
   let status = RwSignal::new(None::<teamcraft_proto::RetentionStatusResponse>);
   let days = RwSignal::new(String::new());
   let messages = RwSignal::new(String::new());
+  let errors = FormErrors::new();
+  // A refusal of the server, which belongs to no single field: shown next to Save.
   let maybe_error = RwSignal::new(None::<&'static str>);
   let is_saved = RwSignal::new(false);
+  let field_errors = move || {
+    let mut found = FieldErrors::new();
+    for (id, text) in [
+      (RETENTION_DAYS_ID, days.get()),
+      (RETENTION_MESSAGES_ID, messages.get()),
+    ] {
+      if let Some(error) = check_retention_field(&text) {
+        found.push(id, i18n.t(error.message_key()));
+      }
+    }
+    found
+  };
+  Effect::new(move |_| errors.follow(field_errors()));
   spawn_local(async move {
     if let Ok(loaded) = hub.retention(conversation).await {
       days.set_if_alive(
@@ -1175,14 +1216,12 @@ fn ChannelRetention(conversation: ConversationId, can_edit: Signal<bool>) -> imp
   let save = move |ev: leptos::ev::SubmitEvent| {
     ev.prevent_default();
     is_saved.set(false);
-    let setting = match parse_retention(&days.get_untracked(), &messages.get_untracked()) {
-      Ok(setting) => setting,
-      Err(error) => {
-        maybe_error.set(Some(error.message_key()));
-        return;
-      },
-    };
     maybe_error.set(None);
+    let Ok(setting) = parse_retention(&days.get_untracked(), &messages.get_untracked()) else {
+      errors.refuse(RETENTION_FORM_ID, untrack(field_errors));
+      return;
+    };
+    errors.clear();
     spawn_local(async move {
       match hub.set_retention(conversation, setting).await {
         Ok(saved) => {
@@ -1213,14 +1252,18 @@ fn ChannelRetention(conversation: ConversationId, can_edit: Signal<bool>) -> imp
     <Show when=move || status.get().is_some() fallback=|| ()>
       <h3>{move || i18n.t("retention-channel-title")}</h3>
       <p class="hint">{move || i18n.t("retention-channel-hint")}</p>
-      <form on:submit=save>
+      <form id=RETENTION_FORM_ID on:submit=save>
         <fieldset class="plain-fieldset" prop:disabled=move || !can_edit.get()>
-          <label for="cs-retention-days">{move || i18n.t("retention-days")}</label>
-          <input id="cs-retention-days" class="input" inputmode="numeric" prop:value=move || days.get()
+          <label for=RETENTION_DAYS_ID>{move || i18n.t("retention-days")}</label>
+          <input id=RETENTION_DAYS_ID class="input" inputmode="numeric" prop:value=move || days.get()
+            aria-invalid=errors.invalid(RETENTION_DAYS_ID) aria-describedby=errors.described(RETENTION_DAYS_ID)
             on:input=move |ev| days.set(event_target_value(&ev)) />
-          <label for="cs-retention-messages">{move || i18n.t("retention-messages")}</label>
-          <input id="cs-retention-messages" class="input" inputmode="numeric" prop:value=move || messages.get()
+          <FieldError errors=errors field=RETENTION_DAYS_ID />
+          <label for=RETENTION_MESSAGES_ID>{move || i18n.t("retention-messages")}</label>
+          <input id=RETENTION_MESSAGES_ID class="input" inputmode="numeric" prop:value=move || messages.get()
+            aria-invalid=errors.invalid(RETENTION_MESSAGES_ID) aria-describedby=errors.described(RETENTION_MESSAGES_ID)
             on:input=move |ev| messages.set(event_target_value(&ev)) />
+          <FieldError errors=errors field=RETENTION_MESSAGES_ID />
         </fieldset>
         <p class="muted-text small">
           {move || status.get().map(|current| {
@@ -1606,6 +1649,8 @@ fn SpaceChannelsSection(space: Space) -> impl IntoView {
   let id = space.id;
   let can_edit = space.can_manage_space;
   let new_category = RwSignal::new(String::new());
+  let errors = FormErrors::new();
+  Effect::new(move |_| errors.follow(name_errors(i18n, NEW_CATEGORY_ID, &new_category.get())));
   let categories = Memo::new(move |_| state.read(|backend| backend.categories(id)));
   // Every channel of the space, joined or not, as the channel browser lists them.
   let channels = Memo::new(move |_| {
@@ -1616,10 +1661,13 @@ fn SpaceChannelsSection(space: Space) -> impl IntoView {
   });
   let add_category = move |ev: leptos::ev::SubmitEvent| {
     ev.prevent_default();
-    if let Some(category) = non_empty(&new_category.get_untracked()) {
-      state.write(|backend| backend.create_category(id, &category));
-      new_category.set(String::new());
-    }
+    let Some(category) = non_empty(&new_category.get_untracked()) else {
+      errors.refuse("ss-new-category-form", name_errors(i18n, NEW_CATEGORY_ID, ""));
+      return;
+    };
+    state.write(|backend| backend.create_category(id, &category));
+    errors.clear();
+    new_category.set(String::new());
   };
   view! {
     <h3>{move || i18n.t("space-categories")}</h3>
@@ -1630,14 +1678,17 @@ fn SpaceChannelsSection(space: Space) -> impl IntoView {
       </For>
     </ul>
     {can_edit.then(|| view! {
-      <form class="inline-form" on:submit=add_category>
-        <label class="visually-hidden" for="ss-new-category">{move || i18n.t("space-category-new")}</label>
-        <input id="ss-new-category" class="input" placeholder=move || i18n.t("space-category-new") prop:value=move || new_category.get() on:input=move |ev| new_category.set(event_target_value(&ev)) />
-        <button type="submit" class="btn btn-small" prop:disabled=move || new_category.get().trim().is_empty()>
+      <form id="ss-new-category-form" class="inline-form" on:submit=add_category>
+        <label class="visually-hidden" for=NEW_CATEGORY_ID>{move || i18n.t("space-category-new")}</label>
+        <input id=NEW_CATEGORY_ID class="input" placeholder=move || i18n.t("space-category-new")
+          aria-invalid=errors.invalid(NEW_CATEGORY_ID) aria-describedby=errors.described(NEW_CATEGORY_ID)
+          prop:value=move || new_category.get() on:input=move |ev| new_category.set(event_target_value(&ev)) />
+        <button type="submit" class="btn btn-small">
           <Icon name=IconName::Plus />
           {move || i18n.t("create")}
         </button>
       </form>
+      <FieldError errors=errors field=NEW_CATEGORY_ID />
     })}
     <h3>{move || i18n.t("space-channels")}</h3>
     <ul class="settings-member-list">

@@ -185,6 +185,7 @@ invite-email-placeholder = name@example.com, …
 invite-email-hint = For people without an account yet. They get an e-mail and join the space when they first sign in.
 invite-email-invalid = Please check these addresses: { $addresses }
 invite-email-too-many = At most { $max } addresses at a time.
+invite-email-refused = The server refused these addresses. Check them and send again.
 invite-message = Personal message (optional)
 invite-message-hint = Added to the invitation e-mails.
 invite-done = { $count ->
@@ -234,7 +235,8 @@ bookmarks-url = Link
 bookmarks-up = Move up
 bookmarks-down = Move down
 bookmarks-remove = Remove bookmark
-bookmarks-invalid = Every bookmark needs a title, and links must start with https:// or http://.
+bookmarks-error-title = Enter a title.
+bookmarks-error-url = Enter a link that starts with https:// or http://.
 
 ## Activity, last seen and call history
 join-requests-title = Requests to join

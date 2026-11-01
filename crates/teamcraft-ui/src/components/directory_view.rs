@@ -2,8 +2,8 @@
 
 use leptos::prelude::*;
 use teamcraft_proto::{
-  CreateUserGroupRequest, ListUserGroupsResponse, Permission, UserGroupDetailResponse, UserGroupId,
-  UserGroupResponse,
+  CreateUserGroupRequest, ErrorCode, ListUserGroupsResponse, Permission, UserGroupDetailResponse,
+  UserGroupId, UserGroupResponse,
 };
 
 use crate::auth::ApiMethod;
@@ -16,6 +16,8 @@ use crate::components::icons::{Icon, IconName};
 use crate::components::skeleton::ListSkeleton;
 use crate::components::sliding_indicator::SlidingIndicator;
 use crate::components::tab_list::{on_tab_keys, roving_tabindex};
+use crate::feedback::{FailureKind, report_failure};
+use crate::form_errors::{FieldError, FieldErrors, FormErrors};
 use crate::i18n::use_i18n;
 use crate::model::{DeviceSetup, User, UserId};
 use crate::profiles::use_profiles;
@@ -33,6 +35,14 @@ const DIRECTORY_DEBOUNCE_MS: u64 = 250;
 
 /// Element ID of the panel the directory tabs control.
 const DIRECTORY_PANEL_ID: &str = "directory-panel";
+const GROUP_FORM_ID: &str = "group-create";
+const GROUP_HANDLE_ID: &str = "group-handle";
+const GROUP_NAME_ID: &str = "group-name";
+/// Server refusals of a new group that are about its handle: taken, or malformed or reserved.
+const GROUP_SERVER_FIELDS: [(ErrorCode, &str); 2] = [
+  (ErrorCode::Conflict, GROUP_HANDLE_ID),
+  (ErrorCode::InvalidRequest, GROUP_HANDLE_ID),
+];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum DirectoryTab {
@@ -247,6 +257,20 @@ fn PersonRow(user: User) -> impl IntoView {
   }
 }
 
+/// A typed group handle as the server stores it: without a leading `@`, lower case.
+fn normalized_handle(typed: &str) -> String {
+  typed.trim().trim_start_matches('@').to_lowercase()
+}
+
+/// Whether a handle has only the characters the server accepts (it also checks the length and
+/// reserved names).
+fn is_group_handle(handle: &str) -> bool {
+  !handle.is_empty()
+    && handle
+      .chars()
+      .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || matches!(c, '-' | '_'))
+}
+
 /// User groups: mentionable handles with members. Admins create and edit them.
 #[component]
 fn UserGroups() -> impl IntoView {
@@ -284,14 +308,27 @@ fn UserGroups() -> impl IntoView {
 
   let handle = RwSignal::new(String::new());
   let name = RwSignal::new(String::new());
+  let errors = FormErrors::new();
+  let field_errors = move || {
+    let mut found = FieldErrors::new();
+    if !is_group_handle(&normalized_handle(&handle.get())) {
+      found.push(GROUP_HANDLE_ID, i18n.t("groups-error-handle"));
+    }
+    if name.with(|name| name.trim().is_empty()) {
+      found.push(GROUP_NAME_ID, i18n.t("form-error-name"));
+    }
+    found
+  };
+  Effect::new(move |_| errors.follow(field_errors()));
   let create = move |ev: leptos::ev::SubmitEvent| {
     ev.prevent_default();
+    let found = untrack(field_errors);
+    if !found.is_empty() {
+      errors.refuse(GROUP_FORM_ID, found);
+      return;
+    }
     let request = CreateUserGroupRequest {
-      handle: handle
-        .get_untracked()
-        .trim()
-        .trim_start_matches('@')
-        .to_lowercase(),
+      handle: normalized_handle(&handle.get_untracked()),
       name: name.get_untracked().trim().to_owned(),
       maybe_description: None,
     };
@@ -307,7 +344,17 @@ fn UserGroups() -> impl IntoView {
           error.set_if_alive(None);
           reload.update_if_alive(|value| *value += 1);
         },
-        Err(failure) => error.set_if_alive(Some(failure.to_string())),
+        Err(refusal) => {
+          let failure = refusal.to_failure();
+          // A taken or reserved handle goes to the handle field; anything else is a toast.
+          let message = match &failure.kind {
+            FailureKind::Server(ErrorCode::Conflict) => i18n.t("groups-error-handle-taken"),
+            _ => i18n.t("groups-error-handle"),
+          };
+          if !errors.refuse_server(GROUP_FORM_ID, &failure, &GROUP_SERVER_FIELDS, message) {
+            report_failure(failure);
+          }
+        },
       }
     });
   };
@@ -342,12 +389,24 @@ fn UserGroups() -> impl IntoView {
       </Show>
     </ul>
     <Show when=move || can_create.get() fallback=|| ()>
-      <form class="inline-form" on:submit=create>
-        <label class="visually-hidden" for="group-handle">{move || i18n.t("groups-handle")}</label>
-        <input id="group-handle" class="input" placeholder=move || i18n.t("groups-handle") required pattern="[a-z0-9_-]+" prop:value=move || handle.get() on:input=move |ev| handle.set(event_target_value(&ev)) />
-        <label class="visually-hidden" for="group-name">{move || i18n.t("groups-name")}</label>
-        <input id="group-name" class="input" placeholder=move || i18n.t("groups-name") required prop:value=move || name.get() on:input=move |ev| name.set(event_target_value(&ev)) />
-        <button type="submit" class="btn btn-primary">{move || i18n.t("create")}</button>
+      <form id=GROUP_FORM_ID class="group-create" on:submit=create>
+        <div class="inline-form">
+          <div class="group-create-field">
+            <label class="visually-hidden" for=GROUP_HANDLE_ID>{move || i18n.t("groups-handle")}</label>
+            <input id=GROUP_HANDLE_ID class="input" placeholder=move || i18n.t("groups-handle") aria-required="true"
+              aria-invalid=errors.invalid(GROUP_HANDLE_ID) aria-describedby=errors.described(GROUP_HANDLE_ID)
+              prop:value=move || handle.get() on:input=move |ev| handle.set(event_target_value(&ev)) />
+            <FieldError errors=errors field=GROUP_HANDLE_ID />
+          </div>
+          <div class="group-create-field">
+            <label class="visually-hidden" for=GROUP_NAME_ID>{move || i18n.t("groups-name")}</label>
+            <input id=GROUP_NAME_ID class="input" placeholder=move || i18n.t("groups-name") aria-required="true"
+              aria-invalid=errors.invalid(GROUP_NAME_ID) aria-describedby=errors.described(GROUP_NAME_ID)
+              prop:value=move || name.get() on:input=move |ev| name.set(event_target_value(&ev)) />
+            <FieldError errors=errors field=GROUP_NAME_ID />
+          </div>
+          <button type="submit" class="btn btn-primary">{move || i18n.t("create")}</button>
+        </div>
       </form>
     </Show>
   }
@@ -433,5 +492,18 @@ fn GroupMembers(
         </button>
       </div>
     </Show>
+  }
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  #[test]
+  fn a_typed_handle_is_read_like_the_server_reads_it() {
+    assert_eq!(normalized_handle(" @Design-Team "), "design-team");
+    assert!(is_group_handle("design_team-2"));
+    assert!(!is_group_handle(""));
+    assert!(!is_group_handle("design team"));
   }
 }
