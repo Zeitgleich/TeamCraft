@@ -1,6 +1,7 @@
 //! The command line (docs/import-synology.md §7–§9).
 
 use std::path::PathBuf;
+use std::time::Duration;
 
 pub const USAGE: &str = "usage: teamcraft-import --state <dir> <command> [options]
 
@@ -17,7 +18,9 @@ inputs:
   --channels <csv>      the channel mapping
   --users <csv>         the user mapping
   --language <de|en>    how mentions of people without an account read (default: en)
-  --max-file-mib <n>    leave files larger than this out, named on their message (default: none)";
+  --max-file-mib <n>    leave files larger than this out, named on their message (default: none)
+  --join-wait <secs>    how long to wait for a member's device to let the import account into an
+                        existing conversation before going on (default: 120; a later run tries again)";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Args {
@@ -43,6 +46,8 @@ pub struct Inputs {
   pub language: Language,
   /// Files above this size are left out (named on their message); `None`: every file.
   pub maybe_max_file_bytes: Option<u64>,
+  /// How long to wait for a member's device; `None` is the run's default.
+  pub maybe_join_wait: Option<Duration>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -98,6 +103,7 @@ pub fn parse(arguments: impl IntoIterator<Item = String>) -> Result<Args, String
       "users",
       "language",
       "max-file-mib",
+      "join-wait",
     ],
   };
   if let Some((unknown, _)) = options.iter().find(|(key, _)| !known.contains(&key.as_str())) {
@@ -122,6 +128,14 @@ pub fn parse(arguments: impl IntoIterator<Item = String>) -> Result<Args, String
             .map_err(|_| format!("--max-file-mib takes a number of MiB, not {value:?}"))?
             .saturating_mul(1024 * 1024),
         ),
+      },
+      maybe_join_wait: match take("join-wait") {
+        None => None,
+        Some(value) => {
+          Some(Duration::from_secs(value.parse::<u64>().map_err(|_| {
+            format!("--join-wait takes a number of seconds, not {value:?}")
+          })?))
+        },
       },
     })
   };
@@ -168,6 +182,12 @@ mod tests {
       panic!()
     };
     assert_eq!(inputs.maybe_max_file_bytes, Some(2 * 1024 * 1024));
+    let quick = args("--state s run --export e --channels c --users u --join-wait 5").unwrap();
+    let Command::Run(inputs) = quick.command else {
+      panic!()
+    };
+    assert_eq!(inputs.maybe_join_wait, Some(Duration::from_secs(5)));
+    assert!(args("--state s run --export e --channels c --users u --join-wait soon").is_err());
     assert!(args("--state s run --export e --channels c --users u --max-file-mib x").is_err());
   }
 
