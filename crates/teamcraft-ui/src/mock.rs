@@ -241,6 +241,7 @@ impl MockBackend {
           can_invite_guests: true,
           can_manage_space: true,
           can_create_channels: true,
+          maybe_my_role: Some(SpaceRole::SpaceAdmin),
         },
         Space {
           id: space_b(),
@@ -257,6 +258,7 @@ impl MockBackend {
           can_invite_guests: false,
           can_manage_space: false,
           can_create_channels: false,
+          maybe_my_role: Some(SpaceRole::Member),
         },
       ],
       conversations: demo_conversations(),

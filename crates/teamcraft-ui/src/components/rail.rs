@@ -4,9 +4,11 @@ use leptos::prelude::*;
 
 use crate::channel_access::is_guest;
 use crate::components::count_badge::{BadgeTone, CountBadge};
+use crate::components::entry_menu::EntryMenuTrigger;
 use crate::components::icons::{Icon, IconName};
 use crate::components::rail_menus::{RailCreateMenu, RailFocusMenu};
 use crate::components::space_tile::SpaceTileContent;
+use crate::entry_actions::MenuEntry;
 use crate::i18n::use_i18n;
 use crate::model::{ConversationKind, Space, SpaceId};
 use crate::sections::{RailBadge, badge_count, has_urgent_activity};
@@ -274,6 +276,7 @@ fn SpaceButton(space: Space) -> impl IntoView {
   let id = space.id;
   // The memo per space keeps a change elsewhere from touching this tile.
   let badge = Memo::new(move |_| space_badge(state, id));
+  let menu = EntryMenuTrigger::new(MenuEntry::Space(id));
   let is_current = move || state.rail.get() == RailEntry::Space && state.space.get() == id;
   let is_muted = move || {
     state
@@ -308,6 +311,14 @@ fn SpaceButton(space: Space) -> impl IntoView {
         aria-label=label.clone()
         title=label
         aria-current=move || is_current().then_some("true")
+        class:is-pressing=move || menu.is_pressing()
+        on:pointerdown=move |ev| menu.on_pointerdown(&ev)
+        on:pointermove=move |ev| menu.on_pointermove(&ev)
+        on:pointerup=move |_| menu.on_pointerup()
+        on:pointercancel=move |_| menu.on_pointerup()
+        on:contextmenu=move |ev| menu.on_contextmenu(&ev)
+        on:keydown=move |ev| menu.on_keydown(&ev)
+        on:click:capture=move |ev| menu.on_click_capture(&ev)
         on:click=move |_| state.open_space(id)
       >
         <SpaceTileContent space=space.clone() />

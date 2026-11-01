@@ -219,6 +219,7 @@ pub fn build_snapshot(
       can_invite_guests: space.can_invite_guests,
       can_manage_space: space.can_manage_space,
       can_create_channels: space.can_create_channels,
+      maybe_my_role: space.maybe_my_role.clone(),
     })
     .collect();
 

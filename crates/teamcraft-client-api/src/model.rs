@@ -214,6 +214,9 @@ pub struct Space {
   /// again).
   #[serde(default)]
   pub can_create_channels: bool,
+  /// The user's role in the space; `None` where the user only belongs to channels moved into it.
+  #[serde(default)]
+  pub maybe_my_role: Option<SpaceRole>,
 }
 
 impl Space {
@@ -356,6 +359,7 @@ impl JoinableSpace {
       can_invite_guests: false,
       can_manage_space: false,
       can_create_channels: false,
+      maybe_my_role: None,
     }
   }
 }

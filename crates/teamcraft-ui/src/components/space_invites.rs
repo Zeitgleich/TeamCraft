@@ -806,6 +806,7 @@ mod tests {
       can_invite_guests,
       can_manage_space: false,
       can_create_channels: false,
+      maybe_my_role: None,
     }
   }
 

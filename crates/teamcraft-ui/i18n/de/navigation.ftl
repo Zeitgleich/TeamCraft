@@ -198,3 +198,15 @@ setup-invite-hint = Hol dein Team dazu.
 notes-title = Mein Speicher
 notes-empty-title = Noch nichts notiert
 notes-empty = Halte hier Ideen, Links und Dateien fest. Nur deine eigenen Geräte können sie lesen.
+
+## Das Menü eines Eintrags der Seitenleiste: Kanal, Chat oder Space (Rechtsklick, langes Drücken, Menütaste)
+entry-menu-notifications = Benachrichtigungen
+entry-menu-unmute = Stummschaltung aufheben
+entry-menu-mark-read = Als gelesen markieren
+entry-menu-leave-channel = Kanal verlassen
+entry-menu-leave-last-channel-admin = Ernenne zuerst jemand anderen zum Kanal-Admin.
+entry-menu-leave-space-ellipsis = Space verlassen…
+entry-menu-leave-space = Space verlassen
+entry-menu-leave-space-confirm = { $name } verlassen? Du verlässt damit auch alle Kanäle darin.
+entry-menu-leave-last-space-admin = Ernenne zuerst jemand anderen zum Space-Admin.
+entry-menu-settings = Einstellungen…

@@ -37,7 +37,7 @@
   width: 40px;
 }
 
-:root[data-layout="compact"] .sidebar-head .space-name > span:not(.space-tile) {
+:root[data-layout="compact"] .sidebar-head .space-name-entry > span:not(.space-tile) {
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
