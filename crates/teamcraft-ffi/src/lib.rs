@@ -894,7 +894,19 @@ impl TeamCraft {
   }
 }
 
-/// A fresh key for one user action that may be retried (`add_people_to_call`).
+/// The text file the diagnostics export shares: versions, then `recent_log_lines()`.
+#[uniffi::export]
+pub fn diagnostics_text(app_version: String, os_version: String) -> String {
+  logging::diagnostics_text(&app_version, &os_version, &logging::recent_lines())
+}
+
+/// The recent system-log lines (logcat, os_log), oldest first, for the diagnostics export
+/// (issue #1094). Bounded; carries what the system log carries, never secrets.
+#[uniffi::export]
+pub fn recent_log_lines() -> Vec<String> {
+  logging::recent_lines()
+}
+
 /// The address of a conversation to share (`{origin}/c/{id}`); `None` for an origin without a web
 /// address (#1105).
 #[uniffi::export]
@@ -902,6 +914,7 @@ pub fn conversation_link(origin: String, conversation_id: String) -> Option<Stri
   teamcraft_client_api::entry_rules::conversation_link(&origin, engine::parse_id(&conversation_id).ok()?)
 }
 
+/// A fresh key for one user action that may be retried (`add_people_to_call`).
 #[uniffi::export]
 pub fn new_request_key() -> String {
   teamcraft_proto::IdempotencyKey::random().to_hex()
