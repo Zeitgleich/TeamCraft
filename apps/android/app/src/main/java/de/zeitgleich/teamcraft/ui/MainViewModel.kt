@@ -306,9 +306,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         else -> AppState.SignedOut(localSignInErrorText(outcome) ?: R.string.sign_in_failed)
       }
     } catch (failure: IOException) {
+      Log.w(TAG, "local sign-in failed", failure)
       AppState.SignedOut(transportErrorText(failure, graph.network.isOnline.value))
     } catch (failure: IllegalStateException) {
       // The server changed while the request ran.
+      Log.w(TAG, "local sign-in failed", failure)
       AppState.SignedOut(R.string.sign_in_failed)
     }
   }
@@ -382,6 +384,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         state.value = waiting.copy(maybeShortCode = shortCode, maybeNotice = null)
         state.value = ready(core.finishDeviceLink(deviceName()))
       } catch (failure: TeamCraftException.LinkCodeExpired) {
+        Log.i(TAG, "the device link code expired", failure)
         if (waiting.maybeShortCode == null) linkThisDevice(R.string.link_expired_restarted) else linkFailed(failure)
       } catch (failure: TeamCraftException.LinkCodeForSignedInDevice) {
         // The wait this replaced lost its listener: start a fresh one, saying what was wrong.
@@ -395,6 +398,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
   }
 
   private fun linkFailed(failure: TeamCraftException) {
+    Log.w(TAG, "linking this device failed", failure)
     state.value = AppState.NeedsEnrollment(hasExistingIdentity = true, maybeError = errorText(failure))
   }
 
@@ -403,6 +407,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     state.value = try {
       AppState.RecoveringThroughOrganization(graph.core.core().startOrgRecovery().verificationCode)
     } catch (failure: TeamCraftException) {
+      Log.w(TAG, "the recovery request could not start", failure)
       AppState.NeedsEnrollment(hasExistingIdentity = true, maybeError = errorText(failure))
     }
   }
@@ -415,6 +420,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     } catch (failure: TeamCraftException.RecoveryPending) {
       current.copy(maybeError = R.string.org_recovery_pending)
     } catch (failure: TeamCraftException) {
+      Log.w(TAG, "recovery through the organization failed", failure)
       current.copy(maybeError = errorText(failure))
     }
   }
@@ -437,6 +443,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
       withContext(Dispatchers.IO) { core.resetStore() }
       loadAccountState()
     } catch (failure: TeamCraftException) {
+      Log.w(TAG, "setting the local data aside failed", failure)
       current.copy(maybeError = errorText(failure))
     }
   }
@@ -736,11 +743,14 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
   }
 
   /** New device: asks the account's other devices to approve this one (the server then holds the code's key). */
-  suspend fun askOtherDevices(): Result<Unit> = runCatching { graph.core.core().announceDeviceLink() }
+  suspend fun askOtherDevices(): Result<Unit> =
+    runCatching { graph.core.core().announceDeviceLink() }
+      .onFailure { Log.w(TAG, "asking the other devices failed", it) }
 
   /** Existing device: joins the new device whose QR code was scanned or typed. */
   suspend fun approveLink(code: String): Result<Unit> =
     runCatching { graph.core.core().approveDeviceLink(code.trim()) }
+      .onFailure { Log.w(TAG, "joining the new device failed", it) }
 
   /** Checks the code the user typed from the new device's screen; sends the keys if it is right. */
   suspend fun confirmLink(typedCode: String): LinkConfirmation =
@@ -752,6 +762,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     } catch (failure: TeamCraftException.LinkAttemptEnded) {
       LinkConfirmation.ATTEMPT_ENDED
     } catch (failure: TeamCraftException) {
+      Log.w(TAG, "sending the keys to the new device failed", failure)
       LinkConfirmation.FAILED
     }
 
@@ -989,7 +1000,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
   companion object {
     const val MESSAGE_PAGE = 200
 
-    private const val TAG = "TeamCraftSignIn"
+    /** The core's logcat tag too (issue #1067): `adb logcat -s TeamCraft` shows both. */
+    private const val TAG = "TeamCraft"
 
     /** A sign-in page this young (just fetched with the server check) is not asked for again. */
     private const val PAGE_REUSE_MILLIS = 10_000L
@@ -1002,6 +1014,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
       is TeamCraftException.Network -> R.string.error_network
       is TeamCraftException.SignedOut -> R.string.error_signed_out
       is TeamCraftException.WrongPassphrase -> R.string.error_wrong_passphrase
+      is TeamCraftException.BackupOutOfMemory -> R.string.error_backup_out_of_memory
+      is TeamCraftException.BackupTooNew -> R.string.error_backup_too_new
+      is TeamCraftException.BackupDamaged -> R.string.error_backup_damaged
       is TeamCraftException.Storage -> R.string.error_storage
       is TeamCraftException.CallMoveRefused -> R.string.error_call_move_refused
       is TeamCraftException.LinkCodeInvalid -> R.string.link_code_invalid

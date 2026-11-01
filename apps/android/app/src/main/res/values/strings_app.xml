@@ -9,6 +9,9 @@
   <string name="error_network">Can\'t reach the server. Check your connection.</string>
   <string name="error_signed_out">Your session expired. Please sign in again.</string>
   <string name="error_wrong_passphrase">That passphrase doesn\'t open your key backup.</string>
+  <string name="error_backup_out_of_memory">This device doesn\'t have enough free memory to unlock your key backup. Close other apps and try again.</string>
+  <string name="error_backup_too_new">Your key backup was made by a newer version of TeamCraft. Update the app and try again.</string>
+  <string name="error_backup_damaged">Your key backup is damaged and can\'t be opened. Link this device from another device, or ask an admin to recover your account.</string>
   <string name="error_storage">The local data couldn\'t be opened.</string>
   <string name="error_generic">Something went wrong.</string>
   <string name="you">You</string>

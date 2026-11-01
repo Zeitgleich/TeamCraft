@@ -12,6 +12,7 @@ mod engine;
 mod error;
 mod http_fetch;
 mod join_requests;
+mod logging;
 mod markup;
 mod media_viewer;
 mod server_entry;
@@ -64,6 +65,7 @@ pub use types::{
 pub use video::{CameraFrame, VideoFrameRgba};
 
 use crate::engine::{Engine, Job, PushOpening, PushReader};
+use crate::logging::{LifecycleStep, outcome};
 
 uniffi::setup_scaffolding!();
 
@@ -114,28 +116,8 @@ impl TeamCraft {
     tokens: Arc<dyn TokenProvider>,
     listener: Arc<dyn EventListener>,
   ) -> Result<Arc<Self>, TeamCraftError> {
-    let network = NetworkChanges::new();
-    let connection = ConnectionStatus::new();
-    let signals = engine::SyncSignals {
-      network: network.clone(),
-      connection: connection.clone(),
-      catch_up_focus: Default::default(),
-    };
-    let start = engine::EngineStart::new(config, tokens, listener, signals)?;
-    let (jobs, maybe_recovery) = match engine::spawn(&start) {
-      Ok(jobs) => (OnceLock::from(jobs), None),
-      Err(engine::OpenError::Unreadable(problem)) => {
-        (OnceLock::new(), Some(StoreRecovery { problem, start }))
-      },
-      Err(engine::OpenError::Failed(error)) => return Err(error),
-    };
-    Ok(Arc::new(Self {
-      jobs,
-      recovery: Mutex::new(maybe_recovery),
-      network,
-      connection,
-      activity: Mutex::default(),
-    }))
+    logging::install();
+    outcome(LifecycleStep::Open, Self::open(config, tokens, listener))
   }
 
   /// The network changed (Android `NetworkCallback`, iOS `NWPathMonitor`) or the app came back
@@ -200,6 +182,7 @@ impl TeamCraft {
       },
       engine::OpenError::Failed(error) => error,
     })?;
+    tracing::info!(target: logging::LIFECYCLE, step = ?LifecycleStep::ResetStore, "done");
     // Invariant: `jobs` is unset while `recovery` holds something, and only set here.
     let _ = self.jobs.set(jobs);
     *recovery = None;
@@ -213,9 +196,12 @@ impl TeamCraft {
     device_name: String,
     passphrase: String,
   ) -> Result<AccountState, TeamCraftError> {
-    self
-      .call(move |engine| Box::pin(engine.enroll(device_name, passphrase)))
-      .await
+    outcome(
+      LifecycleStep::Enroll,
+      self
+        .call(move |engine| Box::pin(engine.enroll(device_name, passphrase)))
+        .await,
+    )
   }
 
   /// New device: the text for the QR code another device of the user scans (e2ee.md §5). The
@@ -226,9 +212,12 @@ impl TeamCraft {
     device_name: String,
     platform: LinkPlatform,
   ) -> Result<String, TeamCraftError> {
-    self
-      .call(move |engine| Box::pin(engine.start_device_link(device_name, platform)))
-      .await
+    outcome(
+      LifecycleStep::StartLink,
+      self
+        .call(move |engine| Box::pin(engine.start_device_link(device_name, platform)))
+        .await,
+    )
   }
 
   /// New device: asks the user's other devices to approve this one with a prompt. This hands the
@@ -254,25 +243,34 @@ impl TeamCraft {
   /// `NoLinkInProgress`). A code of another new device is `LinkCodeForSignedInDevice`, before
   /// anything joins. Then [`Self::finish_device_link`] as for any link.
   pub async fn join_scanned_device_link(&self, code: String) -> Result<String, TeamCraftError> {
-    let peer = self
-      .call(move |engine| Box::pin(async move { engine.join_scanned_device_link(&code) }))
-      .await?;
-    peer.await.map_err(|_| TeamCraftError::NoLinkInProgress)?
+    let joined = async {
+      let peer = self
+        .call(move |engine| Box::pin(async move { engine.join_scanned_device_link(&code) }))
+        .await?;
+      peer.await.map_err(|_| TeamCraftError::NoLinkInProgress)?
+    };
+    outcome(LifecycleStep::JoinScannedLink, joined.await)
   }
 
   /// New device: receives the keys after the user confirmed the code, and enrolls.
   pub async fn finish_device_link(&self, device_name: String) -> Result<AccountState, TeamCraftError> {
-    self
-      .call(move |engine| Box::pin(engine.finish_device_link(device_name)))
-      .await
+    outcome(
+      LifecycleStep::FinishLink,
+      self
+        .call(move |engine| Box::pin(engine.finish_device_link(device_name)))
+        .await,
+    )
   }
 
   /// Existing device: scanned (or typed) `code`; joins the new device. The short code appears only
   /// on the new device: the user types it into [`Self::confirm_device_link`].
   pub async fn approve_device_link(&self, code: String) -> Result<(), TeamCraftError> {
-    self
-      .call(move |engine| Box::pin(engine.approve_device_link(code)))
-      .await
+    outcome(
+      LifecycleStep::ApproveLink,
+      self
+        .call(move |engine| Box::pin(engine.approve_device_link(code)))
+        .await,
+    )
   }
 
   /// Existing device: the user typed the short code the new device shows; sends the keys if it is
@@ -280,10 +278,13 @@ impl TeamCraft {
   /// `LinkAttemptEnded`. Returns once the new device confirmed the keys (up to a minute if it went
   /// away); syncing and the other calls go on meanwhile (issue #415).
   pub async fn confirm_device_link(&self, typed_code: String) -> Result<(), TeamCraftError> {
-    let receipt = self
-      .call(move |engine| Box::pin(engine.confirm_device_link(typed_code)))
-      .await?;
-    receipt.await.map_err(|_| TeamCraftError::EngineStopped)?
+    let confirmed = async {
+      let receipt = self
+        .call(move |engine| Box::pin(engine.confirm_device_link(typed_code)))
+        .await?;
+      receipt.await.map_err(|_| TeamCraftError::EngineStopped)?
+    };
+    outcome(LifecycleStep::ConfirmLink, confirmed.await)
   }
 
   /// New devices of this account that ask to be linked (e2ee.md §5). Read it when the app is told
@@ -355,12 +356,18 @@ impl TeamCraft {
 
   /// Starts syncing (gateway, outbox, membership changes). Call when the app is in the foreground.
   pub async fn start(&self) -> Result<(), TeamCraftError> {
-    self.call(|engine| Box::pin(engine.start())).await
+    outcome(
+      LifecycleStep::StartSync,
+      self.call(|engine| Box::pin(engine.start())).await,
+    )
   }
 
   /// Stops syncing; the store stays open.
   pub async fn stop(&self) -> Result<(), TeamCraftError> {
-    self.call(|engine| Box::pin(engine.stop())).await
+    outcome(
+      LifecycleStep::StopSync,
+      self.call(|engine| Box::pin(engine.stop())).await,
+    )
   }
 
   /// Channels of every space and the user's DMs, as the sidebar lists them.
@@ -726,7 +733,10 @@ impl TeamCraft {
   /// New device without the passphrase: asks the organization's admins to recover the account
   /// (e2ee.md §6.3.1). Show the code; the user reads it to an admin.
   pub async fn start_org_recovery(&self) -> Result<OrgRecoveryStart, TeamCraftError> {
-    self.call(|engine| Box::pin(engine.start_org_recovery())).await
+    outcome(
+      LifecycleStep::StartOrgRecovery,
+      self.call(|engine| Box::pin(engine.start_org_recovery())).await,
+    )
   }
 
   /// After the admins approved: enrolls with the recovered key and a new passphrase. Fails with
@@ -736,9 +746,12 @@ impl TeamCraft {
     device_name: String,
     new_passphrase: String,
   ) -> Result<AccountState, TeamCraftError> {
-    self
-      .call(move |engine| Box::pin(engine.finish_org_recovery(device_name, new_passphrase)))
-      .await
+    outcome(
+      LifecycleStep::FinishOrgRecovery,
+      self
+        .call(move |engine| Box::pin(engine.finish_org_recovery(device_name, new_passphrase)))
+        .await,
+    )
   }
 
   /// Rings and the state of this device's call go to `listener` from now on.
@@ -996,6 +1009,36 @@ pub fn set_deleted_user_name(name: String) {
 }
 
 impl TeamCraft {
+  /// The constructor's work, whose outcome [`Self::new`] logs.
+  fn open(
+    config: AppConfig,
+    tokens: Arc<dyn TokenProvider>,
+    listener: Arc<dyn EventListener>,
+  ) -> Result<Arc<Self>, TeamCraftError> {
+    let network = NetworkChanges::new();
+    let connection = ConnectionStatus::new();
+    let signals = engine::SyncSignals {
+      network: network.clone(),
+      connection: connection.clone(),
+      catch_up_focus: Default::default(),
+    };
+    let start = engine::EngineStart::new(config, tokens, listener, signals)?;
+    let (jobs, maybe_recovery) = match engine::spawn(&start) {
+      Ok(jobs) => (OnceLock::from(jobs), None),
+      Err(engine::OpenError::Unreadable(problem)) => {
+        (OnceLock::new(), Some(StoreRecovery { problem, start }))
+      },
+      Err(engine::OpenError::Failed(error)) => return Err(error),
+    };
+    Ok(Arc::new(Self {
+      jobs,
+      recovery: Mutex::new(maybe_recovery),
+      network,
+      connection,
+      activity: Mutex::default(),
+    }))
+  }
+
   /// Runs `job` on the engine thread and waits for its result.
   async fn call<R, F>(&self, job: F) -> Result<R, TeamCraftError>
   where
