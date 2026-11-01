@@ -264,11 +264,10 @@ fn user_message(message: Message, is_grouped: bool, in_thread: bool, motion: Row
   // An imported message by somebody without an account here (or a bot of the old system) has a
   // stand-in author: their old name, or "Deleted user" (e2ee.md §4.10).
   let maybe_imported = message.maybe_imported.clone();
-  let author = match maybe_imported.as_ref().map(|mark| &mark.author) {
-    Some(ImportedAuthorView::Deleted) => Some(imported_stand_in(i18n.t("user-deleted-name"), false)),
-    Some(ImportedAuthorView::Named { name }) => Some(imported_stand_in(name.clone(), true)),
-    _ => state.read(|backend| backend.user(message.author)),
-  };
+  let author = shown_author(
+    Some(message.author),
+    maybe_imported.as_ref().map(|mark| &mark.author),
+  );
   let has_profile = !matches!(
     maybe_imported.as_ref().map(|mark| &mark.author),
     Some(ImportedAuthorView::Deleted | ImportedAuthorView::Named { .. })
@@ -1162,6 +1161,22 @@ fn imported_source_text(source: ImportedFrom) -> String {
 
 /// The author shown for an imported message by somebody without an account here: no picture, no
 /// profile (e2ee.md §4.10).
+/// The author a message is shown with, wherever it is named (the list, the lightbox): the account
+/// `maybe_author`, or for an imported message by somebody without an account here (or a bot of the
+/// old system) a stand-in, their old name or "Deleted user" (e2ee.md §4.10).
+pub(crate) fn shown_author(
+  maybe_author: Option<UserId>,
+  maybe_imported: Option<&ImportedAuthorView>,
+) -> Option<User> {
+  match maybe_imported {
+    Some(ImportedAuthorView::Deleted) => Some(imported_stand_in(use_i18n().t("user-deleted-name"), false)),
+    Some(ImportedAuthorView::Named { name }) => Some(imported_stand_in(name.clone(), true)),
+    Some(ImportedAuthorView::Person) | None => {
+      maybe_author.and_then(|author| use_app_state().read(|backend| backend.user(author)))
+    },
+  }
+}
+
 fn imported_stand_in(display_name: String, is_bot: bool) -> User {
   let avatar_hue = display_name.bytes().fold(0_u16, |hue, byte| {
     (hue.wrapping_mul(31).wrapping_add(u16::from(byte))) % 360

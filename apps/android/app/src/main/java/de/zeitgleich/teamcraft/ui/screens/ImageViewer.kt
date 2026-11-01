@@ -466,7 +466,10 @@ private fun TopBar(maybeFile: FileInfo?, snapshot: ChatSnapshot?, position: Int,
       Icon(Icons.Filled.Close, contentDescription = stringResource(R.string.close), tint = Color.White)
     }
     Column(Modifier.weight(1f).padding(horizontal = 8.dp).semantics(mergeDescendants = true) {}) {
-      val sender = maybeFile?.maybeSender?.let { snapshot?.name(it) }
+      val deletedName = stringResource(R.string.user_deleted_name)
+      val sender =
+        maybeFile?.maybeSender?.let { snapshot?.name(it) }
+          ?: maybeFile?.maybeImportedAuthor?.standInName(deletedName)
       Text(
         sender ?: maybeFile?.fileName.orEmpty(),
         color = Color.White,

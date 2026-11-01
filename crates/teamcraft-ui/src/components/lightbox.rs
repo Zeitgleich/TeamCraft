@@ -42,6 +42,7 @@ use crate::components::lightbox_controls::{
   Controls, MediaActions, Notice, ThumbnailStrip, still_frame, tooltip,
 };
 use crate::components::lightbox_motion::{MotionHooks, MotionNodes, StageMotion};
+use crate::components::message_row::shown_author;
 use crate::components::modal::Modal;
 use crate::components::pending_button::PendingButton;
 use crate::components::thread_panel::ThreadPanel;
@@ -302,11 +303,11 @@ pub fn Lightbox(conversation: ConversationId, start: MediaKey) -> impl IntoView 
     run(command);
   };
 
+  // The author the message list shows: the original one of an imported message (#1088).
   let sender = Memo::new(move |_| {
     current_file
       .get()
-      .and_then(|file| file.maybe_sender)
-      .and_then(|user| state.read(|backend| backend.user(user)))
+      .and_then(|file| shown_author(file.maybe_sender, file.maybe_imported_author.as_ref()))
   });
   let channel = Memo::new(move |_| {
     state

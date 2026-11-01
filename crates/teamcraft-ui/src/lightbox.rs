@@ -1291,6 +1291,7 @@ mod tests {
       transfer: FileTransfer::Remote,
       maybe_sender: None,
       maybe_sent_at: None,
+      maybe_imported_author: None,
       maybe_dimensions: None,
       maybe_duration_ms: None,
       maybe_content_sha256: None,
