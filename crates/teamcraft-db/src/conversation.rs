@@ -2,7 +2,7 @@ use std::collections::{HashMap, HashSet};
 
 use teamcraft_proto::{
   CategoryId, ChannelModeration, ChannelRole, ConversationId, ConversationKind, ConversationVisibility,
-  HistoryPolicy, IdempotencyKey, MessageId, NotificationLevel, Permission, SpaceId, UserId,
+  HistoryPolicy, IdempotencyKey, MessageId, NotificationLevel, Permission, ReactionsSeen, SpaceId, UserId,
 };
 
 use time::OffsetDateTime;
@@ -59,6 +59,9 @@ pub struct Membership {
   /// The import account added the member while it imported: they see the history from before
   /// they joined also as a guest (e2ee.md §4.10, "Guests in imported conversations").
   pub sees_imported_history: bool,
+  /// The reactions to the member's own messages they saw (notifications.md, "Reactions to my
+  /// messages").
+  pub reactions_seen: ReactionsSeen,
 }
 
 /// A conversation and the viewer's membership (`None`: not a member).
@@ -236,7 +239,8 @@ impl Database {
                 m.is_favorite AS "is_favorite?", m.last_read_message_id, m.muted_until,
                 NOT m.notification_overridden AS "is_inherited?",
                 tc_snowflake_floor(m.joined_at) AS "joined_floor?",
-                m.sees_imported_history AS "sees_imported_history?"
+                m.sees_imported_history AS "sees_imported_history?",
+                m.reactions_seen_through_message_id, m.reactions_seen_message_ids AS "reactions_seen_message_ids?"
          FROM conversations c
          LEFT JOIN memberships m ON m.conversation_id = c.id AND m.user_id = $1
          WHERE ($2::bigint IS NULL OR c.id = $2)
@@ -273,6 +277,15 @@ impl Database {
             maybe_muted_until: row.muted_until,
             joined_floor: from_db(floor)?,
             sees_imported_history: row.sees_imported_history.unwrap_or(false),
+            reactions_seen: ReactionsSeen {
+              maybe_through: from_db_opt(row.reactions_seen_through_message_id)?,
+              message_ids: row
+                .reactions_seen_message_ids
+                .unwrap_or_default()
+                .into_iter()
+                .map(from_db)
+                .collect::<Result<_, _>>()?,
+            },
           }),
           _ => None,
         };
@@ -582,6 +595,63 @@ impl Database {
     .execute(self.pool())
     .await?;
     Ok(())
+  }
+
+  /// Adds reaction messages the member saw to their seen state ([`ReactionsSeen::add`], at most
+  /// `max_ids` kept one by one). `None` if they aren't a member. Two devices at once don't lose
+  /// each other's: the row is locked while it is merged.
+  pub async fn add_reactions_seen(
+    &self,
+    conversation: ConversationId,
+    user: UserId,
+    messages: &[MessageId],
+    max_ids: usize,
+  ) -> Result<Option<ReactionsSeen>, DbError> {
+    let mut tx = self.pool().begin().await?;
+    let Some(row) = sqlx::query!(
+      r#"SELECT reactions_seen_through_message_id, reactions_seen_message_ids FROM memberships
+         WHERE conversation_id = $1 AND user_id = $2 FOR UPDATE"#,
+      to_db(conversation),
+      to_db(user),
+    )
+    .fetch_optional(&mut *tx)
+    .await?
+    else {
+      return Ok(None);
+    };
+    let mut seen = ReactionsSeen {
+      maybe_through: from_db_opt(row.reactions_seen_through_message_id)?,
+      message_ids: row
+        .reactions_seen_message_ids
+        .into_iter()
+        .map(from_db)
+        .collect::<Result<_, _>>()?,
+    };
+    seen.add(messages.iter().copied(), max_ids);
+    sqlx::query!(
+      r#"UPDATE memberships SET reactions_seen_through_message_id = $3, reactions_seen_message_ids = $4
+         WHERE conversation_id = $1 AND user_id = $2"#,
+      to_db(conversation),
+      to_db(user),
+      seen.maybe_through.map(to_db),
+      &to_db_all(&seen.message_ids),
+    )
+    .execute(&mut *tx)
+    .await?;
+    tx.commit().await?;
+    Ok(Some(seen))
+  }
+
+  /// How many of `messages` (distinct IDs) are messages of the conversation.
+  pub async fn count_messages_of(&self, conversation: ConversationId, messages: &[MessageId]) -> Result<usize, DbError> {
+    let count = sqlx::query_scalar!(
+      r#"SELECT count(*) AS "count!" FROM messages WHERE conversation_id = $1 AND id = ANY($2)"#,
+      to_db(conversation),
+      &to_db_all(messages),
+    )
+    .fetch_one(self.pool())
+    .await?;
+    Ok(usize::try_from(count).unwrap_or(usize::MAX))
   }
 
   /// Participants of DMs / group DMs, by conversation. A DM's participants are the two people

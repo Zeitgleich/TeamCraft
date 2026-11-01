@@ -1,0 +1,17 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE memberships SET reactions_seen_through_message_id = $3, reactions_seen_message_ids = $4\n         WHERE conversation_id = $1 AND user_id = $2",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Int8",
+        "Int8",
+        "Int8Array"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "85d8d9ef21aa47fc3508ee10c7dbb912e61fc003425f449d7738e962c8ad2c34"
+}
