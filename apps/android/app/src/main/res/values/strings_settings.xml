@@ -19,4 +19,8 @@
   <string name="custom_status_emoji">Emoji</string>
   <string name="custom_status_text">Status</string>
   <string name="custom_status_missing">Enter a status text.</string>
+  <string name="export_diagnostics">Export diagnostics</string>
+  <string name="export_diagnostics_summary">Share the app and system version and recent log lines with support. Nothing is sent until you pick an app.</string>
+  <string name="export_diagnostics_share_title">TeamCraft diagnostics</string>
+  <string name="export_diagnostics_failed">Could not export the diagnostics.</string>
 </resources>

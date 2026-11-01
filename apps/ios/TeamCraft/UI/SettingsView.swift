@@ -51,6 +51,9 @@ struct SettingsView: View {
           }
         }
         Section {
+          DiagnosticsExportRow()
+        }
+        Section {
           Button("sign_out", role: .destructive) {
             Task {
               await model.signOut()
