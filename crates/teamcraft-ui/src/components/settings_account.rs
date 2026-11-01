@@ -16,6 +16,7 @@ use crate::components::pending_button::PendingButton;
 use crate::components::profile_views::{Weekday, format_minutes, parse_minutes};
 use crate::components::settings_rows::{SettingRow, SettingsCard, SwitchRow, row_id};
 use crate::feedback::{ActionFailure, FailureKind, PendingAction};
+use crate::form_errors::focus_first_invalid;
 use crate::i18n::use_i18n;
 use crate::image_crop::check_pick;
 use crate::prefs::EVERY_DAY;
@@ -23,6 +24,8 @@ use crate::profiles::{MAX_AVATAR_BYTES, ProfileHub, use_profiles};
 use crate::reactive::SetIfAlive;
 use crate::state::use_app_state;
 
+const PROFILE_FORM_ID: &str = "profile-form";
+const HOURS_ERROR_ID: &str = "profile-hours-error";
 const DEFAULT_START: u16 = 9 * 60;
 const DEFAULT_END: u16 = 17 * 60;
 
@@ -223,6 +226,8 @@ fn ProfileDetails(hub: ProfileHub) -> impl IntoView {
     is_saved.set(false);
   });
 
+  let hours_invalid = move || is_hours_invalid.get().then_some("true");
+  let hours_described = move || is_hours_invalid.get().then_some(HOURS_ERROR_ID);
   let save = move |ev: leptos::ev::SubmitEvent| {
     ev.prevent_default();
     let maybe_working_hours = if has_hours.get_untracked() {
@@ -232,6 +237,7 @@ fn ProfileDetails(hub: ProfileHub) -> impl IntoView {
         &end.get_untracked(),
       ) else {
         is_hours_invalid.set(true);
+        focus_first_invalid(PROFILE_FORM_ID);
         return;
       };
       Some(hours)
@@ -272,7 +278,7 @@ fn ProfileDetails(hub: ProfileHub) -> impl IntoView {
     };
 
   view! {
-    <form class="set-form" on:submit=save>
+    <form id=PROFILE_FORM_ID class="set-form" on:submit=save>
       <SettingsCard heading="settings-profile-details" hint="settings-profile-details-hint">
         {text_field("profile-title-field", "profile-title", title, "text")}
         {text_field("profile-department", "profile-department", department, "text")}
@@ -305,12 +311,12 @@ fn ProfileDetails(hub: ProfileHub) -> impl IntoView {
           </SettingRow>
           <div class="set-row is-field set-hours">
             <label class="set-row-label" for="profile-start">{move || i18n.t("profile-hours-from")}</label>
-            <input id="profile-start" class="input" type="time" prop:value=move || start.get() on:input=move |ev| start.set(event_target_value(&ev)) />
+            <input id="profile-start" class="input" type="time" aria-invalid=hours_invalid aria-describedby=hours_described prop:value=move || start.get() on:input=move |ev| start.set(event_target_value(&ev)) />
             <label class="set-row-label" for="profile-end">{move || i18n.t("profile-hours-to")}</label>
-            <input id="profile-end" class="input" type="time" prop:value=move || end.get() on:input=move |ev| end.set(event_target_value(&ev)) />
+            <input id="profile-end" class="input" type="time" aria-invalid=hours_invalid aria-describedby=hours_described prop:value=move || end.get() on:input=move |ev| end.set(event_target_value(&ev)) />
           </div>
           <Show when=move || is_hours_invalid.get() fallback=|| ()>
-            <p class="field-error" role="alert">{move || i18n.t("profile-hours-invalid")}</p>
+            <p id=HOURS_ERROR_ID class="field-error" role="alert">{move || i18n.t("profile-hours-invalid")}</p>
           </Show>
         </Show>
       </SettingsCard>

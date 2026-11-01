@@ -14,10 +14,19 @@ use crate::components::admin_fields::{TextAreaField, TextField};
 use crate::components::admin_policy::{
   CheckRow, PolicyBlockerNote, PolicyFooter, SelectRow, use_policy_draft,
 };
+use crate::form_errors::focus_first_invalid;
 use crate::i18n::use_i18n;
 use crate::integrations::use_bots;
 use crate::state::use_app_state;
 
+const FORM_ID: &str = "admin-notetaker-form";
+const BOT_ID: &str = "notetaker-bot";
+const INVITERS_ID: &str = "notetaker-inviters";
+const TRANSCRIPTION_ID: &str = "notetaker-transcription-model";
+const SUMMARY_ID: &str = "notetaker-summary-model";
+const LANGUAGE_ID: &str = "notetaker-language";
+const PROMPT_ID: &str = "notetaker-prompt";
+const KEY_ID: &str = "notetaker-key";
 /// Languages offered; any ISO 639-1 code is valid policy, these are the common ones.
 const LANGUAGES: [&str; 7] = [LANGUAGE_AUTO, "de", "en", "fr", "es", "it", "nl"];
 
@@ -32,7 +41,26 @@ pub fn NotetakerSection() -> impl IntoView {
   let settings = Memo::new(move |_| state.read(|backend| backend.notetaker_settings()));
   // The key as typed: never stored in the page beyond the save.
   let key_input = RwSignal::new(String::new());
-  let maybe_error = RwSignal::new(None::<&'static str>);
+  // The field the policy check refused and why: shown at that field (forms.md).
+  let maybe_error = RwSignal::new(None::<(&'static str, &'static str)>);
+  let was_refused = RwSignal::new(false);
+  // After a refused save the message follows the input: it goes once the field is fixed.
+  Effect::new(move |_| {
+    let result = draft.with(|draft| draft.notetaker.check());
+    if was_refused.get_untracked() {
+      maybe_error.set(result.err().map(|error| (error_field(&error), error_key(&error))));
+    }
+  });
+  let error_of = move |field: &'static str| {
+    Signal::derive(move || {
+      maybe_error
+        .get()
+        .filter(|(at, _)| *at == field)
+        .map(|(_, key)| key)
+    })
+  };
+  let select_error_of =
+    move |field: &'static str| Signal::derive(move || error_of(field).get().map(|key| i18n.t(key)));
 
   // The instance's bot list (Administration -> Integrations): a bot made for the notetaker shares no
   // conversation yet, so the people this device knows don't include it. Known bots stay as a
@@ -111,10 +139,13 @@ pub fn NotetakerSection() -> impl IntoView {
   let save = move || {
     let candidate = draft.get_untracked().notetaker;
     if let Err(error) = candidate.check() {
-      maybe_error.set(Some(error_key(&error)));
+      maybe_error.set(Some((error_field(&error), error_key(&error))));
+      was_refused.set(true);
+      focus_first_invalid(FORM_ID);
       return;
     }
     maybe_error.set(None);
+    was_refused.set(false);
     let typed = key_input.get_untracked();
     let can_store = settings
       .get_untracked()
@@ -135,6 +166,7 @@ pub fn NotetakerSection() -> impl IntoView {
     <p class="auth-alert" role="note">{move || i18n.t("notetaker-e2ee-warning")}</p>
     <PolicyBlockerNote policy=policy />
     <form
+      id=FORM_ID
       class="policy-form"
       on:submit=move |ev: web_sys::SubmitEvent| {
         ev.prevent_default();
@@ -151,19 +183,21 @@ pub fn NotetakerSection() -> impl IntoView {
           on_change=move |value| policy.edit(|p| p.notetaker.is_enabled = value)
         />
         <SelectRow
-          id="notetaker-bot"
+          id=BOT_ID
           label=Signal::derive(move || i18n.t("notetaker-bot"))
           options=bot_options
           selected=Signal::derive(move || draft.get().notetaker.maybe_bot.map(|id| id.to_string()).unwrap_or_default())
           on_select=move |value: String| policy.edit(|p| p.notetaker.maybe_bot = value.parse().ok())
+          error=select_error_of(BOT_ID)
         />
         <p class="muted-text small">{move || i18n.t("notetaker-bot-hint")}</p>
         <SelectRow
-          id="notetaker-inviters"
+          id=INVITERS_ID
           label=Signal::derive(move || i18n.t("notetaker-inviters"))
           options=inviter_options
           selected=Signal::derive(move || draft.get().notetaker.inviters.as_str().to_owned())
           on_select=move |value: String| policy.edit(|p| p.notetaker.inviters = NotetakerInviters::from(value))
+          error=select_error_of(INVITERS_ID)
         />
         <CheckRow
           name="notetaker_anyone_stop"
@@ -178,30 +212,34 @@ pub fn NotetakerSection() -> impl IntoView {
         <legend>{move || i18n.t("notetaker-models")}</legend>
         <p class="muted-text small">{move || i18n.t("notetaker-models-hint")}</p>
         <TextField
-          id="notetaker-transcription-model"
+          id=TRANSCRIPTION_ID
           label="notetaker-transcription-model"
           placeholder=DEFAULT_TRANSCRIPTION_MODEL
+          error=error_of(TRANSCRIPTION_ID)
           value=Signal::derive(move || draft.get().notetaker.transcription_model)
           on_input=Callback::new(move |value: String| policy.edit(|p| p.notetaker.transcription_model = value.trim().to_owned()))
         />
         <TextField
-          id="notetaker-summary-model"
+          id=SUMMARY_ID
           label="notetaker-summary-model"
           placeholder=DEFAULT_SUMMARY_MODEL
+          error=error_of(SUMMARY_ID)
           value=Signal::derive(move || draft.get().notetaker.summary_model)
           on_input=Callback::new(move |value: String| policy.edit(|p| p.notetaker.summary_model = value.trim().to_owned()))
         />
         <SelectRow
-          id="notetaker-language"
+          id=LANGUAGE_ID
           label=Signal::derive(move || i18n.t("notetaker-language"))
           options=language_options
           selected=Signal::derive(move || draft.get().notetaker.language)
           on_select=move |value: String| policy.edit(|p| p.notetaker.language = value)
+          error=select_error_of(LANGUAGE_ID)
         />
         <TextAreaField
-          id="notetaker-prompt"
+          id=PROMPT_ID
           label="notetaker-prompt"
           hint="notetaker-prompt-hint"
+          error=error_of(PROMPT_ID)
           rows=8
           value=Signal::derive(move || draft.get().notetaker.maybe_prompt.unwrap_or_default())
           on_input=Callback::new(move |value: String| {
@@ -220,10 +258,11 @@ pub fn NotetakerSection() -> impl IntoView {
       <fieldset class="policy-group" prop:disabled=move || policy.is_locked()>
         <legend>{move || i18n.t("notetaker-key")}</legend>
         <TextField
-          id="notetaker-key"
+          id=KEY_ID
           label="notetaker-key"
           input_type="password"
           hint="notetaker-key-hint"
+          error=error_of(KEY_ID)
           placeholder="sk-or-…"
           value=key_input
           on_input=Callback::new(move |value: String| {
@@ -246,9 +285,21 @@ pub fn NotetakerSection() -> impl IntoView {
           </button>
         </Show>
       </fieldset>
-      {move || maybe_error.get().map(|key| view! { <p class="field-error" role="alert">{i18n.t(key)}</p> })}
       <PolicyFooter policy=policy />
     </form>
+  }
+}
+
+/// The field a policy the owner can't sign yet is refused at.
+fn error_field(error: &NotetakerPolicyError) -> &'static str {
+  match error {
+    NotetakerPolicyError::MissingBot => BOT_ID,
+    NotetakerPolicyError::MissingKeyHash | NotetakerPolicyError::InvalidKeyHash => KEY_ID,
+    NotetakerPolicyError::InvalidModel { field } if field.starts_with("transcription") => TRANSCRIPTION_ID,
+    NotetakerPolicyError::InvalidModel { .. } => SUMMARY_ID,
+    NotetakerPolicyError::InvalidLanguage => LANGUAGE_ID,
+    NotetakerPolicyError::InvalidPrompt => PROMPT_ID,
+    NotetakerPolicyError::UnknownInviters(_) => INVITERS_ID,
   }
 }
 
@@ -269,6 +320,21 @@ fn error_key(error: &NotetakerPolicyError) -> &'static str {
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  #[test]
+  fn each_policy_error_lands_at_its_field() {
+    let transcription = NotetakerPolicyError::InvalidModel {
+      field: "transcription model",
+    };
+    let summary = NotetakerPolicyError::InvalidModel {
+      field: "summary model",
+    };
+    assert_eq!(error_field(&NotetakerPolicyError::MissingBot), BOT_ID);
+    assert_eq!(error_field(&NotetakerPolicyError::MissingKeyHash), KEY_ID);
+    assert_eq!(error_field(&transcription), TRANSCRIPTION_ID);
+    assert_eq!(error_field(&summary), SUMMARY_ID);
+    assert_eq!(error_field(&NotetakerPolicyError::InvalidPrompt), PROMPT_ID);
+  }
 
   #[test]
   fn every_policy_error_has_a_text() {

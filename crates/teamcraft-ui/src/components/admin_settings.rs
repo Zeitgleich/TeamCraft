@@ -11,6 +11,7 @@ use crate::components::admin_fields::{
   CheckField, FieldErrors, SourceBadge, TextAreaField, TextField, format_scaled, is_web_url, list_text,
   parse_list, parse_scaled,
 };
+use crate::form_errors::focus_first_invalid;
 use crate::i18n::use_i18n;
 use crate::state::use_app_state;
 
@@ -299,8 +300,9 @@ fn GroupForm(slug: &'static str) -> impl IntoView {
     move |ev: web_sys::SubmitEvent| {
       ev.prevent_default();
       show_errors.set(true);
-      if let Ok(section) = draft.with_untracked(|values| check(&key, values)) {
-        state.write(|backend| backend.save_runtime_settings(section));
+      match draft.with_untracked(|values| check(&key, values)) {
+        Ok(section) => state.write(|backend| backend.save_runtime_settings(section)),
+        Err(_) => focus_first_invalid(form_id(slug)),
       }
     }
   };
@@ -308,7 +310,7 @@ fn GroupForm(slug: &'static str) -> impl IntoView {
   let title = format!("settings-group-{slug}");
   let hint = format!("settings-group-{slug}-hint");
   view! {
-    <form on:submit=save>
+    <form id=form_id(slug) on:submit=save>
       <fieldset class="policy-group">
         <legend>{move || i18n.t(&title)}</legend>
         <p class="settings-source small">
@@ -484,6 +486,11 @@ fn level_choice_key(choice: &str) -> &'static str {
 /// fixed field tables above, so the few bytes leaked per field row are bounded.
 fn leak_key(text: String) -> &'static str {
   Box::leak(text.into_boxed_str())
+}
+
+/// The DOM id of a group's form, where a refused save looks for the first invalid field.
+fn form_id(slug: &str) -> String {
+  format!("settings-form-{slug}")
 }
 
 fn fields_of(slug: &str) -> &'static [FieldDef] {

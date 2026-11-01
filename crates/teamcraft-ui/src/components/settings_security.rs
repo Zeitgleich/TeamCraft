@@ -616,6 +616,7 @@ fn PassphraseRow(editing: RwSignal<Editing>, maybe_done: RwSignal<Option<&'stati
       Ok(())
     });
   };
+  let is_mismatch = move || is_long_enough() && !confirm.get().is_empty() && !do_match();
   view! {
     <SettingRow label="security-recovery-row" hint="recovery-hint">
       <Show when=move || editing.get() == Editing::Nothing fallback=|| ()>
@@ -640,6 +641,7 @@ fn PassphraseRow(editing: RwSignal<Editing>, maybe_done: RwSignal<Option<&'stati
           type="password"
           autocomplete="new-password"
           data-autofocus
+          aria-describedby="recovery-length-hint"
           prop:value=move || passphrase.get()
           on:input=move |ev| passphrase.set(event_target_value(&ev))
         />
@@ -649,12 +651,14 @@ fn PassphraseRow(editing: RwSignal<Editing>, maybe_done: RwSignal<Option<&'stati
           class="input"
           type="password"
           autocomplete="new-password"
+          aria-invalid=move || is_mismatch().then_some("true")
+          aria-describedby=move || if is_mismatch() { "recovery-length-hint recovery-mismatch" } else { "recovery-length-hint" }
           prop:value=move || confirm.get()
           on:input=move |ev| confirm.set(event_target_value(&ev))
         />
-        <p class="set-row-hint">{move || i18n.t_with("recovery-length-hint", &[("count", &MIN_PASSPHRASE_CHARS.to_string())])}</p>
-        <Show when=move || is_long_enough() && !confirm.get().is_empty() && !do_match() fallback=|| ()>
-          <p class="field-error" role="alert">{move || i18n.t("security-passphrase-mismatch")}</p>
+        <p id="recovery-length-hint" class="set-row-hint">{move || i18n.t_with("recovery-length-hint", &[("count", &MIN_PASSPHRASE_CHARS.to_string())])}</p>
+        <Show when=is_mismatch fallback=|| ()>
+          <p id="recovery-mismatch" class="field-error" role="alert">{move || i18n.t("security-passphrase-mismatch")}</p>
         </Show>
         <div class="set-confirm-actions">
           <button type="button" class="btn btn-small" on:click=move |_| editing.set(Editing::Nothing)>{move || i18n.t("cancel")}</button>

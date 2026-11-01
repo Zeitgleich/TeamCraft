@@ -185,6 +185,7 @@ invite-email-placeholder = name@example.com, …
 invite-email-hint = Für Personen ohne Konto. Sie erhalten eine E-Mail und treten dem Space bei der ersten Anmeldung bei.
 invite-email-invalid = Bitte prüfe diese Adressen: { $addresses }
 invite-email-too-many = Höchstens { $max } Adressen auf einmal.
+invite-email-refused = Der Server hat diese Adressen abgelehnt. Prüfe sie und sende noch einmal.
 invite-message = Persönliche Nachricht (optional)
 invite-message-hint = Wird den Einladungs-E-Mails hinzugefügt.
 invite-done = { $count ->
@@ -234,7 +235,8 @@ bookmarks-url = Link
 bookmarks-up = Nach oben
 bookmarks-down = Nach unten
 bookmarks-remove = Lesezeichen entfernen
-bookmarks-invalid = Jedes Lesezeichen braucht einen Titel, und Links müssen mit https:// oder http:// beginnen.
+bookmarks-error-title = Gib einen Titel ein.
+bookmarks-error-url = Gib einen Link ein, der mit https:// oder http:// beginnt.
 
 ## Aktivität, zuletzt online und Anrufliste
 join-requests-title = Beitrittsanfragen
@@ -319,6 +321,7 @@ channel-sources-revoke = Widerrufen
 channel-sources-revoke-confirm = Quelle widerrufen
 channel-sources-name = Name der Quelle
 channel-sources-name-placeholder = z. B. ci oder nas-logs
+channel-sources-name-invalid = Gib einen Namen mit bis zu { $max } Zeichen in einer Zeile ein.
 channel-sources-kind = Art
 channel-sources-kind-webhook = Webhook
 channel-sources-kind-log = Logzeilen

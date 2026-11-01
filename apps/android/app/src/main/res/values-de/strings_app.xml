@@ -8,6 +8,9 @@
   <string name="error_network">Server nicht erreichbar. Prüfe deine Verbindung.</string>
   <string name="error_signed_out">Deine Sitzung ist abgelaufen. Bitte melde dich erneut an.</string>
   <string name="error_wrong_passphrase">Diese Passphrase öffnet deine Schlüsselsicherung nicht.</string>
+  <string name="error_backup_out_of_memory">Dieses Gerät hat nicht genug freien Speicher, um deine Schlüsselsicherung zu entsperren. Schließe andere Apps und versuche es erneut.</string>
+  <string name="error_backup_too_new">Deine Schlüsselsicherung stammt aus einer neueren Version von TeamCraft. Aktualisiere die App und versuche es erneut.</string>
+  <string name="error_backup_damaged">Deine Schlüsselsicherung ist beschädigt und lässt sich nicht öffnen. Verknüpfe dieses Gerät von einem anderen Gerät aus oder bitte einen Admin, dein Konto wiederherzustellen.</string>
   <string name="error_storage">Die lokalen Daten konnten nicht geöffnet werden.</string>
   <string name="error_generic">Etwas ist schiefgelaufen.</string>
   <string name="you">Du</string>

@@ -8,7 +8,7 @@ use std::collections::HashSet;
 
 use leptos::prelude::*;
 use teamcraft_client_api::actions::SpaceInvite;
-use teamcraft_proto::{HistoryPolicy, Permission};
+use teamcraft_proto::{ErrorCode, HistoryPolicy, Permission};
 
 use crate::channel_access::{can_in_workspace_now, is_guest};
 use crate::components::icons::{Icon, IconName};
@@ -16,13 +16,16 @@ use crate::components::message_actions::copy_to_clipboard;
 use crate::components::people_picker::PeoplePicker;
 use crate::components::space_tile::SpaceTile;
 use crate::components::workspace_dialogs::{Dialog, FailureNote};
-use crate::feedback::{ActionFailure, PendingAction, failure_message};
+use crate::feedback::{ActionFailure, FailureKind, PendingAction, failure_message};
+use crate::form_errors::{error_id, focus_first_invalid};
 use crate::i18n::use_i18n;
 use crate::model::{ConversationId, JoinPolicy, JoinableSpace, Space, SpaceId, User, UserId};
 use crate::state::{Overlay, use_app_state};
 
 /// More addresses than this in one go are most likely a pasted list by mistake.
 const MAX_EMAILS_PER_INVITE: usize = 50;
+const INVITE_FORM_ID: &str = "invite-form";
+const INVITE_EMAILS_ID: &str = "invite-emails";
 
 /// What the invited people become in the space.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -308,6 +311,12 @@ fn SpaceText(name: String, maybe_description: Option<String>, member_count: u32)
   }
 }
 
+/// Whether the server refused an invitation over its address (malformed or not allowed), which the
+/// user fixes in the address field.
+fn is_address_refusal(failure: &ActionFailure) -> bool {
+  failure.kind == FailureKind::Server(ErrorCode::InvalidRequest)
+}
+
 /// Invites people to a space: from the directory (they join right away), by e-mail (they join when
 /// they first sign in) or, for an open space, with its link.
 #[component]
@@ -335,6 +344,22 @@ pub fn InvitePeopleDialog(space: SpaceId) -> impl IntoView {
   let last_failure = RwSignal::new(None::<ActionFailure>);
   let is_busy = move || in_flight.get() != 0;
   let parsed = Memo::new(move |_| EmailList::parse(&emails.get()));
+  // The server refused an address it was sent (it stays in the field), not the request as such.
+  let is_address_refused = move || last_failure.with(|maybe| maybe.as_ref().is_some_and(is_address_refusal));
+  // What is wrong with the addresses, shown below them (forms.md).
+  let address_error = move || {
+    let list = parsed.get();
+    if !list.invalid.is_empty() {
+      Some(i18n.t_with("invite-email-invalid", &[("addresses", &list.invalid.join(", "))]))
+    } else if list.is_too_long() {
+      Some(i18n.t_with(
+        "invite-email-too-many",
+        &[("max", &MAX_EMAILS_PER_INVITE.to_string())],
+      ))
+    } else {
+      is_address_refused().then(|| i18n.t("invite-email-refused"))
+    }
+  };
   // A switch to "member" drops picked guest accounts: they can only be guests.
   Effect::new(move |_| {
     let current_role = role.get();
@@ -371,6 +396,12 @@ pub fn InvitePeopleDialog(space: SpaceId) -> impl IntoView {
       let is_done = in_flight.try_get_untracked() == Some(0);
       if is_done && last_failure.try_with_untracked(Option::is_none) == Some(true) {
         let _ = status.try_set(InviteStatus::Sent { count });
+      }
+      if is_done
+        && last_failure.try_with_untracked(|maybe| maybe.as_ref().is_some_and(is_address_refusal))
+          == Some(true)
+      {
+        focus_first_invalid(INVITE_FORM_ID);
       }
     };
     if !users.is_empty() {
@@ -418,7 +449,7 @@ pub fn InvitePeopleDialog(space: SpaceId) -> impl IntoView {
       {match maybe_role {
         None => view! { <p class="hint">{move || i18n.t("invite-link-only")}</p> }.into_any(),
         Some(_) => view! {
-          <form class="invite-form" on:submit=send>
+          <form id=INVITE_FORM_ID class="invite-form" on:submit=send>
             {has_both_roles.then(|| view! {
               <fieldset class="radio-group">
                 <legend>{move || i18n.t("invite-role")}</legend>
@@ -438,28 +469,26 @@ pub fn InvitePeopleDialog(space: SpaceId) -> impl IntoView {
             <h3>{move || i18n.t("invite-from-directory")}</h3>
             <PeoplePicker chosen=chosen chosen_label_key="invite-chosen" allows_guest_accounts=Signal::derive(move || role.get().is_guest()) />
             <h3>{move || i18n.t("invite-by-email")}</h3>
-            <label class="visually-hidden" for="invite-emails">{move || i18n.t("invite-by-email")}</label>
+            <label class="visually-hidden" for=INVITE_EMAILS_ID>{move || i18n.t("invite-by-email")}</label>
             <textarea
-              id="invite-emails"
+              id=INVITE_EMAILS_ID
               class="input"
               rows="2"
               autocomplete="off"
+              aria-invalid=move || address_error().map(|_| "true")
+              aria-describedby=move || {
+                let hint = "invite-email-hint";
+                match address_error() {
+                  Some(_) => format!("{hint} {}", error_id(INVITE_EMAILS_ID)),
+                  None => hint.to_owned(),
+                }
+              }
               placeholder=move || i18n.t("invite-email-placeholder")
               prop:value=move || emails.get()
               on:input=move |ev| { status.set(InviteStatus::Editing); emails.set(event_target_value(&ev)) }
             ></textarea>
-            <p class="hint">{move || i18n.t("invite-email-hint")}</p>
-            {move || {
-              let list = parsed.get();
-              if !list.invalid.is_empty() {
-                let addresses = list.invalid.join(", ");
-                view! { <p class="field-error" role="alert">{i18n.t_with("invite-email-invalid", &[("addresses", &addresses)])}</p> }.into_any()
-              } else if list.is_too_long() {
-                view! { <p class="field-error" role="alert">{i18n.t_with("invite-email-too-many", &[("max", &MAX_EMAILS_PER_INVITE.to_string())])}</p> }.into_any()
-              } else {
-                ().into_any()
-              }
-            }}
+            <p id="invite-email-hint" class="hint">{move || i18n.t("invite-email-hint")}</p>
+            <p class="field-error" id=error_id(INVITE_EMAILS_ID)>{address_error}</p>
             <label for="invite-message">{move || i18n.t("invite-message")}</label>
             <textarea
               id="invite-message"
@@ -475,7 +504,8 @@ pub fn InvitePeopleDialog(space: SpaceId) -> impl IntoView {
               {move || match status.get() {
                 InviteStatus::Sent { count } => view! { <span role="status">{i18n.t_count("invite-done", count)}</span> }.into_any(),
                 InviteStatus::Editing => view! {
-                  {move || last_failure.get().map(|failure| view! { <span class="field-error" role="alert">{failure_message(i18n, &failure)}</span> })}
+                  // Refusals that belong to no field; an address refusal shows at the addresses.
+                  {move || last_failure.get().filter(|failure| !is_address_refusal(failure)).map(|failure| view! { <span class="field-error" role="alert">{failure_message(i18n, &failure)}</span> })}
                 }.into_any(),
               }}
               <span class="grow"></span>

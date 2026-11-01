@@ -154,6 +154,9 @@ pub enum BackupError {
   InvalidArgon2Settings(Argon2Settings),
   #[error("key derivation failed")]
   KeyDerivation,
+  /// The device couldn't allocate the memory the Argon2id settings ask for (a small phone).
+  #[error("not enough memory for Argon2id with {memory_kib} KiB")]
+  OutOfMemory { memory_kib: u32 },
   #[error("the passphrase must be at least {MIN_PASSPHRASE_BYTES} bytes long")]
   PassphraseTooShort,
   #[error("passkey PRF output must be at least 32 bytes")]
@@ -264,7 +267,12 @@ pub(crate) fn argon2id(
   let mut output = Zeroizing::new([0u8; SYMMETRIC_KEY_LEN]);
   Argon2::new(Algorithm::Argon2id, Version::V0x13, params)
     .hash_password_into(passphrase, salt, output.as_mut())
-    .map_err(|_| BackupError::KeyDerivation)?;
+    .map_err(|error| match error {
+      argon2::Error::OutOfMemory => BackupError::OutOfMemory {
+        memory_kib: settings.memory_kib,
+      },
+      _ => BackupError::KeyDerivation,
+    })?;
   Ok(SymmetricKey::from_bytes(*output))
 }
 

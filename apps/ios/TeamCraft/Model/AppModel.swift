@@ -8,6 +8,7 @@ import UserNotifications
 /// Why something failed, as the screens show it (translated per case).
 enum AppFailure: Equatable {
   case network, signedOut, wrongPassphrase, storage, signInFailed, recoveryPending, callMoveRefused, generic
+  case backupOutOfMemory, backupTooNew, backupDamaged
   case linkCodeInvalid, linkCodeForNewDevice, linkCodeForSignedInDevice, linkCodeExpired
   /// The identity provider refused the sign-in (issue #1063); `code` is its cleaned `error`.
   case providerDenied, providerAlreadySignedIn
@@ -18,6 +19,9 @@ enum AppFailure: Equatable {
     case .network: self = .network
     case .signedOut: self = .signedOut
     case .wrongPassphrase: self = .wrongPassphrase
+    case .backupOutOfMemory: self = .backupOutOfMemory
+    case .backupTooNew: self = .backupTooNew
+    case .backupDamaged: self = .backupDamaged
     case .storage: self = .storage
     case .recoveryPending: self = .recoveryPending
     case .callMoveRefused: self = .callMoveRefused
@@ -34,6 +38,9 @@ enum AppFailure: Equatable {
     case .network: return "error_network"
     case .signedOut: return "error_signed_out"
     case .wrongPassphrase: return "error_wrong_passphrase"
+    case .backupOutOfMemory: return "error_backup_out_of_memory"
+    case .backupTooNew: return "error_backup_too_new"
+    case .backupDamaged: return "error_backup_damaged"
     case .storage: return "error_storage"
     case .signInFailed: return "sign_in_failed"
     case .recoveryPending: return "recovery_pending"
@@ -284,7 +291,7 @@ final class AppModel {
         let maybeFailure = AppFailure.signIn(error)
         if maybeFailure != nil {
           // The error's case and the provider's cleaned code; it carries no token or redirect code.
-          Self.signInLog.warning("sign-in failed: \(String(describing: error), privacy: .public)")
+          AppLog.failure("sign-in", error, logger: Self.signInLog)
         }
         phase = .signedOut(maybeFailure)
         return
@@ -327,6 +334,7 @@ final class AppModel {
         do {
           try vault.saveLocal(session)
         } catch {
+          AppLog.failure("saving the local session", error)
           maybeFailure = .generic
           return
         }
@@ -365,6 +373,7 @@ final class AppModel {
         try await Task.detached { try core.resetStore() }.value
         await refreshAccountState()
       } catch {
+        AppLog.failure("setting the local data aside", error)
         phase = .storeUnreadable(problem, failure: AppFailure(CoreFailure(error)))
       }
     }
@@ -389,6 +398,7 @@ final class AppModel {
         let account = try await core().enroll(deviceName: deviceName, passphrase: passphrase)
         await adopt(account)
       } catch {
+        AppLog.failure("enrollment", error)
         phase = .needsEnrollment(hasExistingIdentity: hasExisting, failure: AppFailure(CoreFailure(error)))
       }
     }
@@ -431,6 +441,7 @@ final class AppModel {
       } catch {
         // A replaced wait ends with an error too; the newer one owns the screen.
         guard !Task.isCancelled else { return }
+        AppLog.failure("linking this device", error)
         switch CoreFailure(error) {
         case .linkCodeExpired where waiting.maybeShortCode == nil: startLinking(notice: "link_expired_restarted")
         // The wait the scan replaced lost its listener: a fresh one, saying what was wrong.
@@ -449,6 +460,7 @@ final class AppModel {
       try await core().announceDeviceLink()
       return true
     } catch {
+      AppLog.failure("asking the other devices", error)
       return false
     }
   }
@@ -466,6 +478,7 @@ final class AppModel {
         let start = try await core().startOrgRecovery()
         phase = .recovering(RecoveryProgress(verificationCode: start.verificationCode), failure: nil)
       } catch {
+        AppLog.failure("starting the recovery request", error)
         phase = .needsEnrollment(hasExistingIdentity: true, failure: AppFailure(CoreFailure(error)))
       }
     }
@@ -478,6 +491,7 @@ final class AppModel {
         let account = try await core().finishOrgRecovery(deviceName: deviceName, newPassphrase: newPassphrase)
         await adopt(account)
       } catch {
+        AppLog.failure("recovery through the organization", error)
         phase = .recovering(progress, failure: AppFailure(CoreFailure(error)))
       }
     }
@@ -492,7 +506,12 @@ final class AppModel {
   /// Existing device: joins the new device whose code was scanned or typed. The new device shows
   /// a short code the user types next (`confirmLink`); this device never shows it (docs/e2ee.md §5).
   func approveLink(code: String) async throws {
-    try await core().approveDeviceLink(code: code.trimmingCharacters(in: .whitespacesAndNewlines))
+    do {
+      try await core().approveDeviceLink(code: code.trimmingCharacters(in: .whitespacesAndNewlines))
+    } catch {
+      AppLog.failure("joining the new device", error)
+      throw error
+    }
     maybeLinkReview = LinkReview(maybeDeviceName: nil, maybeRequestId: nil)
   }
 
@@ -504,6 +523,7 @@ final class AppModel {
       maybeLinkReview = nil
       return .approved
     } catch {
+      AppLog.failure("sending the keys to the new device", error)
       switch CoreFailure(error) {
       case .linkCodeRejected: return .wrongCode
       case .linkAttemptEnded:

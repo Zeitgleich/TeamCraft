@@ -203,3 +203,8 @@
   }
 }
 
+
+/* A refused image's message sits on its own line inside its slot's row (forms.md). */
+.brand-asset-error {
+  flex-basis: 100%;
+}

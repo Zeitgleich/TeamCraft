@@ -44,6 +44,9 @@ sealed interface FeedItem {
 
 enum class FeedContentType { Day, Unread, Event, Message, FollowUp }
 
+/** Whether a day's label names its year: only outside the current year (#1086). */
+fun dayShowsYear(date: LocalDate, today: LocalDate): Boolean = date.year != today.year
+
 /**
  * Lays out a conversation (oldest first) the way chat apps do: a date chip per day, the unread line
  * before `maybeFirstUnread`, and follow-up messages of the same author grouped under one name and
