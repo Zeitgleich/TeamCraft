@@ -192,3 +192,10 @@
 .profile-facts dt { color: var(--text-muted); }
 .profile-facts dd { margin: 0; overflow-wrap: anywhere; }
 
+
+/* A failed crop or upload, beside the buttons that retry it. */
+.crop-error {
+  flex: 1 1 auto;
+  min-width: 0;
+  margin: 0;
+}

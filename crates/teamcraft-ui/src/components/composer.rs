@@ -1189,6 +1189,8 @@ pub fn Composer(
     .and_then(|window| window.match_media("(pointer: coarse)").ok().flatten())
     .is_some_and(|query| query.matches());
 
+  // The link dialog's error, unique per composer (a thread's and the channel's can both be open).
+  let link_error_id = move || format!("{}-link-error", editor_id.get_value());
   view! {
     <div
       class="composer"
@@ -1358,14 +1360,15 @@ pub fn Composer(
                       placeholder="https://"
                       node_ref=link_url_input
                       prop:value=move || link_url.get()
-                      aria-invalid=move || is_link_invalid.get().to_string()
+                      aria-invalid=move || is_link_invalid.get().then_some("true")
+                      aria-describedby=move || is_link_invalid.get().then(link_error_id)
                       on:input=move |ev| {
                         link_url.set(event_target_value(&ev));
                         is_link_invalid.set(false);
                       }
                     />
                   </label>
-                  {move || is_link_invalid.get().then(|| view! { <p class="composer-error small" role="alert">{move || i18n.t("composer-link-invalid")}</p> })}
+                  {move || is_link_invalid.get().then(|| view! { <p id=link_error_id() class="composer-error small" role="alert">{move || i18n.t("composer-link-invalid")}</p> })}
                   <div class="link-dialog-actions">
                     <button type="button" class="btn btn-small" on:click=move |_| close_link_dialog()>{move || i18n.t("cancel")}</button>
                     <button type="submit" class="btn btn-small btn-primary">{move || i18n.t("save")}</button>

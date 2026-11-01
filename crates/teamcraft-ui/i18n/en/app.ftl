@@ -208,3 +208,6 @@ tab-end-call-use-here = End call and use here
 tab-cancel = Cancel
 tab-close = Close
 tab-close-hint = You can close this tab now.
+
+# Errors at a form field (forms.md)
+form-error-name = Enter a name.

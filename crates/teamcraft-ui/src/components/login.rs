@@ -45,6 +45,10 @@ use teamcraft_client_api::remote::{CoreStatus, EnrollSecret, LinkStatus};
 use teamcraft_client_api::sign_in_look::LookTheme;
 use teamcraft_crypto::recovery_key::{RecoveryKey, RecoveryKeyError};
 
+/// The messages the recovery secret field points to (forms.md).
+const KIT_FILE_ERROR_ID: &str = "enroll-kit-file-error";
+const ENROLL_ERROR_ID: &str = "enroll-error";
+
 /// Shows the right screen for the sign-in state and the chat shell once the user is in.
 #[component]
 pub fn SessionGate(settings: Settings) -> impl IntoView {
@@ -608,6 +612,14 @@ fn LocalSignInForm(
     }
   });
   let has_error = move || control.local_error.with(Option::is_some);
+  // Refused credentials are the fields' fault; other problems (network, disabled) belong to none.
+  let is_refused = move || {
+    control
+      .local_error
+      .with(|error| *error == Some(LocalSignInProblem::Refused))
+  };
+  let refused_invalid = move || is_refused().then_some("true");
+  let refused_described = move || is_refused().then_some("local-error");
   let reveal_icon = Signal::derive(move || {
     if form.is_revealed.get() {
       IconName::EyeOff
@@ -630,6 +642,8 @@ fn LocalSignInForm(
           spellcheck="false"
           required
           data-autofocus=is_first
+          aria-invalid=refused_invalid
+          aria-describedby=refused_described
           prop:value=move || form.login.get()
           on:input=move |ev| form.login.set(event_target_value(&ev))
         />
@@ -646,6 +660,8 @@ fn LocalSignInForm(
             autocapitalize="off"
             spellcheck="false"
             required
+            aria-invalid=refused_invalid
+            aria-describedby=refused_described
             prop:value=move || form.password.get()
             on:input=move |ev| form.password.set(event_target_value(&ev))
           />
@@ -677,7 +693,8 @@ fn LocalSignInForm(
           spellcheck="false"
           maxlength="10"
           required=requires_code
-          aria-describedby="local-code-hint"
+          aria-invalid=move || (requires_code && is_refused()).then_some("true")
+          aria-describedby=move || if requires_code && is_refused() { "local-code-hint local-error" } else { "local-code-hint" }
           prop:value=move || form.code.get()
           on:input=move |ev| form.code.set(event_target_value(&ev))
         />
@@ -1398,6 +1415,17 @@ fn RecoverForm(
   let looks_like_typo =
     move || secret.with(|text| matches!(RecoveryKey::parse(text), Err(RecoveryKeyError::ChecksumMismatch)));
   let can_submit = move || !control.is_enrolling.get() && secret.with(|text| !text.trim().is_empty());
+  // The message the secret field points to: a kit file without a key, or a secret the core refused.
+  let secret_error_id = move || {
+    if maybe_file_note.get() == Some(FileNote::NoKey) {
+      Some(KIT_FILE_ERROR_ID)
+    } else {
+      control
+        .enroll_error
+        .with(Option::is_some)
+        .then_some(ENROLL_ERROR_ID)
+    }
+  };
   let submit = move |ev: web_sys::SubmitEvent| {
     ev.prevent_default();
     if can_submit() {
@@ -1447,7 +1475,11 @@ fn RecoverForm(
             autocapitalize="off"
             spellcheck="false"
             data-autofocus
-            aria-describedby="enroll-secret-hint"
+            aria-invalid=move || secret_error_id().map(|_| "true")
+            aria-describedby=move || match secret_error_id() {
+              Some(error) => format!("enroll-secret-hint {error}"),
+              None => "enroll-secret-hint".to_owned(),
+            }
             prop:value=move || secret.get()
             on:input=move |ev| {
               maybe_file_note.set(None);
@@ -1472,7 +1504,7 @@ fn RecoverForm(
         </div>
         {move || maybe_file_note.get().map(|note| match note {
           FileNote::Read => view! { <p class="ok-text small" role="status">{move || i18n.t("enroll-kit-read")}</p> }.into_any(),
-          FileNote::NoKey => view! { <p class="field-error" role="alert">{move || i18n.t("kit-file-no-key")}</p> }.into_any(),
+          FileNote::NoKey => view! { <p id=KIT_FILE_ERROR_ID class="field-error" role="alert">{move || i18n.t("kit-file-no-key")}</p> }.into_any(),
         })}
       </div>
       <div class="field">
@@ -1517,7 +1549,7 @@ fn EnrollError(message_key: &'static str, control: SessionControl) -> impl IntoV
         _ => failure_message(i18n, &failure),
       };
       view! {
-        <p class="field-error" role="alert">
+        <p id=ENROLL_ERROR_ID class="field-error" role="alert">
           {text}
           " "
           <span class="small mono" translate="no">{failure.detail}</span>

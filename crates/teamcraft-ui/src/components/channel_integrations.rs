@@ -16,6 +16,7 @@ use crate::components::roster_banner::unsigned_reason;
 use crate::components::space_invites::web_origin;
 use crate::components::workspace_dialogs::FailureNote;
 use crate::feedback::PendingAction;
+use crate::form_errors::{FieldError, FieldErrors, FormErrors};
 use crate::i18n::use_i18n;
 use crate::integrations::{
   BridgeLocation, NewSource, bridge_base_url, ingest_url, is_valid_source_name, webhook_url,
@@ -24,6 +25,8 @@ use crate::model::{ConversationId, ConversationKind, User};
 use crate::state::use_app_state;
 
 /// How many bots the search lists at most.
+const SOURCE_FIELD_ID: &str = "channel-source-field";
+const SOURCE_NAME_ID: &str = "channel-source-name";
 const MAX_BOT_RESULTS: usize = 8;
 
 /// The "Integrations" section of the channel settings (docs/bridge.md): normal or log mode, the
@@ -419,8 +422,27 @@ fn AddSource(
   let is_danger_alert = RwSignal::new(true);
   let maybe_error: RwSignal<Option<&'static str>> = RwSignal::new(None);
   let trimmed = move || name.with(|name| name.trim().to_owned());
-  let can_add = move || has_bot.get() && is_valid_source_name(&trimmed());
+  let errors = FormErrors::new();
+  let name_errors = move || {
+    let mut found = FieldErrors::new();
+    if !is_valid_source_name(&trimmed()) {
+      let max = MAX_SOURCE_NAME_CHARS.to_string();
+      found.push(
+        SOURCE_NAME_ID,
+        i18n.t_with("channel-sources-name-invalid", &[("max", &max)]),
+      );
+    }
+    found
+  };
+  Effect::new(move |_| errors.follow(name_errors()));
+  let can_add = move || has_bot.get();
   let add = move || {
+    let found = untrack(name_errors);
+    if !found.is_empty() {
+      errors.refuse(SOURCE_FIELD_ID, found);
+      return;
+    }
+    errors.clear();
     let Some(new_source) = NewSource::generate() else {
       maybe_error.set(Some("channel-sources-no-random"));
       return;
@@ -465,22 +487,28 @@ fn AddSource(
     }
   };
   view! {
-    <div class="field">
-      <label for="channel-source-name">{move || i18n.t("channel-sources-name")}</label>
+    <div id=SOURCE_FIELD_ID class="field">
+      <label for=SOURCE_NAME_ID>{move || i18n.t("channel-sources-name")}</label>
       <input
-        id="channel-source-name"
+        id=SOURCE_NAME_ID
         class="input"
         type="text"
         maxlength=MAX_SOURCE_NAME_CHARS.to_string()
+        aria-required="true"
+        aria-invalid=errors.invalid(SOURCE_NAME_ID)
+        aria-describedby=errors.described(SOURCE_NAME_ID)
         placeholder=move || i18n.t("channel-sources-name-placeholder")
         prop:value=move || name.get()
         on:input=move |ev| name.set(event_target_value(&ev))
         on:keydown=move |ev| {
           if ev.key() == "Enter" && can_add() {
+            // Enter adds the source; it never submits a surrounding form.
+            ev.prevent_default();
             add();
           }
         }
       />
+      <FieldError errors=errors field=SOURCE_NAME_ID />
     </div>
     <div class="segmented" role="radiogroup" aria-label=move || i18n.t("channel-sources-kind")>
       {kind_button(SourceKind::Webhook, "channel-sources-kind-webhook")}

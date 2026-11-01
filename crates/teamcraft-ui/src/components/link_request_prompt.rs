@@ -215,10 +215,12 @@ fn ActivePrompt(
                 class="input mono"
                 inputmode="numeric"
                 autocomplete="off"
+                aria-invalid=maybe_error.is_some().then_some("true")
+                aria-describedby=maybe_error.is_some().then_some("link-request-short-error")
                 prop:value=move || typed.get()
                 on:input=move |ev| typed.set(event_target_value(&ev))
               />
-              {maybe_error.map(|_| view! { <p class="field-error" role="alert">{move || i18n.t("approve-link-wrong")}</p> })}
+              {maybe_error.map(|_| view! { <p id="link-request-short-error" class="field-error" role="alert">{move || i18n.t("approve-link-wrong")}</p> })}
               <div class="link-prompt-actions">
                 <button type="button" class="btn" on:click=move |_| close()>{move || i18n.t("cancel")}</button>
                 <button type="submit" class="btn btn-primary" prop:disabled=move || typed.get().trim().is_empty()>

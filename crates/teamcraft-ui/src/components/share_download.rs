@@ -181,11 +181,13 @@ pub fn ShareDownloadPage(id: String, fragment: String) -> impl IntoView {
                   type="password"
                   autocomplete="off"
                   data-autofocus
+                  aria-invalid=move || has_wrong_password.get().then_some("true")
+                  aria-describedby=move || has_wrong_password.get().then_some("share-password-error")
                   prop:value=move || password.get()
                   on:input=move |ev| password.set(event_target_value(&ev))
                 />
                 {move || has_wrong_password.get().then(|| view! {
-                  <p role="alert">{move || i18n.t("share-page-wrong-password")}</p>
+                  <p id="share-password-error" class="field-error" role="alert">{move || i18n.t("share-page-wrong-password")}</p>
                 })}
               })}
               <div class="auth-actions">
