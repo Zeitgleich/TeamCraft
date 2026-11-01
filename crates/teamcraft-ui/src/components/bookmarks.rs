@@ -149,29 +149,29 @@ pub fn BookmarksDialog(conversation: ConversationId) -> impl IntoView {
         let url_id = url_field(index);
         view! {
           <li>
-          <div class="bookmark-row">
-            <input class="input emoji-input" maxlength="8" aria-label=move || i18n.t("bookmarks-emoji") prop:value=entry.emoji.clone()
-              on:change=move |ev| list.update(|entries| entries[index].emoji = event_target_value(&ev)) />
-            <input id=title_id.clone() class="input" aria-label=move || i18n.t("bookmarks-title")
-              aria-invalid=errors.invalid(title_id.clone()) aria-describedby=errors.described(title_id.clone()) placeholder=move || i18n.t("bookmarks-title") prop:value=entry.title.clone()
-              on:change=move |ev| list.update(|entries| entries[index].title = event_target_value(&ev)) />
-            {is_link.then(|| view! {
-              <input id=url_id.clone() class="input" type="url" aria-label=move || i18n.t("bookmarks-url")
-                aria-invalid=errors.invalid(url_id.clone()) aria-describedby=errors.described(url_id.clone()) placeholder="https://" prop:value=entry.url.clone()
-                on:change=move |ev| list.update(|entries| entries[index].url = event_target_value(&ev)) />
-            })}
-            <button type="button" class="icon-btn" aria-label=move || i18n.t("bookmarks-up") on:click=move |_| list.update(|entries| move_entry(entries, index, -1))>
-              <span aria-hidden="true">"↑"</span>
-            </button>
-            <button type="button" class="icon-btn" aria-label=move || i18n.t("bookmarks-down") on:click=move |_| list.update(|entries| move_entry(entries, index, 1))>
-              <span aria-hidden="true">"↓"</span>
-            </button>
-            <button type="button" class="icon-btn" aria-label=move || i18n.t("bookmarks-remove") on:click=move |_| list.update(|entries| { if index < entries.len() { entries.remove(index); } })>
-              <Icon name=IconName::Trash />
-            </button>
-          </div>
-          <FieldError errors=errors field=title_id.clone() />
-          <FieldError errors=errors field=url_id.clone() />
+            <div class="bookmark-row">
+              <input class="input emoji-input" maxlength="8" aria-label=move || i18n.t("bookmarks-emoji") prop:value=entry.emoji.clone()
+                on:change=move |ev| list.update(|entries| entries[index].emoji = event_target_value(&ev)) />
+              <input id=title_id.clone() class="input" aria-label=move || i18n.t("bookmarks-title")
+                aria-invalid=errors.invalid(title_id.clone()) aria-describedby=errors.described(title_id.clone()) placeholder=move || i18n.t("bookmarks-title") prop:value=entry.title.clone()
+                on:change=move |ev| list.update(|entries| entries[index].title = event_target_value(&ev)) />
+              {is_link.then(|| view! {
+                <input id=url_id.clone() class="input" type="url" aria-label=move || i18n.t("bookmarks-url")
+                  aria-invalid=errors.invalid(url_id.clone()) aria-describedby=errors.described(url_id.clone()) placeholder="https://" prop:value=entry.url.clone()
+                  on:change=move |ev| list.update(|entries| entries[index].url = event_target_value(&ev)) />
+              })}
+              <button type="button" class="icon-btn" aria-label=move || i18n.t("bookmarks-up") on:click=move |_| list.update(|entries| move_entry(entries, index, -1))>
+                <span aria-hidden="true">"↑"</span>
+              </button>
+              <button type="button" class="icon-btn" aria-label=move || i18n.t("bookmarks-down") on:click=move |_| list.update(|entries| move_entry(entries, index, 1))>
+                <span aria-hidden="true">"↓"</span>
+              </button>
+              <button type="button" class="icon-btn" aria-label=move || i18n.t("bookmarks-remove") on:click=move |_| list.update(|entries| { if index < entries.len() { entries.remove(index); } })>
+                <Icon name=IconName::Trash />
+              </button>
+            </div>
+            <FieldError errors=errors field=title_id.clone() />
+            <FieldError errors=errors field=url_id.clone() />
           </li>
         }
       })

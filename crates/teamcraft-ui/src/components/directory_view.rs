@@ -16,7 +16,7 @@ use crate::components::icons::{Icon, IconName};
 use crate::components::skeleton::ListSkeleton;
 use crate::components::sliding_indicator::SlidingIndicator;
 use crate::components::tab_list::{on_tab_keys, roving_tabindex};
-use crate::feedback::{FailureKind, report_failure};
+use crate::feedback::report_failure;
 use crate::form_errors::{FieldError, FieldErrors, FormErrors};
 use crate::i18n::use_i18n;
 use crate::model::{DeviceSetup, User, UserId};
@@ -38,11 +38,11 @@ const DIRECTORY_PANEL_ID: &str = "directory-panel";
 const GROUP_FORM_ID: &str = "group-create";
 const GROUP_HANDLE_ID: &str = "group-handle";
 const GROUP_NAME_ID: &str = "group-name";
-/// Server refusals of a new group that are about its handle: taken, or malformed or reserved.
-const GROUP_SERVER_FIELDS: [(ErrorCode, &str); 2] = [
-  (ErrorCode::Conflict, GROUP_HANDLE_ID),
-  (ErrorCode::InvalidRequest, GROUP_HANDLE_ID),
-];
+/// The length of a group handle the server accepts.
+const GROUP_HANDLE_CHARS: std::ops::RangeInclusive<usize> = 2..=32;
+/// Server refusals of a new group that are about one field: a taken handle. `invalid_request` names
+/// no field (a reserved handle or a name over the instance's limit), so it stays a toast.
+const GROUP_SERVER_FIELDS: [(ErrorCode, &str); 1] = [(ErrorCode::Conflict, GROUP_HANDLE_ID)];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum DirectoryTab {
@@ -262,10 +262,10 @@ fn normalized_handle(typed: &str) -> String {
   typed.trim().trim_start_matches('@').to_lowercase()
 }
 
-/// Whether a handle has only the characters the server accepts (it also checks the length and
-/// reserved names).
+/// Whether a handle has the length and characters the server accepts (it also refuses reserved
+/// names).
 fn is_group_handle(handle: &str) -> bool {
-  !handle.is_empty()
+  GROUP_HANDLE_CHARS.contains(&handle.chars().count())
     && handle
       .chars()
       .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || matches!(c, '-' | '_'))
@@ -346,11 +346,8 @@ fn UserGroups() -> impl IntoView {
         },
         Err(refusal) => {
           let failure = refusal.to_failure();
-          // A taken or reserved handle goes to the handle field; anything else is a toast.
-          let message = match &failure.kind {
-            FailureKind::Server(ErrorCode::Conflict) => i18n.t("groups-error-handle-taken"),
-            _ => i18n.t("groups-error-handle"),
-          };
+          // A taken handle goes to the handle field; anything else is a toast.
+          let message = i18n.t("groups-error-handle-taken");
           if !errors.refuse_server(GROUP_FORM_ID, &failure, &GROUP_SERVER_FIELDS, message) {
             report_failure(failure);
           }
@@ -498,12 +495,27 @@ fn GroupMembers(
 #[cfg(test)]
 mod tests {
   use super::*;
+  use crate::feedback::{ActionFailure, FailureKind};
+  use crate::form_errors::server_error_field;
 
   #[test]
   fn a_typed_handle_is_read_like_the_server_reads_it() {
     assert_eq!(normalized_handle(" @Design-Team "), "design-team");
     assert!(is_group_handle("design_team-2"));
-    assert!(!is_group_handle(""));
+    assert!(!is_group_handle("a"));
     assert!(!is_group_handle("design team"));
+  }
+
+  #[test]
+  fn a_taken_handle_comes_back_at_the_handle_field() {
+    let refusal = |code: ErrorCode| ActionFailure::new(FailureKind::Server(code), String::new());
+    assert_eq!(
+      server_error_field(&refusal(ErrorCode::Conflict), &GROUP_SERVER_FIELDS),
+      Some(GROUP_HANDLE_ID)
+    );
+    assert_eq!(
+      server_error_field(&refusal(ErrorCode::InvalidRequest), &GROUP_SERVER_FIELDS),
+      None
+    );
   }
 }

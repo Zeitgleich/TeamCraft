@@ -108,5 +108,5 @@ hover-card-profile = View profile
 directory-you = You
 directory-empty-title = Nobody found
 groups-empty-title = No user groups yet
-groups-error-handle = Use lower-case letters, digits, - or _, at least two.
+groups-error-handle = Use 2 to 32 lower-case letters, digits, - or _.
 groups-error-handle-taken = This handle is already used by a group or a person.
