@@ -34,7 +34,7 @@ impl Database {
       r#"SELECT m.conversation_id,
                 (SELECT max(x.id) FROM messages x
                   WHERE x.conversation_id = m.conversation_id
-                    AND x.id >= CASE WHEN c.history_policy = 'full' AND NOT $2 THEN 0
+                    AND x.id >= CASE WHEN c.history_policy = 'full' AND (NOT $2 OR m.sees_imported_history) THEN 0
                                      ELSE tc_snowflake_floor(m.joined_at) END) AS last_message_id,
                 (SELECT max(y.id) FROM mls_messages y
                   WHERE y.conversation_id = m.conversation_id

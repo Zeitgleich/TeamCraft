@@ -2,12 +2,12 @@ use std::collections::HashSet;
 
 use teamcraft_db::{HistoryQuery, NewMessage};
 use teamcraft_proto::{
-  ConversationId, ConversationKind, GatewayEvent, HistoryPolicy, Id, ListMessagesQuery, ListMessagesResponse,
-  MessageId, MessageResponse, Permission, SendMessageRequest,
+  ConversationId, ConversationKind, GatewayEvent, Id, ListMessagesQuery, ListMessagesResponse, MessageId,
+  MessageResponse, Permission, SendMessageRequest,
 };
 use tracing::warn;
 
-use super::access::{is_guest, load_conversation, require};
+use super::access::{load_conversation, require, sees_all_history};
 use super::convert::message_response;
 use super::{presence, threads, urgent};
 use crate::auth::AuthenticatedUser;
@@ -177,7 +177,7 @@ pub async fn list_messages(
     .maybe_limit
     .unwrap_or(limits.default_page_size)
     .clamp(1, limits.max_page_size);
-  let sees_all_history = access.view.conversation.history_policy == HistoryPolicy::Full && !is_guest(caller);
+  let sees_all_history = sees_all_history(caller, &access.view);
   let mut messages = state
     .database
     .list_messages(&HistoryQuery {

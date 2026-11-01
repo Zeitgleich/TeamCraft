@@ -280,7 +280,10 @@ Result:
   history from the join on, the adder sends only the new epoch key, which the other members derive
   themselves.
 - The choice is part of the signed change and settled before signing (guests: always from the join
-  on); a client refuses to commit an admin's signed full-history add of a guest.
+  on); a client refuses to commit an admin's signed full-history add of a guest. One exception: the
+  import device, under the signed import policy, seals the keys of the import of a conversation to
+  the guests the import's mapping named there, added from the join on like any guest (§4.10,
+  "Guests in imported conversations"). No other device ever shares history with a guest.
 - Without an explicit choice the client uses the signed workspace default, never the server's
   per-channel setting, and shares full history only with users the signed roster lists: the server's
   "this user is not a guest" isn't signed, so a user the client can't vouch for gets history from the
@@ -1136,7 +1139,13 @@ never by the server's member list:
     in that time; the commit moves the group to an epoch it has no keys for.
   - *What a guest may commit, and who counts as a guest.* Members merge a commit made by a
     guest's device only if it concerns that guest's own devices, and a guest's signed change is
-    authorized only for their own removal. Who is a guest is not the server's word alone: in a
+    authorized only for their own removal. One more commit is merged from a guest: somebody's
+    verified signed leave (the signer removes themselves, and only them), so the import account can
+    leave somebody's notes or a DM of guests, where nobody else could commit it (#1074). A guest's
+    own device leaves every other signed change of somebody else (an admin's removal) to the
+    members, and a signed leave too while a member who isn't a guest is in the group: members
+    before this version refuse that commit, and the group would split.
+    Who is a guest is not the server's word alone: in a
     meeting chat everyone the signed roster doesn't vouch for is treated as a guest for signed
     changes; a device that admitted a guest records it and treats the user as a guest from then
     on; and a roster member or an organizer is never treated as a guest, whatever kind the server
@@ -1483,6 +1492,74 @@ full history, and leaves each conversation once nobody is missing. If somebody's
 on its own first (a member committed the device's signed self-add, which shares from the join on),
 the importer, which holds that person's pending full-history addition, seals the history to the new
 devices like the history of a new member (§4.3). Its report lists who is still missing, where.
+
+**Guests in imported conversations (issue #1074).** A guest gets history from the join on (§4.3),
+which would hide the import from a guest of the old system who signs in only afterwards. So the
+import device makes one exception: a guest is still added from the join on (the signed change says
+`FromJoin`, as for every guest, and the content key rotates to the epoch key, §4.2), and the import
+device then seals **the import's keys**, and no other, to the guest's devices. The keys of the
+import are those its ring held when the conversation's import was finished; in a new channel the
+import device then switches to a fresh key while it is still alone in the group, so what members
+write afterwards is never under a key of the import. A guest so gets the imported history and
+everything from their join on, not what members wrote between the import and the guest's join.
+
+The import device seals the import's keys when it commits the guest's addition, when a waiting
+addition of its own finds the guest's device let in by somebody else meanwhile, and to a device of
+the guest added back, and only when all of this holds at that moment:
+
+- **The policy.** This account is the import account of the verified workspace policy and the
+  policy's `joins_until_ms` hasn't passed; the verified workspace state raised no alarm (a fork or
+  withheld entries, admin.md §2.3) and its roster is younger than `workspace_max_age`, so a server
+  that withholds an early "End import" can't keep the exception alive for longer than that. Times
+  are the later of the import device's own clock and the newest server time it saw (a server that
+  holds its clock back gains nothing).
+- **The conversation and the person.** The import tool recorded on the import device, from its
+  mapping, that the person was a member or participant of the conversation in the old system (the
+  *import grant*), for a conversation the import made or took over: a new channel, or the DM or
+  notes the server answered for the participants (`POST /admin/import/dms` may hand back an existing
+  one, which the import device then founds or joins, §4.10 above; whether it existed is the server's
+  word, which only decides which group the import's keys belong to). A channel merged into gets no
+  grant: there the import changes no members. The grant names the policy's `joins_until_ms` it was
+  recorded under; under another date (also a renewed policy) it counts only once the tool records it
+  again.
+- **The keys were noted.** The import's keys are noted when the tool finishes a conversation's
+  import, or for a conversation an earlier version finished, on the first pass of this version (then
+  they are the keys the import device holds at that time, which may include what members wrote
+  before under the last of them: a limit of imports run before this version).
+
+Nothing on the wire is new: the addition is an ordinary "from the join on" addition, and sealed keys
+are an ordinary sealed share (§4.3), which every client version takes. Members' devices never share
+history with a guest; only the import device seals the import's keys.
+
+The server keeps the same line for the ciphertext it hands out: a guest lists messages,
+attachments and lines from before their join only in a conversation that shares its full history
+and only when the import account added them, during the import period, to a conversation whose
+import was finished (a membership flag that goes with the membership, admin.md §3.8); everybody
+else as before. It can't check the mapping; the import device decides what can be read.
+
+What the exception can and can't give away, with a compromised server:
+
+- The server's word decides who is a guest (§4.3), as before: claiming a guest is a member already
+  lifts the rule for any full-history addition, with or without this exception. The exception adds
+  no new reliance on the server.
+- Who may get the keys is the mapping's statement, kept on the import device; the server can't add
+  a name to it. Adding somebody else to the conversation gets them nothing from the import device.
+- What they may get is the import's keys of that conversation's group, which the import device
+  holds only as a member of it: another conversation's history can't be routed to a guest by
+  swapping IDs, and nothing members wrote after the import (and, from this version on, before the
+  guest's join) is under those keys.
+- When: only while the owners' signed policy names the account, its date runs and the workspace
+  state is fresh; the server can't extend the date. Once the import account left a conversation it
+  holds nothing more to share.
+
+The import account leaves with a signed leave that a member commits (§4.10 above). In somebody's
+notes or a DM of guests nobody but guests is left to commit it; there a guest's device commits the
+signed leave, which members accept from a guest (§4.6, "What a guest may commit").
+
+People made members for the import and switched back to guests afterwards keep what they got: the
+keys are in their key bag, a member who becomes a guest isn't removed from a conversation, and no
+device re-adds or re-shares because of the switch. A waiting addition of such a person is committed
+from the join on once they are a guest, and gets the import's keys if the import grant names them.
 
 ## 5. Adding a device (Threema/WhatsApp style)
 

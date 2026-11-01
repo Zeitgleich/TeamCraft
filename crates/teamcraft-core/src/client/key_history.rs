@@ -681,7 +681,7 @@ fn member_key(member: GroupMember) -> Result<String, CoreError> {
   Ok(format!("{user}/{device}"))
 }
 
-fn key_hex(id: ContentKeyId) -> String {
+pub(crate) fn key_hex(id: ContentKeyId) -> String {
   id.as_bytes().iter().map(|byte| format!("{byte:02x}")).collect()
 }
 

@@ -191,6 +191,13 @@ when they set it up. Their addition waits on the import device, so leave it runn
 teamcraft-import --state /data/import-state serve
 ```
 
+Guests of the identity provider get the imported history of the channels, DMs and notes the import
+made, and everything from their join on (e2ee.md §4.10, "Guests in imported conversations"); in a
+channel merged into they see it from their join on. They can stay guests for the import. Somebody
+made a member for an earlier import and switched back to guest keeps what they got; their waiting
+additions get the imported history too, once `serve` of this version runs. Renewing the import
+period (a new date) needs `serve` to run again, which records the guests anew.
+
 It reconnects on its own and leaves each conversation once everybody is in. `teamcraft-import
 --state /data/import-state report` shows the counts per conversation, skipped items, who is still
 missing where, and the webhooks to recreate. When nobody is missing (or the remaining people won't

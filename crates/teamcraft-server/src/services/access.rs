@@ -6,8 +6,8 @@
 use teamcraft_db::{ConversationView, SpaceView};
 use teamcraft_proto::{
   ALL_PERMISSIONS, ChannelContext, ChannelRole, ConversationId, ConversationKind, ConversationVisibility,
-  JoinPolicy, Permission, PermissionScope, Role, SpaceContext, SpaceId, SpaceRole, Target, UserKind,
-  is_allowed,
+  HistoryPolicy, JoinPolicy, Permission, PermissionScope, Role, SpaceContext, SpaceId, SpaceRole, Target,
+  UserKind, is_allowed,
 };
 
 use crate::auth::AuthenticatedUser;
@@ -31,6 +31,18 @@ pub fn is_instance_admin(caller: &AuthenticatedUser) -> bool {
 
 pub fn is_guest(caller: &AuthenticatedUser) -> bool {
   caller.user.kind == UserKind::Guest || caller.role == Role::Guest
+}
+
+/// Whether the caller sees the conversation's history from before they joined: a `full`
+/// conversation, and not a guest unless the import account added them (e2ee.md §4.10, "Guests in
+/// imported conversations"). The members' clients decide who can read it; this keeps the server
+/// from handing out more.
+pub fn sees_all_history(caller: &AuthenticatedUser, view: &ConversationView) -> bool {
+  let is_added_by_import = view
+    .maybe_membership
+    .as_ref()
+    .is_some_and(|membership| membership.sees_imported_history);
+  view.conversation.history_policy == HistoryPolicy::Full && (!is_guest(caller) || is_added_by_import)
 }
 
 /// `Ok` if the permission is granted on the target, `Forbidden` otherwise.

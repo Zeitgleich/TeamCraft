@@ -714,6 +714,68 @@ mod rejection {
   }
 
   #[test]
+  fn a_guest_may_commit_somebodys_signed_leave_and_nothing_else_signed() {
+    // Somebody else's signed removal of Alice, committed by the guest: refused.
+    let mut world = World::new();
+    let removal = world.signed_change(
+      BOB,
+      MembershipAction::RemoveUser {
+        user_id: UserId::new(ALICE),
+      },
+    );
+    let commit = world
+      .carol_group
+      .commit_membership_change(
+        &world.carol.provider,
+        &world.carol.user.device,
+        &removal,
+        &[],
+        &world.directory,
+        &EveryMember,
+      )
+      .unwrap()
+      .commit;
+    let view = GuestDirectory {
+      inner: &world.directory,
+      guest: UserId::new(CAROL),
+    };
+    let error = world
+      .alice_group
+      .process_message(&world.alice.provider, &commit, &view, &EveryMember)
+      .unwrap_err();
+    assert!(matches!(error, MlsError::GuestOverreach), "{error}");
+
+    // Alice's own signed leave, committed by the guest: taken.
+    let mut world = World::new();
+    let leave = world.signed_change(
+      ALICE,
+      MembershipAction::RemoveUser {
+        user_id: UserId::new(ALICE),
+      },
+    );
+    let commit = world
+      .carol_group
+      .commit_membership_change(
+        &world.carol.provider,
+        &world.carol.user.device,
+        &leave,
+        &[],
+        &world.directory,
+        &EveryMember,
+      )
+      .unwrap()
+      .commit;
+    let view = GuestDirectory {
+      inner: &world.directory,
+      guest: UserId::new(CAROL),
+    };
+    world
+      .alice_group
+      .process_message(&world.alice.provider, &commit, &view, &EveryMember)
+      .unwrap();
+  }
+
+  #[test]
   fn member_rejects_change_for_other_conversation() {
     let mut world = World::new();
     let epoch = world.alice_group.epoch();

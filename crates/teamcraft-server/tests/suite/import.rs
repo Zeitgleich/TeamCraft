@@ -464,6 +464,76 @@ mod limits {
   }
 }
 
+mod guests {
+  //! Guests the import account adds see the history from before they joined (e2ee.md §4.10,
+  //! "Guests in imported conversations"); guests anybody else adds don't.
+  use super::*;
+
+  #[tokio::test]
+  async fn a_guest_the_import_account_adds_lists_the_history_others_do_not() {
+    let app = app!();
+    let (importer, device, channel, _carol) = channel_with_live_message(&app).await;
+    let ids = import(&app, &importer, &channel, &device, &[(2, OLD_MS)]).await;
+    let alice = owner();
+    // Before the import of the channel is finished, the import account adds like anybody.
+    let early = guest("early");
+    let early_id = user_id(&app, &early).await;
+    let space = app.get(&alice, &format!("/conversations/{channel}")).await.body["space_id"]
+      .as_str()
+      .unwrap()
+      .to_owned();
+    add_space_member(&app, &alice, &space, &early_id, "guest").await;
+    add_channel_member(&app, &importer, &channel, &early_id).await;
+    let finished = app
+      .post(
+        &importer,
+        &format!("/admin/import/conversations/{channel}/finish"),
+        json!({}),
+      )
+      .await;
+    assert!(finished.status.is_success(), "{}", finished.body);
+    let (gus, gil) = (guest("gus"), guest("gil"));
+    for (who, adder) in [(&gus, &importer), (&gil, &alice)] {
+      let id = user_id(&app, who).await;
+      add_space_member(&app, &alice, &space, &id, "guest").await;
+      add_channel_member(&app, adder, &channel, &id).await;
+    }
+
+    let imported = ids[0].to_string();
+    let listed = |messages: Vec<Value>| messages.iter().any(|message| message["id"] == imported.as_str());
+    assert!(
+      listed(list(&app, &gus, &channel).await),
+      "the import account added gus"
+    );
+    assert!(!listed(list(&app, &gil, &channel).await), "alice added gil");
+    assert!(
+      !listed(list(&app, &early, &channel).await),
+      "added before the import was finished"
+    );
+
+    // The mark goes with the membership.
+    let gus_id = user_id(&app, &gus).await;
+    let removed = app
+      .delete(&alice, &format!("/conversations/{channel}/members/{gus_id}"))
+      .await;
+    assert!(removed.status.is_success(), "{}", removed.body);
+    add_channel_member(&app, &alice, &channel, &gus_id).await;
+    assert!(!listed(list(&app, &gus, &channel).await), "added again by alice");
+
+    // Once the import period is over, the import account's additions are ordinary ones.
+    let importer_id = user_id(&app, &importer).await;
+    allow_import(&app, &importer_id, now_ms() - 1);
+    let gwen = guest("gwen");
+    let gwen_id = user_id(&app, &gwen).await;
+    add_space_member(&app, &alice, &space, &gwen_id, "guest").await;
+    add_channel_member(&app, &importer, &channel, &gwen_id).await;
+    assert!(
+      !listed(list(&app, &gwen, &channel).await),
+      "added after the import period"
+    );
+  }
+}
+
 /// A channel that shares its full history, with the importer (the admin), carol and one live
 /// message of carol's; the import is allowed.
 async fn channel_with_live_message(app: &TestApp) -> (TestUser, String, String, TestUser) {
