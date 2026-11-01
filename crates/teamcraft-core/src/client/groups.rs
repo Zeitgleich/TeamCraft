@@ -2045,7 +2045,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     self.seal_history_to(conversation, user, added_epoch, &keys).await
   }
 
-  /// The keys of the ring that [`Self::note_import_keys`] noted as the import's.
+  /// The keys of the ring that are the import's ([`Self::import_keys`]).
   fn import_history_keys(&self, conversation: ConversationId) -> Result<Vec<ContentKey>, CoreError> {
     let imported = self.import_keys(conversation)?;
     Ok(
@@ -2055,6 +2055,74 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
         .filter(|key| imported.contains(&super::key_history::key_hex(key.id())))
         .collect(),
     )
+  }
+
+  /// Seals the import key of `conversation` (e2ee.md §4.10, "The import key") to each verified
+  /// member device of the group not named in `sealed_to` whose user may read the conversation's
+  /// history: no guest, unless the import grant names them. The bundle names no current key, so
+  /// nobody writes under it. Returns the devices it went to, as `user/device`.
+  pub(crate) async fn seal_import_key(
+    &mut self,
+    conversation: ConversationId,
+    key: &ContentKey,
+    sealed_to: &BTreeSet<String>,
+  ) -> Result<Vec<String>, CoreError> {
+    let me = self.own_member();
+    let mut due = Vec::new();
+    for member in self.group_or_error(conversation)?.members()? {
+      let name = super::key_history::member_key(member)?;
+      if member != me && !sealed_to.contains(&name) {
+        due.push((member, name));
+      }
+    }
+    if due.is_empty() {
+      return Ok(Vec::new());
+    }
+    let directory = self.member_directory(conversation).await?;
+    let mut sealed = Vec::new();
+    for (member, name) in due {
+      let user = convert::user_from_crypto(member.user_id)?;
+      // Not noted: a guest made a member later gets it on the next batch.
+      if !self.is_import_granted(conversation, user)?
+        && !self.may_read_imported_history(conversation, user).await?
+      {
+        continue;
+      }
+      let recipient = match self
+        .group_or_error(conversation)?
+        .verified_member(member, &directory)
+      {
+        Ok(Some(device)) => device,
+        Ok(None) => continue,
+        Err(error) => {
+          tracing::warn!(conversation_id = %conversation, %error, "import key not sealed to a device that doesn't verify");
+          continue;
+        },
+      };
+      let guard = self.share_guard(conversation, member, SealedShare::MissedKeys)?;
+      self
+        .seal_keys_to(conversation, std::slice::from_ref(key), &recipient, &guard)
+        .await?;
+      sealed.push(name);
+    }
+    Ok(sealed)
+  }
+
+  /// Whether `user`, a member, may read what the import writes before their join: anybody but a
+  /// guest. When the server doesn't say (a refusal, not a network error), they may not.
+  async fn may_read_imported_history(
+    &mut self,
+    conversation: ConversationId,
+    user: UserId,
+  ) -> Result<bool, CoreError> {
+    match self.is_listed_guest(user).await {
+      Ok(is_guest) => Ok(!is_guest),
+      Err(error) if error.is_transient() => Err(error),
+      Err(error) => {
+        tracing::warn!(conversation_id = %conversation, %error, "could not tell whether a member is a guest; not sealing the import key to them");
+        Ok(false)
+      },
+    }
   }
 
   /// Seals `keys` to each of `user`'s verified devices in the group, as the history of their
@@ -2351,29 +2419,6 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       self.update_account_data(|data, _| data.note_removed_sender(&key, at_ms))?;
     }
     Ok(())
-  }
-
-  /// After the import of `conversation` was finished: while this device is alone in the group (a
-  /// new channel), it switches to a fresh key, which the members it adds then get. What they write
-  /// is never under a key of the import ([`Self::note_import_keys`]), which a guest the import grant
-  /// names gets later (e2ee.md §4.10). Where others are in the group already (a DM, somebody's
-  /// notes), they are the conversation's own participants.
-  pub(crate) fn rotate_after_import(&mut self, conversation: ConversationId) -> Result<(), CoreError> {
-    if !self.has_group(conversation)? {
-      return Ok(());
-    }
-    let me = self.own_member();
-    let group = self.group_or_error(conversation)?;
-    if group.members()?.iter().any(|member| *member != me) {
-      return Ok(());
-    }
-    let epoch = group.epoch();
-    let fresh = ContentKey::generate(&mut OsRng);
-    let ring = self.account.key_bag.ring_mut(convert::conversation(conversation));
-    ring.insert(fresh.duplicate())?;
-    ring.set_current(fresh.id())?;
-    self.persist_keys()?;
-    self.note_key_epochs(conversation, &[fresh.id()], epoch)
   }
 
   /// Switches to the content key of the group's current epoch (after a removal or a "from join"

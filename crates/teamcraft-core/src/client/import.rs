@@ -6,6 +6,7 @@ use std::collections::BTreeSet;
 
 use rand_core::OsRng;
 use serde::{Deserialize, Serialize};
+use teamcraft_crypto::content_key::{ContentKey, ContentKeyRing};
 use teamcraft_crypto::message::encrypt_message;
 use teamcraft_proto::{
   AdminSelfJoin, Base64Bytes, ConversationId, ConversationResponse, Id, ImportDmRequest,
@@ -61,28 +62,14 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     Ok(())
   }
 
-  /// Notes the keys of the import of `conversation`: those the ring holds now, once its history is
-  /// in (at [`Self::finish_import`], or for a conversation an earlier version finished, on the next
-  /// pass). A guest the import grant names gets these and nothing older than their join besides
-  /// (e2ee.md §4.10). Kept once noted.
-  pub fn note_import_keys(&mut self, conversation: ConversationId) -> Result<(), CoreError> {
-    let key = import_keys_key(conversation);
-    if records::get_json::<BTreeSet<String>>(&self.store, Table::SyncState, &key)?.is_some() {
-      return Ok(());
-    }
-    let keys: BTreeSet<String> = self
-      .account
-      .key_bag
-      .ring(convert::conversation(conversation))
-      .map(|ring| ring.keys().iter().map(|key| key_hex(key.id())).collect())
-      .unwrap_or_default();
-    records::put_json(&self.store, Table::SyncState, &key, &keys)?;
-    Ok(())
-  }
-
-  /// The keys noted by [`Self::note_import_keys`], as hex IDs; empty when none were.
+  /// The keys of the import of `conversation`, as hex IDs: the import key
+  /// ([`Self::import_content_key`]) once one was made; empty before, and for a conversation an
+  /// earlier version imported (its history went out under keys members also wrote under, e2ee.md
+  /// §4.10).
   pub(crate) fn import_keys(&self, conversation: ConversationId) -> Result<BTreeSet<String>, CoreError> {
-    Ok(records::get_json(&self.store, Table::SyncState, &import_keys_key(conversation))?.unwrap_or_default())
+    let maybe_record: Option<ImportKey> =
+      records::get_json(&self.store, Table::SyncState, &import_key_key(conversation))?;
+    Ok(maybe_record.map(|record| record.id).into_iter().collect())
   }
 
   /// Whether this device may share the history of `conversation` with `user` although the user
@@ -182,16 +169,17 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     drafts: &[ImportDraft],
   ) -> Result<Vec<MessageId>, CoreError> {
     self.ensure_mls_current(conversation).await?;
-    let Some(ring) = self
-      .account
-      .key_bag
-      .ring(convert::conversation(conversation))
-      .filter(|ring| ring.current().is_some())
-    else {
+    if !self.has_group(conversation)? {
       return Err(CoreError::InvalidRequest(
-        "no content key for this conversation yet".into(),
+        "not in this conversation's group yet".into(),
       ));
-    };
+    }
+    let key = self.import_content_key(conversation)?;
+    self.share_import_key(conversation, &key).await?;
+    // The import key is current only in this ring, which encrypts nothing else.
+    let mut ring = ContentKeyRing::new(convert::conversation(conversation));
+    ring.insert(key.duplicate())?;
+    ring.set_current(key.id())?;
     let mut messages = Vec::with_capacity(drafts.len());
     for draft in drafts {
       let MessageContent::Text { meta, .. } = &draft.content else {
@@ -209,7 +197,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
         serde_json::to_vec(&draft.content).map_err(|error| CoreError::Corrupt(error.to_string()))?,
       );
       let context = self.message_context(conversation, client_message_id);
-      let encrypted = encrypt_message(ring, &context, &plaintext, &self.account.device, &mut OsRng)?;
+      let encrypted = encrypt_message(&ring, &context, &plaintext, &self.account.device, &mut OsRng)?;
       messages.push(ImportedMessage {
         client_message_id,
         content_key_id: Base64Bytes::new(encrypted.content_key_id().as_bytes().to_vec()),
@@ -233,6 +221,58 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     Ok(response.messages.into_iter().map(|stored| stored.id).collect())
   }
 
+  /// The content key the import of `conversation` encrypts with (e2ee.md §4.10, "The import
+  /// key"): made by this device for the import alone and never anybody's current key, so nobody
+  /// writes a live message under it. A guest the import grant names gets this key and no other
+  /// one from before their join. Made once and kept in the ring.
+  fn import_content_key(&mut self, conversation: ConversationId) -> Result<ContentKey, CoreError> {
+    let maybe_record: Option<ImportKey> =
+      records::get_json(&self.store, Table::SyncState, &import_key_key(conversation))?;
+    let ring_id = convert::conversation(conversation);
+    if let Some(record) = maybe_record
+      && let Some(key) = self
+        .account
+        .key_bag
+        .ring(ring_id)
+        .and_then(|ring| ring.keys().iter().find(|key| key_hex(key.id()) == record.id))
+    {
+      return Ok(key.duplicate());
+    }
+    let fresh = ContentKey::generate(&mut OsRng);
+    self.account.key_bag.ring_mut(ring_id).insert(fresh.duplicate())?;
+    self.persist_keys()?;
+    let record = ImportKey {
+      id: key_hex(fresh.id()),
+      sealed_to: BTreeSet::new(),
+    };
+    records::put_json(
+      &self.store,
+      Table::SyncState,
+      &import_key_key(conversation),
+      &record,
+    )?;
+    Ok(fresh)
+  }
+
+  /// Seals the import key to the group's member devices that don't have it from this device yet
+  /// ([`Self::seal_import_key`]) and notes them.
+  async fn share_import_key(
+    &mut self,
+    conversation: ConversationId,
+    key: &ContentKey,
+  ) -> Result<(), CoreError> {
+    let record_key = import_key_key(conversation);
+    let Some(mut record) = records::get_json::<ImportKey>(&self.store, Table::SyncState, &record_key)? else {
+      return Ok(());
+    };
+    let sealed = self.seal_import_key(conversation, key, &record.sealed_to).await?;
+    if !sealed.is_empty() {
+      record.sealed_to.extend(sealed);
+      records::put_json(&self.store, Table::SyncState, &record_key, &record)?;
+    }
+    Ok(())
+  }
+
   /// A member's read position, favourite and mute from the old system.
   pub async fn set_import_member_state(
     &self,
@@ -248,13 +288,9 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     )
   }
 
-  /// Marks the conversation's import as finished, so its members load its history's start again,
-  /// notes the keys of the import ([`Self::note_import_keys`]) and, alone in the group, writes on
-  /// with a fresh key ([`Self::rotate_after_import`]).
+  /// Marks the conversation's import as finished, so its members load its history's start again.
   pub async fn finish_import(&mut self, conversation: ConversationId) -> Result<(), CoreError> {
-    self.api.finish_import(conversation).await?;
-    self.note_import_keys(conversation)?;
-    self.rotate_after_import(conversation)
+    Ok(self.api.finish_import(conversation).await?)
   }
 
   /// Leaves a conversation the import is done with, without a goodbye: a signed removal of this
@@ -277,9 +313,21 @@ struct ImportGrant {
   users: BTreeSet<UserId>,
 }
 
-/// Where the keys of a conversation's import are kept ([`Client::note_import_keys`]).
-fn import_keys_key(conversation: ConversationId) -> String {
-  format!("import_keys/{conversation}")
+/// The import key of a conversation ([`Client::import_content_key`]) and the member devices this
+/// device sealed it to.
+#[derive(Debug, Serialize, Deserialize)]
+struct ImportKey {
+  /// The key's ID in the ring, as hex.
+  id: String,
+  /// Member devices (`user/device`) it was sealed to.
+  sealed_to: BTreeSet<String>,
+}
+
+/// Where the import key of a conversation is kept ([`Client::import_content_key`]). Not the
+/// `import_keys/` of earlier versions, which noted every key the ring held at the end of the
+/// import, live ones included (#1078): those are no longer read.
+fn import_key_key(conversation: ConversationId) -> String {
+  format!("import_key/{conversation}")
 }
 
 /// Where the import grant of a conversation is kept ([`Client::grant_imported_history`]).

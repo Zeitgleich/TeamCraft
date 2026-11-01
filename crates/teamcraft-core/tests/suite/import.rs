@@ -737,6 +737,56 @@ mod guests {
     assert_eq!(owner.texts(channel), vec!["old", "live before Lea"]);
   }
 
+  /// Issue #1078: a member in the group while the import runs writes under the group's key, never
+  /// under the import key, so a guest the grant names gets the import and not that message.
+  #[tokio::test]
+  async fn a_late_guest_gets_no_message_members_wrote_during_the_import() {
+    let server = FakeServer::new();
+    let (mut owner, mut importer) = import_policy(&server, Some(i64::MAX)).await;
+    let late_api = server.add_guest("Lea");
+    let late_id = late_api.user_id();
+    let space = importer.space().await;
+    let channel = importer.client.create_channel(space, "History").await.unwrap();
+    importer
+      .client
+      .grant_imported_history(channel, &[owner.client.user_id(), late_id])
+      .unwrap();
+    importer
+      .client
+      .send_imported(channel, &[draft("1", "old 1", ImportedAuthor::Deleted, OLD_MS)])
+      .await
+      .unwrap();
+    add_full(&mut importer, channel, owner.client.user_id()).await;
+    settle(&mut [&mut owner, &mut importer]).await;
+    owner
+      .client
+      .send_text(channel, None, "live during the import")
+      .await
+      .unwrap();
+    settle(&mut [&mut owner, &mut importer]).await;
+    importer
+      .client
+      .send_imported(
+        channel,
+        &[draft("2", "old 2", ImportedAuthor::Deleted, OLD_MS + 1)],
+      )
+      .await
+      .unwrap();
+    importer.client.finish_import(channel).await.unwrap();
+    add_full(&mut importer, channel, late_id).await;
+    settle(&mut [&mut owner, &mut importer]).await;
+
+    let mut late = Peer::enroll_as(late_api, "Lea").await;
+    join_late(&mut importer, &mut late).await;
+    late.client.catch_up_messages(channel).await.unwrap();
+    assert_eq!(late.texts(channel), vec!["old 1", "old 2"]);
+    owner.client.catch_up_messages(channel).await.unwrap();
+    assert_eq!(
+      owner.texts(channel),
+      vec!["old 1", "old 2", "live during the import"]
+    );
+  }
+
   #[tokio::test]
   async fn a_renewed_policy_needs_the_grant_again() {
     let server = FakeServer::new();

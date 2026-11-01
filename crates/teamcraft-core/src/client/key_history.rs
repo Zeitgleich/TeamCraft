@@ -675,7 +675,7 @@ fn full_history_user(update: &MembershipUpdate) -> Option<UserIdCrypto> {
   }
 }
 
-fn member_key(member: GroupMember) -> Result<String, CoreError> {
+pub(crate) fn member_key(member: GroupMember) -> Result<String, CoreError> {
   let user: UserId = convert::user_from_crypto(member.user_id)?;
   let device: DeviceId = convert::device_from_crypto(member.device_id)?;
   Ok(format!("{user}/{device}"))

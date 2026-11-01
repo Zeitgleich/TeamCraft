@@ -149,13 +149,11 @@ impl<'a, A: ServerApi, S: LocalStore> Importer<'a, A, S> {
   /// meanwhile, then leaving every conversation where nobody is missing any more.
   pub async fn tend(&mut self, plan: &Plan) -> Result<(), RunError> {
     // Also for conversations a run before this version imported: their waiting additions of
-    // guests get the history (e2ee.md §4.10, "Guests in imported conversations").
+    // guests get the history (e2ee.md §4.10, "Guests in imported conversations"), as far as it is
+    // under an import key.
     for item in &plan.items {
       if let Some(conversation) = self.progress.conversation(&item.key())? {
         self.grant_history(item, conversation)?;
-        if self.progress.is_done(&item.key(), Step::Finished)? {
-          self.client.note_import_keys(conversation)?;
-        }
       }
     }
     self.keep_gateway().await;
