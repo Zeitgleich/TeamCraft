@@ -167,7 +167,7 @@ fn let_in_by(user: UserId, commit: &JoinCommit<'_>, asks_for_approval: bool) -> 
 /// `maybe_response` (this device's record) says (its visibility is the server's word, as for the
 /// members' check of a self-join, admin.md §2.4). Not a DM, a group DM or a meeting chat: admins
 /// have no way into those of their own. A conversation this device has no record of is told.
-fn is_told_in(maybe_response: Option<&ConversationResponse>) -> bool {
+pub(super) fn is_told_in(maybe_response: Option<&ConversationResponse>) -> bool {
   maybe_response.is_none_or(|response| {
     response.kind == ConversationKind::Channel
       && !(response.visibility == ConversationVisibility::Public && !response.is_archived)

@@ -8,9 +8,9 @@ use rand_core::OsRng;
 use serde::{Deserialize, Serialize};
 use teamcraft_crypto::message::encrypt_message;
 use teamcraft_proto::{
-  Base64Bytes, ConversationId, ConversationResponse, Id, ImportDmRequest, ImportMemberStateRequest,
-  ImportMessagesRequest, ImportedMessage, MessageId, ProvisionUsersRequest, ProvisionedUser, ThreadId,
-  UserId,
+  AdminSelfJoin, Base64Bytes, ConversationId, ConversationResponse, Id, ImportDmRequest,
+  ImportMemberStateRequest, ImportMessagesRequest, ImportedMessage, MessageId, ProvisionUsersRequest,
+  ProvisionedUser, ThreadId, UserId,
 };
 use zeroize::Zeroizing;
 
@@ -151,6 +151,26 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
   ) -> Result<bool, CoreError> {
     let id = self.found_participants_group(conversation, participants).await?;
     self.has_group(id)
+  }
+
+  /// Asks to be let into the group of a DM or notes the import didn't found (it existed before,
+  /// e2ee.md §4.10): posts this account's signed self-addition, from the join on, which a
+  /// participant's device commits like a workspace admin's self-join (admin.md §2.4: only under
+  /// `admin_self_join = visible`). Posted again while nobody lets it in
+  /// ([`Self::retry_due_self_adds`]). Nothing to do once this device is in the group.
+  pub async fn request_import_join(&mut self, conversation: ConversationId) -> Result<(), CoreError> {
+    if self.has_group(conversation)? {
+      return Ok(());
+    }
+    let self_join = self.workspace()?.policy.admin_self_join.clone();
+    if self_join != AdminSelfJoin::Visible {
+      tracing::warn!(
+        conversation_id = %conversation,
+        policy = %self_join,
+        "members' devices let the import account into an existing DM or notes only while admin_self_join is visible"
+      );
+    }
+    self.post_self_add_change(conversation).await
   }
 
   /// Encrypts `drafts` with the conversation's current content key and stores them as imported
