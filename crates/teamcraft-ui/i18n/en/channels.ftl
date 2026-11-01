@@ -321,6 +321,7 @@ channel-sources-revoke = Revoke
 channel-sources-revoke-confirm = Revoke source
 channel-sources-name = Source name
 channel-sources-name-placeholder = e.g. ci or nas-logs
+channel-sources-name-invalid = Enter a name of up to { $max } characters, on one line.
 channel-sources-kind = Kind
 channel-sources-kind-webhook = Webhook
 channel-sources-kind-log = Log lines

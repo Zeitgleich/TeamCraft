@@ -321,6 +321,7 @@ channel-sources-revoke = Widerrufen
 channel-sources-revoke-confirm = Quelle widerrufen
 channel-sources-name = Name der Quelle
 channel-sources-name-placeholder = z. B. ci oder nas-logs
+channel-sources-name-invalid = Gib einen Namen mit bis zu { $max } Zeichen in einer Zeile ein.
 channel-sources-kind = Art
 channel-sources-kind-webhook = Webhook
 channel-sources-kind-log = Logzeilen
