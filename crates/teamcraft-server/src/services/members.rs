@@ -131,6 +131,11 @@ pub async fn add_member(
     .database
     .add_conversation_member(id, user.id, role.clone())
     .await?;
+  if super::import::is_importing(state, caller.user.id) {
+    // The import account adds the people of what it imported: they see its history, also as
+    // guests (e2ee.md §4.10, "Guests in imported conversations").
+    state.database.mark_imported_history_member(id, user.id).await?;
+  }
   audit::record(
     state,
     Some(caller.user.id),

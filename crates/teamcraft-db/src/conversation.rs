@@ -56,6 +56,9 @@ pub struct Membership {
   pub is_notification_inherited: bool,
   /// Smallest message ID created after the member joined; history cut-off for `from_join`.
   pub joined_floor: MessageId,
+  /// The import account added the member while it imported: they see the history from before
+  /// they joined also as a guest (e2ee.md §4.10, "Guests in imported conversations").
+  pub sees_imported_history: bool,
 }
 
 /// A conversation and the viewer's membership (`None`: not a member).
@@ -232,7 +235,8 @@ impl Database {
                 m.role AS "role?", m.notification_level AS "notification_level?",
                 m.is_favorite AS "is_favorite?", m.last_read_message_id, m.muted_until,
                 NOT m.notification_overridden AS "is_inherited?",
-                tc_snowflake_floor(m.joined_at) AS "joined_floor?"
+                tc_snowflake_floor(m.joined_at) AS "joined_floor?",
+                m.sees_imported_history AS "sees_imported_history?"
          FROM conversations c
          LEFT JOIN memberships m ON m.conversation_id = c.id AND m.user_id = $1
          WHERE ($2::bigint IS NULL OR c.id = $2)
@@ -268,6 +272,7 @@ impl Database {
             maybe_last_read_message_id: from_db_opt(row.last_read_message_id)?,
             maybe_muted_until: row.muted_until,
             joined_floor: from_db(floor)?,
+            sees_imported_history: row.sees_imported_history.unwrap_or(false),
           }),
           _ => None,
         };
@@ -471,6 +476,22 @@ impl Database {
     .execute(self.pool())
     .await?;
     Ok(result.rows_affected() > 0)
+  }
+
+  /// Notes that the import account added the member ([`Membership::sees_imported_history`]).
+  pub async fn mark_imported_history_member(
+    &self,
+    conversation: ConversationId,
+    user: UserId,
+  ) -> Result<(), DbError> {
+    sqlx::query!(
+      "UPDATE memberships SET sees_imported_history = true WHERE conversation_id = $1 AND user_id = $2",
+      to_db(conversation),
+      to_db(user),
+    )
+    .execute(self.pool())
+    .await?;
+    Ok(())
   }
 
   /// `true` if the user was a member.

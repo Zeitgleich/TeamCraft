@@ -8,12 +8,12 @@ use teamcraft_db::{NewAttachment, RemovedAttachment};
 use teamcraft_proto::{
   AttachmentDownloadResponse, AttachmentId, AttachmentPartUrlResponse, AttachmentResponse,
   CompleteMultipartAttachmentRequest, CreateAttachmentRequest, CreateAttachmentResponse,
-  CreateMultipartAttachmentResponse, HistoryPolicy, Id, Permission, PresignAttachmentPartRequest, UnixMillis,
+  CreateMultipartAttachmentResponse, Id, Permission, PresignAttachmentPartRequest, UnixMillis,
 };
 use time::OffsetDateTime;
 use tracing::warn;
 
-use super::access::{is_guest, load_conversation, require};
+use super::access::{load_conversation, require, sees_all_history};
 use super::convert::unix_millis;
 use crate::auth::AuthenticatedUser;
 use crate::error::ApiError;
@@ -288,7 +288,7 @@ pub async fn readable_attachment(
   let Some(membership) = &access.view.maybe_membership else {
     return Err(ApiError::attachment_not_found());
   };
-  let sees_all_history = access.view.conversation.history_policy == HistoryPolicy::Full && !is_guest(caller);
+  let sees_all_history = sees_all_history(caller, &access.view);
   if !sees_all_history && id.snowflake() < membership.joined_floor.snowflake() {
     return Err(ApiError::attachment_not_found());
   }

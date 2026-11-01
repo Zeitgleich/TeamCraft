@@ -2,12 +2,12 @@
 //! concerns. Metadata only — who did what to whom — never content.
 
 use teamcraft_proto::{
-  ConversationId, GatewayEvent, HistoryPolicy, Id, ListSystemEventsQuery, ListSystemEventsResponse,
-  SystemEventKind, SystemEventResponse, UserId,
+  ConversationId, GatewayEvent, Id, ListSystemEventsQuery, ListSystemEventsResponse, SystemEventKind,
+  SystemEventResponse, UserId,
 };
 use tracing::warn;
 
-use super::access::{is_guest, load_conversation};
+use super::access::{load_conversation, sees_all_history};
 use super::convert::unix_millis;
 use crate::auth::AuthenticatedUser;
 use crate::error::ApiError;
@@ -73,7 +73,7 @@ pub async fn list_system_events(
     .maybe_limit
     .unwrap_or(limits.default_page_size)
     .clamp(1, limits.max_page_size);
-  let sees_all = access.view.conversation.history_policy == HistoryPolicy::Full && !is_guest(caller);
+  let sees_all = sees_all_history(caller, &access.view);
   let floor = membership.joined_floor.snowflake();
   let mut events = state
     .database
