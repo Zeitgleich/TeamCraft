@@ -180,6 +180,10 @@ jump-to-latest-new = { $count ->
     [one] 1 neue Nachricht
    *[other] { $count } neue Nachrichten
   }
+jump-to-reaction = { $count ->
+    [one] 1 neue Reaktion auf deine Nachrichten, dorthin springen
+   *[other] { $count } neue Reaktionen auf deine Nachrichten, zur ersten springen
+  }
 action-react-with = Mit { $emoji } reagieren
 emoji-picker-title = Emoji
 emoji-search = Emoji suchen

@@ -6,6 +6,7 @@ use teamcraft_core::api::ApiError;
 use teamcraft_core::store::StoreError;
 use teamcraft_crypto::backup::BackupError;
 use teamcraft_crypto::key_bag::KeyBagError;
+use teamcraft_proto::ErrorCode;
 
 #[derive(Debug, thiserror::Error, uniffi::Error)]
 #[uniffi(flat_error)]
@@ -73,6 +74,10 @@ pub enum TeamCraftError {
   /// or the room holds somebody unnamed): stay in the call.
   #[error("call move refused: {0}")]
   CallMoveRefused(String),
+  /// The account is already in the call on as many devices as the call allows
+  /// (`call_device_limit`, HTTP 409 on the join token): leave on one of them first.
+  #[error("call device limit reached: {0}")]
+  CallDeviceLimit(String),
   /// Anything else the core reported.
   #[error("{0}")]
   Core(String),
@@ -83,6 +88,9 @@ impl From<CoreError> for TeamCraftError {
     match error {
       CoreError::Api(ApiError::Token(_)) | CoreError::Api(ApiError::Status { status: 401, .. }) => {
         Self::SignedOut
+      },
+      CoreError::Api(api) if api.error_code() == Some(&ErrorCode::CallDeviceLimit) => {
+        Self::CallDeviceLimit(api.to_string())
       },
       CoreError::Api(api) if api.is_transient() => Self::Network(api.to_string()),
       CoreError::NotEnrolled => Self::NotEnrolled,
@@ -167,6 +175,35 @@ mod tests {
       TeamCraftError::from(CoreError::Gateway("closed".into())),
       TeamCraftError::Core(_)
     ));
+  }
+
+  mod call_device_limit {
+    use teamcraft_proto::ErrorBody;
+
+    use super::*;
+
+    #[test]
+    fn the_join_token_refusal_has_its_own_error() {
+      let refused = CoreError::Api(ApiError::Status {
+        status: 409,
+        maybe_body: Some(ErrorBody::new(ErrorCode::CallDeviceLimit, "too many devices")),
+        maybe_retry_after: None,
+      });
+      assert!(matches!(
+        TeamCraftError::from(refused),
+        TeamCraftError::CallDeviceLimit(_)
+      ));
+    }
+
+    #[test]
+    fn other_conflicts_stay_generic() {
+      let conflict = CoreError::Api(ApiError::Status {
+        status: 409,
+        maybe_body: Some(ErrorBody::new(ErrorCode::CallLocked, "locked")),
+        maybe_retry_after: None,
+      });
+      assert!(matches!(TeamCraftError::from(conflict), TeamCraftError::Core(_)));
+    }
   }
 
   mod backup_errors {

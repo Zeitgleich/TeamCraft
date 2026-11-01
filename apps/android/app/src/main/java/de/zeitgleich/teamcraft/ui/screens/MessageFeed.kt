@@ -49,8 +49,11 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Done
+import androidx.compose.material.icons.filled.FavoriteBorder
 import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.outlined.Lock
+import androidx.compose.material3.Badge
+import androidx.compose.material3.BadgedBox
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
@@ -122,6 +125,7 @@ import de.zeitgleich.teamcraft.core.Message
 import de.zeitgleich.teamcraft.core.MessageExtras
 import de.zeitgleich.teamcraft.core.ReplyPreview
 import de.zeitgleich.teamcraft.core.User
+import de.zeitgleich.teamcraft.core.UnseenReactions
 import de.zeitgleich.teamcraft.ui.DividerOnScreen
 import de.zeitgleich.teamcraft.ui.FeedItem
 import de.zeitgleich.teamcraft.ui.FeedScrollAction
@@ -143,7 +147,9 @@ import de.zeitgleich.teamcraft.ui.isNearBottom
 import de.zeitgleich.teamcraft.ui.localizedText
 import de.zeitgleich.teamcraft.ui.newerMessages
 import de.zeitgleich.teamcraft.ui.pinnedDay
+import de.zeitgleich.teamcraft.ui.reactionsInView
 import de.zeitgleich.teamcraft.ui.rememberThumbnail
+import de.zeitgleich.teamcraft.ui.rowOf
 import de.zeitgleich.teamcraft.ui.showsSenders
 import de.zeitgleich.teamcraft.ui.systemLine
 import de.zeitgleich.teamcraft.ui.thumbnailKey
@@ -231,6 +237,10 @@ fun MessageFeed(
   /** Whether the user may react here; without it the reactions stay readable but don't toggle. */
   canReact: Boolean = true,
   older: OlderMessages = OlderMessages.None,
+  /** Others' reactions to the user's messages not seen yet: the heart button (issue #1009). */
+  unseenReactions: UnseenReactions = UnseenReactions(),
+  /** These messages' reactions were on screen, or the user jumped to them. */
+  onReactionsSeen: (List<String>) -> Unit = {},
 ) {
   // Newest first in a reversed list: the bottom stays anchored when the keyboard opens or a picture
   // above grows, and the rows keep their place by key (the message ID) when new ones arrive.
@@ -288,6 +298,36 @@ fun MessageFeed(
     }
   }
   PageBack(listState, items.size, older)
+  val onSeen by rememberUpdatedState(onReactionsSeen)
+  // Told once per message while it waits; a message whose reactions were seen and that gets a new
+  // one later waits again.
+  val reported = remember { mutableSetOf<String>() }
+  LaunchedEffect(listState, items, unseenReactions) {
+    reported.retainAll(unseenReactions.messages.toSet())
+    if (unseenReactions.messages.isEmpty()) return@LaunchedEffect
+    snapshotFlow { listState.layoutInfo.visibleItemsInfo.map { it.index } }.collect { visible ->
+      val seen = reactionsInView(items, visible, unseenReactions.messages, reported)
+      if (seen.isNotEmpty()) {
+        reported.addAll(seen)
+        onSeen(seen)
+      }
+    }
+  }
+  // The message the heart button goes to, until its row is loaded.
+  var maybeReactionTarget by remember { mutableStateOf<String?>(null) }
+  LaunchedEffect(maybeReactionTarget, items, older.hasOlder, older.isLoading) {
+    val target = maybeReactionTarget ?: return@LaunchedEffect
+    val maybeRow = rowOf(items, target)
+    when {
+      maybeRow != null -> {
+        maybeReactionTarget = null
+        maybeHighlighted = target
+        showAtTop(listState, maybeRow)
+      }
+      older.hasOlder -> if (!older.isLoading) older.onNearOldest()
+      else -> maybeReactionTarget = null
+    }
+  }
   val context = LocalContext.current
   val onOpenFile: (FileInfo) -> Unit = remember(viewModel, context) {
     { file ->
@@ -333,15 +373,29 @@ fun MessageFeed(
       if (older.hasOlder && older.isLoading) item(key = OLDER_LOADING_KEY) { OlderLoadingRow() }
     }
     FloatingDay(listState, items, Modifier.align(Alignment.TopCenter))
-    AnimatedVisibility(
-      visible = (showsJumpDown || scrollState.unseenCount > 0) && items.isNotEmpty(),
-      enter = fadeIn(),
-      exit = fadeOut(),
-      modifier = Modifier.align(Alignment.BottomEnd).padding(16.dp),
+    Column(
+      Modifier.align(Alignment.BottomEnd).padding(16.dp),
+      horizontalAlignment = Alignment.End,
+      verticalArrangement = Arrangement.spacedBy(12.dp),
     ) {
-      JumpDownButton(scrollState.unseenCount) {
-        decide(FeedScrollEvent.ReachedBottom, isNearBottom = true)
-        scope.launch { listState.animateScrollToItem(0) }
+      AnimatedVisibility(visible = unseenReactions.count > 0 && unseenReactions.messages.isNotEmpty(), enter = fadeIn(), exit = fadeOut()) {
+        ReactionJumpButton(unseenReactions.count) {
+          unseenReactions.messages.firstOrNull()?.let { oldest ->
+            reported.add(oldest)
+            onSeen(listOf(oldest))
+            maybeReactionTarget = oldest
+          }
+        }
+      }
+      AnimatedVisibility(
+        visible = (showsJumpDown || scrollState.unseenCount > 0) && items.isNotEmpty(),
+        enter = fadeIn(),
+        exit = fadeOut(),
+      ) {
+        JumpDownButton(scrollState.unseenCount) {
+          decide(FeedScrollEvent.ReachedBottom, isNearBottom = true)
+          scope.launch { listState.animateScrollToItem(0) }
+        }
       }
     }
   }
@@ -459,6 +513,20 @@ private fun JumpDownButton(unseenCount: Int, onClick: () -> Unit) {
     val label = stringResource(R.string.jump_down)
     SmallFloatingActionButton(onClick = onClick, modifier = Modifier.semantics { contentDescription = label }) {
       Icon(Icons.Filled.KeyboardArrowDown, contentDescription = null)
+    }
+  }
+}
+
+/**
+ * The way to others' reactions to the user's messages that weren't seen yet: a heart with their
+ * count, above the way down; it goes to the oldest such message.
+ */
+@Composable
+private fun ReactionJumpButton(count: Int, onClick: () -> Unit) {
+  val label = pluralStringResource(R.plurals.jump_to_reaction, count, count)
+  SmallFloatingActionButton(onClick = onClick, modifier = Modifier.semantics { contentDescription = label }) {
+    BadgedBox(badge = { Badge { Text(if (count > MAX_SHOWN_UNSEEN) "$MAX_SHOWN_UNSEEN+" else count.toString()) } }) {
+      Icon(Icons.Filled.FavoriteBorder, contentDescription = null)
     }
   }
 }

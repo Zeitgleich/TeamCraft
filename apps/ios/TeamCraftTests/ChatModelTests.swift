@@ -61,12 +61,14 @@ final class ChatModelTests: XCTestCase {
     XCTAssertEqual(names(.groups), ["Amy, Bob"])
   }
 
-  func testBadgeIsRedForMentionsAndUnreadDirectMessagesOnly() {
-    XCTAssertEqual(item("1", "Amy", kind: .direct, unread: 1).badgeTone, .mention)
-    XCTAssertEqual(item("2", "Team", kind: .group, unread: 3).badgeTone, .mention)
-    XCTAssertEqual(item("3", "dev", unread: 3, mentions: 1).badgeTone, .mention)
-    XCTAssertEqual(item("4", "dev", unread: 3).badgeTone, .unread)
-    XCTAssertEqual(item("5", "Amy", kind: .direct, unread: 3, muted: true).badgeTone, .unread)
+  /// #897: the rule is the core's; the app only reads count, label and tone from it.
+  func testRowBadgeComesFromTheCoreRule() {
+    XCTAssertNil(rowBadge(unreadCount: 0, mentionCount: 0, isMuted: false))
+    let red = rowBadge(unreadCount: 120, mentionCount: 0, isMuted: false)
+    XCTAssertEqual(red?.label, "99+")
+    XCTAssertEqual(red?.tone, .red)
+    XCTAssertEqual(rowBadge(unreadCount: 3, mentionCount: 0, isMuted: true)?.tone, .quiet)
+    XCTAssertEqual(rowBadge(unreadCount: 3, mentionCount: 1, isMuted: true)?.count, 1)
   }
 
   /// Issue #829: the notes have an empty name; lists call them "Notes" and the filter finds them.

@@ -468,6 +468,7 @@ private fun subtitle(ui: CallUiState): String {
         CallEndReason.ENDED_BY_HOST -> R.string.call_ended_by_host
         CallEndReason.FAILED -> R.string.call_failed
         CallEndReason.SERVER_LOST -> R.string.call_server_lost
+        CallEndReason.DEVICE_LIMIT -> R.string.error_call_device_limit
         else -> R.string.call_ended
       },
     )

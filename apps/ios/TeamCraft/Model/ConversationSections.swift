@@ -37,7 +37,8 @@ enum HomeFilter: Hashable, CaseIterable {
   }
 }
 
-/// How loud a badge is: red means someone needs you, plain unread is quiet. Mirrors the shared UI's tone.
+/// How loud a counter is: red means someone needs you, plain is quiet. The chat list's badge takes
+/// its tone from the shared rule (`rowBadge`).
 enum BadgeTone: Equatable {
   case mention
   case unread
@@ -51,12 +52,6 @@ extension ConversationItem {
   /// after the other people, and there are none), so they are called "Notes" in the user's
   /// language, like the web and desktop (`notes-title`, issue #829).
   var listName: String { isNotesToSelf ? String(localized: "notes_title") : name }
-
-  /// Red for a mention and for unread messages in a direct or group conversation (they are addressed
-  /// to the user, unless it is muted); quiet for plain unread in channels.
-  var badgeTone: BadgeTone {
-    mentionCount > 0 || (isDirect && !isMuted && unreadCount > 0) ? .mention : .unread
-  }
 }
 
 private func byName(_ lhs: ConversationItem, _ rhs: ConversationItem) -> Bool {

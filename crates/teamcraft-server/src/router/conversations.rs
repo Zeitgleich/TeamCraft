@@ -43,6 +43,7 @@ pub(super) fn routes() -> OpenApiRouter<AppState> {
     ))
     .routes(routes!(handlers::check_member_removal_handler))
     .routes(routes!(handlers::set_read_position_handler))
+    .routes(routes!(handlers::mark_reactions_seen_handler))
     .routes(routes!(handlers::move_channel_handler))
     .routes(routes!(handlers::list_system_events_handler))
     .routes(routes!(handlers::convert_channel_privacy_handler))

@@ -33,7 +33,7 @@ use teamcraft_media::video::{EncodedVideoFrame, VideoResolution, simulcast_layer
 use teamcraft_media::video_capture::CaptureFormat;
 use teamcraft_media::video_pipeline::{VideoSendConfig, preferred_encoders};
 use teamcraft_proto::{
-  AudioCodec, CallJoinTokenResponse, ConversationId, DeviceId, GatewayEvent, MediaCapabilities,
+  AudioCodec, CallJoinTokenResponse, ConversationId, DeviceId, ErrorCode, GatewayEvent, MediaCapabilities,
   MediaStreamId, UserId, VideoCodec, VideoLayerInfo, VideoTrack, VideoTrackKind,
 };
 use tokio::sync::{mpsc, oneshot};
@@ -199,6 +199,9 @@ pub enum CallEndReason {
   /// The call broke off and couldn't be resumed while the chat server stayed connected: the call
   /// server went away (restarted or crashed) and didn't come back in time (issue #427).
   ServerLost,
+  /// The SFU refused the join: the account is already in the call on as many devices as it
+  /// allows (`call_device_limit`; the join token request reports the same as an error).
+  DeviceLimit,
 }
 
 /// Which call status sounds play: a soft repeating tone while this device reconnects, short
@@ -967,11 +970,17 @@ fn apply_event(
     CallEngineEvent::EndedByHost { .. } => return Some(CallEndReason::EndedByHost),
     // Joined from somewhere else as this device: this side just leaves.
     CallEngineEvent::ConnectionReplaced => return Some(CallEndReason::Left),
-    CallEngineEvent::Error(error) => warn!(
-      error_code = ?error.error_code,
-      message = %error.message,
-      "the SFU rejected a call request"
-    ),
+    CallEngineEvent::Error(error) => {
+      warn!(
+        error_code = ?error.error_code,
+        message = %error.message,
+        "the SFU rejected a call request"
+      );
+      // The engine is over after a refused join: say why instead of "interrupted".
+      if error.error_code == ErrorCode::CallDeviceLimit {
+        return Some(CallEndReason::DeviceLimit);
+      }
+    },
     _ => {},
   }
   state.reconnecting_count = count(reconnecting.len());
@@ -1253,6 +1262,26 @@ mod tests {
       ),
       Some(CallEndReason::EndedByHost)
     );
+  }
+
+  #[test]
+  fn the_sfus_device_limit_refusal_ends_the_call_with_its_reason() {
+    let mut state = ended(conversation(5), CallEndReason::Left);
+    let (mut reconnecting, mut roster, mut muted) = (BTreeSet::new(), BTreeMap::new(), BTreeSet::new());
+    let mut apply = |code| {
+      apply_event(
+        &mut state,
+        &mut reconnecting,
+        &mut roster,
+        &mut muted,
+        CallEngineEvent::Error(teamcraft_proto::ErrorBody::new(code, "refused")),
+      )
+    };
+    assert_eq!(
+      apply(ErrorCode::CallDeviceLimit),
+      Some(CallEndReason::DeviceLimit)
+    );
+    assert_eq!(apply(ErrorCode::CallLocked), None);
   }
 
   #[test]

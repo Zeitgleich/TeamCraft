@@ -595,6 +595,10 @@ pub enum ChatAction {
     conversation: ConversationId,
     message: MessageId,
   },
+  MarkReactionsSeen {
+    conversation: ConversationId,
+    messages: Vec<MessageId>,
+  },
   SetFavorite {
     conversation: ConversationId,
     is_favorite: bool,
@@ -1073,6 +1077,10 @@ impl ChatAction {
         conversation,
         message,
       } => backend.mark_read_through(conversation, message),
+      Self::MarkReactionsSeen {
+        conversation,
+        messages,
+      } => backend.mark_reactions_seen(conversation, messages),
       Self::SetFavorite {
         conversation,
         is_favorite,
@@ -1316,6 +1324,9 @@ pub enum ChatQuery {
   FirstUnread {
     conversation: ConversationId,
   },
+  UnseenReactions {
+    conversation: ConversationId,
+  },
   NewestMessage {
     conversation: ConversationId,
   },
@@ -1435,6 +1446,9 @@ pub enum ChatQuery {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "answer", rename_all = "snake_case")]
 pub enum ChatAnswer {
+  UnseenReactions {
+    unseen: crate::model::UnseenReactions,
+  },
   Typing {
     typing: Vec<crate::model::TypingNow>,
   },
@@ -1629,6 +1643,9 @@ impl ChatQuery {
       },
       Self::FirstUnread { conversation } => ChatAnswer::Message {
         maybe_message: backend.first_unread(conversation),
+      },
+      Self::UnseenReactions { conversation } => ChatAnswer::UnseenReactions {
+        unseen: backend.unseen_reactions(conversation),
       },
       Self::NewestMessage { conversation } => ChatAnswer::Message {
         maybe_message: backend.newest_message(conversation),

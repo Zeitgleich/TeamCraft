@@ -169,6 +169,9 @@ max_user_group_members = 5000
 # Unread counts look at this many of the newest unread messages per conversation; a count equal to it
 # means "that many or more" (clients show "1000+"). Keeps the cost independent of huge unread backlogs.
 max_unread_counted = 1000
+# Reactions to a member's own messages remembered one by one as seen, per conversation; beyond it the
+# oldest count as seen together with everything before them.
+max_seen_reactions = 200
 # Unused MLS key packages per device, their size and the count per upload.
 max_key_packages_per_device = 200
 max_key_package_bytes = 16384

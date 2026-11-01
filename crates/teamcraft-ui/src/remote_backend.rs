@@ -26,7 +26,8 @@ use teamcraft_client_api::backend::{ChatBackend, SearchBackend};
 use teamcraft_client_api::calls::BackgroundImageInfo;
 use teamcraft_client_api::model::{
   Conversation, ConversationId, CustomStatus, InviteId, JoinableSpace, Message, MessageId, PendingInvite,
-  PresenceStatus, Space, SpaceId, SpaceRole, SpaceRoster, ThreadId, ThreadSummary, User, UserId,
+  PresenceStatus, Space, SpaceId, SpaceRole, SpaceRoster, ThreadId, ThreadSummary, UnseenReactions, User,
+  UserId,
 };
 use teamcraft_client_api::remote::{
   CORE_CHANGED_EVENT, CORE_FAILED_EVENT, ChatAction, ChatAnswer, ChatQuery, ChatSnapshot, CoreConnection,
@@ -1108,6 +1109,20 @@ impl ChatBackend for RemoteChat {
       Some(ChatAnswer::Message { maybe_message }) => maybe_message,
       _ => None,
     }
+  }
+
+  fn unseen_reactions(&self, conversation: ConversationId) -> UnseenReactions {
+    match self.ask(ChatQuery::UnseenReactions { conversation }) {
+      Some(ChatAnswer::UnseenReactions { unseen }) => unseen,
+      _ => UnseenReactions::default(),
+    }
+  }
+
+  fn mark_reactions_seen(&self, conversation: ConversationId, messages: Vec<MessageId>) {
+    self.act(ChatAction::MarkReactionsSeen {
+      conversation,
+      messages,
+    });
   }
 
   fn newest_message(&self, conversation: ConversationId) -> Option<MessageId> {

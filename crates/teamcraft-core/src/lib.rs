@@ -36,6 +36,7 @@ pub mod push_text;
 pub mod read_state;
 pub mod records;
 pub mod retry;
+pub mod row_badge;
 pub mod runner;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod search;
@@ -64,6 +65,7 @@ mod ui_search;
 pub mod ui_snapshot;
 #[cfg(feature = "ui")]
 mod ui_workspace;
+pub mod unseen_reactions;
 pub mod upkeep;
 #[cfg(target_arch = "wasm32")]
 pub mod web_push;

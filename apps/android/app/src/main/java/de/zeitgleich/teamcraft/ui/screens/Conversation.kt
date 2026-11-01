@@ -111,6 +111,7 @@ import de.zeitgleich.teamcraft.core.Message
 import de.zeitgleich.teamcraft.core.MessageExtras
 import de.zeitgleich.teamcraft.core.PickedFile
 import de.zeitgleich.teamcraft.core.SendOptions
+import de.zeitgleich.teamcraft.core.UnseenReactions
 import de.zeitgleich.teamcraft.ui.ComposerPrefs
 import de.zeitgleich.teamcraft.ui.ConversationRights
 import de.zeitgleich.teamcraft.ui.MainViewModel
@@ -159,6 +160,8 @@ fun ConversationScreen(
   // Admins asking to join this channel, when the user owns it (admin.md §2.4.1).
   var joinRequests by remember { mutableStateOf<List<JoinRequestItem>>(emptyList()) }
   var firstUnread by remember { mutableStateOf<FirstUnread>(FirstUnread.Loading) }
+  // Others' reactions to the user's messages not seen yet: the heart button (issue #1009).
+  var unseenReactions by remember(conversationId) { mutableStateOf(UnseenReactions()) }
   // Counts sends from this screen's composer: each one brings the newest message into view.
   var sentCount by remember { mutableIntStateOf(0) }
   var maybeKeyCatchUp by remember { mutableStateOf<KeyCatchUpItem?>(null) }
@@ -186,6 +189,7 @@ fun ConversationScreen(
     maybeNotified = viewModel.notifiedConversation(conversationId)
     extras = viewModel.readChat { extras(conversationId, messages.map { it.id }) } ?: emptyMap()
     pinned = viewModel.readChat { query(ChatQueries.pinned(conversationId)).messages } ?: emptyList()
+    unseenReactions = viewModel.readChat { query(ChatQueries.unseenReactions(conversationId)).unseen } ?: UnseenReactions()
     joinRequests = requestsIn(conversationId, viewModel.joinRequests.list())
   }
   FollowTransfers(extras) { extras = viewModel.readChat { extras(conversationId, messages.map { it.id }) } ?: extras }
@@ -237,6 +241,8 @@ fun ConversationScreen(
       modifier = Modifier.weight(1f),
       maybeFocusMessage = maybeFocusMessage,
       onOpenPermalink = onOpenPermalink,
+      unseenReactions = unseenReactions,
+      onReactionsSeen = { seen -> viewModel.act(ChatActions.markReactionsSeen(conversationId, seen)) },
       older = OlderMessages(hasOlder, isLoadingOlder) {
         if (isLoadingOlder) return@OlderMessages
         isLoadingOlder = true
@@ -603,6 +609,8 @@ private fun MessageList(
   maybeFocusMessage: String?,
   onOpenPermalink: (String) -> Unit,
   older: OlderMessages = OlderMessages.None,
+  unseenReactions: UnseenReactions = UnseenReactions(),
+  onReactionsSeen: (List<String>) -> Unit = {},
 ) {
   var maybeSelected by remember { mutableStateOf<Message?>(null) }
   MessageFeed(
@@ -620,6 +628,8 @@ private fun MessageList(
     onOpenPermalink = onOpenPermalink,
     canReact = rights.canReact,
     older = older,
+    unseenReactions = unseenReactions,
+    onReactionsSeen = onReactionsSeen,
   )
   maybeSelected?.let { message ->
     MessageActions(

@@ -25,8 +25,8 @@ use teamcraft_client_api::model::{
   Bookmark, BookmarkKind, Conversation, ConversationId, ConversationKind, CustomStatus, DeviceSetup,
   ImportedAuthorView, ImportedFrom, ImportedMark, JoinableSpace, MembershipIssue, Message, MessageKind,
   PENDING_ID_BIT, PendingInvite, Placeholder, PresenceStatus, Reaction, SidebarCategory, Space, SpaceId,
-  SpaceMember, SpaceRoster, SystemEvent, ThreadId, ThreadSummary, TimestampMs, TypingNow, User, UserId,
-  hue_from_hex,
+  SpaceMember, SpaceRoster, SystemEvent, ThreadId, ThreadSummary, TimestampMs, TypingNow, UnseenReactions,
+  User, UserId, hue_from_hex,
 };
 use teamcraft_proto::{
   AttachmentId, ClientMessageId, ConversationKind as ConversationKindProto, ConversationResponse,
@@ -143,6 +143,11 @@ pub enum CoreCommand {
   MarkReadThrough {
     conversation: ConversationId,
     message: MessageId,
+  },
+  /// The user saw these reactions to their own messages (already marked in the store).
+  MarkReactionsSeen {
+    conversation: ConversationId,
+    reactions: Vec<MessageId>,
   },
   /// The thread was read up to this reply.
   MarkThreadRead {
@@ -1631,6 +1636,23 @@ impl<S: LocalStore> ChatBackend for CoreChatBackend<S> {
 
   fn first_unread(&self, conversation: ConversationId) -> Option<MessageId> {
     self.ui_first_unread(conversation)
+  }
+
+  fn unseen_reactions(&self, conversation: ConversationId) -> UnseenReactions {
+    self.read(crate::unseen_reactions::unseen(self.store_ref(), conversation))
+  }
+
+  fn mark_reactions_seen(&self, conversation: ConversationId, messages: Vec<MessageId>) {
+    // Marked here at once, so the button counts down while the server is told.
+    let marked = crate::unseen_reactions::mark_seen(self.store_ref(), conversation, &messages);
+    match marked {
+      Ok(reactions) if reactions.is_empty() => {},
+      Ok(reactions) => self.command(CoreCommand::MarkReactionsSeen {
+        conversation,
+        reactions,
+      }),
+      Err(error) => tracing::warn!(conversation_id = %conversation, %error, "could not mark reactions seen"),
+    }
   }
 
   fn newest_message(&self, conversation: ConversationId) -> Option<MessageId> {
@@ -3705,6 +3727,7 @@ mod tests {
         maybe_last_read_message_id: None,
         maybe_muted_until: None,
         is_notification_inherited: false,
+        reactions_seen: Default::default(),
       }
     }
 

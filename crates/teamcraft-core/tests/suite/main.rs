@@ -58,6 +58,7 @@ mod snapshot_cache;
 mod store_integrity;
 mod sync_engine;
 mod sync_heads;
+mod unseen_reactions;
 mod upkeep;
 mod upload_parts;
 mod workspace;

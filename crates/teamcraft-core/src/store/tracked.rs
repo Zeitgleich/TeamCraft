@@ -460,9 +460,10 @@ fn classify(table: Table, key: &str) -> Change {
     Table::AnnouncedPresence => key.parse().map_or(Change::Live, Change::Announced),
     Table::Unread | Table::Threads | Table::ReadReceipts => Change::Live,
     Table::PinnedIdentities => Change::Security,
-    // The "catching up" marks; the rest are sync cursors.
+    // The "catching up" marks and the unseen reactions; the rest are sync cursors.
     Table::SyncState => key
       .strip_prefix(crate::client::CATCHING_UP_PREFIX)
+      .or_else(|| key.strip_prefix(crate::unseen_reactions::INDEX_PREFIX))
       .map_or(Change::Nothing, conversation_of),
     Table::ContentKeys
     | Table::MlsStorage

@@ -101,3 +101,30 @@ struct CountBadge: View {
       .clipShape(Capsule())
   }
 }
+
+/// The unread number next to a conversation's name in the chat list (#897). Count, label and tone
+/// come from the shared rule (`rowBadge`): red for a conversation that notifies and for mentions,
+/// grey for a muted one. The minimum width keeps the name from shifting while the count changes.
+struct RowCountBadge: View {
+  let badge: RowBadge
+  let isMuted: Bool
+
+  var body: some View {
+    Text(badge.label)
+      .font(.caption2.weight(.bold))
+      .monospacedDigit()
+      .foregroundStyle(badge.tone == .red ? Color.white : Theme.textMuted)
+      .padding(.horizontal, 7)
+      .padding(.vertical, 2)
+      .frame(minWidth: 24)
+      .background(badge.tone == .red ? Theme.badge : Color(.tertiarySystemFill))
+      .clipShape(Capsule())
+      .accessibilityElement(children: .ignore)
+      .accessibilityLabel(
+        // A red badge in a muted conversation counts only its mentions.
+        isMuted && badge.tone == .red
+          ? Text("chat_mentions \(Int(badge.count))")
+          : Text("chat_unread \(Int(badge.count))")
+      )
+  }
+}

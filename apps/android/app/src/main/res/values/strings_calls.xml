@@ -28,6 +28,7 @@
   <string name="call_meeting_title">Call</string>
   <string name="call_move_offer">%1$s moved the call into a meeting room and added %2$s.</string>
   <string name="call_move_join">Join the meeting room</string>
+  <string name="error_call_device_limit">Your account is already in this call on as many devices as are allowed. Leave the call on one of them first, then join from this device.</string>
   <string name="error_call_move_refused">The call wasn\'t moved: the meeting room doesn\'t match what was announced in the conversation. Stay in this call, or join the meeting room from the list if you trust it.</string>
   <string name="channel_mention_confirm_title">Notify everyone?</string>
   <plurals name="channel_mention_confirm">

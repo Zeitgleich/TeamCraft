@@ -96,6 +96,12 @@ object ChatActions {
 
   fun markRead(conversation: String) = action("mark_read") { put("conversation", conversation) }
 
+  /** The reactions to these own messages were on screen (or jumped to): seen, on every device. */
+  fun markReactionsSeen(conversation: String, messages: List<String>) = action("mark_reactions_seen") {
+    put("conversation", conversation)
+    put("messages", JsonArray(messages.map(::JsonPrimitive)))
+  }
+
   /** Reads again how far the others read: receipts sent while the app was offline never arrive. */
   fun refreshReadReceipts(conversation: String) = action("refresh_read_receipts") { put("conversation", conversation) }
 
@@ -242,6 +248,8 @@ object ChatQueries {
   fun typingUsers(conversation: String) = query("typing_users") { put("conversation", conversation) }
 
   fun firstUnread(conversation: String) = query("first_unread") { put("conversation", conversation) }
+
+  fun unseenReactions(conversation: String) = query("unseen_reactions") { put("conversation", conversation) }
 
   fun draft(conversation: String, maybeThread: String?) = query("draft") {
     put("conversation", conversation)

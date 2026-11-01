@@ -109,6 +109,21 @@ class FeedTest {
   private fun entries(vararg messages: Message): List<FeedItem.Entry> =
     feedItems(messages.toList(), maybeFirstUnread = null, zone = ZoneOffset.UTC).filterIsInstance<FeedItem.Entry>()
 
+  @Test
+  fun reactionsAreSeenOnlyForWaitingMessagesOnScreenAndOnce() {
+    val items = entries(message("1", "a", DAY_ONE), message("2", "a", DAY_ONE + MINUTE), message("3", "b", DAY_ONE + 2 * MINUTE))
+    assertEquals(listOf("2"), reactionsInView(items, visible = listOf(1, 2), waiting = listOf("1", "2"), reported = emptySet()))
+    assertEquals(emptyList<String>(), reactionsInView(items, visible = listOf(1, 2), waiting = listOf("2"), reported = setOf("2")))
+    assertEquals(emptyList<String>(), reactionsInView(items, visible = listOf(7), waiting = listOf("2"), reported = emptySet()))
+  }
+
+  @Test
+  fun theJumpFindsTheMessageRowOrWaitsForIt() {
+    val items = feedItems(listOf(message("1", "a", DAY_ONE), message("2", "a", DAY_TWO)), maybeFirstUnread = null, zone = ZoneOffset.UTC)
+    assertEquals(3, rowOf(items, "2"))
+    assertEquals(null, rowOf(items, "9"))
+  }
+
   private fun message(id: String, author: String, sentAt: Long, kind: kotlinx.serialization.json.JsonElement = JsonPrimitive("User")) =
     Message(id = id, conversation = "c", author = author, kind = kind, sentAt = sentAt, body = "text $id")
 

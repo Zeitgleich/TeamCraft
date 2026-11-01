@@ -47,7 +47,7 @@ use crate::i18n::translate_current;
 use crate::live::{LiveScope, LiveServer, REST_ONLY_POLL_INTERVAL_MS, thread_summary, with_local_expiry};
 use crate::model::{
   Conversation, ConversationId, ConversationKind, CustomStatus, DeviceId, Message, MessageId, PresenceStatus,
-  Space, SpaceId, ThreadId, ThreadSummary, TimestampMs, User, UserId, as_log_line,
+  Space, SpaceId, ThreadId, ThreadSummary, TimestampMs, UnseenReactions, User, UserId, as_log_line,
 };
 use crate::reactive::{use_interval_while, use_page_visible};
 use crate::remote_calls::RemoteCalls;
@@ -452,6 +452,14 @@ impl<C: ChatBackend + 'static> ChatBackend for Hybrid<C> {
 
   fn first_unread(&self, conversation: ConversationId) -> Option<MessageId> {
     self.chat.first_unread(conversation)
+  }
+
+  fn unseen_reactions(&self, conversation: ConversationId) -> UnseenReactions {
+    self.chat.unseen_reactions(conversation)
+  }
+
+  fn mark_reactions_seen(&self, conversation: ConversationId, messages: Vec<MessageId>) {
+    self.chat.mark_reactions_seen(conversation, messages);
   }
 
   fn newest_message(&self, conversation: ConversationId) -> Option<MessageId> {

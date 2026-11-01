@@ -432,6 +432,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
           Some(message.id),
         )?;
         apply_early_controls(&self.store, conversation, message.client_message_id)?;
+        crate::unseen_reactions::note_received(&self.store, self.account.user_id, &stored)?;
         self
           .store
           .delete(Table::Undecrypted, &undecrypted_key(&message))?;

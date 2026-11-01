@@ -420,6 +420,18 @@ data class ChatAnswer(
   val value: Boolean = false,
   val threads: List<ThreadSummary> = emptyList(),
   val users: List<String> = emptyList(),
+  val unseen: UnseenReactions? = null,
+)
+
+/**
+ * Others' reactions to the user's own messages in a conversation that the user hasn't seen: the
+ * heart button over the feed (notifications.md, "Reactions to my messages").
+ */
+@Serializable
+data class UnseenReactions(
+  val count: Int = 0,
+  /** The messages they react to, oldest first. */
+  val messages: List<String> = emptyList(),
 )
 
 /** Global notification preferences the server enforces (`/me/notification-settings`). */
