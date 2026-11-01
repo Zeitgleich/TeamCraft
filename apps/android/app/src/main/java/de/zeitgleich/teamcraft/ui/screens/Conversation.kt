@@ -125,6 +125,7 @@ import de.zeitgleich.teamcraft.ui.sensitiveClip
 import de.zeitgleich.teamcraft.ui.requestsIn
 import uniffi.teamcraft_ffi.ConnectionState
 import uniffi.teamcraft_ffi.JoinRequestItem
+import uniffi.teamcraft_ffi.NotifiedConversation
 import uniffi.teamcraft_ffi.emojiConvert
 import uniffi.teamcraft_ffi.emojiSuggestions
 import uniffi.teamcraft_ffi.needsChannelConfirmation
@@ -156,6 +157,8 @@ fun ConversationScreen(
   // Counts sends from this screen's composer: each one brings the newest message into view.
   var sentCount by remember { mutableIntStateOf(0) }
   var undecrypted by remember { mutableStateOf(0) }
+  // What the notification that opened it showed, until the store has it (issue #1065).
+  var maybeNotified by remember(conversationId) { mutableStateOf<NotifiedConversation?>(null) }
   val feed = remember(conversationId) {
     PagedFeed(PAGE, PAGE_BACK) { maybeOldest, older -> viewModel.readChat { tail(conversationId, maybeOldest, older) } }
   }
@@ -174,6 +177,8 @@ fun ConversationScreen(
     messages = maybeTail?.messages ?: emptyList()
     hasOlder = maybeTail?.hasOlder ?: false
     undecrypted = maybeTail?.undecrypted ?: 0
+    // After the messages: once the store has the notified one, the core no longer names it.
+    maybeNotified = viewModel.notifiedConversation(conversationId)
     extras = viewModel.readChat { extras(conversationId, messages.map { it.id }) } ?: emptyMap()
     pinned = viewModel.readChat { query(ChatQueries.pinned(conversationId)).messages } ?: emptyList()
     joinRequests = requestsIn(conversationId, viewModel.joinRequests.list())
@@ -192,7 +197,7 @@ fun ConversationScreen(
   ChatScaffold(
     viewModel = viewModel,
     topBar = {
-      ConversationTopBar(snapshot, conversation, onBack) {
+      ConversationTopBar(snapshot, conversation, maybeNotified, onBack) {
         ConversationMenu(viewModel, conversationId, conversation, rights, onOpenFiles)
       }
     },
@@ -238,6 +243,7 @@ fun ConversationScreen(
         }
       },
     )
+    NotifiedMessageRow(maybeNotified, isLoading = conversation == null || messages.isEmpty())
     TypingIndicator(viewModel, conversationId, snapshot, changes)
     if (conversation?.canPost != false) {
       Composer(viewModel, conversationId, maybeThread = null, snapshot = snapshot, onSent = { sentCount++ })

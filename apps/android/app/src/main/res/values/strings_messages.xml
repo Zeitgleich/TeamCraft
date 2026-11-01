@@ -6,6 +6,8 @@
   <string name="reply_in_thread">Reply in thread</string>
   <string name="pending">Sending…</string>
   <string name="edited">(edited)</string>
+  <string name="conversation_loading">Loading the conversation…</string>
+  <string name="messages_loading">Loading messages…</string>
   <string name="read_only_channel">You can\'t post in this channel.</string>
   <plurals name="replies">
     <item quantity="one">%d reply</item>

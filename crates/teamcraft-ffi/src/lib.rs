@@ -55,9 +55,10 @@ pub use types::{
   AccountState, AppActivity, AppConfig, BrandAccent, BrandLinks, ConnectionState, ConversationItem,
   ConversationKind, EmojiSuggestion, LinkPlatform, LinkRequestItem, LoginBrand, MentionSettings, MessageItem,
   MessagePage, NetworkInterception, NetworkProxy, NotificationAttachmentKind, NotificationContent,
-  NotificationContentSettings, NotificationGap, NotificationSuppression, OrgRecoveryStart, Presence,
-  PushDiagnosticsInfo, PushNotification, PushNotificationKind, PushService, ReactionItem, SearchHitItem,
-  SegmentPrefetchMode, SegmentPrefetchResult, StoreProblem, TestPushOutcome, TestPushResult,
+  NotificationContentSettings, NotificationGap, NotificationSuppression, NotifiedConversation,
+  NotifiedMessage, OrgRecoveryStart, Presence, PushDiagnosticsInfo, PushNotification, PushNotificationKind,
+  PushService, ReactionItem, SearchHitItem, SegmentPrefetchMode, SegmentPrefetchResult, StoreProblem,
+  TestPushOutcome, TestPushResult,
 };
 
 pub use video::{CameraFrame, VideoFrameRgba};
@@ -542,6 +543,18 @@ impl TeamCraft {
           PushReader::App,
         ))
       })
+      .await
+  }
+
+  /// What the newest notification showed of a conversation (its name, the notified message),
+  /// while this device hasn't caught it up yet: the conversation screen shows it at once instead of
+  /// an empty screen without a name (issue #1065). `None` once the store has it all.
+  pub async fn notified_conversation(
+    &self,
+    conversation_id: String,
+  ) -> Result<Option<NotifiedConversation>, TeamCraftError> {
+    self
+      .call(move |engine| Box::pin(async move { engine.notified_conversation(&conversation_id) }))
       .await
   }
 
