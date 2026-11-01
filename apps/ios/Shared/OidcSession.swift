@@ -32,6 +32,8 @@ enum OidcError: Error, Equatable {
   /// The refresh token was rejected: sign in again.
   case sessionExpired
   case network(String)
+  /// The identity provider's `error` in the sign-in redirect, cleaned by the core (issue #1063).
+  case providerRefused(code: String)
 }
 
 /// What an OIDC provider answers a token request with.
