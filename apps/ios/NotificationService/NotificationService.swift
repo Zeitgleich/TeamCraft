@@ -56,6 +56,8 @@ final class NotificationService: UNNotificationServiceExtension {
   }
 
   private static func process(original: UNNotificationContent) async -> UNNotificationContent {
+    // A DM with a deleted account is named in the user's language (#1066).
+    setDeletedUserName(name: String(localized: "user_deleted_name"))
     guard let sealed = PushPayload.sealedBytes(from: original.userInfo),
       let notification = await decrypt(sealed)
     else {

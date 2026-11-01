@@ -528,12 +528,14 @@ pub async fn os_attention() -> Option<OsAttention> {
 
 /// Desktop only: unread count (`None` keeps the badge) and menu texts for the tray icon and the dock/taskbar badge.
 /// `maybe_menu` are the macOS menu bar's texts (the shell's `AppMenuLabels`); `None` leaves them.
+/// `maybe_deleted_user_name` is how the shell's core names deleted accounts (issue #1066).
 pub async fn tray_update(
   maybe_unread: Option<u32>,
   tooltip: &str,
   show_label: &str,
   quit_label: &str,
   maybe_menu: Option<serde_json::Value>,
+  maybe_deleted_user_name: Option<&str>,
 ) {
   if !is_available() {
     return;
@@ -545,6 +547,7 @@ pub async fn tray_update(
       "show_label": show_label,
       "quit_label": quit_label,
       "menu": maybe_menu,
+      "deleted_user_name": maybe_deleted_user_name,
     }
   });
   if let Err(error) = call::<()>("tray_update", &args).await {

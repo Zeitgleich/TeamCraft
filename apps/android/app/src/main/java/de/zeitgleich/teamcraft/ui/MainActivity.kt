@@ -34,6 +34,7 @@ import de.zeitgleich.teamcraft.ui.screens.LockScreen
 import de.zeitgleich.teamcraft.ui.screens.SplashHandoff
 import de.zeitgleich.teamcraft.ui.theme.TeamCraftTheme
 import uniffi.teamcraft_ffi.AppActivity
+import uniffi.teamcraft_ffi.setDeletedUserName
 
 /** The system splash's assembly ends here (scripts/brand/mark_parts.py); the mark rests from then. */
 private const val SPLASH_END_MS = 1040L
@@ -59,6 +60,8 @@ class MainActivity : FragmentActivity() {
 
   override fun onCreate(savedInstanceState: Bundle?) {
     super.onCreate(savedInstanceState)
+    // A language change recreates the activity: the core names deleted accounts in the new one.
+    setDeletedUserName(getString(R.string.user_deleted_name))
     enableEdgeToEdge()
     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) handOverFromSplash()
     // Upright from the first frame while setting up (a recreated activity may be past that).

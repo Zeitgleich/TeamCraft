@@ -281,6 +281,46 @@ mod direct_messages {
     app.stop().await;
   }
 
+  /// Issue #1066: a removal from all chats before the deletion takes the membership, yet the DM is
+  /// still the one with them and goes.
+  #[tokio::test]
+  async fn a_dm_goes_also_after_a_removal_from_all_chats() {
+    let app = app!();
+    let (bob, carol, dave) = (admin(), member("carol"), member("dave"));
+    let carol_id = user_id(&app, &carol).await;
+    let dave_id = user_id(&app, &dave).await;
+    let dave_device = register_device(&app, &dave).await;
+    let dm = app.post(&dave, "/dms", json!({"user_id": carol_id})).await;
+    assert!(dm.status.is_success(), "{}", dm.body);
+    let dm = dm.id();
+    for step in ["deactivate", "remove-from-chats"] {
+      let done = app
+        .post(&bob, &format!("/admin/users/{carol_id}/{step}"), json!({}))
+        .await;
+      assert!(done.status.is_success(), "{step}: {}", done.body);
+    }
+    let mut dave_socket = connect(&app, &dave, &dave_device).await;
+
+    let deleted = app.delete(&bob, &format!("/admin/users/{carol_id}")).await;
+    assert_eq!(deleted.status, StatusCode::NO_CONTENT, "{}", deleted.body);
+
+    let (seen, _) = events(&mut dave_socket).await;
+    assert!(seen.contains(&format!("conversation_delete {dm}")), "{seen:?}");
+    assert!(seen.contains(&format!("membership_remove {dave_id}")), "{seen:?}");
+    assert_eq!(
+      app.get(&dave, &format!("/conversations/{dm}")).await.status,
+      StatusCode::NOT_FOUND
+    );
+    let listing = app.get(&dave, "/conversations").await;
+    assert_eq!(
+      listing.body["deleted_conversation_ids"],
+      json!([dm]),
+      "{}",
+      listing.body
+    );
+    app.stop().await;
+  }
+
   #[tokio::test]
   async fn group_dms_stay_unless_only_one_person_would_remain() {
     let app = app!();

@@ -17,6 +17,7 @@ use teamcraft_proto::{
 use super::Client;
 use crate::api::{ApiError, ServerApi};
 use crate::error::CoreError;
+use crate::people_names::shown_name;
 use crate::records;
 use crate::store::{ConversationEvent, LocalStore, MessageContent, Table};
 use crate::trust::PinnedDirectory;
@@ -103,7 +104,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     for user in users {
       let maybe_summary: Option<teamcraft_proto::UserSummary> =
         records::get_json(&self.store, Table::Users, &user.to_string())?;
-      names.push((user, maybe_summary.map(|summary| summary.display_name)));
+      names.push((user, maybe_summary.map(|summary| shown_name(&summary))));
     }
     Ok(names)
   }

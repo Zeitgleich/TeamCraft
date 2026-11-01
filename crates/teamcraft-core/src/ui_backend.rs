@@ -47,6 +47,7 @@ use crate::clock::Clock;
 use crate::error::CoreError;
 use crate::imported::{Authorship, ImportAdditions, ImportSource, ImportedAuthor, ImportedOrigin};
 use crate::notify_rules::{MentionPreferences, load_mention_preferences};
+use crate::people_names::shown_name;
 use crate::records::{self, Draft};
 use crate::store::{
   BookmarkItem, ConversationEvent, LocalStore, MessageContent, MessageEdge, MessageFilter, StoredMessage,
@@ -587,7 +588,7 @@ impl<S: LocalStore> CoreChatBackend<S> {
     User {
       id: summary.id,
       username: summary.maybe_username.clone().unwrap_or_default(),
-      display_name: summary.display_name.clone(),
+      display_name: shown_name(summary),
       presence: maybe_presence.map_or(PresenceStatus::Offline, presence_status),
       maybe_custom_status: self.custom_status_of(summary.id),
       avatar_hue: hue(summary.id),
@@ -709,7 +710,7 @@ impl<S: LocalStore> CoreChatBackend<S> {
       let mut others: Vec<String> = member_ids
         .iter()
         .filter(|user| **user != self.me)
-        .filter_map(|user| users.get(user).map(|summary| summary.display_name.clone()))
+        .filter_map(|user| users.get(user).map(shown_name))
         .collect();
       if others.is_empty() {
         // The member list is not loaded yet (a sync catching up, issue #247): the conversation
@@ -718,7 +719,7 @@ impl<S: LocalStore> CoreChatBackend<S> {
           .participants
           .iter()
           .filter(|user| user.id != self.me)
-          .map(|user| user.display_name.clone())
+          .map(shown_name)
           .collect();
       }
       others.sort();
@@ -2076,7 +2077,7 @@ impl<S: LocalStore> ChatBackend for CoreChatBackend<S> {
         user: member.user.id,
         is_guest: member.user.kind == UserKind::Guest,
         is_bot: member.user.kind == UserKind::Bot,
-        display_name: member.user.display_name,
+        display_name: shown_name(&member.user),
         role: member.role,
       })
       .collect();
@@ -2923,6 +2924,28 @@ mod tests {
     };
     let conversation = backend.to_conversation(&direct, &BTreeMap::new(), &MentionPreferences::default());
     assert_eq!(conversation.name, "Bob Example");
+
+    // A deleted account is named in the user's language, not by the server's placeholder (#1066).
+    crate::people_names::set_deleted_user_name(crate::people_names::TEST_DELETED_NAME.into());
+    let deleted = UserSummary {
+      is_deactivated: true,
+      is_deleted: true,
+      ..participant(3, "Deleted user")
+    };
+    let with_deleted = ConversationResponse {
+      id: id(11),
+      kind: ConversationKindProto::Group,
+      participants: vec![
+        participant(1, "Alice Example"),
+        participant(2, "Bob Example"),
+        deleted.clone(),
+      ],
+      ..direct
+    };
+    let conversation =
+      backend.to_conversation(&with_deleted, &BTreeMap::new(), &MentionPreferences::default());
+    assert_eq!(conversation.name, "Account removed, Bob Example");
+    assert_eq!(backend.to_user(&deleted).display_name, "Account removed");
   }
 
   #[test]
