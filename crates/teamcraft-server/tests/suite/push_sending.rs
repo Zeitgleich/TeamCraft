@@ -22,7 +22,8 @@ use p256::elliptic_curve::sec1::ToEncodedPoint;
 use reqwest::StatusCode;
 use serde_json::json;
 use teamcraft_proto::{
-  DeviceActivity, GatewayClientMessage, NotificationLevel, PushKind, PushProvider, PushWakeUp,
+  DeviceActivity, GatewayClientMessage, ImportPolicy, NotificationLevel, PushKind, PushProvider, PushWakeUp,
+  UserId,
 };
 use teamcraft_server::auth::BoxFuture;
 use teamcraft_server::push::crypto::{VapidKey, decrypt_web_push, open_wakeup};
@@ -505,6 +506,41 @@ mod routing {
       vec![s.carol_push_device.clone()]
     );
     app.stop().await;
+  }
+
+  /// What the import account sends while its import lasts (people it added, a channel it
+  /// archived) is synced quietly, like the imported messages (e2ee.md §4.10, issue #1079).
+  #[tokio::test]
+  async fn the_import_account_pushes_nothing_while_its_import_lasts() {
+    let recorder = Recorder::default();
+    let Some(app) = start(&recorder).await else { return };
+    let s = scene(&app).await;
+    set_level(&app, &s.carol, &s.channel, "all").await;
+    let alice_id = user_id(&app, &s.alice).await;
+
+    allow_import(&app, &alice_id, i64::MAX);
+    send(&app, &s.alice, &s.channel, &s.alice_device, 1).await;
+    assert!(recorder.wait_for(0).await.is_empty(), "during the import");
+
+    // Once the import period passed, the account is an ordinary member again.
+    allow_import(&app, &alice_id, 1);
+    send(&app, &s.alice, &s.channel, &s.alice_device, 2).await;
+    let pushes = recorder.wait_for(1).await;
+    assert_eq!(
+      pushes.iter().map(|p| p.device.clone()).collect::<Vec<_>>(),
+      vec![s.carol_push_device.clone()]
+    );
+    app.stop().await;
+  }
+
+  /// Puts the server's copy of the signed policy in force directly (the server only reads it).
+  fn allow_import(app: &TestApp, importer: &str, until_ms: i64) {
+    let mut policy = app.state.policy.get().as_ref().clone();
+    policy.import = ImportPolicy {
+      maybe_importer: Some(importer.parse::<UserId>().unwrap()),
+      maybe_joins_until_ms: Some(until_ms),
+    };
+    app.state.policy.set(policy);
   }
 }
 

@@ -1443,9 +1443,15 @@ ciphertext, in `MessageMeta::imported` (`ImportedOrigin`):
   update), then reads the rest in the background, one page per upkeep tick, back to the beginning.
   Where that stands is kept per conversation and import, so it resumes after a restart and a later
   import is read again.
-  Clients count no imported message as unread and don't show the import account adding people, nor
-  a member letting one of them in once they set up the app: they were in the conversation in the
-  old system. Read positions come from the old system (admin.md §3.8).
+  What the import account sends as an ordinary message while its import period lasts (the
+  announcements of people it added, of a channel it archived) is synced the same quiet way: the
+  server sends `message_create` but no push for it (issue #1079).
+  Clients count no imported message as unread and show none of the import account's lines: not
+  its adding people (workspace admins too, "… joined this channel as a workspace admin, added
+  by …"), not the changes it announced (a channel archived), not its leaving, nor a member letting
+  one of the people it added in once they set up the app: they were in the conversation in the old
+  system. The one line that shows is its own joining a channel (as a workspace admin, below).
+  Read positions come from the old system (admin.md §3.8).
 - **Files** are attachments of the importer's message (§4.5), encrypted with a fresh key each and
   uploaded from the export as a stream (multipart above 8 MiB), with thumbnails for pictures.
   Stickers of the old system are pictures.
