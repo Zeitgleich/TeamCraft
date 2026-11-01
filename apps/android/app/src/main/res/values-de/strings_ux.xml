@@ -45,6 +45,10 @@
     <item quantity="one">%s neue</item>
     <item quantity="other">%s neue</item>
   </plurals>
+  <plurals name="jump_to_reaction">
+    <item quantity="one">%d neue Reaktion auf deine Nachrichten, dorthin springen</item>
+    <item quantity="other">%d neue Reaktionen auf deine Nachrichten, zur ersten springen</item>
+  </plurals>
   <string name="day_today">Heute</string>
   <string name="day_yesterday">Gestern</string>
   <string name="react_quick">Mit %1$s reagieren</string>
