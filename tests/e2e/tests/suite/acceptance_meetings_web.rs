@@ -16,7 +16,7 @@ use teamcraft_e2e::{Mailpit, Peer, Stack};
 use teamcraft_media::call_engine::CallEngineEvent;
 use teamcraft_proto::{ConversationId, MeetingId, UserId};
 
-use crate::web::{click_text, type_until_kept, wait_for_element, wait_for_text};
+use crate::web::{TEST_CSP, click_text, type_until_kept, wait_for_element, wait_for_text};
 use crate::web_calls::{MEDIA_ARGS, click_selector, console_log, sfu_identity};
 
 /// Ends a few minutes from now, so the call may start (a meeting that is over can't be joined).
@@ -46,6 +46,8 @@ async fn a_guest_joins_a_meeting_with_the_mailed_link_and_shares_its_call() {
     .with_calls()
     .with_sfu_identity(certificate, key, sha256)
     .with_web_dir(web_dir)
+    // The SFU listens on a random port of its own: the test policy lets the page reach it.
+    .with_env("TEAMCRAFT_WEB__CONTENT_SECURITY_POLICY", TEST_CSP)
     .start()
     .await
   else {

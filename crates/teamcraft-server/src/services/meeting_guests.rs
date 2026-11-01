@@ -301,7 +301,8 @@ pub async fn lobby_entry(
 }
 
 /// A waiting guest's page set up its device: the hosts are told again (`lobby_join`), so an
-/// organizer's device can add it now. `409` while the guest has no device or no longer waits.
+/// organizer's device can add it now. `409` while the guest has no device; a guest who no longer
+/// waits (let in meanwhile, or turned away) needs nobody told, which is no error either.
 pub async fn guest_device_ready(
   state: &AppState,
   caller: &AuthenticatedUser,
@@ -324,7 +325,7 @@ pub async fn guest_device_ready(
     .await?
     .ok_or_else(ApiError::meeting_not_found)?;
   if LobbyState::from(row.state) != LobbyState::Waiting {
-    return Err(ApiError::Conflict("the guest no longer waits".into()));
+    return Ok(());
   }
   if !state
     .database

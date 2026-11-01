@@ -304,13 +304,12 @@ async fn prepare_device(
       .await
       .map_err(|error| failed("anchor", error))?;
   }
-  client
-    .device_ready(meeting, guest_token)
-    .await
-    .map_err(|error| match error {
-      MeetingError::Auth(_) => FailureKind::Network,
-      other => failed("device ready", other.to_string()),
-    })
+  // Only a nudge: the hosts also see the device on their next reload of the lobby, so a failure
+  // here keeps the guest waiting rather than failing the page.
+  if let Err(error) = client.device_ready(meeting, guest_token).await {
+    tracing::warn!(%error, "could not tell the hosts that the guest's device is ready");
+  }
+  Ok(())
 }
 
 /// Removes the fragment (`#invite=…&v=…`) from the address (history entry replaced, nothing reloads).
