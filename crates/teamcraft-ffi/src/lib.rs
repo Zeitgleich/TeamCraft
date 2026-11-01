@@ -987,6 +987,14 @@ pub fn set_trusted_certificates(der_certificates: Vec<Vec<u8>>) {
   teamcraft_core::api::set_platform_roots(der_certificates);
 }
 
+/// The app's own "Deleted user" in the user's language (`user_deleted_name`): every name the core
+/// puts together shows it for a deleted account, DM titles, members and notifications included
+/// (issue #1066). Call at start, in the notification extension too, and when the language changes.
+#[uniffi::export]
+pub fn set_deleted_user_name(name: String) {
+  teamcraft_core::people_names::set_deleted_user_name(name);
+}
+
 impl TeamCraft {
   /// Runs `job` on the engine thread and waits for its result.
   async fn call<R, F>(&self, job: F) -> Result<R, TeamCraftError>

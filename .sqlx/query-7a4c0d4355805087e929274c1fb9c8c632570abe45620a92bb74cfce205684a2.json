@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT c.id AS \"id!\", c.kind AS \"kind!\", o.user_id AS \"other?\"\n         FROM memberships m\n         JOIN conversations c ON c.id = m.conversation_id AND c.kind IN ('dm', 'group')\n         LEFT JOIN memberships o ON o.conversation_id = c.id AND o.user_id <> m.user_id\n         WHERE m.user_id = $1\n         ORDER BY c.id",
+  "query": "SELECT c.id AS \"id!\", c.kind AS \"kind!\", o.user_id AS \"other?\"\n         FROM conversations c\n         LEFT JOIN memberships o ON o.conversation_id = c.id AND o.user_id <> $1\n         WHERE c.kind IN ('dm', 'group')\n           AND ($1 = ANY(string_to_array(c.participants_key, '-')::bigint[])\n             OR (c.kind = 'group'\n                 AND EXISTS (SELECT 1 FROM memberships m WHERE m.conversation_id = c.id AND m.user_id = $1)))\n         ORDER BY c.id",
   "describe": {
     "columns": [
       {
@@ -45,8 +45,8 @@
     "nullable": [
       false,
       false,
-      true
+      false
     ]
   },
-  "hash": "ecc41a324d75c8ffe69fcd67a1400dfbbea91f3a5a9ba60c125fe5468e027b23"
+  "hash": "7a4c0d4355805087e929274c1fb9c8c632570abe45620a92bb74cfce205684a2"
 }

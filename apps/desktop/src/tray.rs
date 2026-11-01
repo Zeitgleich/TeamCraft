@@ -106,6 +106,9 @@ pub struct TrayUpdate {
   #[cfg(target_os = "macos")]
   #[serde(rename = "menu", default)]
   pub maybe_menu: Option<crate::app_menu::AppMenuLabels>,
+  /// How the core names deleted accounts in the UI's language (issue #1066); `None` leaves it.
+  #[serde(rename = "deleted_user_name", default)]
+  pub maybe_deleted_user_name: Option<String>,
 }
 
 /// Creates the tray icon with "Show" and "Quit". The texts are in the OS language until the UI
@@ -315,6 +318,9 @@ fn host_state(_app: &AppHandle) -> Option<bool> {
 
 #[tauri::command(rename_all = "snake_case")]
 pub fn tray_update(app: AppHandle, last_unread: State<'_, LastUnread>, update: TrayUpdate) {
+  if let Some(name) = &update.maybe_deleted_user_name {
+    teamcraft_core::people_names::set_deleted_user_name(name.clone());
+  }
   if let Some(menu) = app.try_state::<TrayMenu>() {
     update_tray(&app, &menu, &update);
   }

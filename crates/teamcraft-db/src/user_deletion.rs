@@ -44,17 +44,22 @@ pub struct ActiveAdminCounts {
 
 impl Database {
   /// The user's 1:1 direct messages, and group DMs that would keep at most one other person: these
-  /// are deleted with the user; group DMs with more people stay, like channels.
+  /// are deleted with the user; group DMs with more people stay, like channels. A DM is the user's
+  /// by its participants (issue #643), not by membership: a removal from all chats before the
+  /// deletion took the membership but leaves the DM with them (issue #1066), and the import account
+  /// is a member of DMs it is no participant of.
   pub async fn direct_conversations_deleted_with(
     &self,
     user: UserId,
   ) -> Result<Vec<DirectConversationToDelete>, DbError> {
     let rows = sqlx::query!(
       r#"SELECT c.id AS "id!", c.kind AS "kind!", o.user_id AS "other?"
-         FROM memberships m
-         JOIN conversations c ON c.id = m.conversation_id AND c.kind IN ('dm', 'group')
-         LEFT JOIN memberships o ON o.conversation_id = c.id AND o.user_id <> m.user_id
-         WHERE m.user_id = $1
+         FROM conversations c
+         LEFT JOIN memberships o ON o.conversation_id = c.id AND o.user_id <> $1
+         WHERE c.kind IN ('dm', 'group')
+           AND ($1 = ANY(string_to_array(c.participants_key, '-')::bigint[])
+             OR (c.kind = 'group'
+                 AND EXISTS (SELECT 1 FROM memberships m WHERE m.conversation_id = c.id AND m.user_id = $1)))
          ORDER BY c.id"#,
       to_db(user),
     )
@@ -79,6 +84,23 @@ impl Database {
         })
       })
       .collect()
+  }
+
+  /// Deleted users who are still a participant of a DM, at most `limit`: their DMs were left
+  /// behind by a deletion that missed them (issue #1066) and go with the next housekeeping.
+  pub async fn deleted_users_with_direct_conversations(&self, limit: i64) -> Result<Vec<UserId>, DbError> {
+    let ids = sqlx::query_scalar!(
+      r#"SELECT u.id FROM users u
+         WHERE u.deleted_at IS NOT NULL
+           AND EXISTS (SELECT 1 FROM conversations c
+                       WHERE c.kind = 'dm'
+                         AND u.id = ANY(string_to_array(c.participants_key, '-')::bigint[]))
+         ORDER BY u.id LIMIT $1"#,
+      limit,
+    )
+    .fetch_all(self.pool())
+    .await?;
+    ids.into_iter().map(from_db).collect()
   }
 
   /// Every object in storage that belongs to the conversation: attachments, message ciphertext

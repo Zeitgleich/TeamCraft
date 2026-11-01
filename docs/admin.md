@@ -425,8 +425,12 @@ Deactivation and removal are two steps (issue #631); deletion is the final one (
     remaining participants' devices drop it with its local history when the gateway announces
     `conversation_delete`, or on their next full sync (`deleted_conversation_ids` of
     `GET /conversations`, remembered for `[policy] deleted_conversations_kept_days`, default 180).
+    A DM is found by its participants, not by membership: a removal from all chats before the
+    deletion took the membership, but the DM still goes (issue #1066). DMs that deletions before
+    that fix left behind are deleted by the account housekeeping, a few accounts per run.
   - **Channels.** The user's messages stay; clients show the author as "Deleted user" (in their own
-    language) in messages, profiles and member lists, and leave the tombstone out of people lists,
+    language) in messages, profiles, member lists, conversation titles, search and notifications
+    (the shells give the core its translation, `people_names`), and leave the tombstone out of people lists,
     the DM list and the mention picker. Optionally deleting their messages is out of scope: the
     server can't read them.
   - **The identity.** The OIDC issuer of the row gets a `deleted:{id}:` prefix, so the issuer and

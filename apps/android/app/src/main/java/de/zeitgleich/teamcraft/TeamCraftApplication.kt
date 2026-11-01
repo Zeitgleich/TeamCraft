@@ -36,6 +36,7 @@ import de.zeitgleich.teamcraft.ui.ConnectionGrace
 import de.zeitgleich.teamcraft.ui.NetworkWatcher
 import de.zeitgleich.teamcraft.ui.Pictures
 import uniffi.teamcraft_ffi.AccountState
+import uniffi.teamcraft_ffi.setDeletedUserName
 
 /** Process-wide objects, shared by the activity, receivers and services. */
 class AppGraph(context: Context) {
@@ -73,6 +74,8 @@ class TeamCraftApplication : Application() {
 
   override fun onCreate() {
     super.onCreate()
+    // DM titles, members and notifications name deleted accounts in the user's language (#1066).
+    setDeletedUserName(getString(R.string.user_deleted_name))
     graph = AppGraph(this)
     // The core waits for these before it opens (issue #157).
     NetworkTrust.startInstalling(this, graph.scope)
