@@ -12,7 +12,7 @@ use teamcraft_core::client::import::ImportDraft;
 use teamcraft_core::imported::{ImportSource, ImportedAuthor, ImportedOrigin};
 use teamcraft_core::store::{LocalStore, MessageContent, MessageFilter, MessageMeta};
 use teamcraft_core::workspace::RosterRole;
-use teamcraft_proto::{ConversationId, HistoryPolicy, ImportPolicy, WorkspacePolicy};
+use teamcraft_proto::{ConversationId, HistoryPolicy, ImportPolicy, UserId, WorkspacePolicy};
 
 /// 2024-05-01.
 const OLD_MS: i64 = 1_714_521_600_000;
@@ -276,6 +276,194 @@ async fn a_dm_its_participant_holds_alone_is_taken_over_by_the_import_accounts_g
   bob.client.full_sync().await.unwrap();
   bob.client.catch_up_messages(dm).await.unwrap();
   assert_eq!(bob.texts(dm), vec!["old", "live"]);
+}
+
+mod guests {
+  //! Guests of the old system in what the import made (e2ee.md §4.10, "Guests in imported
+  //! conversations", issue #1074).
+  use super::*;
+
+  #[tokio::test]
+  async fn a_guest_the_import_adds_gets_the_history() {
+    let server = FakeServer::new();
+    let (mut owner, mut importer) = import_policy(&server, Some(i64::MAX)).await;
+    let mut guest = Peer::enroll_as(server.add_guest("Gus"), "Gus").await;
+    let late_api = server.add_guest("Lea");
+    let late_id = late_api.user_id();
+    let channel = imported_channel(&mut importer, &[guest.client.user_id(), late_id]).await;
+
+    for user in [guest.client.user_id(), late_id] {
+      add_full(&mut importer, channel, user).await;
+    }
+    settle(&mut [&mut owner, &mut importer, &mut guest]).await;
+    guest.client.catch_up_messages(channel).await.unwrap();
+    assert_eq!(guest.texts(channel), vec!["old"]);
+
+    // Lea signs in only after the run: `serve` adds her with the history.
+    let mut late = Peer::enroll_as(late_api, "Lea").await;
+    join_late(&mut importer, &mut late).await;
+    late.client.catch_up_messages(channel).await.unwrap();
+    assert_eq!(late.texts(channel), vec!["old"]);
+  }
+
+  #[tokio::test]
+  async fn a_guest_somebody_else_adds_gets_no_history() {
+    let server = FakeServer::new();
+    let (mut owner, mut importer) = import_policy(&server, Some(i64::MAX)).await;
+    let mut guest = Peer::enroll_as(server.add_guest("Gus"), "Gus").await;
+    let channel = imported_channel(&mut importer, &[owner.client.user_id(), guest.client.user_id()]).await;
+    add_full(&mut importer, channel, owner.client.user_id()).await;
+    settle(&mut [&mut owner, &mut importer]).await;
+
+    // The owner's device adds the guest the grant names, asking for the full history.
+    add_full(&mut owner, channel, guest.client.user_id()).await;
+    settle(&mut [&mut owner, &mut importer, &mut guest]).await;
+    guest.client.catch_up_messages(channel).await.unwrap();
+    assert!(guest.texts(channel).is_empty(), "{:?}", guest.texts(channel));
+  }
+
+  #[tokio::test]
+  async fn a_guest_the_mapping_does_not_name_gets_no_history_from_the_import() {
+    let server = FakeServer::new();
+    let (mut owner, mut importer) = import_policy(&server, Some(i64::MAX)).await;
+    let mut guest = Peer::enroll_as(server.add_guest("Gus"), "Gus").await;
+    let channel = imported_channel(&mut importer, &[]).await;
+    add_full(&mut importer, channel, guest.client.user_id()).await;
+    settle(&mut [&mut owner, &mut importer, &mut guest]).await;
+    guest.client.catch_up_messages(channel).await.unwrap();
+    assert!(guest.texts(channel).is_empty(), "{:?}", guest.texts(channel));
+  }
+
+  #[tokio::test]
+  async fn an_ended_or_missing_policy_shares_no_history_with_a_guest() {
+    for maybe_until in [Some(1), None] {
+      let server = FakeServer::new();
+      let (mut owner, mut importer) = import_policy(&server, maybe_until).await;
+      let mut guest = Peer::enroll_as(server.add_guest("Gus"), "Gus").await;
+      let channel = imported_channel(&mut importer, &[guest.client.user_id()]).await;
+      add_full(&mut importer, channel, guest.client.user_id()).await;
+      settle(&mut [&mut owner, &mut importer, &mut guest]).await;
+      guest.client.catch_up_messages(channel).await.unwrap();
+      assert!(
+        guest.texts(channel).is_empty(),
+        "{maybe_until:?}: {:?}",
+        guest.texts(channel)
+      );
+    }
+  }
+
+  #[tokio::test]
+  async fn a_guests_addition_waiting_from_an_earlier_run_gets_the_history_once_granted() {
+    let server = FakeServer::new();
+    let (_owner, mut importer) = import_policy(&server, Some(i64::MAX)).await;
+    let late_api = server.add_guest("Lea");
+    let late_id = late_api.user_id();
+    // A run before this version: no grant, so the addition waits with history from the join on.
+    let channel = imported_channel(&mut importer, &[]).await;
+    add_full(&mut importer, channel, late_id).await;
+
+    // `serve` of this version records the grant before it applies the waiting additions.
+    importer
+      .client
+      .grant_imported_history(channel, &[late_id])
+      .unwrap();
+    let mut late = Peer::enroll_as(late_api, "Lea").await;
+    join_late(&mut importer, &mut late).await;
+    late.client.catch_up_messages(channel).await.unwrap();
+    assert_eq!(late.texts(channel), vec!["old"]);
+  }
+
+  #[tokio::test]
+  async fn a_member_switched_back_to_guest_keeps_the_history() {
+    let server = FakeServer::new();
+    let (mut owner, mut importer) = import_policy(&server, Some(i64::MAX)).await;
+    let mut bob = Peer::enroll(&server, "Bob").await;
+    let channel = imported_channel(&mut importer, &[bob.client.user_id()]).await;
+    add_full(&mut importer, channel, bob.client.user_id()).await;
+    settle(&mut [&mut owner, &mut importer, &mut bob]).await;
+    bob.client.catch_up_messages(channel).await.unwrap();
+    assert_eq!(bob.texts(channel), vec!["old"]);
+
+    server.show_as_guest(bob.client.user_id());
+    for _ in 0..2 {
+      settle(&mut [&mut owner, &mut importer, &mut bob]).await;
+      importer.client.apply_pending_changes().await.unwrap();
+      bob.client.apply_pending_changes().await.unwrap();
+    }
+    bob.client.full_sync().await.unwrap();
+    assert_eq!(bob.texts(channel), vec!["old"]);
+    assert!(
+      importer
+        .client
+        .group_users(channel)
+        .unwrap()
+        .contains(&bob.client.user_id())
+    );
+  }
+
+  /// An owner and the import account, with the signed roster and the import policy
+  /// (`joins_until_ms`; `None`: no policy at all).
+  async fn import_policy(server: &FakeServer, maybe_until: Option<i64>) -> (Peer, Peer) {
+    let mut owner = Peer::enroll(server, "Owner").await;
+    let importer = Peer::enroll(server, "Import").await;
+    let (owner_id, importer_id) = (owner.client.user_id(), importer.client.user_id());
+    owner
+      .client
+      .publish_roster(&[(owner_id, RosterRole::Owner), (importer_id, RosterRole::Admin)])
+      .await
+      .unwrap();
+    if maybe_until.is_some() {
+      owner
+        .client
+        .publish_policy(WorkspacePolicy {
+          import: ImportPolicy {
+            maybe_importer: Some(importer_id),
+            maybe_joins_until_ms: maybe_until,
+          },
+          ..WorkspacePolicy::default()
+        })
+        .await
+        .unwrap();
+    }
+    let mut importer = importer;
+    settle(&mut [&mut owner, &mut importer]).await;
+    importer.client.full_sync().await.unwrap();
+    (owner, importer)
+  }
+
+  /// A channel the import made, with one imported message, and the grant for `granted`.
+  async fn imported_channel(importer: &mut Peer, granted: &[UserId]) -> ConversationId {
+    let space = importer.space().await;
+    let channel = importer.client.create_channel(space, "History").await.unwrap();
+    if !granted.is_empty() {
+      importer.client.grant_imported_history(channel, granted).unwrap();
+    }
+    importer
+      .client
+      .send_imported(channel, &[draft("1", "old", ImportedAuthor::Deleted, OLD_MS)])
+      .await
+      .unwrap();
+    importer.client.finish_import(channel).await.unwrap();
+    channel
+  }
+
+  async fn add_full(adder: &mut Peer, channel: ConversationId, user: UserId) {
+    adder
+      .client
+      .add_member_with_history(channel, user, Some(HistoryPolicy::Full))
+      .await
+      .unwrap();
+  }
+
+  /// `late` set up the app after the run; `serve` applies the waiting additions.
+  async fn join_late(importer: &mut Peer, late: &mut Peer) {
+    for _ in 0..2 {
+      settle(&mut [&mut *importer, &mut *late]).await;
+      importer.client.apply_pending_changes().await.unwrap();
+    }
+    settle(&mut [&mut *importer, &mut *late]).await;
+    late.client.full_sync().await.unwrap();
+  }
 }
 
 fn draft(source_id: &str, body: &str, author: ImportedAuthor, sent_at_ms: i64) -> ImportDraft {

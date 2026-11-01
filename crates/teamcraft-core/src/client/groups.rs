@@ -979,7 +979,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     user: UserId,
     requested: HistoryShare,
   ) -> Result<HistoryShare, CoreError> {
-    let history = self.effective_history(user, requested).await?;
+    let history = self.own_history(conversation, user, requested).await?;
     self
       .commit_change(
         conversation,
@@ -1526,7 +1526,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       // The history choice is settled before signing: every member rotates (or not) by it.
       ChangeSource::Own(MembershipAction::AddUser { user_id, history }) => {
         let history = self
-          .effective_history(convert::user_from_crypto(user_id)?, history)
+          .own_history(conversation, convert::user_from_crypto(user_id)?, history)
           .await?;
         ChangeSource::Own(MembershipAction::AddUser { user_id, history })
       },
@@ -1546,7 +1546,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     if let MembershipAction::AddUser { user_id, history } = action
       && history
         != self
-          .effective_history(convert::user_from_crypto(user_id)?, history)
+          .allowed_history(conversation, &source, user_id, history)
           .await?
     {
       // An admin signed full history for a guest; that isn't shared (e2ee.md §4.3).
@@ -2124,7 +2124,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     if !self.is_owed_full_history(conversation, member)? {
       return Ok(false);
     }
-    match self.effective_history(user, HistoryShare::Full).await {
+    match self.own_history(conversation, user, HistoryShare::Full).await {
       Ok(history) => Ok(history == HistoryShare::Full),
       Err(error) if error.is_transient() => Err(error),
       Err(error) => {
@@ -2865,6 +2865,41 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       return Ok(HistoryShare::FromJoin);
     }
     self.implicit_history(user)
+  }
+
+  /// The history this device may share with `user` in `conversation` of `requested`, for its own
+  /// addition or a share of its own: [`Self::effective_history`], except that the import device
+  /// shares the history of a conversation it imported with the guests its import grant names
+  /// (e2ee.md §4.10, "Guests in imported conversations").
+  pub(crate) async fn own_history(
+    &mut self,
+    conversation: ConversationId,
+    user: UserId,
+    requested: HistoryShare,
+  ) -> Result<HistoryShare, CoreError> {
+    let history = self.effective_history(user, requested).await?;
+    if history != requested && self.is_import_granted(conversation, user)? {
+      tracing::info!(conversation_id = %conversation, "sharing the imported history with a guest the import grant names");
+      return Ok(requested);
+    }
+    Ok(history)
+  }
+
+  /// The history a change of `source` may share with the user it adds: [`Self::own_history`] for
+  /// this device's own change, [`Self::effective_history`] for one somebody else signed (the
+  /// import exception is never taken for another's change).
+  async fn allowed_history(
+    &mut self,
+    conversation: ConversationId,
+    source: &ChangeSource,
+    user_id: teamcraft_crypto::ids::UserId,
+    requested: HistoryShare,
+  ) -> Result<HistoryShare, CoreError> {
+    let user = convert::user_from_crypto(user_id)?;
+    match source {
+      ChangeSource::Own(_) => self.own_history(conversation, user, requested).await,
+      ChangeSource::Delegated(_) => self.effective_history(user, requested).await,
+    }
   }
 
   /// Guests only ever see history from their join on (e2ee.md §4.3), whatever was asked for.

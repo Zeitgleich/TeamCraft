@@ -148,6 +148,13 @@ impl<'a, A: ServerApi, S: LocalStore> Importer<'a, A, S> {
   /// One pass of what waits after the import (`serve`): additions of people who set up the app
   /// meanwhile, then leaving every conversation where nobody is missing any more.
   pub async fn tend(&mut self, plan: &Plan) -> Result<(), RunError> {
+    // Also for conversations a run before this version imported: their waiting additions of
+    // guests get the history (e2ee.md §4.10, "Guests in imported conversations").
+    for item in &plan.items {
+      if let Some(conversation) = self.progress.conversation(&item.key())? {
+        self.grant_history(item, conversation)?;
+      }
+    }
     self.keep_gateway().await;
     self.client.apply_pending_changes().await?;
     self.keep_gateway().await;
@@ -206,6 +213,7 @@ impl<'a, A: ServerApi, S: LocalStore> Importer<'a, A, S> {
         conversation
       },
     };
+    self.grant_history(item, conversation)?;
     if !self.ensure_in_group(item, conversation).await? {
       self.progress.note(
         &key,
@@ -270,16 +278,32 @@ impl<'a, A: ServerApi, S: LocalStore> Importer<'a, A, S> {
       Target::Dm { participants } => {
         let response = self.client.open_import_dm(participants.to_vec()).await?;
         let id = response.id;
+        self.grant_history(item, id)?;
         self.client.set_up_import_dm(response, participants).await?;
         Ok(id)
       },
       Target::Notes { user } => {
         let response = self.client.open_import_dm(vec![*user]).await?;
         let id = response.id;
+        self.grant_history(item, id)?;
         self.client.set_up_import_dm(response, &[*user]).await?;
         Ok(id)
       },
     }
+  }
+
+  /// Notes on the import device that the import made `conversation` and whom the mapping names in
+  /// it, so they get its history also as guests (e2ee.md §4.10, "Guests in imported
+  /// conversations"). Not for a channel merged into: the import changes no members there.
+  fn grant_history(&mut self, item: &Item, conversation: ConversationId) -> Result<(), RunError> {
+    let people: Vec<UserId> = match &item.target {
+      Target::NewChannel { .. } => item.members.clone(),
+      Target::Dm { participants } => participants.to_vec(),
+      Target::Notes { user } => vec![*user],
+      Target::ExistingChannel { .. } => return Ok(()),
+    };
+    self.client.grant_imported_history(conversation, &people)?;
+    Ok(())
   }
 
   async fn client_api_channels(

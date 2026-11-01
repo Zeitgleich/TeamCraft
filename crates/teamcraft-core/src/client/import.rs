@@ -2,22 +2,26 @@
 //! messages are encrypted like any send, with the origin inside the ciphertext, and stored by the
 //! server below the conversation's live messages. Used by `teamcraft-import`.
 
+use std::collections::BTreeSet;
+
 use rand_core::OsRng;
 use teamcraft_crypto::message::encrypt_message;
 use teamcraft_proto::{
-  Base64Bytes, ConversationId, ConversationResponse, Id, ImportDmRequest, ImportMemberStateRequest,
-  ImportMessagesRequest, ImportedMessage, MessageId, ProvisionUsersRequest, ProvisionedUser, ThreadId,
-  UserId,
+  Base64Bytes, ConversationId, ConversationResponse, HistoryPolicy, Id, ImportDmRequest,
+  ImportMemberStateRequest, ImportMessagesRequest, ImportedMessage, MessageId, ProvisionUsersRequest,
+  ProvisionedUser, ThreadId, UserId,
 };
 use zeroize::Zeroizing;
 
 use super::Client;
 use super::server_changes::Observed;
+use super::workspace::PendingChange;
 use crate::api::ServerApi;
 use crate::convert;
 use crate::error::CoreError;
-use crate::imported::imported_message_id;
-use crate::store::{LocalStore, MessageContent};
+use crate::imported::{import_policy, imported_message_id};
+use crate::records;
+use crate::store::{LocalStore, MessageContent, Table};
 
 /// One message to import: its text with [`crate::store::MessageMeta::imported`] set, and the thread it answers.
 #[derive(Clone, Debug)]
@@ -28,6 +32,69 @@ pub struct ImportDraft {
 }
 
 impl<A: ServerApi, S: LocalStore> Client<A, S> {
+  /// Records the import grant of `conversation` (e2ee.md §4.10, "Guests in imported
+  /// conversations"): the import made it, and the import's mapping names `users` as its members or
+  /// participants, so this device may share its history with them even if they are guests. Adds to
+  /// what was recorded before. People of the grant whose addition waits here with history from the
+  /// join on (noted while they were guests, before this version) get the full history instead.
+  /// Only the import device acts on it, and only under the signed import policy.
+  pub fn grant_imported_history(
+    &mut self,
+    conversation: ConversationId,
+    users: &[UserId],
+  ) -> Result<(), CoreError> {
+    let key = import_grant_key(conversation);
+    let mut granted: BTreeSet<UserId> =
+      records::get_json(&self.store, Table::SyncState, &key)?.unwrap_or_default();
+    let before = granted.len();
+    granted.extend(users.iter().copied().filter(|user| *user != self.account.user_id));
+    if granted.len() != before {
+      records::put_json(&self.store, Table::SyncState, &key, &granted)?;
+    }
+    for user in &granted {
+      let pending_key = PendingChange::user_add_key(conversation, *user);
+      let Some(mut change) =
+        records::get_json::<PendingChange>(&self.store, Table::PendingChanges, &pending_key)?
+      else {
+        continue;
+      };
+      if let PendingChange::AddUser { history, .. } = &mut change
+        && *history == HistoryPolicy::FromJoin
+      {
+        *history = HistoryPolicy::Full;
+        records::put_json(&self.store, Table::PendingChanges, &pending_key, &change)?;
+      }
+    }
+    Ok(())
+  }
+
+  /// Whether this device may share the history of `conversation` with `user` although the user
+  /// is a guest: this account is the import account of the verified policy, whose date hasn't
+  /// passed by the later of this device's clock and the newest server time it saw, and the import
+  /// grant of the conversation names the user ([`Self::grant_imported_history`]).
+  pub(crate) fn is_import_granted(
+    &self,
+    conversation: ConversationId,
+    user: UserId,
+  ) -> Result<bool, CoreError> {
+    let Some(policy) = import_policy(&self.store) else {
+      return Ok(false);
+    };
+    let newest_server_ms = self
+      .sync
+      .mls_cursors
+      .values()
+      .map(|cursor| cursor.snowflake().unix_millis())
+      .max()
+      .unwrap_or(i64::MIN);
+    if !policy.allows(self.account.user_id, self.now_ms().max(newest_server_ms)) {
+      return Ok(false);
+    }
+    let granted: Option<BTreeSet<UserId>> =
+      records::get_json(&self.store, Table::SyncState, &import_grant_key(conversation))?;
+    Ok(granted.is_some_and(|granted| granted.contains(&user)))
+  }
+
   /// Creates the accounts of `usernames` from the identity provider (admin.md §3.8).
   pub async fn provision_users(&self, usernames: Vec<String>) -> Result<Vec<ProvisionedUser>, CoreError> {
     let response = self
@@ -149,4 +216,9 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     self.api.check_member_removal(conversation, me).await?;
     self.record_and_run_removal(conversation, me, None).await
   }
+}
+
+/// Where the import grant of a conversation is kept ([`Client::grant_imported_history`]).
+fn import_grant_key(conversation: ConversationId) -> String {
+  format!("import_grant/{conversation}")
 }

@@ -206,10 +206,13 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     }
     self.sync_mls(conversation).await?;
     if self.group_users(conversation)?.contains(&user) {
-      if *history == HistoryPolicy::Full {
+      if *history == HistoryPolicy::Full
+        && self.own_history(conversation, user, HistoryShare::Full).await? == HistoryShare::Full
+      {
         // Somebody else let the person's first device in, maybe from the join on (a member
         // committed its signed self-add): this device decided to share the history with them,
-        // so it seals the history to their devices like a new member's (e2ee.md §4.10).
+        // so it seals the history to their devices like a new member's (e2ee.md §4.10). Not to
+        // a guest, unless the import grant names them.
         let epoch = self.group_or_error(conversation)?.epoch();
         self.send_history(conversation, user, epoch).await?;
         tracing::info!(conversation_id = %conversation, "sealed the history to a waiting user who joined meanwhile");
