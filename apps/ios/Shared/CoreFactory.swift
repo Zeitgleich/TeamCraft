@@ -103,6 +103,8 @@ enum CoreFailure: Equatable {
   case backupOutOfMemory, backupTooNew, backupDamaged
   /// A move of the call into a meeting room didn't check out (docs/meetings.md): stay in the call.
   case callMoveRefused
+  /// The account is in the call on as many devices as it allows: leave on one of them first.
+  case callDeviceLimit
   /// Device linking: the typed code is not the one on the new device (try again), or the last try failed.
   case linkCodeRejected, linkAttemptEnded
   /// Device linking: not a link code; a code for the other side (issue #998); a code that ran out.
@@ -131,6 +133,8 @@ enum CoreFailure: Equatable {
       self = .recoveryPending
     } else if name.hasPrefix("callmoverefused") {
       self = .callMoveRefused
+    } else if name.hasPrefix("calldevicelimit") {
+      self = .callDeviceLimit
     } else if name.hasPrefix("linkcoderejected") {
       self = .linkCodeRejected
     } else if name.hasPrefix("linkattemptended") {
