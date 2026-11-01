@@ -28,6 +28,14 @@
   --mention-text: #6a4b00;
   /* Code fills (#843): 1.2:1 against the surface so a code block reads as one; text on it 13:1. */
   --code-bg: #e8ebf0;
+  /* The emoji skin tones (the Fitzpatrick modifiers' usual colours, and the yellow default) for the
+     picker's swatches: the same in light and dark, like the emoji they stand for. */
+  --skin-tone-default: #ffcc4d;
+  --skin-tone-light: #f7dece;
+  --skin-tone-medium-light: #f3d2a2;
+  --skin-tone-medium: #d5ab88;
+  --skin-tone-medium-dark: #af7e57;
+  --skin-tone-dark: #7c533e;
   --shadow: 0 8px 28px rgba(16, 24, 40, 0.18);
 
   --chrome: #111926;

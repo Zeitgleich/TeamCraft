@@ -5,6 +5,7 @@ import androidx.compose.ui.semantics.contentDescription
 import android.content.ClipboardManager
 import android.content.Context
 import android.content.Intent
+import android.graphics.Paint
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -90,6 +91,7 @@ import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.core.content.FileProvider
+import androidx.core.graphics.PaintCompat
 import java.io.File
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -1081,11 +1083,19 @@ private fun ComposerField(
   }
 }
 
-/** Emoji for the `:name` being typed, from the core's catalog; a tap puts the emoji in. */
+/**
+ * Emoji for the `:name` being typed, from the core's catalog (all of Unicode); a tap puts the
+ * emoji in. Emoji newer than the device's font are left out: they would show as empty boxes.
+ */
 @Composable
 private fun EmojiSuggestions(text: String, onPick: (String) -> Unit) {
   val maybeQuery = EmojiInput.activeQuery(text) ?: return
-  val suggestions = remember(maybeQuery) { emojiSuggestions(maybeQuery, MAX_EMOJI_SUGGESTIONS.toUInt()) }
+  val suggestions = remember(maybeQuery) {
+    val paint = Paint()
+    emojiSuggestions(maybeQuery, (MAX_EMOJI_SUGGESTIONS * 4).toUInt())
+      .filter { PaintCompat.hasGlyph(paint, it.emoji) }
+      .take(MAX_EMOJI_SUGGESTIONS)
+  }
   if (suggestions.isEmpty()) return
   LazyRow(
     Modifier.fillMaxWidth().padding(horizontal = 8.dp),

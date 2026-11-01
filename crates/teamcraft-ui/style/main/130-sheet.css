@@ -121,7 +121,7 @@
   font-size: 22px;
 }
 
-/* The emoji picker in the sheet: the grid scrolls, the search stays on top. */
+/* The emoji picker in the sheet: the grid scrolls, the tabs and the search stay on top. */
 .emoji-sheet {
   height: min(70dvh, 440px);
   overflow: hidden;
@@ -132,15 +132,17 @@
   margin: 0 var(--space-3) var(--space-2);
 }
 
-.emoji-sheet .emoji-hint {
-  padding-inline: var(--space-3);
+.emoji-sheet .emoji-tabs,
+.emoji-sheet .emoji-footer {
+  margin-inline: var(--space-3);
 }
 
-.emoji-sheet .emoji-grid {
-  flex: 1;
-  min-height: 0;
+.emoji-sheet .emoji-tabs {
+  margin-bottom: var(--space-2);
+}
+
+.emoji-sheet .emoji-scroller {
   padding-inline: var(--space-2);
-  overflow-y: auto;
 }
 
 .msg-system {

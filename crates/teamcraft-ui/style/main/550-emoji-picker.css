@@ -7,9 +7,9 @@
   flex-direction: column;
   gap: 6px;
   /* rem: grows with the text size; emoji_picker.rs places it with the same size. */
-  width: 20.25rem;
-  height: 18.75rem;
-  padding: 8px;
+  width: 22.5rem;
+  height: 26rem;
+  padding: 4px 8px 6px;
   border: 1px solid var(--border);
   border-radius: var(--radius);
   background: var(--surface);
@@ -17,48 +17,182 @@
   box-shadow: var(--shadow);
 }
 
-.emoji-hint {
+/* One tab per section; the one in view is marked. They jump, so they are buttons, not tabs. */
+.emoji-tabs {
+  display: flex;
+  flex: none;
+  justify-content: space-between;
+  border-bottom: 1px solid var(--border);
+}
+
+.emoji-tab {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 2rem;
+  height: 2.25rem;
+  padding: 0;
+  border: 0;
+  border-radius: var(--radius-sm) var(--radius-sm) 0 0;
+  background: none;
+  color: var(--text-muted);
+  cursor: pointer;
+  transition: color 120ms ease-out, transform 100ms ease-out;
+}
+
+.emoji-tab:hover {
+  color: var(--text);
+}
+
+.emoji-tab:active {
+  transform: scale(0.94);
+}
+
+.emoji-tab.current {
+  color: var(--accent);
+  box-shadow: inset 0 -2px 0 var(--accent);
+}
+
+.emoji-search {
+  flex: none;
+}
+
+.emoji-scroller {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
+/* Virtualised: the list has the full height, only the rows in view are in it, each moved to its
+   place (emoji_picker.rs, ROW_REM and SECTION_REM are these heights). */
+.emoji-grid {
+  position: relative;
   margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.emoji-row,
+.emoji-section {
+  position: absolute;
+  top: 0;
+  right: 0;
+  left: 0;
+}
+
+.emoji-row {
+  display: grid;
+  grid-template-columns: repeat(9, 1fr);
+  align-items: center;
+  height: 2.375rem;
+}
+
+.emoji-section {
+  display: flex;
+  align-items: flex-end;
+  height: 1.75rem;
+  padding: 0 4px 4px;
   color: var(--text-muted);
   font-size: var(--text-xs);
   letter-spacing: var(--tracking-xs);
   font-weight: var(--weight-semibold);
 }
 
-.emoji-grid {
-  display: grid;
-  grid-template-columns: repeat(8, 1fr);
-  align-content: start;
-  gap: 2px;
-  margin: 0;
-  padding: 0;
-  overflow-y: auto;
-  list-style: none;
-}
-
-.emoji-grid li {
+.emoji-cell {
   display: flex;
   align-items: center;
   justify-content: center;
-  height: 34px;
+  height: 2.25rem;
   border-radius: var(--radius-sm);
-  font-size: 20px;
+  font-size: var(--text-2xl);
+  line-height: 1;
   cursor: pointer;
 }
 
-.emoji-grid li.active {
+.emoji-cell.active {
   background: var(--accent-soft);
-  outline: 2px solid var(--accent);
-  outline-offset: -2px;
+}
+
+.emoji-cell:active {
+  transform: scale(0.92);
 }
 
 .emoji-grid .emoji-empty {
-  grid-column: 1 / -1;
-  height: auto;
   padding: 12px;
   color: var(--text-muted);
   font-size: var(--text-sm);
-  cursor: default;
+}
+
+/* The emoji under the pointer or keyboard with its shortcode, and the skin tone. */
+.emoji-footer {
+  display: flex;
+  flex: none;
+  align-items: center;
+  gap: 8px;
+  height: 2.25rem;
+  padding: 4px 4px 0;
+  border-top: 1px solid var(--border);
+}
+
+.emoji-preview {
+  font-size: var(--text-2xl);
+  line-height: 1;
+}
+
+.emoji-preview-code {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--text-muted);
+  font-size: var(--text-sm);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.emoji-tones {
+  display: flex;
+  flex: 1;
+  gap: 8px;
+}
+
+.emoji-tone-swatch {
+  flex: none;
+  width: 1.25rem;
+  height: 1.25rem;
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: 50%;
+  cursor: pointer;
+  transition: transform 100ms ease-out;
+}
+
+.emoji-tone-swatch:active {
+  transform: scale(0.9);
+}
+
+.emoji-tone-swatch[aria-checked="true"],
+.emoji-tone-button[aria-expanded="true"] {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.emoji-tone-button {
+  margin-left: auto;
+}
+
+.tone-default { background: var(--skin-tone-default); }
+.tone-light { background: var(--skin-tone-light); }
+.tone-medium-light { background: var(--skin-tone-medium-light); }
+.tone-medium { background: var(--skin-tone-medium); }
+.tone-medium-dark { background: var(--skin-tone-medium-dark); }
+.tone-dark { background: var(--skin-tone-dark); }
+
+@media (prefers-reduced-motion: reduce) {
+  .emoji-tab,
+  .emoji-tone-swatch {
+    transition: none;
+  }
 }
 
 .msg-toolbar .quick-reaction {

@@ -1,19 +1,24 @@
-//! Finding the `@mention` or `/command` being typed in the composer, on UTF-16 offsets (what the
-//! browser's selection reports).
+//! Finding the `@mention`, `/command` or `:emoji` being typed in the composer, on UTF-16 offsets
+//! (what the browser's selection reports).
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TriggerKind {
   Mention,
   Command,
+  /// `:po`: emoji whose shortcode or name starts with it.
+  Emoji,
 }
+
+/// Letters typed after `:` before emoji are suggested, so `:)` and `12:30` stay quiet.
+const MIN_EMOJI_QUERY_CHARS: usize = 2;
 
 /// The word being typed that opens a picker.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Trigger {
   pub kind: TriggerKind,
-  /// What was typed after the `@` or `/`.
+  /// What was typed after the `@`, `/` or `:`.
   pub query: String,
-  /// UTF-16 offset of the `@` or `/`.
+  /// UTF-16 offset of the `@`, `/` or `:`.
   pub start: usize,
 }
 
@@ -21,8 +26,8 @@ fn is_mention_char(character: char) -> bool {
   character.is_alphanumeric() || matches!(character, '_' | '.' | '-')
 }
 
-/// The trigger right before the cursor: `@na` after a space or at the start (a mention), or `/he` at
-/// the very start of the text (a command).
+/// The trigger right before the cursor: `@na` after a space or at the start (a mention), `/he` at
+/// the very start of the text (a command), or `:po` after a space or at the start (an emoji).
 pub fn trigger(text: &str, cursor: usize) -> Option<Trigger> {
   let mut offset = 0;
   let mut before: Vec<(usize, char)> = Vec::new();
@@ -54,8 +59,20 @@ pub fn trigger(text: &str, cursor: usize) -> Option<Trigger> {
       query,
       start: 0,
     }),
+    ':' if preceded_by_boundary && is_emoji_query(&query) => Some(Trigger {
+      kind: TriggerKind::Emoji,
+      query,
+      start: marker_at,
+    }),
     _ => None,
   }
+}
+
+/// Long enough, starting with a letter or digit and without dots (`:-)`, `:..` stay text).
+fn is_emoji_query(query: &str) -> bool {
+  query.chars().count() >= MIN_EMOJI_QUERY_CHARS
+    && query.chars().next().is_some_and(char::is_alphanumeric)
+    && !query.contains('.')
 }
 
 #[cfg(test)]
@@ -80,5 +97,23 @@ mod tests {
     assert_eq!((found.kind, found.query.as_str()), (TriggerKind::Command, "he"));
     assert!(trigger("a /he", 5).is_none());
     assert!(trigger("/usr/bin", 8).is_none());
+  }
+
+  #[test]
+  fn emoji_open_after_two_characters_at_a_boundary() {
+    let found = trigger("nice :po", 8).expect("an emoji");
+    assert_eq!(
+      (found.kind, found.query.as_str(), found.start),
+      (TriggerKind::Emoji, "po", 5)
+    );
+    assert_eq!(
+      trigger(":thumbs", 7).map(|found| found.kind),
+      Some(TriggerKind::Emoji)
+    );
+    assert!(trigger("hi :p", 5).is_none());
+    assert!(trigger("at 12:30", 8).is_none());
+    assert!(trigger("see http://example", 18).is_none());
+    assert!(trigger("hi :-)", 6).is_none());
+    assert!(trigger(":tada: ", 7).is_none());
   }
 }
