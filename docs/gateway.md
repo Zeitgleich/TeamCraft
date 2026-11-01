@@ -29,7 +29,12 @@ A fresh session costs what changed since the device was last caught up, not what
   knows and the open link requests. None needs another's answer; each step of the sync takes its answer
   instead of asking again. Reads wait for `ready`, so a change after a read always arrives as an event.
 - `GET /sync/heads` names per conversation the newest message and MLS entry the caller can read and a
-  digest of the member list, per space a digest of its member list. The client keeps the heads it caught
+  digest of the member list, per space a digest of its member list. The digest is not computed from the
+  members: database triggers give each list a new random token whenever its answer would change (a
+  member added or removed, a role, expiry or sponsor, or a member's username, name, kind, organization,
+  deactivation or deletion; migration 0075), and the digest covers that token and the directory policy
+  that formats the names. So the answer costs one row per conversation, whatever the lists' size.
+  The client keeps the heads it caught
   up to (one record in its store) and reads member lists, MLS queues and history only where a head moved,
   or where local work needs a read anyway (no group yet, a commit of its own not landed, messages waiting
   for keys, an earlier failure). The heads only let the client skip reads; nothing read is trusted

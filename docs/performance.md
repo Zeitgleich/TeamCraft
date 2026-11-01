@@ -948,9 +948,30 @@ moving from step to step as each was fixed:
   are read only when somebody is left to ask.
 
 What is left at 300 channels, 30 ms away: socket and `hello` 33 ms, `ready` 35 ms, the first reads
-80 ms (the heads answer grows with the conversations: one row and one member digest each, about
-45 ms more than for 24 channels), local work about 60 ms (the device list check 15, joining
-missing groups 10, deciding what is due 9). Opening the store before the connection took about
+80 ms, local work about 60 ms (the device list check 15, joining missing groups 10, deciding what
+is due 9).
+
+**The heads answer on the server** digested the member list answer of every conversation and space
+of the caller on each request: every member row, formatted and serialized. In the test above (two
+people per channel) that was about 45 ms more than for 24 channels; with channels of real size it
+was the largest cost of a fresh session. Each list now has a token that database triggers renew
+whenever its answer would change (migration 0075, docs/gateway.md), and the digest covers the
+token and the directory policy. The server's load test (`sync_heads::heads_of_a_large_workspace`,
+ignored by default; debug build, dev Postgres, local machine):
+
+```sh
+DATABASE_URL=postgres://teamcraft:teamcraft-dev-only@127.0.0.1:5432/teamcraft \
+  cargo test -p teamcraft-server --features integration --test suite -- --ignored --nocapture \
+  sync_heads::heads_of_a_large_workspace
+```
+
+| `GET /sync/heads`, 300 channels × 200 members, space of 2,000 | Before | After   |
+|---------------------------------------------------------------|--------|---------|
+| Server time, p50                                              | 831 ms | 19 ms   |
+| Answer                                                        | 24 KB  | 24 KB   |
+
+The first sync after the update reads every member list once: all digests change with the new
+scheme. Opening the store before the connection took about
 60 ms; it is outside the measured time and belongs to #778 (the stores loading lazily).
 
 `tests/e2e` `perf.rs` reads the same trace from the web client's console after the reload

@@ -1,21 +1,21 @@
 //! Where a user's conversations stand, read in one go for a client coming back (issue #714,
 //! `GET /sync/heads`): the newest message and MLS entry the user can read per conversation, and
-//! every member of those conversations for the member list digests.
+//! the tokens of the member lists (migration 0075), which change whenever a list's answer would.
 
-use teamcraft_proto::{ChannelRole, ConversationId, MessageId, MlsMessageId, UserId};
+use teamcraft_proto::{ConversationId, MessageId, MlsMessageId, SpaceId, UserId};
 
-use crate::conversation::ConversationMember;
 use crate::database::Database;
 use crate::error::DbError;
 use crate::ids::{from_db, from_db_opt, to_db};
-use crate::user::User;
 
-/// The newest entries of one conversation the user is a member of.
+/// The newest entries of one conversation the user is a member of, and its member list token
+/// (`None`: unchanged since migration 0075).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ConversationHeadRow {
   pub conversation: ConversationId,
   pub maybe_last_message_id: Option<MessageId>,
   pub maybe_last_mls_message_id: Option<MlsMessageId>,
+  pub maybe_members_token: Option<String>,
 }
 
 impl Database {
@@ -41,8 +41,10 @@ impl Database {
                     AND y.id >= tc_snowflake_floor(m.joined_at)
                     AND (y.kind <> 'welcome' OR EXISTS (
                           SELECT 1 FROM devices d WHERE d.id = y.recipient_device_id AND d.user_id = $1))
-                ) AS last_mls_message_id
+                ) AS last_mls_message_id,
+                t.token::text AS "members_token?"
          FROM memberships m JOIN conversations c ON c.id = m.conversation_id
+         LEFT JOIN conversation_member_tokens t ON t.conversation_id = m.conversation_id
          WHERE m.user_id = $1
          ORDER BY m.conversation_id"#,
       to_db(user),
@@ -57,51 +59,27 @@ impl Database {
           conversation: from_db(row.conversation_id)?,
           maybe_last_message_id: from_db_opt(row.last_message_id)?,
           maybe_last_mls_message_id: from_db_opt(row.last_mls_message_id)?,
+          maybe_members_token: row.members_token,
         })
       })
       .collect()
   }
 
-  /// The members of every conversation `user` is a member of, grouped by conversation and in the
-  /// order [`Database::list_conversation_members`] lists them: one query instead of one per
-  /// conversation.
-  pub async fn list_members_of_conversations_of(
+  /// The member list tokens of `spaces` that have one (migration 0075).
+  pub async fn list_space_member_tokens(
     &self,
-    user: UserId,
-  ) -> Result<Vec<(ConversationId, ConversationMember)>, DbError> {
+    spaces: &[SpaceId],
+  ) -> Result<Vec<(SpaceId, String)>, DbError> {
+    let ids: Vec<i64> = spaces.iter().map(|space| to_db(*space)).collect();
     let rows = sqlx::query!(
-      r#"SELECT m.conversation_id, u.id, u.username, u.display_name, u.kind, u.created_at, u.organization,
-                u.deactivated_at IS NOT NULL AS "is_deactivated!", u.deleted_at IS NOT NULL AS "is_deleted!",
-                m.role
-         FROM memberships mine
-         JOIN memberships m ON m.conversation_id = mine.conversation_id
-         JOIN users u ON u.id = m.user_id
-         WHERE mine.user_id = $1
-         ORDER BY m.conversation_id, u.display_name, u.id"#,
-      to_db(user),
+      r#"SELECT space_id, token::text AS "token!" FROM space_member_tokens WHERE space_id = ANY($1)"#,
+      &ids,
     )
     .fetch_all(self.pool())
     .await?;
     rows
       .into_iter()
-      .map(|row| {
-        Ok((
-          from_db(row.conversation_id)?,
-          ConversationMember {
-            user: User {
-              id: from_db(row.id)?,
-              maybe_username: row.username,
-              display_name: row.display_name,
-              kind: row.kind.into(),
-              created_at: row.created_at,
-              is_deactivated: row.is_deactivated,
-              is_deleted: row.is_deleted,
-              maybe_organization: row.organization,
-            },
-            role: ChannelRole::from(row.role),
-          },
-        ))
-      })
+      .map(|row| Ok((from_db(row.space_id)?, row.token)))
       .collect()
   }
 }

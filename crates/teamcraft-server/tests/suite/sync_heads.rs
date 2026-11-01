@@ -100,6 +100,57 @@ async fn only_the_callers_conversations_and_no_space_lists_for_guests() {
   app.stop().await;
 }
 
+/// The member list tokens (migration 0075) follow everything the member list answer shows, and
+/// only that.
+#[tokio::test]
+async fn the_digests_follow_what_the_member_lists_show() {
+  let app = app!();
+  let (carol, dave) = (member("carol"), member("dave"));
+  let channel = channel_with(&app, &[&carol, &dave]).await;
+  let space = space_of(&app, &channel).await;
+  let dave_id: i64 = user_id(&app, &dave).await.parse().unwrap();
+  let pool = app.sql_pool();
+  let mut seen = digests(&app, &carol, &channel).await;
+
+  for (change, is_shown) in [
+    (
+      "UPDATE users SET display_name = 'Dave Renamed' WHERE id = $1",
+      true,
+    ),
+    ("UPDATE users SET organization = 'Org B' WHERE id = $1", true),
+    ("UPDATE users SET deactivated_at = now() WHERE id = $1", true),
+    ("UPDATE users SET deactivated_at = NULL WHERE id = $1", true),
+    ("UPDATE memberships SET role = 'admin' WHERE user_id = $1", true),
+    (
+      "UPDATE memberships SET notification_level = 'all' WHERE user_id = $1",
+      false,
+    ),
+    (
+      "UPDATE users SET display_name = display_name WHERE id = $1",
+      false,
+    ),
+  ] {
+    sqlx::query(sqlx::AssertSqlSafe(change))
+      .bind(dave_id)
+      .execute(pool)
+      .await
+      .unwrap();
+    let now = digests(&app, &carol, &channel).await;
+    assert_eq!(now.0 != seen.0, is_shown, "channel digest after {change}");
+    seen = now;
+  }
+
+  // A rename shows in the space's member list too.
+  sqlx::query("UPDATE users SET display_name = 'Dave Again' WHERE id = $1")
+    .bind(dave_id)
+    .execute(pool)
+    .await
+    .unwrap();
+  let renamed = digests(&app, &carol, &channel).await;
+  assert_ne!(renamed.1, seen.1, "space digest after a rename in {space}");
+  app.stop().await;
+}
+
 /// How long the server takes for the heads of a large workspace (issue #714): 300 channels of 200
 /// members each in a space of 2,000 people, seeded in SQL. The numbers are in
 /// docs/performance.md ("Coming back to 300 channels").
@@ -202,6 +253,13 @@ async fn seed_large_workspace(app: &TestApp, channel: &str, space: &str, carol: 
   .execute(pool)
   .await
   .unwrap();
+}
+
+/// The digests of `conversation`'s member list and of the caller's first space.
+async fn digests(app: &TestApp, user: &TestUser, conversation: &str) -> (Value, Value) {
+  let all = heads(app, user).await;
+  let conversation = head_of(app, user, conversation).await["members_digest"].clone();
+  (conversation, all["spaces"][0]["members_digest"].clone())
 }
 
 async fn heads(app: &TestApp, user: &TestUser) -> Value {
