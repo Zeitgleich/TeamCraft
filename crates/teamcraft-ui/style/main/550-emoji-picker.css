@@ -105,7 +105,7 @@
   justify-content: center;
   height: 2.25rem;
   border-radius: var(--radius-sm);
-  font-size: 1.5rem;
+  font-size: var(--text-2xl);
   line-height: 1;
   cursor: pointer;
 }
@@ -136,7 +136,7 @@
 }
 
 .emoji-preview {
-  font-size: 1.5rem;
+  font-size: var(--text-2xl);
   line-height: 1;
 }
 
@@ -181,13 +181,12 @@
   margin-left: auto;
 }
 
-/* The Fitzpatrick tones of the emoji modifiers, and the yellow default. */
-.tone-default { background: #ffcc4d; }
-.tone-light { background: #f7dece; }
-.tone-medium-light { background: #f3d2a2; }
-.tone-medium { background: #d5ab88; }
-.tone-medium-dark { background: #af7e57; }
-.tone-dark { background: #7c533e; }
+.tone-default { background: var(--skin-tone-default); }
+.tone-light { background: var(--skin-tone-light); }
+.tone-medium-light { background: var(--skin-tone-medium-light); }
+.tone-medium { background: var(--skin-tone-medium); }
+.tone-medium-dark { background: var(--skin-tone-medium-dark); }
+.tone-dark { background: var(--skin-tone-dark); }
 
 @media (prefers-reduced-motion: reduce) {
   .emoji-tab,
