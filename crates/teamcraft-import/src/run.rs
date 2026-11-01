@@ -325,14 +325,21 @@ impl<'a, A: ServerApi, S: LocalStore> Importer<'a, A, S> {
 
   /// The import account in the conversation's group. A new channel or DM has it already; an
   /// existing one asks to be let in (a workspace admin's self-addition, which a member's device
-  /// commits) and waits a while for it.
+  /// commits) and waits a while for it. Asked again on every run, also for a conversation an
+  /// earlier run opened.
   async fn ensure_in_group(&mut self, item: &Item, conversation: ConversationId) -> Result<bool, RunError> {
     if self.client.has_group(conversation)? {
       return Ok(true);
     }
-    let me = self.client.user_id();
-    if let Target::ExistingChannel { .. } = item.target {
-      self.client.admin_add_member(conversation, me).await?;
+    match item.target {
+      Target::ExistingChannel { .. } => {
+        let me = self.client.user_id();
+        self.client.admin_add_member(conversation, me).await?;
+      },
+      // The server made the import account a member already (`open_import_dm`); the group is
+      // somebody else's: a participant's device lets it in.
+      Target::Dm { .. } | Target::Notes { .. } => self.client.request_import_join(conversation).await?,
+      Target::NewChannel { .. } => {},
     }
     let deadline = Instant::now() + self.join_wait;
     while Instant::now() < deadline {

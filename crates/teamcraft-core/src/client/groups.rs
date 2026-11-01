@@ -2853,10 +2853,9 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
   ) -> Result<(), CoreError> {
     let maybe_response: Option<teamcraft_proto::ConversationResponse> =
       records::get_json(&self.store, Table::Conversations, &conversation.to_string())?;
-    let is_public = maybe_response.is_some_and(|response| {
-      response.visibility == teamcraft_proto::ConversationVisibility::Public && !response.is_archived
-    });
-    if is_public || !self.workspace()?.is_admin(user) {
+    // Where the line is shown: a private channel. The import account's self-join to a DM or notes
+    // (e2ee.md §4.10) tells nothing.
+    if !super::admin_joins::is_told_in(maybe_response.as_ref()) || !self.workspace()?.is_admin(user) {
       return Ok(());
     }
     self

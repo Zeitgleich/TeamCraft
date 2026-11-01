@@ -177,7 +177,11 @@ It works conversation by conversation, oldest posts first, and shows its progres
 the state directory, and a run skips it and fills gaps (a conversation cut short, a channel added to
 the mapping). A second run over a finished import changes nothing. For existing channels it joins as
 a workspace admin, which needs a device of a member of that channel online (the run waits and says
-so); for existing DMs, a device of one of the two people.
+so); for existing DMs and notes, a device of one of the two people (or of the notes' owner). Both
+need **Admins joining private channels** set to **Visible** (`admin_self_join = visible`, admin.md §2.4)
+while the import runs: under owner approval members' apps refuse the import account's self-join, and
+the run warns. A conversation that waited is picked up by the next run once somebody let the import
+account in; each run asks again.
 
 The state directory holds the tool's device keys (encrypted, the key in `store.key`): keep it, back it
 up, and never run two imports with the same state at once.
@@ -216,6 +220,6 @@ come), stop it, choose **End import** in Administration → Import and deactivat
 |-------------------------------|------------------------------------------------------------------------------------------------------------|
 | `import_not_allowed`          | The signed import policy doesn't name this account, or its date passed (step 2)                            |
 | A user name is not found      | The name in `users.csv` differs from the identity provider's, or the account lacks a role                  |
-| Waiting for a member's device | Somebody of that channel or DM has to open the app once                                                    |
+| Waiting for a member's device | Somebody of that channel or DM has to open the app once, with `admin_self_join` visible; then run again    |
 | `import_window_full`          | Far more posts after the merged conversation's first message than fit before it; reported per conversation |
 | A file is missing             | The message names it; finish the transfer before the run next time                                         |

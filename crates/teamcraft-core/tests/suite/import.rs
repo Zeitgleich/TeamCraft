@@ -15,7 +15,7 @@ use teamcraft_core::clock::ManualClock;
 use teamcraft_core::imported::{ImportSource, ImportedAuthor, ImportedOrigin};
 use teamcraft_core::store::{LocalStore, MessageContent, MessageFilter, MessageMeta};
 use teamcraft_core::workspace::RosterRole;
-use teamcraft_proto::{ConversationId, HistoryPolicy, ImportPolicy, UserId, WorkspacePolicy};
+use teamcraft_proto::{AdminSelfJoin, ConversationId, HistoryPolicy, ImportPolicy, UserId, WorkspacePolicy};
 
 /// 2024-05-01.
 const OLD_MS: i64 = 1_714_521_600_000;
@@ -279,6 +279,175 @@ async fn a_dm_its_participant_holds_alone_is_taken_over_by_the_import_accounts_g
   bob.client.full_sync().await.unwrap();
   bob.client.catch_up_messages(dm).await.unwrap();
   assert_eq!(bob.texts(dm), vec!["old", "live"]);
+}
+
+mod existing {
+  //! A DM or notes that existed before the import: the import account, a member on the server
+  //! already, asks to be let in, and a participant's device commits it (e2ee.md §4.10).
+  use super::*;
+
+  #[tokio::test]
+  async fn a_participants_device_lets_the_import_account_into_an_existing_dm() {
+    let server = FakeServer::new();
+    let mut alice = Peer::enroll(&server, "Alice").await;
+    let mut importer = Peer::enroll(&server, "Import").await;
+    let mut bob = Peer::enroll(&server, "Bob").await;
+    sign_import_policy(&mut alice, &mut importer, AdminSelfJoin::Visible).await;
+    let dm = alice.client.open_dm(bob.client.user_id()).await.unwrap();
+    alice.client.send_text(dm, None, "live").await.unwrap();
+    settle(&mut [&mut alice, &mut bob, &mut importer]).await;
+
+    let participants = vec![alice.client.user_id(), bob.client.user_id()];
+    assert!(!open_existing(&mut importer, &participants, dm).await);
+    importer.client.request_import_join(dm).await.unwrap();
+    // Only Bob's device is online: either participant lets it in.
+    settle(&mut [&mut bob, &mut importer]).await;
+    bob.client.apply_pending_changes().await.unwrap();
+    settle(&mut [&mut alice, &mut bob, &mut importer]).await;
+    assert!(importer.client.has_group(dm).unwrap());
+
+    import_one(&mut importer, dm).await;
+    settle(&mut [&mut alice, &mut bob, &mut importer]).await;
+    for peer in [&mut alice, &mut bob] {
+      peer.client.catch_up_messages(dm).await.unwrap();
+      assert_eq!(peer.texts(dm), vec!["old", "live"], "{}", peer.name);
+    }
+
+    importer.client.leave_after_import(dm).await.unwrap();
+    for _ in 0..2 {
+      settle(&mut [&mut alice, &mut bob, &mut importer]).await;
+      alice.client.apply_pending_changes().await.unwrap();
+      importer.client.apply_pending_changes().await.unwrap();
+    }
+    settle(&mut [&mut alice, &mut bob, &mut importer]).await;
+    let mut in_group = alice.client.group_users(dm).unwrap();
+    in_group.sort();
+    let mut expected = participants.clone();
+    expected.sort();
+    assert_eq!(in_group, expected, "only the two people are left in the group");
+  }
+
+  #[tokio::test]
+  async fn an_owners_device_lets_the_import_account_into_their_existing_notes() {
+    let server = FakeServer::new();
+    let mut phone = Peer::enroll_with_settings(&server, "Alice", settings().with_notes_to_self()).await;
+    let mut importer = Peer::enroll(&server, "Import").await;
+    sign_import_policy(&mut phone, &mut importer, AdminSelfJoin::Visible).await;
+    let me = phone.client.user_id();
+    let notes = phone.client.open_dm(me).await.unwrap();
+    phone.client.send_text(notes, None, "buy milk").await.unwrap();
+    // A second device of hers joins the notes, so their group is past epoch 0.
+    let mut laptop = second_device(&mut phone).await;
+    phone.client.full_sync().await.unwrap();
+    phone.client.apply_pending_changes().await.unwrap();
+    laptop.client.full_sync().await.unwrap();
+    settle(&mut [&mut phone, &mut laptop, &mut importer]).await;
+
+    assert!(!open_existing(&mut importer, &[me], notes).await);
+    importer.client.request_import_join(notes).await.unwrap();
+    settle(&mut [&mut laptop, &mut importer]).await;
+    laptop.client.apply_pending_changes().await.unwrap();
+    settle(&mut [&mut phone, &mut laptop, &mut importer]).await;
+    assert!(importer.client.has_group(notes).unwrap());
+
+    import_one(&mut importer, notes).await;
+    settle(&mut [&mut phone, &mut laptop, &mut importer]).await;
+    for peer in [&mut phone, &mut laptop] {
+      peer.client.catch_up_messages(notes).await.unwrap();
+      assert_eq!(peer.texts(notes), vec!["old", "buy milk"], "{}", peer.name);
+    }
+  }
+
+  #[tokio::test]
+  async fn without_visible_admin_self_joins_the_import_account_stays_out_and_waits() {
+    let server = FakeServer::new();
+    let mut alice = Peer::enroll(&server, "Alice").await;
+    let mut importer = Peer::enroll(&server, "Import").await;
+    let mut bob = Peer::enroll(&server, "Bob").await;
+    sign_import_policy(&mut alice, &mut importer, AdminSelfJoin::OwnerApproval).await;
+    let dm = alice.client.open_dm(bob.client.user_id()).await.unwrap();
+    settle(&mut [&mut alice, &mut bob, &mut importer]).await;
+
+    let participants = vec![alice.client.user_id(), bob.client.user_id()];
+    assert!(!open_existing(&mut importer, &participants, dm).await);
+    importer.client.request_import_join(dm).await.unwrap();
+    settle(&mut [&mut alice, &mut bob, &mut importer]).await;
+    alice.client.apply_pending_changes().await.unwrap();
+    bob.client.apply_pending_changes().await.unwrap();
+    settle(&mut [&mut alice, &mut bob, &mut importer]).await;
+    assert!(!importer.client.has_group(dm).unwrap());
+    let mut in_group = alice.client.group_users(dm).unwrap();
+    in_group.sort();
+    let mut expected = participants;
+    expected.sort();
+    assert_eq!(in_group, expected);
+  }
+
+  /// The import's DM or notes of `participants`, which is `existing`; `true` if the import device
+  /// is in its group right away.
+  async fn open_existing(importer: &mut Peer, participants: &[UserId], existing: ConversationId) -> bool {
+    let response = importer
+      .client
+      .open_import_dm(participants.to_vec())
+      .await
+      .unwrap();
+    assert_eq!(response.id, existing);
+    importer
+      .client
+      .set_up_import_dm(response, participants)
+      .await
+      .unwrap()
+  }
+
+  async fn import_one(importer: &mut Peer, conversation: ConversationId) {
+    importer
+      .client
+      .send_imported(
+        conversation,
+        &[draft("1", "old", ImportedAuthor::Deleted, OLD_MS)],
+      )
+      .await
+      .unwrap();
+    importer.client.finish_import(conversation).await.unwrap();
+  }
+
+  /// The signed roster (`owner` owner, `importer` admin) and a policy naming `importer` as the
+  /// import account, with admins' self-joins as `self_join` says.
+  async fn sign_import_policy(owner: &mut Peer, importer: &mut Peer, self_join: AdminSelfJoin) {
+    let (owner_id, importer_id) = (owner.client.user_id(), importer.client.user_id());
+    owner
+      .client
+      .publish_roster(&[(owner_id, RosterRole::Owner), (importer_id, RosterRole::Admin)])
+      .await
+      .unwrap();
+    owner
+      .client
+      .publish_policy(WorkspacePolicy {
+        admin_self_join: self_join,
+        import: ImportPolicy {
+          maybe_importer: Some(importer_id),
+          maybe_joins_until_ms: Some(i64::MAX),
+        },
+        ..WorkspacePolicy::default()
+      })
+      .await
+      .unwrap();
+    settle(&mut [&mut *owner, &mut *importer]).await;
+    importer.client.full_sync().await.unwrap();
+  }
+
+  /// A further device of `owner`'s user, linked and connected.
+  async fn second_device(owner: &mut Peer) -> Peer {
+    let mut client = common::link_device(owner).await;
+    let (gateway, _) = client.connect_gateway().await.unwrap();
+    Peer {
+      name: format!("{} laptop", owner.name),
+      api: owner.api.clone(),
+      store: client.store().clone(),
+      client,
+      gateway,
+    }
+  }
 }
 
 mod guests {
