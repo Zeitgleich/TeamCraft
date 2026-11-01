@@ -494,7 +494,9 @@ mod channels {
 
     let seen = app.put(&carol, &path, json!({"message_ids": [second]})).await;
     assert_eq!(seen.status, StatusCode::NO_CONTENT, "{}", seen.body);
-    let again = app.put(&carol, &path, json!({"message_ids": [first, second]})).await;
+    let again = app
+      .put(&carol, &path, json!({"message_ids": [first, second]}))
+      .await;
     assert_eq!(again.status, StatusCode::NO_CONTENT, "{}", again.body);
     let view = app.get(&carol, &format!("/conversations/{channel}")).await;
     assert_eq!(

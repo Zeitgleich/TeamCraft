@@ -3,8 +3,8 @@ use teamcraft_db::{ConversationMember, MembershipChanges};
 use teamcraft_proto::{
   AddConversationMemberRequest, ChannelRole, ConversationId, ConversationMemberResponse,
   ConversationVisibility, GatewayEvent, ListConversationMembersResponse, MAX_REACTIONS_SEEN_PER_REQUEST,
-  MarkReactionsSeenRequest, Permission, SetReadPositionRequest,
-  SpaceRole, SystemEventKind, UpdateConversationMemberRequest, UserId,
+  MarkReactionsSeenRequest, Permission, SetReadPositionRequest, SpaceRole, SystemEventKind,
+  UpdateConversationMemberRequest, UserId,
 };
 use tracing::warn;
 

@@ -643,7 +643,11 @@ impl Database {
   }
 
   /// How many of `messages` (distinct IDs) are messages of the conversation.
-  pub async fn count_messages_of(&self, conversation: ConversationId, messages: &[MessageId]) -> Result<usize, DbError> {
+  pub async fn count_messages_of(
+    &self,
+    conversation: ConversationId,
+    messages: &[MessageId],
+  ) -> Result<usize, DbError> {
     let count = sqlx::query_scalar!(
       r#"SELECT count(*) AS "count!" FROM messages WHERE conversation_id = $1 AND id = ANY($2)"#,
       to_db(conversation),

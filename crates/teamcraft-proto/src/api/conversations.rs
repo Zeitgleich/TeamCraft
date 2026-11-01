@@ -46,7 +46,11 @@ pub struct MyMembership {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 pub struct ReactionsSeen {
   /// Every message up to this ID counts as seen.
-  #[serde(rename = "through_message_id", default, skip_serializing_if = "Option::is_none")]
+  #[serde(
+    rename = "through_message_id",
+    default,
+    skip_serializing_if = "Option::is_none"
+  )]
   pub maybe_through: Option<MessageId>,
   /// Reaction messages after `through` seen one by one, ascending.
   #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -309,7 +313,8 @@ impl ReactionsSeen {
   }
 
   pub fn is_seen(&self, message: MessageId) -> bool {
-    self.maybe_through.is_some_and(|through| message <= through) || self.message_ids.binary_search(&message).is_ok()
+    self.maybe_through.is_some_and(|through| message <= through)
+      || self.message_ids.binary_search(&message).is_ok()
   }
 
   /// Adds seen messages and keeps at most `max_ids` of them one by one: beyond it `through` moves up
@@ -477,7 +482,10 @@ mod tests {
       let mut seen = ReactionsSeen::default();
       seen.add((1..=5).map(message_id), 3);
       assert_eq!(seen.maybe_through, Some(message_id(2)));
-      assert_eq!(seen.message_ids, vec![message_id(3), message_id(4), message_id(5)]);
+      assert_eq!(
+        seen.message_ids,
+        vec![message_id(3), message_id(4), message_id(5)]
+      );
     }
 
     #[test]
