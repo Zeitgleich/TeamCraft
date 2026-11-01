@@ -47,6 +47,8 @@ import androidx.compose.ui.autofill.ContentType
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.focus.FocusDirection
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
@@ -71,9 +73,15 @@ import androidx.compose.ui.unit.dp
 import de.zeitgleich.teamcraft.R
 import de.zeitgleich.teamcraft.auth.SignInItem
 import de.zeitgleich.teamcraft.auth.cleanTotpCode
-import de.zeitgleich.teamcraft.auth.isLocalFormComplete
+import de.zeitgleich.teamcraft.auth.SignInField
+import de.zeitgleich.teamcraft.auth.localFormErrors
+import de.zeitgleich.teamcraft.auth.localSignInErrorField
 import de.zeitgleich.teamcraft.auth.signInItems
 import de.zeitgleich.teamcraft.auth.totpCodeToSend
+import de.zeitgleich.teamcraft.ui.forms.FieldErrors
+import de.zeitgleich.teamcraft.ui.forms.fieldError
+import de.zeitgleich.teamcraft.ui.forms.focusFirst
+import de.zeitgleich.teamcraft.ui.forms.supportingText
 import uniffi.teamcraft_ffi.BrandLinks
 import uniffi.teamcraft_ffi.LoginBrand
 import uniffi.teamcraft_ffi.SignInPageInfo
@@ -130,12 +138,13 @@ fun LoginScreen(
       horizontalAlignment = Alignment.CenterHorizontally,
     ) {
       BrandHeader(maybeBrand, maybeLogo, maybeIcon, name)
-      maybeError?.let { SignInError(it, maybeErrorCode) }
+      // A refused e-mail or password is shown at the local form's field, everything else up here.
+      maybeError?.takeIf { localSignInErrorField(it) == null }?.let { SignInError(it, maybeErrorCode) }
       if (maybePage == null) {
         val loading = stringResource(R.string.sign_in_loading)
         CircularProgressIndicator(Modifier.size(32.dp).semantics { contentDescription = loading })
       } else {
-        SignInMethods(maybePage, maybeSsoIcon, isBusy, onSso, onLocal)
+        SignInMethods(maybePage, maybeSsoIcon, maybeError, isBusy, onSso, onLocal)
         SignInHelp(maybePage)
       }
       EncryptionNote()
@@ -231,6 +240,7 @@ private fun Tile(background: Color, content: @Composable () -> Unit) {
 private fun SignInMethods(
   page: SignInPageInfo,
   maybeSsoIcon: Bitmap?,
+  @StringRes maybeError: Int?,
   isBusy: Boolean,
   onSso: () -> Unit,
   onLocal: (String, String, String?) -> Unit,
@@ -239,7 +249,7 @@ private fun SignInMethods(
     when (item) {
       SignInItem.SsoButton -> SsoButton(page.ssoLabel, maybeSsoIcon, isBusy, onSso)
       SignInItem.Divider -> OrDivider()
-      is SignInItem.LocalForm -> LocalForm(item.isCodeRequired, isBusy, onLocal)
+      is SignInItem.LocalForm -> LocalForm(item.isCodeRequired, maybeError, isBusy, onLocal)
     }
   }
 }
@@ -278,21 +288,43 @@ private fun OrDivider() {
 /**
  * E-mail, password and one-time code of a local account. The password and the code live only in
  * memory (never in saved state); the code is cleared after each attempt, since it expires anyway.
+ * A refused submit shows every missing field's error at once and focuses the first; the server's
+ * refusal ([maybeError], when it belongs to a field) stays at its field until the user edits.
  */
 @Composable
-private fun LocalForm(isCodeRequired: Boolean, isBusy: Boolean, onSubmit: (String, String, String?) -> Unit) {
+private fun LocalForm(
+  isCodeRequired: Boolean,
+  @StringRes maybeError: Int?,
+  isBusy: Boolean,
+  onSubmit: (String, String, String?) -> Unit,
+) {
   var email by rememberSaveable { mutableStateOf("") }
   var password by remember { mutableStateOf("") }
   var code by remember { mutableStateOf("") }
   var isPasswordVisible by remember { mutableStateOf(false) }
+  var hasTried by remember { mutableStateOf(false) }
   var hasSubmitted by remember { mutableStateOf(false) }
+  var isRefusalEdited by remember(maybeError) { mutableStateOf(false) }
+  val requesters = remember { SignInField.entries.associateWith { FocusRequester() } }
   val keyboard = LocalSoftwareKeyboardController.current
   val focus = LocalFocusManager.current
-  val isComplete = isLocalFormComplete(email, password, code, isCodeRequired)
-  val submit = {
-    if (!isBusy && isComplete) {
+  val errors = localFormErrors(email, password, code, isCodeRequired)
+  val maybeRefusal = maybeError?.takeUnless { isRefusalEdited || isBusy }
+  val maybeRefusedField = maybeRefusal?.let(::localSignInErrorField)
+  val shown = (if (hasTried) errors else FieldErrors<SignInField>(emptyMap()))
+    .let { if (maybeRefusedField != null) it.withServerError(maybeRefusedField, maybeRefusal) else it }
+  val edit: (() -> Unit) -> Unit = { change ->
+    change()
+    isRefusalEdited = true
+  }
+  val submit: () -> Unit = {
+    hasTried = true
+    if (!errors.isValid) {
+      errors.focusFirst(requesters)
+    } else if (!isBusy) {
       // The keyboard would hide the progress and the answer.
       keyboard?.hide()
+      isRefusalEdited = false
       hasSubmitted = true
       onSubmit(email, password, totpCodeToSend(code))
     }
@@ -303,19 +335,28 @@ private fun LocalForm(isCodeRequired: Boolean, isBusy: Boolean, onSubmit: (Strin
       hasSubmitted = false
     }
   }
+  LaunchedEffect(maybeRefusedField) {
+    maybeRefusedField?.let { requesters[it]?.requestFocus() }
+  }
   OutlinedTextField(
     value = email,
-    onValueChange = { email = it },
+    onValueChange = { edit { email = it } },
     label = { Text(stringResource(R.string.local_email)) },
     keyboardOptions = EMAIL_KEYBOARD,
     keyboardActions = KeyboardActions(onNext = { focus.moveFocus(FocusDirection.Down) }),
     singleLine = true,
     enabled = !isBusy,
-    modifier = Modifier.fillMaxWidth().semantics { contentType = ContentType.Username + ContentType.EmailAddress },
+    isError = shown[SignInField.EMAIL] != null,
+    supportingText = supportingText(shown[SignInField.EMAIL]),
+    modifier = Modifier
+      .fillMaxWidth()
+      .focusRequester(requesters.getValue(SignInField.EMAIL))
+      .fieldError(shown[SignInField.EMAIL])
+      .semantics { contentType = ContentType.Username + ContentType.EmailAddress },
   )
   OutlinedTextField(
     value = password,
-    onValueChange = { password = it },
+    onValueChange = { edit { password = it } },
     label = { Text(stringResource(R.string.local_password)) },
     visualTransformation = if (isPasswordVisible) VisualTransformation.None else PasswordVisualTransformation(),
     // Next goes on to the code; Done sends the form when the code field is optional.
@@ -326,6 +367,8 @@ private fun LocalForm(isCodeRequired: Boolean, isBusy: Boolean, onSubmit: (Strin
     ),
     singleLine = true,
     enabled = !isBusy,
+    isError = shown[SignInField.PASSWORD] != null,
+    supportingText = supportingText(shown[SignInField.PASSWORD]),
     trailingIcon = {
       IconButton(onClick = { isPasswordVisible = !isPasswordVisible }) {
         Icon(
@@ -334,21 +377,31 @@ private fun LocalForm(isCodeRequired: Boolean, isBusy: Boolean, onSubmit: (Strin
         )
       }
     },
-    modifier = Modifier.fillMaxWidth().semantics { contentType = ContentType.Password },
+    modifier = Modifier
+      .fillMaxWidth()
+      .focusRequester(requesters.getValue(SignInField.PASSWORD))
+      .fieldError(shown[SignInField.PASSWORD])
+      .semantics { contentType = ContentType.Password },
   )
   OutlinedTextField(
     value = code,
-    onValueChange = { code = cleanTotpCode(it) },
+    onValueChange = { edit { code = cleanTotpCode(it) } },
     label = { Text(stringResource(if (isCodeRequired) R.string.local_code else R.string.local_code_optional)) },
     keyboardOptions = CODE_KEYBOARD,
     keyboardActions = KeyboardActions(onDone = { submit() }),
     singleLine = true,
     enabled = !isBusy,
-    modifier = Modifier.fillMaxWidth().semantics { contentType = ContentType.SmsOtpCode },
+    isError = shown[SignInField.CODE] != null,
+    supportingText = supportingText(shown[SignInField.CODE]),
+    modifier = Modifier
+      .fillMaxWidth()
+      .focusRequester(requesters.getValue(SignInField.CODE))
+      .fieldError(shown[SignInField.CODE])
+      .semantics { contentType = ContentType.SmsOtpCode },
   )
   Button(
     onClick = submit,
-    enabled = !isBusy && isComplete,
+    enabled = !isBusy,
     modifier = Modifier.fillMaxWidth().heightIn(min = BUTTON_MIN_HEIGHT),
   ) {
     if (isBusy && hasSubmitted) {

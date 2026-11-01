@@ -36,6 +36,8 @@ import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import de.zeitgleich.teamcraft.R
+import de.zeitgleich.teamcraft.ui.forms.fieldError
+import de.zeitgleich.teamcraft.ui.forms.supportingText
 import uniffi.teamcraft_ffi.CheckedServer
 import uniffi.teamcraft_ffi.LoginBrand
 
@@ -62,12 +64,16 @@ fun ServerEntryScreen(
   onSubmit: (String) -> Unit,
 ) {
   var address by rememberSaveable(prefill) { mutableStateOf(prefill) }
+  // The server's answer is about the address as sent; once the user edits it, it no longer applies.
+  var isErrorEdited by remember(maybeError) { mutableStateOf(false) }
+  val maybeShownError = maybeError.takeUnless { isErrorEdited || isBusy }
   val focus = remember { FocusRequester() }
   val keyboard = LocalSoftwareKeyboardController.current
-  val submit = {
+  val submit: () -> Unit = {
     if (!isBusy) {
       // The keyboard would hide the progress and the answer.
       keyboard?.hide()
+      isErrorEdited = false
       onSubmit(address)
     }
   }
@@ -82,18 +88,22 @@ fun ServerEntryScreen(
     )
     OutlinedTextField(
       value = address,
-      onValueChange = { address = it },
+      onValueChange = {
+        address = it
+        isErrorEdited = true
+      },
       label = { Text(stringResource(R.string.server_entry_label)) },
       placeholder = { Text(stringResource(R.string.server_entry_placeholder)) },
       keyboardOptions = ADDRESS_KEYBOARD,
       keyboardActions = KeyboardActions(onGo = { submit() }),
       singleLine = true,
       readOnly = isLocked,
-      isError = maybeError != null,
-      modifier = Modifier.fillMaxWidth().focusRequester(focus),
+      isError = maybeShownError != null,
+      supportingText = supportingText(maybeShownError),
+      modifier = Modifier.fillMaxWidth().focusRequester(focus).fieldError(maybeShownError),
     )
-    maybeError?.let { ErrorLine(it) }
-    Button(onClick = submit, enabled = !isBusy && address.isNotBlank(), modifier = Modifier.fillMaxWidth()) {
+    // Never silently disabled: an empty address is refused with its message at the field.
+    Button(onClick = submit, enabled = !isBusy, modifier = Modifier.fillMaxWidth()) {
       if (isBusy) {
         CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp)
       } else {
@@ -101,8 +111,9 @@ fun ServerEntryScreen(
       }
     }
   }
-  LaunchedEffect(isLocked) {
-    if (!isLocked) focus.requestFocus()
+  // On start, and again when the server refused the address: the field takes the focus.
+  LaunchedEffect(isLocked, maybeError, isBusy) {
+    if (!isLocked && !isBusy) focus.requestFocus()
   }
 }
 

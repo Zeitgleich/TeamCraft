@@ -40,7 +40,7 @@
   <string name="mention_keywords">Keywords</string>
   <string name="mention_keywords_hint">Comma-separated. Messages with these words count as mentions when they reach this phone.</string>
   <string name="mention_confirm_over">Confirm @channel above this many members</string>
-  <string name="mention_confirm_over_hint">0 never asks.</string>
+  <string name="mention_confirm_over_hint">0 to 99999. 0 never asks.</string>
   <string name="search_prefetch_title">Search</string>
   <string name="search_prefetch">Download search history on Wi-Fi while charging</string>
   <string name="search_prefetch_hint">Keeps older messages searchable without a connection. The search index stays encrypted on this phone.</string>
@@ -66,4 +66,9 @@
     <item quantity="other">%d other people in the call</item>
   </plurals>
   <string name="call_start">Start a call</string>
+  <string name="mention_confirm_over_range">Enter a number from 0 to 99999.</string>
+  <plurals name="mention_confirm_over_unit">
+    <item quantity="one">member</item>
+    <item quantity="other">members</item>
+  </plurals>
 </resources>

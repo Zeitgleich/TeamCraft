@@ -16,4 +16,7 @@
   <string name="custom_status_hint">Was machst du gerade?</string>
   <string name="custom_status_set">Bis heute Abend setzen</string>
   <string name="custom_status_clear">Entfernen</string>
+  <string name="custom_status_emoji">Emoji</string>
+  <string name="custom_status_text">Status</string>
+  <string name="custom_status_missing">Gib einen Statustext ein.</string>
 </resources>

@@ -36,4 +36,7 @@
   <string name="org_recovery_new_passphrase">Choose a new recovery passphrase for your key backup:</string>
   <string name="org_recovery_finish">Finish recovery</string>
   <string name="org_recovery_pending">The admins haven\'t approved yet. Try again in a moment.</string>
+  <string name="passphrase_missing">Enter a passphrase.</string>
+  <string name="passphrase_repeat_missing">Enter the passphrase again.</string>
+  <string name="passphrase_rule_short">At least 12 characters.</string>
 </resources>

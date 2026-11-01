@@ -40,7 +40,7 @@
   <string name="mention_keywords">Stichwörter</string>
   <string name="mention_keywords_hint">Durch Kommas getrennt. Nachrichten mit diesen Wörtern zählen als Erwähnung, wenn sie dieses Telefon erreichen.</string>
   <string name="mention_confirm_over">@channel ab so vielen Mitgliedern bestätigen</string>
-  <string name="mention_confirm_over_hint">0 fragt nie.</string>
+  <string name="mention_confirm_over_hint">0 bis 99999. 0 fragt nie.</string>
   <string name="search_prefetch_title">Suche</string>
   <string name="search_prefetch">Suchverlauf im WLAN beim Laden herunterladen</string>
   <string name="search_prefetch_hint">Ältere Nachrichten bleiben ohne Verbindung durchsuchbar. Der Suchindex bleibt verschlüsselt auf diesem Telefon.</string>
@@ -66,4 +66,9 @@
     <item quantity="other">%d weitere Personen im Anruf</item>
   </plurals>
   <string name="call_start">Anruf starten</string>
+  <string name="mention_confirm_over_range">Gib eine Zahl von 0 bis 99999 ein.</string>
+  <plurals name="mention_confirm_over_unit">
+    <item quantity="one">Mitglied</item>
+    <item quantity="other">Mitglieder</item>
+  </plurals>
 </resources>
