@@ -37,7 +37,11 @@ impl CommandError {
 
 impl From<AuthError> for CommandError {
   fn from(error: AuthError) -> Self {
-    Self::new(error.kind(), error.to_string())
+    match error {
+      // The UI shows the provider's code itself (issue #1063).
+      AuthError::AuthorizationRefused(code) => Self::new("authorization_refused", code),
+      other => Self::new(other.kind(), other.to_string()),
+    }
   }
 }
 
@@ -295,7 +299,11 @@ pub async fn auth_login(
       .open_url(url, None::<&str>)
       .map_err(|error| error.to_string())
   };
-  let signed_in = service.login(&look, &request, open).await?;
+  let signed_in = service.login(&look, &request, open).await.inspect_err(|error| {
+    if !matches!(error, AuthError::Cancelled) {
+      tracing::warn!(kind = error.kind(), %error, "sign-in failed");
+    }
+  })?;
   if let (Some(profile), Some(hint)) = (maybe_profile, signed_in.maybe_login_hint)
     && let Err(error) = servers
       .directory

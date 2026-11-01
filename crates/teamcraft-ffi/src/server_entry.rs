@@ -3,6 +3,7 @@
 //! desktop app. The apps fetch `GET /api/v1/server-info` (Android through [`crate::http_fetch`])
 //! without following redirects and hand the answer over.
 
+use teamcraft_client_api::oidc_login::AuthorizationErrorKind as AuthorizationErrorKindApi;
 use teamcraft_client_api::server_entry::{
   self, HttpPolicy, ServerAddressError, ServerAnswer, ServerCheckError, ServerOrigin, ServerProfile,
 };
@@ -236,6 +237,39 @@ pub fn login_hint_from_id_token(id_token: String) -> Option<String> {
   teamcraft_client_api::oidc_login::login_hint_from_id_token(&id_token)
 }
 
+/// What the identity provider's `error` in the sign-in redirect means (issue #1063). The apps
+/// retry [`AuthorizationErrorKind::AlreadySignedIn`] once, with `prompt=login` kept.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
+pub enum AuthorizationErrorKind {
+  /// `already_logged_in`: the browser re-sent a finished login; a fresh request fixes it.
+  AlreadySignedIn,
+  /// `access_denied`: the account may not use the app.
+  AccessDenied,
+  /// The provider refuses the app's request (`invalid_request`, `unauthorized_client`, …): an
+  /// admin has to fix the client registration.
+  Misconfigured,
+  /// Anything else; the screen shows the code.
+  Other,
+}
+
+/// The kind of the sign-in redirect's `error` value.
+#[uniffi::export]
+pub fn authorization_error_kind(code: String) -> AuthorizationErrorKind {
+  match AuthorizationErrorKindApi::from_code(&code) {
+    AuthorizationErrorKindApi::AlreadySignedIn => AuthorizationErrorKind::AlreadySignedIn,
+    AuthorizationErrorKindApi::AccessDenied => AuthorizationErrorKind::AccessDenied,
+    AuthorizationErrorKindApi::Misconfigured => AuthorizationErrorKind::Misconfigured,
+    AuthorizationErrorKindApi::Other => AuthorizationErrorKind::Other,
+  }
+}
+
+/// The sign-in redirect's `error` value as it may be shown and logged (`unknown` unless it is a
+/// plain ASCII code).
+#[uniffi::export]
+pub fn shown_authorization_error_code(code: String) -> String {
+  teamcraft_client_api::oidc_login::shown_error_code(&code)
+}
+
 fn stored(profile: &ServerProfile) -> Result<StoredServer, ServerEntryError> {
   let profile_json =
     serde_json::to_string(profile).map_err(|error| ServerEntryError::InvalidSignIn(error.to_string()))?;
@@ -346,6 +380,19 @@ mod tests {
     assert_eq!(hinted.maybe_login_hint.as_deref(), Some("alice"));
     let back = stored_server(hinted.profile_json.clone()).unwrap();
     assert_eq!(back, hinted);
+  }
+
+  #[test]
+  fn authorization_errors_keep_their_kind() {
+    assert_eq!(
+      authorization_error_kind("already_logged_in".into()),
+      AuthorizationErrorKind::AlreadySignedIn
+    );
+    assert_eq!(
+      authorization_error_kind("unauthorized_client".into()),
+      AuthorizationErrorKind::Misconfigured
+    );
+    assert_eq!(shown_authorization_error_code("a b".into()), "unknown");
   }
 
   #[test]
