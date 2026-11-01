@@ -829,10 +829,10 @@ impl Engine {
     let backend = self.backend()?;
     let conversation: ConversationId = parse_id(conversation_id)?;
     self.signals.catch_up_focus.set(conversation);
-    let count = backend.message_count(conversation);
-    let len = usize::try_from(limit).unwrap_or(usize::MAX).min(count);
-    let messages = backend.messages(conversation, count - len, len);
-    Ok(self.message_items(backend, &messages))
+    // One read for count and page: a separate count could change before the page is read and
+    // shift the window (issue #1060).
+    let tail = backend.feed_tail(conversation, None, usize::try_from(limit).unwrap_or(usize::MAX));
+    Ok(self.message_items(backend, &tail.messages))
   }
 
   pub(crate) fn messages_from(
