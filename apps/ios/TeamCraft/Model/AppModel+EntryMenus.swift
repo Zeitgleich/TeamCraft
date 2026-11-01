@@ -12,7 +12,7 @@ extension AppModel {
   }
 
   /// `{origin}/c/{id}`, or `nil` where the server has no web address.
-  func shareLink(forConversation conversationId: String) -> AppFailure? {
+  func shareLink(forConversation conversationId: String) -> String? {
     guard let origin = maybeServer?.address.origin else { return nil }
     return conversationLink(origin: origin, conversationId: conversationId)
   }
