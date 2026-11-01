@@ -2663,34 +2663,83 @@ mod tests {
       assert_eq!(server_ids(&tail), [103, 104, 105]);
     }
 
+    #[test]
+    fn hidden_rows_and_thread_replies_are_left_out_and_replies_sent_to_the_channel_kept() {
+      let (backend, conversation, store) = feed_with_store(3);
+      let reply = |n: i64, is_also_in_channel: bool| StoredMessage {
+        maybe_thread_id: Some(ThreadId::from_snowflake(id::<MessageId>(101).snowflake())),
+        content: MessageContent::Text {
+          body: format!("reply {n}"),
+          mentions: Vec::new(),
+          meta: crate::store::MessageMeta {
+            is_also_in_channel,
+            ..Default::default()
+          },
+        },
+        ..stored(conversation, n)
+      };
+      store.upsert_message(&reply(4, true)).unwrap();
+      store.upsert_message(&reply(5, false)).unwrap();
+      let reaction = StoredMessage {
+        content: MessageContent::Reaction {
+          target: stored(conversation, 3).client_message_id,
+          emoji: "+1".to_string(),
+          is_added: true,
+        },
+        ..stored(conversation, 6)
+      };
+      store.upsert_message(&reaction).unwrap();
+
+      assert_eq!(backend.message_count(conversation), 4);
+      let tail = backend.feed_tail(conversation, None, 2);
+      assert_eq!(server_ids(&tail), [103, 104], "the newest two feed rows");
+      let count = backend.message_count(conversation);
+      let page = backend.messages(conversation, count - 2, 2);
+      let paged: Vec<i64> = page.iter().map(|message| message.id.snowflake().get()).collect();
+      assert_eq!(paged, [103, 104], "count and page agree");
+    }
+
     fn feed_of(count: i64) -> (CoreChatBackend<std::sync::Arc<MemoryStore>>, ConversationId) {
+      let (backend, conversation, _) = feed_with_store(count);
+      (backend, conversation)
+    }
+
+    fn feed_with_store(
+      count: i64,
+    ) -> (
+      CoreChatBackend<std::sync::Arc<MemoryStore>>,
+      ConversationId,
+      std::sync::Arc<MemoryStore>,
+    ) {
       let store = std::sync::Arc::new(MemoryStore::new());
       let conversation = id::<ConversationId>(10);
       for n in 1..=count {
-        store
-          .upsert_message(&StoredMessage {
-            conversation_id: conversation,
-            client_message_id: ClientMessageId::from_bytes([u8::try_from(n).unwrap(); 16]),
-            maybe_server_id: Some(id(100 + n)),
-            sender_user_id: id(2),
-            maybe_thread_id: None,
-            sent_at_ms: n * 1_000,
-            content: MessageContent::Text {
-              body: format!("message {n}"),
-              mentions: Vec::new(),
-              meta: Default::default(),
-            },
-            is_edited: false,
-            edits: Vec::new(),
-            maybe_edit_id: None,
-            is_pinned: false,
-            maybe_verified_commit: None,
-            maybe_server_change: None,
-          })
-          .unwrap();
+        store.upsert_message(&stored(conversation, n)).unwrap();
       }
-      let backend = CoreChatBackend::new(store, id(1), Box::new(ManualClock::new(10_000)));
-      (backend, conversation)
+      let backend = CoreChatBackend::new(store.clone(), id(1), Box::new(ManualClock::new(10_000)));
+      (backend, conversation, store)
+    }
+
+    fn stored(conversation: ConversationId, n: i64) -> StoredMessage {
+      StoredMessage {
+        conversation_id: conversation,
+        client_message_id: ClientMessageId::from_bytes([u8::try_from(n).unwrap(); 16]),
+        maybe_server_id: Some(id(100 + n)),
+        sender_user_id: id(2),
+        maybe_thread_id: None,
+        sent_at_ms: n * 1_000,
+        content: MessageContent::Text {
+          body: format!("message {n}"),
+          mentions: Vec::new(),
+          meta: Default::default(),
+        },
+        is_edited: false,
+        edits: Vec::new(),
+        maybe_edit_id: None,
+        is_pinned: false,
+        maybe_verified_commit: None,
+        maybe_server_change: None,
+      }
     }
 
     fn anchor(server_id: i64, sent_at: TimestampMs) -> FeedAnchor {
@@ -3408,7 +3457,7 @@ mod tests {
         content: MessageContent::Text {
           body: "old news".into(),
           mentions: Vec::new(),
-          meta: MessageMeta {
+          meta: crate::store::MessageMeta {
             maybe_imported: Some(Box::new(ImportedOrigin {
               source: ImportSource::Synology,
               source_id: "1".into(),

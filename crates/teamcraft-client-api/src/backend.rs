@@ -83,7 +83,8 @@ pub trait ChatBackend {
   fn direct_conversations(&self) -> Vec<Conversation>;
   fn conversation(&self, id: ConversationId) -> Option<Conversation>;
 
-  /// Number of top-level messages (thread replies excluded).
+  /// Number of rows of the feed, as [`Self::messages`] pages them: top-level messages and replies
+  /// also sent to the conversation.
   fn message_count(&self, conversation: ConversationId) -> usize;
 
   /// Messages of the conversation received but not readable on this device yet (their keys have
@@ -95,7 +96,8 @@ pub trait ChatBackend {
   fn last_activity(&self, _conversation: ConversationId) -> Option<TimestampMs> {
     None
   }
-  /// Top-level messages `start..start + len`, oldest first. Out-of-range parts are clipped.
+  /// Feed rows `start..start + len`, oldest first, counted as [`Self::message_count`] counts
+  /// them. Out-of-range parts are clipped.
   fn messages(&self, conversation: ConversationId, start: usize, len: usize) -> Vec<Message>;
   /// Messages `start..start + len` will be read soon (the rows just beyond what the feed shows):
   /// a backend that loads them asynchronously starts now, so they are there when scrolled to
