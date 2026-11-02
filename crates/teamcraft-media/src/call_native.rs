@@ -16,6 +16,7 @@
 use std::collections::{HashMap, VecDeque};
 use std::future::Future;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, UdpSocket};
+use std::ops::RangeInclusive;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -74,7 +75,12 @@ const MAX_SIGNALING_BYTES: usize = 1024 * 1024;
 /// At most this much audio waits for the speakers (latency bound).
 const MAX_PLAYBACK_BUFFER_SAMPLES: usize = 48_000 / 5;
 /// QUIC application close code of a deliberate leave.
+/// The call socket's receive buffer: some of the keyframes a viewer may get at once.
+const RECEIVE_BUFFER_BYTES: usize = 2 * 1024 * 1024;
 const LEAVE: u32 = 0;
+/// HTTP/3's and QPACK's error codes (RFC 9114, section 8.1; RFC 9204, section 6), without
+/// H3_NO_ERROR.
+const H3_ERROR_CODES: RangeInclusive<u64> = 0x101..=0x3ff;
 /// How long a broken signaling stream waits for its connection's close reason.
 const STREAM_CLOSE_WAIT: Duration = Duration::from_millis(200);
 /// How often the route toward the SFU is looked up (see [`RouteWatch`]).
@@ -1278,7 +1284,8 @@ async fn connect_to(
   certificate_hashes: &[[u8; 32]],
   resilience: &ResilienceConfig,
 ) -> Result<(Endpoint<Client>, Connection), NativeCallError> {
-  let builder = ClientConfig::builder().with_bind_default();
+  let socket = bind_wildcard(true).map_err(|error| NativeCallError::Connect(error.to_string()))?;
+  let builder = ClientConfig::builder().with_bind_socket(socket);
   let builder = if certificate_hashes.is_empty() {
     with_trusted_roots(builder)
   } else {
@@ -1323,27 +1330,36 @@ fn bind_wildcard(is_ipv6: bool) -> std::io::Result<UdpSocket> {
   if is_ipv6 {
     socket.set_only_v6(false)?;
   }
+  // Room for a keyframe's burst while the call's threads are busy. The system caps the size without
+  // an error; a socket with less only loses a picture more often, which the call recovers from.
+  if let Err(error) = socket.set_recv_buffer_size(RECEIVE_BUFFER_BYTES) {
+    debug!(%error, "could not size the call socket's receive buffer");
+  }
   socket.bind(&address.into())?;
   Ok(socket.into())
 }
 
 /// A deliberate close by the SFU ends the call, unless the SFU is going away; anything else is a
-/// loss to recover from.
+/// loss to recover from, also an HTTP/3 error on our side: this connection is broken, not the call.
 fn link_end(error: &ConnectionError) -> LinkEnd {
   match error {
     ConnectionError::ApplicationClosed(close) => application_close_end(close.code().into_inner()),
-    ConnectionError::LocallyClosed | ConnectionError::LocalH3Error(_) => LinkEnd::Closed,
-    ConnectionError::ConnectionClosed(_)
+    ConnectionError::LocallyClosed => LinkEnd::Closed,
+    ConnectionError::LocalH3Error(_)
+    | ConnectionError::ConnectionClosed(_)
     | ConnectionError::TimedOut
     | ConnectionError::QuicProto(_)
     | ConnectionError::CidsExhausted => LinkEnd::Lost,
   }
 }
 
-/// How a close by the SFU with this application code ends the link.
+/// How a close by the SFU with this application code ends the link. HTTP/3's errors are no
+/// decision by the SFU: its HTTP/3 layer gave up on this connection (a rejoin gets a new one).
 fn application_close_end(code: u64) -> LinkEnd {
   if code == u64::from(SFU_GOING_AWAY_CLOSE_CODE) {
     LinkEnd::GoingAway
+  } else if H3_ERROR_CODES.contains(&code) {
+    LinkEnd::Lost
   } else {
     LinkEnd::Closed
   }
@@ -2341,6 +2357,21 @@ mod tests {
     for code in [0, 0x4801, 0x4802, 0x4804] {
       assert_eq!(application_close_end(code), LinkEnd::Closed, "{code:#x}");
     }
+  }
+
+  #[test]
+  fn an_http3_error_is_a_loss_to_rejoin_after() {
+    // H3_FRAME_UNEXPECTED and QPACK's last error from the SFU's HTTP/3 layer.
+    for code in [0x105, 0x202] {
+      assert_eq!(application_close_end(code), LinkEnd::Lost, "{code:#x}");
+    }
+    // H3_NO_ERROR: how the session close (the capsule) ends the QUIC connection.
+    assert_eq!(application_close_end(0x100), LinkEnd::Closed);
+    assert_eq!(
+      link_end(&ConnectionError::LocallyClosed),
+      LinkEnd::Closed,
+      "our own leave"
+    );
   }
 
   #[test]

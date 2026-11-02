@@ -39,8 +39,9 @@ use teamcraft_proto::{
 use teamcraft_sfu::auth::DevTokenVerifier;
 use teamcraft_sfu::config::SfuConfig;
 use teamcraft_sfu::server::{CALL_PATH, Sfu};
-use tokio::net::UdpSocket;
 use wtransport::Identity;
+
+use crate::common::relay::{bind_sockets, dropped_by_kernel, receive_on_thread};
 
 /// A 14" Retina display (3024×1964) fitted into the detail mode's 1440p, as ScreenCaptureKit
 /// captures it.
@@ -138,6 +139,9 @@ struct Timeline {
   encoded: Vec<Encoded>,
   /// What the presenter heard: the layers someone receives, its uplink estimate.
   heard: Vec<(Duration, Heard)>,
+  /// Packets the kernel dropped at the test's relays: a sign of a starved machine, not of a
+  /// regression.
+  dropped_at_relays: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -156,6 +160,25 @@ struct Decoded {
   own_psnr_db: f64,
 }
 
+/// A picture as it came out of the viewer's decoder. Judged after the run: comparing 1440p pictures
+/// on the viewer's decoding thread takes the CPU the call needs, and a debug build's much of it.
+struct Received {
+  at: Duration,
+  frame: VideoFrame,
+}
+
+impl Received {
+  fn judged(&self, sources: &[VideoFrame], shown: &BTreeMap<u64, usize>) -> Decoded {
+    let source = &sources[shown_at(shown, self.frame.timestamp_us())];
+    Decoded {
+      at: self.at,
+      resolution: self.frame.resolution(),
+      psnr_db: psnr_at_shared_size(source, &self.frame),
+      own_psnr_db: luma_psnr(&source.scaled(self.frame.resolution()).unwrap(), &self.frame),
+    }
+  }
+}
+
 #[derive(Debug, Clone, Copy)]
 struct Encoded {
   at: Duration,
@@ -168,8 +191,8 @@ struct Encoded {
 async fn run(scenario: Scenario, duration: Duration) -> Timeline {
   let (port, certificate_hash) = start_sfu().await;
   let sfu = SocketAddr::new(Ipv6Addr::LOCALHOST.into(), port);
-  let presenter_relay = Relay::start(sfu).await;
-  let viewer_relay = Relay::start(sfu).await;
+  let presenter_relay = Relay::start(sfu);
+  let viewer_relay = Relay::start(sfu);
   let mut presenter = join(presenter_relay.address, certificate_hash, 1, 2).await;
   let mut viewer = join(viewer_relay.address, certificate_hash, 2, 1).await;
   wait_until_secured(&mut presenter).await;
@@ -212,7 +235,7 @@ async fn run(scenario: Scenario, duration: Duration) -> Timeline {
   };
   presenter.start_video(config).await.unwrap();
 
-  let decoded: Arc<Mutex<Vec<Decoded>>> = Arc::default();
+  let received: Arc<Mutex<Vec<Received>>> = Arc::default();
   let mut heard = Vec::new();
   let end = tokio::time::Instant::now() + duration;
   while tokio::time::Instant::now() < end {
@@ -229,20 +252,14 @@ async fn run(scenario: Scenario, duration: Duration) -> Timeline {
       tokio::time::timeout(Duration::from_millis(5), viewer.next_event()).await
       && track.kind == VideoTrackKind::Screen
     {
-      let (sink, sources, shown) = (Arc::clone(&decoded), Arc::clone(&sources), Arc::clone(&shown));
+      let sink = Arc::clone(&received);
       viewer.watch_video(
         track.stream_id,
         None,
         Box::new(move |frame| {
-          let at = start.elapsed();
-          let source = shown_at(&shown.lock().unwrap(), frame.timestamp_us());
-          let psnr_db = psnr_at_shared_size(&sources[source], &frame);
-          let own_psnr_db = luma_psnr(&sources[source].scaled(frame.resolution()).unwrap(), &frame);
-          sink.lock().unwrap().push(Decoded {
-            at,
-            resolution: frame.resolution(),
-            psnr_db,
-            own_psnr_db,
+          sink.lock().unwrap().push(Received {
+            at: start.elapsed(),
+            frame,
           });
         }),
       );
@@ -251,12 +268,19 @@ async fn run(scenario: Scenario, duration: Duration) -> Timeline {
   presenter.stop_video(VideoTrackKind::Screen);
   presenter.leave().await.unwrap();
   viewer.leave().await.unwrap();
-  let decoded = decoded.lock().unwrap().clone();
+  let shown = shown.lock().unwrap();
+  let decoded = received
+    .lock()
+    .unwrap()
+    .iter()
+    .map(|received| received.judged(&sources, &shown))
+    .collect();
   let encoded = encoded.lock().unwrap().clone();
   Timeline {
     decoded,
     encoded,
     heard,
+    dropped_at_relays: presenter_relay.dropped_by_kernel() + viewer_relay.dropped_by_kernel(),
   }
 }
 
@@ -346,6 +370,10 @@ impl Timeline {
         presenter.join(" ")
       ));
     }
+    lines.push(format!(
+      "packets dropped at the relays: {}",
+      self.dropped_at_relays
+    ));
     lines.join("\n")
   }
 }
@@ -609,57 +637,52 @@ async fn pump_for(presenter: &mut NativeCall, viewer: &mut NativeCall, duration:
 /// direction.
 struct Relay {
   address: SocketAddr,
+  sockets: [Arc<std::net::UdpSocket>; 2],
   to_sfu_losing: Arc<AtomicBool>,
   to_client_losing: Arc<AtomicBool>,
 }
 
 impl Relay {
-  async fn start(sfu: SocketAddr) -> Self {
-    let client_side = Arc::new(UdpSocket::bind((Ipv6Addr::LOCALHOST, 0)).await.unwrap());
-    let sfu_side = Arc::new(UdpSocket::bind((Ipv6Addr::LOCALHOST, 0)).await.unwrap());
-    sfu_side.connect(sfu).await.unwrap();
+  fn start(sfu: SocketAddr) -> Self {
+    let (client_side, sfu_side) = bind_sockets(sfu);
     let address = client_side.local_addr().unwrap();
     let (to_sfu_losing, to_client_losing) =
       (Arc::new(AtomicBool::new(false)), Arc::new(AtomicBool::new(false)));
     let client: Arc<Mutex<Option<SocketAddr>>> = Arc::default();
-    let (from_client, to_sfu, known_client, losing) = (
-      Arc::clone(&client_side),
+    let (to_sfu, known_client, losing) = (
       Arc::clone(&sfu_side),
       Arc::clone(&client),
       Arc::clone(&to_sfu_losing),
     );
-    tokio::spawn(async move {
-      let mut buffer = vec![0; 65_536];
-      let mut is_odd = false;
-      while let Ok((len, from)) = from_client.recv_from(&mut buffer).await {
-        *known_client.lock().unwrap() = Some(from);
-        is_odd = !is_odd;
-        if losing.load(Ordering::Relaxed) && is_odd {
-          continue;
-        }
-        let _ = to_sfu.send(&buffer[..len]).await;
+    let mut is_odd = false;
+    receive_on_thread(Arc::clone(&client_side), move |packet, from| {
+      *known_client.lock().unwrap() = Some(from);
+      is_odd = !is_odd;
+      if !(losing.load(Ordering::Relaxed) && is_odd) {
+        let _ = to_sfu.send(packet);
       }
     });
-    let losing = Arc::clone(&to_client_losing);
-    tokio::spawn(async move {
-      let mut buffer = vec![0; 65_536];
-      let mut is_odd = false;
-      while let Ok(len) = sfu_side.recv(&mut buffer).await {
-        is_odd = !is_odd;
-        if losing.load(Ordering::Relaxed) && is_odd {
-          continue;
-        }
-        let maybe_client = *client.lock().unwrap();
-        if let Some(client) = maybe_client {
-          let _ = client_side.send_to(&buffer[..len], client).await;
-        }
+    let (to_client, losing) = (Arc::clone(&client_side), Arc::clone(&to_client_losing));
+    let mut is_odd = false;
+    receive_on_thread(Arc::clone(&sfu_side), move |packet, _| {
+      is_odd = !is_odd;
+      let maybe_client = *client.lock().unwrap();
+      if let Some(client) = maybe_client
+        && !(losing.load(Ordering::Relaxed) && is_odd)
+      {
+        let _ = to_client.send_to(packet, client);
       }
     });
     Self {
       address,
+      sockets: [client_side, sfu_side],
       to_sfu_losing,
       to_client_losing,
     }
+  }
+
+  fn dropped_by_kernel(&self) -> u64 {
+    dropped_by_kernel(&[&self.sockets[0], &self.sockets[1]]).unwrap_or(0)
   }
 }
 

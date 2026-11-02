@@ -20,11 +20,12 @@
 
 use std::{
   future::Future,
-  net::SocketAddr,
+  net::{SocketAddr, UdpSocket},
   sync::Arc,
   time::{Duration, Instant},
 };
 
+use socket2::{Domain, Protocol, Socket, Type};
 use teamcraft_proto::{
   CallClientMessage, CallEvent, CallServerMessage, ErrorBody, ErrorCode, SFU_GOING_AWAY_CLOSE_CODE,
   SfuControlRequest, SfuRosterReport,
@@ -35,7 +36,6 @@ use tokio::time::MissedTickBehavior;
 use tracing::{Instrument, debug, info, info_span, warn};
 use wtransport::{
   Connection, Endpoint, Identity, RecvStream, SendStream, ServerConfig,
-  config::Ipv6DualStackConfig,
   endpoint::{IncomingSession, endpoint_side::Server},
   tls::Sha256Digest,
 };
@@ -140,12 +140,8 @@ impl Sfu {
       .first()
       .ok_or(SfuError::NoCertificate)?
       .hash();
-    let builder = ServerConfig::builder();
-    let builder = match config.bind_addr {
-      SocketAddr::V6(addr) => builder.with_bind_address_v6(addr, Ipv6DualStackConfig::Allow),
-      SocketAddr::V4(_) => builder.with_bind_address(config.bind_addr),
-    };
-    let server_config = builder
+    let server_config = ServerConfig::builder()
+      .with_bind_socket(bind_socket(&config).map_err(SfuError::Bind)?)
       .with_identity(identity)
       .keep_alive_interval(Some(config.keep_alive_interval))
       .max_idle_timeout(Some(config.idle_timeout))
@@ -272,6 +268,22 @@ impl Shared {
       calls: self.rooms.roster(),
     }
   }
+}
+
+/// The SFU's socket, dual stack where bound to IPv6, with [`SfuConfig::udp_receive_buffer_bytes`]
+/// (as far as the system allows: it caps the size at `net.core.rmem_max` without an error).
+fn bind_socket(config: &SfuConfig) -> std::io::Result<UdpSocket> {
+  let socket = Socket::new(
+    Domain::for_address(config.bind_addr),
+    Type::DGRAM,
+    Some(Protocol::UDP),
+  )?;
+  if config.bind_addr.is_ipv6() {
+    socket.set_only_v6(false)?;
+  }
+  socket.set_recv_buffer_size(config.udp_receive_buffer_bytes)?;
+  socket.bind(&config.bind_addr.into())?;
+  Ok(socket.into())
 }
 
 async fn handle_session(incoming: IncomingSession, shared: &Shared) -> Result<(), SessionError> {

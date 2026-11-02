@@ -6,7 +6,7 @@
 | Version      | 0.7.2, upstream commit `d022a6ad5f6260cb526e06d8ca42d09516ce6440`           |
 | License      | MIT OR Apache-2.0 (`LICENSE-MIT`, `LICENSE-APACHE`, from that commit)       |
 | Used by      | `teamcraft-media` (native call driver), `teamcraft-sfu`; `[patch.crates-io]` |
-| Why vendored | Client `Endpoint::rebind` (issue #139); sending `CLOSE_WEBTRANSPORT_SESSION` (#459) |
+| Why vendored | Client `Endpoint::rebind` (issue #139); sending `CLOSE_WEBTRANSPORT_SESSION` (#459); reads of the control streams that survive being cancelled (#1139) |
 
 ## Why
 
@@ -35,9 +35,17 @@ crates/vendor/wtransport` shows every change since.
    `Connection::closed()`: when the QUIC connection ended locally because the peer's capsule
    arrived, it reports that capsule's code and reason as `ConnectionError::ApplicationClosed`
    instead of `LocallyClosed`, so a native client still learns the SFU's going-away code.
-3. `Cargo.toml`: an empty `[workspace]` table so the copy builds and tests on its own (our workspace
+3. Control stream reads that survive being cancelled (#1139): the driver's worker polls them in a
+   `select!` and drops them each time anything else happens on the connection, but
+   `Frame::read_async` isn't cancel safe, and frames are written as type, length and payload, which
+   may arrive in separate packets. The bytes already read were lost and the rest taken for new
+   frames, which closed the connection (`H3_FRAME_UNEXPECTED`, 261; other codes as well).
+   `src/driver/streams/mod.rs` (`FrameReadProgress`, `read_frame_resumable`), `settings.rs` and
+   `connect.rs`. Checked end to end by `teamcraft-sfu`'s `tests/suite/handshake_frames.rs`. Worth
+   reporting upstream.
+4. `Cargo.toml`: an empty `[workspace]` table so the copy builds and tests on its own (our workspace
    excludes `crates/vendor`).
-4. Added `VENDORED.md`, `UPSTREAM_PR.md` with `upstream.patch` (change 1, relative to the upstream
+5. Added `VENDORED.md`, `UPSTREAM_PR.md` with `upstream.patch` (change 1, relative to the upstream
    repository), `.gitignore` (standalone `Cargo.lock` and `target/`).
 
 No other source changes. The capsule encoding is covered by unit tests in `connect.rs`

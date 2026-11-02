@@ -119,6 +119,9 @@ exists; clients can still read what they have stored locally.
   from clients (QUIC); its health endpoint (`8081/tcp`) is for the orchestrator only. Calls don't
   work on networks that block outbound UDP (some corporate, hotel and guest networks); there is no
   TCP fallback yet (ARCHITECTURE.md §6.6), so name the port in the instructions for users.
+- The SFU asks for a 4 MiB UDP receive buffer (`TEAMCRAFT_SFU_UDP_RECEIVE_BUFFER_BYTES`), so a
+  keyframe's burst isn't lost while it is busy. The kernel caps it at `net.core.rmem_max` without an
+  error, often about 200 KiB: raise that sysctl on the host to at least the same value.
 - Keep the SFU's UDP port out of anything that tracks UDP "connections" by address and port (a
   load balancer without QUIC connection-ID routing, a strict stateful firewall): when a client
   changes networks its QUIC connection continues from a new address (connection migration,

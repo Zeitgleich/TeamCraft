@@ -9,6 +9,7 @@ mod camera_start;
 mod common;
 mod dave_call;
 mod handover;
+mod handshake_frames;
 mod host_controls;
 mod multi_device;
 mod native_client;
