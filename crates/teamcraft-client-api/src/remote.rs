@@ -1363,6 +1363,8 @@ pub enum ChatQuery {
   OlderHistory {
     conversation: ConversationId,
   },
+  /// [`ChatBackend::first_sync`].
+  FirstSync,
   /// The `#fragment` values of a guest link to the meeting, once the core made them.
   GuestLinkFragment {
     meeting: teamcraft_proto::MeetingId,
@@ -1489,6 +1491,9 @@ pub enum ChatAnswer {
     older_history: crate::model::OlderHistory,
     /// The feed's rows when this was read: a mirror that holds fewer hasn't got the page yet.
     total: usize,
+  },
+  FirstSync {
+    maybe_progress: Option<crate::model::FirstSync>,
   },
   CallMoveOffer {
     maybe_offer: Option<CallMoveOffer>,
@@ -1676,6 +1681,9 @@ impl ChatQuery {
       Self::OlderHistory { conversation } => ChatAnswer::OlderHistory {
         older_history: backend.older_history(conversation),
         total: backend.message_count(conversation),
+      },
+      Self::FirstSync => ChatAnswer::FirstSync {
+        maybe_progress: backend.first_sync(),
       },
       Self::MembershipIssues { conversation } => ChatAnswer::MembershipIssues {
         issues: backend.membership_issues(conversation),

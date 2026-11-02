@@ -20,6 +20,7 @@ pub mod direct_uploads;
 pub mod disk_downloads;
 mod enroll;
 pub mod files;
+mod first_sync;
 mod gateway;
 mod group_health;
 mod groups;
@@ -81,6 +82,10 @@ pub use channel_roles::RoleSigning;
 pub(crate) use channel_roles::channel_roles_key;
 pub use enroll::{
   EnrollmentOptions, EnrollmentSecret, OrgRecoveryUnlock, PendingEnrollment, parse_recovery_key,
+};
+pub use first_sync::{
+  FirstSyncProgress, FirstSyncSignal, FirstSyncStage, HistoryBackfill, first_sync_progress,
+  notify_first_sync_during,
 };
 pub use gateway::{
   DEFAULT_HANDSHAKE_TIMEOUT, GatewayOutcome, GatewayStart, GatewayTiming, HeldFrames, HeldLimits, KeptAlive,
@@ -144,6 +149,8 @@ pub struct ClientSettings {
   pub key_package_retention: std::time::Duration,
   /// Messages per history page.
   pub history_page_size: u32,
+  /// How much older history a newly set up device reads ahead in the background.
+  pub history_backfill: HistoryBackfill,
   /// Messages per page when reading back through imported history in the background (the
   /// server caps it at its own page limit).
   pub imported_page_size: u32,
@@ -361,6 +368,8 @@ pub struct Client<A, S> {
   device_activity: DeviceActivity,
   /// The conversation the user looks at; a catch-up takes it first (issue #247).
   catch_up_focus: CatchUpFocus,
+  /// The first sync of a newly set up device, beside its record in the store.
+  first_sync: first_sync::FirstSyncState,
   /// Set while a catch-up joins the focused conversation's welcomes ahead of the others: the
   /// welcome cursor then stays where it is, so the welcomes before them are still read in order.
   /// Cleared right after each such join; a catch-up future dropped in between leaves it set until
@@ -390,6 +399,7 @@ impl Default for ClientSettings {
       key_package_check_interval: std::time::Duration::from_secs(6 * 60 * 60),
       key_package_retention: std::time::Duration::from_secs(30 * 24 * 60 * 60),
       history_page_size: 50,
+      history_backfill: HistoryBackfill::OFF,
       imported_page_size: 200,
       max_commit_attempts: 3,
       device_add_stagger: std::time::Duration::from_secs(10),
@@ -493,6 +503,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       are_welcomes_synced: false,
       maybe_waiting_checked_at_ms: None,
       catch_up_focus: CatchUpFocus::default(),
+      first_sync: Default::default(),
       is_welcome_cursor_held: false,
       sync_trace: Default::default(),
       maybe_heads: None,
@@ -503,6 +514,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     };
     // A catch-up the app was closed during left its marks; the next one sets them again.
     catch_up::clear_marks(&client.store)?;
+    client.resume_first_sync()?;
     // Startup: removal records of the user's devices count from the start, and this device's own
     // (also from older versions) are shared.
     client.apply_shared_removals()?;

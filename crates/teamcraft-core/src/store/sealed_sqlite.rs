@@ -570,6 +570,27 @@ mod tests {
     }
 
     #[test]
+    fn a_failed_group_takes_its_feed_version_along() {
+      let (store, directory) = shared_store();
+      let conversation = id(10);
+      let row = message(conversation, 1, Some(10), None, 1);
+      store.upsert_message(&row).unwrap();
+      let before = store.feed_version(conversation).unwrap();
+      store.begin_writes().unwrap();
+      store
+        .upsert_message(&crate::store::StoredMessage {
+          is_edited: true,
+          ..row
+        })
+        .unwrap();
+      assert_ne!(store.feed_version(conversation).unwrap(), before);
+      store.backend().fail_group();
+      store.end_writes().unwrap_err();
+      assert_eq!(store.feed_version(conversation).unwrap(), before);
+      finish(store, directory);
+    }
+
+    #[test]
     fn a_write_stays_out_of_the_group_and_survives_its_rollback() {
       let (store, directory) = shared_store();
       let in_group = Arc::new(Barrier::new(2));

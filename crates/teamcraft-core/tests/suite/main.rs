@@ -29,6 +29,7 @@ mod dm_setup;
 mod enrollment;
 mod files;
 mod first_add_back;
+mod first_sync;
 mod guest_meetings;
 mod import;
 mod key_packages;

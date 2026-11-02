@@ -26,7 +26,7 @@
 
 /* The title bar is the window's top edge: banners go below it. */
 :root[data-titlebar="custom"] .app {
-  grid-template-rows: var(--topbar-h) auto minmax(0, 1fr);
+  grid-template-rows: var(--topbar-h) auto auto minmax(0, 1fr);
 }
 
 :root[data-titlebar="custom"] .app > .top-bar {
@@ -37,8 +37,12 @@
   grid-row: 2;
 }
 
-:root[data-titlebar="custom"] .app > .app-body {
+:root[data-titlebar="custom"] .app > .first-sync-row {
   grid-row: 3;
+}
+
+:root[data-titlebar="custom"] .app > .app-body {
+  grid-row: 4;
 }
 
 :root[data-titlebar="custom"] .top-bar {

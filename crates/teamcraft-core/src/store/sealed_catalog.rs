@@ -38,6 +38,8 @@ pub(crate) const DIRECTORY_KIND: &str = "d";
 pub(crate) const FEED_KIND: &str = "f";
 /// Prefix of a conversation's relations index.
 pub(crate) const RELATIONS_KIND: &str = "x";
+/// Prefix of a conversation's [`super::FeedVersion`] counts.
+pub(crate) const FEED_VERSION_KIND: &str = "v";
 /// What a complete catalog holds. A store with an older one builds it again when it opens: the
 /// build only adds what is missing. 1: tables and messages; 2: feeds and relations.
 pub(crate) const CATALOG_VERSION: u32 = 2;
@@ -442,7 +444,7 @@ pub(crate) fn is_current_node(key: &str, generation: u64) -> bool {
 }
 
 /// A node's value, padded with spaces (which JSON ignores) to a power of two.
-fn encode_node<T: Serialize>(node: &T) -> Result<Vec<u8>, StoreError> {
+pub(crate) fn encode_node<T: Serialize>(node: &T) -> Result<Vec<u8>, StoreError> {
   let mut bytes = encode(node)?;
   let padded = bytes.len().next_power_of_two().max(MIN_NODE_BYTES);
   bytes.resize(padded, b' ');

@@ -1102,6 +1102,13 @@ impl ChatBackend for RemoteChat {
     )
   }
 
+  fn first_sync(&self) -> Option<teamcraft_client_api::model::FirstSync> {
+    match self.ask(ChatQuery::FirstSync) {
+      Some(ChatAnswer::FirstSync { maybe_progress }) => maybe_progress,
+      _ => None,
+    }
+  }
+
   fn key_catch_up(&self) -> Option<teamcraft_client_api::model::KeyCatchUp> {
     match self.ask(ChatQuery::KeyCatchUp) {
       Some(ChatAnswer::KeyCatchUp { maybe_progress }) => maybe_progress,

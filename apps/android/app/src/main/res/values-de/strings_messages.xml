@@ -63,6 +63,12 @@
     <item quantity="one">Von %d Person bestätigt</item>
     <item quantity="other">Von %d Personen bestätigt</item>
   </plurals>
+  <string name="first_sync_newest">Lade Nachrichten…</string>
+  <string name="first_sync_older">Lade ältere Nachrichten…</string>
+  <plurals name="first_sync_count">
+    <item quantity="one">%1$d von %2$d Unterhaltung</item>
+    <item quantity="other">%1$d von %2$d Unterhaltungen</item>
+  </plurals>
   <plurals name="key_catch_up_progress">
     <item quantity="one">Schlüssel für ältere Nachrichten werden geholt: %1$d von %2$d Unterhaltung vollständig Nachrichten erscheinen, sobald eines deiner anderen Geräte oder ein Mitglied online ist.</item>
     <item quantity="other">Schlüssel für ältere Nachrichten werden geholt: %1$d von %2$d Unterhaltungen vollständig Nachrichten erscheinen, sobald eines deiner anderen Geräte oder ein Mitglied online ist.</item>

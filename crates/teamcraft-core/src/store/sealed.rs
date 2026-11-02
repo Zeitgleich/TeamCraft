@@ -47,14 +47,14 @@ use zeroize::Zeroizing;
 
 use super::lru::Lru;
 use super::sealed_catalog::{
-  CATALOG_TABLE, CATALOG_VERSION, CatalogState, DIRECTORY_KIND, FEED_KIND, MESSAGES_KIND, META_KEY,
-  MessageEntry, MessageKey, NodeCache, NodeChange, RELATIONS_KIND, Relation, RelationKey, ScopedNodes,
-  decode, encode, is_current_node, messages_scope,
+  CATALOG_TABLE, CATALOG_VERSION, CatalogState, DIRECTORY_KIND, FEED_KIND, FEED_VERSION_KIND, MESSAGES_KIND,
+  META_KEY, MessageEntry, MessageKey, NodeCache, NodeChange, RELATIONS_KIND, Relation, RelationKey,
+  ScopedNodes, decode, encode, encode_node, generation_prefix, is_current_node, messages_scope,
 };
 use super::sealed_index::{self, Direction};
 use super::{
-  LocalStore, MediaRange, MessageEdge, MessageFilter, MessageOrder, MessageSlot, StoreError, StoredMessage,
-  Table, WriteTally,
+  FeedChange, FeedVersion, LocalStore, MediaRange, MessageEdge, MessageFilter, MessageOrder, MessageSlot,
+  StoreError, StoredMessage, Table, WriteTally,
 };
 
 const ENTRY_NAMESPACE: &str = "entry";
@@ -99,6 +99,8 @@ struct State<B> {
   relation_nodes: NodeCache<RelationKey, ()>,
   /// Writes per conversation since the caches were last dropped ([`LocalStore::message_revision`]).
   revisions: HashMap<ConversationId, u64>,
+  /// The catalog's [`FeedVersion`] counts as read or written, by conversation; none on disk is zero.
+  feed_versions: HashMap<ConversationId, FeedVersion>,
   /// Raised whenever the caches are dropped: part of every revision.
   epoch: u64,
   depth: u32,
@@ -292,6 +294,7 @@ impl<B: RecordBackend> SealedStore<B> {
         feed_nodes: NodeCache::new(FEED_KIND, limits.max_index_nodes),
         relation_nodes: NodeCache::new(RELATIONS_KIND, limits.max_index_nodes),
         revisions: HashMap::new(),
+        feed_versions: HashMap::new(),
         epoch: 0,
         depth: 0,
         maybe_group_owner: None,
@@ -501,6 +504,9 @@ impl<B: RecordBackend> SealedStore<B> {
     else {
       return Ok(());
     };
+    if let Some(change) = maybe_earlier.and_then(|earlier| FeedChange::of(earlier, maybe_message)) {
+      self.note_feed_change(state, conversation, change)?;
+    }
     let feed_key = |message: &StoredMessage| message.is_feed_row().then(|| MessageKey::of(message));
     let relation_keys = |message: &StoredMessage| -> Vec<RelationKey> {
       let key = MessageKey::of(message);
@@ -542,6 +548,61 @@ impl<B: RecordBackend> SealedStore<B> {
       })?;
     }
     Ok(())
+  }
+
+  /// Counts `change` in the group of writes that makes it, so the count can't get ahead of or fall
+  /// behind the messages. Under a catalog's generation: a catalog built again starts over.
+  fn note_feed_change(
+    &self,
+    state: &mut State<B>,
+    conversation: ConversationId,
+    change: FeedChange,
+  ) -> Result<(), StoreError> {
+    let Some(version) = self.current_feed_version(state, conversation)? else {
+      return Ok(());
+    };
+    let version = version.after(change);
+    let key = feed_version_key(version.generation, conversation);
+    let counts = [version.generation, version.reshaped, version.edited];
+    self.write_named(CATALOG_TABLE, &key, &encode_node(&counts)?)?;
+    state.feed_versions.insert(conversation, version);
+    Ok(())
+  }
+
+  /// `None` until the catalog is complete: what it says of a feed is not whole yet.
+  fn current_feed_version(
+    &self,
+    state: &mut State<B>,
+    conversation: ConversationId,
+  ) -> Result<Option<FeedVersion>, StoreError> {
+    let Some(CatalogState::Complete { generation, .. }) = state.maybe_catalog else {
+      return Ok(None);
+    };
+    if let Some(version) = state.feed_versions.get(&conversation) {
+      return Ok(Some(*version));
+    }
+    let key = feed_version_key(generation, conversation);
+    // Damage to it is damage to the catalog: built again under a new generation, which no reader
+    // counted at.
+    let result = self.read_named(CATALOG_TABLE, &key);
+    state.note_catalog_result(&result);
+    let version = match result?.as_deref().map(|value| decode::<[u64; 3]>(value)) {
+      Some(Ok([stored, reshaped, edited])) if stored == generation => FeedVersion {
+        generation,
+        reshaped,
+        edited,
+      },
+      Some(_) => {
+        state.is_catalog_damaged = true;
+        return Err(StoreError::Corrupt("a feed version doesn't read".into()));
+      },
+      None => FeedVersion {
+        generation,
+        ..FeedVersion::default()
+      },
+    };
+    state.feed_versions.insert(conversation, version);
+    Ok(Some(version))
   }
 
   /// Runs `write` as a group of writes ([`LocalStore::begin_writes`]); a failed step fails the
@@ -1039,6 +1100,7 @@ impl<B> State<B> {
     self.feed_nodes.clear();
     self.relation_nodes.clear();
     self.revisions.clear();
+    self.feed_versions.clear();
     self.epoch += 1;
   }
 
@@ -1049,6 +1111,7 @@ impl<B> State<B> {
     self.directory_nodes.set_generation(maybe_generation);
     self.feed_nodes.set_generation(maybe_generation);
     self.relation_nodes.set_generation(maybe_generation);
+    self.feed_versions.clear();
     self.maybe_catalog = maybe_catalog;
   }
 
@@ -1316,6 +1379,10 @@ impl<B: RecordBackend> LocalStore for SealedStore<B> {
     true
   }
 
+  fn feed_version(&self, conversation: ConversationId) -> Result<Option<FeedVersion>, StoreError> {
+    self.reading(|state| self.current_feed_version(state, conversation))
+  }
+
   /// From the feed index's root alone.
   fn feed_len(&self, conversation: ConversationId) -> Result<usize, StoreError> {
     self.reading(|state| {
@@ -1417,6 +1484,7 @@ impl<B: RecordBackend> LocalStore for SealedStore<B> {
       self.feed(state, conversation, |nodes| sealed_index::clear(nodes))?;
       self.relations(state, conversation, |nodes| sealed_index::clear(nodes))?;
       self.sweep_messages(state, conversation)?;
+      self.note_feed_change(state, conversation, FeedChange::Reshaped)?;
       state.messages.retain(|(held, _)| *held != conversation);
       state.bump(conversation);
       Ok(())
@@ -1592,6 +1660,13 @@ impl<B> std::fmt::Debug for SealedStore<B> {
 }
 
 /// A random generation for a catalog about to be built.
+fn feed_version_key(generation: u64, conversation: ConversationId) -> String {
+  format!(
+    "{}/{FEED_VERSION_KIND}/{conversation}",
+    generation_prefix(generation)
+  )
+}
+
 fn new_generation() -> u64 {
   rand_core::RngCore::next_u64(&mut OsRng)
 }

@@ -64,6 +64,7 @@ pub mod file_drop;
 pub mod file_preview;
 pub mod file_views;
 pub mod files_view;
+pub mod first_sync_bar;
 pub mod getting_started;
 pub mod guest_join;
 pub mod guest_meeting;

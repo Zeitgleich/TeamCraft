@@ -63,6 +63,12 @@
     <item quantity="one">Confirmed by %d person</item>
     <item quantity="other">Confirmed by %d people</item>
   </plurals>
+  <string name="first_sync_newest">Loading messages…</string>
+  <string name="first_sync_older">Loading older messages…</string>
+  <plurals name="first_sync_count">
+    <item quantity="one">%1$d of %2$d conversation</item>
+    <item quantity="other">%1$d of %2$d conversations</item>
+  </plurals>
   <plurals name="key_catch_up_progress">
     <item quantity="one">Getting the keys for older messages: %1$d of %2$d conversation caught up Messages fill in when one of your other devices or a member comes online.</item>
     <item quantity="other">Getting the keys for older messages: %1$d of %2$d conversations caught up Messages fill in when one of your other devices or a member comes online.</item>

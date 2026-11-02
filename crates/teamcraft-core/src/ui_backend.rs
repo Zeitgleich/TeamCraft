@@ -46,14 +46,15 @@ use crate::client::bookmarks_key;
 use crate::client::older_history::{is_failure_current, older_history_record};
 use crate::client::workspace_admin::{ChannelOptions, StoredRoster};
 use crate::clock::Clock;
+use crate::entry_tally::{self, EntryPass, EntryTally, TallyInputs};
 use crate::error::CoreError;
 use crate::imported::{Authorship, ImportAdditions, ImportSource, ImportedAuthor, ImportedOrigin};
 use crate::notify_rules::{MentionPreferences, load_mention_preferences};
 use crate::people_names::shown_name;
 use crate::records::{self, Draft};
 use crate::store::{
-  BookmarkItem, ConversationEvent, LocalStore, MessageContent, MessageEdge, MessageFilter, MessageSlot,
-  StoredMessage, Table, Unreadable,
+  BookmarkItem, ConversationEvent, FeedVersion, LocalStore, MessageContent, MessageEdge, MessageFilter,
+  MessageSlot, StoredMessage, Table, Unreadable, write_group,
 };
 
 /// Rows read at a time when a list's anchor is looked for by its time ([`FeedAnchor`]).
@@ -499,6 +500,8 @@ pub struct CoreChatBackend<S> {
   pub(crate) mentions: RefCell<MentionMemo>,
   /// The activity feed's entries per conversation, kept while it doesn't change.
   pub(crate) activity: RefCell<HashMap<ConversationId, crate::ui_activity::KeptActivity>>,
+  /// Tallies counted and not kept yet ([`Self::flush_entry_tallies`]).
+  entry_tallies: RefCell<BTreeMap<ConversationId, EntryTally>>,
   /// The feed rows of the conversations read last, kept while their messages don't change.
   feeds: RefCell<Vec<(ConversationId, FeedView)>>,
   /// What paging an indexed feed needs of the conversations read last, kept likewise.
@@ -538,6 +541,7 @@ impl<S: LocalStore> CoreChatBackend<S> {
       requests: RefCell::default(),
       mentions: RefCell::default(),
       activity: RefCell::default(),
+      entry_tallies: RefCell::default(),
       feeds: RefCell::default(),
       layouts: RefCell::default(),
       older_requests: RefCell::default(),
@@ -708,12 +712,14 @@ impl<S: LocalStore> CoreChatBackend<S> {
       .read(crate::client::stored_account_data(&self.store))
       .unread_mark(response.id);
     let counts = self.entry_counts(response, maybe_mark, users.get(&self.me), preferences);
+    self.flush_entry_tallies();
     self.conversation_view(response, users, counts.unread)
   }
 
-  /// One pass over a conversation's top-level messages, by reference: what its sidebar entry
-  /// counts. Run on every change of the conversation, so it neither copies the messages nor decides
-  /// a message's mention twice (a log channel can hold thousands unread, issue #1000).
+  /// What a conversation's sidebar entry counts, from the kept tally and only the rows it doesn't
+  /// cover ([`crate::entry_tally`]). Run on every change of the conversation, so it neither copies
+  /// messages nor decides a message's mention twice (a log channel can hold thousands unread, issue
+  /// #1000). Callers [`Self::flush_entry_tallies`] when done.
   pub(crate) fn entry_counts(
     &self,
     response: &ConversationResponse,
@@ -722,6 +728,7 @@ impl<S: LocalStore> CoreChatBackend<S> {
     preferences: &MentionPreferences,
   ) -> EntryCounts {
     let is_unread = self.unread_check(response, maybe_mark);
+    let maybe_importer = self.importer();
     let rules = MentionRules {
       username: maybe_me
         .and_then(|me| me.maybe_username.as_deref())
@@ -733,26 +740,72 @@ impl<S: LocalStore> CoreChatBackend<S> {
     };
     let mut memo = self.mentions.borrow_mut();
     memo.follow(&rules);
-    let mut counts = EntryCounts::default();
-    let mut additions = ImportAdditions::new(self.importer());
-    self.visit_top_level(response.id, &mut |message| {
-      if additions.note(message) {
-        return;
+    let pass = EntryPass::new(self.me, &rules, &mut memo, &is_unread, maybe_importer);
+    let conversation = response.id;
+    let result = match self.kept_feed_version(conversation) {
+      Some(version) => {
+        let maybe_last_read = response
+          .maybe_my_membership
+          .as_ref()
+          .and_then(|membership| membership.maybe_last_read_message_id);
+        let maybe_lines_read = self.read(lines_read_through(&self.store, conversation));
+        let inputs = TallyInputs {
+          version,
+          maybe_importer,
+          unread_key: entry_tally::unread_key(
+            maybe_mark,
+            maybe_last_read,
+            maybe_lines_read,
+            maybe_importer,
+            &rules,
+          ),
+          maybe_boundary: entry_tally::read_boundary(maybe_mark, maybe_last_read),
+        };
+        let maybe_kept = entry_tally::kept_tally(&self.store, conversation);
+        entry_tally::counted(&self.store, conversation, &inputs, maybe_kept.clone(), pass).map(
+          |(counts, tally)| {
+            if maybe_kept.as_ref() != Some(&tally) {
+              self.entry_tallies.borrow_mut().insert(conversation, tally);
+            }
+            counts
+          },
+        )
+      },
+      None => entry_tally::counted_unkept(&self.store, conversation, pass),
+    };
+    result.unwrap_or_else(|error| {
+      tracing::error!(%error, "local store read failed");
+      EntryCounts::default()
+    })
+  }
+
+  /// The feed's version, where reads can use the store's feed index and a tally can be kept.
+  fn kept_feed_version(&self, conversation: ConversationId) -> Option<FeedVersion> {
+    if !self.store.indexes_feed() {
+      return None;
+    }
+    // One that doesn't read means counting every row, which reads what is damaged anyway.
+    self.store.feed_version(conversation).ok().flatten()
+  }
+
+  /// Keeps the tallies counted since the last call, in one group: a start counts many at once, and
+  /// each on its own would wait for the disk. They are a cache: one not kept is counted again.
+  pub(crate) fn flush_entry_tallies(&self) {
+    let tallies = std::mem::take(&mut *self.entry_tallies.borrow_mut());
+    if tallies.is_empty() {
+      return;
+    }
+    let result: Result<(), CoreError> = write_group(&self.store, || {
+      for (conversation, tally) in &tallies {
+        self
+          .store
+          .put(Table::EntryTallies, &conversation.to_string(), &tally.to_bytes())?;
       }
-      if !is_deleted(message) {
-        counts.messages += 1;
-        if message.maybe_unreadable.is_none() {
-          counts.maybe_last_activity = counts.maybe_last_activity.max(Some(message.sent_at_ms));
-        }
-      }
-      if is_unread(message) {
-        counts.unread.messages = counts.unread.messages.saturating_add(1);
-        if memo.is_mention(message, self.me, &rules) {
-          counts.unread.mentions = counts.unread.mentions.saturating_add(1);
-        }
-      }
+      Ok(())
     });
-    counts
+    if let Err(error) = result {
+      tracing::debug!(%error, "could not keep the sidebar counts");
+    }
   }
 
   /// A conversation's entry with its unread messages already picked.
@@ -978,16 +1031,6 @@ impl<S: LocalStore> CoreChatBackend<S> {
       .read(crate::client::stored_account_data(&self.store))
       .unread_mark(response.id);
     self.unread_among(response, maybe_mark, self.top_level(response.id))
-  }
-
-  /// [`Self::top_level`] one by one, by reference.
-  pub(crate) fn visit_top_level(&self, conversation: ConversationId, visit: &mut dyn FnMut(&StoredMessage)) {
-    self.read(
-      self
-        .store
-        .visit_messages(conversation, MessageFilter::TopLevel, visit)
-        .map_err(CoreError::from),
-    );
   }
 
   /// A conversation's top-level messages, deleted ones included.
@@ -1977,6 +2020,20 @@ impl<S: LocalStore> ChatBackend for CoreChatBackend<S> {
     crate::client::is_waiting_for_device(&self.store, conversation).unwrap_or(false)
   }
 
+  fn first_sync(&self) -> Option<teamcraft_client_api::model::FirstSync> {
+    self
+      .read(crate::client::first_sync_progress(&self.store))
+      .map(|progress| teamcraft_client_api::model::FirstSync {
+        stage: match progress.stage {
+          crate::client::FirstSyncStage::Newest => teamcraft_client_api::model::FirstSyncStage::Newest,
+          crate::client::FirstSyncStage::Older => teamcraft_client_api::model::FirstSyncStage::Older,
+        },
+        done: progress.done,
+        total: progress.total,
+        maybe_fraction: progress.maybe_fraction,
+      })
+  }
+
   fn key_catch_up(&self) -> Option<teamcraft_client_api::model::KeyCatchUp> {
     self
       .read(crate::client::key_catch_up(&self.store))
@@ -2785,7 +2842,7 @@ impl MentionMemo {
     }
   }
 
-  fn is_mention(&mut self, message: &StoredMessage, me: UserId, rules: &MentionRules<'_>) -> bool {
+  pub(crate) fn is_mention(&mut self, message: &StoredMessage, me: UserId, rules: &MentionRules<'_>) -> bool {
     if message.sender_user_id == me {
       return false;
     }

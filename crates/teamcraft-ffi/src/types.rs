@@ -278,6 +278,27 @@ pub struct KeyCatchUpItem {
   pub total: u32,
 }
 
+/// How far the first sync of a newly set up device is, for the bar under the top bar.
+#[derive(Clone, Copy, Debug, PartialEq, uniffi::Record)]
+pub struct FirstSyncItem {
+  pub stage: FirstSyncStageItem,
+  /// Conversations done in this stage.
+  pub done: u32,
+  /// Conversations in this stage; 0 until the list is here.
+  pub total: u32,
+  /// How far overall, from 0 to 1; `None` for an indeterminate bar (nothing finished yet).
+  pub maybe_fraction: Option<f32>,
+}
+
+/// What the first sync is reading.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
+pub enum FirstSyncStageItem {
+  /// The newest messages of every conversation.
+  Newest,
+  /// Older messages, in the background.
+  Older,
+}
+
 /// What still waits for the server (issue #158): the app keeps background time while it isn't
 /// empty.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Record)]

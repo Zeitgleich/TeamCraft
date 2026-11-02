@@ -1888,6 +1888,14 @@ plaintext), so no message can make or fake one.
   learned and now also after a key bag merge, for the conversations whose key ring gained keys in
   it, so a key from the user's other device fills the rows at once. The apps show how far the conversations that had waiting messages have caught up
   ("3 of 5 conversations caught up"); it ends when none waits.
+- **How much a new device reads.** The first sync takes the newest page of every conversation, then
+  on phones and desktops the last three months in the background (at most 20,000 messages per
+  conversation and 100,000 overall, the most recently active conversations first; settings:
+  `HistoryBackfill`). The browser stops after the newest page, without the bar: it reads its whole
+  store when it opens, and each conversation says "catching up" there. Older messages stay on the server and come a page at a time when the reader scrolls up to them. What the bar under the top
+  bar counts is conversations, because the server keeps no message count. Reading ahead asks the
+  server for nothing it wouldn't hand out anyway: `sees_all_history` still decides, retention still
+  deletes, and a message without its key is a placeholder as above.
 - **Elsewhere.** A placeholder may turn out to be a reaction, an edit or a delete (the server can't
   tell kinds apart, by design), so it counts as neither unread, nor a thread reply, nor the
   conversation's latest activity, notifies nothing, has no actions and isn't searched; a month with
@@ -2726,6 +2734,10 @@ The browser has neither SQLCipher nor an OS keystore. The web client keeps the s
    rewritten together: a message record with its conversation's index nodes, so they can group
    message records by conversation, which before only their write times hinted at. Contents, names
    and IDs stay hidden.
+   The same goes for a conversation's kept sidebar counts: message count, last activity and unread
+   counts as a sealed entry (`entry_tallies`), how far its feed was rewritten as a catalog record, so
+   a start doesn't decrypt every message for them. Both say nothing the sealed messages don't, and a
+   lost or damaged one means counting again (`core/entry_tally.rs`).
 5. **Where the database key lives:** wrapped (AES-256-GCM) by a **non-extractable Web Crypto key**,
    both stored in the same IndexedDB database. The wrapping key's own bytes can never be read by a
    script, but any script of the origin can *use* it: unwrapping the database key is one

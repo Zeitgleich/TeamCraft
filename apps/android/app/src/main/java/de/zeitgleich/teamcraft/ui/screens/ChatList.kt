@@ -128,6 +128,7 @@ import de.zeitgleich.teamcraft.ui.toggled
 import de.zeitgleich.teamcraft.ui.selectionActions
 import de.zeitgleich.teamcraft.ui.UserAvatar
 import de.zeitgleich.teamcraft.ui.theme.LocalTeamCraftColors
+import uniffi.teamcraft_ffi.FirstSyncItem
 import uniffi.teamcraft_ffi.ConversationItem
 import uniffi.teamcraft_ffi.JoinRequestItem
 import uniffi.teamcraft_ffi.ConversationKind
@@ -177,12 +178,14 @@ fun ChatListScreen(
       if (tab != ChatTab.Activity) tab = if (selected.isDirect) ChatTab.Home else ChatTab.Spaces
     }
   }
+  var maybeFirstSync by remember { mutableStateOf<FirstSyncItem?>(null) }
   LaunchedEffect(Unit) {
     // Every read finishes before the next starts: while syncing, changes come faster than a full
     // pass over all conversations, and restarting on each would never show the previews.
     viewModel.changeCount.collect {
       val loaded = viewModel.conversations()
       conversations = loaded
+      maybeFirstSync = viewModel.firstSync()
       joinRequests = viewModel.joinRequests.list()
       previews = viewModel.chatPreviews(loaded)
     }
@@ -244,6 +247,7 @@ fun ChatListScreen(
     onNavigate = onNavigate,
     banners = {
       OfflineBanner(onSignInAgain = { viewModel.signOut() })
+      maybeFirstSync?.let { FirstSyncBar(it) }
       NotificationPermissionCard()
     },
     isGuest = isGuest,

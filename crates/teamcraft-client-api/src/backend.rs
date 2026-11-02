@@ -34,8 +34,8 @@ use crate::calls::{
   CallPreview, CameraFallback, JoinMedia, OrgBackgroundRule, OrgBackgrounds, PreviewCamera,
 };
 use crate::model::{
-  Conversation, ConversationId, CustomStatus, DeviceId, KeyCatchUp, MembershipIssue, Message, MessageId,
-  PresenceStatus, Space, SpaceId, ThreadId, ThreadSummary, TimestampMs, User, UserId,
+  Conversation, ConversationId, CustomStatus, DeviceId, FirstSync, KeyCatchUp, MembershipIssue, Message,
+  MessageId, PresenceStatus, Space, SpaceId, ThreadId, ThreadSummary, TimestampMs, User, UserId,
 };
 use crate::privacy::{LastSeenVisibility, PrivacySettings};
 use crate::search::{ParsedQuery, SavedSearch, SearchHit, SearchResults};
@@ -345,6 +345,11 @@ pub trait ChatBackend {
   /// device, issue #888); `None` while nothing waits. Backends without end-to-end encryption have
   /// none.
   fn key_catch_up(&self) -> Option<KeyCatchUp> {
+    None
+  }
+  /// How far the first sync of a newly set up device is; `None` when none runs. Backends that keep
+  /// no local history have none.
+  fn first_sync(&self) -> Option<FirstSync> {
     None
   }
   /// Removals and leaves on their way or failed, people left in the encryption group (for admins)

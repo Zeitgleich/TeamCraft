@@ -1311,9 +1311,28 @@ read these as a comparison, and the logs (`slow read`, `slow engine job`) for th
 | Channel switch p95                            | 0.7 ms             | 0.7 ms      | 150 ms          |
 | Channel switch p95, a token refresh takes 3 s | 3001 ms            | 0.5 ms      | 150 ms          |
 
-Still open: the first snapshot reads and decrypts every message of every conversation for its counts
-(`entry_counts`), about 1.4 s here, so a phone with this workspace stays over the budget until the
-counts are kept. It no longer holds anything else up: the channel list is what waits.
+The first snapshot used to read and decrypt every message of every conversation for its counts
+(`entry_counts`). Now each conversation keeps a sealed tally (`crates/teamcraft-core/src/entry_tally.rs`):
+
+| List usable (read thread, 100,000 messages)                  | Result  | Budget  |
+|--------------------------------------------------------------|---------|---------|
+| Before, and the first start after updating (counts them all) | 875 ms  | 2000 ms |
+| Next starts                                                  | 171 ms  | 2000 ms |
+| Next start, a token refresh takes 3 s                        | 140 ms  | 2000 ms |
+
+Same run, under a machine load of about 10; of those next starts about 80 ms is the start of the sync
+and about 90 ms the snapshot. This workspace is the worst case for the first start: nothing was ever
+read, so every message is unread. What a read costs since a tally was written:
+
+| Since then                                    | Reads                    |
+|-----------------------------------------------|--------------------------|
+| Nothing                                       | No message               |
+| New messages at the end                       | Those messages           |
+| Read position, mark, mention rules, an edit   | The rows from the read position on |
+| A row left, moved or got readable; older rows | The whole conversation, as before |
+
+A tally is checked against a version the store writes in the group of the messages, so it is never
+updated by hand and can't drift; one written before a crash means counting the difference.
 
 ### Web bundle size
 
@@ -1334,11 +1353,14 @@ runs `scripts/check-web-size.py`. The script prints uncompressed, gzip -9 and (w
 module is installed) brotli -11 sizes, the gzip delta to `main` and a guest's first visit, and lists
 the chunks that load later. The limit:
 
-| Limit                                   | Value       | Above it                         |
-|-----------------------------------------|-------------|----------------------------------|
-| A guest in a meeting: gzip -9 total     | 5,700,000 B | fails; warns from 95 % (5.42 MB) |
-| Signed-in first visit: gzip -9 total    | 5,200,000 B | fails; warns from 95 % (4.94 MB) |
-| The call module: gzip -9                | 1,000,000 B | fails                            |
+| Limit                                | Value        | Above it                        |
+|--------------------------------------|--------------|---------------------------------|
+| A guest in a meeting: gzip -9 total  | 10,000,000 B | fails; warns from 95 % (9.5 MB) |
+| Signed-in first visit: gzip -9 total | 10,000,000 B | fails; warns from 95 % (9.5 MB) |
+| The call module: gzip -9             | 1,000,000 B  | fails                           |
+
+Both budgets are temporarily 10 MB, until #1148 brings them back down; before that they were 5.7 and
+5.2 MB. The rest of this paragraph describes those.
 
 The guest budget is the guest's meeting measured below plus about 4 %, the signed-in ceiling the
 signed-in first visit on `main` 8d653d3c plus about 10 %. The single budget before (4,700,000 B,

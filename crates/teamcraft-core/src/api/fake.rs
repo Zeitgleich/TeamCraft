@@ -145,6 +145,7 @@ struct State {
   call_moves: Vec<(ConversationId, MoveCallRequest)>,
   /// REST calls per user, also those that failed (tests about idle traffic).
   rest_calls: HashMap<UserId, u64>,
+  message_lists: HashMap<UserId, u64>,
   users: BTreeMap<UserId, UserSummary>,
   devices: BTreeMap<DeviceId, Device>,
   identity_keys: HashMap<UserId, IdentityKeyResponse>,
@@ -579,6 +580,11 @@ impl FakeServer {
   /// How many REST calls `user` made so far, including failed ones.
   pub fn rest_call_count(&self, user: UserId) -> u64 {
     self.lock().rest_calls.get(&user).copied().unwrap_or(0)
+  }
+
+  /// How many pages of messages `user` asked for so far.
+  pub fn message_list_count(&self, user: UserId) -> u64 {
+    self.lock().message_lists.get(&user).copied().unwrap_or(0)
   }
 
   /// How many directory searches (`GET /users?query=`) arrived so far.
@@ -3429,6 +3435,7 @@ impl ServerApi for FakeServerApi {
     query: &ListMessagesQuery,
   ) -> Result<ListMessagesResponse, ApiError> {
     self.with(|state, me| {
+      *state.message_lists.entry(me).or_default() += 1;
       let limit = query
         .maybe_limit
         .map_or(PAGE_SIZE, |limit| limit as usize)

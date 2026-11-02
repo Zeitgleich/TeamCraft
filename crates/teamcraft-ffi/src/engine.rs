@@ -20,8 +20,8 @@ use teamcraft_core::api::{AccessTokenSource, ApiError, HttpRendezvous, HttpServe
 use teamcraft_core::client::NewDeviceLink;
 use teamcraft_core::client::files::sweep_staged_copies;
 use teamcraft_core::client::{
-  CatchUpFocus, LinkAnnouncement, LinkApproval, LinkRequestList, PushRegistrar, ReceiptCancel,
-  SIGN_OUT_REVOKE_PATIENCE,
+  CatchUpFocus, HistoryBackfill, LinkAnnouncement, LinkApproval, LinkRequestList, PushRegistrar,
+  ReceiptCancel, SIGN_OUT_REVOKE_PATIENCE,
 };
 use teamcraft_core::clock::{Clock as _, SystemClock};
 use teamcraft_core::connection::{ConnectionStatus, NetworkChanges};
@@ -1512,6 +1512,7 @@ impl Engine {
       maybe_push_gateway_url: self.maybe_push_gateway_url.clone(),
       maybe_upload_staging_dir: Some(self.upload_staging_dir.clone()),
       creates_notes_to_self: true,
+      history_backfill: HistoryBackfill::KEEP_RECENT,
       ..ClientSettings::default()
     }
   }
