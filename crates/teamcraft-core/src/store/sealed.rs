@@ -38,8 +38,8 @@ use zeroize::Zeroizing;
 
 use super::lru::Lru;
 use super::sealed_catalog::{
-  CATALOG_TABLE, CatalogState, META_KEY, MessageEntry, MessageKey, NodeCache, ScopedNodes, decode, encode,
-  messages_scope,
+  CATALOG_TABLE, CatalogState, META_KEY, MessageEntry, MessageKey, NodeCache, NodeChange, ScopedNodes,
+  decode, encode, messages_scope,
 };
 use super::sealed_index::{self, Direction};
 use super::{
@@ -218,6 +218,19 @@ impl<B: RecordBackend> SealedStore<B> {
     let store = Self::unbuilt(backend, database_key, limits)?;
     store.build_catalog(None)?;
     Ok(store)
+  }
+
+  /// Opens the store over a database an older version still owns (the service worker beside an
+  /// older page, which writes without keeping the catalog): the catalog is not built, so what isn't
+  /// in it yet is not listed (a message the preview doesn't find is fetched), and nothing marks it
+  /// complete for the version that takes the database over and builds it.
+  #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
+  pub(crate) fn open_without_catalog(
+    backend: B,
+    database_key: &SymmetricKey,
+    limits: SealedStoreLimits,
+  ) -> Result<Self, StoreError> {
+    Self::unbuilt(backend, database_key, limits)
   }
 
   /// The store before its catalog is checked: tests interrupt the build.
@@ -538,7 +551,7 @@ impl<B: RecordBackend> SealedStore<B> {
       .take_dirty()?
       .into_iter()
       .chain(state.directory_nodes.take_dirty()?);
-    for (key, maybe_value) in changes {
+    for NodeChange { key, maybe_value } in changes {
       match maybe_value {
         Some(value) => self.write_named(CATALOG_TABLE, &key, &value)?,
         None => self.backend.delete_record(&self.entry_id(CATALOG_TABLE, &key))?,

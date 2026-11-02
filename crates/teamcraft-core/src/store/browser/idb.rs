@@ -68,6 +68,12 @@ pub(crate) async fn open_database_with(name: &str, mode: OpenMode) -> Result<Idb
     .map_err(|_| StoreError::Database("open did not return a database".into()))
 }
 
+/// Whether `database` has this version's layout: opened [`OpenMode::AsIs`] it may still have an
+/// older one, which an older page owns.
+pub(crate) fn is_current(database: &IdbDatabase) -> bool {
+  database.version() >= f64::from(SCHEMA_VERSION)
+}
+
 /// Deletes the database `name` with everything in it. A page that still holds it open is asked to
 /// close it (`versionchange`; this app's pages do); if one doesn't (`blocked`), or nothing happens
 /// within [`DELETE_TIMEOUT`], this fails with [`StoreError::InUse`] instead of waiting forever.

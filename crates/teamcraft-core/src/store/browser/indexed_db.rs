@@ -44,7 +44,7 @@ use web_sys::{IdbDatabase, IdbObjectStore, IdbTransaction, IdbTransactionMode};
 
 use super::idb::{self, OpenMode, RECORDS};
 use crate::store::sealed::{LazySeal, RecordBackend, SealedStore, format_id, parse_id};
-use crate::store::write_queue::{Issue, RecordValue, WriteFailure, Writes};
+use crate::store::write_queue::{Issue, OpenValue, RecordValue, WriteFailure, Writes};
 use crate::store::{SealedStoreLimits, StoreError};
 
 /// How long writes are collected before they are issued together. Short enough that little is
@@ -99,8 +99,13 @@ impl SealedStore<IndexedDbRecords> {
         return Err(error);
       },
     };
+    let is_current = idb::is_current(&database);
     let backend = IndexedDbRecords::new(database, records.into_iter().collect());
-    Self::open_backend(backend, database_key, SealedStoreLimits::default())
+    if is_current {
+      Self::open_backend(backend, database_key, SealedStoreLimits::default())
+    } else {
+      Self::open_without_catalog(backend, database_key, SealedStoreLimits::default())
+    }
   }
 
   /// Deletes the database `name` (records and key wrapping): the user chose to set up a device
@@ -160,8 +165,10 @@ impl RecordBackend for IndexedDbRecords {
   }
 
   fn get_record(&self, id: &LookupId) -> Result<Option<Vec<u8>>, StoreError> {
-    if let Some(maybe_sealed) = self.inner.writes.borrow_mut().latest(&format_id(id))? {
-      return Ok(maybe_sealed);
+    match self.inner.writes.borrow_mut().latest(&format_id(id))? {
+      Some(OpenValue::Put(sealed)) => return Ok(Some(sealed)),
+      Some(OpenValue::Delete) => return Ok(None),
+      None => {},
     }
     Ok(self.inner.records.borrow().get(id).cloned())
   }

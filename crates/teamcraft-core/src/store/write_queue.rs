@@ -49,6 +49,13 @@ pub(crate) enum RecordValue {
   Unsealed(LazySeal),
 }
 
+/// What an open write of a record does ([`Writes::latest`]).
+pub(crate) enum OpenValue {
+  /// Puts these sealed bytes.
+  Put(Vec<u8>),
+  Delete,
+}
+
 /// What one queued write puts into the batch being issued.
 pub(crate) enum Issue<'a> {
   Put { sealed: &'a [u8], sequence: u32 },
@@ -106,10 +113,9 @@ impl Writes {
     self.group_depth == 0 && self.is_over_limit()
   }
 
-  /// The latest write of `key` that hasn't committed: `Some(None)` a delete, `Some(Some(bytes))` a
-  /// put (sealed now if it waited for its batch; the batch then takes the sealed bytes), `None`
-  /// when no write of it is open.
-  pub(crate) fn latest(&mut self, key: &str) -> Result<Option<Option<Vec<u8>>>, StoreError> {
+  /// The latest write of `key` that hasn't committed, if one is open; a put waiting for its batch
+  /// is sealed now (the batch then takes the sealed bytes).
+  pub(crate) fn latest(&mut self, key: &str) -> Result<Option<OpenValue>, StoreError> {
     let Some(write) = self.open.get_mut(key) else {
       return Ok(None);
     };
@@ -117,10 +123,9 @@ impl Writes {
       write.maybe_value = Some(RecordValue::Sealed(seal()?));
     }
     Ok(Some(match &write.maybe_value {
-      Some(RecordValue::Sealed(sealed)) => Some(sealed.clone()),
+      Some(RecordValue::Sealed(sealed)) => OpenValue::Put(sealed.clone()),
       // Sealed just above.
-      Some(RecordValue::Unsealed(_)) => None,
-      None => None,
+      Some(RecordValue::Unsealed(_)) | None => OpenValue::Delete,
     }))
   }
 

@@ -60,22 +60,36 @@ impl MessageFlags {
   const UNREADABLE: u8 = 8;
 }
 
+/// A page of an index: its scope (the conversation or table) and its number.
+type PageId = (String, u64);
+/// A decoded page, shared by the cache and its readers.
+type SharedPage<K, V> = Arc<IndexPage<K, V>>;
+/// Reads a catalog record's value by its key.
+pub(crate) type NodeRead<'a> = &'a dyn Fn(&str) -> Result<Option<Vec<u8>>, StoreError>;
+
+/// A catalog record to write when a group of writes ends: its key, and its value or `None` to
+/// delete it.
+pub(crate) struct NodeChange {
+  pub(crate) key: String,
+  pub(crate) maybe_value: Option<Vec<u8>>,
+}
+
 /// The roots and pages of one kind of index, cached, with the changes of the open group of writes
 /// until it ends ([`Self::take_dirty`]).
 pub(crate) struct NodeCache<K, V> {
   kind: &'static str,
   roots: Lru<String, Arc<IndexRoot<K>>>,
-  pages: Lru<(String, u64), Arc<IndexPage<K, V>>>,
+  pages: Lru<PageId, SharedPage<K, V>>,
   /// Written in the open group; an empty root removes the index.
   dirty_roots: BTreeMap<String, Arc<IndexRoot<K>>>,
-  dirty_pages: BTreeMap<(String, u64), Option<Arc<IndexPage<K, V>>>>,
+  dirty_pages: BTreeMap<PageId, Option<SharedPage<K, V>>>,
 }
 
 /// One index of a [`NodeCache`], reading what isn't cached through `read`.
 pub(crate) struct ScopedNodes<'a, K, V> {
   pub(crate) cache: &'a mut NodeCache<K, V>,
   pub(crate) scope: &'a str,
-  pub(crate) read: &'a dyn Fn(&str) -> Result<Option<Vec<u8>>, StoreError>,
+  pub(crate) read: NodeRead<'a>,
 }
 
 impl MessageKey {
@@ -198,17 +212,18 @@ impl<K, V> NodeCache<K, V> {
 }
 
 impl<K: Serialize, V: Serialize> NodeCache<K, V> {
-  /// The changes of the group that ends, serialized, each with its catalog key: a value to write,
-  /// or `None` to delete. They stay cached.
-  pub(crate) fn take_dirty(&mut self) -> Result<Vec<(String, Option<Vec<u8>>)>, StoreError> {
+  /// The changes of the group that ends, serialized. They stay cached.
+  pub(crate) fn take_dirty(&mut self) -> Result<Vec<NodeChange>, StoreError> {
     let mut changes = Vec::with_capacity(self.dirty_roots.len() + self.dirty_pages.len());
     for (scope, root) in std::mem::take(&mut self.dirty_roots) {
       let key = root_key(self.kind, &scope);
-      changes.push((key, (!root.is_empty()).then(|| encode(&*root)).transpose()?));
+      let maybe_value = (!root.is_empty()).then(|| encode(&*root)).transpose()?;
+      changes.push(NodeChange { key, maybe_value });
     }
     for ((scope, id), maybe_page) in std::mem::take(&mut self.dirty_pages) {
       let key = page_key(self.kind, &scope, id);
-      changes.push((key, maybe_page.map(|page| encode(&*page)).transpose()?));
+      let maybe_value = maybe_page.map(|page| encode(&*page)).transpose()?;
+      changes.push(NodeChange { key, maybe_value });
     }
     Ok(changes)
   }
