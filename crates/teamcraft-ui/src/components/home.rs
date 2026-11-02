@@ -7,6 +7,7 @@ use leptos::prelude::*;
 use crate::channel_access::{can_invite_to, can_start_any_direct};
 use crate::components::avatar::{Avatar, AvatarSize};
 use crate::components::channel_view::shown_name;
+use crate::components::entry_menu::EntryMenuTrigger;
 use crate::components::huddle_bar::CallPill;
 use crate::components::icons::{Icon, IconName};
 use crate::components::modal::Modal;
@@ -16,6 +17,7 @@ use crate::components::sidebar::{
 };
 
 use crate::components::people_picker::PeoplePicker;
+use crate::entry_actions::MenuEntry;
 use crate::i18n::use_i18n;
 use crate::model::{Conversation, ConversationKind, User, UserId};
 use crate::prefs::DmSort;
@@ -317,6 +319,7 @@ fn DirectItem(#[prop(into)] conversation: Signal<Conversation>) -> impl IntoView
   let name = Memo::new(move |_| conversation.with(|conv| shown_name(i18n, conv)));
   let is_peer_in_call =
     Memo::new(move |_| maybe_other.is_some_and(|other| state.read(|backend| backend.is_in_call(other))));
+  let menu = EntryMenuTrigger::new(MenuEntry::Conversation(id));
   let label = move || {
     let aria_name = name.get();
     let count = count.get();
@@ -341,9 +344,17 @@ fn DirectItem(#[prop(into)] conversation: Signal<Conversation>) -> impl IntoView
       class:current=is_current
       class:unread=move || is_unread.get()
       class:muted=move || is_muted.get()
+      class:is-pressing=move || menu.is_pressing()
       data-conversation=id.to_string()
       aria-current=move || is_current().then_some("page")
       aria-label=label
+      on:pointerdown=move |ev| menu.on_pointerdown(&ev)
+      on:pointermove=move |ev| menu.on_pointermove(&ev)
+      on:pointerup=move |_| menu.on_pointerup()
+      on:pointercancel=move |_| menu.on_pointerup()
+      on:contextmenu=move |ev| menu.on_contextmenu(&ev)
+      on:keydown=move |ev| menu.on_keydown(&ev)
+      on:click:capture=move |ev| menu.on_click_capture(&ev)
       on:click=move |_| state.open_conversation(id)
     >
       {leading}
