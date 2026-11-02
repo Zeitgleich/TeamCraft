@@ -9,7 +9,7 @@ use std::sync::{Mutex, MutexGuard};
 
 use rusqlite::types::Value;
 use rusqlite::{Connection, OptionalExtension, params, params_from_iter};
-use teamcraft_proto::{ClientMessageId, ConversationId, Id, MessageId};
+use teamcraft_proto::{ClientMessageId, ConversationId, Id, MessageId, ThreadId};
 use zeroize::Zeroizing;
 
 use super::sql_group::{
@@ -18,8 +18,8 @@ use super::sql_group::{
 use super::sqlite_log::{LOG_PRAGMAS, PurgeState};
 use super::sqlite_wipe::wipe_free_pages;
 use super::{
-  DatabaseKeySource, LocalStore, MediaRange, MessageEdge, MessageFilter, MessageSlot, StoreError,
-  StoredMessage, Table, WriteTally,
+  DatabaseKeySource, LocalStore, MediaRange, MessageEdge, MessageFilter, MessageOrder, MessageSlot,
+  StoreError, StoredMessage, Table, WriteTally,
 };
 
 /// The layout steps of this store, in order ([`run_migrations`]). Released 1.0 databases carry
@@ -39,6 +39,11 @@ pub(crate) const MIGRATIONS: &[Migration] = &[
     version: 3,
     kind: MigrationKind::Marker,
   },
+  // The feed's columns and indexes (issue #155), filled from the records.
+  Migration {
+    version: 4,
+    kind: MigrationKind::Layout(migrate_to_v4),
+  },
 ];
 /// How a message record spells the media type of a picture or a video (`AttachmentRef`, compact JSON):
 /// the bytes [`SqlCipherStore::media_messages`] looks for.
@@ -46,6 +51,28 @@ const MEDIA_IMAGE_MARKER: &[u8] = br#""media_type":"image/"#;
 const MEDIA_VIDEO_MARKER: &[u8] = br#""media_type":"video/"#;
 /// Rows a media query reads at a time at least.
 const MEDIA_SCAN_BATCH: usize = 64;
+/// IDs a query of the feed's reactions or replies names at most at once.
+const IDS_PER_QUERY: usize = 256;
+/// What a message is for the feed (issue #155): a row of it, an event the import's additions are
+/// decided from, a reaction to another message, a shown reply. Written from the record by
+/// [`FeedColumns`]; the feed reads trust them (they count positions), so a change of what they mean
+/// fills them again in a layout step. Each has a partial index, so a page of the feed, the
+/// reactions to its rows and their replies read only those.
+const FEED_COLUMNS_V4: &str = "
+  ALTER TABLE messages ADD COLUMN is_feed_row INTEGER NOT NULL DEFAULT 0;
+  ALTER TABLE messages ADD COLUMN is_event INTEGER NOT NULL DEFAULT 0;
+  ALTER TABLE messages ADD COLUMN reaction_target BLOB;
+  ALTER TABLE messages ADD COLUMN is_reply INTEGER NOT NULL DEFAULT 0;
+  CREATE INDEX messages_feed ON messages (conversation_id, sort_group, sort_value, client_message_id)
+    WHERE is_feed_row = 1;
+  CREATE INDEX messages_events ON messages (conversation_id, sort_group, sort_value, client_message_id)
+    WHERE is_event = 1;
+  CREATE INDEX messages_reactions ON messages (conversation_id, reaction_target)
+    WHERE reaction_target IS NOT NULL;
+  CREATE INDEX messages_replies ON messages (conversation_id, thread_id) WHERE is_reply = 1;
+";
+/// The feed's display order, ties broken as [`super::MessageOrder`] does.
+const FEED_ORDER: &str = "ORDER BY sort_group, sort_value, client_message_id";
 
 /// The layout this version writes.
 #[cfg(test)]
@@ -74,6 +101,14 @@ const SCHEMA_V1: &str = "
 
 pub struct SqlCipherStore {
   inner: Mutex<Inner>,
+}
+
+/// The feed's columns of a message ([`FEED_COLUMNS_V4`]).
+struct FeedColumns {
+  is_feed_row: bool,
+  is_event: bool,
+  maybe_reaction_target: Option<[u8; 16]>,
+  is_reply: bool,
 }
 
 /// The connection and the group of writes open on it: one lock, so a write and the group it joins
@@ -155,6 +190,58 @@ impl SqlCipherStore {
   }
 }
 
+impl SqlCipherStore {
+  /// [`LocalStore::feed_ranks`] of several orders: the feed's index walked once from its start to
+  /// the last of them, reading keys only.
+  fn feed_ranks_by_walk(
+    &self,
+    conversation: ConversationId,
+    orders: &[MessageOrder],
+  ) -> Result<Vec<usize>, StoreError> {
+    let mut sorted: Vec<(usize, MessageOrder)> = orders.iter().copied().enumerate().collect();
+    sorted.sort_by_key(|(_, order)| *order);
+    let Some((_, last)) = sorted.last().copied() else {
+      return Ok(Vec::new());
+    };
+    let inner = self.lock();
+    let mut statement = inner
+      .connection
+      .prepare_cached(&format!(
+        "SELECT sort_group, sort_value, client_message_id FROM messages
+         WHERE conversation_id = ?1 AND is_feed_row = 1
+           AND (sort_group, sort_value, client_message_id) < (?2, ?3, ?4) {FEED_ORDER}"
+      ))
+      .map_err(database_error)?;
+    let mut rows = statement
+      .query(params![
+        conversation.snowflake().get(),
+        last.group,
+        last.value,
+        last.client_message_id.as_slice()
+      ])
+      .map_err(database_error)?;
+    let mut ranks = vec![0; orders.len()];
+    let mut pending = sorted.into_iter().peekable();
+    let mut before = 0usize;
+    while let Some(row) = rows.next().map_err(database_error)? {
+      let client: Vec<u8> = row.get(2).map_err(database_error)?;
+      let row_order = MessageOrder {
+        group: row.get(0).map_err(database_error)?,
+        value: row.get(1).map_err(database_error)?,
+        client_message_id: client.try_into().unwrap_or([0; 16]),
+      };
+      while let Some((at, _)) = pending.next_if(|(_, order)| *order <= row_order) {
+        ranks[at] = before;
+      }
+      before += 1;
+    }
+    for (at, _) in pending {
+      ranks[at] = before;
+    }
+    Ok(ranks)
+  }
+}
+
 impl LocalStore for SqlCipherStore {
   fn get(&self, table: Table, key: &str) -> Result<Option<Vec<u8>>, StoreError> {
     self
@@ -228,15 +315,19 @@ impl LocalStore for SqlCipherStore {
   fn upsert_message(&self, message: &StoredMessage) -> Result<(), StoreError> {
     let record = serde_json::to_vec(message).map_err(|error| StoreError::Corrupt(error.to_string()))?;
     let (sort_group, sort_value) = message.sort_key();
+    let feed = FeedColumns::of(message);
     self.write(|connection| {
       connection.execute(
         "INSERT INTO messages
-           (conversation_id, client_message_id, sort_group, sort_value, thread_id, is_hidden, in_channel, record)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+           (conversation_id, client_message_id, sort_group, sort_value, thread_id, is_hidden, in_channel, record,
+            is_feed_row, is_event, reaction_target, is_reply)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
          ON CONFLICT (conversation_id, client_message_id) DO UPDATE SET
            sort_group = excluded.sort_group, sort_value = excluded.sort_value,
            thread_id = excluded.thread_id, is_hidden = excluded.is_hidden,
-           in_channel = excluded.in_channel, record = excluded.record",
+           in_channel = excluded.in_channel, record = excluded.record,
+           is_feed_row = excluded.is_feed_row, is_event = excluded.is_event,
+           reaction_target = excluded.reaction_target, is_reply = excluded.is_reply",
         params![
           message.conversation_id.snowflake().get(),
           message.client_message_id.as_bytes().as_slice(),
@@ -246,6 +337,10 @@ impl LocalStore for SqlCipherStore {
           message.is_hidden(),
           message.is_also_in_channel(),
           record,
+          feed.is_feed_row,
+          feed.is_event,
+          feed.maybe_reaction_target.as_ref().map(<[u8; 16]>::as_slice),
+          feed.is_reply,
         ],
       )
     })
@@ -474,6 +569,170 @@ impl LocalStore for SqlCipherStore {
     Ok(found)
   }
 
+  fn indexes_feed(&self) -> bool {
+    true
+  }
+
+  fn feed_len(&self, conversation: ConversationId) -> Result<usize, StoreError> {
+    let count: i64 = self
+      .lock()
+      .connection
+      .prepare_cached("SELECT count(*) FROM messages WHERE conversation_id = ?1 AND is_feed_row = 1")
+      .and_then(|mut statement| {
+        statement.query_row(params![conversation.snowflake().get()], |row| row.get(0))
+      })
+      .map_err(database_error)?;
+    Ok(usize::try_from(count).unwrap_or(0))
+  }
+
+  /// A range of the feed's index; the offset steps through the index only, not the records.
+  fn feed_rows(
+    &self,
+    conversation: ConversationId,
+    start: usize,
+    len: usize,
+  ) -> Result<Vec<StoredMessage>, StoreError> {
+    let inner = self.lock();
+    let records: Vec<Vec<u8>> = inner
+      .connection
+      .prepare_cached(&format!(
+        "SELECT record FROM messages WHERE conversation_id = ?1 AND is_feed_row = 1 {FEED_ORDER}
+         LIMIT ?2 OFFSET ?3"
+      ))
+      .and_then(|mut statement| {
+        statement
+          .query_map(
+            params![
+              conversation.snowflake().get(),
+              i64::try_from(len).unwrap_or(i64::MAX),
+              i64::try_from(start).unwrap_or(i64::MAX)
+            ],
+            |row| row.get(0),
+          )?
+          .collect()
+      })
+      .map_err(database_error)?;
+    records.iter().map(|record| decode_message(record)).collect()
+  }
+
+  /// One order is counted from the end of the index, where the lists' anchors are; several in one
+  /// walk from its start up to the last of them.
+  fn feed_ranks(
+    &self,
+    conversation: ConversationId,
+    orders: &[MessageOrder],
+  ) -> Result<Vec<usize>, StoreError> {
+    match orders {
+      [] => Ok(Vec::new()),
+      [order] => {
+        let len = self.feed_len(conversation)?;
+        let after: i64 = self
+          .lock()
+          .connection
+          .prepare_cached(
+            "SELECT count(*) FROM messages WHERE conversation_id = ?1 AND is_feed_row = 1
+               AND (sort_group, sort_value, client_message_id) >= (?2, ?3, ?4)",
+          )
+          .and_then(|mut statement| {
+            statement.query_row(
+              params![
+                conversation.snowflake().get(),
+                order.group,
+                order.value,
+                order.client_message_id.as_slice()
+              ],
+              |row| row.get(0),
+            )
+          })
+          .map_err(database_error)?;
+        Ok(vec![len.saturating_sub(usize::try_from(after).unwrap_or(0))])
+      },
+      orders => self.feed_ranks_by_walk(conversation, orders),
+    }
+  }
+
+  fn event_messages(&self, conversation: ConversationId) -> Result<Vec<StoredMessage>, StoreError> {
+    let inner = self.lock();
+    let records: Vec<Vec<u8>> = inner
+      .connection
+      .prepare_cached(&format!(
+        "SELECT record FROM messages WHERE conversation_id = ?1 AND is_event = 1 {FEED_ORDER}"
+      ))
+      .and_then(|mut statement| {
+        statement
+          .query_map(params![conversation.snowflake().get()], |row| row.get(0))?
+          .collect()
+      })
+      .map_err(database_error)?;
+    records.iter().map(|record| decode_message(record)).collect()
+  }
+
+  fn reactions_to(
+    &self,
+    conversation: ConversationId,
+    targets: &[ClientMessageId],
+  ) -> Result<Vec<StoredMessage>, StoreError> {
+    let inner = self.lock();
+    let mut reactions = Vec::new();
+    for chunk in targets.chunks(IDS_PER_QUERY) {
+      let sql = format!(
+        "SELECT record FROM messages WHERE conversation_id = ?1 AND reaction_target IN ({})",
+        placeholders(chunk.len())
+      );
+      let mut values = vec![Value::Integer(conversation.snowflake().get())];
+      values.extend(chunk.iter().map(|target| Value::Blob(target.as_bytes().to_vec())));
+      let records: Vec<Vec<u8>> = inner
+        .connection
+        .prepare(&sql)
+        .and_then(|mut statement| {
+          statement
+            .query_map(params_from_iter(values), |row| row.get(0))?
+            .collect()
+        })
+        .map_err(database_error)?;
+      for record in &records {
+        reactions.push(decode_message(record)?);
+      }
+    }
+    reactions.sort_by_key(StoredMessage::order);
+    Ok(reactions)
+  }
+
+  fn reply_counts(
+    &self,
+    conversation: ConversationId,
+    threads: &[ThreadId],
+  ) -> Result<Vec<usize>, StoreError> {
+    let inner = self.lock();
+    let mut counts = vec![0; threads.len()];
+    for (chunk_at, chunk) in threads.chunks(IDS_PER_QUERY).enumerate() {
+      let sql = format!(
+        "SELECT thread_id, count(*) FROM messages
+         WHERE conversation_id = ?1 AND is_reply = 1 AND thread_id IN ({}) GROUP BY thread_id",
+        placeholders(chunk.len())
+      );
+      let mut values = vec![conversation.snowflake().get()];
+      values.extend(chunk.iter().map(|thread| thread.snowflake().get()));
+      let found: Vec<(i64, i64)> = inner
+        .connection
+        .prepare(&sql)
+        .and_then(|mut statement| {
+          statement
+            .query_map(params_from_iter(values), |row| Ok((row.get(0)?, row.get(1)?)))?
+            .collect()
+        })
+        .map_err(database_error)?;
+      for (thread, count) in found {
+        for (at, asked) in chunk.iter().enumerate() {
+          if asked.snowflake().get() == thread {
+            counts[chunk_at * IDS_PER_QUERY + at] = usize::try_from(count).unwrap_or(0);
+          }
+        }
+      }
+    }
+    Ok(counts)
+  }
+
   fn delete_messages(&self, conversation: ConversationId) -> Result<(), StoreError> {
     self.write(|connection| {
       connection.execute(
@@ -584,6 +843,69 @@ impl std::fmt::Debug for SqlCipherStore {
 
 fn decode_message(record: &[u8]) -> Result<StoredMessage, StoreError> {
   serde_json::from_slice(record).map_err(|error| StoreError::Corrupt(error.to_string()))
+}
+
+/// Version 4: the feed's columns and indexes, filled from every record (issue #155). A record that
+/// doesn't decode keeps the defaults, as no row of the feed; reading it fails as before.
+fn migrate_to_v4(connection: &Connection) -> Result<(), StoreError> {
+  connection
+    .execute_batch(FEED_COLUMNS_V4)
+    .map_err(database_error)?;
+  let mut select = connection
+    .prepare("SELECT rowid, record FROM messages")
+    .map_err(database_error)?;
+  let mut update = connection
+    .prepare(
+      "UPDATE messages SET is_feed_row = ?2, is_event = ?3, reaction_target = ?4, is_reply = ?5
+       WHERE rowid = ?1",
+    )
+    .map_err(database_error)?;
+  let mut rows = select.query([]).map_err(database_error)?;
+  let mut undecodable = 0usize;
+  while let Some(row) = rows.next().map_err(database_error)? {
+    let rowid: i64 = row.get(0).map_err(database_error)?;
+    let record: Vec<u8> = row.get(1).map_err(database_error)?;
+    let Ok(message) = decode_message(&record) else {
+      undecodable += 1;
+      continue;
+    };
+    let feed = FeedColumns::of(&message);
+    update
+      .execute(params![
+        rowid,
+        feed.is_feed_row,
+        feed.is_event,
+        feed.maybe_reaction_target.as_ref().map(<[u8; 16]>::as_slice),
+        feed.is_reply,
+      ])
+      .map_err(database_error)?;
+  }
+  if undecodable > 0 {
+    tracing::warn!(
+      undecodable,
+      "messages left out of the feed's index: their records don't decode"
+    );
+  }
+  Ok(())
+}
+
+impl FeedColumns {
+  fn of(message: &StoredMessage) -> Self {
+    Self {
+      is_feed_row: message.is_feed_row(),
+      is_event: message.is_event(),
+      maybe_reaction_target: message.reaction_target().map(|target| *target.as_bytes()),
+      is_reply: message.counts_as_reply(),
+    }
+  }
+}
+
+/// `?2, ?3, …` for `count` values after the conversation.
+fn placeholders(count: usize) -> String {
+  (2..count + 2)
+    .map(|at| format!("?{at}"))
+    .collect::<Vec<_>>()
+    .join(", ")
 }
 
 /// Version 1: the tables, and the `in_channel` column that early 1.0 previews lacked (thread
@@ -809,11 +1131,76 @@ mod tests {
     let as_in_1_0_8 = &MIGRATIONS[..2];
     assert!(matches!(
       run_migrations(&store.lock().connection, as_in_1_0_8),
-      Err(StoreError::NewerSchema {
-        found: 3,
-        supported: 2
-      })
+      Err(StoreError::NewerSchema { found, supported: 2 }) if found == SCHEMA_VERSION
     ));
+  }
+
+  /// Issue #155: a database from before the feed's columns gets them, filled from its records.
+  #[test]
+  fn a_database_before_the_feed_columns_has_them_filled() {
+    use crate::store::tests::{id, message};
+    use crate::store::{MessageContent, MessageOrder};
+
+    let directory = scratch_dir();
+    let path = directory.join("store.db");
+    let key = SymmetricKey::generate(&mut OsRng);
+    let conversation = id(5);
+    let root = message(conversation, 1, Some(100), None, 1);
+    let reply = message(conversation, 2, Some(110), Some(100), 2);
+    let mut reaction = message(conversation, 3, Some(120), None, 3);
+    reaction.content = MessageContent::Reaction {
+      target: root.client_message_id,
+      emoji: "+1".into(),
+      is_added: true,
+    };
+    let later = message(conversation, 4, Some(130), None, 4);
+    {
+      let connection = Connection::open(&path).unwrap();
+      keyed(&connection, &key);
+      run_migrations(&connection, &MIGRATIONS[..3]).unwrap();
+      for stored in [&root, &reply, &reaction, &later] {
+        let (sort_group, sort_value) = stored.sort_key();
+        connection
+          .execute(
+            "INSERT INTO messages
+               (conversation_id, client_message_id, sort_group, sort_value, thread_id, is_hidden, in_channel, record)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, 0, ?7)",
+            params![
+              conversation.snowflake().get(),
+              stored.client_message_id.as_bytes().as_slice(),
+              sort_group,
+              sort_value,
+              stored.maybe_thread_id.map(|thread| thread.snowflake().get()),
+              stored.is_hidden(),
+              serde_json::to_vec(stored).unwrap(),
+            ],
+          )
+          .unwrap();
+      }
+    }
+    let store = SqlCipherStore::open(&path, &StaticKeySource::new(key)).unwrap();
+    assert_eq!(store.feed_len(conversation).unwrap(), 2);
+    assert_eq!(store.feed_rows(conversation, 1, 5).unwrap(), vec![later.clone()]);
+    assert_eq!(store.feed_ranks(conversation, &[later.order()]).unwrap(), [1]);
+    let past_all = MessageOrder {
+      value: i64::MAX,
+      ..later.order()
+    };
+    assert_eq!(
+      store
+        .feed_ranks(conversation, &[past_all, root.order(), later.order()])
+        .unwrap(),
+      [2, 0, 1]
+    );
+    assert_eq!(
+      store
+        .reactions_to(conversation, &[root.client_message_id])
+        .unwrap(),
+      vec![reaction]
+    );
+    assert_eq!(store.reply_counts(conversation, &[id(100)]).unwrap(), [1]);
+    drop(store);
+    std::fs::remove_dir_all(&directory).unwrap();
   }
 
   /// Issue #424 review, H2: a commit of another connection to the same file (another process)

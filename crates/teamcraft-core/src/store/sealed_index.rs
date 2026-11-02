@@ -86,8 +86,7 @@ impl<K> IndexRoot<K> {
     self.pages.iter().map(|page| page.id)
   }
 
-  /// The entries of all pages together.
-  #[cfg(test)]
+  /// The entries of all pages together, from the root alone.
   pub(crate) fn len(&self) -> usize {
     self
       .pages
@@ -272,6 +271,57 @@ pub(crate) fn scan<K: Ord, V>(
   Ok(())
 }
 
+/// The keys at positions `start..start + len` in key order. Reads the root and only the pages
+/// that hold them: the root knows each page's length.
+pub(crate) fn keys_at<K: Ord + Clone, V>(
+  nodes: &mut impl IndexNodes<K, V>,
+  start: usize,
+  len: usize,
+) -> Result<Vec<K>, StoreError> {
+  let root = nodes.root()?;
+  let mut keys = Vec::with_capacity(len.min(MAX_PAGE_ENTRIES));
+  let mut page_start = 0usize;
+  let end = start.saturating_add(len);
+  for page_ref in &root.pages {
+    if page_start >= end {
+      break;
+    }
+    let page_len = usize::try_from(page_ref.len).unwrap_or(usize::MAX);
+    let page_end = page_start.saturating_add(page_len);
+    if page_end > start {
+      let page = nodes.page(page_ref.id)?;
+      let from = start.saturating_sub(page_start);
+      let to = (end - page_start).min(page.entries.len());
+      keys.extend(
+        page
+          .entries
+          .get(from..to)
+          .into_iter()
+          .flatten()
+          .map(|(key, _)| key.clone()),
+      );
+    }
+    page_start = page_end;
+  }
+  Ok(keys)
+}
+
+/// How many keys sort before `key`: the lengths of the pages before its page, from the root, and
+/// its place in that page.
+pub(crate) fn rank<K: Ord, V>(nodes: &mut impl IndexNodes<K, V>, key: &K) -> Result<usize, StoreError> {
+  let root = nodes.root()?;
+  if root.is_empty() {
+    return Ok(0);
+  }
+  let at = root.locate(key);
+  let before: usize = root.pages[..at]
+    .iter()
+    .map(|page| usize::try_from(page.len).unwrap_or(usize::MAX))
+    .sum();
+  let page = nodes.page(root.pages[at].id)?;
+  Ok(before + page.entries.partition_point(|(entry, _)| entry < key))
+}
+
 /// Removes every page and the root.
 pub(crate) fn clear<K, V>(nodes: &mut impl IndexNodes<K, V>) -> Result<(), StoreError> {
   let root = nodes.root()?;
@@ -435,6 +485,42 @@ mod tests {
       walk(&mut nodes, Bound::Unbounded, Direction::Forward, usize::MAX).len(),
       500
     );
+  }
+
+  #[test]
+  fn positions_and_ranks_come_from_the_page_lengths() {
+    let mut nodes = MemoryNodes::default();
+    for key in (0..2_000u64).map(|n| n * 3) {
+      upsert(&mut nodes, key, ()).unwrap();
+    }
+    for key in (0..300u64).map(|n| n * 3 + 1) {
+      upsert(&mut nodes, key, ()).unwrap();
+    }
+    let keys: Vec<u64> = all(&mut nodes).into_iter().map(|(key, ())| key).collect();
+    for (start, len) in [
+      (0, 0),
+      (0, 5),
+      (250, 20),
+      (1_000, 600),
+      (2_295, 10),
+      (2_300, 4),
+      (5_000, 1),
+    ] {
+      let expected: Vec<u64> = keys.iter().skip(start).take(len).copied().collect();
+      assert_eq!(
+        keys_at(&mut nodes, start, len).unwrap(),
+        expected,
+        "{start}+{len}"
+      );
+    }
+    for probe in [0, 1, 2, 899, 900, 3_000, 5_997, 6_000] {
+      assert_eq!(
+        rank(&mut nodes, &probe).unwrap(),
+        keys.partition_point(|key| *key < probe),
+        "{probe}"
+      );
+    }
+    assert_eq!(rank(&mut MemoryNodes::<()>::default(), &5).unwrap(), 0);
   }
 
   #[test]

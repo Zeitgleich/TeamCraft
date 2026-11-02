@@ -42,6 +42,12 @@ pub(crate) const MIGRATIONS: &[Migration] = &[
     version: 4,
     kind: MigrationKind::Marker,
   },
+  // The catalog's feed and relations indexes (issue #155): versions before would write messages
+  // they don't list. The store builds them when it opens, like the catalog itself.
+  Migration {
+    version: 5,
+    kind: MigrationKind::Marker,
+  },
 ];
 /// How much of the database file reads map into memory instead of copying it.
 const MMAP_BYTES: u64 = 256 * 1024 * 1024;
@@ -723,15 +729,16 @@ mod tests {
   }
 
   /// Issue #424 review, H1: 1.0.8 (its steps end before the marker) refuses the database; so does
-  /// a version before the catalog (issue #155), which would write records it doesn't list.
+  /// a version before the catalog or its feed indexes (issue #155), which would write records they
+  /// don't list.
   #[test]
   fn versions_before_the_last_marker_refuse_the_database() {
     let store =
       SealedSqliteStore::open_in_memory(&StaticKeySource::new(SymmetricKey::generate(&mut OsRng))).unwrap();
-    for steps in [2, 3] {
+    for steps in [2, 3, 4] {
       assert!(matches!(
         run_migrations(&store.backend().lock().connection, &MIGRATIONS[..steps]),
-        Err(StoreError::NewerSchema { found: 4, supported })
+        Err(StoreError::NewerSchema { found: 5, supported })
           if supported == i64::try_from(steps).unwrap()
       ));
     }

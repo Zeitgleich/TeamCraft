@@ -1,29 +1,33 @@
 //! The sealed store's budgets for a large workspace (issue #155, docs/performance.md, "Local
-//! store"): opening costs nothing that grows with the history, a page of a conversation costs that
-//! page, and the iOS notification extension shows a message within a few MiB of its ~24 MB.
+//! store"): opening costs nothing that grows with the history, a page of a conversation and of its
+//! feed costs that page, and the iOS notification extension shows a message within a few MiB of its ~24 MB.
 //! Its own test binary: the counting allocator sees every allocation of the process, so no other
 //! test may run beside it.
 //!
 //! `TEAMCRAFT_STORE_BUDGET_MESSAGES` sets the workspace's size (default 20,000 messages in 300
 //! conversations, half of them in one channel; docs/performance.md has the numbers for 100,000,
 //! measured with `--release`).
-#![cfg(all(feature = "sealed-sqlite", not(target_arch = "wasm32")))]
+#![cfg(all(feature = "sealed-sqlite", feature = "ui", not(target_arch = "wasm32")))]
 #![allow(clippy::unwrap_used)]
 
 #[path = "common/mod.rs"]
 mod common;
 
+use std::rc::Rc;
 use std::time::{Duration, Instant};
 
 use common::{Peer, settle};
 use peak_alloc::PeakAlloc;
 use rand_core::OsRng;
+use teamcraft_client_api::backend::ChatBackend;
 use teamcraft_core::api::fake::{FakeServer, FakeServerApi};
+use teamcraft_core::clock::ManualClock;
 use teamcraft_core::push_preview::{PreviewContent, push_preview};
 use teamcraft_core::store::{
   LocalStore, MessageContent, MessageEdge, MessageFilter, MessageSlot, SealedSqliteStore, SealedStoreLimits,
   StaticKeySource, StoredMessage, Table, write_group,
 };
+use teamcraft_core::ui_backend::CoreChatBackend;
 use teamcraft_crypto::push::seal_wakeup;
 use teamcraft_crypto::secret::SymmetricKey;
 use teamcraft_proto::{
@@ -41,6 +45,10 @@ const MAX_EXTENSION_BYTES: usize = 8 * MIB;
 /// Generous for a debug build on a busy CI runner; measured in milliseconds.
 const MAX_OPEN: Duration = Duration::from_secs(1);
 const MAX_PAGE: Duration = Duration::from_millis(200);
+/// Rows of the feed a list shows first.
+const FEED_PAGE: usize = 50;
+const MAX_FEED_PAGE: Duration = Duration::from_millis(300);
+const MAX_FEED_PAGE_BYTES: usize = 4 * MIB;
 const NOTIFIED_BODY: &str = "the message the notification shows";
 const HISTORY_BODY: &str =
   "an ordinary message of the history, about a hundred bytes long, as most of them are";
@@ -87,7 +95,7 @@ async fn a_large_store_opens_and_shows_a_notification_within_budget() {
 
   // The app: open, then the newest page of a conversation and one message far back.
   let started = Instant::now();
-  let store = SealedSqliteStore::open(&path, &StaticKeySource::new(key)).unwrap();
+  let store = SealedSqliteStore::open(&path, &StaticKeySource::new(key.duplicate())).unwrap();
   let open_time = started.elapsed();
   let started = Instant::now();
   let newest = store
@@ -102,6 +110,30 @@ async fn a_large_store_opens_and_shows_a_notification_within_budget() {
   assert!(store.message_by_server_id(channel, oldest).unwrap().is_some());
   let page_time = started.elapsed();
   assert_eq!(page.len(), 1);
+  drop(store);
+
+  // Opening the conversation after a start: the newest rows of the feed, on empty caches.
+  let store = Rc::new(SealedSqliteStore::open(&path, &StaticKeySource::new(key)).unwrap());
+  let backend = CoreChatBackend::new(
+    Rc::clone(&store),
+    bob.client.user_id(),
+    Box::new(ManualClock::new(0)),
+  );
+  let before = ALLOCATOR.current_usage();
+  ALLOCATOR.reset_peak_usage();
+  let started = Instant::now();
+  let rows = backend.message_count(channel);
+  let feed_page = backend.messages(channel, rows - FEED_PAGE, FEED_PAGE);
+  let feed_page_time = started.elapsed();
+  let feed_page_bytes = ALLOCATOR.peak_usage().saturating_sub(before);
+  assert_eq!(feed_page.len(), FEED_PAGE);
+  let started = Instant::now();
+  assert_eq!(
+    backend.feed_tail(channel, None, FEED_PAGE).messages.len(),
+    FEED_PAGE
+  );
+  let feed_tail_time = started.elapsed();
+
   let before = ALLOCATOR.current_usage();
   ALLOCATOR.reset_peak_usage();
   let started = Instant::now();
@@ -112,8 +144,11 @@ async fn a_large_store_opens_and_shows_a_notification_within_budget() {
   println!(
     "{messages} messages in {CONVERSATIONS} conversations (filled in {fill_time:?}): extension open + \
      preview {extension_time:?} with {:.2} MiB at its peak; app open {open_time:?}; newest and oldest \
-     message {page_time:?}; all {whole} of the channel {whole_time:?} with {:.2} MiB at its peak",
+     message {page_time:?}; first {FEED_PAGE} rows of the feed {feed_page_time:?} with {:.2} MiB at its \
+     peak, the same as a tail {feed_tail_time:?}; all {whole} of the channel {whole_time:?} with {:.2} \
+     MiB at its peak",
     extension_bytes as f64 / MIB as f64,
+    feed_page_bytes as f64 / MIB as f64,
     whole_bytes as f64 / MIB as f64
   );
   assert!(
@@ -123,6 +158,16 @@ async fn a_large_store_opens_and_shows_a_notification_within_budget() {
   );
   assert!(open_time < MAX_OPEN, "opening took {open_time:?}");
   assert!(page_time < MAX_PAGE, "two messages took {page_time:?}");
+  assert!(
+    feed_page_time < MAX_FEED_PAGE,
+    "a page of the feed took {feed_page_time:?}"
+  );
+  assert!(
+    feed_page_bytes < MAX_FEED_PAGE_BYTES,
+    "a page of the feed took {} MiB",
+    feed_page_bytes / MIB
+  );
+  drop(backend);
   drop(store);
   std::fs::remove_dir_all(&directory).unwrap();
   settle(&mut [&mut alice, &mut bob]).await;

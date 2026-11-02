@@ -2658,7 +2658,8 @@ The browser has neither SQLCipher nor an OS keystore. The web client keeps the s
 4. **Catalog (issue #155):** so a record is decrypted when it is read instead of all of them when
    the store opens, the store keeps a catalog, sealed like every other record (entries of a reserved
    table name that versions before skip): per table the keys it holds, and per conversation its
-   messages in display order with server ID, thread and a few flags (hidden, media, unreadable).
+   messages in display order with server ID, thread and a few flags (hidden, media, unreadable), the
+   rows of its feed, and its reactions by target, replies by thread and events.
    Each is a paged index: a root listing pages of up to 256 entries. Table, conversation and message
    IDs stay inside the sealed plaintext. The catalog is derived from the records: a node that is
    damaged, or disagrees with them, is built again under a new random generation, and never makes

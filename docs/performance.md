@@ -1223,6 +1223,8 @@ debug build):
 | Opening the store                                           | ≤ 50 ms  | 1 s                |
 | Notification extension: opening and the message, Rust heap  | ≤ 4 MiB  | 8 MiB              |
 | The newest and the oldest message of a conversation         | ≤ 20 ms  | 200 ms             |
+| The first 50 rows of the feed, on empty caches              | ≤ 20 ms  | 300 ms             |
+| The same, Rust heap at its peak                             | ≤ 1 MiB  | 4 MiB              |
 
 Measured on the sealed SQLite store (the mobile apps' store), release build, local machine
 (Linux, Ryzen, NVMe), November 2026; "before" is the same test on `main` 7dba4e60:
@@ -1238,6 +1240,7 @@ TEAMCRAFT_STORE_BUDGET_MESSAGES=100000 cargo test --release -p teamcraft-core --
 | App: open the store                                        | 414 ms                        | 0.3 ms               |
 | Newest and oldest message of the 50,000-message channel    | 96 ms                         | 0.6 ms               |
 | All 50,000 messages of the channel, first read             | 30 ms (all were in memory)    | 350–475 ms, 50 MiB   |
+| Newest 50 feed rows of that channel, first read            | 350–475 ms, 50 MiB (whole)    | 1.1 ms, 0.11 MiB     |
 
 - **The extension stays far under its limit**, independent of the history: its Rust heap is the
   index root and one page of the notified conversation plus a few entries (names, the push key, the
@@ -1249,12 +1252,23 @@ TEAMCRAFT_STORE_BUDGET_MESSAGES=100000 cargo test --release -p teamcraft-core --
   and index nodes (256 each) by default, plus the message cache of the conversations read last
   (60,000 messages on every platform, as the desktop had). Before, the whole store was in memory:
   148 MiB for this account, growing with every message.
-- **The first full read of a big conversation got slower:** records are read one by one under
-  pseudorandom IDs, about 9 µs a message (the file is memory-mapped, so a read is no system call).
-  The UI still reads a conversation whole for its feed (reactions and replies can be anywhere in
-  it), so the first open of the 50,000-message channel after a start takes about 0.5 s on this
-  machine; the message cache serves it from then on, and the feed's rows are derived once per change
-  instead of once per row asked for. Paging the feed from the index itself is the next step.
+- **A full read of a big conversation got slower:** records are read one by one under pseudorandom
+  IDs, about 9 µs a message (the file is memory-mapped, so a read is no system call).
+- **The feed no longer needs a full read:** the sealed store's catalog also keeps, per conversation,
+  a feed index (the rows; the root's page lengths count positions) and a relations index (reactions
+  by target, replies by thread, events), and the SQLCipher store has columns with partial indexes for
+  the same. `feed_tail` and `message_page` read the rows they return, their reactions and their reply
+  counts: the first page of the 50,000-message channel is at most 80 records
+  (`the_first_page_of_a_large_channel_reads_that_page` counts them). A channel with an import account
+  also reads its events once per change, the only messages the import's additions can be. The memory
+  store keeps the whole-read view, which costs it no decryption.
+- **Writes pay for it:** filling this account took 12.0 s instead of 9.7 s (+24 %, one run each; an
+  earlier pair differed by 9 %). A message outside a group of writes seals the feed index's root and
+  page as well.
+- **What still reads a conversation whole:** a sidebar entry's counts (`entry_counts`), the last
+  activity, the activity feed, a thread, toggling a reaction and the other actions that look a message
+  up. The message cache serves those after their first read, so opening a big channel is only as fast
+  as these numbers once none of them runs for it. Not measured end to end in an app.
 - **The browser** keeps the records' ciphertext in memory (IndexedDB has no synchronous reads) and
   decrypts a record only when it is read: opening no longer decrypts the store (part of #778), but
   it still reads all of the ciphertext, so its open time and memory stay O(store), and the first
@@ -1267,7 +1281,8 @@ TEAMCRAFT_STORE_BUDGET_MESSAGES=100000 cargo test --release -p teamcraft-core --
   the released 1.0.9 fixture and on a 4,500-message store stopped after two batches
   (`store::sealed::tests::catalog`). A damaged or inconsistent catalog is built again the same way,
   once, when it is noticed (`store::sealed::tests::repair`); that read takes as long as the build.
-- The desktop's SQLCipher store already read pages through its own index and is unchanged.
+  A catalog from before the feed indexes is built again under a new generation too, and SQLCipher
+  fills its new columns from every record in one layout step when it opens.
 
 ### Android (first numbers)
 

@@ -13,9 +13,9 @@ pub(crate) const RECORDS: &str = "records";
 pub(crate) const KEYS: &str = "keys";
 /// Schema version: bump with an upgrade step when object stores change, or when what records hold
 /// changes so that an older version would misread it. 2: the MLS state per entry (issue #424); 3:
-/// the catalog (issue #155), which a version before would not keep up to date. The object stores
-/// are those of 1.
-const SCHEMA_VERSION: u32 = 3;
+/// the catalog (issue #155), which a version before would not keep up to date; 4: its feed and
+/// relations indexes, likewise. The object stores are those of 1.
+const SCHEMA_VERSION: u32 = 4;
 /// How long deleting the database may wait for other pages to close it.
 const DELETE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
