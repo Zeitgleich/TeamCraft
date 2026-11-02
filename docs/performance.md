@@ -1334,11 +1334,14 @@ runs `scripts/check-web-size.py`. The script prints uncompressed, gzip -9 and (w
 module is installed) brotli -11 sizes, the gzip delta to `main` and a guest's first visit, and lists
 the chunks that load later. The limit:
 
-| Limit                                   | Value       | Above it                         |
-|-----------------------------------------|-------------|----------------------------------|
-| A guest in a meeting: gzip -9 total     | 5,700,000 B | fails; warns from 95 % (5.42 MB) |
-| Signed-in first visit: gzip -9 total    | 5,200,000 B | fails; warns from 95 % (4.94 MB) |
-| The call module: gzip -9                | 1,000,000 B | fails                            |
+| Limit                                | Value        | Above it                        |
+|--------------------------------------|--------------|---------------------------------|
+| A guest in a meeting: gzip -9 total  | 10,000,000 B | fails; warns from 95 % (9.5 MB) |
+| Signed-in first visit: gzip -9 total | 10,000,000 B | fails; warns from 95 % (9.5 MB) |
+| The call module: gzip -9             | 1,000,000 B  | fails                           |
+
+Both budgets are temporarily 10 MB, until #1148 brings them back down; before that they were 5.7 and
+5.2 MB. The rest of this paragraph describes those.
 
 The guest budget is the guest's meeting measured below plus about 4 %, the signed-in ceiling the
 signed-in first visit on `main` 8d653d3c plus about 10 %. The single budget before (4,700,000 B,

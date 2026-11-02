@@ -101,9 +101,10 @@ in [docs/performance.md](../../docs/performance.md) ("Clients"). A change that t
 | Idle, connected, in the foreground: CPU                 | ≤ 0.5 %   | ≤ 1 %                       | ≤ 1 %                                        |
 | Network while idle besides the gateway heartbeat        | none      | none                        | none                                         |
 | In the background                                       | –         | –                           | no wakelocks, no polling; push wakes the app |
-| Download size, a guest in a meeting (compressed)        | –         | ≤ 5.7 MB wasm, gzip -9      | –                                            |
-| Download size, signed-in first visit (compressed)       | –         | ≤ 5.2 MB wasm, gzip -9      | –                                            |
+| Download size, a guest in a meeting (compressed)        | –         | ≤ 10 MB wasm, gzip -9       | –                                            |
+| Download size, signed-in first visit (compressed)       | –         | ≤ 10 MB wasm, gzip -9       | –                                            |
 
+- Both download budgets are temporarily 10 MB (were 5.7 and 5.2 MB) until #1148 brings them back down.
 - The strict download budget is a guest's: somebody from outside who opens a meeting link, often
   once and in a browser that never saw the app, waits for the lobby (the app and the service
   worker), then the meeting's chunks (`guest`, `calls`) and the call module. The signed-in first
