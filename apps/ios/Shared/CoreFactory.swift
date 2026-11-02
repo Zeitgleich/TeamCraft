@@ -56,8 +56,11 @@ struct CoreFactory {
   }
 
   /// Opens the core for `account` (the OIDC subject) on the active server. The app creates the
-  /// database key on first sign-in (`createKey`); the extension never does.
-  func open(account: String, createKey: Bool, listener: EventListener) throws -> TeamCraft {
+  /// database key on first sign-in (`createKey`); the extension never does, and opens the store
+  /// with small caches (`isMemoryConstrained`, issue #155).
+  func open(
+    account: String, createKey: Bool, isMemoryConstrained: Bool = false, listener: EventListener
+  ) throws -> TeamCraft {
     guard let server = servers.activeServer else { throw CoreFactoryError.noAccount }
     let keyName = Self.databaseKeyName(storageKey: server.address.storageKey, account: account)
     let key: Data
@@ -78,7 +81,8 @@ struct CoreFactory {
       dataDir: container.dataDirectory.path,
       account: account,
       databaseKey: key,
-      pushGatewayUrl: environment.pushGatewayURL?.absoluteString)
+      pushGatewayUrl: environment.pushGatewayURL?.absoluteString,
+      isMemoryConstrained: isMemoryConstrained)
     return try TeamCraft(config: config, tokens: VaultTokenProvider(vault: vault), listener: listener)
   }
 

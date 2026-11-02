@@ -1,7 +1,8 @@
 //! [`LocalStore`] on IndexedDB: a [`SealedStore`] whose records live in one object store
 //! (e2ee.md §9.1).
 //!
-//! [`LocalStore`] is synchronous, IndexedDB is not. Opening reads every record; writes are queued
+//! [`LocalStore`] is synchronous, IndexedDB is not. Opening reads every record's ciphertext into
+//! memory, which the store decrypts only when a record is asked for (issue #155, #778); writes are queued
 //! and issued together in one transaction a moment later ([`BATCH_DELAY`], or at once when much is
 //! queued or on [`IndexedDbStore::flush`]). Of several writes of one record in that time only the
 //! last is issued: a catch-up rewrites some records after every group it processes, and one
@@ -31,6 +32,7 @@
 //! failure; the app shows it to the user.
 
 use std::cell::RefCell;
+use std::collections::BTreeMap;
 use std::rc::{Rc, Weak};
 use std::time::Duration;
 
@@ -41,9 +43,9 @@ use wasm_bindgen::{JsCast, JsValue};
 use web_sys::{IdbDatabase, IdbObjectStore, IdbTransaction, IdbTransactionMode};
 
 use super::idb::{self, OpenMode, RECORDS};
-use crate::store::StoreError;
 use crate::store::sealed::{LazySeal, RecordBackend, SealedStore, format_id, parse_id};
 use crate::store::write_queue::{Issue, RecordValue, WriteFailure, Writes};
+use crate::store::{SealedStoreLimits, StoreError};
 
 /// How long writes are collected before they are issued together. Short enough that little is
 /// lost when the page dies, long enough that a burst of writes becomes one transaction.
@@ -66,6 +68,8 @@ pub struct IndexedDbRecords {
 /// What the batch timer needs to issue the queued writes.
 struct Inner {
   database: IdbDatabase,
+  /// Every record's sealed bytes as of its latest issued write (what is queued is in `writes`).
+  records: RefCell<BTreeMap<LookupId, Vec<u8>>>,
   writes: Rc<RefCell<Writes>>,
   on_complete: Closure<dyn FnMut(web_sys::Event)>,
   on_abort: Closure<dyn FnMut(web_sys::Event)>,
@@ -73,8 +77,8 @@ struct Inner {
 }
 
 impl SealedStore<IndexedDbRecords> {
-  /// Opens the database `name` and decrypts it into memory with `database_key`; a page that owns
-  /// the store (it holds the Web Lock) upgrades it to this version.
+  /// Opens the database `name` with `database_key`, reading its ciphertext into memory; a page that
+  /// owns the store (it holds the Web Lock) upgrades it to this version.
   pub async fn open(name: &str, database_key: &SymmetricKey) -> Result<Self, StoreError> {
     Self::open_with(name, database_key, OpenMode::Upgrade).await
   }
@@ -95,8 +99,8 @@ impl SealedStore<IndexedDbRecords> {
         return Err(error);
       },
     };
-    let backend = IndexedDbRecords::new(database);
-    Self::load(backend, database_key, records)
+    let backend = IndexedDbRecords::new(database, records.into_iter().collect());
+    Self::open_backend(backend, database_key, SealedStoreLimits::default())
   }
 
   /// Deletes the database `name` (records and key wrapping): the user chose to set up a device
@@ -155,6 +159,31 @@ impl RecordBackend for IndexedDbRecords {
     Ok(())
   }
 
+  fn get_record(&self, id: &LookupId) -> Result<Option<Vec<u8>>, StoreError> {
+    if let Some(maybe_sealed) = self.inner.writes.borrow_mut().latest(&format_id(id))? {
+      return Ok(maybe_sealed);
+    }
+    Ok(self.inner.records.borrow().get(id).cloned())
+  }
+
+  fn records_after(
+    &self,
+    maybe_after: Option<&LookupId>,
+    limit: usize,
+  ) -> Result<Vec<(LookupId, Vec<u8>)>, StoreError> {
+    let records = self.inner.records.borrow();
+    let range = match maybe_after {
+      Some(after) => records.range((std::ops::Bound::Excluded(*after), std::ops::Bound::Unbounded)),
+      None => records.range(..),
+    };
+    Ok(
+      range
+        .take(limit)
+        .map(|(id, sealed)| (*id, sealed.clone()))
+        .collect(),
+    )
+  }
+
   fn begin_writes(&self) -> Result<(), StoreError> {
     let mut writes = self.inner.writes.borrow_mut();
     writes.group_depth = writes.group_depth.saturating_add(1);
@@ -182,7 +211,7 @@ impl RecordBackend for IndexedDbRecords {
 }
 
 impl IndexedDbRecords {
-  fn new(database: IdbDatabase) -> Self {
+  fn new(database: IdbDatabase, records: BTreeMap<LookupId, Vec<u8>>) -> Self {
     let writes = Rc::new(RefCell::new(Writes::default()));
     let on_complete = Closure::<dyn FnMut(web_sys::Event)>::new({
       let writes = writes.clone();
@@ -224,6 +253,7 @@ impl IndexedDbRecords {
     Self {
       inner: Rc::new(Inner {
         database,
+        records: RefCell::new(records),
         writes,
         on_complete,
         on_abort,
@@ -282,12 +312,23 @@ impl Inner {
     let mut maybe_refused = None;
     for key in &keys {
       let record = JsValue::from_str(key);
+      let maybe_id = parse_id(key);
       let (issued, sequence) = match writes.issue(key) {
-        Some(Issue::Put { sealed, sequence }) => (
-          records.put_with_key(&js_sys::Uint8Array::from(sealed), &record),
-          sequence,
-        ),
-        Some(Issue::Delete { sequence }) => (records.delete(&record), sequence),
+        Some(Issue::Put { sealed, sequence }) => {
+          if let Some(id) = maybe_id {
+            self.records.borrow_mut().insert(id, sealed.to_vec());
+          }
+          (
+            records.put_with_key(&js_sys::Uint8Array::from(sealed), &record),
+            sequence,
+          )
+        },
+        Some(Issue::Delete { sequence }) => {
+          if let Some(id) = maybe_id {
+            self.records.borrow_mut().remove(&id);
+          }
+          (records.delete(&record), sequence)
+        },
         // Replaced, or dropped for a failed seal.
         None => continue,
       };

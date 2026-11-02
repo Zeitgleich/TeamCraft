@@ -78,6 +78,9 @@ use crate::web_tabs::{self, Follower, OwnerChannel, OwnerLock, Ownership};
 
 /// Wrong short codes allowed before a link approval is dropped.
 const MAX_APPROVAL_MISSES: u8 = 3;
+/// Decoded messages of the conversations read last: the store decrypts a record only when it is
+/// asked for (issue #155), so the open conversation is kept instead of decrypted on every change.
+const MESSAGE_CACHE_MESSAGES: usize = 60_000;
 /// How often the loop wakes up on its own: outbox retries, heartbeats, staggered commits.
 const TICK: Duration = Duration::from_secs(3);
 /// How often the UI is told to read again while a long sync fills the store (issue #247).
@@ -1370,7 +1373,7 @@ impl Core {
       Ok(opened) => opened,
       Err(error) => return unreadable_status(error.into()),
     };
-    let store = TrackedStore::new(Rc::new(opened));
+    let store = TrackedStore::with_message_cache(Rc::new(opened), MESSAGE_CACHE_MESSAGES);
     self.store = Some(store.clone());
     watch_page_lifecycle(store.inner());
     let maybe_client = match Client::open(

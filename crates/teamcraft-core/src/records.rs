@@ -913,7 +913,8 @@ mod tests {
         |store| save_pending_device(store, &sample_pending(sample_user()), 0).unwrap(),
         |store| assert!(abandon_pending_device(store).unwrap()),
       );
-      assert_eq!(gone, 1, "the key pair's record");
+      // The key pair's record, and the old versions of its table's directory page and root (#155).
+      assert_eq!(gone, 3);
     }
 
     /// Signing out drops the keys of a link and the key pair; neither stays in the files.
@@ -938,12 +939,14 @@ mod tests {
         },
         |store| forget_unfinished_enrollment(store).unwrap(),
       );
-      assert_eq!(gone, 2, "the key pair's and the link's records");
+      // The key pair's and the link's records, and the old versions of their directory page and
+      // root.
+      assert_eq!(gone, 4);
     }
 
     /// Runs `before`, then `operation` on a sealed SQLite store, and checks that no ciphertext of
-    /// the records `operation` deleted is left in the database or its log. Returns how many it
-    /// deleted.
+    /// the records `operation` deleted or replaced is left in the database or its log. Returns how
+    /// many those were.
     #[cfg(all(feature = "sealed-sqlite", not(target_arch = "wasm32")))]
     fn sealed_records_gone(
       before: impl FnOnce(&crate::store::SealedSqliteStore),

@@ -443,6 +443,8 @@ pub struct CoreChatBackend<S> {
   pub(crate) mentions: RefCell<MentionMemo>,
   /// The activity feed's entries per conversation, kept while it doesn't change.
   pub(crate) activity: RefCell<HashMap<ConversationId, crate::ui_activity::KeptActivity>>,
+  /// The feed rows of the conversations read last, kept while their messages don't change.
+  feeds: RefCell<Vec<(ConversationId, FeedView)>>,
   #[cfg(not(target_arch = "wasm32"))]
   pub(crate) search: RefCell<crate::ui_search::UiSearchState>,
 }
@@ -476,6 +478,7 @@ impl<S: LocalStore> CoreChatBackend<S> {
       requests: RefCell::default(),
       mentions: RefCell::default(),
       activity: RefCell::default(),
+      feeds: RefCell::default(),
       #[cfg(not(target_arch = "wasm32"))]
       search: RefCell::new(Default::default()),
     }
@@ -1069,26 +1072,53 @@ impl<S: LocalStore> CoreChatBackend<S> {
     older: usize,
   ) -> FeedTail {
     let mut tail = FeedTail::default();
-    self.with_all_messages(conversation, &mut |all| {
-      let additions = ImportAdditions::of(all, self.importer());
-      let feed: Vec<&StoredMessage> = all
-        .iter()
-        .filter(|message| is_feed_row(message) && !additions.hides(message))
-        .collect();
+    let maybe_importer = self.importer();
+    self.with_feed(conversation, &mut |all, view| {
+      let feed: Vec<&StoredMessage> = view.rows.iter().map(|&at| &all[at]).collect();
       let anchor_at = maybe_oldest
         .and_then(|anchor| anchor.position_in(&feed))
         .unwrap_or(feed.len());
       let start = anchor_at.saturating_sub(older);
-      let relations = Relations::of(all, self.importer());
+      let rows = &view.rows[start..];
+      let relations = view.relations(all, rows, maybe_importer);
       tail = FeedTail {
-        messages: feed[start..]
+        messages: rows
           .iter()
-          .map(|message| self.to_message_among(message, &relations))
+          .map(|&at| self.to_message_among(&all[at], &relations))
           .collect(),
         has_older: start > 0,
       };
     });
     tail
+  }
+
+  /// Hands `read` a conversation's messages and its [`FeedView`], derived again only when the
+  /// messages changed since it was kept (a store without revisions derives it every time).
+  fn with_feed(&self, conversation: ConversationId, read: &mut dyn FnMut(&[StoredMessage], &FeedView)) {
+    let maybe_revision = self.store.message_revision(conversation);
+    let maybe_importer = self.importer();
+    let mut maybe_kept = {
+      let mut feeds = self.feeds.borrow_mut();
+      feeds
+        .iter()
+        .position(|(held, _)| *held == conversation)
+        .map(|at| feeds.remove(at).1)
+    };
+    self.with_all_messages(conversation, &mut |all| {
+      let view = match maybe_kept.take() {
+        Some(view) if view.is_for(maybe_revision, maybe_importer, all) => view,
+        _ => FeedView::of(all, maybe_revision, maybe_importer),
+      };
+      read(all, &view);
+      maybe_kept = Some(view);
+    });
+    if let Some(view) = maybe_kept.filter(|view| view.maybe_revision.is_some()) {
+      let mut feeds = self.feeds.borrow_mut();
+      if feeds.len() >= FeedView::MAX_KEPT {
+        feeds.remove(0);
+      }
+      feeds.push((conversation, view));
+    }
   }
 
   /// A conversation's messages lent to `read` without a copy where the store holds them.
@@ -1287,13 +1317,7 @@ impl<S: LocalStore> ChatBackend for CoreChatBackend<S> {
   /// The rows of the feed, as [`Self::message_page`] pages them.
   fn message_count(&self, conversation: ConversationId) -> usize {
     let mut count = 0;
-    self.with_all_messages(conversation, &mut |all| {
-      let additions = ImportAdditions::of(all, self.importer());
-      count = all
-        .iter()
-        .filter(|message| is_feed_row(message) && !additions.hides(message))
-        .count();
-    });
+    self.with_feed(conversation, &mut |_, view| count = view.rows.len());
     count
   }
 
@@ -1320,20 +1344,16 @@ impl<S: LocalStore> ChatBackend for CoreChatBackend<S> {
   /// conversation, and a log channel changes all the time (issue #1000).
   fn message_page(&self, conversation: ConversationId, start: usize, len: usize) -> (usize, Vec<Message>) {
     let mut answer = (0, Vec::new());
-    self.with_all_messages(conversation, &mut |all| {
-      let additions = ImportAdditions::of(all, self.importer());
-      let top_level: Vec<&StoredMessage> = all
+    let maybe_importer = self.importer();
+    self.with_feed(conversation, &mut |all, view| {
+      let end = start.saturating_add(len).min(view.rows.len());
+      let rows = &view.rows[start.min(end)..end];
+      let relations = view.relations(all, rows, maybe_importer);
+      let page = rows
         .iter()
-        .filter(|message| is_feed_row(message) && !additions.hides(message))
+        .map(|&at| self.to_message_among(&all[at], &relations))
         .collect();
-      let end = start.saturating_add(len).min(top_level.len());
-      let start = start.min(end);
-      let relations = Relations::of(all, self.importer());
-      let page = top_level[start..end]
-        .iter()
-        .map(|message| self.to_message_among(message, &relations))
-        .collect();
-      answer = (top_level.len(), page);
+      answer = (view.rows.len(), page);
     });
     answer
   }
@@ -2443,6 +2463,103 @@ struct Relations<'a> {
   maybe_importer: Option<UserId>,
 }
 
+/// A conversation's feed as the lists page it (issue #155): which messages are rows, and where
+/// each one's reactions and replies are. Derived once per change of the conversation's messages:
+/// a list asks for its rows a few at a time (a row for its neighbour, a window per scroll), and
+/// each ask walked the whole conversation.
+struct FeedView {
+  /// The store's revision of the messages it was derived from; `None` (a store without revisions)
+  /// is never kept.
+  maybe_revision: Option<u64>,
+  maybe_importer: Option<UserId>,
+  /// How many messages the conversation had, a check that positions still point where they did.
+  messages: usize,
+  /// Positions of the rows among the conversation's messages, in display order.
+  rows: Vec<usize>,
+  /// Positions of the reactions to each message, in conversation order (the latest counts).
+  reactions: HashMap<ClientMessageId, Vec<usize>>,
+  /// Shown replies per thread.
+  replies: HashMap<ThreadId, usize>,
+}
+
+impl FeedView {
+  /// Conversations whose views are kept (the open one, a thread or call beside it, a few recent).
+  const MAX_KEPT: usize = 4;
+
+  fn of(all: &[StoredMessage], maybe_revision: Option<u64>, maybe_importer: Option<UserId>) -> Self {
+    #[cfg(test)]
+    tests::FEED_VIEWS_DERIVED.with(|derived| derived.set(derived.get() + 1));
+    let additions = ImportAdditions::of(all, maybe_importer);
+    let mut rows = Vec::new();
+    let mut reactions: HashMap<ClientMessageId, Vec<usize>> = HashMap::new();
+    let mut replies: HashMap<ThreadId, usize> = HashMap::new();
+    for (at, message) in all.iter().enumerate() {
+      if is_feed_row(message) && !additions.hides(message) {
+        rows.push(at);
+      }
+      if let MessageContent::Reaction { target, .. } = &message.content {
+        reactions.entry(*target).or_default().push(at);
+      }
+      if counts_as_reply(message)
+        && let Some(thread) = message.maybe_thread_id
+      {
+        *replies.entry(thread).or_default() += 1;
+      }
+    }
+    Self {
+      maybe_revision,
+      maybe_importer,
+      messages: all.len(),
+      rows,
+      reactions,
+      replies,
+    }
+  }
+
+  fn is_for(
+    &self,
+    maybe_revision: Option<u64>,
+    maybe_importer: Option<UserId>,
+    all: &[StoredMessage],
+  ) -> bool {
+    maybe_revision.is_some()
+      && self.maybe_revision == maybe_revision
+      && self.maybe_importer == maybe_importer
+      && self.messages == all.len()
+  }
+
+  /// The reactions and replies of the messages at `rows`, for showing them.
+  fn relations<'a>(
+    &self,
+    all: &'a [StoredMessage],
+    rows: &[usize],
+    maybe_importer: Option<UserId>,
+  ) -> Relations<'a> {
+    let mut reactions = HashMap::new();
+    let mut replies = HashMap::new();
+    for &at in rows {
+      let message = &all[at];
+      if let Some(positions) = self.reactions.get(&message.client_message_id) {
+        reactions.insert(
+          message.client_message_id,
+          positions.iter().map(|&position| &all[position]).collect(),
+        );
+      }
+      if let Some(server_id) = message.maybe_server_id {
+        let thread = ThreadId::from_snowflake(server_id.snowflake());
+        if let Some(count) = self.replies.get(&thread) {
+          replies.insert(thread, *count);
+        }
+      }
+    }
+    Relations {
+      reactions,
+      replies,
+      maybe_importer,
+    }
+  }
+}
+
 impl<'a> Relations<'a> {
   fn of(all: &'a [StoredMessage], maybe_importer: Option<UserId>) -> Self {
     let mut reactions: HashMap<ClientMessageId, Vec<&'a StoredMessage>> = HashMap::new();
@@ -2451,11 +2568,8 @@ impl<'a> Relations<'a> {
       if let MessageContent::Reaction { target, .. } = &message.content {
         reactions.entry(*target).or_default().push(message);
       }
-      // A placeholder (issue #888) may turn out to be no reply at all: counted once readable.
-      if let Some(thread) = message.maybe_thread_id
-        && !message.is_hidden()
-        && !is_deleted(message)
-        && message.maybe_unreadable.is_none()
+      if counts_as_reply(message)
+        && let Some(thread) = message.maybe_thread_id
       {
         *replies.entry(thread).or_default() += 1;
       }
@@ -2619,6 +2733,15 @@ fn unread_position(message: &StoredMessage) -> Option<MessageId> {
 /// Whether a stored message is a row of the conversation's feed: top level (or a reply also sent
 /// to the channel), not hidden, not deleted. The import account's additions are left out too
 /// ([`ImportAdditions`]).
+/// A shown reply of a thread. A placeholder (issue #888) may turn out to be no reply at all:
+/// counted once readable.
+fn counts_as_reply(message: &StoredMessage) -> bool {
+  message.maybe_thread_id.is_some()
+    && !message.is_hidden()
+    && !is_deleted(message)
+    && message.maybe_unreadable.is_none()
+}
+
 fn is_feed_row(message: &StoredMessage) -> bool {
   (message.maybe_thread_id.is_none() || message.is_also_in_channel())
     && !message.is_hidden()
@@ -2722,6 +2845,69 @@ mod tests {
     // #641: the reaction raises the unread count, so the open conversation must see it to read it.
     assert_eq!(backend.messages(conversation, 0, 10).len(), 1);
     assert_eq!(backend.newest_message(conversation), Some(id(102)));
+  }
+
+  thread_local! {
+    /// How often a [`FeedView`] was derived on this thread.
+    pub(super) static FEED_VIEWS_DERIVED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+  }
+
+  /// Issue #155: a list asking for its rows one at a time walks the conversation once per change.
+  #[test]
+  fn rows_asked_one_by_one_derive_the_feed_once_per_change() {
+    let store =
+      crate::store::TrackedStore::with_message_cache(std::sync::Arc::new(MemoryStore::new()), 1_000);
+    let conversation = id::<ConversationId>(10);
+    let backend = CoreChatBackend::new(store.clone(), id(1), Box::new(ManualClock::new(1_000)));
+    let text = |client: u8, server_id: i64| plain(conversation, client, server_id, "hello");
+    store.upsert_message(&text(1, 101)).unwrap();
+    let mut reaction = plain(conversation, 2, 102, "");
+    reaction.content = MessageContent::Reaction {
+      target: ClientMessageId::from_bytes([1; 16]),
+      emoji: "+1".into(),
+      is_added: true,
+    };
+    store.upsert_message(&reaction).unwrap();
+    store.upsert_message(&text(3, 103)).unwrap();
+
+    let before = FEED_VIEWS_DERIVED.with(std::cell::Cell::get);
+    assert_eq!(backend.message_count(conversation), 2);
+    let first = backend.messages(conversation, 0, 1);
+    let second = backend.messages(conversation, 1, 1);
+    assert_eq!(
+      first[0].reactions.len(),
+      1,
+      "a row's reaction is found without the rest"
+    );
+    assert!(second[0].reactions.is_empty());
+    assert_eq!(FEED_VIEWS_DERIVED.with(std::cell::Cell::get) - before, 1);
+
+    store.upsert_message(&text(4, 104)).unwrap();
+    assert_eq!(backend.message_count(conversation), 3);
+    assert_eq!(FEED_VIEWS_DERIVED.with(std::cell::Cell::get) - before, 2);
+  }
+
+  fn plain(conversation: ConversationId, client: u8, server_id: i64, body: &str) -> StoredMessage {
+    StoredMessage {
+      conversation_id: conversation,
+      client_message_id: ClientMessageId::from_bytes([client; 16]),
+      maybe_server_id: Some(id(server_id)),
+      sender_user_id: id(2),
+      maybe_thread_id: None,
+      sent_at_ms: 1_000,
+      content: MessageContent::Text {
+        body: body.into(),
+        mentions: Vec::new(),
+        meta: Default::default(),
+      },
+      is_edited: false,
+      edits: Vec::new(),
+      maybe_edit_id: None,
+      is_pinned: false,
+      maybe_verified_commit: None,
+      maybe_server_change: None,
+      maybe_unreadable: None,
+    }
   }
 
   mod feed_tail {

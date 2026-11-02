@@ -19,7 +19,7 @@ use crate::client::decrypt_content;
 use crate::error::CoreError;
 use crate::people_names::shown_name;
 use crate::records;
-use crate::store::{LocalStore, MessageContent, MessageFilter, Table};
+use crate::store::{LocalStore, MessageContent, Table};
 
 pub(crate) const PUSH_KEY_RECORD: &str = "push_key";
 const PUSH_SESSION_RECORD: &str = "push_session";
@@ -282,14 +282,11 @@ async fn preview_content<A: ServerApi>(
   message_id: MessageId,
 ) -> (Result<PreviewContent, PreviewGap>, bool, bool) {
   let conversation = wake_up.conversation_id;
+  // One indexed lookup: the notification extension has little memory (issue #155).
   let local = store
-    .messages(conversation, MessageFilter::All)
+    .message_by_server_id(conversation, message_id)
     .ok()
-    .and_then(|messages| {
-      messages
-        .into_iter()
-        .find(|message| message.maybe_server_id == Some(message_id))
-    });
+    .flatten();
   if let Some(message) = local {
     return (
       Ok(content_preview(&message.content)),

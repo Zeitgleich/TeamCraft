@@ -872,7 +872,7 @@ impl TeamCraft {
         Box::pin(async move {
           let from = engine::parse_id(&from_conversation_id)?;
           let to = engine::parse_id(&to_conversation_id)?;
-          let maybe_record = teamcraft_core::client::call_move_announcement(engine.store.as_ref(), from, to)?;
+          let maybe_record = teamcraft_core::client::call_move_announcement(&engine.store, from, to)?;
           Ok(maybe_record.map(|record| CallMoveInfo {
             by_user_id: record.by.to_string(),
             added_user_ids: record.added.iter().map(ToString::to_string).collect(),
@@ -1387,6 +1387,7 @@ mod tests {
       account: ACCOUNT.into(),
       database_key,
       push_gateway_url: None,
+      is_memory_constrained: false,
     }
   }
 

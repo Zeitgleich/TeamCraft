@@ -106,6 +106,24 @@ impl Writes {
     self.group_depth == 0 && self.is_over_limit()
   }
 
+  /// The latest write of `key` that hasn't committed: `Some(None)` a delete, `Some(Some(bytes))` a
+  /// put (sealed now if it waited for its batch; the batch then takes the sealed bytes), `None`
+  /// when no write of it is open.
+  pub(crate) fn latest(&mut self, key: &str) -> Result<Option<Option<Vec<u8>>>, StoreError> {
+    let Some(write) = self.open.get_mut(key) else {
+      return Ok(None);
+    };
+    if let Some(RecordValue::Unsealed(seal)) = &write.maybe_value {
+      write.maybe_value = Some(RecordValue::Sealed(seal()?));
+    }
+    Ok(Some(match &write.maybe_value {
+      Some(RecordValue::Sealed(sealed)) => Some(sealed.clone()),
+      // Sealed just above.
+      Some(RecordValue::Unsealed(_)) => None,
+      None => None,
+    }))
+  }
+
   /// Whether so much is queued that it should be issued now ([`MAX_QUEUED_BYTES`]).
   pub(crate) fn is_over_limit(&self) -> bool {
     self.queued_bytes >= MAX_QUEUED_BYTES

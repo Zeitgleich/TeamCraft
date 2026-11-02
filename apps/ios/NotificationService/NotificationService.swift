@@ -10,7 +10,8 @@ import UserNotifications
 /// The extension never touches MLS state; it takes the cross-process lock so the app and the
 /// extension don't sync at the same time.
 ///
-/// Memory: extensions have a small limit (about 24 MB); the first device test must watch it.
+/// Memory: extensions have a small limit (about 24 MB). The core opens the store with small caches
+/// and reads only the records of the notified message (issue #155; measured in docs/performance.md).
 final class NotificationService: UNNotificationServiceExtension {
   /// How long to wait for the app, which holds the lock while it is in the foreground.
   private static let lockTimeout: TimeInterval = 8
@@ -105,7 +106,8 @@ final class NotificationService: UNNotificationServiceExtension {
     guard hasLock else { return nil }
     defer { lock.release() }
     do {
-      let core = try CoreFactory().open(account: account, createKey: false, listener: ClosureEventListener {})
+      let core = try CoreFactory().open(
+        account: account, createKey: false, isMemoryConstrained: true, listener: ClosureEventListener {})
       // Never catches the conversation up: the app alone advances the account's state (MLS,
       // cursors), or the two processes would fork it (docs/e2ee.md §7.2).
       let notification = try await core.notificationPreviewForPush(

@@ -210,7 +210,7 @@ impl Engine {
   fn join_request_alerts(&mut self) -> Result<JoinRequestAlertChanges, TeamCraftError> {
     let backend = self.backend()?;
     let requests = backend.join_requests();
-    let store = self.store.as_ref();
+    let store = &self.store;
     let maybe_saved = store
       .get(Table::SyncState, ALERTS_KEY)?
       .map(|bytes| String::from_utf8_lossy(&bytes).into_owned());

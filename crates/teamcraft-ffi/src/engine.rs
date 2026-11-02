@@ -36,7 +36,9 @@ use teamcraft_core::push_preview::{
   PreviewGap, PushPreview, device_push_content, push_content_mode, push_preview, save_device_push_content,
 };
 use teamcraft_core::runner::{RunnerCommand, RunnerHandle, RunnerSettings, SyncRunner};
-use teamcraft_core::store::{LocalStore as _, SealedSqliteStore, StaticKeySource};
+use teamcraft_core::store::{
+  LocalStore as _, SealedSqliteStore, SealedStoreLimits, StaticKeySource, TrackedStore,
+};
 use teamcraft_core::ui_backend::{CoreChatBackend, CoreCommand, FeedAnchor};
 use teamcraft_core::{
   Client, ClientSettings, CoreError, EnrollmentOptions, EnrollmentSecret, LinkCodeKind, LinkOffer,
@@ -78,6 +80,10 @@ const PUSH_FOLLOW_MIN_LEFT: Duration = Duration::from_secs(2);
 const MAX_DOWNLOADS_BYTES: u64 = 1024 * 1024 * 1024;
 /// Plaintext copies of files waiting to be uploaded, one folder per account below it.
 const UPLOAD_STAGING_DIR: &str = "outgoing";
+/// Decoded messages of the conversations read last, kept so the open conversation isn't decrypted
+/// again on every change (issue #155; as many as the desktop keeps). A
+/// memory-constrained process (the iOS notification extension) keeps none.
+const MESSAGE_CACHE_MESSAGES: usize = 60_000;
 
 /// A boxed future that stays on the engine thread.
 pub(crate) type LocalFuture<'a, T> = Pin<Box<dyn Future<Output = T> + 'a>>;
@@ -85,7 +91,7 @@ pub(crate) type LocalFuture<'a, T> = Pin<Box<dyn Future<Output = T> + 'a>>;
 pub(crate) type Job = Box<dyn for<'a> FnOnce(&'a mut Engine) -> LocalFuture<'a, ()> + Send>;
 
 pub(crate) type Api = HttpServerApi<ForeignTokens>;
-pub(crate) type Store = Arc<SealedSqliteStore>;
+pub(crate) type Store = TrackedStore<Arc<SealedSqliteStore>>;
 pub(crate) type CoreClient = Client<Api, Store>;
 
 pub(crate) struct Engine {
@@ -159,6 +165,8 @@ pub(crate) struct EngineStart {
   tokens: Arc<dyn TokenProvider>,
   listener: Arc<dyn EventListener>,
   signals: SyncSignals,
+  /// The process has little memory (the iOS notification extension): small store caches.
+  is_memory_constrained: bool,
 }
 
 /// Why the engine didn't open.
@@ -360,6 +368,7 @@ impl EngineStart {
       tokens,
       listener,
       signals,
+      is_memory_constrained: config.is_memory_constrained,
     })
   }
 
@@ -391,6 +400,7 @@ impl EngineStart {
       key: self.key.duplicate(),
       tokens: self.tokens.clone(),
       listener: self.listener.clone(),
+      is_memory_constrained: self.is_memory_constrained,
       signals: self.signals.clone(),
     }
   }
@@ -410,19 +420,23 @@ impl Engine {
       tokens,
       listener,
       signals,
+      is_memory_constrained,
       ..
     } = start;
-    let store =
-      SealedSqliteStore::open(&path, &StaticKeySource::new(key)).map_err(|error| open_error(error.into()))?;
-    let store = Arc::new(store);
+    let (limits, cached_messages) = if is_memory_constrained {
+      (SealedStoreLimits::minimal(), 0)
+    } else {
+      (SealedStoreLimits::default(), MESSAGE_CACHE_MESSAGES)
+    };
+    let store = SealedSqliteStore::open_with_limits(&path, &StaticKeySource::new(key), limits)
+      .map_err(|error| open_error(error.into()))?;
+    let store = TrackedStore::with_message_cache(Arc::new(store), cached_messages);
     // Plaintext copies of files that were never sent (taken out of the composer, app stopped).
-    if let Err(error) = sweep_staged_copies(store.as_ref(), &upload_staging_dir) {
+    if let Err(error) = sweep_staged_copies(&store, &upload_staging_dir) {
       tracing::debug!(%error, "stray staged upload copies could not be listed");
     }
     // A broken record only costs the preferences, not the store.
-    let mentions: MentionSettings = load_mention_preferences(store.as_ref())
-      .unwrap_or_default()
-      .into();
+    let mentions: MentionSettings = load_mention_preferences(&store).unwrap_or_default().into();
     trim_downloads(&download_dir, MAX_DOWNLOADS_BYTES);
     let mut engine = Self {
       server_url,
@@ -1210,7 +1224,7 @@ impl Engine {
   ) -> Result<PushNotification, TeamCraftError> {
     let preview = self.push_preview_within_budget(&payload, reader).await?;
     let now_ms = SystemClock.now_ms();
-    let store = self.store.as_ref();
+    let store = &self.store;
     // A retry is the same push again: counting it would skew the received count and the delay.
     if opening == PushOpening::Received {
       push_guard::record_received(store, &preview.wake_up, now_ms);
@@ -1256,15 +1270,12 @@ impl Engine {
     // Without a token the preview still names conversation and sender.
     let maybe_api = self.tokens.0.access_token().map(|_| &api);
     // Cancel-safe: the preview only reads the store.
-    let fetched = tokio::time::timeout(
-      PUSH_FETCH_BUDGET,
-      push_preview(self.store.as_ref(), maybe_api, payload),
-    )
-    .await;
+    let fetched =
+      tokio::time::timeout(PUSH_FETCH_BUDGET, push_preview(&self.store, maybe_api, payload)).await;
     let mut preview = match fetched {
       Ok(result) => result?,
       Err(_elapsed) => {
-        let mut preview = push_preview::<Api>(self.store.as_ref(), None, payload).await?;
+        let mut preview = push_preview::<Api>(&self.store, None, payload).await?;
         // Only a missing message is the timeout's fault; a policy or setting cut stays as it is.
         if matches!(
           preview.maybe_gap,
@@ -1287,7 +1298,7 @@ impl Engine {
       if let Err(error) = catch_up_for_push(client, conversation, deadline).await {
         tracing::debug!(%error, conversation_id = %conversation, "push catch-up stopped");
       }
-      let caught_up = push_preview::<Api>(self.store.as_ref(), None, payload).await?;
+      let caught_up = push_preview::<Api>(&self.store, None, payload).await?;
       // The store-only preview names `NoSession` while the message is still missing: then the first
       // try's reason stays (a failed decryption, a timeout), with any names the catch-up learned.
       if caught_up.maybe_gap != Some(PreviewGap::NoSession) {
@@ -1309,26 +1320,22 @@ impl Engine {
     conversation_id: &str,
   ) -> Result<Option<NotifiedConversation>, TeamCraftError> {
     let conversation: ConversationId = parse_id(conversation_id)?;
-    Ok(notified::notified_conversation(self.store.as_ref(), conversation)?.map(Into::into))
+    Ok(notified::notified_conversation(&self.store, conversation)?.map(Into::into))
   }
 
   pub(crate) fn push_diagnostics(&self) -> Result<PushDiagnosticsInfo, TeamCraftError> {
-    Ok(push_guard::push_diagnostics(self.store.as_ref())?.into())
+    Ok(push_guard::push_diagnostics(&self.store)?.into())
   }
 
   pub(crate) async fn send_test_push(&self) -> Result<TestPushResult, TeamCraftError> {
     let api = self.api();
-    Ok(
-      push_guard::send_test_push(self.store.as_ref(), &api)
-        .await?
-        .into(),
-    )
+    Ok(push_guard::send_test_push(&self.store, &api).await?.into())
   }
 
   /// Remembers the preferences in the store, so a process that opens the store later (the iOS
   /// notification extension) applies them too.
   pub(crate) fn set_mention_settings(&mut self, settings: MentionSettings) -> Result<(), TeamCraftError> {
-    save_mention_preferences(self.store.as_ref(), &settings.clone().into())?;
+    save_mention_preferences(&self.store, &settings.clone().into())?;
     self.mentions = settings;
     Ok(())
   }
@@ -1340,7 +1347,7 @@ impl Engine {
   /// This device's notification privacy setting and the workspace policy's limit; both stored, so
   /// a notification extension reads them too.
   pub(crate) fn notification_content(&self) -> NotificationContentSettings {
-    let store = self.store.as_ref();
+    let store = &self.store;
     NotificationContentSettings {
       device: (&device_push_content(store)).into(),
       workspace: (&push_content_mode(store)).into(),
@@ -1348,15 +1355,15 @@ impl Engine {
   }
 
   pub(crate) fn set_notification_content(&self, content: NotificationContent) -> Result<(), TeamCraftError> {
-    Ok(save_device_push_content(self.store.as_ref(), &content.into())?)
+    Ok(save_device_push_content(&self.store, &content.into())?)
   }
 
   pub(crate) fn segment_prefetch(&self) -> Result<SegmentPrefetchMode, TeamCraftError> {
-    Ok(load_segment_prefetch(self.store.as_ref())?.into())
+    Ok(load_segment_prefetch(&self.store)?.into())
   }
 
   pub(crate) fn set_segment_prefetch(&self, mode: SegmentPrefetchMode) -> Result<(), TeamCraftError> {
-    Ok(save_segment_prefetch(self.store.as_ref(), mode.into())?)
+    Ok(save_segment_prefetch(&self.store, mode.into())?)
   }
 
   /// Prefetches the search segments if the saved mode allows it on this network; nothing is
@@ -1366,7 +1373,7 @@ impl Engine {
     is_network_metered: bool,
     max_total_bytes: u64,
   ) -> Result<SegmentPrefetchResult, TeamCraftError> {
-    if !load_segment_prefetch(self.store.as_ref())?.allows(is_network_metered) {
+    if !load_segment_prefetch(&self.store)?.allows(is_network_metered) {
       return Ok(SegmentPrefetchResult {
         fetched: 0,
         skipped: 0,
