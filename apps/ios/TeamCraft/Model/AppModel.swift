@@ -123,6 +123,7 @@ enum AppPhase {
 final class AppModel {
   static let shared = AppModel()
   private static let signInLog = Logger(subsystem: "de.zeitgleich.teamcraft", category: "sign-in")
+  private static let syncLog = Logger(subsystem: "de.zeitgleich.teamcraft", category: "sync")
   /// One wait for the cross-process lock; the extension holds it at most for its push budget.
   private static let lockWaitSeconds: TimeInterval = 5
   /// The longest a background flush waits, even if the system grants more time.
@@ -1319,7 +1320,14 @@ final class AppModel {
     // loser is signed out (docs/e2ee.md §7). It holds the lock at most for its push budget.
     guard await acquireProcessLock() else { return }
     isSyncing = true
-    try? await core.start()
+    do {
+      try await core.start()
+    } catch {
+      // Not syncing after all: the next foreground tries again (issue #1142).
+      Self.syncLog.error("sync not started: \(String(describing: error), privacy: .public)")
+      isSyncing = false
+      processLock.release()
+    }
   }
 
   /// Waits for the cross-process lock while the app is in the foreground; `false` once it left

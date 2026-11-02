@@ -24,6 +24,9 @@ sealed interface ConnectionNotice {
 
   data object Connecting : ConnectionNotice
 
+  /** The sync loop should run but couldn't be started; the app keeps trying (issue #1142). */
+  data object SyncNotStarted : ConnectionNotice
+
   /** Connected, but the server answers late (a saturated link): messages still go out (issue #1064). */
   data object Slow : ConnectionNotice
 
@@ -61,12 +64,19 @@ fun isConnectionDown(isOnline: Boolean, maybeConnection: ConnectionState?): Bool
  * The banner for this moment, or none. The device's own connectivity wins: without a network the
  * server can't be the problem. No core open (`null`): nothing to say about the server.
  */
-fun connectionNotice(isOnline: Boolean, maybeConnection: ConnectionState?, unsettled: Unsettled, nowMs: Long): ConnectionNotice? {
+fun connectionNotice(
+  isOnline: Boolean,
+  maybeConnection: ConnectionState?,
+  unsettled: Unsettled,
+  nowMs: Long,
+  isSyncStartFailing: Boolean = false,
+): ConnectionNotice? {
   if (maybeConnection is ConnectionState.SignInRequired) return ConnectionNotice.SignInRequired
   // Connected, so no grace period: the core doesn't flip it back and forth.
   if (isOnline && maybeConnection is ConnectionState.Slow) return ConnectionNotice.Slow
   if (!unsettled.isPastGrace(nowMs)) return null
   if (!isOnline) return ConnectionNotice.DeviceOffline
+  if (isSyncStartFailing) return ConnectionNotice.SyncNotStarted
   return when (maybeConnection) {
     is ConnectionState.Connecting -> ConnectionNotice.Connecting
     // The attempt is due but hasn't started yet: "next attempt in 0 s" would read as stuck.
@@ -88,6 +98,7 @@ class ConnectionGrace(
   scope: CoroutineScope,
   connection: StateFlow<ConnectionState?>,
   isOnline: StateFlow<Boolean>,
+  isSyncStartFailing: StateFlow<Boolean>,
   private val clock: () -> Long = System::currentTimeMillis,
 ) {
   private val current = MutableStateFlow(Unsettled())
@@ -96,7 +107,10 @@ class ConnectionGrace(
 
   init {
     scope.launch {
-      combine(connection, isOnline) { maybeConnection, online -> isConnectionDown(online, maybeConnection) }
+      // A loop that couldn't start leaves the last state standing, which may read as connected.
+      combine(connection, isOnline, isSyncStartFailing) { maybeConnection, online, isFailing ->
+        isFailing || isConnectionDown(online, maybeConnection)
+      }
         .collect { isDown -> current.update { it.observe(isDown, clock()) } }
     }
   }

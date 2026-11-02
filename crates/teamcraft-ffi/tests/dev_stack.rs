@@ -17,8 +17,11 @@ use teamcraft_core::store::MemoryStore;
 use teamcraft_core::{ClientSettings, EnrollmentOptions, EnrollmentSecret, PendingEnrollment};
 use teamcraft_crypto::backup::Argon2Settings;
 use teamcraft_crypto::secret::SecretBytes;
-use teamcraft_ffi::{AccountState, AppConfig, EventListener, TeamCraft, TokenProvider};
+use teamcraft_ffi::{
+  AccountState, AppConfig, ConnectionState, EventListener, PushService, TeamCraft, TokenProvider,
+};
 use teamcraft_proto::{CreateSpaceRequest, JoinPolicy, SpaceResponse};
+use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 
 /// Same as teamcraft-core's dev-stack tests, so both recover the same identities.
 const PASSPHRASE: &str = "dev-stack integration passphrase";
@@ -182,6 +185,72 @@ async fn mobile_client_receives_and_answers_a_message() {
   std::fs::remove_dir_all(&directory).unwrap();
 }
 
+/// Issue #1142, the app's cold start as Android runs it: the sync loop starts, then the push refresh
+/// and the token's registration follow right away. They must not cost the loop its connection.
+#[tokio::test]
+async fn push_upkeep_leaves_the_gateway_connection_open() {
+  let Some(server_url) = std::env::var("TEAMCRAFT_TEST_SERVER_URL").ok() else {
+    eprintln!("skipping: TEAMCRAFT_TEST_SERVER_URL is not set");
+    return;
+  };
+  let (proxy_url, connections) = counting_proxy(&server_url).await;
+  let token = dev_token("bob");
+  let directory = std::env::temp_dir().join(format!("teamcraft-ffi-push-{}", SystemClock.now_ms()));
+  let open = || {
+    TeamCraft::new(
+      AppConfig {
+        server_url: proxy_url.clone(),
+        data_dir: directory.to_string_lossy().into_owned(),
+        account: "bob".into(),
+        database_key: vec![42; 32],
+        push_gateway_url: None,
+        is_memory_constrained: false,
+      },
+      Arc::new(Token(token.clone())),
+      Arc::new(Changes(AtomicU32::new(0))),
+    )
+    .unwrap()
+  };
+  let enrolled = open();
+  enrolled
+    .enroll("bob phone".into(), PASSPHRASE.into())
+    .await
+    .unwrap();
+  enrolled.start().await.unwrap();
+  enrolled
+    .register_push(PushService::Fcm, "device-token-before".into())
+    .await
+    .unwrap();
+  enrolled.stop().await.unwrap();
+  drop(enrolled);
+  tokio::time::sleep(Duration::from_millis(200)).await;
+
+  let phone = open();
+  connections.store(0, Ordering::Relaxed);
+  let started = Instant::now();
+  phone.start().await.unwrap();
+  phone.refresh_push().await.unwrap();
+  phone
+    .register_push(PushService::Fcm, "device-token-after".into())
+    .await
+    .unwrap();
+  let push_done = started.elapsed();
+  wait_until("the gateway connection", || async {
+    phone.connection_state() == ConnectionState::Connected
+  })
+  .await;
+  let connected = started.elapsed();
+  eprintln!(
+    "cold start: push done after {push_done:?}, connected after {connected:?}, {} gateway connections",
+    connections.load(Ordering::Relaxed)
+  );
+  assert_eq!(connections.load(Ordering::Relaxed), 1);
+
+  phone.stop().await.unwrap();
+  drop(phone);
+  std::fs::remove_dir_all(&directory).unwrap();
+}
+
 struct Token(String);
 
 impl TokenProvider for Token {
@@ -256,4 +325,35 @@ fn dev_token(user: &str) -> String {
     .expect("python3 runs dev-token.py");
   assert!(output.status.success(), "dev-token.py failed");
   String::from_utf8(output.stdout).unwrap().trim().to_string()
+}
+
+/// A relay in front of the server that counts the gateway connections opened through it, as the
+/// proxy's access log does. Returns the relay's URL.
+async fn counting_proxy(server_url: &str) -> (String, Arc<AtomicU32>) {
+  let upstream = server_url.trim_start_matches("http://").to_owned();
+  let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+  let url = format!("http://{}", listener.local_addr().unwrap());
+  let connections = Arc::new(AtomicU32::new(0));
+  let counted = connections.clone();
+  tokio::spawn(async move {
+    loop {
+      let (mut downstream, _) = listener.accept().await.unwrap();
+      let mut server = tokio::net::TcpStream::connect(&upstream).await.unwrap();
+      let counted = counted.clone();
+      tokio::spawn(async move {
+        let mut first = vec![0; 4096];
+        let Ok(read) = downstream.read(&mut first).await else {
+          return;
+        };
+        if first[..read].windows(15).any(|part| part == b"/api/v1/gateway") {
+          counted.fetch_add(1, Ordering::Relaxed);
+        }
+        if server.write_all(&first[..read]).await.is_ok() {
+          // Either side closing ends the relay; nothing to report.
+          let _ = tokio::io::copy_bidirectional(&mut downstream, &mut server).await;
+        }
+      });
+    }
+  });
+  (url, connections)
 }

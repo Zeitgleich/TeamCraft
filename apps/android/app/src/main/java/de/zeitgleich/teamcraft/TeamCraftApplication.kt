@@ -2,15 +2,18 @@ package de.zeitgleich.teamcraft
 
 import android.app.Application
 import android.content.Context
+import android.util.Log
 import java.io.File
 import androidx.lifecycle.DefaultLifecycleObserver
 import androidx.lifecycle.LifecycleOwner
 import androidx.lifecycle.ProcessLifecycleOwner
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -65,8 +68,10 @@ class AppGraph(context: Context) {
   val joinRequestNotifier = JoinRequestNotifier(context, notificationContent)
   val joinRequestWatcher = JoinRequestWatcher(core, joinRequestNotifier, scope)
   val network = NetworkWatcher(context) { core.networkChanged() }
+  /** The sync loop should run but couldn't be started; the banner says so (issue #1142). */
+  val isSyncStartFailing = MutableStateFlow(false)
   /** The connection banner's grace period, shared by every screen (issue #700). */
-  val connectionGrace = ConnectionGrace(scope, core.connectionState, network.isOnline)
+  val connectionGrace = ConnectionGrace(scope, core.connectionState, network.isOnline, isSyncStartFailing)
 }
 
 class TeamCraftApplication : Application() {
@@ -101,6 +106,7 @@ class TeamCraftApplication : Application() {
    */
   private class ForegroundSync(private val context: Context, private val graph: AppGraph) : DefaultLifecycleObserver {
     private var maybeStopping: Job? = null
+    private var maybeStarting: Job? = null
     /** Start and stop one after the other: a stop already under way finishes before the start. */
     private val order = Mutex()
 
@@ -108,13 +114,13 @@ class TeamCraftApplication : Application() {
       maybeStopping?.cancel()
       maybeStopping = null
       graph.connectionGrace.appReturned()
-      graph.scope.launch {
-        if (!graph.auth.isSignedIn.value) return@launch
-        order.withLock { startSync() }
-      }
+      maybeStarting?.cancel()
+      maybeStarting = graph.scope.launch { keepStarting() }
     }
 
     override fun onStop(owner: LifecycleOwner) {
+      maybeStarting?.cancel()
+      graph.isSyncStartFailing.value = false
       maybeStopping?.cancel()
       maybeStopping = graph.scope.launch {
         if (graph.auth.isSignedIn.value) scheduleOutbox()
@@ -132,7 +138,25 @@ class TeamCraftApplication : Application() {
       if (isPending) OutboxWork.enqueue(context)
     }
 
-    private suspend fun startSync() {
+    /**
+     * Starts the sync and tries again while the app stays in the foreground: a failure must neither
+     * vanish nor take a restart to get out of (issue #1142).
+     */
+    private suspend fun keepStarting() {
+      var waitMs = START_RETRY_MIN_MS
+      while (graph.auth.isSignedIn.value) {
+        val maybeFailure = order.withLock { startSync() }
+        graph.isSyncStartFailing.value = maybeFailure != null
+        if (maybeFailure == null) return
+        Log.w(TAG, "sync not started, next try in $waitMs ms: ${maybeFailure.javaClass.simpleName}")
+        delay(waitMs)
+        waitMs = (waitMs * 2).coerceAtMost(START_RETRY_MAX_MS)
+      }
+      graph.isSyncStartFailing.value = false
+    }
+
+    /** What kept the sync from starting, if anything. */
+    private suspend fun startSync(): Throwable? =
       runCatching {
         val core = graph.core.core()
         if (core.accountState() is AccountState.Ready) {
@@ -143,11 +167,14 @@ class TeamCraftApplication : Application() {
           graph.calls.start()
           graph.push.refresh()
         }
-      }
-    }
+      }.exceptionOrNull().also { if (it is CancellationException) throw it }
   }
 
   companion object {
+    private const val TAG = "TeamCraft"
+    private const val START_RETRY_MIN_MS = 2_000L
+    private const val START_RETRY_MAX_MS = 60_000L
+
     /** How long the sync keeps running after the app left the foreground. */
     private const val STOP_DELAY_MS = 10_000L
 

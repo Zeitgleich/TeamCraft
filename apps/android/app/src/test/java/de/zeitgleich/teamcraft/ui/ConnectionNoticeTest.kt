@@ -140,4 +140,18 @@ class ConnectionNoticeTest {
   }
 
   private fun offline(retryAtMs: Long) = ConnectionState.Offline(retryAtMs = retryAtMs, maybeInterception = null)
+
+  @Test
+  fun aSyncThatCouldNotStartIsNamedAfterTheGracePeriod() {
+    val unsettled = Unsettled(maybeSinceMs = 0)
+    assertNull(connectionNotice(true, ConnectionState.Connected, unsettled, CONNECTION_GRACE_MS - 1, isSyncStartFailing = true))
+    assertEquals(
+      ConnectionNotice.SyncNotStarted,
+      connectionNotice(true, ConnectionState.Connected, unsettled, CONNECTION_GRACE_MS, isSyncStartFailing = true),
+    )
+    assertEquals(
+      ConnectionNotice.DeviceOffline,
+      connectionNotice(false, ConnectionState.Connecting, unsettled, CONNECTION_GRACE_MS, isSyncStartFailing = true),
+    )
+  }
 }

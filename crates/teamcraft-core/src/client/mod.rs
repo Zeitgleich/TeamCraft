@@ -104,6 +104,7 @@ pub(crate) use messaging::{REMOVED_SENDER_GRACE_MS, decrypt_content};
 #[cfg(feature = "ui")]
 pub(crate) use messaging::{apply_control, bookmarks_key};
 pub use missing_keys::{KeyCatchUp, key_catch_up};
+pub use notifications::PushRegistrar;
 pub(crate) use notifications::registered_push_token;
 use openmls_rust_crypto::OpenMlsRustCrypto;
 pub use org_recovery::{SealedShare, recovery_request};

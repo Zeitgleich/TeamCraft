@@ -229,6 +229,34 @@ async fn a_token_delivered_again_keeps_the_push_key_and_is_sent_again() {
   assert_ne!(other.push_key.as_slice(), before.push_key.as_slice());
 }
 
+/// Issue #1142: what failed keeps nothing half-done, and the app's retry goes through. A first
+/// registration's key reaches the device only with the server's answer (issue #826).
+#[tokio::test]
+async fn a_failed_registration_stays_retryable() {
+  let (server, _alice, mut bob, _channel) = channel_with_two().await;
+  let (device, user) = (bob.client.device_id(), bob.client.user_id());
+  let before = server.push_registration(device).unwrap();
+
+  server.set_rest_failing(user, true);
+  let token = r#"{"endpoint":"https://push.example.com/retried"}"#;
+  let failed = bob
+    .client
+    .register_push_keeping_key(PushProvider::WebPush, token)
+    .await;
+  assert!(failed.is_err());
+  assert_eq!(server.push_registration(device).unwrap().token, before.token);
+
+  server.set_rest_failing(user, false);
+  bob
+    .client
+    .register_push_keeping_key(PushProvider::WebPush, token)
+    .await
+    .unwrap();
+  let after = server.push_registration(device).unwrap();
+  assert_eq!(after.token, token);
+  assert_eq!(after.push_key.as_slice(), before.push_key.as_slice());
+}
+
 #[tokio::test]
 async fn without_a_session_only_names_are_shown_unless_the_store_has_the_message() {
   let (server, mut alice, mut bob, channel) = channel_with_two().await;

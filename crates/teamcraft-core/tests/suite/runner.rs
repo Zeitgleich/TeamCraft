@@ -12,13 +12,54 @@ use std::time::Duration;
 use common::{PASSPHRASE, TokioClock, clock, options, settings};
 use teamcraft_core::api::ServerApi;
 use teamcraft_core::api::fake::{FakeServer, FakeServerApi};
+use teamcraft_core::client::PushRegistrar;
+use teamcraft_core::clock::SystemClock;
 use teamcraft_core::runner::{RunnerCommand, RunnerSettings, SyncRunner};
 use teamcraft_core::store::{LocalStore, MemoryStore, MessageFilter};
 use teamcraft_core::{Client, PendingEnrollment};
-use teamcraft_proto::{DeviceActivity, GatewayEvent};
+use teamcraft_proto::{DeviceActivity, GatewayEvent, PushProvider};
 
 /// The server's default `heartbeat_timeout_secs`.
 const SERVER_HEARTBEAT_TIMEOUT: Duration = Duration::from_secs(90);
+
+/// Issue #1142: push registration runs beside the loop, which keeps the one connection it has.
+#[tokio::test]
+async fn push_work_beside_the_runner_leaves_its_connection_open() {
+  let server = FakeServer::new();
+  let api = server.add_user("Alice");
+  let store = Arc::new(MemoryStore::new());
+  let client = PendingEnrollment::new()
+    .complete(
+      api.clone(),
+      store.clone(),
+      clock(),
+      settings(),
+      options(PASSPHRASE),
+    )
+    .await
+    .unwrap();
+  let device = client.device_id();
+  let (runner, handle) = SyncRunner::new(client, RunnerSettings::default(), Box::new(|| {}));
+  let client_settings = settings();
+  let push_clock = SystemClock;
+  let registrar = PushRegistrar::new(&api, &store, &push_clock, &client_settings, device);
+  let push_work = async {
+    while server.gateway_connect_count() == 0 {
+      tokio::task::yield_now().await;
+    }
+    registrar
+      .register_keeping_key(PushProvider::WebPush, "token")
+      .await
+      .unwrap();
+    assert!(!registrar.refresh().await.unwrap());
+    assert!(handle.send(RunnerCommand::Stop));
+  };
+
+  let (_client, ()) = tokio::join!(runner.run(), push_work);
+
+  assert_eq!(server.gateway_connect_count(), 1);
+  assert_eq!(server.push_registration(device).unwrap().token, "token");
+}
 
 #[tokio::test]
 async fn runner_connects_flushes_and_returns_the_client_on_stop() {
