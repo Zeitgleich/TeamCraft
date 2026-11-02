@@ -248,7 +248,7 @@ impl Database {
          JOIN conversations c ON c.id = r.conversation_id
          JOIN users u ON u.id = r.user_id
          WHERE r.state = 'open' AND r.expires_at > now()
-           AND c.kind = 'channel' AND c.visibility = 'private' AND c.archived_at IS NULL
+           AND c.kind = 'channel' AND c.visibility = 'private' AND c.archived_at IS NULL AND c.deleted_at IS NULL
            AND u.deactivated_at IS NULL AND u.oidc_role IN ('admin', 'owner')
            AND EXISTS (SELECT 1 FROM space_members s
                        WHERE s.space_id = c.space_id AND s.user_id = r.user_id

@@ -436,9 +436,7 @@ pub fn is_allowed(
         _ => {
           is_member
             || is_instance_admin
-            || (is_space_admin
-              && (channel.visibility == ConversationVisibility::Public
-                || *permission == Permission::DeleteChannel))
+            || (is_space_admin && channel.visibility == ConversationVisibility::Public)
         },
       };
       let is_exempt_from_moderation =
@@ -914,8 +912,8 @@ mod tests {
       ));
     }
 
-    /// #1130: channel admins, the admins of its space, workspace admins and owners; also archived,
-    /// also a private channel the space's admin isn't in; nobody else.
+    /// #1130: channel admins, workspace admins and owners; a space admin only where they reach the
+    /// channel (public, or they are in it); nobody else. Also archived.
     #[test]
     fn who_may_delete_a_channel() {
       for is_archived in [false, true] {
@@ -939,6 +937,8 @@ mod tests {
           maybe_role: Some(SpaceRole::SpaceAdmin),
           maybe_space_id: None,
         });
+        assert!(!may(&Role::Member, &Target::Channel(outside.clone())));
+        outside.visibility = ConversationVisibility::Public;
         assert!(may(&Role::Member, &Target::Channel(outside)));
       }
     }

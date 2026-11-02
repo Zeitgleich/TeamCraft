@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT s.id, s.name, s.join_policy, s.archived_at IS NOT NULL AS \"is_archived!\", s.created_at,\n                (SELECT count(*) FROM space_members m WHERE m.space_id = s.id) AS \"member_count!\",\n                (SELECT count(*) FROM space_members m JOIN users u ON u.id = m.user_id\n                  WHERE m.space_id = s.id AND u.kind = 'guest') AS \"guest_count!\",\n                (SELECT count(*) FROM conversations c WHERE c.space_id = s.id) AS \"channel_count!\"\n         FROM spaces s ORDER BY s.name, s.id",
+  "query": "SELECT s.id, s.name, s.join_policy, s.archived_at IS NOT NULL AS \"is_archived!\", s.created_at,\n                (SELECT count(*) FROM space_members m WHERE m.space_id = s.id) AS \"member_count!\",\n                (SELECT count(*) FROM space_members m JOIN users u ON u.id = m.user_id\n                  WHERE m.space_id = s.id AND u.kind = 'guest') AS \"guest_count!\",\n                (SELECT count(*) FROM conversations c WHERE c.space_id = s.id AND c.deleted_at IS NULL)\n                  AS \"channel_count!\"\n         FROM spaces s WHERE s.deleted_at IS NULL ORDER BY s.name, s.id",
   "describe": {
     "columns": [
       {
@@ -86,5 +86,5 @@
       null
     ]
   },
-  "hash": "641336ec4dd3830004bf98d409b28302e8fa122d00f156daef4cf1f8bf9c3de9"
+  "hash": "0bfd974b9c1214eb4aa723e066d6b3435cf38226631429f9187bca91d2866b4f"
 }

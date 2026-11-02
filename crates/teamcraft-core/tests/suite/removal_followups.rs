@@ -598,10 +598,10 @@ mod announced_once {
     let channel = channel_with(&mut alice, &mut [&mut bob, &mut carol]).await;
 
     server.cut_next_proposal(carol.client.user_id(), NetworkCut::BeforeRequest);
-    let error = carol.client.leave_channel(channel).await.unwrap_err();
+    let error = carol.client.leave_channel(channel, false).await.unwrap_err();
     assert!(error.is_transient(), "{error}");
     let mut carol = restart(carol).await;
-    carol.client.leave_channel(channel).await.unwrap();
+    carol.client.leave_channel(channel, false).await.unwrap();
     settle(&mut [&mut alice, &mut bob, &mut carol]).await;
     bob.client.apply_pending_changes().await.unwrap();
     settle(&mut [&mut alice, &mut bob, &mut carol]).await;
@@ -650,7 +650,7 @@ mod refused_queue {
     let (mut alice, mut bob, mut carol) = three(&server).await;
     let channel = channel_with(&mut alice, &mut [&mut bob, &mut carol]).await;
 
-    carol.client.leave_channel(channel).await.unwrap();
+    carol.client.leave_channel(channel, false).await.unwrap();
     server.refuse_queue_to(carol.client.user_id());
     carol.client.sync_mls(channel).await.unwrap();
 
@@ -865,9 +865,10 @@ mod account_deletion {
     // The members committed the signed removal: she can't read anything new.
     assert_eq!(commits(&alice, channel).await, commits_before + 1);
     // The DM went, with what Bob kept of it.
+    // Hidden, and without its secrets; the history stays for now on the server's word (e2ee.md §4.6).
     assert!(!is_cached(&bob, dm));
     assert!(
-      bob
+      !bob
         .store
         .messages(dm, MessageFilter::TopLevel)
         .unwrap()
@@ -904,9 +905,9 @@ mod account_deletion {
     admin.client.admin_delete_user(carol_id).await.unwrap();
   }
 
-  /// A device that was away when the DM was deleted drops it on its next full sync.
+  /// A device that was away when the DM was deleted hides it on its next full sync; the server's word alone keeps the history for now (e2ee.md §4.6).
   #[tokio::test]
-  async fn a_device_that_was_away_drops_the_deleted_dm_on_its_next_sync() {
+  async fn a_device_that_was_away_hides_the_deleted_dm_on_its_next_sync() {
     let server = FakeServer::new();
     let (mut alice, mut bob, mut carol) = three(&server).await;
     let alice_id = alice.client.user_id();
@@ -926,7 +927,7 @@ mod account_deletion {
     bob.client.full_sync().await.unwrap();
     assert!(!is_cached(&bob, dm));
     assert!(
-      bob
+      !bob
         .store
         .messages(dm, MessageFilter::TopLevel)
         .unwrap()

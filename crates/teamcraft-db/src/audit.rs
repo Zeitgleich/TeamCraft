@@ -59,6 +59,26 @@ impl Database {
     Ok(())
   }
 
+  /// [`Self::record_audit`] as part of a transaction, so a change and its audit row go together.
+  pub(crate) async fn record_audit_in(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    entry: &NewAuditEntry<'_>,
+  ) -> Result<(), DbError> {
+    sqlx::query!(
+      r#"INSERT INTO audit_log (id, actor_user_id, action, target_kind, target_id, detail)
+         VALUES ($1, $2, $3, $4, $5, $6::text::jsonb)"#,
+      entry.id.get(),
+      entry.maybe_actor.map(to_db),
+      entry.action,
+      entry.maybe_target_kind,
+      entry.maybe_target_id,
+      entry.detail,
+    )
+    .execute(&mut **tx)
+    .await?;
+    Ok(())
+  }
+
   /// Newest first; `limit + 1` rows so callers can tell if more exist.
   pub async fn list_audit(&self, query: &AuditQuery<'_>) -> Result<Vec<AuditEntry>, DbError> {
     let rows = sqlx::query!(

@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 use teamcraft_crypto::membership::MembershipAction;
 use teamcraft_crypto::mls::MAX_CHANGE_AGE_EPOCHS;
 use teamcraft_proto::{
-  Base64Bytes, ConversationId, DeviceId, ListConversationMembersResponse, MlsMessageKind,
+  Base64Bytes, ConversationId, DeviceId, ErrorCode, ListConversationMembersResponse, MlsMessageKind,
   PostMlsMessageRequest, SpaceId, UserId,
 };
 
@@ -189,10 +189,30 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
   /// remaining members commit (MLS doesn't let a member commit its own removal). Once a commit
   /// removed this device, the pending queue drops the server's membership; `Ok` before that. The
   /// goodbye is part of the pending leave, so leaving again after a crash doesn't repeat it.
-  pub async fn leave_channel(&mut self, conversation: ConversationId) -> Result<(), CoreError> {
+  /// `deletes_if_last`: the user confirmed that this deletes the channel if nobody else is in it;
+  /// without it the server refuses such a leave, also when this device's member list was stale.
+  pub async fn leave_channel(
+    &mut self,
+    conversation: ConversationId,
+    deletes_if_last: bool,
+  ) -> Result<(), CoreError> {
     let me = self.account.user_id;
     // Asked first, so a leave the server refuses (the last channel admin) sends no goodbye.
-    self.api.check_member_removal(conversation, me).await?;
+    if let Err(error) = self.api.check_leave(conversation, me, deletes_if_last).await {
+      if error.error_code() == Some(&ErrorCode::LastMember)
+        && let Err(refresh) = self.refresh_conversation(conversation).await
+      {
+        tracing::debug!(%refresh, "could not read the member list again");
+      }
+      return Err(error.into());
+    }
+    if deletes_if_last {
+      self.note_own_deletion(conversation)?;
+    }
+    // Fresh: a device may not have heard that the channel was archived or restored.
+    if let Err(error) = self.refresh_conversation(conversation).await {
+      tracing::debug!(conversation_id = %conversation, %error, "leaving on what this device knows");
+    }
     // An archived channel takes no messages; the server's own line says who left.
     let can_say_goodbye = self.has_group(conversation)? && !self.is_archived(conversation)?;
     let maybe_event = can_say_goodbye.then_some(ConversationEvent::Left);
@@ -200,37 +220,44 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
   }
 
   /// Deletes a channel for everybody (e2ee.md §4.6, "Deleting a channel"), then drops it here with
-  /// its local history, as the other devices do on the server's word. Not queued while offline: a
-  /// deletion can't be undone, so it happens when the user asks or fails visibly. Done also when
-  /// the channel is gone already (a lost answer, a second admin).
+  /// its local history: the user confirmed this here. Not queued while offline: a deletion can't be
+  /// undone, so it happens when the user asks or fails visibly. Done also when the channel is gone
+  /// already (a lost answer, a second admin); any other 404 is a refusal like the rest.
   pub async fn delete_channel(&mut self, conversation: ConversationId) -> Result<(), CoreError> {
-    match self.api.delete_conversation(conversation).await {
-      Ok(()) => {},
-      Err(error) if error.is_not_found() => {},
-      Err(error) => return Err(error.into()),
+    self.note_own_deletion(conversation)?;
+    if let Err(error) = self.api.delete_conversation(conversation).await
+      && error.error_code() != Some(&ErrorCode::ChannelNotFound)
+    {
+      self.forget_own_deletion(conversation)?;
+      return Err(error.into());
     }
     self.purge_conversation(conversation)
   }
 
-  /// Deletes a space with its channels for everybody (e2ee.md §4.6, "Deleting a channel"), then
-  /// drops them here. Done also when it is gone already.
+  /// Deletes a space with its channels for everybody, then drops them here (e2ee.md §4.6). Done also
+  /// when it is gone already.
   pub async fn delete_space(&mut self, space: SpaceId) -> Result<(), CoreError> {
-    match self.api.delete_space(space).await {
-      Ok(()) => {},
-      Err(error) if error.is_not_found() => {},
-      Err(error) => return Err(error.into()),
-    }
     let channels: Vec<ConversationId> = self
       .cached_conversations()?
       .into_values()
       .filter(|known| known.maybe_space_id == Some(space))
       .map(|known| known.id)
       .collect();
+    for channel in &channels {
+      self.note_own_deletion(*channel)?;
+    }
+    if let Err(error) = self.api.delete_space(space).await
+      && error.error_code() != Some(&ErrorCode::SpaceNotFound)
+    {
+      for channel in &channels {
+        self.forget_own_deletion(*channel)?;
+      }
+      return Err(error.into());
+    }
     for channel in channels {
       self.purge_conversation(channel)?;
     }
-    self.store.delete(Table::Spaces, &space.to_string())?;
-    Ok(())
+    self.forget_space(&space.to_string())
   }
 
   /// "Retry" on a removal or leave shown as failed, or "remove" on an admin's unconfirmed one
@@ -372,11 +399,25 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       tracing::info!(conversation_id = %conversation, "the user is in the group again; dropped the removal");
       return Ok(RemovalProgress::Done);
     }
-    match self.api.remove_member(conversation, user).await {
+    let me = self.account.user_id;
+    let removed = if user == me {
+      let deletes_if_last = self.has_own_deletion(conversation)?;
+      self
+        .api
+        .leave_conversation(conversation, me, deletes_if_last)
+        .await
+    } else {
+      self.api.remove_member(conversation, user).await
+    };
+    match removed {
       Ok(()) => {},
       // Gone already: somebody who left no longer sees the conversation.
       Err(error) if error.is_not_found() => {},
       Err(error) => return Err(error.into()),
+    }
+    if user == me {
+      // Out: the MLS secrets go now, not when the server's event comes, which it could withhold.
+      self.forget_conversation(conversation)?;
     }
     match step {
       // An epoch-0 group has nobody who could have committed anything yet; nothing to watch.
@@ -699,6 +740,15 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       Err(error) if error.is_forbidden() || error.is_not_found() => Ok(false),
       Err(error) => Err(error.into()),
     }
+  }
+
+  fn forget_own_deletion(&mut self, conversation: ConversationId) -> Result<(), CoreError> {
+    for marker in super::server_deletions::purge_markers(conversation) {
+      if marker.starts_with("own_deletion/") {
+        self.store.delete(Table::AppliedChanges, &marker)?;
+      }
+    }
+    Ok(())
   }
 
   /// Whether this device knows the channel as archived.

@@ -193,23 +193,6 @@ pub async fn load_conversation(
   }
 }
 
-/// Loads a channel to delete it: what [`load_conversation`] shows, and for the admin of its space
-/// also a private channel they aren't in. Only its row: `delete_channel` reaches no content.
-pub async fn load_channel_to_delete(
-  state: &AppState,
-  caller: &AuthenticatedUser,
-  id: ConversationId,
-) -> Result<ConversationAccess, ApiError> {
-  let (view, maybe_space_role) = conversation_and_space_role(state, caller, id).await?;
-  if view.conversation.kind == ConversationKind::Channel && maybe_space_role == Some(SpaceRole::SpaceAdmin) {
-    return Ok(ConversationAccess {
-      view,
-      maybe_space_role,
-    });
-  }
-  load_conversation(state, caller, id).await
-}
-
 async fn conversation_and_space_role(
   state: &AppState,
   caller: &AuthenticatedUser,

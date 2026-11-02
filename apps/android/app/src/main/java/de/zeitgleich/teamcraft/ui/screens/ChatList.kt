@@ -194,6 +194,12 @@ fun ChatListScreen(
   val selected = loaded.orEmpty().filter { it.id in selection }
   // A decision on a request to join that didn't go through, among others.
   val snackbars = rememberFailureSnackbars(viewModel)
+  val suspectDeletionsText = stringResource(R.string.deletions_suspect)
+  // The server claimed many conversations deleted at once (e2ee.md §4.6): told once.
+  LaunchedEffect(conversations?.size) {
+    val count = viewModel.takeSuspectDeletions()
+    if (count > 0u) snackbars.showSnackbar(suspectDeletionsText.format(count.toInt()))
+  }
   MainScaffold(
     brand = MainBrand(maybeBrand?.displayName ?: stringResource(R.string.app_name), maybeLogo),
     accountUserId = accountUserId,

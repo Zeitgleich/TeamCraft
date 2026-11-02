@@ -310,7 +310,7 @@ fn ConversationItems(
           aria-describedby=format!("entry-menu-confirm-{conversation}")
           on:click=move |_| {
             close.run(());
-            state.leave_with_undo(conversation, left_text(state, i18n, conversation));
+            state.leave_with_undo(conversation, left_text(state, i18n, conversation), true);
           }
         >
           <Icon name=IconName::Leave />
@@ -376,7 +376,7 @@ fn ConversationItems(
                   <div class="menu-sep" role="separator"></div>
                   <button type="button" class="menu-item is-destructive" role="menuitem" on:click=move |_| {
                     close.run(());
-                    state.leave_with_undo(conversation, left_text(state, i18n, conversation));
+                    state.leave_with_undo(conversation, left_text(state, i18n, conversation), false);
                   }>
                     <Icon name=IconName::Leave />
                     <span class="menu-label">{move || i18n.t("entry-menu-leave-channel")}</span>
@@ -451,6 +451,7 @@ fn SpaceItems(space: SpaceId, page: RwSignal<MenuPage>, close: Callback<()>) -> 
   let leave = move || info.with(|menu| menu.as_ref().map_or(LeaveChoice::Hidden, |menu| menu.leave));
   let name = move || info.with(|menu| menu.as_ref().map(|menu| menu.name.clone()).unwrap_or_default());
   let can_delete = move || info.with(|menu| menu.as_ref().is_some_and(|menu| menu.can_delete));
+  let channel_count = move || info.with(|menu| menu.as_ref().map_or(0, |menu| menu.channel_count));
   let delete_pending = PendingAction::new();
   let hint_id = format!("entry-menu-leave-space-{space}");
   view! {
@@ -458,7 +459,7 @@ fn SpaceItems(space: SpaceId, page: RwSignal<MenuPage>, close: Callback<()>) -> 
       MenuPage::Notifications => view! { <NotificationsPage target=target page=page /> }.into_any(),
       MenuPage::ConfirmDelete => view! {
         <p class="menu-confirm" id=format!("entry-menu-confirm-{space}")>
-          {move || i18n.t_with("entry-menu-delete-space-confirm", &[("name", &name())])}
+          {move || i18n.t_with("entry-menu-delete-space-confirm", &[("name", &name()), ("count", &channel_count().to_string())])}
         </p>
         <button
           type="button"

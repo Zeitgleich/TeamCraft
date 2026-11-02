@@ -206,6 +206,15 @@ fun ConversationScreen(
     if (isConnected) viewModel.readChat { act(ChatActions.refreshReadReceipts(conversationId)) }
   }
   val conversation = snapshot?.conversation(conversationId)
+  // Deleted or left elsewhere while open: back to the list, not a screen that keeps loading.
+  var wasKnown by remember(conversationId) { mutableStateOf(false) }
+  LaunchedEffect(conversationId, conversation != null, snapshot != null) {
+    if (conversation != null) {
+      wasKnown = true
+    } else if (wasKnown && snapshot != null) {
+      onBack()
+    }
+  }
   ChatScaffold(
     viewModel = viewModel,
     topBar = {
@@ -514,7 +523,7 @@ private fun ConversationMenu(
       onConfirm = {
         when (confirmation) {
           ChannelConfirmation.Archive -> viewModel.act(ChatActions.archiveChannel(conversationId))
-          ChannelConfirmation.Leave -> viewModel.act(ChatActions.leaveChannel(conversationId))
+          ChannelConfirmation.Leave -> viewModel.act(ChatActions.leaveChannel(conversationId, leave == LeaveChoice.LAST_MEMBER))
           ChannelConfirmation.Delete -> viewModel.act(ChatActions.deleteChannel(conversationId))
         }
       },

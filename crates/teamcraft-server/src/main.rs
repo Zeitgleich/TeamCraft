@@ -44,8 +44,9 @@ use teamcraft_server::services::permission_scheme::{self, SchemeStore};
 use teamcraft_server::services::presence::{self, refresh_presence};
 use teamcraft_server::services::session::{self, PolicyHolder};
 use teamcraft_server::services::{
-  admin, admin_join_requests, attachments, backgrounds, brands, calendar_settings, email_digest, guests,
-  key_packages, mail_settings, meeting_guests, oidc, retention, runtime_settings, urgent,
+  admin, admin_join_requests, attachments, backgrounds, brands, calendar_settings, conversations,
+  email_digest, guests, key_packages, mail_settings, meeting_guests, oidc, retention, runtime_settings,
+  urgent,
 };
 use teamcraft_server::state::{
   AppState, MeetingMailConfig, OidcSyncSettings, PushSettings, PushTtls, RetryPolicy, Settings,
@@ -614,6 +615,11 @@ fn spawn_account_housekeeping(state: AppState) {
         Ok(0) => {},
         Ok(deleted) => info!(deleted, "deleted direct messages left with deleted accounts"),
         Err(error) => warn!(%error, "deleting direct messages of deleted accounts failed"),
+      }
+      match conversations::sweep_deleted(&state).await {
+        Ok(0) => {},
+        Ok(cleared) => info!(cleared, "cleared deleted channels"),
+        Err(error) => warn!(%error, "clearing deleted channels failed"),
       }
       match admin::prune_deleted_conversations(&state, now).await {
         Ok(0) => {},

@@ -266,7 +266,9 @@ pub enum CoreCommand {
   },
   LeaveChannel {
     conversation: ConversationId,
+    deletes_if_last: bool,
   },
+  DismissSuspectDeletions,
   /// Deletes a channel for everybody, after the user confirmed it.
   DeleteChannel {
     conversation: ConversationId,
@@ -779,6 +781,7 @@ impl<S: LocalStore> CoreChatBackend<S> {
       is_catching_up: self.read(crate::client::is_catching_up(&self.store, response.id)),
       is_notes_to_self,
       is_archived: response.is_archived,
+      is_imported: response.maybe_imported_through.is_some(),
       maybe_permissions: response.maybe_my_permissions.clone(),
       has_only_deactivated_others: response.has_only_deactivated_others(self.me, |participant| {
         users
@@ -1494,6 +1497,7 @@ impl<S: LocalStore> ChatBackend for CoreChatBackend<S> {
         can_invite_guests: space.can_invite_guests,
         can_manage_space: space.can_manage_space,
         can_delete_space: space.can_delete_space,
+        deleted_channel_count: space.deleted_channel_count,
         // An older server leaves the hint out (taken as allowed); its guests still create nothing.
         can_create_channels: space.can_create_channels && space.maybe_my_role != Some(SpaceRole::Guest),
         maybe_my_role: space.maybe_my_role.clone(),
@@ -2339,8 +2343,27 @@ impl<S: LocalStore> ChatBackend for CoreChatBackend<S> {
     self.command(CoreCommand::JoinSpace { space });
   }
 
-  fn leave_channel(&self, conversation: ConversationId) {
-    self.command(CoreCommand::LeaveChannel { conversation });
+  fn leave_channel(&self, conversation: ConversationId, deletes_if_last: bool) {
+    self.command(CoreCommand::LeaveChannel {
+      conversation,
+      deletes_if_last,
+    });
+  }
+
+  fn suspect_deletions(&self) -> u32 {
+    self
+      .read(records::get_json::<
+        crate::client::server_deletions::SuspectDeletions,
+      >(
+        &self.store,
+        Table::AppliedChanges,
+        crate::client::server_deletions::SUSPECT_DELETIONS_KEY,
+      ))
+      .map_or(0, |found| found.count)
+  }
+
+  fn dismiss_suspect_deletions(&self) {
+    self.command(CoreCommand::DismissSuspectDeletions);
   }
 
   fn delete_channel(&self, conversation: ConversationId) {
@@ -3437,6 +3460,7 @@ mod tests {
         can_invite_guests: false,
         can_manage_space: false,
         can_delete_space: false,
+        deleted_channel_count: 0,
         // `true` is also what a server that doesn't send it is taken to mean.
         can_create_channels,
       };

@@ -3,6 +3,7 @@ use leptos::prelude::*;
 use teamcraft_proto::{ChannelModeration, HistoryPolicy, Permission};
 
 use crate::admin::{AdminChannel, AdminLoad, SelfJoinOutcome, format_bytes};
+use crate::channel_access::ChannelAccess;
 use crate::clock::{format_relative, now_ms};
 use crate::components::admin_console::SectionHeader;
 use crate::components::admin_spaces::{LoadNotice, SpacesPanel};
@@ -448,6 +449,7 @@ fn ChannelDetail(channel: AdminChannel, latest: Memo<Option<AdminChannel>>) -> i
   let outcome = RwSignal::new(None::<SelfJoinOutcome>);
   let id = channel.id;
   let is_private = channel.kind == ConversationKind::Private;
+  let delete_access = ChannelAccess::new(state, id);
   // The channel as the last refresh has it; the one it was opened with once it is gone.
   let current = Memo::new(move |previous: Option<&AdminChannel>| {
     latest
@@ -534,7 +536,9 @@ fn ChannelDetail(channel: AdminChannel, latest: Memo<Option<AdminChannel>>) -> i
     </div>
     {move || maybe_owner.get().is_none().then(|| view! { <OwnerAssign channel=id /> })}
     <ModerationEditor channel=id />
-    <DeleteChannelSection conversation=id on_deleted=Callback::new(move |()| state.write(|backend| backend.admin_refresh())) />
+    <Show when=move || delete_access.can(&Permission::DeleteChannel) fallback=|| ()>
+      <DeleteChannelSection conversation=id on_deleted=Callback::new(move |()| state.write(|backend| backend.admin_refresh())) />
+    </Show>
     <p class="status-line" role="status">
       {move || {
         outcome

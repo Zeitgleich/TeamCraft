@@ -1,19 +1,21 @@
+use std::collections::HashMap;
+
 use serde_json::json;
 use teamcraft_db::{
-  ConversationFilter, ExpiryChange, NewSpace, NewSpaceMember, SpaceChanges, SpaceListing, SpaceMember,
-  SpaceView,
+  ExpiryChange, NewSpace, NewSpaceMember, SpaceChanges, SpaceChannelCounts, SpaceLeft, SpaceListing,
+  SpaceMember, SpaceView,
 };
 use teamcraft_proto::{
-  AddSpaceMemberRequest, CategoryId, CategoryResponse, ConversationId, CreateCategoryRequest,
-  CreateSpaceRequest, GatewayEvent, JoinPolicy, ListCategoriesResponse, ListSpaceMembersResponse,
-  ListSpacesResponse, Permission, SpaceId, SpaceMemberResponse, SpaceResponse, SpaceRole, UnixMillis,
+  AddSpaceMemberRequest, CategoryId, CategoryResponse, CreateCategoryRequest, CreateSpaceRequest,
+  GatewayEvent, JoinPolicy, ListCategoriesResponse, ListSpaceMembersResponse, ListSpacesResponse, Permission,
+  RemoveMemberQuery, SpaceId, SpaceMemberResponse, SpaceResponse, SpaceRole, UnixMillis,
   UpdateCategoryRequest, UpdateSpaceMemberRequest, UpdateSpaceRequest, UserId, UserKind,
 };
 use time::OffsetDateTime;
 
 use super::access::{is_guest, is_instance_admin, load_space, require, space_target};
 use super::audit::{self, Target as AuditTarget};
-use super::conversations::purge_channel;
+use super::conversations::{announce_deleted_direct, wake_sweep};
 use super::convert::{category_response, offset_date_time, space_response, unix_millis, user_summary};
 use super::permission_scheme::announce_conversation_rights;
 use super::{validate_name, validate_text};
@@ -36,12 +38,43 @@ pub async fn list_spaces(
     .database
     .list_spaces_for_user(caller.user.id, listing)
     .await?;
+  let counts = deletion_counts(state, caller, &views).await?;
   Ok(ListSpacesResponse {
     spaces: views
       .iter()
-      .map(|view| space_for_caller(state, caller, view))
+      .map(|view| {
+        let counts = counts.get(&view.space.id).copied().unwrap_or_default();
+        space_for_caller(state, caller, view, counts)
+      })
       .collect(),
   })
+}
+
+/// What deleting the spaces would take, for those the caller may delete; asked only for them.
+async fn deletion_counts(
+  state: &AppState,
+  caller: &AuthenticatedUser,
+  views: &[SpaceView],
+) -> Result<HashMap<SpaceId, SpaceChannelCounts>, ApiError> {
+  let deletable: Vec<SpaceId> = views
+    .iter()
+    .filter(|view| {
+      let target = space_target(Some(view.space.id), view.maybe_role.clone());
+      require(state, caller, Permission::DeleteSpace, &target).is_ok()
+    })
+    .map(|view| view.space.id)
+    .collect();
+  if deletable.is_empty() {
+    return Ok(HashMap::new());
+  }
+  Ok(
+    state
+      .database
+      .space_channel_counts(caller.user.id, &deletable)
+      .await?
+      .into_iter()
+      .collect(),
+  )
 }
 
 pub async fn create_space(
@@ -93,7 +126,12 @@ pub async fn create_space(
     .await?;
   }
   let access = load_space(state, caller, created.id).await?;
-  Ok(space_for_caller(state, caller, &access.view))
+  Ok(space_for_caller(
+    state,
+    caller,
+    &access.view,
+    SpaceChannelCounts::default(),
+  ))
 }
 
 pub async fn get_space(
@@ -101,24 +139,31 @@ pub async fn get_space(
   caller: &AuthenticatedUser,
   id: SpaceId,
 ) -> Result<SpaceResponse, ApiError> {
-  Ok(space_for_caller(
-    state,
-    caller,
-    &load_space(state, caller, id).await?.view,
-  ))
+  let view = load_space(state, caller, id).await?.view;
+  let counts = deletion_counts(state, caller, std::slice::from_ref(&view)).await?;
+  let counts = counts.get(&id).copied().unwrap_or_default();
+  Ok(space_for_caller(state, caller, &view, counts))
 }
 
 /// The space as the caller sees it, with what they may do in it (UI hints; every request is checked
 /// again).
-fn space_for_caller(state: &AppState, caller: &AuthenticatedUser, view: &SpaceView) -> SpaceResponse {
+fn space_for_caller(
+  state: &AppState,
+  caller: &AuthenticatedUser,
+  view: &SpaceView,
+  counts: SpaceChannelCounts,
+) -> SpaceResponse {
   let target = space_target(Some(view.space.id), view.maybe_role.clone());
   let is_open_for_changes = !view.space.is_archived;
   let may = |permission| is_open_for_changes && require(state, caller, permission, &target).is_ok();
+  let can_delete_space = require(state, caller, Permission::DeleteSpace, &target).is_ok()
+    && (is_instance_admin(caller) || counts.hidden_private == 0);
   SpaceResponse {
     can_add_members: may(Permission::ManageSpaceMembers),
     can_invite_guests: may(Permission::InviteGuest),
     can_manage_space: may(Permission::ManageSpaceProperties),
-    can_delete_space: require(state, caller, Permission::DeleteSpace, &target).is_ok(),
+    can_delete_space,
+    deleted_channel_count: if can_delete_space { counts.channels } else { 0 },
     can_create_channels: may(Permission::CreateChannel),
     ..space_response(view)
   }
@@ -182,40 +227,47 @@ pub async fn update_space(
 }
 
 /// Deletes a space with all of its channels for everybody, archived or not, also with people in it
-/// (`delete_space`: the admins of the space, workspace admins and owners; admin.md §3.1). Channel by
-/// channel first, as [`purge_channel`] does, so a failure leaves a space a retry finishes. Answers
-/// 404 once it is gone, which clients take as done.
+/// (`delete_space`: workspace admins and owners, and the admins of the space unless it holds a
+/// private channel they aren't in; admin.md §3.1.1). Marks it and its channels in one transaction,
+/// then background work clears them ([`super::conversations::sweep_deleted`]). Answers 404 once it is
+/// gone, which clients take as done.
 pub async fn delete_space(state: &AppState, caller: &AuthenticatedUser, id: SpaceId) -> Result<(), ApiError> {
   let access = load_space(state, caller, id).await?;
   require(state, caller, Permission::DeleteSpace, &access.target())?;
-  let filter = ConversationFilter {
-    maybe_space: Some(id),
-    ..ConversationFilter::default()
+  let audit_target = AuditTarget::new("space", id);
+  let audit = audit::prepared(state, caller.user.id, "space_deleted", &audit_target)?;
+  let sees_all = is_instance_admin(caller);
+  let maybe_deletion = state
+    .database
+    .delete_space_locked(id, &audit, |channels| {
+      if channels.iter().any(|channel| channel.maybe_importer.is_some()) {
+        return Err(ApiError::ImportInProgress);
+      }
+      let has_hidden = channels
+        .iter()
+        .any(|channel| channel.is_private && !channel.members.contains(&caller.user.id));
+      if has_hidden && !sees_all {
+        return Err(ApiError::SpaceHasHiddenChannels);
+      }
+      Ok(())
+    })
+    .await?;
+  let Some(deletion) = maybe_deletion else {
+    return Err(ApiError::space_not_found());
   };
-  for view in state.database.list_conversations(caller.user.id, &filter).await? {
-    let channel = view.conversation.id;
-    let members = state.database.conversation_member_ids(channel).await?;
-    purge_channel(state, caller, channel, &members, "channel_deleted").await?;
+  for (channel, members) in &deletion.channels {
+    for member in members {
+      super::calls::evict_from_call(state, *channel, *member).await;
+    }
+    announce_deleted_direct(state, *channel, members);
   }
-  let members = state.database.list_space_members(id).await?;
-  if let Some(image) = &access.view.space.maybe_image {
-    super::retention::delete_object(state, &image.key).await?;
-  }
-  state.database.delete_space(id).await?;
-  audit::record(
-    state,
-    Some(caller.user.id),
-    "space_deleted",
-    Some(AuditTarget::new("space", id)),
-    &json!({}),
-  )
-  .await?;
   // A device asks for the spaces again and finds this one gone; one that is away does at its next
   // sync.
   state.hub.publish(
-    members.iter().map(|member| member.user.id),
+    deletion.members.iter().copied(),
     &GatewayEvent::SpaceUpdate { space_id: id },
   );
+  wake_sweep(state);
   Ok(())
 }
 
@@ -388,6 +440,7 @@ pub async fn remove_space_member(
   caller: &AuthenticatedUser,
   id: SpaceId,
   user_id: UserId,
+  query: &RemoveMemberQuery,
 ) -> Result<(), ApiError> {
   let access = load_space(state, caller, id).await?;
   if user_id != caller.user.id {
@@ -402,42 +455,36 @@ pub async fn remove_space_member(
     ensure_not_last_admin(state, id).await?;
   }
 
-  let left_channels = remove_everywhere(state, id, user_id).await?;
+  // Leaving, and saying so: a private channel doesn't stay behind without members.
+  let deletes_memberless = user_id == caller.user.id && query.maybe_delete_if_last == Some(true);
+  let left = remove_everywhere(state, id, user_id, deletes_memberless).await?;
   audit::record(
     state,
     Some(caller.user.id),
     "space_member_removed",
     Some(AuditTarget::new("space", id)),
-    &json!({"user_id": user_id.to_string()}),
+    &json!({
+      "user_id": user_id.to_string(),
+      "deleted_channels": left.deleted.iter().map(ToString::to_string).collect::<Vec<_>>(),
+    }),
   )
   .await?;
-  // Leaving: a channel doesn't stay behind without members (the confirmation says so).
-  if user_id == caller.user.id {
-    for channel in left_channels {
-      if state.database.conversation_member_ids(channel).await?.is_empty() {
-        super::conversations::purge_channel(
-          state,
-          caller,
-          channel,
-          &[user_id],
-          "channel_deleted_last_member",
-        )
-        .await?;
-      }
-    }
-  }
   Ok(())
 }
 
-/// Removes the user from the space and its channels and tells everybody concerned. Used by the
-/// removal endpoint and by the guest expiry job. Returns the channels they were in.
+/// Removes the user from the space and its channels in one transaction and tells everybody
+/// concerned. Used by the removal endpoint and by the guest expiry job, which never deletes anything.
 pub async fn remove_everywhere(
   state: &AppState,
   id: SpaceId,
   user_id: UserId,
-) -> Result<Vec<ConversationId>, ApiError> {
+  deletes_memberless: bool,
+) -> Result<SpaceLeft, ApiError> {
   let remaining_before = state.database.list_space_members(id).await?;
-  let left_channels = state.database.remove_space_member(id, user_id).await?;
+  let left = state
+    .database
+    .remove_space_member(id, user_id, deletes_memberless)
+    .await?;
   state.hub.publish(
     remaining_before
       .iter()
@@ -448,9 +495,13 @@ pub async fn remove_everywhere(
       user_id,
     },
   );
-  for channel in &left_channels {
+  for channel in &left.left {
     let channel = *channel;
     super::calls::evict_from_call(state, channel, user_id).await;
+    if left.deleted.contains(&channel) {
+      announce_deleted_direct(state, channel, &[user_id]);
+      continue;
+    }
     let members = state.database.conversation_member_ids(channel).await?;
     state.hub.publish(
       members.into_iter().chain([user_id]),
@@ -460,7 +511,10 @@ pub async fn remove_everywhere(
       },
     );
   }
-  Ok(left_channels)
+  if !left.deleted.is_empty() {
+    wake_sweep(state);
+  }
+  Ok(left)
 }
 
 /// The expiry of a newly added member: guests get the given one or the configured default.

@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "INSERT INTO memberships (conversation_id, user_id, role)\n           SELECT c.id, $2, 'member' FROM conversations c\n           WHERE c.space_id = $1 AND c.kind = 'channel' AND c.visibility = 'public'\n             AND c.archived_at IS NULL AND c.id = ANY($3)\n           ON CONFLICT DO NOTHING RETURNING conversation_id",
+  "query": "INSERT INTO memberships (conversation_id, user_id, role)\n           SELECT c.id, $2, 'member' FROM conversations c\n           WHERE c.space_id = $1 AND c.kind = 'channel' AND c.visibility = 'public' AND c.deleted_at IS NULL\n             AND c.archived_at IS NULL AND c.id = ANY($3)\n           ON CONFLICT DO NOTHING RETURNING conversation_id",
   "describe": {
     "columns": [
       {
@@ -26,5 +26,5 @@
       false
     ]
   },
-  "hash": "d4afe961dca21673182847c2626986f981dd6439face17c6cc377216453eb8b3"
+  "hash": "3888a107dfe83c1443c3120ffadff4c7435c4e15fca294e4fc48420d1cbc8c75"
 }

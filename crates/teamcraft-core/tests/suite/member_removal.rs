@@ -255,7 +255,7 @@ mod refused {
     let entries_before = queue_len(&alice, channel).await;
 
     server.refuse_removals_by(carol.client.user_id());
-    carol.client.leave_channel(channel).await.unwrap_err();
+    carol.client.leave_channel(channel, false).await.unwrap_err();
     settle(&mut [&mut alice, &mut bob, &mut carol]).await;
 
     assert_eq!(queue_len(&alice, channel).await, entries_before);
@@ -276,7 +276,7 @@ mod leaving {
     let channel = channel_with(&mut alice, &mut [&mut bob, &mut carol]).await;
     let commits_before = commits(&alice, channel).await;
 
-    carol.client.leave_channel(channel).await.unwrap();
+    carol.client.leave_channel(channel, false).await.unwrap();
     settle(&mut [&mut alice, &mut bob, &mut carol]).await;
     alice.client.apply_pending_changes().await.unwrap();
     bob.client.apply_pending_changes().await.unwrap();
@@ -296,7 +296,7 @@ mod leaving {
 
     server.cut_next_removal(carol.client.user_id(), NetworkCut::BeforeRequest);
     // Done from the user's side: the signed request is in the queue, the rest waits.
-    carol.client.leave_channel(channel).await.unwrap();
+    carol.client.leave_channel(channel, false).await.unwrap();
     carol.client.apply_pending_changes().await.unwrap();
     // No member committed it yet: the server still lists Carol.
     assert!(is_listed(&alice, channel, carol.client.user_id()).await);
@@ -323,7 +323,7 @@ mod leaving {
     let channel = channel_with(&mut alice, &mut []).await;
 
     // Done at once: the server dropped the membership, and its removal event ends the group here.
-    alice.client.leave_channel(channel).await.unwrap();
+    alice.client.leave_channel(channel, true).await.unwrap();
     assert!(alice.api.list_members(channel).await.is_err());
     settle(&mut [&mut alice]).await;
     assert!(!alice.client.has_group(channel).unwrap());
@@ -340,7 +340,7 @@ mod leaving {
     let mut phone = common::link_device(&mut carol).await;
     assert!(!phone.has_group(channel).unwrap());
 
-    phone.leave_channel(channel).await.unwrap();
+    phone.leave_channel(channel, false).await.unwrap();
     settle(&mut [&mut alice, &mut bob, &mut carol]).await;
     bob.client.apply_pending_changes().await.unwrap();
     settle(&mut [&mut alice, &mut bob, &mut carol]).await;

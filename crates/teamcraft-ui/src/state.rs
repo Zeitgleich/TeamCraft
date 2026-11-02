@@ -1288,8 +1288,19 @@ impl AppState {
     self.dismiss_toast(toast);
   }
 
+  /// The server claimed many conversations deleted at once (e2ee.md §4.6): told once. Their messages
+  /// stay on this device for now.
+  pub fn tell_suspect_deletions(&self, i18n: crate::i18n::I18n) {
+    let count = self.read(|backend| backend.suspect_deletions());
+    if count > 0 {
+      let text = i18n.t_with("deletions-suspect", &[("count", &count.to_string())]);
+      self.push_toast(text, None);
+      self.try_write(|backend| backend.dismiss_suspect_deletions());
+    }
+  }
+
   /// Leaves a channel after the undo window; it disappears from the sidebar at once.
-  pub fn leave_with_undo(&self, conversation: ConversationId, text: String) {
+  pub fn leave_with_undo(&self, conversation: ConversationId, text: String, deletes_if_last: bool) {
     let state = *self;
     if self.current_conversation_id() == Some(conversation) {
       let next = self
@@ -1311,7 +1322,7 @@ impl AppState {
         .try_update(|hidden| hidden.remove(&conversation))
         .unwrap_or(false);
       if is_still_leaving {
-        state.try_write(|backend| backend.leave_channel(conversation));
+        state.try_write(|backend| backend.leave_channel(conversation, deletes_if_last));
       }
     });
   }

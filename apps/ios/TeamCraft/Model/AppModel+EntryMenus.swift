@@ -18,8 +18,13 @@ extension AppModel {
   }
 
   /// Each of these answers why the core refused (nil when it took the action).
-  func leaveChannel(_ conversationId: String) async -> AppFailure? {
-    await performReporting(.leaveChannel(conversationId: conversationId))
+  func leaveChannel(_ conversationId: String, deletesIfLast: Bool = false) async -> AppFailure? {
+    await performReporting(.leaveChannel(conversationId: conversationId, deletesIfLast: deletesIfLast))
+  }
+
+  /// How many conversations the server just claimed deleted at once, if suspect; told once.
+  func takeSuspectDeletions() async -> UInt32 {
+    (try? await core().takeSuspectDeletions()) ?? 0
   }
 
   func deleteChannel(_ conversationId: String) async -> AppFailure? {

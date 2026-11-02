@@ -108,6 +108,9 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     after: &ConversationResponse,
     observed: Observed,
   ) -> Result<(), CoreError> {
+    if after.is_notes_to_self(self.account.user_id) {
+      self.remember_notes_to_self(after.id)?;
+    }
     // A full sync lists every conversation; one that stayed as it was costs no write (issue #714).
     if maybe_before == Some(after) {
       return Ok(());

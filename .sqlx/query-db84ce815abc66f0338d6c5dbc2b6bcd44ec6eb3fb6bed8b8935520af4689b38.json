@@ -1,0 +1,28 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE conversations c SET deleted_at = now()\n       WHERE c.id = ANY($1) AND c.kind = 'channel' AND c.visibility = 'private'\n         AND c.imported_through_message_id IS NULL AND c.importer_user_id IS NULL\n         AND NOT EXISTS (SELECT 1 FROM memberships m WHERE m.conversation_id = c.id)\n       RETURNING c.id",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "conversations",
+            "name": "id"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8Array"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "db84ce815abc66f0338d6c5dbc2b6bcd44ec6eb3fb6bed8b8935520af4689b38"
+}

@@ -102,6 +102,9 @@ class ChatClient(
 
   suspend fun spaceMenu(space: String): SpaceMenuItem? = core().spaceMenu(space)
 
+  /** How many conversations the server just claimed deleted at once, if suspect; told once. */
+  suspend fun takeSuspectDeletions(): UInt = core().takeSuspectDeletions()
+
   /** The space's mute time (`muted_until`), if it is muted ahead. */
   suspend fun spaceMutedUntil(space: String, nowMs: Long): Long? =
     spaceSettings(space)["muted_until"]?.jsonPrimitive?.longOrNull?.takeIf { it > nowMs }

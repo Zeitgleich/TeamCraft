@@ -179,6 +179,9 @@ pub struct SpaceMenuItem {
   /// "Delete space" is offered (`delete_space`).
   #[uniffi(default = false)]
   pub can_delete: bool,
+  /// How many channels go with the space.
+  #[uniffi(default = 0)]
+  pub channel_count: u32,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
@@ -1163,6 +1166,7 @@ mod tests {
         maybe_image_version: None,
         is_notes_to_self: false,
         is_archived: false,
+        is_imported: false,
         maybe_permissions,
         has_only_deactivated_others: false,
       };
@@ -1223,6 +1227,7 @@ mod tests {
       maybe_image_version: None,
       is_notes_to_self: false,
       is_archived: false,
+      is_imported: false,
       maybe_permissions: None,
       has_only_deactivated_others: false,
     };
@@ -1379,6 +1384,7 @@ mod tests {
       maybe_image_version: None,
       is_notes_to_self: false,
       is_archived: false,
+      is_imported: false,
       maybe_permissions: None,
       has_only_deactivated_others: false,
     }

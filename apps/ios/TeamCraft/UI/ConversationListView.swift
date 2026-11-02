@@ -26,6 +26,7 @@ struct ConversationListView: View {
   @State private var isMuteFailed = false
   /// An entry-menu action the core or server refused (#1105, #322).
   @State private var maybeActionFailure: AppFailure?
+  @State private var suspectDeletions: UInt32 = 0
   /// What the core says about leaving, per channel row and space header: the rule is the core's.
   @State private var leaveChoices: [String: LeaveChoice] = [:]
   @State private var spaceMenus: [String: SpaceMenuItem] = [:]
@@ -43,6 +44,11 @@ struct ConversationListView: View {
         }
         .navigationTitle("chats_title")
         .alert("dnd_save_failed", isPresented: $isMuteFailed) {}
+        .alert("deletions_suspect \(suspectDeletions)", isPresented: isSuspectDeletionsShown) {}
+        .task(id: shownSections.count) {
+          let count = await model.takeSuspectDeletions()
+          if count > 0 { suspectDeletions = count }
+        }
         .alert("entry_action_failed", isPresented: isActionFailureShown) {
         } message: {
           if let failure = maybeActionFailure { Text(failure.message) }
@@ -376,7 +382,7 @@ struct ConversationListView: View {
       }
       if menu?.canDelete == true {
         Button("entry_delete_space", systemImage: "trash", role: .destructive) {
-          maybeLeaving = .spaceDeletion(id: spaceId, name: name)
+          maybeLeaving = .spaceDeletion(id: spaceId, name: name, channels: menu?.channelCount ?? 0)
         }
       }
     }
@@ -403,10 +409,14 @@ struct ConversationListView: View {
     Binding(get: { maybeLeaving != nil }, set: { if !$0 { maybeLeaving = nil } })
   }
 
+  private var isSuspectDeletionsShown: Binding<Bool> {
+    Binding(get: { suspectDeletions > 0 }, set: { if !$0 { suspectDeletions = 0 } })
+  }
+
   private var leaveTitle: LocalizedStringKey {
     switch maybeLeaving {
     case .channel(_, let name), .lastMember(_, let name): return "entry_leave_channel_title \(name)"
-    case .deletion(_, let name), .spaceDeletion(_, let name): return "entry_delete_channel_title \(name)"
+    case .deletion(_, let name), .spaceDeletion(_, let name, _): return "entry_delete_channel_title \(name)"
     case .space(_, let name): return "entry_leave_space_title \(name)"
     case nil: return ""
     }
@@ -417,7 +427,7 @@ struct ConversationListView: View {
     case .space: return "entry_leave_space_text"
     case .lastMember: return "entry_leave_last_member_text"
     case .deletion: return "entry_delete_channel_text"
-    case .spaceDeletion: return "entry_delete_space_text"
+    case .spaceDeletion(_, _, let channels): return "entry_delete_space_text \(channels)"
     case .channel, nil: return "entry_leave_channel_text"
     }
   }
@@ -427,9 +437,10 @@ struct ConversationListView: View {
     maybeLeaving = nil
     Task {
       switch target {
-      case .channel(let id, _), .lastMember(let id, _): maybeActionFailure = await model.leaveChannel(id)
+      case .channel(let id, _): maybeActionFailure = await model.leaveChannel(id)
+      case .lastMember(let id, _): maybeActionFailure = await model.leaveChannel(id, deletesIfLast: true)
       case .deletion(let id, _): maybeActionFailure = await model.deleteChannel(id)
-      case .spaceDeletion(let id, _): maybeActionFailure = await model.deleteSpace(id)
+      case .spaceDeletion(let id, _, _): maybeActionFailure = await model.deleteSpace(id)
       case .space(let id, _): maybeActionFailure = await model.leaveSpace(id)
       }
     }
@@ -574,7 +585,7 @@ private enum LeaveTarget {
   /// Nobody else is in the channel: leaving deletes it.
   case lastMember(id: String, name: String)
   case deletion(id: String, name: String)
-  case spaceDeletion(id: String, name: String)
+  case spaceDeletion(id: String, name: String, channels: UInt32)
   case space(id: String, name: String)
 
   var isDeletion: Bool {

@@ -187,7 +187,11 @@ object ChatActions {
 
   fun joinChannel(conversation: String) = action("join_channel") { put("conversation", conversation) }
 
-  fun leaveChannel(conversation: String) = action("leave_channel") { put("conversation", conversation) }
+  /** [deletesIfLast]: the user confirmed that this deletes a channel nobody else is in. */
+  fun leaveChannel(conversation: String, deletesIfLast: Boolean = false) = action("leave_channel") {
+    put("conversation", conversation)
+    put("deletes_if_last", deletesIfLast)
+  }
 
   fun deleteChannel(conversation: String) = action("delete_channel") { put("conversation", conversation) }
 

@@ -3,7 +3,7 @@
 
 use std::collections::BTreeMap;
 
-use teamcraft_proto::{ConversationId, SpaceId, UserId};
+use teamcraft_proto::{ConversationId, UserId};
 use time::OffsetDateTime;
 
 use crate::admin::ChatRemovalEffects;
@@ -151,46 +151,6 @@ impl Database {
     .execute(&mut *tx)
     .await?;
     tx.commit().await?;
-    Ok(())
-  }
-
-  /// Deletes a channel with everything in it (messages, MLS state, attachments) and records it
-  /// for its members, whose devices drop it on their next sync. Its objects in storage are deleted
-  /// before ([`Self::conversation_object_keys`]). Idempotent.
-  pub async fn delete_channel(
-    &self,
-    conversation: ConversationId,
-    members: &[UserId],
-  ) -> Result<(), DbError> {
-    let mut tx = self.pool().begin().await?;
-    sqlx::query!(
-      r#"INSERT INTO deleted_conversations (user_id, conversation_id)
-         SELECT unnest($1::bigint[]), $2 ON CONFLICT DO NOTHING"#,
-      &to_db_all(members),
-      to_db(conversation),
-    )
-    .execute(&mut *tx)
-    .await?;
-    // Attachment rows would only lose their conversation (ON DELETE SET NULL).
-    sqlx::query!(
-      "DELETE FROM attachments WHERE conversation_id = $1",
-      to_db(conversation)
-    )
-    .execute(&mut *tx)
-    .await?;
-    sqlx::query!("DELETE FROM conversations WHERE id = $1", to_db(conversation))
-      .execute(&mut *tx)
-      .await?;
-    tx.commit().await?;
-    Ok(())
-  }
-
-  /// Deletes a space; its conversations were deleted before ([`Self::delete_channel`]), so a
-  /// conversation's cascade never skips its storage. Idempotent.
-  pub async fn delete_space(&self, space: SpaceId) -> Result<(), DbError> {
-    sqlx::query!("DELETE FROM spaces WHERE id = $1", to_db(space))
-      .execute(self.pool())
-      .await?;
     Ok(())
   }
 

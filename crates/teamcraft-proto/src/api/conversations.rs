@@ -262,6 +262,16 @@ pub struct AddConversationMemberRequest {
   pub maybe_role: Option<ChannelRole>,
 }
 
+/// `DELETE /api/v1/conversations/{id}/members/{user_id}` and its `…/removal` check, and leaving a
+/// space. Says what the caller wants when they are the last member of a private channel, so nobody
+/// deletes one on a stale member list: `true` deletes it, `false` is refused with `last_member`, and
+/// a client that sends nothing (older versions) leaves it without members.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct RemoveMemberQuery {
+  #[serde(rename = "delete_if_last", default, skip_serializing_if = "Option::is_none")]
+  pub maybe_delete_if_last: Option<bool>,
+}
+
 /// `PATCH /api/v1/conversations/{id}/members/{user_id}`: role (needs `manage_channel_roles`) or the
 /// caller's own preferences.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, ToSchema)]

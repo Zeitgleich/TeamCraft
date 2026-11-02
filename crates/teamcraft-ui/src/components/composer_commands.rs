@@ -173,7 +173,7 @@ pub fn run(state: AppState, i18n: I18n, conversation: ConversationId, command: S
       if leave == Some(LeaveChoice::LastMember) {
         return Outcome::Notice(Notice::Text(i18n.t("slash-leave-last-member")));
       }
-      state.leave_with_undo(conversation, left_text(state, i18n, conversation));
+      state.leave_with_undo(conversation, left_text(state, i18n, conversation), false);
       Outcome::Done
     },
     SlashCommand::Kick(name) => match find_person(state, &name) {

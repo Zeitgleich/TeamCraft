@@ -10041,6 +10041,22 @@
         }
       }
     },
+    "deletions_suspect %lld": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "The server says %lld of your conversations were deleted at once. They are hidden, and their messages stay on this device for now. Tell your administrator."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Der Server meldet %lld deiner Unterhaltungen auf einmal als gelöscht. Sie sind ausgeblendet, ihre Nachrichten bleiben vorerst auf diesem Gerät. Informiere deine Administration."
+          }
+        }
+      }
+    },
     "entry_delete_channel": {
       "localizations": {
         "en": {
@@ -10153,18 +10169,18 @@
         }
       }
     },
-    "entry_delete_space_text": {
+    "entry_delete_space_text %lld": {
       "localizations": {
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "All of its channels go too, with their messages and files, for all their members. This can't be undone."
+            "value": "Channels that go with it: %lld, with their messages and files, for all their members. This can't be undone."
           }
         },
         "de": {
           "stringUnit": {
             "state": "translated",
-            "value": "Auch alle Kanäle darin verschwinden mit ihren Nachrichten und Dateien für alle ihre Mitglieder. Das lässt sich nicht rückgängig machen."
+            "value": "Kanäle, die mit verschwinden: %lld, mit ihren Nachrichten und Dateien für alle ihre Mitglieder. Das lässt sich nicht rückgängig machen."
           }
         }
       }

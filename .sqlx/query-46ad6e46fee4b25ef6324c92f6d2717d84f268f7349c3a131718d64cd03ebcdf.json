@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT c.id, c.retention_max_age_days, c.retention_max_messages,\n                s.retention_max_age_days AS \"space_age?\", s.retention_max_messages AS \"space_messages?\"\n         FROM conversations c LEFT JOIN spaces s ON s.id = c.space_id ORDER BY c.id",
+  "query": "SELECT c.id, c.retention_max_age_days, c.retention_max_messages,\n                s.retention_max_age_days AS \"space_age?\", s.retention_max_messages AS \"space_messages?\"\n         FROM conversations c LEFT JOIN spaces s ON s.id = c.space_id\n         WHERE c.deleted_at IS NULL ORDER BY c.id",
   "describe": {
     "columns": [
       {
@@ -70,5 +70,5 @@
       true
     ]
   },
-  "hash": "68f01aa525e0fc68dac3e4d089821651bd3ab3ae2dbe6fcdc0cb9cfd15fa7d0c"
+  "hash": "46ad6e46fee4b25ef6324c92f6d2717d84f268f7349c3a131718d64cd03ebcdf"
 }

@@ -547,6 +547,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
   }
 
   /** Whether the menu offers "Leave" for this conversation: the core's rule. */
+  suspend fun takeSuspectDeletions(): UInt = readChat { takeSuspectDeletions() } ?: 0u
+
   suspend fun leaveChoice(conversationId: String): LeaveChoice =
     readChat { leaveChoice(conversationId) } ?: LeaveChoice.HIDDEN
 

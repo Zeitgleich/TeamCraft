@@ -104,7 +104,8 @@ impl Database {
     let rows = sqlx::query!(
       r#"SELECT c.id, c.retention_max_age_days, c.retention_max_messages,
                 s.retention_max_age_days AS "space_age?", s.retention_max_messages AS "space_messages?"
-         FROM conversations c LEFT JOIN spaces s ON s.id = c.space_id ORDER BY c.id"#,
+         FROM conversations c LEFT JOIN spaces s ON s.id = c.space_id
+         WHERE c.deleted_at IS NULL ORDER BY c.id"#,
     )
     .fetch_all(self.pool())
     .await?;

@@ -40,6 +40,8 @@ pub struct SpaceMenu {
   pub leave: LeaveChoice,
   /// "Delete space" is offered (`delete_space`).
   pub can_delete: bool,
+  /// How many channels go with the space.
+  pub channel_count: u32,
 }
 
 impl ConversationMenu {
@@ -85,6 +87,7 @@ impl SpaceMenu {
     };
     Some(Self {
       can_delete: found.can_delete_space,
+      channel_count: found.deleted_channel_count,
       name: found.name,
       has_unread,
       is_muted,

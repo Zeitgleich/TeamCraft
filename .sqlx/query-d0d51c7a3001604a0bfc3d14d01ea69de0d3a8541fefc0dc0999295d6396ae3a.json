@@ -1,0 +1,28 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "DELETE FROM space_members WHERE space_id = $1 RETURNING user_id",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "user_id",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "space_members",
+            "name": "user_id"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "d0d51c7a3001604a0bfc3d14d01ea69de0d3a8541fefc0dc0999295d6396ae3a"
+}

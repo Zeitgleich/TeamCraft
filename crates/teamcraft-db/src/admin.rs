@@ -128,8 +128,9 @@ impl Database {
                 (SELECT count(*) FROM space_members m WHERE m.space_id = s.id) AS "member_count!",
                 (SELECT count(*) FROM space_members m JOIN users u ON u.id = m.user_id
                   WHERE m.space_id = s.id AND u.kind = 'guest') AS "guest_count!",
-                (SELECT count(*) FROM conversations c WHERE c.space_id = s.id) AS "channel_count!"
-         FROM spaces s ORDER BY s.name, s.id"#,
+                (SELECT count(*) FROM conversations c WHERE c.space_id = s.id AND c.deleted_at IS NULL)
+                  AS "channel_count!"
+         FROM spaces s WHERE s.deleted_at IS NULL ORDER BY s.name, s.id"#,
     )
     .fetch_all(self.pool())
     .await?;
@@ -172,7 +173,7 @@ impl Database {
                    + (SELECT COALESCE(sum(s.size_bytes), 0) FROM index_segments s
                      WHERE s.conversation_id = c.id))::bigint AS storage_bytes
            FROM conversations c
-           WHERE c.kind = 'channel'
+           WHERE c.kind = 'channel' AND c.deleted_at IS NULL
              AND ($1::bigint IS NULL OR c.space_id = $1)
              AND ($2::text IS NULL OR c.visibility = $2)
              AND ($3::bigint IS NULL OR c.id > $3)

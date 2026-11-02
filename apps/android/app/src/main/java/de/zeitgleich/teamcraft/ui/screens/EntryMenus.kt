@@ -89,7 +89,7 @@ fun ConversationEntryMenu(
       title = stringResource(R.string.channel_leave_title, conversation.name),
       text = stringResource(leaveText(leave)),
       confirmLabel = stringResource(R.string.channel_leave_confirm),
-      onConfirm = { viewModel.act(ChatActions.leaveChannel(conversation.id)) },
+      onConfirm = { viewModel.act(ChatActions.leaveChannel(conversation.id, leave == LeaveChoice.LAST_MEMBER)) },
       onDismiss = { isConfirmingLeave = false },
     )
   }
@@ -135,7 +135,7 @@ fun SpaceEntryMenu(viewModel: MainViewModel, spaceId: String, name: String, isOp
   if (isConfirmingDelete) {
     ConfirmDialog(
       title = stringResource(R.string.space_delete_title, name),
-      text = stringResource(R.string.space_delete_text),
+      text = stringResource(R.string.space_delete_text, maybeMenu?.channelCount?.toInt() ?: 0),
       confirmLabel = stringResource(R.string.channel_delete_confirm),
       onConfirm = { viewModel.act(ChatActions.deleteSpace(spaceId)) },
       onDismiss = { isConfirmingDelete = false },

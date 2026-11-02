@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "DELETE FROM messages WHERE id IN\n             (SELECT id FROM messages WHERE conversation_id = $1 ORDER BY id LIMIT $2)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Int8"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "4a67fbfef94f5e12eb99ad534bbf74ad313a04e88dbcf911e3d94c5cba845f15"
+}

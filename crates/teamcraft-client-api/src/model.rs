@@ -213,6 +213,9 @@ pub struct Space {
   /// May delete the space with its channels (`delete_space`); the server's word.
   #[serde(default, skip_serializing_if = "std::ops::Not::not")]
   pub can_delete_space: bool,
+  /// How many channels go with the space, for the confirmation.
+  #[serde(default)]
+  pub deleted_channel_count: u32,
   /// Whether the user may create channels in the space (guests may not; the server checks
   /// again).
   #[serde(default)]
@@ -362,6 +365,7 @@ impl JoinableSpace {
       can_invite_guests: false,
       can_manage_space: false,
       can_delete_space: false,
+      deleted_channel_count: 0,
       can_create_channels: false,
       maybe_my_role: None,
     }
@@ -465,6 +469,9 @@ pub struct Conversation {
   /// An archived channel: read-only, and its last admin may leave (#1130).
   #[serde(default, skip_serializing_if = "std::ops::Not::not")]
   pub is_archived: bool,
+  /// Holds imported history (e2ee.md §4.10): the last member's leave doesn't delete it.
+  #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+  pub is_imported: bool,
   pub bookmarks: Vec<Bookmark>,
   /// The client is still catching up this conversation's history after being away (issue #247):
   /// what it shows may be incomplete.
@@ -895,6 +902,7 @@ mod tests {
         maybe_image_version: None,
         is_notes_to_self: false,
         is_archived: false,
+        is_imported: false,
         maybe_permissions,
         has_only_deactivated_others: false,
       }

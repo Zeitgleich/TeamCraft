@@ -364,7 +364,7 @@ fn BrowseRow(channel: BrowsableChannel) -> impl IntoView {
       {if channel.is_member {
         view! {
           <button class="btn btn-small" on:click=move |_| { state.open_conversation(id); state.close_overlay(); }>{move || i18n.t("browse-open")}</button>
-          <button class="btn btn-small" on:click=move |_| state.leave_with_undo(id, left_text(state, i18n, id))>{move || i18n.t("browse-leave")}</button>
+          <button class="btn btn-small" on:click=move |_| state.leave_with_undo(id, left_text(state, i18n, id), false)>{move || i18n.t("browse-leave")}</button>
         }
         .into_any()
       } else {
@@ -1812,6 +1812,7 @@ fn SpaceAdvanced(space: Space) -> impl IntoView {
   let i18n = use_i18n();
   let id = space.id;
   let can_delete = space.can_delete_space;
+  let channel_count = space.deleted_channel_count;
   let is_confirming_delete = RwSignal::new(false);
   let delete_pending = PendingAction::new();
   let delete = move |_| {
@@ -1865,7 +1866,7 @@ fn SpaceAdvanced(space: Space) -> impl IntoView {
         when=move || is_confirming_delete.get()
         fallback=move || view! { <button type="button" class="btn btn-danger" on:click=move |_| is_confirming_delete.set(true)>{move || i18n.t("space-delete-action")}</button> }
       >
-        <p role="alert">{move || i18n.t("space-delete-confirm")}</p>
+        <p role="alert">{move || i18n.t_with("space-delete-confirm", &[("count", &channel_count.to_string())])}</p>
         <div class="inline-actions">
           <button type="button" class="btn btn-danger" prop:disabled=move || delete_pending.is_pending() on:click=delete>{move || i18n.t("space-delete-action")}</button>
           <button type="button" class="btn" on:click=move |_| is_confirming_delete.set(false)>{move || i18n.t("cancel")}</button>
@@ -2210,6 +2211,7 @@ mod tests {
       can_invite_guests: true,
       can_manage_space: true,
       can_delete_space: false,
+      deleted_channel_count: 0,
       can_create_channels: true,
     }
   }

@@ -50,6 +50,18 @@ pub enum ApiError {
   /// Deleting the account would leave the workspace without an active admin.
   #[error("the workspace must keep at least one active admin")]
   LastAdmin,
+  #[error("make another member channel admin first, or delete the channel")]
+  LastChannelAdmin,
+  #[error("nobody else is in this channel: leaving deletes it")]
+  LastMember,
+  #[error("an import account holds this channel")]
+  ImportInProgress,
+  #[error("the space holds private channels you aren't in")]
+  SpaceHasHiddenChannels,
+  #[error("assign a channel admin before restoring this channel")]
+  ChannelNeedsAdmin,
+  #[error("not allowed for DMs and group DMs")]
+  NotAChannel,
   /// Channel members must belong to the channel's space; the user is not in it (yet).
   #[error("the user is not a member of the space")]
   NotSpaceMember,
@@ -316,14 +328,21 @@ impl ApiError {
       | Self::MfaRequired => StatusCode::FORBIDDEN,
       Self::Auth(AuthError::KeysUnavailable(_)) => StatusCode::SERVICE_UNAVAILABLE,
       Self::NotFound { .. } => StatusCode::NOT_FOUND,
-      Self::InvalidRequest(_) | Self::InvalidKeyPackage(_) | Self::LastOwner | Self::NotSpaceMember => {
-        StatusCode::BAD_REQUEST
-      },
+      Self::NotAChannel
+      | Self::InvalidRequest(_)
+      | Self::InvalidKeyPackage(_)
+      | Self::LastOwner
+      | Self::NotSpaceMember => StatusCode::BAD_REQUEST,
       Self::Conflict(_)
       | Self::AdminJoinRequestTooSoon
       | Self::CallDeviceLimit { .. }
       | Self::CannotDeleteSelf
       | Self::LastAdmin
+      | Self::LastChannelAdmin
+      | Self::LastMember
+      | Self::ImportInProgress
+      | Self::SpaceHasHiddenChannels
+      | Self::ChannelNeedsAdmin
       | Self::ImportWindowFull
       | Self::KeyPackageExhausted
       | Self::EpochConflict { .. }
@@ -367,6 +386,12 @@ impl ApiError {
       Self::LastOwner => ErrorCode::LastOwner,
       Self::CannotDeleteSelf => ErrorCode::CannotDeleteSelf,
       Self::LastAdmin => ErrorCode::LastAdmin,
+      Self::LastChannelAdmin => ErrorCode::LastChannelAdmin,
+      Self::LastMember => ErrorCode::LastMember,
+      Self::ImportInProgress => ErrorCode::ImportInProgress,
+      Self::SpaceHasHiddenChannels => ErrorCode::SpaceHasHiddenChannels,
+      Self::ChannelNeedsAdmin => ErrorCode::ChannelNeedsAdmin,
+      Self::NotAChannel => ErrorCode::NotAChannel,
       Self::NotSpaceMember => ErrorCode::NotSpaceMember,
       Self::AdminJoinRequestTooSoon => ErrorCode::AdminJoinRequestTooSoon,
       Self::CallDeviceLimit { .. } => ErrorCode::CallDeviceLimit,

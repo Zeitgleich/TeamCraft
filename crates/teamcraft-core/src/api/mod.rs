@@ -249,6 +249,21 @@ pub trait ServerApi {
     conversation: ConversationId,
     user: UserId,
   ) -> impl Future<Output = Result<(), ApiError>>;
+  /// Asks whether this user may leave (`…/members/{me}/removal`); see [`Self::leave_conversation`].
+  fn check_leave(
+    &self,
+    conversation: ConversationId,
+    me: UserId,
+    deletes_if_last: bool,
+  ) -> impl Future<Output = Result<(), ApiError>>;
+  /// This user leaves, saying what to do if they are the last member of a private channel:
+  /// `deletes_if_last` deletes it, otherwise the server refuses with `last_member`.
+  fn leave_conversation(
+    &self,
+    conversation: ConversationId,
+    me: UserId,
+    deletes_if_last: bool,
+  ) -> impl Future<Output = Result<(), ApiError>>;
   /// Deletes a channel for everybody (`DELETE /conversations/{id}`, `delete_channel`); not found
   /// once it is gone (e2ee.md §4.6).
   fn delete_conversation(&self, conversation: ConversationId) -> impl Future<Output = Result<(), ApiError>>;

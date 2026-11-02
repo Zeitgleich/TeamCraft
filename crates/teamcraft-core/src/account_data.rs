@@ -479,6 +479,40 @@ impl AccountData {
       .is_some_and(|entry| !entry.is_removed)
   }
 
+  /// Drops what the user kept about a conversation that is gone for good: its drafts, saved
+  /// messages and unread mark, on all devices. Whether anything changed.
+  pub fn forget_conversation(&mut self, conversation: ConversationId, now_ms: i64) -> bool {
+    let id = conversation.to_string();
+    let prefix = format!("{conversation}/");
+    let is_about_it = |key: &str| key == id || key.starts_with(&prefix);
+    let mut has_changed = false;
+    for (_, entry) in self
+      .saved
+      .iter_mut()
+      .filter(|(key, entry)| is_about_it(key) && !entry.is_removed)
+    {
+      entry.is_removed = true;
+      entry.updated_at_ms = now_ms;
+      has_changed = true;
+    }
+    for (_, entry) in self
+      .drafts
+      .iter_mut()
+      .filter(|(key, entry)| is_about_it(key) && !entry.is_removed)
+    {
+      entry.is_removed = true;
+      entry.value.body = String::new();
+      entry.updated_at_ms = now_ms;
+      has_changed = true;
+    }
+    if let Some(entry) = self.marked_unread.get_mut(&id).filter(|entry| !entry.is_removed) {
+      entry.is_removed = true;
+      entry.updated_at_ms = now_ms;
+      has_changed = true;
+    }
+    has_changed
+  }
+
   pub fn set_saved(
     &mut self,
     conversation: ConversationId,

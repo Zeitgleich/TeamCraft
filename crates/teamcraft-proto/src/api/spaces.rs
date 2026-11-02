@@ -59,6 +59,9 @@ pub struct SpaceResponse {
   /// like `can_add_members`.
   #[serde(default, skip_serializing_if = "std::ops::Not::not")]
   pub can_delete_space: bool,
+  /// How many channels go with the space, for its confirmation; only with `can_delete_space`.
+  #[serde(default, skip_serializing_if = "is_zero")]
+  pub deleted_channel_count: u32,
   /// Whether the caller may create channels in the space (`create_channel`, which guests don't
   /// have). A UI hint like `can_add_members`; servers that don't send it leave it to the request.
   #[serde(default = "unknown_is_allowed")]
@@ -221,6 +224,10 @@ pub struct ListInvitesResponse {
   pub invites: Vec<InviteResponse>,
 }
 
+fn is_zero(count: &u32) -> bool {
+  *count == 0
+}
+
 #[cfg(test)]
 mod tests {
   use serde_json::json;
@@ -306,6 +313,7 @@ mod tests {
       can_invite_guests: false,
       can_manage_space: false,
       can_delete_space: false,
+      deleted_channel_count: 0,
       // What an older server, which doesn't send it, is taken to mean.
       can_create_channels: true,
     }

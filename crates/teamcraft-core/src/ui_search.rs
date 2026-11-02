@@ -450,6 +450,7 @@ mod tests {
       can_invite_guests: false,
       can_manage_space: false,
       can_delete_space: false,
+      deleted_channel_count: 0,
       can_create_channels: false,
     };
     records::put_json(&store, Table::Spaces, &space.to_string(), &project).unwrap();
