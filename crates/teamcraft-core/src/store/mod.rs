@@ -135,6 +135,9 @@ pub enum Table {
   /// Presence as `presence_update` events (and the reads after a connection) announced it to the
   /// UI, one record per user with its revision (issue #259).
   AnnouncedPresence,
+  /// Downloads to disk, keyed by attachment ID: how far each got and the recent ones the app lists
+  /// (`client::disk_downloads`).
+  Downloads,
 }
 
 /// A decrypted (or own, not yet sent) message, or a line this device derived itself: from a
@@ -1131,7 +1134,7 @@ pub fn pick_media(messages: Vec<StoredMessage>, range: MediaRange, limit: usize)
 
 impl Table {
   /// Every table; a new variant goes here too (stores that load by name skip unknown tables).
-  pub const ALL: [Self; 34] = [
+  pub const ALL: [Self; 35] = [
     Self::Account,
     Self::Spaces,
     Self::Conversations,
@@ -1166,6 +1169,7 @@ impl Table {
     Self::RemovedSenders,
     Self::PendingActions,
     Self::AnnouncedPresence,
+    Self::Downloads,
   ];
 
   /// The table with this [`Self::name`], if this version knows it.
@@ -1210,6 +1214,7 @@ impl Table {
       Self::RemovedSenders => "removed_senders",
       Self::PendingActions => "pending_actions",
       Self::AnnouncedPresence => "announced_presence",
+      Self::Downloads => "downloads",
     }
   }
 }

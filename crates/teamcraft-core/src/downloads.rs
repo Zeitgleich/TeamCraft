@@ -1,9 +1,11 @@
 //! Attachment downloads beside a host's loop (issue #491): the web and desktop cores start them
 //! with the client and then let them run, so a large file doesn't hold up reads, sends or gateway
 //! frames. At most a few run at once; the rest wait their turn in order, except what the user opened
-//! (the image viewer), which goes first.
+//! (the image viewer), which goes first. Saves to disk that failed on the network come back when
+//! their retry is due, and those an app left running when it stopped continue once it starts
+//! again (issue #153, `client::disk_downloads`).
 
-use std::collections::VecDeque;
+use std::collections::{HashSet, VecDeque};
 use std::future::Future;
 use std::path::PathBuf;
 use std::pin::Pin;
@@ -15,6 +17,7 @@ use teamcraft_proto::{AttachmentId, ConversationId};
 
 use crate::api::ServerApi;
 use crate::client::Client;
+use crate::client::disk_downloads::{DownloadTarget, due_downloads};
 use crate::client::files::failure_of;
 use crate::error::CoreError;
 use crate::store::{AttachmentRef, LocalStore};
@@ -28,6 +31,13 @@ pub struct Downloads {
   limit: usize,
   waiting: VecDeque<Job>,
   running: FuturesUnordered<Pin<Box<dyn Future<Output = Finished>>>>,
+  /// Files being saved: one transfer per file, so two never write the same partial file.
+  saving: HashSet<AttachmentId>,
+  /// When to look for saves to continue (client clock): at the start, after a save finished and
+  /// when the next retry is due.
+  maybe_next_scan_ms: Option<i64>,
+  /// The first scan also continues the saves an app left running when it stopped.
+  has_resumed: bool,
 }
 
 /// What a finished download leaves for the host.
@@ -74,18 +84,8 @@ enum Job {
   Save {
     conversation: ConversationId,
     attachment: AttachmentId,
-    target: SaveTarget,
+    target: DownloadTarget,
   },
-}
-
-/// Where a saved file goes.
-enum SaveTarget {
-  /// A new name in the download directory.
-  DownloadDirectory,
-  /// The exact file the user picked in a save dialog.
-  File(PathBuf),
-  /// A new name in the folder the user picked for several files ("Download all", #1014).
-  Folder(PathBuf),
 }
 
 impl Downloads {
@@ -95,6 +95,9 @@ impl Downloads {
       limit: limit.max(1),
       waiting: VecDeque::new(),
       running: FuturesUnordered::new(),
+      saving: HashSet::new(),
+      maybe_next_scan_ms: Some(i64::MIN),
+      has_resumed: false,
     }
   }
 
@@ -150,30 +153,20 @@ impl Downloads {
 
   /// Queues saving a file to disk (in the browser: to its download folder).
   pub fn save(&mut self, conversation: ConversationId, attachment: AttachmentId) {
-    self.waiting.push_back(Job::Save {
-      conversation,
-      attachment,
-      target: SaveTarget::DownloadDirectory,
-    });
+    self.queue_save(conversation, attachment, DownloadTarget::DownloadDirectory);
   }
 
   /// Queues saving a file to `path`, which the user picked in a save dialog.
   pub fn save_to(&mut self, conversation: ConversationId, attachment: AttachmentId, path: PathBuf) {
-    self.waiting.push_back(Job::Save {
-      conversation,
-      attachment,
-      target: SaveTarget::File(path),
-    });
+    let path = path.to_string_lossy().into_owned();
+    self.queue_save(conversation, attachment, DownloadTarget::File { path });
   }
 
   /// Queues saving a file under its own name into `folder`, which the user picked for several files
   /// at once; a name that is taken there gets a number (`name (2).jpg`).
   pub fn save_into(&mut self, conversation: ConversationId, attachment: AttachmentId, folder: PathBuf) {
-    self.waiting.push_back(Job::Save {
-      conversation,
-      attachment,
-      target: SaveTarget::Folder(folder),
-    });
+    let path = folder.to_string_lossy().into_owned();
+    self.queue_save(conversation, attachment, DownloadTarget::Folder { path });
   }
 
   pub fn is_running(&self) -> bool {
@@ -184,6 +177,7 @@ impl Downloads {
   /// download URL (a short request); a failure goes to whoever waits. Returns whether the store
   /// changed (a file to save is marked as downloading).
   pub async fn start_due<A: ServerApi, S: LocalStore>(&mut self, client: &mut Client<A, S>) -> bool {
+    self.queue_due_saves(client);
     let mut is_changed = false;
     // What the user opened has one slot beyond the limit, so it never waits for previews.
     while self.running.len() < self.limit
@@ -214,24 +208,29 @@ impl Downloads {
           target,
         } => {
           is_changed = true;
-          let started = client.start_download_to_disk(conversation, attachment).await;
-          match started.map(|download| match target {
-            SaveTarget::DownloadDirectory => download,
-            SaveTarget::File(path) => download.to_path(path),
-            SaveTarget::Folder(folder) => download.into_folder(folder),
-          }) {
-            Ok(download) => self.running.push(Box::pin(async move {
-              Finished::Saved {
-                attachment,
-                saved: download.save().await,
-              }
-            })),
-            Err(error) => tracing::warn!(
-              %error,
-              attachment_id = %attachment,
-              reason = ?failure_of(&error),
-              "could not start saving a file"
-            ),
+          match client
+            .start_download_to_disk_at(conversation, attachment, target)
+            .await
+          {
+            Ok(download) => {
+              self.saving.insert(attachment);
+              self.running.push(Box::pin(async move {
+                Finished::Saved {
+                  attachment,
+                  saved: download.save().await,
+                }
+              }));
+            },
+            Err(error) => {
+              // A retry may have come due: look again.
+              self.maybe_next_scan_ms = Some(i64::MIN);
+              tracing::warn!(
+                %error,
+                attachment_id = %attachment,
+                reason = ?failure_of(&error),
+                "could not start saving a file"
+              );
+            },
           }
         },
       }
@@ -242,7 +241,14 @@ impl Downloads {
   /// The next download that finishes; never completes while none runs.
   pub async fn next_finished(&mut self) -> Finished {
     match self.running.next().await {
-      Some(finished) => finished,
+      Some(finished) => {
+        if let Finished::Saved { attachment, .. } = &finished {
+          self.saving.remove(attachment);
+          // It may have failed on the network: its retry is due later.
+          self.maybe_next_scan_ms = Some(i64::MIN);
+        }
+        finished
+      },
       None => std::future::pending().await,
     }
   }
@@ -268,7 +274,66 @@ impl Downloads {
   }
 }
 
+impl Downloads {
+  /// Queues a save unless the file is being saved or waits already.
+  fn queue_save(&mut self, conversation: ConversationId, attachment: AttachmentId, target: DownloadTarget) {
+    if self.saving.contains(&attachment) || self.waiting.iter().any(|job| job.saves(attachment)) {
+      tracing::debug!(attachment_id = %attachment, "the file is being saved already");
+      return;
+    }
+    self.waiting.push_back(Job::Save {
+      conversation,
+      attachment,
+      target,
+    });
+  }
+
+  /// Queues the saves whose retry came due (and, the first time, those an app left running).
+  fn queue_due_saves<A: ServerApi, S: LocalStore>(&mut self, client: &Client<A, S>) {
+    let now_ms = client.now_ms();
+    if self.maybe_next_scan_ms.is_none_or(|next| now_ms < next) {
+      return;
+    }
+    let includes_interrupted = !self.has_resumed;
+    match due_downloads(client.store(), now_ms, includes_interrupted) {
+      Ok((due, maybe_next_ms)) => {
+        self.has_resumed = true;
+        self.maybe_next_scan_ms = maybe_next_ms;
+        if includes_interrupted {
+          sweep_partials(client);
+        }
+        for download in due {
+          tracing::info!(attachment_id = %download.attachment_id, "continuing a download");
+          self.queue_save(download.conversation_id, download.attachment_id, download.target);
+        }
+      },
+      Err(error) => {
+        self.maybe_next_scan_ms = None;
+        tracing::warn!(%error, "could not read the downloads to continue");
+      },
+    }
+  }
+}
+
+/// Deletes partial downloads nothing continues any more (native: the browser keeps none).
+fn sweep_partials<A: ServerApi, S: LocalStore>(client: &Client<A, S>) {
+  #[cfg(not(target_arch = "wasm32"))]
+  if let Some(staging) = &client.settings().maybe_upload_staging_dir {
+    match crate::client::disk_downloads::sweep_partial_downloads(client.store(), staging) {
+      Ok(0) => {},
+      Ok(removed) => tracing::info!(removed, "deleted partial downloads nobody continues"),
+      Err(error) => tracing::warn!(%error, "could not sweep the partial downloads"),
+    }
+  }
+  #[cfg(target_arch = "wasm32")]
+  let _ = client;
+}
+
 impl Job {
+  fn saves(&self, attachment: AttachmentId) -> bool {
+    matches!(self, Self::Save { attachment: saved, .. } if *saved == attachment)
+  }
+
   fn is_urgent(&self) -> bool {
     matches!(
       self,

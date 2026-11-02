@@ -97,6 +97,25 @@ pub type DetachedPart = Pin<Box<dyn Future<Output = Result<String, ApiError>>>>;
 /// A download that doesn't borrow the API, like [`DetachedRequest`]; it yields the blob.
 pub type DetachedDownload = Pin<Box<dyn Future<Output = Result<Vec<u8>, ApiError>>>>;
 
+/// The pieces of a blob as they arrive from the storage, each at most a few KiB.
+#[cfg(not(target_arch = "wasm32"))]
+pub type BlobPieces = Pin<Box<dyn futures_util::Stream<Item = Result<Vec<u8>, ApiError>>>>;
+
+/// A ranged download that doesn't borrow the API, like [`DetachedRequest`]: it yields the blob from
+/// an offset on, piece by piece, so a download to disk never holds the file and continues where an
+/// interrupted one stopped.
+#[cfg(not(target_arch = "wasm32"))]
+pub type DetachedRange = Pin<Box<dyn Future<Output = Result<RangedBlob, ApiError>>>>;
+
+/// The answer to a ranged blob download ([`ServerApi::get_blob_from_detached`]).
+#[cfg(not(target_arch = "wasm32"))]
+pub struct RangedBlob {
+  /// The offset of the first piece: the one asked for, or 0 when the storage ignored the range and
+  /// sends the whole blob again.
+  pub start: u64,
+  pub pieces: BlobPieces,
+}
+
 /// Everything the sync engine needs from the server.
 pub trait ServerApi {
   type Gateway: GatewayConnection;
@@ -605,6 +624,11 @@ pub trait ServerApi {
     maybe_max_bytes: Option<u64>,
     received: ByteCounter,
   ) -> DetachedDownload;
+  /// Downloads a blob from byte `start` on (an HTTP `Range` request), as a request of its own
+  /// whose pieces the caller writes away as they arrive. A `start` at or past the end yields no
+  /// pieces. Stops with a network error once a piece takes longer than the stall timeout.
+  #[cfg(not(target_arch = "wasm32"))]
+  fn get_blob_from_detached(&self, url: &str, start: u64) -> DetachedRange;
   /// Downloads an encrypted blob from a presigned URL.
   fn get_blob(&self, url: &str) -> impl Future<Output = Result<Vec<u8>, ApiError>>;
   /// Like [`Self::get_blob`], but stops reading (and fails) once the blob grows past `max_bytes`,

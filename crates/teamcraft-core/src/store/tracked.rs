@@ -473,6 +473,7 @@ fn classify(table: Table, key: &str) -> Change {
     | Table::SearchSegments
     | Table::SavedSearches
     | Table::FileTransfers
+    | Table::Downloads
     | Table::ShareLinks
     | Table::ChannelBrowser
     | Table::DeviceLists

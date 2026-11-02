@@ -23,6 +23,7 @@ mod custom_status;
 mod dev_stack;
 mod devices;
 mod direct_uploads;
+mod disk_downloads;
 mod dm_setup;
 mod enrollment;
 mod files;

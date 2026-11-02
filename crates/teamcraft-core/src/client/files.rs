@@ -15,7 +15,10 @@ use teamcraft_proto::{
 };
 
 use super::Client;
-use super::attachments::{BlobDownload, OutgoingFile};
+#[cfg(target_arch = "wasm32")]
+use super::attachments::BlobDownload;
+use super::attachments::OutgoingFile;
+use super::disk_downloads::{self, DownloadTarget};
 use super::upload_parts::{PartOutcome, PartTarget, PartsUpload, is_multipart};
 use crate::api::{ApiError, ServerApi};
 use crate::error::CoreError;
@@ -542,19 +545,30 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     conversation: ConversationId,
     attachment: AttachmentId,
   ) -> Result<DiskDownload, CoreError> {
+    self
+      .start_download_to_disk_at(conversation, attachment, DownloadTarget::DownloadDirectory)
+      .await
+  }
+
+  /// [`Self::start_download_to_disk`] into `target`. The download is recorded
+  /// ([`disk_downloads::DownloadRecord`]): natively it continues where it stopped after a network
+  /// failure or a restart.
+  pub async fn start_download_to_disk_at(
+    &mut self,
+    conversation: ConversationId,
+    attachment: AttachmentId,
+    target: DownloadTarget,
+  ) -> Result<DiskDownload, CoreError> {
     let reference = find_attachment(&self.store, conversation, attachment)?
       .ok_or_else(|| CoreError::Corrupt("no such file in this conversation".into()))?;
+    disk_downloads::record_start(&self.store, conversation, &reference, &target, self.now_ms())?;
     if exceeds_download_limit(reference.size_bytes, MAX_DOWNLOAD_BYTES) {
-      set_transfer(
-        &self.store,
-        attachment,
-        &TransferState::Failed {
-          reason: TransferFailure::TooLarge,
-        },
-      )?;
-      return Err(CoreError::InvalidRequest(
-        "the file is too large to download here".into(),
-      ));
+      let error = CoreError::InvalidRequest("the file is too large to download here".into());
+      let too_large = Err(CoreError::Api(ApiError::BlobTooLarge {
+        max_bytes: MAX_DOWNLOAD_BYTES.unwrap_or(u64::MAX),
+      }));
+      self.finish_download_to_disk(attachment, too_large)?;
+      return Err(error);
     }
     set_transfer(
       &self.store,
@@ -563,19 +577,16 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
         total_bytes: reference.size_bytes,
       },
     )?;
-    // The cap is enforced on the bytes actually received, not on the sender-declared size.
-    match self.start_download(&reference, MAX_DOWNLOAD_BYTES).await {
-      Ok(download) => Ok(DiskDownload {
+    match self.start_disk_transfer(&reference).await {
+      Ok(download) => Ok(DiskDownload::new(
         download,
-        maybe_directory: self.settings.maybe_download_dir.clone(),
-        maybe_target: None,
-      }),
+        &target,
+        self.settings.maybe_download_dir.clone(),
+      )),
       Err(error) => {
-        let failed = TransferState::Failed {
-          reason: failure_of(&error),
-        };
-        set_transfer(&self.store, attachment, &failed)?;
-        Err(error)
+        let failed = Err(error);
+        self.finish_download_to_disk(attachment, failed)?;
+        Err(CoreError::InvalidRequest("the download could not start".into()))
       },
     }
   }
@@ -586,14 +597,46 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     attachment: AttachmentId,
     saved: Result<String, CoreError>,
   ) -> Result<String, CoreError> {
-    let state = match &saved {
-      Ok(path) => TransferState::Local { path: path.clone() },
-      Err(error) => TransferState::Failed {
-        reason: failure_of(error),
-      },
-    };
+    let state = disk_downloads::record_finish(
+      &self.store,
+      attachment,
+      &saved,
+      self.now_ms(),
+      &self.settings.upload_retry,
+    )?;
     set_transfer(&self.store, attachment, &state)?;
     saved
+  }
+
+  /// Requests the file's blob: natively from where its partial file ends, in the browser whole.
+  #[cfg(not(target_arch = "wasm32"))]
+  async fn start_disk_transfer(&self, reference: &AttachmentRef) -> Result<DiskTransfer, CoreError> {
+    // The apps always have a staging directory; tools and tests without one keep partial files in
+    // the download directory, hidden, or in the temporary directory.
+    let staging = match (
+      &self.settings.maybe_upload_staging_dir,
+      &self.settings.maybe_download_dir,
+    ) {
+      (Some(staging), _) => staging.clone(),
+      (None, Some(directory)) => directory.join(".teamcraft"),
+      (None, None) => std::env::temp_dir().join("teamcraft"),
+    };
+    let download = self.api.download_attachment(reference.attachment_id).await?;
+    let progress = self
+      .transfers
+      .start(reference.attachment_id, reference.size_bytes);
+    let partial = disk_downloads::native::partial_path(&staging, reference.attachment_id);
+    Ok(disk_downloads::RangedDownload::start(
+      reference.clone(),
+      partial,
+      progress,
+      |offset| self.api.get_blob_from_detached(&download.download_url, offset),
+    ))
+  }
+
+  #[cfg(target_arch = "wasm32")]
+  async fn start_disk_transfer(&self, reference: &AttachmentRef) -> Result<DiskTransfer, CoreError> {
+    self.start_download(reference, MAX_DOWNLOAD_BYTES).await
   }
 
   /// Creates a public download link for a file of the conversation (e2ee.md §4.5.1).
@@ -995,7 +1038,8 @@ impl DiskDownload {
     self.download.attachment_id()
   }
 
-  /// Receives and decrypts the file and writes it into the download directory.
+  /// Receives the rest of the file, checks and decrypts it and writes it into the download
+  /// directory.
   #[cfg(not(target_arch = "wasm32"))]
   pub async fn save(self) -> Result<String, CoreError> {
     let Self {
@@ -1007,17 +1051,20 @@ impl DiskDownload {
       // The user picked this file in a save dialog, which asked before replacing one. Written in
       // place, not through a temporary file beside it: on macOS the save dialog grants access to
       // the picked file only, not to other files in a protected folder (Downloads, Documents).
-      let plaintext = download.open().await?;
-      write_file(&path, plaintext.expose_secret())?;
+      // Opened only once the whole blob is in and checked, so a failed transfer leaves the picked
+      // file as it was.
+      let verified = download.receive().await?;
+      let file = std::fs::File::create(&path).map_err(CoreError::LocalFile)?;
+      verified.write_into(file, &path)?;
       return Ok(path.to_string_lossy().into_owned());
     }
     let directory =
       maybe_directory.ok_or_else(|| CoreError::InvalidRequest("no download directory configured".into()))?;
     let file_name = download.reference().file_name.clone();
-    let plaintext = download.open().await?;
+    let verified = download.receive().await?;
     std::fs::create_dir_all(&directory).map_err(CoreError::LocalFile)?;
     let (file, path) = create_unique(&directory, &file_name)?;
-    write_into(file, &path, plaintext.expose_secret())?;
+    verified.write_into(file, &path)?;
     Ok(path.to_string_lossy().into_owned())
   }
 
@@ -1051,10 +1098,16 @@ fn is_unreachable(error: &ApiError) -> bool {
   error.is_unreachable()
 }
 
+/// The transfer of a [`DiskDownload`]: natively ranged into a partial file, in the browser whole.
+#[cfg(not(target_arch = "wasm32"))]
+type DiskTransfer = disk_downloads::RangedDownload;
+#[cfg(target_arch = "wasm32")]
+type DiskTransfer = BlobDownload;
+
 /// A file on its way to disk (or, in the browser, to its download folder), detached from the client
-/// like a [`BlobDownload`].
+/// like a [`super::BlobDownload`].
 pub struct DiskDownload {
-  download: BlobDownload,
+  download: DiskTransfer,
   #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
   maybe_directory: Option<std::path::PathBuf>,
   /// The exact file to write (picked in a save dialog) instead of a new name in the directory.
@@ -1063,21 +1116,20 @@ pub struct DiskDownload {
 }
 
 impl DiskDownload {
-  /// Writes the file to `path` (the user's choice in a save dialog) instead of the download
-  /// directory. The browser has no paths and saves to its download folder anyway.
-  pub fn to_path(self, path: std::path::PathBuf) -> Self {
+  fn new(
+    download: DiskTransfer,
+    target: &DownloadTarget,
+    maybe_download_dir: Option<std::path::PathBuf>,
+  ) -> Self {
+    let (maybe_directory, maybe_target) = match target {
+      DownloadTarget::DownloadDirectory => (maybe_download_dir, None),
+      DownloadTarget::File { path } => (maybe_download_dir, Some(std::path::PathBuf::from(path))),
+      DownloadTarget::Folder { path } => (Some(std::path::PathBuf::from(path)), None),
+    };
     Self {
-      maybe_target: Some(path),
-      ..self
-    }
-  }
-
-  /// Writes the file under a new name into `folder` (picked for several files at once) instead of
-  /// the download directory. The browser saves to its download folder anyway.
-  pub fn into_folder(self, folder: std::path::PathBuf) -> Self {
-    Self {
-      maybe_directory: Some(folder),
-      ..self
+      download,
+      maybe_directory,
+      maybe_target,
     }
   }
 }
@@ -1554,29 +1606,6 @@ fn create_unique(
   )))
 }
 
-/// Writes a downloaded file. A write that fails halfway removes what it left, so no cut-off file
-/// looks like the real one.
-#[cfg(not(target_arch = "wasm32"))]
-fn write_file(path: &std::path::Path, bytes: &[u8]) -> Result<(), CoreError> {
-  let file = std::fs::File::create(path).map_err(CoreError::LocalFile)?;
-  write_into(file, path, bytes)
-}
-
-/// Writes `bytes` into the opened `file` at `path`; removes it again when the write fails.
-#[cfg(not(target_arch = "wasm32"))]
-fn write_into(mut file: std::fs::File, path: &std::path::Path, bytes: &[u8]) -> Result<(), CoreError> {
-  use std::io::Write;
-
-  if let Err(error) = file.write_all(bytes) {
-    drop(file);
-    // Deliberately ignored: the write error is what the user needs; a file that can't be removed
-    // either stays as it is.
-    let _ = std::fs::remove_file(path);
-    return Err(CoreError::LocalFile(error));
-  }
-  Ok(())
-}
-
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests {
   use super::*;
@@ -1648,21 +1677,6 @@ mod tests {
         .to_string()
         .starts_with("writing the file on this device failed")
     );
-  }
-
-  #[test]
-  fn writing_into_a_missing_folder_is_a_local_file_error() {
-    let missing = std::env::temp_dir()
-      .join(format!(
-        "teamcraft-no-folder-{}",
-        rand_core::RngCore::next_u64(&mut OsRng)
-      ))
-      .join("file.wav");
-    assert!(matches!(
-      write_file(&missing, b"RIFF"),
-      Err(CoreError::LocalFile(error)) if error.kind() == std::io::ErrorKind::NotFound
-    ));
-    assert!(!missing.exists());
   }
 
   #[test]
