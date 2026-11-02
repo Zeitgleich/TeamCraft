@@ -66,7 +66,7 @@ pub struct SealedStore<B> {
   backend: B,
   /// Shared with the seals a backend runs later ([`LazySeal`]).
   keys: Arc<LocalStoreKeys>,
-  state: Mutex<State>,
+  state: Mutex<State<B>>,
   entries: Mutex<EntryLog>,
 }
 
@@ -83,7 +83,7 @@ pub struct SealedStoreLimits {
 }
 
 /// The caches, the catalog's nodes and the open group, under one lock.
-struct State {
+struct State<B> {
   /// Entry values by table and key; `None` caches that there is none.
   values: Lru<(Table, String), Option<Zeroizing<Vec<u8>>>>,
   messages: Lru<(ConversationId, [u8; 16]), StoredMessage>,
@@ -105,9 +105,14 @@ struct State {
   is_catalog_damaged: bool,
   /// The catalog is being built: damage found meanwhile fails the build instead of starting another.
   is_building: bool,
-  /// This process may build the catalog ([`SealedStore::open_without_building`]: it may not).
-  can_build: bool,
+  /// Builds the catalog again; `None` in a process that may not build it
+  /// ([`SealedStore::open_backend_without_building`]). A pointer set only where the store is opened
+  /// to build, so the service worker's bundle doesn't carry the build.
+  maybe_rebuild: Option<Rebuild<B>>,
 }
+
+/// See [`State::maybe_rebuild`].
+type Rebuild<B> = fn(&SealedStore<B>) -> Result<(), StoreError>;
 
 /// The entries the open group of writes touched, and deletes the backend rolled back.
 #[derive(Default)]
@@ -244,6 +249,7 @@ impl<B: RecordBackend> SealedStore<B> {
     limits: SealedStoreLimits,
   ) -> Result<Self, StoreError> {
     let store = Self::unbuilt(backend, database_key, limits)?;
+    store.lock().maybe_rebuild = Some(Self::rebuild_catalog);
     store.build_catalog(None)?;
     Ok(store)
   }
@@ -260,11 +266,7 @@ impl<B: RecordBackend> SealedStore<B> {
   ) -> Result<Self, StoreError> {
     let store = Self::unbuilt(backend, database_key, limits)?;
     let maybe_catalog = store.read_catalog_state()?;
-    {
-      let mut state = store.lock();
-      state.set_catalog(maybe_catalog);
-      state.can_build = false;
-    }
+    store.lock().set_catalog(maybe_catalog);
     Ok(store)
   }
 
@@ -288,7 +290,7 @@ impl<B: RecordBackend> SealedStore<B> {
         maybe_catalog: None,
         is_catalog_damaged: false,
         is_building: false,
-        can_build: true,
+        maybe_rebuild: None,
       }),
       entries: Mutex::default(),
     })
@@ -441,7 +443,7 @@ impl<B: RecordBackend> SealedStore<B> {
   /// (of a build that was interrupted) and entries of tables this version doesn't know are left out.
   fn note_in_catalog(
     &self,
-    state: &mut State,
+    state: &mut State<B>,
     generation: u64,
     id: &LookupId,
     record: Record,
@@ -535,7 +537,10 @@ impl<B: RecordBackend> SealedStore<B> {
   /// Runs `write` as a group of writes ([`LocalStore::begin_writes`]); a failed step fails the
   /// group where the backend can undo it. Damage to the catalog found on the way builds it again
   /// (once no group is open) and runs `write` once more.
-  fn grouped<T>(&self, mut write: impl FnMut(&mut State) -> Result<T, StoreError>) -> Result<T, StoreError> {
+  fn grouped<T>(
+    &self,
+    mut write: impl FnMut(&mut State<B>) -> Result<T, StoreError>,
+  ) -> Result<T, StoreError> {
     let result = self.group_once(&mut write);
     if self.repair_catalog()? {
       return self.group_once(&mut write);
@@ -545,7 +550,7 @@ impl<B: RecordBackend> SealedStore<B> {
 
   fn group_once<T>(
     &self,
-    write: &mut impl FnMut(&mut State) -> Result<T, StoreError>,
+    write: &mut impl FnMut(&mut State<B>) -> Result<T, StoreError>,
   ) -> Result<T, StoreError> {
     self.begin_writes()?;
     let result = write(&mut self.lock());
@@ -560,7 +565,10 @@ impl<B: RecordBackend> SealedStore<B> {
 
   /// Runs `read` on one snapshot of the records, after dropping the caches if the disk moved under
   /// them. Damage to the catalog found on the way builds it again and runs `read` once more.
-  fn reading<T>(&self, mut read: impl FnMut(&mut State) -> Result<T, StoreError>) -> Result<T, StoreError> {
+  fn reading<T>(
+    &self,
+    mut read: impl FnMut(&mut State<B>) -> Result<T, StoreError>,
+  ) -> Result<T, StoreError> {
     let result = self.read_once(&mut read);
     if self.repair_catalog()? {
       return self.read_once(&mut read);
@@ -572,7 +580,7 @@ impl<B: RecordBackend> SealedStore<B> {
   /// connection in the middle of the snapshot.
   fn read_once<T>(
     &self,
-    read: &mut impl FnMut(&mut State) -> Result<T, StoreError>,
+    read: &mut impl FnMut(&mut State<B>) -> Result<T, StoreError>,
   ) -> Result<T, StoreError> {
     let mut state = self.lock();
     let is_snapshot = state.depth == 0;
@@ -590,7 +598,7 @@ impl<B: RecordBackend> SealedStore<B> {
   /// Drops the caches if the disk moved under them since the last look (another process committed,
   /// or a group of writes rolled back). Not inside a group: its own changes must stay, and nobody
   /// else commits while it holds the write lock.
-  fn follow_disk(&self, state: &mut State) {
+  fn follow_disk(&self, state: &mut State<B>) {
     let maybe_tally = self.backend.write_tally();
     if maybe_tally != state.maybe_tally {
       state.forget_all();
@@ -601,18 +609,20 @@ impl<B: RecordBackend> SealedStore<B> {
   /// Builds the catalog again if it was found damaged and no group of writes is open; whether it
   /// did, so the caller tries again. A process that may not build goes on without a catalog.
   fn repair_catalog(&self) -> Result<bool, StoreError> {
-    {
+    let maybe_rebuild = {
       let mut state = self.lock();
       if !state.is_catalog_damaged || state.depth > 0 || state.is_building {
         return Ok(false);
       }
       state.is_catalog_damaged = false;
-      if !state.can_build {
+      if state.maybe_rebuild.is_none() {
         state.set_catalog(None);
-        return Ok(true);
       }
+      state.maybe_rebuild
+    };
+    if let Some(rebuild) = maybe_rebuild {
+      rebuild(self)?;
     }
-    self.rebuild_catalog()?;
     Ok(true)
   }
 
@@ -621,7 +631,7 @@ impl<B: RecordBackend> SealedStore<B> {
     std::mem::take(&mut self.lock().is_catalog_damaged)
   }
 
-  fn lock(&self) -> MutexGuard<'_, State> {
+  fn lock(&self) -> MutexGuard<'_, State<B>> {
     // A poisoned lock only means another thread panicked; the caches stay consistent with what
     // each step wrote.
     self.state.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
@@ -630,7 +640,7 @@ impl<B: RecordBackend> SealedStore<B> {
   /// Runs `step` on `table`'s key directory.
   fn directory<T>(
     &self,
-    state: &mut State,
+    state: &mut State<B>,
     table: Table,
     step: impl FnOnce(&mut ScopedNodes<'_, String, ()>) -> Result<T, StoreError>,
   ) -> Result<T, StoreError> {
@@ -651,7 +661,7 @@ impl<B: RecordBackend> SealedStore<B> {
   /// Runs `step` on `conversation`'s message index.
   fn index<T>(
     &self,
-    state: &mut State,
+    state: &mut State<B>,
     conversation: ConversationId,
     step: impl FnOnce(&mut ScopedNodes<'_, MessageKey, MessageEntry>) -> Result<T, StoreError>,
   ) -> Result<T, StoreError> {
@@ -744,7 +754,7 @@ impl<B: RecordBackend> SealedStore<B> {
   /// until `keep` says to stop (`None`).
   fn index_keys(
     &self,
-    state: &mut State,
+    state: &mut State<B>,
     conversation: ConversationId,
     from: Bound<&MessageKey>,
     direction: Direction,
@@ -773,7 +783,7 @@ impl<B: RecordBackend> SealedStore<B> {
   /// the disk lacks, or holds at another place, is left out and the catalog is built again.
   fn load_messages(
     &self,
-    state: &mut State,
+    state: &mut State<B>,
     conversation: ConversationId,
     keys: &[MessageKey],
   ) -> Result<Vec<StoredMessage>, StoreError> {
@@ -820,7 +830,7 @@ impl<B: RecordBackend> SealedStore<B> {
 
   fn cached_message(
     &self,
-    state: &mut State,
+    state: &mut State<B>,
     conversation: ConversationId,
     client_message_id: ClientMessageId,
   ) -> Result<Option<StoredMessage>, StoreError> {
@@ -839,7 +849,12 @@ impl<B: RecordBackend> SealedStore<B> {
     Ok(Some(*message))
   }
 
-  fn cached_value(&self, state: &mut State, table: Table, key: &str) -> Result<Option<Vec<u8>>, StoreError> {
+  fn cached_value(
+    &self,
+    state: &mut State<B>,
+    table: Table,
+    key: &str,
+  ) -> Result<Option<Vec<u8>>, StoreError> {
     let cache_key = (table, key.to_string());
     if let Some(maybe_value) = state.values.get(&cache_key) {
       return Ok(maybe_value.as_ref().map(|value| value.to_vec()));
@@ -899,7 +914,7 @@ impl<B: RecordBackend> SealedStore<B> {
   }
 
   /// Writes the catalog nodes the ending group changed.
-  fn flush_catalog(&self, state: &mut State) -> Result<(), StoreError> {
+  fn flush_catalog(&self, state: &mut State<B>) -> Result<(), StoreError> {
     let changes = state
       .message_nodes
       .take_dirty()?
@@ -933,7 +948,7 @@ impl<B: RecordBackend> SealedStore<B> {
   /// Deletes the message records of `conversation` still on the disk. The index lists all of them
   /// unless it is damaged; this reads every record, so a conversation that goes away leaves nothing
   /// behind even then. Rare (a conversation removed for this user).
-  fn sweep_messages(&self, state: &mut State, conversation: ConversationId) -> Result<(), StoreError> {
+  fn sweep_messages(&self, state: &mut State<B>, conversation: ConversationId) -> Result<(), StoreError> {
     let (mut maybe_after, mut swept) = (None, 0usize);
     loop {
       let batch = self.backend.records_after(maybe_after.as_ref(), CATALOG_BATCH)?;
@@ -959,7 +974,7 @@ impl<B: RecordBackend> SealedStore<B> {
   }
 
   /// Removes a stored message from the disk, its index and the cache.
-  fn remove_message(&self, state: &mut State, message: &StoredMessage) -> Result<(), StoreError> {
+  fn remove_message(&self, state: &mut State<B>, message: &StoredMessage) -> Result<(), StoreError> {
     let conversation = message.conversation_id;
     self
       .backend
@@ -997,7 +1012,7 @@ impl<B> SealedStore<B> {
   }
 }
 
-impl State {
+impl<B> State<B> {
   /// The disk may no longer hold what the caches do: nothing kept or derived counts any more.
   fn forget_all(&mut self) {
     self.values.clear();

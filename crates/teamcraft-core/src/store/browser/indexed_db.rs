@@ -78,35 +78,18 @@ struct Inner {
 
 impl SealedStore<IndexedDbRecords> {
   /// Opens the database `name` with `database_key`, reading its ciphertext into memory; a page that
-  /// owns the store (it holds the Web Lock) upgrades it to this version.
+  /// owns the store (it holds the Web Lock) upgrades it to this version and builds its catalog.
   pub async fn open(name: &str, database_key: &SymmetricKey) -> Result<Self, StoreError> {
-    Self::open_with(name, database_key, OpenMode::Upgrade).await
+    let backend = IndexedDbRecords::read(name, OpenMode::Upgrade).await?;
+    Self::open_backend(backend, database_key, SealedStoreLimits::default())
   }
 
-  /// [`Self::open`] for the service worker, at whatever version the database has: it never
-  /// upgrades it ([`OpenMode::AsIs`]).
+  /// [`Self::open`] for the service worker, a second writer beside the page that owns the store: at
+  /// whatever version the database has, never upgrading it ([`OpenMode::AsIs`]) or building its
+  /// catalog.
   pub async fn open_without_upgrade(name: &str, database_key: &SymmetricKey) -> Result<Self, StoreError> {
-    Self::open_with(name, database_key, OpenMode::AsIs).await
-  }
-
-  async fn open_with(name: &str, database_key: &SymmetricKey, mode: OpenMode) -> Result<Self, StoreError> {
-    let database = idb::open_database_with(name, mode).await?;
-    let records = match read_all(&database).await {
-      Ok(records) => records,
-      Err(error) => {
-        // Closed, so a reset can delete the database (issue #160) instead of being blocked by it.
-        database.close();
-        return Err(error);
-      },
-    };
-    let backend = IndexedDbRecords::new(database, records.into_iter().collect());
-    match mode {
-      OpenMode::Upgrade => Self::open_backend(backend, database_key, SealedStoreLimits::default()),
-      // The service worker is a second writer beside the page that owns the store: it never builds.
-      OpenMode::AsIs => {
-        Self::open_backend_without_building(backend, database_key, SealedStoreLimits::default())
-      },
-    }
+    let backend = IndexedDbRecords::read(name, OpenMode::AsIs).await?;
+    Self::open_backend_without_building(backend, database_key, SealedStoreLimits::default())
   }
 
   /// Deletes the database `name` (records and key wrapping): the user chose to set up a device
@@ -226,6 +209,19 @@ impl RecordBackend for IndexedDbRecords {
 }
 
 impl IndexedDbRecords {
+  /// Opens the database `name` as `mode` says and reads every record's ciphertext.
+  async fn read(name: &str, mode: OpenMode) -> Result<Self, StoreError> {
+    let database = idb::open_database_with(name, mode).await?;
+    match read_all(&database).await {
+      Ok(records) => Ok(Self::new(database, records.into_iter().collect())),
+      Err(error) => {
+        // Closed, so a reset can delete the database (issue #160) instead of being blocked by it.
+        database.close();
+        Err(error)
+      },
+    }
+  }
+
   fn new(database: IdbDatabase, records: BTreeMap<LookupId, Vec<u8>>) -> Self {
     let writes = Rc::new(RefCell::new(Writes::default()));
     let on_complete = Closure::<dyn FnMut(web_sys::Event)>::new({
