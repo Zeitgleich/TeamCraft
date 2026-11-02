@@ -563,7 +563,8 @@ impl<B: RecordBackend> SealedStore<B> {
     };
     let version = version.after(change);
     let key = feed_version_key(version.generation, conversation);
-    self.write_named(CATALOG_TABLE, &key, &encode_node(&version)?)?;
+    let counts = [version.generation, version.reshaped, version.edited];
+    self.write_named(CATALOG_TABLE, &key, &encode_node(&counts)?)?;
     state.feed_versions.insert(conversation, version);
     Ok(())
   }
@@ -585,8 +586,12 @@ impl<B: RecordBackend> SealedStore<B> {
     // counted at.
     let result = self.read_named(CATALOG_TABLE, &key);
     state.note_catalog_result(&result);
-    let version = match result?.as_deref().map(|value| decode::<FeedVersion>(value)) {
-      Some(Ok(version)) if version.generation == generation => version,
+    let version = match result?.as_deref().map(|value| decode::<[u64; 3]>(value)) {
+      Some(Ok([stored, reshaped, edited])) if stored == generation => FeedVersion {
+        generation,
+        reshaped,
+        edited,
+      },
       Some(_) => {
         state.is_catalog_damaged = true;
         return Err(StoreError::Corrupt("a feed version doesn't read".into()));

@@ -743,10 +743,8 @@ impl<S: LocalStore> CoreChatBackend<S> {
     if !self.store.indexes_feed() {
       return None;
     }
-    self.store.feed_version(conversation).unwrap_or_else(|error| {
-      tracing::debug!(%error, "no feed version");
-      None
-    })
+    // One that doesn't read means counting every row, which reads what is damaged anyway.
+    self.store.feed_version(conversation).ok().flatten()
   }
 
   /// Keeps the tallies counted since the last call, in one group: a start counts many at once, and
@@ -758,7 +756,9 @@ impl<S: LocalStore> CoreChatBackend<S> {
     }
     let result: Result<(), CoreError> = write_group(&self.store, || {
       for (conversation, tally) in &tallies {
-        records::put_json(&self.store, Table::EntryTallies, &conversation.to_string(), tally)?;
+        self
+          .store
+          .put(Table::EntryTallies, &conversation.to_string(), &tally.to_bytes())?;
       }
       Ok(())
     });

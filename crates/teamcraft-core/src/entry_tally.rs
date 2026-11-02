@@ -22,13 +22,11 @@
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 
-use serde::{Deserialize, Serialize};
 use teamcraft_client_api::model::TimestampMs;
 use teamcraft_client_api::notify::MentionRules;
-use teamcraft_proto::{ConversationId, Id, MessageId, UserId};
+use teamcraft_proto::{ConversationId, Id, MessageId, Snowflake, UserId};
 
 use crate::imported::ImportAdditions;
-use crate::records;
 use crate::store::{FeedVersion, LocalStore, MessageFilter, MessageOrder, StoreError, StoredMessage, Table};
 use crate::ui_backend::{EntryCounts, MentionMemo, UnreadCounts, is_deleted};
 
@@ -37,10 +35,16 @@ const ROWS_PER_READ: usize = 256;
 /// The sort group of messages with a place on the server's clock ([`StoredMessage::sort_key`]);
 /// pending ones come after them, change without notice and are never kept.
 const PLACED_GROUP: u8 = 0;
+/// What [`EntryTally::to_bytes`] writes first. Another one reads as no tally, so it is counted again.
+const TALLY_FORMAT: u64 = 1;
+/// The numbers of a tally's record.
+const TALLY_WORDS: usize = 15;
 
 /// The counts of a conversation's rows up to [`Self::maybe_through`], as they were at
-/// [`Self::version`]. Sealed like every record; says nothing the messages don't.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+/// [`Self::version`]. Sealed like every record; says nothing the messages don't. Stored as plain
+/// numbers: the web app's download budget has no room for what deriving a JSON form adds, and a
+/// guest's meeting carries this code too.
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct EntryTally {
   version: FeedVersion,
   /// Decides which rows are hidden as the import's additions.
@@ -57,7 +61,7 @@ pub(crate) struct EntryTally {
 }
 
 /// The last row a tally counted.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct Through {
   value: i64,
   client_message_id: [u8; 16],
@@ -143,9 +147,9 @@ impl<'a> EntryPass<'a> {
   }
 
   /// Before an event in the middle of a conversation: the additions told of before it.
-  fn note_earlier_events<S: LocalStore>(
+  fn note_earlier_events(
     &mut self,
-    store: &S,
+    store: &dyn LocalStore,
     conversation: ConversationId,
     before: MessageOrder,
   ) -> Result<(), StoreError> {
@@ -164,9 +168,9 @@ impl<'a> EntryPass<'a> {
 
 impl EntryTally {
   /// Whether this tally holds under `inputs`, its place checked against the store's feed index.
-  fn holds<S: LocalStore>(
+  fn holds(
     &self,
-    store: &S,
+    store: &dyn LocalStore,
     conversation: ConversationId,
     inputs: &TallyInputs,
     rows_now: usize,
@@ -191,11 +195,69 @@ impl EntryTally {
       mentions: self.unread_mentions,
     }
   }
+
+  pub(crate) fn to_bytes(&self) -> Vec<u8> {
+    let through = self.maybe_through;
+    let words: [u64; TALLY_WORDS] = [
+      TALLY_FORMAT,
+      self.version.generation,
+      self.version.reshaped,
+      self.version.edited,
+      self
+        .maybe_importer
+        .map_or(0, |user| user.snowflake().get().unsigned_abs()),
+      u64::from(through.is_some()),
+      through.map_or(0, |through| through.value.cast_unsigned()),
+      through.map_or(0, |through| u128::from_be_bytes(through.client_message_id) as u64),
+      through.map_or(0, |through| {
+        (u128::from_be_bytes(through.client_message_id) >> 64) as u64
+      }),
+      self.rows as u64,
+      self.messages as u64,
+      u64::from(self.maybe_last_activity.is_some()),
+      self.maybe_last_activity.unwrap_or(0).cast_unsigned(),
+      self.unread_key,
+      u64::from(self.unread_messages) << 32 | u64::from(self.unread_mentions),
+    ];
+    words.iter().flat_map(|word| word.to_le_bytes()).collect()
+  }
+
+  /// `None` for anything [`Self::to_bytes`] didn't write.
+  fn from_bytes(bytes: &[u8]) -> Option<Self> {
+    let (words, rest) = bytes.as_chunks::<8>();
+    let word = |at: usize| words.get(at).map(|bytes| u64::from_le_bytes(*bytes));
+    if !rest.is_empty() || words.len() != TALLY_WORDS || word(0)? != TALLY_FORMAT {
+      return None;
+    }
+    let maybe_importer = match word(4)? {
+      0 => None,
+      raw => Some(UserId::from_snowflake(Snowflake::new(raw.cast_signed()).ok()?)),
+    };
+    let client_message_id = (u128::from(word(8)?) << 64 | u128::from(word(7)?)).to_be_bytes();
+    Some(Self {
+      version: FeedVersion {
+        generation: word(1)?,
+        reshaped: word(2)?,
+        edited: word(3)?,
+      },
+      maybe_importer,
+      maybe_through: (word(5)? != 0).then_some(Through {
+        value: word(6)?.cast_signed(),
+        client_message_id,
+      }),
+      rows: usize::try_from(word(9)?).ok()?,
+      messages: usize::try_from(word(10)?).ok()?,
+      maybe_last_activity: (word(11)? != 0).then_some(word(12)?.cast_signed()),
+      unread_key: word(13)?,
+      unread_messages: (word(14)? >> 32) as u32,
+      unread_mentions: word(14)? as u32,
+    })
+  }
 }
 
 /// The counts of `conversation`, from `maybe_kept` where it holds, and the tally to keep.
-pub(crate) fn counted<S: LocalStore>(
-  store: &S,
+pub(crate) fn counted(
+  store: &dyn LocalStore,
   conversation: ConversationId,
   inputs: &TallyInputs,
   maybe_kept: Option<EntryTally>,
@@ -217,8 +279,8 @@ pub(crate) fn counted<S: LocalStore>(
 }
 
 /// The counts of `conversation` in a store that keeps no version: all its rows, every time.
-pub(crate) fn counted_unkept<S: LocalStore>(
-  store: &S,
+pub(crate) fn counted_unkept(
+  store: &dyn LocalStore,
   conversation: ConversationId,
   mut pass: EntryPass<'_>,
 ) -> Result<EntryCounts, StoreError> {
@@ -226,8 +288,8 @@ pub(crate) fn counted_unkept<S: LocalStore>(
   Ok(pass.counts)
 }
 
-fn counted_whole<S: LocalStore>(
-  store: &S,
+fn counted_whole(
+  store: &dyn LocalStore,
   conversation: ConversationId,
   pass: &mut EntryPass<'_>,
   progress: &mut Progress,
@@ -283,8 +345,8 @@ impl Progress {
 
 /// `kept` holds: its counts, with the unread ones decided again if what decides them changed, and
 /// the rows after it.
-fn counted_from<S: LocalStore>(
-  store: &S,
+fn counted_from(
+  store: &dyn LocalStore,
   conversation: ConversationId,
   inputs: &TallyInputs,
   kept: EntryTally,
@@ -336,8 +398,8 @@ fn counted_from<S: LocalStore>(
 }
 
 /// The unread counts of the rows `kept` covers: those from the read position on.
-fn unread_up_to<S: LocalStore>(
-  store: &S,
+fn unread_up_to(
+  store: &dyn LocalStore,
   conversation: ConversationId,
   inputs: &TallyInputs,
   kept: &EntryTally,
@@ -410,10 +472,9 @@ pub(crate) fn unread_key(
 }
 
 /// The kept tally of `conversation`. One that doesn't read counts as none: it is counted again.
-pub(crate) fn kept_tally<S: LocalStore>(store: &S, conversation: ConversationId) -> Option<EntryTally> {
-  records::get_json(store, Table::EntryTallies, &conversation.to_string())
-    .ok()
-    .flatten()
+pub(crate) fn kept_tally(store: &dyn LocalStore, conversation: ConversationId) -> Option<EntryTally> {
+  let bytes = store.get(Table::EntryTallies, &conversation.to_string()).ok()??;
+  EntryTally::from_bytes(&bytes)
 }
 
 #[cfg(test)]
@@ -432,13 +493,14 @@ mod tests {
   use teamcraft_crypto::secret::SymmetricKey;
   use teamcraft_proto::{
     ChannelRole, ClientMessageId, ConversationResponse, ConversationVisibility, HistoryPolicy, MyMembership,
-    NotificationLevel, Snowflake, UserKind, UserSummary,
+    NotificationLevel, UserKind, UserSummary,
   };
 
   use super::*;
   use crate::clock::ManualClock;
   use crate::imported::{ImportSource, ImportedAuthor, ImportedOrigin};
   use crate::notify_rules::MentionPreferences;
+  use crate::records;
   use crate::store::{
     ConversationEvent, EditRecord, FeedChange, MemoryStore, MessageContent, MessageMeta, SealedSqliteStore,
     SqlCipherStore, StaticKeySource, StoreChanges, TrackedStore, Unreadable,
@@ -747,6 +809,67 @@ mod tests {
     assert_eq!(fixture.check(), 0, "only the unread counts are decided again");
   }
 
+  mod record {
+    use super::*;
+
+    #[test]
+    fn a_tally_reads_back_as_written() {
+      let full = EntryTally {
+        version: FeedVersion {
+          generation: u64::MAX,
+          reshaped: 2,
+          edited: 3,
+        },
+        maybe_importer: Some(id(IMPORTER)),
+        maybe_through: Some(Through {
+          value: i64::MAX,
+          client_message_id: *client_id(7).as_bytes(),
+        }),
+        rows: 11,
+        messages: 10,
+        maybe_last_activity: Some(0),
+        unread_key: u64::MAX - 1,
+        unread_messages: u32::MAX,
+        unread_mentions: 5,
+      };
+      assert_eq!(EntryTally::from_bytes(&full.to_bytes()), Some(full));
+      let empty = EntryTally {
+        version: FeedVersion::default(),
+        maybe_importer: None,
+        maybe_through: None,
+        rows: 0,
+        messages: 0,
+        maybe_last_activity: None,
+        unread_key: 0,
+        unread_messages: 0,
+        unread_mentions: 0,
+      };
+      assert_eq!(EntryTally::from_bytes(&empty.to_bytes()), Some(empty));
+    }
+
+    #[test]
+    fn anything_else_reads_as_none() {
+      let bytes = EntryTally {
+        version: FeedVersion::default(),
+        maybe_importer: None,
+        maybe_through: None,
+        rows: 0,
+        messages: 0,
+        maybe_last_activity: None,
+        unread_key: 0,
+        unread_messages: 0,
+        unread_mentions: 0,
+      }
+      .to_bytes();
+      assert_eq!(EntryTally::from_bytes(&[]), None);
+      assert_eq!(EntryTally::from_bytes(&bytes[..bytes.len() - 1]), None);
+      assert_eq!(EntryTally::from_bytes(&bytes[..bytes.len() - 8]), None);
+      let mut other_format = bytes;
+      other_format[0] = 2;
+      assert_eq!(EntryTally::from_bytes(&other_format), None);
+    }
+  }
+
   mod kept_in_the_store {
     use super::*;
 
@@ -770,7 +893,7 @@ mod tests {
       let snapshot = cache.snapshot(&fixture.backend, StoreChanges::default(), || None);
       assert_eq!(snapshot.message_counts, [(conversation(), FIRST_ROWS as usize)]);
       assert_eq!(WHOLE_PASSES.with(std::cell::Cell::get) - before, 1);
-      assert!(kept_tally(&fixture.store, conversation()).is_some());
+      assert!(kept_tally(fixture.store.as_ref(), conversation()).is_some());
       // The cache of the next start.
       let mut next = SnapshotCache::new(2);
       let again = next.snapshot(&fixture.backend, StoreChanges::default(), || None);

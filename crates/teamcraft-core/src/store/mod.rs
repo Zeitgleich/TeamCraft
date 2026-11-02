@@ -572,7 +572,7 @@ pub struct MessageOrder {
 
 /// How far a conversation's feed was rewritten since the store began ([`LocalStore::feed_version`]).
 /// A new message changes neither count: a reader finds those by their position.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct FeedVersion {
   /// Changes when the store's indexes are built again, which starts the counts over.
   pub generation: u64,
