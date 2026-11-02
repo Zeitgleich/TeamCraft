@@ -437,7 +437,7 @@ private fun ConversationMenu(
   val name = maybeConversation?.name.orEmpty()
   // Archiving changes the channel itself; DMs have none to archive.
   val canArchive = maybeConversation?.isDirect == false && rights.canManageChannel
-  val canDelete = maybeConversation?.canDeleteChannel == true
+  val canDelete = maybeConversation?.isDirect == false && rights.canDeleteChannel
   var leave by remember(conversationId) { mutableStateOf(LeaveChoice.HIDDEN) }
   var isOpen by remember { mutableStateOf(false) }
   LaunchedEffect(conversationId, isOpen) { leave = viewModel.leaveChoice(conversationId) }
