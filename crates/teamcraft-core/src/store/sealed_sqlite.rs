@@ -43,6 +43,8 @@ pub(crate) const MIGRATIONS: &[Migration] = &[
     kind: MigrationKind::Marker,
   },
 ];
+/// How much of the database file reads map into memory instead of copying it.
+const MMAP_BYTES: u64 = 256 * 1024 * 1024;
 /// How long a write waits for another connection's lock (a checkpoint of the log runs into one).
 const BUSY_TIMEOUT: Duration = Duration::from_secs(1);
 const SCHEMA_V1: &str = "
@@ -103,9 +105,13 @@ impl SealedStore<SqliteRecords> {
     limits: SealedStoreLimits,
   ) -> Result<Self, StoreError> {
     // secure_delete: freed pages are zeroed, so a deleted record's ciphertext doesn't linger in
-    // them (issue #391); the write-ahead log is cleared by `purge_freed`.
+    // them (issue #391); the write-ahead log is cleared by `purge_freed`. Records are read one by
+    // one under pseudorandom IDs (issue #155): mapped, a read is no system call, and the pages
+    // are the file system's cache, not the app's memory.
     connection
-      .execute_batch(&format!("{LOG_PRAGMAS} PRAGMA secure_delete = ON;"))
+      .execute_batch(&format!(
+        "{LOG_PRAGMAS} PRAGMA secure_delete = ON; PRAGMA mmap_size = {MMAP_BYTES};"
+      ))
       .map_err(database_error)?;
     connection.busy_timeout(BUSY_TIMEOUT).map_err(database_error)?;
     run_migrations(&connection, MIGRATIONS)?;

@@ -81,8 +81,8 @@ const MAX_DOWNLOADS_BYTES: u64 = 1024 * 1024 * 1024;
 /// Plaintext copies of files waiting to be uploaded, one folder per account below it.
 const UPLOAD_STAGING_DIR: &str = "outgoing";
 /// Decoded messages of the conversations read last, kept so the open conversation isn't decrypted
-/// again on every change (issue #155; as many as the desktop keeps). A
-/// memory-constrained process (the iOS notification extension) keeps none.
+/// again on every change (issue #155; as many as the desktop keeps). A memory-constrained process
+/// (the iOS notification extension) keeps none.
 const MESSAGE_CACHE_MESSAGES: usize = 60_000;
 
 /// A boxed future that stays on the engine thread.
