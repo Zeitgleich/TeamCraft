@@ -397,6 +397,7 @@ fn config_at(directory: &std::path::Path, key: [u8; 32], server_url: &str) -> Ap
     account: "tester".into(),
     database_key: key.to_vec(),
     push_gateway_url: None,
+    is_memory_constrained: false,
   }
 }
 

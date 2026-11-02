@@ -33,6 +33,10 @@ pub struct AppConfig {
   /// FCM are sealed for it. `None` for self-built apps, which use the gateway their server names.
   #[uniffi(default = None)]
   pub push_gateway_url: Option<String>,
+  /// The process runs under a tight memory limit (the iOS notification extension, about 24 MB):
+  /// the local store keeps only small caches (issue #155).
+  #[uniffi(default = false)]
+  pub is_memory_constrained: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, uniffi::Enum)]

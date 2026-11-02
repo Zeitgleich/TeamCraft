@@ -1205,6 +1205,70 @@ answered within 10 s (`heartbeat_answer_timeout`): at most one interval plus tha
 test on a paused clock; the run above found it after 45 s, which is not yet explained. The gateway still connects after the catch-up;
 with the focused conversation caught up first (0.6 s above) that is no longer what users wait for.
 
+### Local store: opening and reading a large account (issue #155)
+
+The sealed store of the mobile apps and the browser decrypted every record when it opened, so open
+time and memory grew with the history, and the iOS notification extension (about 24 MB for
+everything) opened the same store. Records are now read when they are asked for, through a sealed
+catalog (docs/e2ee.md §9.1): a table's keys and each conversation's messages in display order,
+kept as paged sealed records. Opening reads one record; a message is the conversation's index root,
+one index page and the record.
+
+Budgets for a large account, 300 conversations with 100,000 messages (one channel holds half of
+them); `tests/store_memory.rs` checks them with generous bounds in every test run (20,000 messages,
+debug build):
+
+| Budget                                                      | Budget   | Test bound (debug) |
+|-------------------------------------------------------------|----------|--------------------|
+| Opening the store                                           | ≤ 50 ms  | 1 s                |
+| Notification extension: opening and the message, Rust heap  | ≤ 4 MiB  | 8 MiB              |
+| The newest and the oldest message of a conversation         | ≤ 20 ms  | 200 ms             |
+
+Measured on the sealed SQLite store (the mobile apps' store), release build, local machine
+(Linux, Ryzen, NVMe), November 2026; "before" is the same test on `main` 7dba4e60:
+
+```sh
+TEAMCRAFT_STORE_BUDGET_MESSAGES=100000 cargo test --release -p teamcraft-core --all-features \
+  --test store_memory -- --nocapture
+```
+
+| 300 conversations, 100,000 messages                        | Before                        | After                |
+|------------------------------------------------------------|-------------------------------|----------------------|
+| Notification extension: open and show the message          | 461 ms, 148 MiB at its peak   | 0.7 ms, 0.06 MiB     |
+| App: open the store                                        | 414 ms                        | 0.3 ms               |
+| Newest and oldest message of the 50,000-message channel    | 96 ms                         | 0.6 ms               |
+| All 50,000 messages of the channel, first read             | 30 ms (all were in memory)    | 350–475 ms, 50 MiB   |
+
+- **The extension stays far under its limit**, independent of the history: its Rust heap is the
+  index root and one page of the notified conversation plus a few entries (names, the push key, the
+  policy). SQLite's own page cache comes on top (its default, 2 MiB at most; the counting allocator
+  doesn't see it). It opens the store with `SealedStoreLimits::minimal()`, keeps no message cache and
+  never builds the catalog: on the first push after an update, before the app ran the migration, it
+  fetches the message instead.
+- **The app's memory for the store is bounded:** decrypted entries (8 MiB), decoded messages (4,096)
+  and index nodes (256 each) by default, plus the message cache of the conversations read last
+  (60,000 messages on every platform, as the desktop had). Before, the whole store was in memory:
+  148 MiB for this account, growing with every message.
+- **The first full read of a big conversation got slower:** records are read one by one under
+  pseudorandom IDs, about 9 µs a message (the file is memory-mapped, so a read is no system call).
+  The UI still reads a conversation whole for its feed (reactions and replies can be anywhere in
+  it), so the first open of the 50,000-message channel after a start takes about 0.5 s on this
+  machine; the message cache serves it from then on, and the feed's rows are derived once per change
+  instead of once per row asked for. Paging the feed from the index itself is the next step.
+- **The browser** keeps the records' ciphertext in memory (IndexedDB has no synchronous reads) and
+  decrypts a record only when it is read: opening no longer decrypts the store (part of #778), but
+  it still reads all of the ciphertext, so its open time and memory stay O(store), and the first
+  catalog build runs on the main thread. The catalog costs download size: about 28 kB gzip in the
+  app and 25 kB in the service worker, which doesn't carry the build (27 kB less). It is needed
+  from the first page on, so it can't move to a chunk; the guest budget went from 5.6 to 5.7 MB.
+- **Migration:** a store written before builds its catalog once, when the app opens it: every
+  record is decrypted once (what every start did before), in batches of 512 records, each a group of
+  writes that saves its progress, so a build that is killed goes on after its last batch. Tested on
+  the released 1.0.9 fixture and on a 4,500-message store stopped after two batches
+  (`store::sealed::tests::catalog`). A damaged or inconsistent catalog is built again the same way,
+  once, when it is noticed (`store::sealed::tests::repair`); that read takes as long as the build.
+- The desktop's SQLCipher store already read pages through its own index and is unchanged.
+
 ### Android (first numbers)
 
 Release Rust core, debug Kotlin build (`assembleLibreDebug`), API 35 emulator (the Pixel 10 / API 37
@@ -1236,7 +1300,7 @@ the chunks that load later. The limit:
 
 | Limit                                   | Value       | Above it                         |
 |-----------------------------------------|-------------|----------------------------------|
-| A guest in a meeting: gzip -9 total     | 5,600,000 B | fails; warns from 95 % (5.32 MB) |
+| A guest in a meeting: gzip -9 total     | 5,700,000 B | fails; warns from 95 % (5.42 MB) |
 | Signed-in first visit: gzip -9 total    | 5,200,000 B | fails; warns from 95 % (4.94 MB) |
 | The call module: gzip -9                | 1,000,000 B | fails                            |
 

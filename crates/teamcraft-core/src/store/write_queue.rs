@@ -49,6 +49,13 @@ pub(crate) enum RecordValue {
   Unsealed(LazySeal),
 }
 
+/// What an open write of a record does ([`Writes::latest`]).
+pub(crate) enum OpenValue {
+  /// Puts these sealed bytes.
+  Put(Vec<u8>),
+  Delete,
+}
+
 /// What one queued write puts into the batch being issued.
 pub(crate) enum Issue<'a> {
   Put { sealed: &'a [u8], sequence: u32 },
@@ -104,6 +111,22 @@ impl Writes {
       None => self.queued.push(key),
     }
     self.group_depth == 0 && self.is_over_limit()
+  }
+
+  /// The latest write of `key` that hasn't committed, if one is open; a put waiting for its batch
+  /// is sealed now (the batch then takes the sealed bytes).
+  pub(crate) fn latest(&mut self, key: &str) -> Result<Option<OpenValue>, StoreError> {
+    let Some(write) = self.open.get_mut(key) else {
+      return Ok(None);
+    };
+    if let Some(RecordValue::Unsealed(seal)) = &write.maybe_value {
+      write.maybe_value = Some(RecordValue::Sealed(seal()?));
+    }
+    Ok(Some(match &write.maybe_value {
+      Some(RecordValue::Sealed(sealed)) => OpenValue::Put(sealed.clone()),
+      // Sealed just above.
+      Some(RecordValue::Unsealed(_)) | None => OpenValue::Delete,
+    }))
   }
 
   /// Whether so much is queued that it should be issued now ([`MAX_QUEUED_BYTES`]).

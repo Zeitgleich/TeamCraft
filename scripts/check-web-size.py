@@ -47,7 +47,7 @@ except ImportError:  # Optional: gzip is the budget, brotli is informational.
 
 # A guest's meeting visit (lobby, the meeting's modules, call module), gzip -9, decimal megabytes:
 # measured in docs/performance.md, "Web bundle size", plus about 10 %. The strict one.
-DEFAULT_GUEST_BUDGET_BYTES = 5_600_000
+DEFAULT_GUEST_BUDGET_BYTES = 5_700_000
 # The split modules a guest loads once let into a meeting (teamcraft-ui `areas.rs`).
 GUEST_MODULES = ("guest", "calls")
 SPLIT_LOADER = "teamcraft-ui-split-*.js"

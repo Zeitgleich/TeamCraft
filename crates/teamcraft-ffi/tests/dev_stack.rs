@@ -41,6 +41,7 @@ async fn mobile_client_receives_and_answers_a_message() {
       account: "bob".into(),
       database_key: vec![42; 32],
       push_gateway_url: None,
+      is_memory_constrained: false,
     },
     Arc::new(Token(bob_token.clone())),
     changes.clone(),

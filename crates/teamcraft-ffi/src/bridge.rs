@@ -296,7 +296,7 @@ impl Engine {
       return Err(TeamCraftError::NotEnrolled);
     }
     let fingerprint = |key: [u8; 32]| IdentityPublicKey::from_bytes(key).fingerprint().to_string();
-    let contacts = records::pinned_identities(self.store.as_ref())?
+    let contacts = records::pinned_identities(&self.store)?
       .into_iter()
       .map(|(user, pinned)| ContactKeys {
         user,
@@ -308,27 +308,23 @@ impl Engine {
     Ok(SecuritySnapshot {
       my_fingerprint: self.identity_fingerprint.clone(),
       contacts,
-      maybe_push_content: Some(teamcraft_core::push_preview::push_content_mode(
-        self.store.as_ref(),
-      )),
+      maybe_push_content: Some(teamcraft_core::push_preview::push_content_mode(&self.store)),
       maybe_owners: {
         let settings = teamcraft_core::ClientSettings::default();
         teamcraft_core::workspace::owner_roster_status(
-          self.store.as_ref(),
+          &self.store,
           settings.workspace_max_age,
           settings.workspace_expiry_warning,
         )
       },
-      maybe_presence_policy: teamcraft_core::workspace::presence_policy(self.store.as_ref()),
-      maybe_screen_share_policy: teamcraft_core::workspace::screen_share_policy(self.store.as_ref()),
-      maybe_notetaker: teamcraft_core::notetaker::notetaker_policy(self.store.as_ref()),
-      maybe_backup: teamcraft_core::ui_snapshot::key_backup_state(self.store.as_ref()).unwrap_or_else(
-        |error| {
-          // The app then shows the backup as unknown; the rest of the snapshot still counts.
-          tracing::warn!(%error, "the key backup state is unreadable");
-          None
-        },
-      ),
+      maybe_presence_policy: teamcraft_core::workspace::presence_policy(&self.store),
+      maybe_screen_share_policy: teamcraft_core::workspace::screen_share_policy(&self.store),
+      maybe_notetaker: teamcraft_core::notetaker::notetaker_policy(&self.store),
+      maybe_backup: teamcraft_core::ui_snapshot::key_backup_state(&self.store).unwrap_or_else(|error| {
+        // The app then shows the backup as unknown; the rest of the snapshot still counts.
+        tracing::warn!(%error, "the key backup state is unreadable");
+        None
+      }),
     })
   }
 }
