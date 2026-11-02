@@ -32,6 +32,7 @@ pub mod composer_focus;
 pub mod copy_image;
 pub mod delivery;
 pub mod diff;
+pub mod download_speed;
 pub mod editor_doc;
 pub mod editor_lines;
 pub mod emoji_support;

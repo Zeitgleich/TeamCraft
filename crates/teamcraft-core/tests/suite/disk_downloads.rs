@@ -20,7 +20,7 @@ use teamcraft_core::api::fake::FakeServer;
 use teamcraft_core::client::disk_downloads::{DownloadStatus, download_record, download_records};
 use teamcraft_core::client::files::UploadRetrySettings;
 use teamcraft_core::clock::ManualClock;
-use teamcraft_core::downloads::Downloads;
+use teamcraft_core::downloads::{DownloadControl, Downloads, OpenRequest};
 use teamcraft_proto::{AttachmentId, ConversationId, MessageId};
 
 const MIB: u64 = 1024 * 1024;
@@ -149,6 +149,102 @@ async fn a_download_that_keeps_failing_stops_for_the_user() {
   assert_eq!(download_records(setup.bob.client.store()).unwrap().len(), 1);
 }
 
+#[tokio::test]
+async fn a_paused_download_waits_for_the_user_and_continues_from_its_partial_file() {
+  let mut setup = Setup::new("pause").await;
+  setup.server.cut_next_download_after(MIB);
+  let mut downloads = Downloads::new(1);
+  downloads.save(setup.channel, setup.attachment);
+  setup.run(&mut downloads).await;
+
+  downloads.control(setup.attachment, DownloadControl::Pause);
+  setup.run(&mut downloads).await;
+  assert_eq!(setup.status(), DownloadStatus::Paused);
+  assert_eq!(
+    setup.transfer(),
+    FileTransfer::Remote,
+    "the card offers the download again"
+  );
+  assert_eq!(setup.partial_files(), 1, "what arrived stays");
+  // Its retry would have been due: a paused download doesn't come back by itself.
+  setup.clock.advance(60_000);
+  setup.run(&mut downloads).await;
+  assert_eq!(setup.server.download_starts(), vec![0]);
+
+  downloads.control(setup.attachment, DownloadControl::Resume);
+  setup.run(&mut downloads).await;
+  assert_eq!(setup.server.download_starts(), vec![0, MIB]);
+  setup.assert_saved();
+}
+
+#[tokio::test]
+async fn pausing_a_running_download_stops_its_transfer() {
+  let mut setup = Setup::new("pause-running").await;
+  let mut downloads = Downloads::new(1);
+  downloads.save(setup.channel, setup.attachment);
+  downloads.start_due(&mut setup.bob.client).await;
+  assert!(downloads.is_running());
+
+  downloads.control(setup.attachment, DownloadControl::Pause);
+  setup.run(&mut downloads).await;
+  assert!(!downloads.is_running());
+  assert_eq!(setup.status(), DownloadStatus::Paused);
+}
+
+#[tokio::test]
+async fn a_cancelled_download_deletes_what_arrived_and_starts_over_when_asked_again() {
+  let mut setup = Setup::new("cancel").await;
+  setup.server.cut_next_download_after(MIB);
+  let mut downloads = Downloads::new(1);
+  downloads.save(setup.channel, setup.attachment);
+  setup.run(&mut downloads).await;
+
+  downloads.control(setup.attachment, DownloadControl::Cancel);
+  setup.run(&mut downloads).await;
+  assert_eq!(setup.status(), DownloadStatus::Cancelled);
+  assert_eq!(setup.partial_files(), 0);
+  assert_eq!(setup.transfer(), FileTransfer::Remote);
+
+  downloads.control(setup.attachment, DownloadControl::Resume);
+  setup.run(&mut downloads).await;
+  assert_eq!(setup.server.download_starts(), vec![0, 0]);
+  setup.assert_saved();
+}
+
+#[tokio::test]
+async fn a_saved_file_opens_from_its_record_and_leaves_the_list_when_removed() {
+  let mut setup = Setup::new("open").await;
+  let mut downloads = Downloads::new(1);
+  downloads.save(setup.channel, setup.attachment);
+  setup.run(&mut downloads).await;
+  let FileTransfer::Local { path } = setup.transfer() else {
+    panic!("not saved");
+  };
+
+  downloads.control(setup.attachment, DownloadControl::Reveal);
+  downloads.control(setup.attachment, DownloadControl::Open);
+  setup.run(&mut downloads).await;
+  assert_eq!(
+    downloads.take_opens(),
+    vec![
+      OpenRequest {
+        path: PathBuf::from(&path),
+        is_reveal: true
+      },
+      OpenRequest {
+        path: PathBuf::from(&path),
+        is_reveal: false
+      },
+    ]
+  );
+  assert!(downloads.take_opens().is_empty());
+
+  downloads.control(setup.attachment, DownloadControl::Forget);
+  setup.run(&mut downloads).await;
+  assert!(download_records(setup.bob.client.store()).unwrap().is_empty());
+  assert!(std::fs::metadata(&path).is_ok(), "the saved file stays");
+}
+
 /// Alice sends Bob a file of [`FILE_BYTES`]; Bob's downloads go into a folder of their own.
 struct Setup {
   server: FakeServer,
@@ -235,6 +331,13 @@ impl Setup {
       let finished = downloads.next_finished().await;
       Downloads::finish(&mut self.bob.client, finished);
     }
+  }
+
+  fn status(&self) -> DownloadStatus {
+    download_record(self.bob.client.store(), self.attachment)
+      .unwrap()
+      .unwrap()
+      .status
   }
 
   fn transfer(&self) -> FileTransfer {
