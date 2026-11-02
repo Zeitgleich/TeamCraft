@@ -1891,8 +1891,8 @@ plaintext), so no message can make or fake one.
 - **How much a new device reads.** The first sync takes the newest page of every conversation, then
   on phones and desktops the last three months in the background (at most 20,000 messages per
   conversation and 100,000 overall, the most recently active conversations first; settings:
-  `HistoryBackfill`). The browser stops after the newest page: it reads its whole store when it
-  opens. Older messages stay on the server and come with "jump to date". What the bar under the top
+  `HistoryBackfill`). The browser stops after the newest page, without the bar: it reads its whole
+  store when it opens, and each conversation says "catching up" there. Older messages stay on the server and come with "jump to date". What the bar under the top
   bar counts is conversations, because the server keeps no message count. Reading ahead asks the
   server for nothing it wouldn't hand out anyway: `sees_all_history` still decides, retention still
   deletes, and a message without its key is a placeholder as above.

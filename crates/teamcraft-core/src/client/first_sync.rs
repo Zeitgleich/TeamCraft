@@ -40,6 +40,11 @@ const OLDER_CURSOR_PREFIX: &str = "first_sync_older/";
 /// gateway connection doesn't shorten it: the catch-up after it has enough to do.
 const OLDER_RETRY: Duration = Duration::from_secs(30);
 
+/// Whether this build keeps the record. The browser doesn't: it reads the newest page only, each
+/// conversation already says "catching up" there (`catch_up.rs`), and a guest's download has no room
+/// for this bookkeeping (robustness.md, "Download size").
+const TRACKS_FIRST_SYNC: bool = !cfg!(target_arch = "wasm32");
+
 /// How much older history a newly set up device reads ahead. What lies before it stays on the server
 /// and comes with "jump to date".
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -200,6 +205,9 @@ pub async fn notify_first_sync_during<F: Future>(
 
 /// The first sync's progress, or `None` when it isn't running. Reads one small record.
 pub fn first_sync_progress(store: &impl LocalStore) -> Result<Option<FirstSyncProgress>, CoreError> {
+  if !TRACKS_FIRST_SYNC {
+    return Ok(None);
+  }
   let Some(record) = read_record(store)? else {
     return Ok(None);
   };
@@ -261,6 +269,9 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
   /// At the start of a full sync: a device with no conversation stored shows the bar from now on,
   /// before the list is here.
   pub(super) fn note_first_sync_starting(&mut self) -> Result<(), CoreError> {
+    if !TRACKS_FIRST_SYNC {
+      return Ok(());
+    }
     if read_record(&self.store)?.is_some() || !self.store.list(Table::Conversations)?.is_empty() {
       return Ok(());
     }
@@ -276,6 +287,9 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
   /// The conversation list is stored: the first sync of a new device knows its total now. A device
   /// that has read history before (an update of the app) is done with this for good.
   pub(super) fn note_first_sync_listed(&mut self, listed: &[ConversationId]) -> Result<(), CoreError> {
+    if !TRACKS_FIRST_SYNC {
+      return Ok(());
+    }
     let maybe_record = read_record(&self.store)?;
     if maybe_record
       .as_ref()
@@ -310,6 +324,9 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
 
   /// A catch-up starts: what it doesn't read was read before an interruption.
   pub(super) fn note_first_sync_due(&mut self, due: &[ConversationId]) -> Result<(), CoreError> {
+    if !TRACKS_FIRST_SYNC {
+      return Ok(());
+    }
     let Some(mut record) = read_record(&self.store)?.filter(|record| record.stage == Stage::Newest) else {
       return Ok(());
     };
@@ -324,6 +341,9 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
   /// The catch-up finished a conversation, whatever came of it: one it had to skip is the upkeep's
   /// to retry (`resync_marked_conversations`) and must not hold up the bar.
   pub(super) fn note_first_sync_caught_up(&mut self, conversation: ConversationId) -> Result<(), CoreError> {
+    if !TRACKS_FIRST_SYNC {
+      return Ok(());
+    }
     let Some(mut record) = read_record(&self.store)?.filter(|record| record.stage == Stage::Newest) else {
       return Ok(());
     };
@@ -337,6 +357,9 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
 
   /// The catch-up is through: on to older history, the most recently active conversation first.
   pub(super) fn finish_first_sync_newest(&mut self, listed: &[ConversationId]) -> Result<(), CoreError> {
+    if !TRACKS_FIRST_SYNC {
+      return Ok(());
+    }
     let Some(mut record) = read_record(&self.store)?.filter(|record| record.stage == Stage::Newest) else {
       return Ok(());
     };
@@ -474,6 +497,9 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
 
   /// After opening the store: older history goes on where it stood.
   pub(super) fn resume_first_sync(&mut self) -> Result<(), CoreError> {
+    if !TRACKS_FIRST_SYNC {
+      return Ok(());
+    }
     self.first_sync.is_loading_older =
       read_record(&self.store)?.is_some_and(|record| record.stage == Stage::Older);
     Ok(())
