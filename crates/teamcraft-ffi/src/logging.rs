@@ -6,7 +6,7 @@
 use std::collections::VecDeque;
 use std::fmt::{self, Write as _};
 use std::sync::{Arc, Mutex, Once, OnceLock};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 #[cfg(any(target_os = "android", target_os = "ios", test))]
 use tracing::Level;
@@ -21,8 +21,15 @@ use crate::TeamCraftError;
 /// The target of lifecycle events, logged at `info` while everything else needs `warn`.
 pub(crate) const LIFECYCLE: &str = "teamcraft_lifecycle";
 
+/// The core's module that sums up each gateway connection's phases.
+#[cfg(any(target_os = "android", target_os = "ios", test))]
+const SYNC_TRACE: &str = "teamcraft_core::client::sync_trace";
+
 /// Lines the in-memory ring keeps for the diagnostics export (issue #1094); older ones drop out.
 pub(crate) const RING_CAPACITY: usize = 300;
+
+/// From here on an engine job is worth a line in the system log.
+const SLOW_JOB: Duration = Duration::from_millis(250);
 
 /// Longest line the ring keeps, in characters; the rest is cut so the ring's memory stays bounded.
 const MAX_LINE_CHARS: usize = 1024;
@@ -51,10 +58,38 @@ pub(crate) enum LifecycleStep {
   StopSync,
 }
 
-/// Sends `tracing` to the system log, once per process; later calls do nothing.
+/// Sends `tracing` and panics to the system log, once per process; later calls do nothing.
 pub(crate) fn install() {
   static INSTALLED: Once = Once::new();
-  INSTALLED.call_once(install_system_log);
+  INSTALLED.call_once(|| {
+    install_system_log();
+    install_panic_log();
+  });
+}
+
+/// Rust's panic output goes nowhere on Android: panics of any thread (their message and location)
+/// go to the system log, and with it the diagnostics export (issue #1142).
+fn install_panic_log() {
+  let previous = std::panic::take_hook();
+  std::panic::set_hook(Box::new(move |info| {
+    tracing::error!(target: LIFECYCLE, panic = %info, "panicked");
+    previous(info);
+  }));
+}
+
+/// Logs an engine job that held the engine thread, or waited for it, for long. Everything the apps
+/// ask for runs on that thread beside the sync loop, so this names what a slow start waits for
+/// (issue #1142). `job` is the job's type name: code, never data.
+pub(crate) fn slow_job(job: &str, waited: Duration, ran: Duration) {
+  if waited >= SLOW_JOB || ran >= SLOW_JOB {
+    tracing::info!(
+      target: LIFECYCLE,
+      job,
+      waited_ms = waited.as_millis(),
+      ran_ms = ran.as_millis(),
+      "slow engine job"
+    );
+  }
 }
 
 /// Logs how `step` ended (the error's variant and message on failure) and passes the result on.
@@ -202,6 +237,8 @@ fn system_log_filter() -> Targets {
   Targets::new()
     .with_default(Level::WARN)
     .with_target(LIFECYCLE, Level::INFO)
+    // One line per connection: where the time of the last connect went (issue #1142).
+    .with_target(SYNC_TRACE, Level::INFO)
 }
 
 #[cfg(target_os = "android")]

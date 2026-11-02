@@ -8,12 +8,13 @@ use serde::{Deserialize, Serialize};
 use teamcraft_crypto::push_gateway::seal_bound_token;
 use teamcraft_crypto::secret::SymmetricKey;
 use teamcraft_proto::{
-  BOUND_TOKEN_PREFIX, Base64Bytes, ConversationId, GatewayClientMessage, PushProvider, PushWakeUp,
+  BOUND_TOKEN_PREFIX, Base64Bytes, ConversationId, DeviceId, GatewayClientMessage, PushProvider, PushWakeUp,
   RegisterPushRequest, TestPushResponse, UserId,
 };
 
-use super::Client;
+use super::{Client, ClientSettings};
 use crate::api::{ApiError, ServerApi};
+use crate::clock::Clock;
 use crate::error::CoreError;
 use crate::push_guard;
 use crate::push_preview::{self, PUSH_KEY_RECORD};
@@ -30,6 +31,18 @@ pub const PUSH_TOKEN_LIFETIME_MS: i64 = 30 * 24 * 60 * 60 * 1000;
 const GATEWAY_LIFETIME_MARGIN_MS: i64 = 24 * 60 * 60 * 1000;
 /// Record of the registration (the raw token is kept in the encrypted local store only).
 const PUSH_REGISTRATION_RECORD: &str = "push_registration";
+
+/// Registers this device's push channel and keeps it current. Needs the API, the store and nothing
+/// of the sync state, so an app runs it beside the sync loop: stopping the loop for it cut the
+/// gateway connection on every start and return to the foreground (issue #1142). One at a time: two
+/// first registrations side by side would leave server and device with different push keys.
+pub struct PushRegistrar<'a, A, S> {
+  api: &'a A,
+  store: &'a S,
+  clock: &'a dyn Clock,
+  settings: &'a ClientSettings,
+  device_id: DeviceId,
+}
 
 /// What the app registered with the server, to seal it again and to end it. No `Debug`: it holds
 /// the raw device token.
@@ -78,14 +91,38 @@ struct GatewayPlan {
   lifetime_ms: i64,
 }
 
-impl<A: ServerApi, S: LocalStore> Client<A, S> {
+impl<'a, A: ServerApi, S: LocalStore> PushRegistrar<'a, A, S> {
+  pub fn new(
+    api: &'a A,
+    store: &'a S,
+    clock: &'a dyn Clock,
+    settings: &'a ClientSettings,
+    device_id: DeviceId,
+  ) -> Self {
+    Self {
+      api,
+      store,
+      clock,
+      settings,
+      device_id,
+    }
+  }
+
+  /// The push service this device registered with, if any.
+  pub fn registered_provider(&self) -> Result<Option<PushProvider>, CoreError> {
+    Ok(
+      records::get_json::<StoredPushRegistration>(self.store, Table::Account, PUSH_REGISTRATION_RECORD)?
+        .map(|stored| stored.provider),
+    )
+  }
+
   /// Registers this device's push channel. A fresh random push key is shared with the server only,
   /// so Apple, Google or the push relay see nothing but ciphertext. Where the server sends APNs and
   /// FCM pushes through a push gateway, the device token is sealed for that gateway, bound to this
   /// server (the server never holds a usable token).
-  pub async fn register_push(&mut self, provider: PushProvider, token: &str) -> Result<(), CoreError> {
+  pub async fn register(&self, provider: PushProvider, token: &str) -> Result<(), CoreError> {
     let push_key = SymmetricKey::generate(&mut OsRng);
-    self.register_push_with(provider, token, push_key).await
+    self.register_with(provider, token, push_key).await
   }
 
   /// The platform handed the app its device token again (every app start, a UnifiedPush
@@ -95,28 +132,24 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
   /// answer was lost left server and device with different keys, so every later wake-up opened to
   /// nothing (issue #826). Always sends, also for an unchanged token: the server may have
   /// forgotten the registration after a push service called it gone.
-  pub async fn register_push_keeping_key(
-    &mut self,
-    provider: PushProvider,
-    token: &str,
-  ) -> Result<(), CoreError> {
-    let is_same_provider = self.registered_push_provider()?.as_ref() == Some(&provider);
+  pub async fn register_keeping_key(&self, provider: PushProvider, token: &str) -> Result<(), CoreError> {
+    let is_same_provider = self.registered_provider()?.as_ref() == Some(&provider);
     let maybe_key = if is_same_provider {
       self.stored_push_key()?
     } else {
       None
     };
     let push_key = maybe_key.unwrap_or_else(|| SymmetricKey::generate(&mut OsRng));
-    self.register_push_with(provider, token, push_key).await
+    self.register_with(provider, token, push_key).await
   }
 
   /// The platform handed out a new device token (a browser rotated its Web Push subscription,
   /// e2ee.md §7): registers it under the push key the server already has, so wake-ups in flight stay
   /// readable. Does nothing when no push of `provider` is registered or the token is the registered
   /// one. Returns whether the registration changed.
-  pub async fn renew_push_token(&mut self, provider: PushProvider, token: &str) -> Result<bool, CoreError> {
+  pub async fn renew_token(&self, provider: PushProvider, token: &str) -> Result<bool, CoreError> {
     let Some(stored) =
-      records::get_json::<StoredPushRegistration>(&self.store, Table::Account, PUSH_REGISTRATION_RECORD)?
+      records::get_json::<StoredPushRegistration>(self.store, Table::Account, PUSH_REGISTRATION_RECORD)?
     else {
       return Ok(false);
     };
@@ -126,30 +159,22 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     let push_key = self
       .stored_push_key()?
       .unwrap_or_else(|| SymmetricKey::generate(&mut OsRng));
-    self.register_push_with(provider, token, push_key).await?;
+    self.register_with(provider, token, push_key).await?;
     Ok(true)
-  }
-
-  /// The push service this device registered with, if any.
-  pub fn registered_push_provider(&self) -> Result<Option<PushProvider>, CoreError> {
-    Ok(
-      records::get_json::<StoredPushRegistration>(&self.store, Table::Account, PUSH_REGISTRATION_RECORD)?
-        .map(|stored| stored.provider),
-    )
   }
 
   /// Seals the device token again when it is due (the gateway or the server changed, or the sealed
   /// token is getting old), so a gateway key rotation and the token's expiry cost nothing. Cheap
   /// when nothing is due: one request. Call it when the app starts or comes to the foreground.
   /// Returns whether the registration was renewed.
-  pub async fn refresh_push(&mut self) -> Result<bool, CoreError> {
+  pub async fn refresh(&self) -> Result<bool, CoreError> {
     let Some(stored) =
-      records::get_json::<StoredPushRegistration>(&self.store, Table::Account, PUSH_REGISTRATION_RECORD)?
+      records::get_json::<StoredPushRegistration>(self.store, Table::Account, PUSH_REGISTRATION_RECORD)?
     else {
       return Ok(false);
     };
     let plan = self.gateway_plan(&stored.provider).await?;
-    let now = self.now_ms();
+    let now = self.clock.now_ms();
     let is_due = match (&stored.maybe_sealed, &plan) {
       (None, None) => false,
       (Some(sealed), Some(plan)) => {
@@ -177,23 +202,23 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       .stored_push_key()?
       .unwrap_or_else(|| SymmetricKey::generate(&mut OsRng));
     self
-      .register_push_with(stored.provider, &stored.raw_token, push_key)
+      .register_with(stored.provider, &stored.raw_token, push_key)
       .await?;
     Ok(true)
   }
 
-  async fn register_push_with(
-    &mut self,
+  async fn register_with(
+    &self,
     provider: PushProvider,
     token: &str,
     push_key: SymmetricKey,
   ) -> Result<(), CoreError> {
     let previous =
-      records::get_json::<StoredPushRegistration>(&self.store, Table::Account, PUSH_REGISTRATION_RECORD)?;
+      records::get_json::<StoredPushRegistration>(self.store, Table::Account, PUSH_REGISTRATION_RECORD)?;
     let maybe_plan = self.gateway_plan(&provider).await?;
     let (registered_token, maybe_sealed) = match maybe_plan {
       Some(plan) => {
-        let sealed_at_ms = self.now_ms();
+        let sealed_at_ms = self.clock.now_ms();
         let blob = seal_bound_token(
           &plan.public_key,
           provider.as_str(),
@@ -219,15 +244,15 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       token: registered_token,
       push_key: Base64Bytes::new(push_key.expose_secret().to_vec()),
     };
-    self.api.register_push(self.account.device_id, &request).await?;
+    self.api.register_push(self.device_id, &request).await?;
     records::put_json(
-      &self.store,
+      self.store,
       Table::Account,
       PUSH_KEY_RECORD,
       &Base64Bytes::new(push_key.expose_secret().to_vec()),
     )?;
     records::put_json(
-      &self.store,
+      self.store,
       Table::Account,
       PUSH_REGISTRATION_RECORD,
       &StoredPushRegistration {
@@ -251,31 +276,16 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
   /// the server (or a copy of its database) can't push to the device any more.
   /// The push key on this device goes first, also when the server can't be reached (sign-out
   /// offline): wake-ups that still arrive can't be opened any more.
-  pub async fn unregister_push(&mut self) -> Result<(), CoreError> {
+  pub async fn unregister(&self) -> Result<(), CoreError> {
     self.store.delete(Table::Account, PUSH_KEY_RECORD)?;
     let stored =
-      records::get_json::<StoredPushRegistration>(&self.store, Table::Account, PUSH_REGISTRATION_RECORD)?;
+      records::get_json::<StoredPushRegistration>(self.store, Table::Account, PUSH_REGISTRATION_RECORD)?;
     self.store.delete(Table::Account, PUSH_REGISTRATION_RECORD)?;
     if let Some(sealed) = stored.and_then(|stored| stored.maybe_sealed) {
       self.revoke_sealed(&sealed).await;
     }
-    self.api.unregister_push(self.account.device_id).await?;
+    self.api.unregister_push(self.device_id).await?;
     Ok(())
-  }
-
-  /// Asks the server for a test wake-up to this device (notification diagnostics).
-  pub async fn send_test_push(&self) -> Result<TestPushResponse, CoreError> {
-    Ok(self.api.send_test_push(self.account.device_id).await?)
-  }
-
-  /// Fetches the user's notification settings for the device's own DND check (on fresh sessions
-  /// and when another device changed them).
-  pub async fn refresh_notification_settings(&mut self) -> Result<(), CoreError> {
-    let settings = match self.read_ahead.notification_settings.take() {
-      Some(settings) => settings?,
-      None => self.api.notification_settings().await?,
-    };
-    push_guard::save_notification_settings(&self.store, &settings)
   }
 
   /// What sealing a token for the server's gateway needs, or `None` when the provider goes to the
@@ -350,8 +360,71 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
   }
 
   fn stored_push_key(&self) -> Result<Option<SymmetricKey>, CoreError> {
-    let stored: Option<Base64Bytes> = records::get_json(&self.store, Table::Account, PUSH_KEY_RECORD)?;
+    let stored: Option<Base64Bytes> = records::get_json(self.store, Table::Account, PUSH_KEY_RECORD)?;
     Ok(stored.and_then(|bytes| SymmetricKey::from_slice(bytes.as_slice())))
+  }
+}
+
+impl<A: ServerApi, S: LocalStore> Client<A, S> {
+  /// The push registration of this device, which needs nothing of the client but what the
+  /// [`PushRegistrar`] holds: an app can run it beside the sync loop (issue #1142).
+  pub fn push_registrar(&self) -> PushRegistrar<'_, A, S> {
+    PushRegistrar::new(
+      &self.api,
+      &self.store,
+      self.clock.as_ref(),
+      &self.settings,
+      self.account.device_id,
+    )
+  }
+
+  /// [`PushRegistrar::register`].
+  pub async fn register_push(&mut self, provider: PushProvider, token: &str) -> Result<(), CoreError> {
+    self.push_registrar().register(provider, token).await
+  }
+
+  /// [`PushRegistrar::register_keeping_key`].
+  pub async fn register_push_keeping_key(
+    &mut self,
+    provider: PushProvider,
+    token: &str,
+  ) -> Result<(), CoreError> {
+    self.push_registrar().register_keeping_key(provider, token).await
+  }
+
+  /// [`PushRegistrar::renew_token`].
+  pub async fn renew_push_token(&mut self, provider: PushProvider, token: &str) -> Result<bool, CoreError> {
+    self.push_registrar().renew_token(provider, token).await
+  }
+
+  /// [`PushRegistrar::refresh`].
+  pub async fn refresh_push(&mut self) -> Result<bool, CoreError> {
+    self.push_registrar().refresh().await
+  }
+
+  /// [`PushRegistrar::unregister`].
+  pub async fn unregister_push(&mut self) -> Result<(), CoreError> {
+    self.push_registrar().unregister().await
+  }
+
+  /// The push service this device registered with, if any.
+  pub fn registered_push_provider(&self) -> Result<Option<PushProvider>, CoreError> {
+    self.push_registrar().registered_provider()
+  }
+
+  /// Asks the server for a test wake-up to this device (notification diagnostics).
+  pub async fn send_test_push(&self) -> Result<TestPushResponse, CoreError> {
+    Ok(self.api.send_test_push(self.account.device_id).await?)
+  }
+
+  /// Fetches the user's notification settings for the device's own DND check (on fresh sessions
+  /// and when another device changed them).
+  pub async fn refresh_notification_settings(&mut self) -> Result<(), CoreError> {
+    let settings = match self.read_ahead.notification_settings.take() {
+      Some(settings) => settings?,
+      None => self.api.notification_settings().await?,
+    };
+    push_guard::save_notification_settings(&self.store, &settings)
   }
 
   /// Opens a sealed push payload (the app or its notification extension), naming the conversation

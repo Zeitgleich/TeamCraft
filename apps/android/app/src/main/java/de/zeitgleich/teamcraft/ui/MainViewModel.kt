@@ -1067,7 +1067,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
   private suspend fun ready(account: AccountState): AppState {
     val ready = account as? AccountState.Ready ?: return AppState.NeedsEnrollment(hasExistingIdentity = true)
+    // Also started on every foreground, which keeps trying and tells the user (issue #1142).
     runCatching { graph.core.core().start() }
+      .onFailure { Log.w(TAG, "sync not started: ${it.javaClass.simpleName}") }
     graph.push.register()
     return AppState.Ready(ready.userId, ready.displayName, ready.identityFingerprint)
   }

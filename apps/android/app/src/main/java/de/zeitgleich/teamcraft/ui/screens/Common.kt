@@ -112,6 +112,7 @@ fun OfflineBanner(onSignInAgain: () -> Unit) {
   val isOnline = rememberIsOnline()
   val maybeConnection by graph.core.connectionState.collectAsState()
   val unsettled by graph.connectionGrace.unsettled.collectAsState()
+  val isSyncStartFailing by graph.isSyncStartFailing.collectAsState()
   // The clock only matters while the connection is down; a connected app doesn't wake every second.
   val now by produceState(System.currentTimeMillis(), unsettled) {
     value = System.currentTimeMillis()
@@ -120,10 +121,11 @@ fun OfflineBanner(onSignInAgain: () -> Unit) {
       value = System.currentTimeMillis()
     }
   }
-  val notice = connectionNotice(isOnline, maybeConnection, unsettled, now) ?: return
+  val notice = connectionNotice(isOnline, maybeConnection, unsettled, now, isSyncStartFailing) ?: return
   val (text, maybeAction) = when (notice) {
     ConnectionNotice.DeviceOffline -> stringResource(R.string.offline_banner) to null
     ConnectionNotice.Connecting -> stringResource(R.string.connection_connecting) to null
+    ConnectionNotice.SyncNotStarted -> stringResource(R.string.connection_sync_not_started) to null
     ConnectionNotice.Slow -> stringResource(R.string.connection_slow) to null
     is ConnectionNotice.Unreachable -> {
       val text = when (notice.maybeInterception) {

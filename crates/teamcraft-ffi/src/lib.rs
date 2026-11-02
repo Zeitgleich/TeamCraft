@@ -549,22 +549,29 @@ impl TeamCraft {
   /// the key the device already holds when the same service delivers its token again (every app
   /// start, a UnifiedPush endpoint re-sent by the distributor). Safe to call repeatedly.
   pub async fn register_push(&self, service: PushService, token: String) -> Result<(), TeamCraftError> {
-    self
-      .call(move |engine| Box::pin(engine.register_push(service, token)))
-      .await
+    let answered = self
+      .call(move |engine| Box::pin(async move { engine.register_push(service, token) }))
+      .await?;
+    answered.await.map_err(|_| TeamCraftError::EngineStopped)?
   }
 
   /// Seals the registered APNs/FCM device token for the push gateway again when that is due (it
   /// is sealed for one server and expires); call it when the app starts or returns to the
   /// foreground. Returns whether the registration was renewed; a no-op without a registration.
   pub async fn refresh_push(&self) -> Result<bool, TeamCraftError> {
-    self.call(|engine| Box::pin(engine.refresh_push())).await
+    let answered = self
+      .call(|engine| Box::pin(async move { engine.refresh_push() }))
+      .await?;
+    answered.await.map_err(|_| TeamCraftError::EngineStopped)?
   }
 
   /// Removes this device's push registration and its push key, and ends a sealed device token at
   /// its gateway (sign-out).
   pub async fn unregister_push(&self) -> Result<(), TeamCraftError> {
-    self.call(|engine| Box::pin(engine.unregister_push())).await
+    let answered = self
+      .call(|engine| Box::pin(async move { engine.unregister_push() }))
+      .await?;
+    answered.await.map_err(|_| TeamCraftError::EngineStopped)?
   }
 
   /// What to do for a push payload (an FCM data message, a UnifiedPush message, an APNs payload's
@@ -1142,10 +1149,14 @@ impl TeamCraft {
     F: for<'a> FnOnce(&'a mut Engine) -> engine::LocalFuture<'a, Result<R, TeamCraftError>> + Send + 'static,
   {
     let (reply, answer) = oneshot::channel();
+    let queued = Instant::now();
     let boxed: Job = Box::new(move |engine| {
       Box::pin(async move {
+        let started = Instant::now();
+        let result = job(engine).await;
+        logging::slow_job(std::any::type_name::<F>(), started - queued, started.elapsed());
         // The caller may have given up waiting (cancelled coroutine); nothing to tell it then.
-        let _ = reply.send(job(engine).await);
+        let _ = reply.send(result);
       })
     });
     self

@@ -23,7 +23,8 @@ use teamcraft_core::api::{AccessTokenSource, ApiError, HttpRendezvous, HttpServe
 use teamcraft_core::client::NewDeviceLink;
 use teamcraft_core::client::files::sweep_staged_copies;
 use teamcraft_core::client::{
-  CatchUpFocus, LinkAnnouncement, LinkApproval, LinkRequestList, ReceiptCancel, SIGN_OUT_REVOKE_PATIENCE,
+  CatchUpFocus, LinkAnnouncement, LinkApproval, LinkRequestList, PushRegistrar, ReceiptCancel,
+  SIGN_OUT_REVOKE_PATIENCE,
 };
 use teamcraft_core::clock::{Clock as _, SystemClock};
 use teamcraft_core::connection::{ConnectionStatus, NetworkChanges};
@@ -46,7 +47,9 @@ use teamcraft_core::{
 };
 use teamcraft_crypto::backup::Argon2Settings;
 use teamcraft_crypto::secret::{SecretBytes, SymmetricKey};
-use teamcraft_proto::{CallJoinTokenResponse, ConversationId, DeviceActivity, Id, ThreadId};
+use teamcraft_proto::{
+  CallJoinTokenResponse, ConversationId, CreateCallJoinTokenRequest, DeviceActivity, DeviceId, Id, ThreadId,
+};
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::{JoinHandle, LocalSet};
 
@@ -84,6 +87,11 @@ const UPLOAD_STAGING_DIR: &str = "outgoing";
 /// again on every change (issue #155; as many as the desktop keeps). A memory-constrained process
 /// (the iOS notification extension) keeps none.
 const MESSAGE_CACHE_MESSAGES: usize = 60_000;
+/// A sync loop that keeps dying waits this long at most before the next one starts; the first
+/// restart is immediate.
+const MAX_LOOP_RESTART_DELAY: Duration = Duration::from_secs(300);
+/// A sync loop that ran this long counts as healthy: the next death restarts at once again.
+const LOOP_STABLE_AFTER: Duration = Duration::from_secs(300);
 
 /// A boxed future that stays on the engine thread.
 pub(crate) type LocalFuture<'a, T> = Pin<Box<dyn Future<Output = T> + 'a>>;
@@ -106,6 +114,13 @@ pub(crate) struct Engine {
   pub(crate) store: Store,
   pub(crate) client: ClientSlot,
   maybe_backend: Option<CoreChatBackend<Store>>,
+  /// This device, once enrolled; readable while the sync loop owns the client.
+  maybe_device_id: Option<DeviceId>,
+  /// One push registration at a time, beside the sync loop and the jobs ([`PushRegistrar`]).
+  push_turn: Rc<tokio::sync::Mutex<()>>,
+  /// Sync loops that died since one last ran for [`LOOP_STABLE_AFTER`].
+  loop_deaths: u32,
+  maybe_loop_started: Option<tokio::time::Instant>,
   /// The enrolled identity's fingerprint (empty before enrollment).
   pub(crate) identity_fingerprint: String,
   pub(crate) maybe_recovery: Option<crate::bridge::PendingRecovery>,
@@ -153,6 +168,10 @@ struct NewLinkWait {
   link: Rc<RefCell<Option<NewDeviceLink<HttpRendezvous>>>>,
 }
 
+/// Tells the engine when the sync loop's task unwinds: a panic ends only that task, and nothing else
+/// would notice while the slot says `Running` (issue #1142).
+struct LoopDeathNotice(Option<mpsc::WeakUnboundedSender<Job>>);
+
 /// What opening the engine needs, checked once. The handle keeps it while the local store is
 /// unreadable, to open the engine again after a reset (issue #414); the key zeroizes on drop.
 pub(crate) struct EngineStart {
@@ -179,6 +198,8 @@ pub(crate) enum OpenError {
 }
 
 /// Where the client is: not enrolled yet, held by the engine, or running in the sync loop.
+/// `Missing` on an enrolled device repairs itself ([`Engine::repair_client`]), and `Running` may name
+/// a loop that died ([`Engine::collect_dead_loop`]): neither takes a restart of the app (issue #1142).
 pub(crate) enum ClientSlot {
   Missing,
   Idle(Box<CoreClient>),
@@ -456,6 +477,10 @@ impl Engine {
       store,
       client: ClientSlot::Missing,
       maybe_backend: None,
+      maybe_device_id: None,
+      push_turn: Rc::default(),
+      loop_deaths: 0,
+      maybe_loop_started: None,
       identity_fingerprint: String::new(),
       maybe_recovery: None,
       maybe_link_offer: None,
@@ -548,7 +573,8 @@ impl Engine {
   /// pair registered (otherwise the next start of this account does). Nothing changes on a device
   /// that is set up.
   pub(crate) async fn forget_unfinished_setup(&mut self) -> Result<(), TeamCraftError> {
-    if !matches!(self.client, ClientSlot::Missing) {
+    // An empty slot alone doesn't say so: it may be a client that is to be reopened (issue #1142).
+    if !matches!(self.client, ClientSlot::Missing) || self.maybe_backend.is_some() {
       return Ok(());
     }
     self.maybe_link_offer = None;
@@ -764,6 +790,8 @@ impl Engine {
   }
 
   pub(crate) async fn start(&mut self) -> Result<(), TeamCraftError> {
+    self.collect_dead_loop().await;
+    self.repair_client()?;
     let client = match std::mem::replace(&mut self.client, ClientSlot::Missing) {
       ClientSlot::Idle(client) => client,
       // Already running: keep it (the app starts on sign-in and again on every foreground).
@@ -783,8 +811,13 @@ impl Engine {
     );
     runner.watch_network(&self.signals.network);
     runner.share_connection_status(self.signals.connection.clone());
-    let task = tokio::task::spawn_local(runner.run());
+    let notice = LoopDeathNotice(self.maybe_jobs.clone());
+    let task = tokio::task::spawn_local(async move {
+      let _notice = notice;
+      runner.run().await
+    });
     self.client = ClientSlot::Running { handle, task };
+    self.maybe_loop_started = Some(tokio::time::Instant::now());
     Ok(())
   }
 
@@ -1114,37 +1147,53 @@ impl Engine {
     )
   }
 
-  pub(crate) async fn register_push(
-    &mut self,
+  /// Registers the token beside the sync loop; the receiver gets the outcome.
+  pub(crate) fn register_push(
+    &self,
     service: PushService,
     token: String,
-  ) -> Result<(), TeamCraftError> {
-    let was_running = matches!(self.client, ClientSlot::Running { .. });
-    let mut client = self.take_client().await?;
-    let result = client.register_push_keeping_key(service.into(), &token).await;
-    self.client = ClientSlot::Idle(client);
-    if was_running {
-      self.start().await?;
-    }
-    Ok(result?)
+  ) -> Result<oneshot::Receiver<Result<(), TeamCraftError>>, TeamCraftError> {
+    self.beside_the_loop(move |registrar| {
+      Box::pin(async move { registrar.register_keeping_key(service.into(), &token).await })
+    })
   }
 
-  /// Seals the registered device token again when that is due; whether it was renewed.
-  pub(crate) async fn refresh_push(&mut self) -> Result<bool, TeamCraftError> {
-    let was_running = matches!(self.client, ClientSlot::Running { .. });
-    let mut client = self.take_client().await?;
-    let result = client.refresh_push().await;
-    self.client = ClientSlot::Idle(client);
-    if was_running {
-      self.start().await?;
-    }
-    Ok(result?)
+  /// Seals the registered device token again when that is due, beside the sync loop; the receiver
+  /// gets whether it was renewed.
+  pub(crate) fn refresh_push(
+    &self,
+  ) -> Result<oneshot::Receiver<Result<bool, TeamCraftError>>, TeamCraftError> {
+    self.beside_the_loop(|registrar| Box::pin(async move { registrar.refresh().await }))
   }
 
-  pub(crate) async fn unregister_push(&mut self) -> Result<(), TeamCraftError> {
-    self
-      .with_client(|client| Box::pin(async move { client.unregister_push().await }))
-      .await
+  pub(crate) fn unregister_push(
+    &self,
+  ) -> Result<oneshot::Receiver<Result<(), TeamCraftError>>, TeamCraftError> {
+    self.beside_the_loop(|registrar| Box::pin(async move { registrar.unregister().await }))
+  }
+
+  /// Runs push registration work on the engine thread beside the sync loop and the jobs: it needs
+  /// nothing of the sync state, and stopping the loop for it cut the gateway connection on every
+  /// start and return to the foreground (issue #1142). A slow push gateway holds up nothing else.
+  fn beside_the_loop<T, F>(
+    &self,
+    work: F,
+  ) -> Result<oneshot::Receiver<Result<T, TeamCraftError>>, TeamCraftError>
+  where
+    T: 'static,
+    F: for<'a> FnOnce(PushRegistrar<'a, Api, Store>) -> LocalFuture<'a, Result<T, CoreError>> + 'static,
+  {
+    let device_id = self.maybe_device_id.ok_or(TeamCraftError::NotEnrolled)?;
+    let (api, store, settings) = (self.api(), self.store.clone(), self.client_settings());
+    let turn = self.push_turn.clone();
+    let (answer, answered) = oneshot::channel();
+    tokio::task::spawn_local(async move {
+      let _turn = turn.lock().await;
+      let registrar = PushRegistrar::new(&api, &store, &SystemClock, &settings, device_id);
+      // The app may have stopped waiting (a cancelled coroutine); nobody is left to tell then.
+      let _ = answer.send(work(registrar).await.map_err(TeamCraftError::from));
+    });
+    Ok(answered)
   }
 
   /// What joining the conversation's call needs from the client; pauses syncing meanwhile.
@@ -1222,14 +1271,11 @@ impl Engine {
     &mut self,
     conversation: ConversationId,
   ) -> Result<CallJoinTokenResponse, TeamCraftError> {
-    let was_running = matches!(self.client, ClientSlot::Running { .. });
-    let client = self.take_client().await?;
-    let result = client.call_join_token(conversation).await;
-    self.client = ClientSlot::Idle(client);
-    if was_running {
-      self.start().await?;
-    }
-    Ok(result?)
+    // A plain request: no reason to stop the sync loop, least of all during a call.
+    let device_id = self.maybe_device_id.ok_or(TeamCraftError::NotEnrolled)?;
+    let request = CreateCallJoinTokenRequest { device_id };
+    let token = self.api().create_call_join_token(conversation, &request).await;
+    Ok(token.map_err(CoreError::from)?)
   }
 
   pub(crate) fn calls(&self) -> &CallHub {
@@ -1442,6 +1488,7 @@ impl Engine {
     self.attach_call_sink(&mut client);
     self.link_requests = client.link_request_list();
     self.identity_fingerprint = client.identity_fingerprint();
+    self.maybe_device_id = Some(client.device_id());
     self.maybe_backend = Some(
       CoreChatBackend::new(self.store.clone(), client.user_id(), Box::new(SystemClock))
         .with_typing(client.typing_state())
@@ -1459,32 +1506,118 @@ impl Engine {
   /// Stops the sync loop if it runs and hands out the client; put it back into `self.client`.
   async fn take_client(&mut self) -> Result<Box<CoreClient>, TeamCraftError> {
     self.stop_runner().await;
+    self.repair_client()?;
     match std::mem::replace(&mut self.client, ClientSlot::Missing) {
       ClientSlot::Idle(client) => Ok(client),
       _ => Err(TeamCraftError::NotEnrolled),
     }
   }
 
+  /// Stops the sync loop if it runs; an idle client stays where it is.
   async fn stop_runner(&mut self) {
-    if let ClientSlot::Running { handle, task } = std::mem::replace(&mut self.client, ClientSlot::Missing) {
-      handle.send(RunnerCommand::Stop);
-      match task.await {
-        Ok(client) => self.client = ClientSlot::Idle(Box::new(client)),
-        // Only a panic in the sync loop gets here; reopen the client from the store.
-        Err(error) => {
-          tracing::error!(%error, "sync loop ended abnormally");
-          if let Ok(Some(mut client)) = Client::open(
-            self.api(),
-            self.store.clone(),
-            Box::new(SystemClock),
-            self.client_settings(),
-          ) {
-            self.attach_call_sink(&mut client);
-            self.link_requests = client.link_request_list();
-            self.client = ClientSlot::Idle(Box::new(client));
-          }
-        },
+    match std::mem::replace(&mut self.client, ClientSlot::Missing) {
+      ClientSlot::Running { handle, task } => {
+        handle.send(RunnerCommand::Stop);
+        match task.await {
+          Ok(client) => self.client = ClientSlot::Idle(Box::new(client)),
+          // Only a panic in the sync loop gets here (the panic log names it, logging.rs); reopen
+          // the client from the store.
+          Err(error) => {
+            tracing::error!(%error, "sync loop ended abnormally");
+            // Said by `reopen_client`; the next start tries again.
+            let _ = self.reopen_client();
+          },
+        }
+      },
+      other => self.client = other,
+    }
+  }
+
+  /// An enrolled device whose slot is empty gets its client back from the store.
+  fn repair_client(&mut self) -> Result<(), TeamCraftError> {
+    if !matches!(self.client, ClientSlot::Missing) || self.maybe_backend.is_none() {
+      return Ok(());
+    }
+    tracing::warn!("no client on an enrolled device; reopening it from the store");
+    self.reopen_client()
+  }
+
+  fn reopen_client(&mut self) -> Result<(), TeamCraftError> {
+    let opened = Client::open(
+      self.api(),
+      self.store.clone(),
+      Box::new(SystemClock),
+      self.client_settings(),
+    );
+    match opened {
+      Ok(Some(client)) => {
+        // Everything hanging off the old client (typing, transfers, the call sink) moves over.
+        self.adopt(client);
+        Ok(())
+      },
+      Ok(None) => {
+        tracing::error!("could not reopen the client: the store holds no account");
+        Err(TeamCraftError::NotEnrolled)
+      },
+      Err(error) => {
+        tracing::error!(%error, "could not reopen the client from the store");
+        Err(error.into())
+      },
+    }
+  }
+
+  /// A loop that died leaves the slot saying `Running`: collects it, so the client comes back.
+  async fn collect_dead_loop(&mut self) {
+    if matches!(&self.client, ClientSlot::Running { task, .. } if task.is_finished()) {
+      self.stop_runner().await;
+    }
+  }
+
+  /// The sync loop panicked ([`LoopDeathNotice`]): brings the client back and starts a new loop,
+  /// at once the first time, then after a growing pause, so a panic that repeats doesn't spin. The
+  /// app's next start doesn't wait for the pause.
+  async fn recover_sync_loop(&mut self) {
+    if !matches!(&self.client, ClientSlot::Running { task, .. } if task.is_finished()) {
+      return;
+    }
+    let was_stable = self
+      .maybe_loop_started
+      .is_some_and(|started| started.elapsed() >= LOOP_STABLE_AFTER);
+    self.loop_deaths = if was_stable {
+      1
+    } else {
+      self.loop_deaths.saturating_add(1)
+    };
+    self.stop_runner().await;
+    self.signals.connection.report_restarting();
+    self.listener.on_change();
+    let delay = loop_restart_delay(self.loop_deaths);
+    if delay.is_zero() {
+      self.restart_sync_loop().await;
+      return;
+    }
+    tracing::warn!(
+      delay_secs = delay.as_secs(),
+      "the sync loop keeps dying; waiting before the next one"
+    );
+    let maybe_jobs = self.maybe_jobs.clone();
+    tokio::task::spawn_local(async move {
+      tokio::time::sleep(delay).await;
+      if let Some(jobs) = maybe_jobs.and_then(|jobs| jobs.upgrade()) {
+        let restart: Job = Box::new(|engine| Box::pin(engine.restart_sync_loop()));
+        // The engine thread is ending otherwise; nothing to restart then.
+        let _ = jobs.send(restart);
       }
+    });
+  }
+
+  /// A new sync loop after one died, if the app or a drain still wants one.
+  async fn restart_sync_loop(&mut self) {
+    if !self.is_syncing_for_app && self.active_drains == 0 {
+      return;
+    }
+    if let Err(error) = self.start().await {
+      tracing::error!(?error, "could not start a new sync loop");
     }
   }
 
@@ -1506,7 +1639,9 @@ impl Engine {
 
   /// Hands the UI adapter's queued commands to the sync loop, or runs them right away.
   pub(crate) async fn dispatch_commands(&mut self) -> Result<(), TeamCraftError> {
+    // Taken first: repairing the client replaces the backend that holds them.
     let commands = self.backend()?.drain_commands();
+    self.repair_client()?;
     match &mut self.client {
       ClientSlot::Running { handle, .. } => {
         for command in commands {
@@ -1572,6 +1707,19 @@ impl Engine {
   }
 }
 
+impl Drop for LoopDeathNotice {
+  fn drop(&mut self) {
+    if !std::thread::panicking() {
+      return;
+    }
+    if let Some(jobs) = self.0.as_ref().and_then(mpsc::WeakUnboundedSender::upgrade) {
+      let recover: Job = Box::new(|engine| Box::pin(engine.recover_sync_loop()));
+      // No queue left: the engine thread is ending and has no use for a new loop.
+      let _ = jobs.send(recover);
+    }
+  }
+}
+
 impl NewLinkWait {
   /// Joins the relay and waits there; a wait still running for an earlier link ends.
   fn start(&mut self, api: Api, offer: Rc<LinkOffer>) -> oneshot::Receiver<Result<String, TeamCraftError>> {
@@ -1619,6 +1767,15 @@ impl Drop for NewLinkWait {
     if let Some(task) = &self.maybe_task {
       task.abort();
     }
+  }
+}
+
+/// How long to wait before the next sync loop after `deaths` died in a row: none after the first.
+fn loop_restart_delay(deaths: u32) -> Duration {
+  let doublings = deaths.saturating_sub(2).min(16);
+  match deaths {
+    0 | 1 => Duration::ZERO,
+    _ => Duration::from_secs(1u64 << doublings).min(MAX_LOOP_RESTART_DELAY),
   }
 }
 
@@ -1881,6 +2038,233 @@ mod tests {
   }
 
   /// A fresh folder in the system's temporary directory, removed when dropped.
+  /// The client's slot and the sync loop (issue #1142). The server is unreachable, so the loop stays
+  /// at its first connection attempts; what matters here is the slot.
+  mod client_slot {
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    use teamcraft_core::api::fake::FakeServer;
+    use teamcraft_crypto::backup::Argon2Settings;
+
+    use super::*;
+
+    const UNREACHABLE_SERVER: &str = "http://127.0.0.1:9";
+    const KEY: [u8; 32] = [7; 32];
+
+    #[tokio::test]
+    async fn stopping_or_taking_an_idle_client_keeps_it() {
+      in_engine_thread(async {
+        let directory = TestDir::new("idle");
+        let mut engine = enrolled_engine(&directory, Listener::default()).await;
+        engine.stop().await.unwrap();
+        engine.stop().await.unwrap();
+        assert!(matches!(engine.client, ClientSlot::Idle(_)));
+        let client = engine.take_client().await.unwrap();
+        engine.client = ClientSlot::Idle(client);
+        // The first job in the background used to lose the client here.
+        let result = engine.with_client(|_| Box::pin(async { Ok(()) })).await;
+        assert!(result.is_ok());
+        assert!(matches!(engine.client, ClientSlot::Idle(_)));
+      })
+      .await;
+    }
+
+    #[tokio::test]
+    async fn an_empty_slot_on_an_enrolled_device_repairs_itself_on_start() {
+      in_engine_thread(async {
+        let directory = TestDir::new("empty");
+        let mut engine = enrolled_engine(&directory, Listener::default()).await;
+        engine.client = ClientSlot::Missing;
+        engine.start_syncing().await.unwrap();
+        assert!(matches!(engine.client, ClientSlot::Running { .. }));
+        engine.stop_runner().await;
+      })
+      .await;
+    }
+
+    #[tokio::test]
+    async fn an_empty_slot_is_no_abandoned_setup_on_an_enrolled_device() {
+      in_engine_thread(async {
+        let directory = TestDir::new("not-abandoned");
+        let mut engine = enrolled_engine(&directory, Listener::default()).await;
+        engine.client = ClientSlot::Missing;
+        engine.forget_unfinished_setup().await.unwrap();
+        engine.start_syncing().await.unwrap();
+        assert!(matches!(engine.client, ClientSlot::Running { .. }));
+        engine.stop_runner().await;
+      })
+      .await;
+    }
+
+    #[tokio::test]
+    async fn a_sync_loop_that_dies_is_replaced_at_once() {
+      in_engine_thread(async {
+        let directory = TestDir::new("dies");
+        let listener = Listener::default();
+        let mut engine = enrolled_engine(&directory, listener.clone()).await;
+        let (jobs, mut queue) = mpsc::unbounded_channel::<Job>();
+        engine.maybe_jobs = Some(jobs.downgrade());
+        listener.panic_next_time();
+        engine.start_syncing().await.unwrap();
+        let dead = running_task(&engine);
+
+        let notice = queue.recv().await.unwrap();
+        notice(&mut engine).await;
+
+        assert_ne!(running_task(&engine), dead, "a new loop runs");
+        assert_eq!(engine.loop_deaths, 1);
+        engine.stop_runner().await;
+      })
+      .await;
+    }
+
+    #[tokio::test]
+    async fn start_notices_a_dead_loop_though_the_slot_says_running() {
+      in_engine_thread(async {
+        let directory = TestDir::new("noticed");
+        let listener = Listener::default();
+        let mut engine = enrolled_engine(&directory, listener.clone()).await;
+        listener.panic_next_time();
+        engine.start_syncing().await.unwrap();
+        let dead = running_task(&engine);
+        while !matches!(&engine.client, ClientSlot::Running { task, .. } if task.is_finished()) {
+          tokio::task::yield_now().await;
+        }
+
+        engine.start_syncing().await.unwrap();
+
+        assert_ne!(running_task(&engine), dead);
+        engine.stop_runner().await;
+      })
+      .await;
+    }
+
+    #[tokio::test]
+    async fn a_push_refresh_leaves_the_sync_loop_running() {
+      in_engine_thread(async {
+        let directory = TestDir::new("refresh");
+        let mut engine = enrolled_engine(&directory, Listener::default()).await;
+        engine.start_syncing().await.unwrap();
+        let task = running_task(&engine);
+
+        // Nothing registered yet: answered from the store alone.
+        let renewed = engine.refresh_push().unwrap().await.unwrap();
+
+        assert!(!renewed.unwrap());
+        assert_eq!(running_task(&engine), task);
+        engine.stop_runner().await;
+      })
+      .await;
+    }
+
+    /// The app retries a registration on a network error (`PushRegistrationRetry`).
+    #[tokio::test]
+    async fn a_failed_registration_says_network_and_leaves_the_loop_running() {
+      in_engine_thread(async {
+        let directory = TestDir::new("register");
+        let mut engine = enrolled_engine(&directory, Listener::default()).await;
+        engine.start_syncing().await.unwrap();
+        let task = running_task(&engine);
+
+        let registered = engine
+          .register_push(PushService::Fcm, "token".into())
+          .unwrap()
+          .await
+          .unwrap();
+
+        assert!(matches!(registered, Err(TeamCraftError::Network(_))));
+        assert_eq!(running_task(&engine), task);
+        engine.stop_runner().await;
+      })
+      .await;
+    }
+
+    #[test]
+    fn a_loop_that_keeps_dying_waits_longer_each_time() {
+      assert_eq!(loop_restart_delay(1), Duration::ZERO);
+      assert_eq!(loop_restart_delay(2), Duration::from_secs(1));
+      assert_eq!(loop_restart_delay(3), Duration::from_secs(2));
+      assert_eq!(loop_restart_delay(100), MAX_LOOP_RESTART_DELAY);
+    }
+
+    /// Panics once when armed, like a bug anywhere in what the sync loop runs.
+    #[derive(Clone, Default)]
+    struct Listener(Arc<AtomicBool>);
+
+    impl Listener {
+      fn panic_next_time(&self) {
+        self.0.store(true, Ordering::SeqCst);
+      }
+    }
+
+    impl EventListener for Listener {
+      fn on_change(&self) {
+        assert!(!self.0.swap(false, Ordering::SeqCst), "a bug in the sync loop");
+      }
+    }
+
+    struct Token;
+
+    impl TokenProvider for Token {
+      fn access_token(&self) -> Option<String> {
+        Some("token".into())
+      }
+    }
+
+    async fn in_engine_thread(test: impl Future<Output = ()>) {
+      LocalSet::new().run_until(test).await;
+    }
+
+    /// An engine as a restarted app has it: the device enrolled earlier, the account in the store.
+    async fn enrolled_engine(directory: &TestDir, listener: Listener) -> Engine {
+      let config = AppConfig {
+        server_url: UNREACHABLE_SERVER.into(),
+        data_dir: directory.path().to_string_lossy().into_owned(),
+        account: "account".into(),
+        database_key: KEY.to_vec(),
+        push_gateway_url: None,
+        is_memory_constrained: false,
+      };
+      let signals = SyncSignals {
+        network: NetworkChanges::new(),
+        connection: ConnectionStatus::new(),
+        catch_up_focus: CatchUpFocus::default(),
+      };
+      let start = EngineStart::new(config, Arc::new(Token), Arc::new(listener), signals).unwrap();
+      let key_source = StaticKeySource::new(SymmetricKey::from_slice(&KEY).unwrap());
+      let store = SealedSqliteStore::open(&start.store_path(), &key_source).unwrap();
+      let client = PendingEnrollment::new()
+        .complete(
+          FakeServer::new().add_user("Alice"),
+          Arc::new(store),
+          Box::new(SystemClock),
+          ClientSettings::default(),
+          EnrollmentOptions {
+            argon2: Argon2Settings {
+              memory_kib: 1024,
+              iterations: 1,
+              parallelism: 1,
+            },
+            ..enrollment_options(
+              "phone".into(),
+              EnrollmentSecret::Passphrase(SecretBytes::new(b"passphrase".to_vec())),
+            )
+          },
+        )
+        .await
+        .unwrap();
+      drop(client);
+      Engine::open(start).map_err(|_| "engine did not open").unwrap()
+    }
+
+    fn running_task(engine: &Engine) -> tokio::task::Id {
+      match &engine.client {
+        ClientSlot::Running { task, .. } => task.id(),
+        _ => panic!("no sync loop"),
+      }
+    }
+  }
+
   struct TestDir(PathBuf);
 
   impl TestDir {

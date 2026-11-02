@@ -166,6 +166,12 @@ impl ConnectionStatus {
     self.0.lock().map_or(ConnectionState::Connecting, |state| *state)
   }
 
+  /// Back to the start: the sync loop that reported here died, and the next one connects again
+  /// (until then the last state would still stand, maybe "connected"; issue #1142).
+  pub fn report_restarting(&self) {
+    self.set(ConnectionState::Connecting);
+  }
+
   fn set(&self, state: ConnectionState) {
     if let Ok(mut slot) = self.0.lock() {
       *slot = state;
