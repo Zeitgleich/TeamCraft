@@ -125,8 +125,11 @@ impl MediaActions {
           .viewport
           .update(|viewport| viewport.zoom_by(factor, Point::ORIGIN, image, stage));
       },
-      Command::ZoomReset => self.viewport.update(Viewport::reset),
-      Command::Rotate if can_transform => self.viewport.update(Viewport::rotate_clockwise),
+      Command::ZoomReset => self.motion.settle_view_to(1.0, Point::ORIGIN),
+      Command::Rotate if can_transform => {
+        self.motion.turn();
+        self.viewport.update(Viewport::rotate_clockwise);
+      },
       Command::TogglePlay => self.toggle_play(),
       Command::JumpToMessage => self.jump_to_message(),
       Command::Download => self.download(),
@@ -232,7 +235,8 @@ pub fn Controls(
   let can_transform = Signal::derive(move || actions.kind.get().is_some_and(MediaKind::can_transform));
   let is_animated = move || actions.kind.get() == Some(MediaKind::Animated);
   let is_details_open = RwSignal::new(false);
-  let zoom_label = move || format!("{:.0} %", viewport.get().scale() * 100.0);
+  // In the picture's own pixels, as other image viewers mean it (#1089).
+  let zoom_label = move || zoom_percent_label(viewport.get().own_pixel_ratio());
   let on_slider = move |ev: web_sys::Event| {
     let Ok(value) = event_target_value(&ev).parse::<f64>() else {
       return;
@@ -334,6 +338,14 @@ pub fn Controls(
         <FileDetails actions=actions is_open=is_details_open />
       </Show>
     </footer>
+  }
+}
+
+/// The zoom in percent of the picture's own pixels; a dash before the picture is known.
+fn zoom_percent_label(maybe_ratio: Option<f64>) -> String {
+  match maybe_ratio {
+    Some(ratio) => format!("{:.0} %", ratio * 100.0),
+    None => String::from('–'),
   }
 }
 
