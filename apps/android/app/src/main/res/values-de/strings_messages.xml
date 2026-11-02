@@ -61,8 +61,8 @@
     <item quantity="one">Von %d Person bestätigt</item>
     <item quantity="other">Von %d Personen bestätigt</item>
   </plurals>
-  <string name="first_sync_newest">Nachrichten werden geladen…</string>
-  <string name="first_sync_older">Ältere Nachrichten werden geladen…</string>
+  <string name="first_sync_newest">Lade Nachrichten…</string>
+  <string name="first_sync_older">Lade ältere Nachrichten…</string>
   <plurals name="first_sync_count">
     <item quantity="one">%1$d von %2$d Unterhaltung</item>
     <item quantity="other">%1$d von %2$d Unterhaltungen</item>

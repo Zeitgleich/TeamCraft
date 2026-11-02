@@ -12,6 +12,13 @@
   padding: 4px 12px;
   font-size: var(--text-xs);
   color: var(--text-muted);
+  white-space: nowrap;
+}
+
+.first-sync-text > :first-child {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .first-sync-count {

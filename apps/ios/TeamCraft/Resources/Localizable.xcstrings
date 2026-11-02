@@ -8684,7 +8684,7 @@
         "de": {
           "stringUnit": {
             "state": "translated",
-            "value": "Nachrichten werden geladen…"
+            "value": "Lade Nachrichten…"
           }
         }
       }
@@ -8700,7 +8700,7 @@
         "de": {
           "stringUnit": {
             "state": "translated",
-            "value": "Ältere Nachrichten werden geladen…"
+            "value": "Lade ältere Nachrichten…"
           }
         }
       }
