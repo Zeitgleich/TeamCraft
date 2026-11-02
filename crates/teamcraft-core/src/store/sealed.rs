@@ -481,7 +481,7 @@ impl<B: RecordBackend> SealedStore<B> {
   /// change little, and only what changes is written.
   fn note_feed_places(
     &self,
-    state: &mut State,
+    state: &mut State<B>,
     maybe_earlier: Option<&StoredMessage>,
     maybe_message: Option<&StoredMessage>,
   ) -> Result<(), StoreError> {
@@ -683,7 +683,7 @@ impl<B: RecordBackend> SealedStore<B> {
   /// Runs `step` on `conversation`'s feed index.
   fn feed<T>(
     &self,
-    state: &mut State,
+    state: &mut State<B>,
     conversation: ConversationId,
     step: impl FnOnce(&mut ScopedNodes<'_, MessageKey, ()>) -> Result<T, StoreError>,
   ) -> Result<T, StoreError> {
@@ -705,7 +705,7 @@ impl<B: RecordBackend> SealedStore<B> {
   /// Runs `step` on `conversation`'s relations index.
   fn relations<T>(
     &self,
-    state: &mut State,
+    state: &mut State<B>,
     conversation: ConversationId,
     step: impl FnOnce(&mut ScopedNodes<'_, RelationKey, ()>) -> Result<T, StoreError>,
   ) -> Result<T, StoreError> {
@@ -727,7 +727,7 @@ impl<B: RecordBackend> SealedStore<B> {
   /// The messages `relation` lists in `conversation`'s relations index, as their keys.
   fn related_keys(
     &self,
-    state: &mut State,
+    state: &mut State<B>,
     conversation: ConversationId,
     relation: Relation,
   ) -> Result<Vec<MessageKey>, StoreError> {
@@ -810,7 +810,7 @@ impl<B: RecordBackend> SealedStore<B> {
   /// `is_listed` asks for is left out, and the catalog is built again.
   fn load_listed(
     &self,
-    state: &mut State,
+    state: &mut State<B>,
     conversation: ConversationId,
     keys: &[MessageKey],
     is_listed: impl Fn(&StoredMessage) -> bool,
