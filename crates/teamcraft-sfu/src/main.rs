@@ -25,6 +25,8 @@
 //! - `TEAMCRAFT_SFU_SHUTDOWN_DRAIN_SECS`: on SIGTERM every call connection is closed as "going
 //!   away" (clients rejoin, ARCHITECTURE.md §6.5); how long those closes get to reach the clients
 //!   before the process exits, default 2
+//! - `TEAMCRAFT_SFU_UDP_RECEIVE_BUFFER_BYTES`: the UDP socket's receive buffer, default 4 MiB (the
+//!   kernel caps it at `net.core.rmem_max`)
 //! - `TEAMCRAFT_SFU_MAX_DEVICES_PER_USER_PER_CALL`: devices of one account in the same call at once,
 //!   default 3 (keep it equal to `calls.max_devices_per_user_per_call` of the server)
 //! - `TEAMCRAFT_SFU_ROSTER_INTERVAL_SECS`: how often the whole call roster is reported to the
@@ -101,6 +103,9 @@ async fn run() -> anyhow::Result<()> {
   }
   if let Some(interval) = env_duration_secs("TEAMCRAFT_SFU_ROSTER_INTERVAL_SECS")? {
     config.roster_interval = interval;
+  }
+  if let Some(bytes) = env_count("TEAMCRAFT_SFU_UDP_RECEIVE_BUFFER_BYTES")? {
+    config.udp_receive_buffer_bytes = bytes;
   }
   if let Some(devices) = env_count("TEAMCRAFT_SFU_MAX_DEVICES_PER_USER_PER_CALL")? {
     config.max_devices_per_user_per_call = devices;

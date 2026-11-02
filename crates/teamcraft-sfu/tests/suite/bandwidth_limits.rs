@@ -240,7 +240,7 @@ async fn run(limited: Limited, steps: &[(Option<u64>, Duration)]) -> Timeline {
   let (port, certificate_hash) = start_sfu().await;
   let sfu = SocketAddr::new(Ipv6Addr::LOCALHOST.into(), port);
   let start = Instant::now();
-  let relay = Relay::start(sfu, start).await;
+  let relay = Relay::start(sfu, start);
   let (presenter_address, first_viewer_address) = match limited {
     Limited::PresenterUplink => (relay.address, sfu),
     Limited::ViewerDownlink => (sfu, relay.address),

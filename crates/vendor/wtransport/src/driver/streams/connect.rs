@@ -10,6 +10,7 @@ use wtransport_proto::frame::FrameKind;
 use wtransport_proto::varint::VarInt;
 
 use super::session::StreamSession;
+use super::FrameReadProgress;
 use super::ProtoReadError;
 use crate::driver::DriverError;
 use crate::error::ApplicationClose;
@@ -17,11 +18,15 @@ use std::future::pending;
 
 pub struct ConnectStream {
     stream: Option<StreamSession>,
+    progress: FrameReadProgress,
 }
 
 impl ConnectStream {
     pub fn empty() -> Self {
-        Self { stream: None }
+        Self {
+            stream: None,
+            progress: FrameReadProgress::default(),
+        }
     }
 
     pub fn is_empty(&self) -> bool {
@@ -59,7 +64,7 @@ impl ConnectStream {
         };
 
         loop {
-            return match stream.read_frame().await {
+            return match stream.read_frame_resumable(&mut self.progress).await {
                 Ok(frame) => {
                     if !matches!(frame.kind(), FrameKind::Data) {
                         debug!("Skipping non-data frame of kind {:?}", frame.kind());

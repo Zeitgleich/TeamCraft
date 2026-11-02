@@ -17,6 +17,8 @@ teamcraft-proto.workspace = true
 anyhow.workspace = true
 jsonwebtoken.workspace = true
 axum = { version = "0.8", default-features = false, features = ["http1", "tokio", "json"] }
+# Room in the UDP socket's receive buffer, which wtransport's own binding has no setting for.
+socket2.workspace = true
 # Reports call participants to teamcraft-server.
 reqwest.workspace = true
 # Constant-time comparison of the registration token on the control endpoint.
@@ -42,3 +44,5 @@ teamcraft-crypto.workspace = true
 rand_core.workspace = true
 # A stand-in for the server's internal endpoints in the reporting test.
 axum = { version = "0.8", default-features = false, features = ["http1", "tokio", "json"] }
+# Its quinn, for a raw QUIC client that cuts HTTP/3 frames where a test wants them cut.
+wtransport = { version = "0.7.2", features = ["quinn"] }

@@ -26,6 +26,67 @@ pub type ProtoWriteError = wtransport_proto::stream::IoWriteError;
 #[derive(Debug)]
 pub struct AlreadyStop;
 
+/// Longest a frame read may take from its stream: a frame's largest payload, its header, and some
+/// room. Only a peer sending nothing but unknown frames gets here.
+const MAX_FRAME_READ_BYTES: usize = 8 * 1024;
+
+/// What the current frame's read took from its stream so far, kept across cancelled reads.
+///
+/// The driver's worker polls the control streams in a `select!` and drops those reads each time
+/// anything else happens on the connection, but `read_frame_async` isn't cancel safe: the bytes it
+/// has taken would be lost and the rest of the frame read as new frames. The next read goes
+/// through them again.
+#[derive(Debug, Default)]
+pub struct FrameReadProgress {
+    bytes: Vec<u8>,
+}
+
+/// A [`QuicRecvStream`] that first gives back the bytes of [`FrameReadProgress`], then records
+/// what it reads from the stream.
+struct ResumedRead<'a> {
+    stream: &'a mut QuicRecvStream,
+    progress: &'a mut FrameReadProgress,
+    replayed: usize,
+}
+
+impl<'a> ResumedRead<'a> {
+    fn new(stream: &'a mut QuicRecvStream, progress: &'a mut FrameReadProgress) -> Self {
+        Self {
+            stream,
+            progress,
+            replayed: 0,
+        }
+    }
+}
+
+impl wtransport_proto::bytes::AsyncRead for ResumedRead<'_> {
+    fn poll_read(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut [u8],
+    ) -> Poll<std::io::Result<usize>> {
+        let this = self.get_mut();
+        let replay = &this.progress.bytes[this.replayed..];
+        if !replay.is_empty() {
+            let len = replay.len().min(buf.len());
+            buf[..len].copy_from_slice(&replay[..len]);
+            this.replayed += len;
+            return Poll::Ready(Ok(len));
+        }
+        if this.progress.bytes.len() >= MAX_FRAME_READ_BYTES {
+            return Poll::Ready(Err(std::io::ErrorKind::ConnectionReset.into()));
+        }
+        let read = ready!(wtransport_proto::bytes::AsyncRead::poll_read(
+            Pin::new(&mut *this.stream),
+            cx,
+            buf
+        ))?;
+        this.progress.bytes.extend_from_slice(&buf[..read]);
+        this.replayed += read;
+        Poll::Ready(Ok(read))
+    }
+}
+
 #[derive(Debug)]
 pub struct QuicSendStream(quinn::SendStream);
 
@@ -414,8 +475,15 @@ pub mod uniremote {
     }
 
     impl StreamUniRemoteH3 {
-        pub async fn read_frame<'a>(&mut self) -> Result<Frame<'a>, ProtoReadError> {
-            self.proto.read_frame_async(&mut self.stream).await
+        /// Reads the next frame; safe to cancel with the same `progress` for the next call.
+        pub async fn read_frame_resumable<'a>(
+            &mut self,
+            progress: &mut FrameReadProgress,
+        ) -> Result<Frame<'a>, ProtoReadError> {
+            let mut reader = ResumedRead::new(&mut self.stream, progress);
+            let frame = self.proto.read_frame_async(&mut reader).await?;
+            progress.bytes.clear();
+            Ok(frame)
         }
 
         pub fn kind(&self) -> StreamKind {
@@ -524,6 +592,17 @@ pub mod session {
     impl StreamSession {
         pub async fn read_frame<'a>(&mut self) -> Result<Frame<'a>, ProtoReadError> {
             self.proto.read_frame_async(&mut self.stream.1).await
+        }
+
+        /// As [`Self::read_frame`], and safe to cancel with the same `progress` for the next call.
+        pub async fn read_frame_resumable<'a>(
+            &mut self,
+            progress: &mut FrameReadProgress,
+        ) -> Result<Frame<'a>, ProtoReadError> {
+            let mut reader = ResumedRead::new(&mut self.stream.1, progress);
+            let frame = self.proto.read_frame_async(&mut reader).await?;
+            progress.bytes.clear();
+            Ok(frame)
         }
 
         pub async fn write_frame(&mut self, frame: Frame<'_>) -> Result<(), ProtoWriteError> {
