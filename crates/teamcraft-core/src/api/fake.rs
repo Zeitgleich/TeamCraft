@@ -5240,7 +5240,7 @@ impl ServerApi for FakeServerApi {
     })
   }
 
-  fn gateway_token(&self) -> Result<String, ApiError> {
+  async fn gateway_token(&self) -> Result<String, ApiError> {
     Ok(format!("fake-token-{}", self.user))
   }
 }

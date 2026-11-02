@@ -92,6 +92,20 @@ pub(crate) fn slow_job(job: &str, waited: Duration, ran: Duration) {
   }
 }
 
+/// Logs a read on the read thread that took long or waited long, which should be rare: nothing but
+/// another read and another thread's group of writes holds it up.
+pub(crate) fn slow_read(job: &str, waited: Duration, ran: Duration) {
+  if waited >= SLOW_JOB || ran >= SLOW_JOB {
+    tracing::info!(
+      target: LIFECYCLE,
+      job,
+      waited_ms = waited.as_millis(),
+      ran_ms = ran.as_millis(),
+      "slow read"
+    );
+  }
+}
+
 /// Logs how `step` ended (the error's variant and message on failure) and passes the result on.
 pub(crate) fn outcome<T>(
   step: LifecycleStep,

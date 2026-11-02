@@ -793,7 +793,7 @@ async fn join<A: ServerApi>(api: &A, offer: &LinkOffer) -> Result<A::Rendezvous,
   let mut connection = api.connect_rendezvous().await?;
   connection
     .send_control(&RendezvousClientMessage::Join {
-      token: api.gateway_token()?,
+      token: api.gateway_token().await?,
       rendezvous_id: offer.rendezvous_id.clone(),
     })
     .await?;

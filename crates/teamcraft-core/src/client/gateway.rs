@@ -148,7 +148,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     let handshake_timeout = timing.handshake_timeout;
     if let Some(session) = self.sync.maybe_gateway_session.clone() {
       let resume = GatewayClientMessage::Resume {
-        token: self.api.gateway_token()?,
+        token: self.api.gateway_token().await?,
         session_id: session.session_id,
         last_seq: session.last_seq,
         device_id: self.account.device_id,
@@ -227,7 +227,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     // The first reads wait for `ready`: a change between a read and the new session would reach
     // neither (#714).
     let identify = GatewayClientMessage::Identify {
-      token: self.api.gateway_token()?,
+      token: self.api.gateway_token().await?,
       device_id: self.account.device_id,
       activity: self.device_activity.clone(),
     };
@@ -341,8 +341,8 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
   }
 
   /// The token the handshake sends (`identify`/`resume`).
-  pub(crate) fn gateway_token(&self) -> Result<String, ApiError> {
-    self.api.gateway_token()
+  pub(crate) async fn gateway_token(&self) -> Result<String, ApiError> {
+    self.api.gateway_token().await
   }
 
   /// A new gateway connection after the server's `hello`, with `first` (`identify` or `resume`)

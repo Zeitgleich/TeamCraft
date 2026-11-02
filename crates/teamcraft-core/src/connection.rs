@@ -296,7 +296,7 @@ impl<G: GatewayConnection> ConnectionSupervisor<G> {
     A: ServerApi<Gateway = G>,
     S: LocalStore,
   {
-    if self.maybe_gateway.is_some() || !self.is_attempt_due(client) {
+    if self.maybe_gateway.is_some() || !self.is_attempt_due(client).await {
       return None;
     }
     self.set_state(ConnectionState::Connecting);
@@ -338,7 +338,7 @@ impl<G: GatewayConnection> ConnectionSupervisor<G> {
       },
       Err(error) if error.is_sign_in_required() => {
         tracing::warn!(%error, "the gateway refused the access token");
-        self.maybe_refused_token = token_fingerprint(client);
+        self.maybe_refused_token = token_fingerprint(client).await;
         let reason = match &error {
           CoreError::Api(ApiError::SignInExpired) => SignInReason::SignInExpired,
           CoreError::Api(api) => api
@@ -618,10 +618,10 @@ impl<G: GatewayConnection> ConnectionSupervisor<G> {
     true
   }
 
-  fn is_attempt_due<A: ServerApi, S: LocalStore>(&self, client: &Client<A, S>) -> bool {
+  async fn is_attempt_due<A: ServerApi, S: LocalStore>(&self, client: &Client<A, S>) -> bool {
     match self.state() {
       // Only another token can change the answer.
-      ConnectionState::SignInRequired { .. } => token_fingerprint(client) != self.maybe_refused_token,
+      ConnectionState::SignInRequired { .. } => token_fingerprint(client).await != self.maybe_refused_token,
       _ => client.now_ms() >= self.next_attempt_ms,
     }
   }
@@ -760,8 +760,8 @@ impl From<ConnectionState> for teamcraft_client_api::remote::CoreConnection {
 
 /// Tells tokens apart without keeping one around. Not a security measure: it only notices that the
 /// app has another token than the refused one.
-fn token_fingerprint<A: ServerApi, S: LocalStore>(client: &Client<A, S>) -> Option<u64> {
-  let token = client.gateway_token().ok()?;
+async fn token_fingerprint<A: ServerApi, S: LocalStore>(client: &Client<A, S>) -> Option<u64> {
+  let token = client.gateway_token().await.ok()?;
   let mut hasher = DefaultHasher::new();
   token.hash(&mut hasher);
   Some(hasher.finish())

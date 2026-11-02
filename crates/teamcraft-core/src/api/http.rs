@@ -118,6 +118,12 @@ const GATEWAY_SILENCE_LIMIT_MS: i64 = 50_000;
 /// Supplies a valid OIDC access token. The app owns login and refresh; the core only asks.
 pub trait AccessTokenSource {
   fn access_token(&self) -> Result<String, ApiError>;
+
+  /// What a request waits for. A source that may block (a token refresh in the app) answers here
+  /// without holding the caller's thread, which also runs the sync loop.
+  fn fresh_token(&self) -> impl Future<Output = Result<String, ApiError>> {
+    std::future::ready(self.access_token())
+  }
 }
 
 /// A fixed token (tests, command-line tools).
@@ -199,9 +205,9 @@ impl<T: AccessTokenSource> HttpServerApi<T> {
     let _ = method;
   }
 
-  fn request(&self, method: Method, path: &str) -> Result<RequestBuilder, ApiError> {
+  async fn request(&self, method: Method, path: &str) -> Result<RequestBuilder, ApiError> {
     self.require_secure_transport()?;
-    let token = self.tokens.access_token()?;
+    let token = self.tokens.fresh_token().await?;
     let request = self
       .http()
       .request(method, format!("{}/api/v1{path}", self.base_url))
@@ -210,7 +216,7 @@ impl<T: AccessTokenSource> HttpServerApi<T> {
   }
 
   async fn get<R: DeserializeOwned>(&self, path: &str) -> Result<R, ApiError> {
-    decode_api(send_api(self.request(Method::GET, path)?).await?).await
+    decode_api(send_api(self.request(Method::GET, path).await?).await?).await
   }
 
   /// A user the server doesn't show the caller (404 with an error code) has published nothing, as
@@ -237,7 +243,7 @@ impl<T: AccessTokenSource> HttpServerApi<T> {
     body: &B,
   ) -> Result<R, ApiError> {
     self.before_change(&method).await;
-    decode_api(send_api(self.request(method, path)?.json(body)).await?).await
+    decode_api(send_api(self.request(method, path).await?.json(body)).await?).await
   }
 
   async fn send_without_response<B: Serialize>(
@@ -247,7 +253,7 @@ impl<T: AccessTokenSource> HttpServerApi<T> {
     maybe_body: Option<&B>,
   ) -> Result<(), ApiError> {
     self.before_change(&method).await;
-    let mut request = self.request(method, path)?;
+    let mut request = self.request(method, path).await?;
     if let Some(body) = maybe_body {
       request = request.json(body);
     }
@@ -269,7 +275,7 @@ impl<T: AccessTokenSource> HttpServerApi<T> {
     let method =
       Method::from_bytes(method.as_bytes()).map_err(|error| ApiError::Decode(error.to_string()))?;
     self.before_change(&method).await;
-    let mut request = self.request(method, path)?;
+    let mut request = self.request(method, path).await?;
     if let Some(body) = maybe_body {
       request = request
         .header(reqwest::header::CONTENT_TYPE, "application/json")
@@ -1239,8 +1245,10 @@ impl<T: AccessTokenSource> ServerApi for HttpServerApi<T> {
 
   async fn complete_attachment(&self, attachment: AttachmentId) -> Result<AttachmentResponse, ApiError> {
     self.before_change(&Method::POST).await;
-    decode_api(send_api(self.request(Method::POST, &format!("/attachments/{attachment}/complete"))?).await?)
-      .await
+    let request = self
+      .request(Method::POST, &format!("/attachments/{attachment}/complete"))
+      .await?;
+    decode_api(send_api(request).await?).await
   }
 
   async fn create_multipart_attachment(
@@ -1581,8 +1589,8 @@ impl<T: AccessTokenSource> ServerApi for HttpServerApi<T> {
     HttpRendezvous::connect(&self.websocket_url("/api/v1/rendezvous")).await
   }
 
-  fn gateway_token(&self) -> Result<String, ApiError> {
-    self.tokens.access_token()
+  async fn gateway_token(&self) -> Result<String, ApiError> {
+    self.tokens.fresh_token().await
   }
 }
 

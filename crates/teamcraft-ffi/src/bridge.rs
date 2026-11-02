@@ -10,8 +10,6 @@ use teamcraft_client_api::remote::{
 };
 use teamcraft_core::api::ServerApi as _;
 use teamcraft_core::records;
-use teamcraft_core::store::LocalStore;
-use teamcraft_core::ui_backend::CoreChatBackend;
 use teamcraft_crypto::identity::IdentityPublicKey;
 use teamcraft_crypto::org_recovery::RecoveryRequestKey;
 use teamcraft_proto::{
@@ -19,8 +17,9 @@ use teamcraft_proto::{
   RecoveryRequestId, RecoveryRequestResponse, RecoveryResultPayload,
 };
 
-use crate::engine::{ClientSlot, Engine, feed_anchor, older_len, parse_id};
+use crate::engine::{Engine, feed_anchor, older_len, parse_id};
 use crate::error::TeamCraftError;
+use crate::reads::Reads;
 use crate::types::{AccountState, OrgRecoveryStart};
 
 /// A recovery this (new) device asked the organization for (e2ee.md §6.3.1).
@@ -41,18 +40,16 @@ struct AppSnapshot {
   former_users: Vec<User>,
 }
 
-impl AppSnapshot {
-  fn read<S: LocalStore>(backend: &CoreChatBackend<S>, security: SecuritySnapshot) -> Self {
-    Self {
-      snapshot: ChatSnapshot::read(backend, security),
+impl Reads {
+  pub(crate) fn snapshot_json(&mut self) -> Result<String, TeamCraftError> {
+    let security = self.security_snapshot()?;
+    let changes = self.store.take_changes();
+    let account = self.account_mut()?;
+    let (backend, snapshots) = account.parts();
+    to_json(&AppSnapshot {
+      snapshot: snapshots.snapshot(backend, changes, || Some(security)),
       former_users: backend.former_users(),
-    }
-  }
-}
-
-impl Engine {
-  pub(crate) fn snapshot_json(&self) -> Result<String, TeamCraftError> {
-    to_json(&AppSnapshot::read(self.backend()?, self.security_snapshot()?))
+    })
   }
 
   pub(crate) fn window_json(
@@ -63,7 +60,7 @@ impl Engine {
   ) -> Result<String, TeamCraftError> {
     let conversation = parse_id(conversation_id)?;
     // The next catch-up starts with the conversation the user opened (issue #972).
-    self.signals.catch_up_focus.set(conversation);
+    self.focus(conversation);
     let window = MessageWindow::read(
       self.backend()?,
       conversation,
@@ -81,7 +78,7 @@ impl Engine {
     older: u32,
   ) -> Result<String, TeamCraftError> {
     let conversation = parse_id(conversation_id)?;
-    self.signals.catch_up_focus.set(conversation);
+    self.focus(conversation);
     let backend = self.backend()?;
     let tail = backend.feed_tail(
       conversation,
@@ -101,10 +98,77 @@ impl Engine {
     to_json(&query.answer(self.backend()?))
   }
 
-  /// Runs an action. Actions that change encryption groups or keys need the client; admin
-  /// actions stay on desktop and web.
-  pub(crate) async fn act(&mut self, action: &str) -> Result<(), TeamCraftError> {
-    let action: ChatAction = from_json(action)?;
+  /// An action that only needs the backend ([`needs_client`]): its local half.
+  pub(crate) fn apply_action(&self, action: ChatAction) -> Result<(), TeamCraftError> {
+    match action.apply_to(self.backend()?) {
+      Some(unhandled) => Err(TeamCraftError::InvalidInput(format!(
+        "unsupported action: {unhandled:?}"
+      ))),
+      None => Ok(()),
+    }
+  }
+
+  fn security_snapshot(&self) -> Result<SecuritySnapshot, TeamCraftError> {
+    let my_fingerprint = self.identity_fingerprint()?;
+    let fingerprint = |key: [u8; 32]| IdentityPublicKey::from_bytes(key).fingerprint().to_string();
+    let contacts = records::pinned_identities(&self.store)?
+      .into_iter()
+      .map(|(user, pinned)| ContactKeys {
+        user,
+        fingerprint: fingerprint(pinned.public_key),
+        maybe_new_fingerprint: pinned.maybe_changed_to.map(fingerprint),
+        is_attested: pinned.is_attested,
+      })
+      .collect();
+    Ok(SecuritySnapshot {
+      my_fingerprint,
+      contacts,
+      maybe_push_content: Some(teamcraft_core::push_preview::push_content_mode(&self.store)),
+      maybe_owners: {
+        let settings = teamcraft_core::ClientSettings::default();
+        teamcraft_core::workspace::owner_roster_status(
+          &self.store,
+          settings.workspace_max_age,
+          settings.workspace_expiry_warning,
+        )
+      },
+      maybe_presence_policy: teamcraft_core::workspace::presence_policy(&self.store),
+      maybe_screen_share_policy: teamcraft_core::workspace::screen_share_policy(&self.store),
+      maybe_notetaker: teamcraft_core::notetaker::notetaker_policy(&self.store),
+      maybe_backup: teamcraft_core::ui_snapshot::key_backup_state(&self.store).unwrap_or_else(|error| {
+        // The app then shows the backup as unknown; the rest of the snapshot still counts.
+        tracing::warn!(%error, "the key backup state is unreadable");
+        None
+      }),
+    })
+  }
+}
+
+/// Whether an action takes the client (encryption groups, keys) or the engine, and so runs there;
+/// the others run on the backend ([`Reads::apply_action`]).
+pub(crate) fn needs_client(action: &ChatAction) -> bool {
+  matches!(
+    action,
+    ChatAction::CreateChannel { .. }
+      | ChatAction::OpenDm { .. }
+      | ChatAction::OpenGroupDm { .. }
+      | ChatAction::AddMember { .. }
+      | ChatAction::ChangePassphrase { .. }
+      | ChatAction::AcceptKeyChange { .. }
+      | ChatAction::SetActivity { .. }
+      | ChatAction::SetAttention { .. }
+      | ChatAction::PublishPolicy { .. }
+      | ChatAction::PublishRoster { .. }
+      | ChatAction::AdminJoinChannel { .. }
+      | ChatAction::AdminRemoveFromAllChats { .. }
+      | ChatAction::AdminDeleteUser { .. }
+      | ChatAction::AdminRemoveGroupLeftover { .. }
+  )
+}
+
+impl Engine {
+  /// Runs an action that [`needs_client`]; admin actions stay on desktop and web.
+  pub(crate) async fn act(&mut self, action: ChatAction) -> Result<(), TeamCraftError> {
     match action {
       ChatAction::CreateChannel { space, name } => {
         self
@@ -166,14 +230,9 @@ impl Engine {
       | ChatAction::AdminRemoveGroupLeftover { .. } => Err(TeamCraftError::InvalidInput(
         "workspace administration is on desktop and web".into(),
       )),
-      other => {
-        if let Some(unhandled) = other.apply_to(self.backend()?) {
-          return Err(TeamCraftError::InvalidInput(format!(
-            "unsupported action: {unhandled:?}"
-          )));
-        }
-        self.dispatch_commands().await
-      },
+      other => Err(TeamCraftError::InvalidInput(format!(
+        "unsupported action: {other:?}"
+      ))),
     }
   }
 
@@ -289,51 +348,13 @@ impl Engine {
     };
     self.complete_enrollment(options).await
   }
-
-  /// Fingerprints of the identity keys this device pinned, for key verification in the app.
-  fn security_snapshot(&self) -> Result<SecuritySnapshot, TeamCraftError> {
-    if matches!(self.client, ClientSlot::Missing) {
-      return Err(TeamCraftError::NotEnrolled);
-    }
-    let fingerprint = |key: [u8; 32]| IdentityPublicKey::from_bytes(key).fingerprint().to_string();
-    let contacts = records::pinned_identities(&self.store)?
-      .into_iter()
-      .map(|(user, pinned)| ContactKeys {
-        user,
-        fingerprint: fingerprint(pinned.public_key),
-        maybe_new_fingerprint: pinned.maybe_changed_to.map(fingerprint),
-        is_attested: pinned.is_attested,
-      })
-      .collect();
-    Ok(SecuritySnapshot {
-      my_fingerprint: self.identity_fingerprint.clone(),
-      contacts,
-      maybe_push_content: Some(teamcraft_core::push_preview::push_content_mode(&self.store)),
-      maybe_owners: {
-        let settings = teamcraft_core::ClientSettings::default();
-        teamcraft_core::workspace::owner_roster_status(
-          &self.store,
-          settings.workspace_max_age,
-          settings.workspace_expiry_warning,
-        )
-      },
-      maybe_presence_policy: teamcraft_core::workspace::presence_policy(&self.store),
-      maybe_screen_share_policy: teamcraft_core::workspace::screen_share_policy(&self.store),
-      maybe_notetaker: teamcraft_core::notetaker::notetaker_policy(&self.store),
-      maybe_backup: teamcraft_core::ui_snapshot::key_backup_state(&self.store).unwrap_or_else(|error| {
-        // The app then shows the backup as unknown; the rest of the snapshot still counts.
-        tracing::warn!(%error, "the key backup state is unreadable");
-        None
-      }),
-    })
-  }
 }
 
 fn to_json(value: &impl serde::Serialize) -> Result<String, TeamCraftError> {
   serde_json::to_string(value).map_err(|error| TeamCraftError::Core(error.to_string()))
 }
 
-fn from_json<T: serde::de::DeserializeOwned>(text: &str) -> Result<T, TeamCraftError> {
+pub(crate) fn from_json<T: serde::de::DeserializeOwned>(text: &str) -> Result<T, TeamCraftError> {
   serde_json::from_str(text).map_err(|error| TeamCraftError::InvalidInput(error.to_string()))
 }
 
@@ -374,9 +395,17 @@ mod snapshot_tests {
     ] {
       records::put_json(&store, Table::Users, &summary.id.to_string(), &summary).unwrap();
     }
-    let backend = CoreChatBackend::new(store, id_from_raw(1), Box::new(ManualClock::default()));
+    let backend = teamcraft_core::ui_backend::CoreChatBackend::new(
+      store,
+      id_from_raw(1),
+      Box::new(ManualClock::default()),
+    );
 
-    let json = serde_json::to_value(AppSnapshot::read(&backend, SecuritySnapshot::default())).unwrap();
+    let json = serde_json::to_value(AppSnapshot {
+      snapshot: ChatSnapshot::read(&backend, SecuritySnapshot::default()),
+      former_users: backend.former_users(),
+    })
+    .unwrap();
 
     assert_eq!(
       json["me"]["id"], "1",

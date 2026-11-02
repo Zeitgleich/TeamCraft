@@ -985,6 +985,7 @@ final class AppModel {
     }
     Task { [weak self] in await self?.refreshLinkRequests() }
     Task { [weak self] in await self?.refreshJoinRequests() }
+    Task { [weak self] in await self?.leaveIfStoreTurnedUnreadable() }
     guard maybeReconcile == nil else { return }
     maybeReconcile = Task { [weak self] in
       // Coalesces a burst of changes (a sync delivers many) into one pass.
@@ -1290,6 +1291,15 @@ final class AppModel {
       } else {
         phase = .failed(AppFailure(failure))
       }
+    }
+  }
+
+  /// The app shows what the store holds before the core's client opened. Should that find the store
+  /// unreadable after all, the core says so on the next change (issue #414).
+  private func leaveIfStoreTurnedUnreadable() async {
+    guard case .ready = phase, let maybeCore else { return }
+    if case .storeUnreadable(let problem)? = try? await maybeCore.accountState() {
+      phase = .storeUnreadable(problem, failure: nil)
     }
   }
 

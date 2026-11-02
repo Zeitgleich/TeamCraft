@@ -2,9 +2,11 @@
 //! Android app now and the iOS app later, generated with UniFFI.
 //!
 //! The core's futures aren't `Send` (one engine per device, single-threaded like the browser), and
-//! UniFFI's async calls need `Send` futures. So one engine thread owns the client, the store and
-//! the sync loop; every call posts a job to it and awaits the answer. The app supplies access
-//! tokens ([`TokenProvider`]) and is told when to re-read ([`EventListener`]).
+//! UniFFI's async calls need `Send` futures. So one engine thread owns the client and the sync loop;
+//! a call that needs them posts a job to it and awaits the answer. What the app reads from the local
+//! store, and the local half of its actions, run on a read thread beside it ([`reads`]), so they
+//! don't wait for the network. The app supplies access tokens ([`TokenProvider`]) and is told when
+//! to re-read ([`EventListener`]).
 
 mod bridge;
 mod calls;
@@ -15,13 +17,14 @@ mod join_requests;
 mod logging;
 mod markup;
 mod media_viewer;
+mod reads;
 mod row_badge;
 mod server_entry;
 mod types;
 mod video;
 
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex, OnceLock, PoisonError};
+use std::sync::{Arc, Mutex, PoisonError, RwLock};
 use std::time::{Duration, Instant};
 
 pub use calls::{
@@ -47,6 +50,7 @@ pub use server_entry::{
   CheckedServer, ServerAddress, ServerEntryError, SignInOption, SignInPageInfo, StoredServer,
   check_server_info, normalize_server_address, sign_in_page, sso_only_sign_in_page, stored_server,
 };
+use teamcraft_client_api::remote::ChatAction;
 use teamcraft_core::api::proxy::SystemProxy;
 use teamcraft_core::clock::{Clock as _, SystemClock};
 use teamcraft_core::connection::{ConnectionStatus, NetworkChanges};
@@ -65,20 +69,21 @@ pub use types::{
 
 pub use video::{CameraFrame, VideoFrameRgba};
 
-use crate::engine::{Engine, Job, PushOpening, PushReader};
+use crate::engine::{Engine, EngineThreads, Job, PushOpening, PushReader};
 use crate::logging::{LifecycleStep, outcome};
+use crate::reads::{ReadQueue, Reads};
 
 uniffi::setup_scaffolding!();
 
 /// The app's handle on the client core of one signed-in account.
 #[derive(uniffi::Object)]
 pub struct TeamCraft {
-  /// The engine thread's queue, set once the engine runs: unset while the local store is
-  /// unreadable, until [`Self::reset_store`] (issue #414).
-  jobs: OnceLock<mpsc::UnboundedSender<Job>>,
-  /// While the local store is unreadable: why, and what opens the engine after a reset. `None` once
-  /// the engine runs (only ever taken away, under its lock, when `jobs` is set).
-  recovery: Mutex<Option<StoreRecovery>>,
+  /// The engine's queues: unset while the local store is unreadable from the start, replaced by
+  /// [`Self::reset_store`] (issue #414).
+  threads: RwLock<Option<EngineThreads>>,
+  /// While the local store is unreadable: why, and what opens the engine after a reset. The engine
+  /// thread sets it when only the client finds that out, once the app can read.
+  recovery: Arc<Mutex<Option<StoreRecovery>>>,
   /// Network changes the app reports; the sync loop (and later calls) listen.
   network: NetworkChanges,
   connection: ConnectionStatus,
@@ -150,7 +155,7 @@ impl TeamCraft {
     };
     let job: Job = Box::new(move |engine| Box::pin(async move { engine.report_activity(device_activity) }));
     // No engine while the store is unreadable, and a closing handle refuses: nothing to report to.
-    if let Some(jobs) = self.jobs.get() {
+    if let Ok(jobs) = self.engine_jobs() {
       let _ = jobs.send(job);
     }
   }
@@ -158,6 +163,18 @@ impl TeamCraft {
   pub async fn account_state(&self) -> Result<AccountState, TeamCraftError> {
     if let Some(problem) = self.unreadable_problem() {
       return Ok(AccountState::StoreUnreadable { problem });
+    }
+    match self.read(|reads| Ok(reads.ready_account())).await {
+      Ok(Some(ready)) => return Ok(ready),
+      Ok(None) => {},
+      // The client found the store unreadable while this was on its way.
+      Err(TeamCraftError::EngineStopped) => {
+        if let Some(problem) = self.unreadable_problem() {
+          return Ok(AccountState::StoreUnreadable { problem });
+        }
+        return Err(TeamCraftError::EngineStopped);
+      },
+      Err(error) => return Err(error),
     }
     self.call(|engine| Box::pin(engine.account_state())).await
   }
@@ -176,7 +193,7 @@ impl TeamCraft {
       ));
     };
     engine::set_store_aside(&unreadable.start.store_path(), SystemClock.now_ms())?;
-    let jobs = engine::spawn(&unreadable.start).map_err(|error| match error {
+    let threads = engine::spawn(&unreadable.start, self.late_problem()).map_err(|error| match error {
       // A new, empty store that doesn't open: no room or no permission, not the old data.
       engine::OpenError::Unreadable(_) => {
         TeamCraftError::Storage("the new local database can't be read".into())
@@ -184,8 +201,7 @@ impl TeamCraft {
       engine::OpenError::Failed(error) => error,
     })?;
     tracing::info!(target: logging::LIFECYCLE, step = ?LifecycleStep::ResetStore, "done");
-    // Invariant: `jobs` is unset while `recovery` holds something, and only set here.
-    let _ = self.jobs.set(jobs);
+    *self.threads.write().unwrap_or_else(PoisonError::into_inner) = Some(threads);
     *recovery = None;
     Ok(())
   }
@@ -369,7 +385,7 @@ impl TeamCraft {
   /// is back.
   pub async fn pending_work(&self) -> Result<PendingWorkItem, TeamCraftError> {
     self
-      .call(|engine| Box::pin(async move { engine.pending_work() }))
+      .read(|reads| reads.pending_work())
       .await
       .map(PendingWorkItem::from)
   }
@@ -401,25 +417,19 @@ impl TeamCraft {
 
   /// Channels of every space and the user's DMs, as the sidebar lists them.
   pub async fn conversations(&self) -> Result<Vec<ConversationItem>, TeamCraftError> {
-    self
-      .call(|engine| Box::pin(async move { engine.conversations() }))
-      .await
+    self.read(|reads| reads.conversations()).await
   }
 
   /// Where a share from another app can go: the conversations the user may post in, their notes
   /// first, then by last activity (issue #829).
   pub async fn share_targets(&self) -> Result<Vec<ConversationItem>, TeamCraftError> {
-    self
-      .call(|engine| Box::pin(async move { engine.share_targets() }))
-      .await
+    self.read(|reads| reads.share_targets()).await
   }
 
   /// How far conversations with messages waiting for keys have caught up (a newly linked device,
   /// issue #888); `None` while nothing waits. Read again after each change notification.
   pub async fn key_catch_up(&self) -> Result<Option<KeyCatchUpItem>, TeamCraftError> {
-    self
-      .call(|engine| Box::pin(async move { engine.key_catch_up() }))
-      .await
+    self.read(|reads| reads.key_catch_up()).await
   }
 
   /// The newest `limit` top-level messages, oldest first.
@@ -429,7 +439,7 @@ impl TeamCraft {
     limit: u32,
   ) -> Result<Vec<MessageItem>, TeamCraftError> {
     self
-      .call(move |engine| Box::pin(async move { engine.messages(&conversation_id, limit) }))
+      .read(move |reads| reads.messages(&conversation_id, limit))
       .await
   }
 
@@ -445,15 +455,13 @@ impl TeamCraft {
     older: u32,
   ) -> Result<MessagePage, TeamCraftError> {
     self
-      .call(move |engine| {
-        Box::pin(async move {
-          engine.messages_from(
-            &conversation_id,
-            maybe_oldest_id.as_deref(),
-            oldest_sent_at_ms,
-            older,
-          )
-        })
+      .read(move |reads| {
+        reads.messages_from(
+          &conversation_id,
+          maybe_oldest_id.as_deref(),
+          oldest_sent_at_ms,
+          older,
+        )
       })
       .await
   }
@@ -465,7 +473,7 @@ impl TeamCraft {
     thread_id: String,
   ) -> Result<Vec<MessageItem>, TeamCraftError> {
     self
-      .call(move |engine| Box::pin(async move { engine.thread(&conversation_id, &thread_id) }))
+      .read(move |reads| reads.thread(&conversation_id, &thread_id))
       .await
   }
 
@@ -477,22 +485,20 @@ impl TeamCraft {
     body: String,
   ) -> Result<(), TeamCraftError> {
     self
-      .call(move |engine| Box::pin(engine.send_message(conversation_id, maybe_thread_id, body)))
+      .act_locally(move |reads| reads.send_message(conversation_id, maybe_thread_id, body))
       .await
   }
 
   pub async fn mark_read(&self, conversation_id: String) -> Result<(), TeamCraftError> {
     self
-      .call(move |engine| Box::pin(engine.mark_read(conversation_id)))
+      .act_locally(move |reads| reads.mark_read(conversation_id))
       .await
   }
 
   /// How many conversations the server just claimed deleted at once, if that looks suspect (e2ee.md
   /// §4.6); 0 otherwise. The app tells the user once.
   pub async fn take_suspect_deletions(&self) -> Result<u32, TeamCraftError> {
-    self
-      .call(move |engine| Box::pin(engine.take_suspect_deletions()))
-      .await
+    self.act_locally(|reads| reads.take_suspect_deletions()).await
   }
 
   /// Whether the conversation's long-press menu offers "Leave" (#1105).
@@ -501,48 +507,40 @@ impl TeamCraft {
     conversation_id: String,
   ) -> Result<LeaveChoice, TeamCraftError> {
     self
-      .call(move |engine| Box::pin(async move { engine.conversation_leave_choice(&conversation_id) }))
+      .read(move |reads| reads.conversation_leave_choice(&conversation_id))
       .await
   }
 
   /// What a space's menu needs; `None` for a space the account isn't in.
   pub async fn space_menu(&self, space_id: String) -> Result<Option<SpaceMenuItem>, TeamCraftError> {
-    self
-      .call(move |engine| Box::pin(async move { engine.space_menu(&space_id) }))
-      .await
+    self.read(move |reads| reads.space_menu(&space_id)).await
   }
 
   /// Marks every unread channel of the space as read (queued offline like `mark_read`).
   pub async fn mark_space_read(&self, space_id: String) -> Result<(), TeamCraftError> {
     self
-      .call(move |engine| Box::pin(engine.mark_space_read(space_id)))
+      .act_locally(move |reads| reads.mark_space_read(space_id))
       .await
   }
 
   /// Leaves the space and its channels; refused where its menu doesn't offer it.
   pub async fn leave_space(&self, space_id: String) -> Result<(), TeamCraftError> {
-    self
-      .call(move |engine| Box::pin(engine.leave_space(space_id)))
-      .await
+    self.act_locally(move |reads| reads.leave_space(space_id)).await
   }
 
   pub async fn set_favorite(&self, conversation_id: String, is_favorite: bool) -> Result<(), TeamCraftError> {
     self
-      .call(move |engine| Box::pin(engine.set_favorite(conversation_id, is_favorite)))
+      .act_locally(move |reads| reads.set_favorite(conversation_id, is_favorite))
       .await
   }
 
   pub async fn set_presence(&self, presence: Presence) -> Result<(), TeamCraftError> {
-    self
-      .call(move |engine| Box::pin(engine.set_presence(presence)))
-      .await
+    self.act_locally(move |reads| reads.set_presence(presence)).await
   }
 
   /// Full-text search over decrypted messages (`from:`, `in:` and the other filters work).
   pub async fn search(&self, query: String) -> Result<Vec<SearchHitItem>, TeamCraftError> {
-    self
-      .call(move |engine| Box::pin(async move { engine.search(&query) }))
-      .await
+    self.read(move |reads| reads.search(&query)).await
   }
 
   /// Registers the device's push channel (e2ee.md §7): with a fresh push key the first time, under
@@ -644,15 +642,13 @@ impl TeamCraft {
     conversation_id: String,
   ) -> Result<Option<NotifiedConversation>, TeamCraftError> {
     self
-      .call(move |engine| Box::pin(async move { engine.notified_conversation(&conversation_id) }))
+      .read(move |reads| reads.notified_conversation(&conversation_id))
       .await
   }
 
   /// What this device saw of pushes (notification diagnostics).
   pub async fn push_diagnostics(&self) -> Result<PushDiagnosticsInfo, TeamCraftError> {
-    self
-      .call(|engine| Box::pin(async move { engine.push_diagnostics() }))
-      .await
+    self.read(|reads| reads.push_diagnostics()).await
   }
 
   /// Asks the server for a sealed test wake-up to this device; it arrives like any push.
@@ -669,16 +665,12 @@ impl TeamCraft {
 
   /// The saved mention preferences (kept in the store, so the push extension applies them too).
   pub async fn mention_settings(&self) -> Result<MentionSettings, TeamCraftError> {
-    self
-      .call(|engine| Box::pin(async move { Ok(engine.mention_settings()) }))
-      .await
+    self.read(|reads| Ok(reads.mention_settings())).await
   }
 
   /// How much message notifications show: this device's setting and the workspace policy's limit.
   pub async fn notification_content(&self) -> Result<NotificationContentSettings, TeamCraftError> {
-    self
-      .call(|engine| Box::pin(async move { Ok(engine.notification_content()) }))
-      .await
+    self.read(|reads| Ok(reads.notification_content())).await
   }
 
   /// Sets this device's notification privacy setting; the workspace policy can only lower it.
@@ -691,9 +683,7 @@ impl TeamCraft {
   /// When search index segments are prefetched; the platform schedules the work (see
   /// `prefetch_segments`).
   pub async fn segment_prefetch(&self) -> Result<SegmentPrefetchMode, TeamCraftError> {
-    self
-      .call(|engine| Box::pin(async move { engine.segment_prefetch() }))
-      .await
+    self.read(|reads| reads.segment_prefetch()).await
   }
 
   pub async fn set_segment_prefetch(&self, mode: SegmentPrefetchMode) -> Result<(), TeamCraftError> {
@@ -729,9 +719,7 @@ impl TeamCraft {
   /// Everything the conversation list and headers show, as JSON (`ChatSnapshot` of
   /// teamcraft-client-api: users, spaces, conversations with unread counts, message counts, keys).
   pub async fn snapshot(&self) -> Result<String, TeamCraftError> {
-    self
-      .call(|engine| Box::pin(async move { engine.snapshot_json() }))
-      .await
+    self.read(|reads| reads.snapshot_json()).await
   }
 
   /// `len` messages of a conversation's feed from `start` on, oldest first, as JSON
@@ -743,7 +731,7 @@ impl TeamCraft {
     len: u32,
   ) -> Result<String, TeamCraftError> {
     self
-      .call(move |engine| Box::pin(async move { engine.window_json(&conversation_id, start, len) }))
+      .read(move |reads| reads.window_json(&conversation_id, start, len))
       .await
   }
 
@@ -756,15 +744,13 @@ impl TeamCraft {
     older: u32,
   ) -> Result<String, TeamCraftError> {
     self
-      .call(move |engine| {
-        Box::pin(async move {
-          engine.tail_json(
-            &conversation_id,
-            maybe_oldest_id.as_deref(),
-            oldest_sent_at_ms,
-            older,
-          )
-        })
+      .read(move |reads| {
+        reads.tail_json(
+          &conversation_id,
+          maybe_oldest_id.as_deref(),
+          oldest_sent_at_ms,
+          older,
+        )
       })
       .await
   }
@@ -773,17 +759,17 @@ impl TeamCraft {
   /// delete, forward, pin, save, mark (un)read, drafts, threads, presence and status, channels,
   /// downloads and share links. Admin actions stay on desktop and web.
   pub async fn act(&self, action_json: String) -> Result<(), TeamCraftError> {
-    self
-      .call(move |engine| Box::pin(async move { engine.act(&action_json).await }))
-      .await
+    let action: ChatAction = bridge::from_json(&action_json)?;
+    if bridge::needs_client(&action) {
+      return self.call(move |engine| Box::pin(engine.act(action))).await;
+    }
+    self.act_locally(move |reads| reads.apply_action(action)).await
   }
 
   /// Answers a `ChatQuery` (JSON, tagged by `kind`) with a `ChatAnswer` (JSON, tagged by `answer`):
   /// message extras, threads, pins, saved items, drafts, files, channel browser, search, mentions.
   pub async fn query(&self, query_json: String) -> Result<String, TeamCraftError> {
-    self
-      .call(move |engine| Box::pin(async move { engine.query_json(&query_json) }))
-      .await
+    self.read(move |reads| reads.query_json(&query_json)).await
   }
 
   /// An authenticated call to a plain server endpoint under `/api/v1` (notification settings,
@@ -1126,16 +1112,18 @@ impl TeamCraft {
       catch_up_focus: Default::default(),
     };
     let start = engine::EngineStart::new(config, tokens, listener, signals)?;
-    let (jobs, maybe_recovery) = match engine::spawn(&start) {
-      Ok(jobs) => (OnceLock::from(jobs), None),
+    let recovery = Arc::new(Mutex::new(None));
+    let threads = match engine::spawn(&start, late_problem(recovery.clone())) {
+      Ok(threads) => Some(threads),
       Err(engine::OpenError::Unreadable(problem)) => {
-        (OnceLock::new(), Some(StoreRecovery { problem, start }))
+        *recovery.lock().unwrap_or_else(PoisonError::into_inner) = Some(StoreRecovery { problem, start });
+        None
       },
       Err(engine::OpenError::Failed(error)) => return Err(error),
     };
     Ok(Arc::new(Self {
-      jobs,
-      recovery: Mutex::new(maybe_recovery),
+      threads: RwLock::new(threads),
+      recovery,
       network,
       connection,
       activity: Mutex::default(),
@@ -1166,12 +1154,44 @@ impl TeamCraft {
     answer.await.map_err(|_| TeamCraftError::EngineStopped)?
   }
 
-  /// The engine thread's queue; none while the local store is unreadable (issue #414).
-  fn engine_jobs(&self) -> Result<&mpsc::UnboundedSender<Job>, TeamCraftError> {
+  /// Runs `job` on the read thread: what the local store holds, without waiting for the engine.
+  async fn read<R, F>(&self, job: F) -> Result<R, TeamCraftError>
+  where
+    R: Send + 'static,
+    F: FnOnce(&mut Reads) -> Result<R, TeamCraftError> + Send + 'static,
+  {
+    self.read_queue()?.read(job).await
+  }
+
+  /// Runs an action's local half on the read thread and hands the rest to the engine.
+  async fn act_locally<R, F>(&self, job: F) -> Result<R, TeamCraftError>
+  where
+    R: Send + 'static,
+    F: FnOnce(&mut Reads) -> Result<R, TeamCraftError> + Send + 'static,
+  {
+    self.read_queue()?.act(job).await
+  }
+
+  /// The engine's queues; none while the local store is unreadable (issue #414).
+  fn threads(&self) -> Result<EngineThreads, TeamCraftError> {
     self
-      .jobs
-      .get()
+      .threads
+      .read()
+      .unwrap_or_else(PoisonError::into_inner)
+      .clone()
       .ok_or_else(|| TeamCraftError::Storage("the local data can't be read; set this device up again".into()))
+  }
+
+  fn engine_jobs(&self) -> Result<mpsc::UnboundedSender<Job>, TeamCraftError> {
+    Ok(self.threads()?.jobs)
+  }
+
+  fn read_queue(&self) -> Result<ReadQueue, TeamCraftError> {
+    Ok(self.threads()?.reads)
+  }
+
+  fn late_problem(&self) -> engine::LateProblem {
+    late_problem(self.recovery.clone())
   }
 
   /// Why the local store can't be read, while it can't.
@@ -1183,6 +1203,17 @@ impl TeamCraft {
       .as_ref()
       .map(|recovery| recovery.problem)
   }
+}
+
+/// Tells the handle that the client found the store unreadable after the app could already read.
+fn late_problem(recovery: Arc<Mutex<Option<StoreRecovery>>>) -> engine::LateProblem {
+  Box::new(move |problem, start, close_store| {
+    // Held while the store closes: whoever asks meanwhile waits and hears of the problem, not of a
+    // stopped thread, and no reset can start on a store that is still open.
+    let mut recovery = recovery.lock().unwrap_or_else(PoisonError::into_inner);
+    close_store();
+    *recovery = Some(StoreRecovery { problem, start });
+  })
 }
 
 #[cfg(test)]
@@ -1393,6 +1424,260 @@ mod tests {
       )
       .unwrap();
       store.get(Table::Account, "pending_device").unwrap().is_some()
+    }
+  }
+
+  /// What the app reads and does locally doesn't wait for the engine thread, and a token refresh
+  /// holds neither. Nothing here sleeps: each step waits for the signal of the one before.
+  mod read_thread {
+    use std::sync::mpsc;
+
+    use teamcraft_core::api::fake::FakeServer;
+    use teamcraft_core::{ClientSettings, EnrollmentOptions, EnrollmentSecret, PendingEnrollment};
+    use teamcraft_crypto::backup::Argon2Settings;
+    use teamcraft_crypto::secret::SecretBytes;
+
+    use super::*;
+
+    const UNREACHABLE_SERVER: &str = "http://127.0.0.1:9";
+    const CONVERSATION: &str = "42";
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn reads_answer_while_the_engine_thread_is_held() {
+      let directory = TestDir::new("held-reads");
+      enroll(&directory).await;
+      let core = open_with(&directory, Arc::new(NoTokens), Arc::new(Quiet));
+      let held = hold_engine(&core);
+
+      assert!(matches!(
+        core.account_state().await.unwrap(),
+        AccountState::Ready { .. }
+      ));
+      assert!(core.conversations().await.unwrap().is_empty());
+      assert!(!core.snapshot().await.unwrap().is_empty());
+      assert!(core.messages(CONVERSATION.into(), 10).await.unwrap().is_empty());
+      assert!(core.join_requests().await.unwrap().is_empty());
+
+      held.release().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_message_shows_before_the_engine_thread_is_free() {
+      let directory = TestDir::new("held-send");
+      enroll(&directory).await;
+      let (changed, changes) = mpsc::channel();
+      let core = open_with(&directory, Arc::new(NoTokens), Arc::new(Changes(changed)));
+      let held = hold_engine(&core);
+
+      let sending = {
+        let core = core.clone();
+        tokio::spawn(async move { core.send_message(CONVERSATION.into(), None, "hello".into()).await })
+      };
+      changes.recv().unwrap();
+      let shown = core.messages(CONVERSATION.into(), 10).await.unwrap();
+      assert_eq!(shown.len(), 1, "written locally already");
+      assert!(!sending.is_finished(), "the client hasn't had it yet");
+
+      held.release().await;
+      sending.await.unwrap().unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_token_refresh_holds_neither_reads_nor_the_engine() {
+      let directory = TestDir::new("token-refresh");
+      enroll(&directory).await;
+      let (entered, in_refresh) = mpsc::channel();
+      let (finish, finished) = mpsc::channel::<()>();
+      let tokens = Arc::new(BlockedTokens {
+        entered,
+        finished: Mutex::new(finished),
+      });
+      let core = open_with(&directory, tokens, Arc::new(Quiet));
+      // A task on the engine thread, standing in for the sync loop. A job couldn't show this: jobs
+      // run one after another, so the next one waits for the request's.
+      let (wake, woken) = tokio::sync::oneshot::channel::<()>();
+      let (ran, engine_ran) = tokio::sync::oneshot::channel::<()>();
+      core
+        .call(move |_| {
+          Box::pin(async move {
+            tokio::task::spawn_local(async move {
+              let _ = woken.await;
+              let _ = ran.send(());
+            });
+            Ok(())
+          })
+        })
+        .await
+        .unwrap();
+
+      let request = {
+        let core = core.clone();
+        tokio::spawn(async move { core.api_request("GET".into(), "/me".into(), None).await })
+      };
+      in_refresh.recv().unwrap();
+      assert!(core.conversations().await.is_ok(), "the read thread answers");
+      wake.send(()).unwrap();
+      engine_ran
+        .await
+        .expect("the engine thread runs during the refresh");
+
+      // Ends every refresh: the sync loop may have asked for a token as well.
+      drop(finish);
+      assert!(matches!(request.await.unwrap(), Err(TeamCraftError::Network(_))));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_store_only_the_client_finds_unreadable_leads_to_the_recovery() {
+      let directory = TestDir::new("late-problem");
+      enroll(&directory).await;
+      damage_sync_state(&directory);
+      let (changed, changes) = mpsc::channel();
+      let core = open_with(&directory, Arc::new(NoTokens), Arc::new(Changes(changed)));
+
+      // The app may have read meanwhile; the change says the client gave up.
+      changes.recv().unwrap();
+      assert!(matches!(
+        core.account_state().await.unwrap(),
+        AccountState::StoreUnreadable { .. }
+      ));
+
+      core.reset_store().unwrap();
+      assert!(core.mention_settings().await.is_ok());
+      assert_eq!(directory.files_containing(".unreadable-").len(), 1);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_notification_extension_hears_of_an_unreadable_store_when_it_opens() {
+      let directory = TestDir::new("extension");
+      enroll(&directory).await;
+      damage_sync_state(&directory);
+      let config = AppConfig {
+        is_memory_constrained: true,
+        ..config(&directory, KEY.to_vec())
+      };
+      let core = TeamCraft::new(config, Arc::new(NoTokens), Arc::new(Quiet)).unwrap();
+      assert!(matches!(
+        core.account_state().await.unwrap(),
+        AccountState::StoreUnreadable { .. }
+      ));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn repeated_snapshots_agree() {
+      let directory = TestDir::new("snapshots");
+      enroll(&directory).await;
+      let core = open_with(&directory, Arc::new(NoTokens), Arc::new(Quiet));
+      let first = core.snapshot().await.unwrap();
+      assert_eq!(core.snapshot().await.unwrap(), first);
+    }
+
+    /// The engine thread busy with a job until [`Held::release`].
+    struct Held {
+      release: mpsc::Sender<()>,
+      job: tokio::task::JoinHandle<Result<(), TeamCraftError>>,
+    }
+
+    impl Held {
+      async fn release(self) {
+        self.release.send(()).unwrap();
+        self.job.await.unwrap().unwrap();
+      }
+    }
+
+    fn hold_engine(core: &Arc<TeamCraft>) -> Held {
+      let (entered, inside) = mpsc::channel();
+      let (release, released) = mpsc::channel::<()>();
+      let job = {
+        let core = core.clone();
+        tokio::spawn(async move {
+          core
+            .call(move |_| {
+              Box::pin(async move {
+                entered.send(()).unwrap();
+                released.recv().unwrap();
+                Ok(())
+              })
+            })
+            .await
+        })
+      };
+      inside.recv().unwrap();
+      Held { release, job }
+    }
+
+    async fn enroll(directory: &TestDir) {
+      let store = SealedSqliteStore::open(
+        &directory.store(),
+        &StaticKeySource::new(SymmetricKey::from_bytes(KEY)),
+      )
+      .unwrap();
+      let client = PendingEnrollment::new()
+        .complete(
+          FakeServer::new().add_user("Alice"),
+          Arc::new(store),
+          Box::new(SystemClock),
+          ClientSettings::default(),
+          EnrollmentOptions {
+            device_name: "phone".into(),
+            secret: EnrollmentSecret::Passphrase(SecretBytes::new(b"passphrase".to_vec())),
+            argon2: Argon2Settings {
+              memory_kib: 1024,
+              iterations: 1,
+              parallelism: 1,
+            },
+            maybe_attestation: None,
+          },
+        )
+        .await
+        .unwrap();
+      drop(client);
+    }
+
+    /// A sync state that doesn't decode: only the client reads it.
+    fn damage_sync_state(directory: &TestDir) {
+      let store = SealedSqliteStore::open(
+        &directory.store(),
+        &StaticKeySource::new(SymmetricKey::from_bytes(KEY)),
+      )
+      .unwrap();
+      store
+        .put(Table::SyncState, teamcraft_core::records::SYNC_KEY, b"not json")
+        .unwrap();
+    }
+
+    fn open_with(
+      directory: &TestDir,
+      tokens: Arc<dyn TokenProvider>,
+      listener: Arc<dyn EventListener>,
+    ) -> Arc<TeamCraft> {
+      let config = AppConfig {
+        server_url: UNREACHABLE_SERVER.into(),
+        ..config(directory, KEY.to_vec())
+      };
+      TeamCraft::new(config, tokens, listener).unwrap()
+    }
+
+    struct Changes(mpsc::Sender<()>);
+
+    impl EventListener for Changes {
+      fn on_change(&self) {
+        // The test may be over.
+        let _ = self.0.send(());
+      }
+    }
+
+    /// A token refresh that takes until the test lets it finish.
+    struct BlockedTokens {
+      entered: mpsc::Sender<()>,
+      finished: Mutex<mpsc::Receiver<()>>,
+    }
+
+    impl TokenProvider for BlockedTokens {
+      fn access_token(&self) -> Option<String> {
+        let _ = self.entered.send(());
+        let _ = self.finished.lock().unwrap().recv();
+        Some("token".into())
+      }
     }
   }
 

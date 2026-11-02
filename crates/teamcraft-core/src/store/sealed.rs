@@ -22,7 +22,10 @@
 //! When the disk may no longer hold what the caches do (a group of writes rolled back, or another
 //! process committed: the iOS notification extension) the caches are dropped and read again; it is
 //! checked once a group of writes holds the database's write lock, and reads that walk several
-//! catalog nodes see one snapshot ([`RecordBackend::begin_read`]). The catalog is derived data: a
+//! catalog nodes see one snapshot ([`RecordBackend::begin_read`]). A group of writes belongs to the
+//! thread that opened it: on the one connection another thread would see the group's uncommitted
+//! records and could write into it, so every other thread waits until it ended. Groups are
+//! synchronous and never stay open across a network request. The catalog is derived data: a
 //! node that is damaged or disagrees with the records makes the store build it again (a new
 //! generation) instead of failing, and the read or write is tried once more. The
 //! entries a rolled-back group deleted are remembered ([`LocalStore::lost_deletes`]) for a backend
@@ -31,7 +34,8 @@
 
 use std::collections::{BTreeSet, HashMap};
 use std::ops::Bound;
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard};
+use std::thread::{self, ThreadId as ThreadIdStd};
 
 use rand_core::OsRng;
 use serde::{Deserialize, Serialize};
@@ -67,6 +71,8 @@ pub struct SealedStore<B> {
   /// Shared with the seals a backend runs later ([`LazySeal`]).
   keys: Arc<LocalStoreKeys>,
   state: Mutex<State<B>>,
+  /// Told when [`State::maybe_group_owner`] became free.
+  group_ended: Condvar,
   entries: Mutex<EntryLog>,
 }
 
@@ -96,6 +102,8 @@ struct State<B> {
   /// Raised whenever the caches are dropped: part of every revision.
   epoch: u64,
   depth: u32,
+  /// The thread whose group of writes is open; every other thread waits in [`SealedStore::lock`].
+  maybe_group_owner: Option<ThreadIdStd>,
   /// The backend's tally when last looked at: a change means the disk moved under the caches.
   maybe_tally: Option<WriteTally>,
   /// The catalog's current generation and whether it is complete; `None`: never started.
@@ -286,12 +294,14 @@ impl<B: RecordBackend> SealedStore<B> {
         revisions: HashMap::new(),
         epoch: 0,
         depth: 0,
+        maybe_group_owner: None,
         maybe_tally,
         maybe_catalog: None,
         is_catalog_damaged: false,
         is_building: false,
         maybe_rebuild: None,
       }),
+      group_ended: Condvar::new(),
       entries: Mutex::default(),
     })
   }
@@ -634,7 +644,14 @@ impl<B: RecordBackend> SealedStore<B> {
   fn lock(&self) -> MutexGuard<'_, State<B>> {
     // A poisoned lock only means another thread panicked; the caches stay consistent with what
     // each step wrote.
-    self.state.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+    let state = self.state.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let me = thread::current().id();
+    self
+      .group_ended
+      .wait_while(state, |state| {
+        state.maybe_group_owner.is_some_and(|owner| owner != me)
+      })
+      .unwrap_or_else(|poisoned| poisoned.into_inner())
   }
 
   /// Runs `step` on `table`'s key directory.
@@ -1422,6 +1439,8 @@ impl<B: RecordBackend> LocalStore for SealedStore<B> {
   }
 
   fn purge_freed(&self) -> Result<(), StoreError> {
+    // Not in the middle of another thread's group on this connection.
+    let _state = self.lock();
     self.backend.purge_freed()
   }
 
@@ -1436,6 +1455,7 @@ impl<B: RecordBackend> LocalStore for SealedStore<B> {
       // Looked at once the group holds the write lock: a commit of another process it waited for
       // counts, and nobody else commits from here on.
       self.follow_disk(&mut state);
+      state.maybe_group_owner = Some(thread::current().id());
     }
     state.depth += 1;
     drop(state);
@@ -1446,6 +1466,7 @@ impl<B: RecordBackend> LocalStore for SealedStore<B> {
   fn end_writes(&self) -> Result<(), StoreError> {
     let mut state = self.lock();
     state.depth = state.depth.saturating_sub(1);
+    let is_group_over = state.depth == 0;
     if state.depth == 0
       && (state.message_nodes.has_dirty()
         || state.directory_nodes.has_dirty()
@@ -1477,6 +1498,11 @@ impl<B: RecordBackend> LocalStore for SealedStore<B> {
           log.lost_deletes.insert((table, key));
         }
       }
+    }
+    drop(log);
+    if is_group_over {
+      self.lock().maybe_group_owner = None;
+      self.group_ended.notify_all();
     }
     ended
   }

@@ -6,6 +6,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.update
+import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
@@ -70,7 +71,6 @@ class CoreRepository(
       it.close()
       onAccountClosed()
     }
-    NetworkTrust.awaitTrustedCertificates()
     val core = withContext(Dispatchers.IO) {
       TeamCraft(
         AppConfig(
@@ -107,7 +107,14 @@ class CoreRepository(
       .readOrCreate(DATABASE_KEY_LENGTH)
 
   private class Tokens(private val auth: AuthRepository) : TokenProvider {
-    override fun accessToken(): String? = auth.accessToken()
+    /**
+     * Called on the core's own token thread, never on one that reads. Every authenticated request
+     * of the core passes here, so reading what the store holds doesn't wait for the device's CAs.
+     */
+    override fun accessToken(): String? = runBlocking {
+      NetworkTrust.awaitTrustedCertificates()
+      auth.accessToken()
+    }
   }
 
   private class Changes(private val onChange: () -> Unit) : EventListener {

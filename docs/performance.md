@@ -1294,6 +1294,27 @@ image does not boot on this AMD host), signed out:
 | Cold start to the first frame (`am start -W`) | 1.0–1.2 s |
 | Memory after start (PSS)                      | 95 MiB    |
 
+### Mobile core: start and channel switch on a large workspace
+
+`crates/teamcraft-ffi/tests/start_budget.rs` measures through the API the apps call, on a sealed
+store with 300 conversations, 100,000 messages (half in one) and 3,000 MLS values of 4 KiB; no server
+is reachable. Release build on a desktop machine, not a phone: a phone is several times slower, so
+read these as a comparison, and the logs (`slow read`, `slow engine job`) for the device.
+
+| Measured                                      | Engine thread only | Read thread | Budget (mobile) |
+|-----------------------------------------------|--------------------|-------------|-----------------|
+| Constructor returns                           | 77 ms              | 1 ms        |                 |
+| List usable (first snapshot)                  | 2165 ms            | 1474 ms     | 2000 ms         |
+| List usable, a token refresh takes 3 s        | 5262 ms            | 1476 ms     | 2000 ms         |
+| Snapshot again, nothing changed               | 1358 ms            | 0.2 ms      |                 |
+| Same, a token refresh takes 3 s               | 4385 ms            | 0.3 ms      |                 |
+| Channel switch p95                            | 0.7 ms             | 0.7 ms      | 150 ms          |
+| Channel switch p95, a token refresh takes 3 s | 3001 ms            | 0.5 ms      | 150 ms          |
+
+Still open: the first snapshot reads and decrypts every message of every conversation for its counts
+(`entry_counts`), about 1.4 s here, so a phone with this workspace stays over the budget until the
+counts are kept. It no longer holds anything else up: the channel list is what waits.
+
 ### Web bundle size
 
 Two budgets, both on the **compressed** wasm (issue #910's follow-up, 2026-10-31). The strict one
