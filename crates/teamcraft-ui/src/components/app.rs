@@ -146,6 +146,7 @@ pub fn Shell(backend: Rc<dyn Backend>, settings: Settings) -> impl IntoView {
   change_source.set_change_notifier(Rc::new(move || state.backend_changed()));
   // A failed action is never silent (issue #322).
   crate::feedback::set_failure_sink(move |failure| state.show_failure(i18n, &failure));
+  Effect::new(move |_| state.tell_suspect_deletions(i18n));
   // Preferences the server enforces (push, do not disturb, mutes) follow the account on the server.
   if let Some(sync) = use_context::<StoredValue<NotificationSync, LocalStorage>>() {
     sync.get_value().start(settings);

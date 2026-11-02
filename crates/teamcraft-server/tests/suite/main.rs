@@ -21,6 +21,7 @@ mod call_features;
 mod call_move;
 mod call_roster;
 mod calls;
+mod channel_deletion;
 mod channel_images;
 mod channel_roles;
 mod conversations;

@@ -158,7 +158,7 @@ impl Database {
       let joined = sqlx::query_scalar!(
         r#"INSERT INTO memberships (conversation_id, user_id, role)
            SELECT c.id, $2, 'member' FROM conversations c
-           WHERE c.id = ANY($1) AND c.space_id = $3 AND c.kind = 'channel'
+           WHERE c.id = ANY($1) AND c.space_id = $3 AND c.kind = 'channel' AND c.deleted_at IS NULL
            ON CONFLICT DO NOTHING RETURNING conversation_id"#,
         &invite.channel_ids,
         to_db(user),
@@ -200,7 +200,7 @@ impl Database {
     let joined_spaces = sqlx::query_scalar!(
       r#"INSERT INTO space_members (space_id, user_id, role)
          SELECT s.id, $2, 'member' FROM spaces s
-         WHERE s.id = ANY($1) AND s.archived_at IS NULL
+         WHERE s.id = ANY($1) AND s.archived_at IS NULL AND s.deleted_at IS NULL
          ON CONFLICT (space_id, user_id) DO NOTHING RETURNING space_id"#,
       &to_db_all(spaces),
       to_db(user),
@@ -212,7 +212,7 @@ impl Database {
       let joined = sqlx::query_scalar!(
         r#"INSERT INTO memberships (conversation_id, user_id, role)
            SELECT c.id, $2, 'member' FROM conversations c
-           WHERE c.space_id = $1 AND c.kind = 'channel' AND c.visibility = 'public'
+           WHERE c.space_id = $1 AND c.kind = 'channel' AND c.visibility = 'public' AND c.deleted_at IS NULL
              AND c.archived_at IS NULL AND c.id = ANY($3)
            ON CONFLICT DO NOTHING RETURNING conversation_id"#,
         space,

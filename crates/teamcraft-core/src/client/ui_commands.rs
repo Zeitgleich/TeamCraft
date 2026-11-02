@@ -237,7 +237,13 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
         self.decline_admin_join(conversation, user).await
       },
       CoreCommand::JoinSpace { space } => self.join_space(space).await,
-      CoreCommand::LeaveChannel { conversation } => self.leave_channel(conversation).await,
+      CoreCommand::LeaveChannel {
+        conversation,
+        deletes_if_last,
+      } => self.leave_channel(conversation, deletes_if_last).await,
+      CoreCommand::DismissSuspectDeletions => self.dismiss_suspect_deletions(),
+      CoreCommand::DeleteChannel { conversation } => self.delete_channel(conversation).await,
+      CoreCommand::DeleteSpace { space } => self.delete_space(space).await,
       CoreCommand::RefreshCategories { space } => self.refresh_categories(space).await.map(|_| ()),
       CoreCommand::CreateCategory { space, name } => self.create_category(space, &name).await,
       CoreCommand::RenameCategory {

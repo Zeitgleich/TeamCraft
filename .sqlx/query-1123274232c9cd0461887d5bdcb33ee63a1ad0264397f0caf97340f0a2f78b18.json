@@ -1,0 +1,16 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO memberships (conversation_id, user_id, role)\n         SELECT c.id, $2, $3 FROM conversations c WHERE c.id = $1 AND c.deleted_at IS NULL FOR SHARE\n         ON CONFLICT DO NOTHING",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Int8",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "1123274232c9cd0461887d5bdcb33ee63a1ad0264397f0caf97340f0a2f78b18"
+}

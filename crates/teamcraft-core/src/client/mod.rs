@@ -48,6 +48,7 @@ mod removal;
 mod segments;
 mod self_add;
 mod server_changes;
+pub(crate) mod server_deletions;
 mod sources;
 mod sync;
 mod sync_trace;
@@ -220,6 +221,15 @@ pub struct ClientSettings {
   /// How long an admin outside the group keeps checking that its posted removal doesn't get too
   /// old to be committed (it can't see the members' commit).
   pub removal_watch: std::time::Duration,
+  /// How long the messages of a conversation the server says was deleted stay on this device,
+  /// hidden, before they go (e2ee.md §4.6, "Deleting a channel"): the local copy may be the last.
+  pub deleted_conversation_retention: std::time::Duration,
+  /// More conversations than this claimed deleted within `suspect_deletion_window` are suspect,
+  /// and the user is told once.
+  pub suspect_deletion_count: usize,
+  /// So is more than this share of the user's conversations, in percent, from two on.
+  pub suspect_deletion_percent: usize,
+  pub suspect_deletion_window: std::time::Duration,
   /// Larger MLS group information is not sent with a commit (it would push the commit over the
   /// server's payload limit); a further device then waits for a member instead.
   pub max_group_info_bytes: usize,
@@ -398,6 +408,10 @@ impl Default for ClientSettings {
       revocation_check_delay: std::time::Duration::from_secs(5 * 60),
       max_pending_revocation_checks: 16,
       removal_watch: std::time::Duration::from_secs(30 * 24 * 60 * 60),
+      deleted_conversation_retention: std::time::Duration::from_secs(30 * 24 * 60 * 60),
+      suspect_deletion_count: 5,
+      suspect_deletion_percent: 50,
+      suspect_deletion_window: std::time::Duration::from_secs(60 * 60),
       max_group_info_bytes: 256 * 1024,
       max_missed_keys: 512,
       max_upload_bytes: 100 * 1024 * 1024,

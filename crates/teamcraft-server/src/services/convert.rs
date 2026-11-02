@@ -108,6 +108,8 @@ pub fn space_response(view: &SpaceView) -> SpaceResponse {
     can_add_members: false,
     can_invite_guests: false,
     can_manage_space: false,
+    can_delete_space: false,
+    deleted_channel_count: 0,
     can_create_channels: false,
   }
 }

@@ -27,7 +27,11 @@ enum ChatAction {
   case cancelUpload(conversationId: String, messageId: String, fileId: String)
   case joinChannel(conversationId: String)
   /// Leaves a channel (never a DM); the core sends it once the connection is back.
-  case leaveChannel(conversationId: String)
+  case leaveChannel(conversationId: String, deletesIfLast: Bool)
+  /// Deletes a channel for everybody, after the user confirmed it.
+  case deleteChannel(conversationId: String)
+  /// Deletes a space with its channels for everybody, after the user confirmed it.
+  case deleteSpace(spaceId: String)
   case createChannel(spaceId: String, name: String)
   /// The direct conversation with a person; created when there is none yet.
   case openDm(userId: String)
@@ -95,8 +99,12 @@ enum ChatAction {
       object = ["action": "open_group_dm", "users": users]
     case .refreshReadReceipts(let conversation):
       object = ["action": "refresh_read_receipts", "conversation": conversation]
-    case .leaveChannel(let conversation):
-      object = ["action": "leave_channel", "conversation": conversation]
+    case .leaveChannel(let conversation, let deletesIfLast):
+      object = ["action": "leave_channel", "conversation": conversation, "deletes_if_last": deletesIfLast]
+    case .deleteChannel(let conversation):
+      object = ["action": "delete_channel", "conversation": conversation]
+    case .deleteSpace(let space):
+      object = ["action": "delete_space", "space": space]
     case .markReactionsSeen(let conversation, let messages):
       object = ["action": "mark_reactions_seen", "conversation": conversation, "messages": messages]
     case .setDraft(let conversation, let maybeThread, let body):

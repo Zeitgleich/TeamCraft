@@ -71,6 +71,19 @@ wire_enum! {
     CannotDeleteSelf => "cannot_delete_self",
     /// Deleting the account would leave the workspace without an active admin.
     LastAdmin => "last_admin",
+    /// The last channel admin of an active channel with others in it hands the role on first, or
+    /// deletes the channel.
+    LastChannelAdmin => "last_channel_admin",
+    /// Nobody else is in this private channel: leaving deletes it, which takes `delete_if_last`.
+    LastMember => "last_member",
+    /// An import account holds the channel (docs/import-synology.md): it can't be deleted now.
+    ImportInProgress => "import_in_progress",
+    /// The space holds private channels the space admin isn't in; a workspace admin deletes it.
+    SpaceHasHiddenChannels => "space_has_hidden_channels",
+    /// A channel with members and no channel admin is restored once a workspace admin assigned one.
+    ChannelNeedsAdmin => "channel_needs_admin",
+    /// Only channels can be left or deleted this way, not DMs and group DMs.
+    NotAChannel => "not_a_channel",
     /// A guest tried to start a direct message the instance policy doesn't allow them to start
     /// (`guest_dm_start`, PLAN.md §12). Only given to guests about people they can already see.
     GuestDmNotAllowed => "guest_dm_not_allowed",

@@ -294,6 +294,8 @@ audit-admin-joined-channel = Admin ist Kanal beigetreten
 audit-owner-assigned = Eigentümer zugewiesen
 audit-guest-invited = Gast eingeladen
 audit-channel-archived = Kanal archiviert
+audit-channel-deleted = Kanal gelöscht
+audit-space-deleted = Space gelöscht
 
 ## Geräte-Freigabe, Verknüpfung und Schlüsseländerungen
 admin-left-in-group-title = Noch in verschlüsselten Gruppen, obwohl der Server sie nicht mehr als Mitglied führt
@@ -508,6 +510,8 @@ permission-manage_channel_properties = Kanaleigenschaften ändern
 permission-manage_channel_properties-hint = Name, Thema, Verlaufsregel.
 permission-convert_channel_privacy = Kanäle öffentlich oder privat machen
 permission-convert_channel_privacy-hint = Die Sichtbarkeit eines Kanals ändern.
+permission-delete_channel = Kanäle löschen
+permission-delete_channel-hint = Einen Kanal für alle löschen, mit Nachrichten und Dateien.
 permission-create_dm = Direktnachrichten beginnen
 permission-create_dm-hint = Eine Unterhaltung mit einer Person öffnen.
 permission-create_group_dm = Gruppennachrichten beginnen
@@ -544,6 +548,8 @@ permission-create_space = Bereiche erstellen
 permission-create_space-hint = Oberste Gruppen von Kanälen.
 permission-manage_space_properties = Bereichseigenschaften ändern
 permission-manage_space_properties-hint = Name und Einstellungen eines Bereichs.
+permission-delete_space = Spaces löschen
+permission-delete_space-hint = Einen Space für alle löschen, mit Kanälen, Nachrichten und Dateien.
 permission-manage_space_members = Bereichsmitglieder verwalten
 permission-manage_space_members-hint = Personen in einem Bereich hinzufügen und entfernen.
 permission-manage_workspace = Arbeitsbereich verwalten

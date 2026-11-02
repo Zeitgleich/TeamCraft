@@ -174,16 +174,7 @@ pub async fn load_conversation(
   caller: &AuthenticatedUser,
   id: ConversationId,
 ) -> Result<ConversationAccess, ApiError> {
-  let view = state
-    .database
-    .get_conversation(id, caller.user.id)
-    .await?
-    .ok_or_else(ApiError::conversation_not_found)?;
-  let maybe_space_role = match view.conversation.maybe_space_id {
-    Some(space) => state.database.space_role(space, caller.user.id).await?,
-    None => None,
-  };
-
+  let (view, maybe_space_role) = conversation_and_space_role(state, caller, id).await?;
   let conversation = &view.conversation;
   let is_channel = conversation.kind == ConversationKind::Channel;
   let is_visible = view.maybe_membership.is_some()
@@ -200,4 +191,21 @@ pub async fn load_conversation(
   } else {
     Err(ApiError::conversation_not_found())
   }
+}
+
+async fn conversation_and_space_role(
+  state: &AppState,
+  caller: &AuthenticatedUser,
+  id: ConversationId,
+) -> Result<(ConversationView, Option<SpaceRole>), ApiError> {
+  let view = state
+    .database
+    .get_conversation(id, caller.user.id)
+    .await?
+    .ok_or_else(ApiError::conversation_not_found)?;
+  let maybe_space_role = match view.conversation.maybe_space_id {
+    Some(space) => state.database.space_role(space, caller.user.id).await?,
+    None => None,
+  };
+  Ok((view, maybe_space_role))
 }

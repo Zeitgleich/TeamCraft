@@ -377,9 +377,30 @@ sign it yet (a follow-up of issue #380), so until then the new owner's role show
 | Set posting permissions (announcement channels), history policy, guest access                                               | v1    |
 | Retention per space/channel: last N days and/or last N messages; admin defaults and maximums, owners choose within them     | v1    |
 | Integration channels: who may create them, register bridges, default retention; allow server-readable mode (off by default) | v1    |
-| Delete a channel completely (all ciphertext + attachments)                                                                  | v1    |
+| Delete a channel completely (all ciphertext + attachments), members or not, archived or not; §3.1.1                         | v1    |
 | Default spaces/channels for new users (`policy.default_spaces` / `default_channels`, applied once at first sign-in)         | v1    |
 | Space templates                                                                                                             | later |
+
+#### 3.1.1 Leaving and deleting channels and spaces (issue #1130)
+
+| Case                                              | Who                                                                                                             | What happens                                                                                                                         |
+|---------------------------------------------------|-----------------------------------------------------------------------------------------------------------------|--------------------------------------------------------------------------------------------------------------------------------------|
+| Delete a channel (`delete_channel`)               | Channel admin, workspace admin, owner; space admin where they reach it (public, or they are in it)              | Gone for all members, also with people in it, active or archived. A channel the caller can't see answers 404                        |
+| Delete a space (`delete_space`)                   | Workspace admin, owner; space admin unless it holds a private channel they aren't in (409)                      | The space and all of its channels go for everybody in them; the confirmation names how many channels                                |
+| Either, while an import account holds a channel   | Nobody (409 `import_in_progress`)                                                                               | The import finishes first (docs/import-synology.md)                                                                                  |
+| Leave, archived channel                           | Anybody in it, also the last channel admin                                                                      | Allowed: an archived channel takes no role changes. Removing the last admin by somebody else stays refused                           |
+| Leave, last member of a private channel           | The last member, saying so (`delete_if_last`; otherwise 409 `last_member`, older clients leave it without members) | The channel is deleted. Leaving a space does the same for private channels only the leaver is in; its confirmation says so        |
+| Leave or removal, public or imported channel      | Anybody                                                                                                         | Stays without members, findable, for an admin to restore: anyone could join and leave to delete it, and imports can't come back      |
+| Admin removal or guest expiry of the last member  | As for any removal                                                                                              | Nothing is deleted                                                                                                                   |
+| Leave, active channel, last admin, others present | Refused (409 `last_channel_admin`)                                                                              | The refusal says the way out: make someone else channel admin, or delete the channel                                                 |
+
+An archived channel left without an admin stays for its members: they read it and may leave. Restoring
+it takes an admin (409 `channel_needs_admin`): a workspace admin assigns an owner (below) or deletes it.
+Roles are signed, so the server can't make the restorer one. Archiving and restoring take
+`manage_channel_properties`. None of this reaches content. On members' devices a deletion hides the
+conversation and keeps its messages for a while, since nobody signs it yet (e2ee.md §4.6). Deletions
+are in the audit log (`channel_deleted`, `channel_deleted_last_member`, `space_deleted`; a space leave
+names the channels it deleted in `space_member_removed`).
 
 ### 3.2 Users and guests
 

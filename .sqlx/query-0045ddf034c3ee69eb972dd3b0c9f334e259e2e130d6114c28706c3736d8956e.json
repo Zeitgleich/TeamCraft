@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "DELETE FROM attachments WHERE conversation_id = $1 AND completed_at IS NOT NULL",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int8"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "0045ddf034c3ee69eb972dd3b0c9f334e259e2e130d6114c28706c3736d8956e"
+}

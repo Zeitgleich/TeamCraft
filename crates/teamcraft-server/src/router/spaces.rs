@@ -14,7 +14,8 @@ pub(super) fn routes() -> OpenApiRouter<AppState> {
     ))
     .routes(routes!(
       handlers::get_space_handler,
-      handlers::update_space_handler
+      handlers::update_space_handler,
+      handlers::delete_space_handler
     ))
     .routes(routes!(
       handlers::list_categories_handler,

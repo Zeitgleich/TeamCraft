@@ -210,6 +210,12 @@ pub struct Space {
   /// server checks again).
   #[serde(default)]
   pub can_manage_space: bool,
+  /// May delete the space with its channels (`delete_space`); the server's word.
+  #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+  pub can_delete_space: bool,
+  /// How many channels go with the space, for the confirmation.
+  #[serde(default)]
+  pub deleted_channel_count: u32,
   /// Whether the user may create channels in the space (guests may not; the server checks
   /// again).
   #[serde(default)]
@@ -358,6 +364,8 @@ impl JoinableSpace {
       can_add_members: false,
       can_invite_guests: false,
       can_manage_space: false,
+      can_delete_space: false,
+      deleted_channel_count: 0,
       can_create_channels: false,
       maybe_my_role: None,
     }
@@ -458,6 +466,12 @@ pub struct Conversation {
   pub is_muted: bool,
   /// Whether the signed-in user may post (announcement and integration channels may forbid it).
   pub can_post: bool,
+  /// An archived channel: read-only, and its last admin may leave (#1130).
+  #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+  pub is_archived: bool,
+  /// Holds imported history (e2ee.md §4.10): the last member's leave doesn't delete it.
+  #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+  pub is_imported: bool,
   pub bookmarks: Vec<Bookmark>,
   /// The client is still catching up this conversation's history after being away (issue #247):
   /// what it shows may be incomplete.
@@ -521,6 +535,12 @@ impl Conversation {
       && self
         .maybe_holds(&Permission::ManageChannelProperties)
         .unwrap_or(true)
+  }
+
+  /// Whether the user may delete the channel for everybody (`delete_channel`). Not undoable, so
+  /// unlike [`Self::can_manage_channel`] it is offered only on the server's word.
+  pub fn can_delete_channel(&self) -> bool {
+    !self.kind.is_direct_like() && self.maybe_holds(&Permission::DeleteChannel).unwrap_or(false)
   }
 
   /// Whether the server says the user holds `permission` here; `None` when it didn't say.
@@ -881,6 +901,8 @@ mod tests {
         is_catching_up: false,
         maybe_image_version: None,
         is_notes_to_self: false,
+        is_archived: false,
+        is_imported: false,
         maybe_permissions,
         has_only_deactivated_others: false,
       }

@@ -204,7 +204,8 @@ impl Database {
          FROM spaces s
          LEFT JOIN space_members m ON m.space_id = s.id AND m.user_id = $1
               AND (m.expires_at IS NULL OR m.expires_at > now())
-         WHERE ($2::bigint IS NULL OR s.id = $2)
+         WHERE s.deleted_at IS NULL
+           AND ($2::bigint IS NULL OR s.id = $2)
            AND ($2::bigint IS NOT NULL OR $4 OR m.user_id IS NOT NULL
                 OR ($3 AND s.join_policy = 'open' AND s.archived_at IS NULL))
          ORDER BY s.name, s.id"#,
@@ -418,8 +419,18 @@ impl Database {
     &self,
     space: SpaceId,
     user: UserId,
-  ) -> Result<Vec<teamcraft_proto::ConversationId>, DbError> {
+    deletes_memberless: bool,
+  ) -> Result<crate::SpaceLeft, DbError> {
     let mut tx = self.pool().begin().await?;
+    // Against a join or a leave at the same moment: who stays is counted below.
+    sqlx::query_scalar!(
+      r#"SELECT c.id FROM conversations c JOIN memberships m ON m.conversation_id = c.id
+         WHERE c.space_id = $1 AND m.user_id = $2 ORDER BY c.id FOR UPDATE OF c"#,
+      to_db(space),
+      to_db(user),
+    )
+    .fetch_all(&mut *tx)
+    .await?;
     let left = sqlx::query_scalar!(
       r#"DELETE FROM memberships USING conversations c
          WHERE memberships.conversation_id = c.id AND c.space_id = $1 AND memberships.user_id = $2
@@ -436,8 +447,16 @@ impl Database {
     )
     .execute(&mut *tx)
     .await?;
+    let deleted = if deletes_memberless {
+      crate::channel_deletion::mark_memberless_private_deleted(&mut tx, &left, user).await?
+    } else {
+      Vec::new()
+    };
     tx.commit().await?;
-    left.into_iter().map(from_db).collect()
+    Ok(crate::SpaceLeft {
+      left: left.into_iter().map(from_db).collect::<Result<_, _>>()?,
+      deleted: deleted.into_iter().map(from_db).collect::<Result<_, _>>()?,
+    })
   }
 
   /// Number of space admins; the last one can't be removed or demoted.

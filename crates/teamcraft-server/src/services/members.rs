@@ -1,10 +1,10 @@
 use serde_json::json;
-use teamcraft_db::{ConversationMember, MembershipChanges};
+use teamcraft_db::{ChannelFacts, ConversationMember, MembershipChanges, RemovalStep};
 use teamcraft_proto::{
   AddConversationMemberRequest, ChannelRole, ConversationId, ConversationMemberResponse,
   ConversationVisibility, GatewayEvent, ListConversationMembersResponse, MAX_REACTIONS_SEEN_PER_REQUEST,
-  MarkReactionsSeenRequest, Permission, SetReadPositionRequest, SpaceRole, SystemEventKind,
-  UpdateConversationMemberRequest, UserId,
+  MarkReactionsSeenRequest, Permission, RemoveMemberQuery, SetReadPositionRequest, SpaceRole,
+  SystemEventKind, UpdateConversationMemberRequest, UserId,
 };
 use tracing::warn;
 
@@ -173,25 +173,50 @@ pub async fn check_removal(
   caller: &AuthenticatedUser,
   id: ConversationId,
   user_id: UserId,
+  query: &RemoveMemberQuery,
 ) -> Result<(), ApiError> {
-  authorize_removal(state, caller, id, user_id).await.map(|_| ())
+  let access = load_conversation(state, caller, id).await?;
+  let facts = state
+    .database
+    .channel_facts(id)
+    .await?
+    .ok_or_else(ApiError::conversation_not_found)?;
+  decide_removal(state, caller, &access, user_id, query, &facts).map(|_| ())
 }
 
-/// Removes a member, or leaves when `user_id` is the caller. Idempotent: removing somebody who is
-/// no longer a member succeeds, so a retry after a lost answer or a second admin doing the same
-/// finishes instead of failing.
+/// Removes a member, or leaves when `user_id` is the caller. The last member's leave deletes a
+/// private channel if they said so. Idempotent: removing somebody who is no longer a member
+/// succeeds, so a retry after a lost answer or a second admin doing the same finishes instead of
+/// failing.
 pub async fn remove_member(
   state: &AppState,
   caller: &AuthenticatedUser,
   id: ConversationId,
   user_id: UserId,
+  query: &RemoveMemberQuery,
 ) -> Result<(), ApiError> {
-  let Some(members) = authorize_removal(state, caller, id, user_id).await? else {
-    return Ok(());
-  };
-  // The import account leaves without a line in the conversation (e2ee.md §4.10).
-  let was_importer = state.database.remove_importer(id, user_id).await?;
-  state.database.remove_conversation_member(id, user_id).await?;
+  let access = load_conversation(state, caller, id).await?;
+  let audit_target = AuditTarget::new("conversation", id);
+  let audit = audit::prepared(
+    state,
+    caller.user.id,
+    "channel_deleted_last_member",
+    &audit_target,
+  )?;
+  let done = state
+    .database
+    .remove_member_locked(id, user_id, &audit, |facts| {
+      decide_removal(state, caller, &access, user_id, query, facts)
+    })
+    .await?;
+  match done.step {
+    RemovalStep::Nothing => return Ok(()),
+    RemovalStep::DeleteChannel => {
+      super::conversations::announce_deleted(state, id, &done.members).await;
+      return Ok(());
+    },
+    RemovalStep::Remove => {},
+  }
   if user_id != caller.user.id {
     audit::record(
       state,
@@ -203,7 +228,7 @@ pub async fn remove_member(
     .await?;
   }
   state.hub.publish(
-    members.iter().map(|m| m.user.id),
+    done.members.iter().copied(),
     &GatewayEvent::MembershipRemove {
       conversation_id: id,
       user_id,
@@ -214,7 +239,8 @@ pub async fn remove_member(
   } else {
     SystemEventKind::MemberRemoved
   };
-  if !was_importer {
+  // The import account leaves without a line in the conversation (e2ee.md §4.10).
+  if !done.was_importer {
     system_events::emit(state, id, kind, Some(caller.user.id), Some(user_id)).await;
   }
   super::calls::evict_from_call(state, id, user_id).await;
@@ -407,50 +433,56 @@ pub async fn mark_reactions_seen(
   Ok(())
 }
 
-/// The permission checks of a removal. `None` if `user_id` isn't a member (nothing left to do),
-/// otherwise the current members.
-async fn authorize_removal(
+/// The rules of a removal, on facts read under the conversation's lock: who may remove whom, that
+/// an active channel keeps an admin, and that only the last member of a private channel that wasn't
+/// imported can delete it by leaving. Anyone can join a public channel and leave it again, and imported
+/// history can't come back, so those stay without members, findable for an admin (admin.md §3.1.1).
+fn decide_removal(
   state: &AppState,
   caller: &AuthenticatedUser,
-  id: ConversationId,
+  access: &ConversationAccess,
   user_id: UserId,
-) -> Result<Option<Vec<teamcraft_db::ConversationMember>>, ApiError> {
-  let access = load_conversation(state, caller, id).await?;
+  query: &RemoveMemberQuery,
+  facts: &ChannelFacts,
+) -> Result<RemovalStep, ApiError> {
+  let is_self = user_id == caller.user.id;
   // The import account leaves a DM or notes it imported into like a channel (e2ee.md §4.10).
-  let is_importer_leaving =
-    user_id == caller.user.id && access.view.conversation.maybe_importer == Some(caller.user.id);
-  if !is_importer_leaving {
-    ensure_open_channel_for_leaving(&access)?;
+  let is_importer_leaving = is_self && facts.maybe_importer == Some(caller.user.id);
+  if !is_importer_leaving && !facts.is_channel {
+    return Err(ApiError::NotAChannel);
   }
-  if user_id != caller.user.id {
+  if !is_self {
     require(state, caller, Permission::ManageMembers, &access.target())?;
   }
-  let members = state.database.list_conversation_members(id).await?;
-  let Some(target) = members.iter().find(|m| m.user.id == user_id) else {
-    return Ok(None);
+  let Some((_, target_role)) = facts.members.iter().find(|(member, _)| *member == user_id) else {
+    return Ok(RemovalStep::Nothing);
   };
   // Moderators remove members; removing a moderator or an admin takes the right to manage roles.
-  if user_id != caller.user.id && is_privileged(&target.role) {
+  if !is_self && is_privileged(target_role) {
     require(state, caller, Permission::ManageChannelRoles, &access.target())?;
   }
-  if target.role == ChannelRole::Admin
-    && members.len() > 1
-    && state.database.count_channel_admins(id).await? <= 1
-  {
-    return Err(ApiError::Conflict(
-      "make another member channel admin first".into(),
-    ));
+  let admins = facts
+    .members
+    .iter()
+    .filter(|(_, role)| *role == ChannelRole::Admin)
+    .count();
+  // An archived channel takes no role changes, so its last admin could never get out otherwise; a
+  // workspace admin can still assign an owner (admin.md §3.1.1).
+  let is_leaving_archived = is_self && facts.is_archived;
+  if *target_role == ChannelRole::Admin && facts.members.len() > 1 && admins <= 1 && !is_leaving_archived {
+    return Err(ApiError::LastChannelAdmin);
   }
-  Ok(Some(members))
-}
-
-fn ensure_open_channel_for_leaving(access: &ConversationAccess) -> Result<(), ApiError> {
-  if access.view.conversation.kind != teamcraft_proto::ConversationKind::Channel {
-    return Err(ApiError::InvalidRequest(
-      "not allowed for DMs and group DMs".into(),
-    ));
+  let can_delete_by_leaving = is_self
+    && facts.members.len() == 1
+    && facts.is_channel
+    && facts.is_private
+    && !facts.is_imported
+    && facts.maybe_importer.is_none();
+  match (can_delete_by_leaving, query.maybe_delete_if_last) {
+    (true, Some(true)) => Ok(RemovalStep::DeleteChannel),
+    (true, Some(false)) => Err(ApiError::LastMember),
+    _ => Ok(RemovalStep::Remove),
   }
-  Ok(())
 }
 
 async fn announce_added(

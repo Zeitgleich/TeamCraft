@@ -1446,8 +1446,30 @@ impl ChatBackend for RemoteChat {
     self.act(ChatAction::JoinSpace { space });
   }
 
-  fn leave_channel(&self, conversation: ConversationId) {
-    self.act(ChatAction::LeaveChannel { conversation });
+  fn leave_channel(&self, conversation: ConversationId, deletes_if_last: bool) {
+    self.act(ChatAction::LeaveChannel {
+      conversation,
+      deletes_if_last,
+    });
+  }
+
+  fn suspect_deletions(&self) -> u32 {
+    match self.ask(ChatQuery::SuspectDeletions) {
+      Some(ChatAnswer::SuspectDeletions { count }) => count,
+      _ => 0,
+    }
+  }
+
+  fn dismiss_suspect_deletions(&self) {
+    self.act(ChatAction::DismissSuspectDeletions);
+  }
+
+  fn delete_channel(&self, conversation: ConversationId) {
+    self.act(ChatAction::DeleteChannel { conversation });
+  }
+
+  fn delete_space(&self, space: SpaceId) {
+    self.act(ChatAction::DeleteSpace { space });
   }
 
   fn categories(&self, space: SpaceId) -> Vec<CategoryInfo> {

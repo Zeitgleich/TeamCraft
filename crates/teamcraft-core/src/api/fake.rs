@@ -200,6 +200,9 @@ struct State {
   admins: HashSet<UserId>,
   /// Direct messages deleted with a deleted account, per remaining participant.
   deleted_conversations: HashMap<UserId, Vec<ConversationId>>,
+  maybe_delete_answer: Option<(u16, ErrorCode)>,
+  /// Deleted spaces; the default one isn't made again.
+  deleted_spaces: HashSet<SpaceId>,
   attachments: HashMap<AttachmentId, FakeAttachment>,
   push_registrations: HashMap<DeviceId, RegisterPushRequest>,
   notification_settings: HashMap<UserId, NotificationSettings>,
@@ -1291,6 +1294,56 @@ impl FakeServer {
 
   /// Sends an event as the server would (for events whose endpoints the fake doesn't have, like
   /// read receipts and acknowledgements).
+  /// A sync's `deleted_conversation_ids` names this for `user`, true or not.
+  pub fn claim_deleted(&self, user: UserId, conversation: ConversationId) {
+    self
+      .lock()
+      .deleted_conversations
+      .entry(user)
+      .or_default()
+      .push(conversation);
+  }
+
+  /// The server stops listing the conversation for `user` and claims it was deleted: returns their
+  /// membership for [`Self::restore_for`].
+  pub fn hide_from(&self, user: UserId, conversation: ConversationId) -> Option<(ChannelRole, i64)> {
+    let mut state = self.lock();
+    state
+      .deleted_conversations
+      .entry(user)
+      .or_default()
+      .push(conversation);
+    state
+      .conversations
+      .get_mut(&conversation)
+      .and_then(|entry| entry.members.remove(&user))
+  }
+
+  /// Lists it again and takes the claim back.
+  pub fn restore_for(
+    &self,
+    user: UserId,
+    conversation: ConversationId,
+    membership: Option<(ChannelRole, i64)>,
+  ) {
+    let mut state = self.lock();
+    if let Some(claims) = state.deleted_conversations.get_mut(&user) {
+      claims.retain(|claimed| *claimed != conversation);
+    }
+    if let (Some(entry), Some(membership)) = (state.conversations.get_mut(&conversation), membership) {
+      entry.members.insert(user, membership);
+    }
+  }
+
+  pub fn has_conversation(&self, conversation: ConversationId) -> bool {
+    self.lock().conversations.contains_key(&conversation)
+  }
+
+  /// The next `delete_conversation` is answered with this error.
+  pub fn answer_next_delete_with(&self, status: u16, code: ErrorCode) {
+    self.lock().maybe_delete_answer = Some((status, code));
+  }
+
   pub fn publish_event(&self, users: &[UserId], event: &GatewayEvent) {
     self.lock().publish(users.iter().copied(), event);
   }
@@ -2495,8 +2548,11 @@ impl ServerApi for FakeServerApi {
     Ok(())
   }
 
-  async fn check_member_removal(&self, conversation: ConversationId, _user: UserId) -> Result<(), ApiError> {
-    self.with(|state, me| state.removal_target(conversation, me).map(|_| ()))
+  async fn check_member_removal(&self, conversation: ConversationId, user: UserId) -> Result<(), ApiError> {
+    self.with(|state, me| {
+      let entry = state.removal_target(conversation, me)?;
+      refuse_last_admin(entry, user, me)
+    })
   }
 
   async fn remove_member(&self, conversation: ConversationId, user: UserId) -> Result<(), ApiError> {
@@ -2510,6 +2566,7 @@ impl ServerApi for FakeServerApi {
         ));
       }
       let entry = state.removal_target(conversation, me)?;
+      refuse_last_admin(entry, user, me)?;
       let mut recipients: Vec<UserId> = entry.members.keys().copied().collect();
       if entry.members.remove(&user).is_none() {
         // Idempotent like the server: already gone.
@@ -2525,6 +2582,137 @@ impl ServerApi for FakeServerApi {
           user_id: user,
         },
       );
+      Ok(())
+    })
+  }
+
+  async fn check_leave(
+    &self,
+    conversation: ConversationId,
+    _me: UserId,
+    deletes_if_last: bool,
+  ) -> Result<(), ApiError> {
+    self.with(|state, me| {
+      let entry = state.removal_target(conversation, me)?;
+      refuse_last_admin(entry, me, me)?;
+      if last_member_step(entry, me) == LastMemberStep::Deletes && !deletes_if_last {
+        return Err(last_member_refusal());
+      }
+      Ok(())
+    })
+  }
+
+  async fn leave_conversation(
+    &self,
+    conversation: ConversationId,
+    _me: UserId,
+    deletes_if_last: bool,
+  ) -> Result<(), ApiError> {
+    self.with_removal_cut(|state, me| {
+      state.removal_requests += 1;
+      if state.refusing_removal_steps_by.contains(&me) {
+        return Err(ApiError::status(
+          403,
+          ErrorCode::Forbidden,
+          "may not remove members",
+        ));
+      }
+      let entry = state.removal_target(conversation, me)?;
+      refuse_last_admin(entry, me, me)?;
+      if last_member_step(entry, me) == LastMemberStep::Deletes {
+        if !deletes_if_last {
+          return Err(last_member_refusal());
+        }
+        state.delete_channel(conversation, vec![me]);
+        return Ok(());
+      }
+      let mut recipients: Vec<UserId> = entry.members.keys().copied().collect();
+      if entry.members.remove(&me).is_none() {
+        return Ok(());
+      }
+      recipients.retain(|member| *member != me);
+      recipients.push(me);
+      state.publish(
+        recipients,
+        &GatewayEvent::MembershipRemove {
+          conversation_id: conversation,
+          user_id: me,
+        },
+      );
+      Ok(())
+    })
+  }
+
+  async fn delete_space(&self, space: SpaceId) -> Result<(), ApiError> {
+    self.with(|state, me| {
+      let is_space_admin = state.space_roles.get(&(space, me)) == Some(&SpaceRole::SpaceAdmin);
+      if !is_space_admin && !state.admins.contains(&me) {
+        return Err(ApiError::status(
+          403,
+          ErrorCode::Forbidden,
+          "missing permission delete_space",
+        ));
+      }
+      let channels: Vec<(ConversationId, Vec<UserId>)> = state
+        .conversations
+        .iter()
+        .filter(|(_, entry)| entry.response.maybe_space_id == Some(space))
+        .map(|(id, entry)| (*id, entry.members.keys().copied().collect()))
+        .collect();
+      let mut told: Vec<UserId> = state
+        .space_roles
+        .keys()
+        .filter(|(of, _)| *of == space)
+        .map(|(_, user)| *user)
+        .collect();
+      for (channel, members) in channels {
+        told.extend(members.iter().copied());
+        state.delete_channel(channel, members);
+      }
+      if state.spaces.remove(&space).is_none() {
+        return Err(ApiError::status(404, ErrorCode::SpaceNotFound, "no such space"));
+      }
+      state.deleted_spaces.insert(space);
+      state.space_roles.retain(|(of, _), _| *of != space);
+      state.publish(told, &GatewayEvent::SpaceUpdate { space_id: space });
+      Ok(())
+    })
+  }
+
+  async fn delete_conversation(&self, conversation: ConversationId) -> Result<(), ApiError> {
+    self.with(|state, me| {
+      if let Some((status, code)) = state.maybe_delete_answer.take() {
+        return Err(ApiError::status(status, code, "refused"));
+      }
+      let is_instance_admin = state.admins.contains(&me);
+      let entry = state.actor_conversation_mut(conversation, me)?;
+      if entry.response.kind != ConversationKind::Channel {
+        return Err(ApiError::status(
+          400,
+          ErrorCode::NotAChannel,
+          "not allowed for DMs and group DMs",
+        ));
+      }
+      let is_channel_admin = entry
+        .members
+        .get(&me)
+        .is_some_and(|(own, _)| *own == ChannelRole::Admin);
+      if !is_channel_admin && !is_instance_admin {
+        return Err(ApiError::status(
+          403,
+          ErrorCode::Forbidden,
+          "missing permission delete_channel",
+        ));
+      }
+      if entry.response.maybe_importer_user_id.is_some() {
+        return Err(ApiError::status(
+          409,
+          ErrorCode::ImportInProgress,
+          "an import account holds this channel",
+        ));
+      }
+      let members = entry.members.keys().copied().collect();
+      state.delete_channel(conversation, members);
       Ok(())
     })
   }
@@ -3739,6 +3927,8 @@ impl ServerApi for FakeServerApi {
         can_add_members: true,
         can_invite_guests: true,
         can_manage_space: true,
+        can_delete_space: true,
+        deleted_channel_count: 0,
         can_create_channels: true,
       };
       state.spaces.insert(id, space.clone());
@@ -5503,6 +5693,9 @@ impl State {
   /// The default space as an entry of `spaces`, created on first use.
   fn default_space_entry(&mut self) {
     let id = self.space();
+    if self.deleted_spaces.contains(&id) {
+      return;
+    }
     self.spaces.entry(id).or_insert_with(|| SpaceResponse {
       id,
       name: "Space A".into(),
@@ -5519,6 +5712,8 @@ impl State {
       can_add_members: false,
       can_invite_guests: false,
       can_manage_space: false,
+      can_delete_space: false,
+      deleted_channel_count: 0,
       can_create_channels: false,
     });
   }
@@ -5604,6 +5799,24 @@ impl State {
 
   /// The conversation `me` may remove somebody from: as a member, or as a server admin (also in
   /// conversations they aren't in).
+  /// Like the server's `purge_channel`: gone for everybody, and recorded for devices that are away.
+  fn delete_channel(&mut self, conversation: ConversationId, members: Vec<UserId>) {
+    self.conversations.remove(&conversation);
+    for member in &members {
+      self
+        .deleted_conversations
+        .entry(*member)
+        .or_default()
+        .push(conversation);
+    }
+    self.publish(
+      members,
+      &GatewayEvent::ConversationDelete {
+        conversation_id: conversation,
+      },
+    );
+  }
+
   fn removal_target(
     &mut self,
     conversation: ConversationId,
@@ -6240,4 +6453,51 @@ fn default_notification_settings() -> NotificationSettings {
     maybe_level: None,
     maybe_default_level: None,
   }
+}
+
+/// The server's rule (`authorize_removal`): the last admin of an active channel with others in it
+/// hands the role on first; leaving an archived channel is always allowed.
+fn refuse_last_admin(entry: &Conversation, user: UserId, me: UserId) -> Result<(), ApiError> {
+  let is_admin = |role: &ChannelRole| *role == ChannelRole::Admin;
+  let is_last_admin = entry.members.get(&user).is_some_and(|(role, _)| is_admin(role))
+    && entry.members.values().filter(|(role, _)| is_admin(role)).count() <= 1;
+  let is_leaving_archived = user == me && entry.response.is_archived;
+  if entry.response.kind == ConversationKind::Channel
+    && is_last_admin
+    && entry.members.len() > 1
+    && !is_leaving_archived
+  {
+    return Err(ApiError::status(
+      409,
+      ErrorCode::LastChannelAdmin,
+      "make another member channel admin first, or delete the channel",
+    ));
+  }
+  Ok(())
+}
+
+#[derive(PartialEq)]
+enum LastMemberStep {
+  Deletes,
+  Stays,
+}
+
+/// The server's rule: only the last member of a private channel that wasn't imported deletes it.
+fn last_member_step(entry: &Conversation, me: UserId) -> LastMemberStep {
+  let response = &entry.response;
+  let deletes = entry.members.len() == 1
+    && entry.members.contains_key(&me)
+    && response.kind == ConversationKind::Channel
+    && response.visibility == ConversationVisibility::Private
+    && response.maybe_imported_through.is_none()
+    && response.maybe_importer_user_id.is_none();
+  if deletes {
+    LastMemberStep::Deletes
+  } else {
+    LastMemberStep::Stays
+  }
+}
+
+fn last_member_refusal() -> ApiError {
+  ApiError::status(409, ErrorCode::LastMember, "leaving deletes this channel")
 }

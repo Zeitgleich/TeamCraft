@@ -29,6 +29,8 @@ wire_enum! {
     ManageChannelRoles => "manage_channel_roles",
     ManageChannelProperties => "manage_channel_properties",
     ConvertChannelPrivacy => "convert_channel_privacy",
+    /// Delete a channel for everybody, archived or not. Reaches no content (admin.md §3.1).
+    DeleteChannel => "delete_channel",
     CreateDm => "create_dm",
     CreateGroupDm => "create_group_dm",
     CreateChannel => "create_channel",
@@ -47,6 +49,8 @@ wire_enum! {
     ManageBranding => "manage_branding",
     CreateSpace => "create_space",
     ManageSpaceProperties => "manage_space_properties",
+    /// Delete a space with all of its channels for everybody. Reaches no content (admin.md §3.1).
+    DeleteSpace => "delete_space",
     ManageSpaceMembers => "manage_space_members",
     /// Administration: all spaces and channels (metadata), users, devices, workspace policy (read).
     ManageWorkspace => "manage_workspace",
@@ -123,7 +127,11 @@ impl Permission {
       | P::ManageWorkspace
       | P::ManageUsers
       | P::SignWorkspace => S::Instance,
-      P::CreateChannel | P::InviteGuest | P::ManageSpaceProperties | P::ManageSpaceMembers => S::Space,
+      P::CreateChannel
+      | P::InviteGuest
+      | P::ManageSpaceProperties
+      | P::DeleteSpace
+      | P::ManageSpaceMembers => S::Space,
       P::CreatePost
       | P::AddReaction
       | P::RemoveOthersReactions
@@ -133,9 +141,11 @@ impl Permission {
       | P::UseGroupMentions
       | P::ManageBookmarks
       | P::CreateShareLink => S::ChannelContent,
-      P::ManageMembers | P::ManageChannelRoles | P::ManageChannelProperties | P::ConvertChannelPrivacy => {
-        S::ChannelManagement
-      },
+      P::ManageMembers
+      | P::ManageChannelRoles
+      | P::ManageChannelProperties
+      | P::ConvertChannelPrivacy
+      | P::DeleteChannel => S::ChannelManagement,
       P::Unknown(_) => return None,
     })
   }
@@ -256,12 +266,14 @@ impl Default for PermissionScheme {
       P::ManageChannelRoles,
       P::ManageChannelProperties,
       P::ConvertChannelPrivacy,
+      P::DeleteChannel,
       P::DeleteOthersPosts,
       P::RemoveOthersReactions,
     ];
     let channel_moderator = [P::ManageMembers, P::DeleteOthersPosts, P::RemoveOthersReactions];
     let space_admin = [
       P::ManageSpaceProperties,
+      P::DeleteSpace,
       P::ManageSpaceMembers,
       P::InviteGuest,
       P::CreateUserGroup,
@@ -295,7 +307,7 @@ impl Default for PermissionScheme {
 }
 
 /// All permissions this version knows.
-pub const ALL_KNOWN: [Permission; 34] = [
+pub const ALL_KNOWN: [Permission; 36] = [
   Permission::CreatePost,
   Permission::AddReaction,
   Permission::RemoveOthersReactions,
@@ -308,6 +320,7 @@ pub const ALL_KNOWN: [Permission; 34] = [
   Permission::ManageChannelRoles,
   Permission::ManageChannelProperties,
   Permission::ConvertChannelPrivacy,
+  Permission::DeleteChannel,
   Permission::CreateDm,
   Permission::CreateGroupDm,
   Permission::CreateChannel,
@@ -326,6 +339,7 @@ pub const ALL_KNOWN: [Permission; 34] = [
   Permission::ManageBranding,
   Permission::CreateSpace,
   Permission::ManageSpaceProperties,
+  Permission::DeleteSpace,
   Permission::ManageSpaceMembers,
   Permission::ManageWorkspace,
   Permission::ManageUsers,
@@ -896,6 +910,55 @@ mod tests {
         &Permission::UseChannelMentions,
         &Target::Channel(ctx)
       ));
+    }
+
+    /// #1130: channel admins, workspace admins and owners; a space admin only where they reach the
+    /// channel (public, or they are in it); nobody else. Also archived.
+    #[test]
+    fn who_may_delete_a_channel() {
+      for is_archived in [false, true] {
+        let member_with = |role| {
+          let mut ctx = member_channel_ctx();
+          ctx.is_archived = is_archived;
+          ctx.maybe_role = Some(role);
+          Target::Channel(ctx)
+        };
+        let may = |role: &Role, target: &Target| check(role, &Permission::DeleteChannel, target);
+        assert!(may(&Role::Member, &member_with(ChannelRole::Admin)));
+        assert!(!may(&Role::Member, &member_with(ChannelRole::Moderator)));
+        assert!(!may(&Role::Member, &member_with(ChannelRole::Member)));
+        assert!(!may(&Role::Guest, &member_with(ChannelRole::Admin)));
+        let mut outside = non_member_channel(Some(member_space()), ConversationVisibility::Private);
+        outside.is_archived = is_archived;
+        assert!(may(&Role::Admin, &Target::Channel(outside.clone())));
+        assert!(may(&Role::Owner, &Target::Channel(outside.clone())));
+        assert!(!may(&Role::Member, &Target::Channel(outside.clone())));
+        outside.maybe_space = Some(SpaceContext {
+          maybe_role: Some(SpaceRole::SpaceAdmin),
+          maybe_space_id: None,
+        });
+        assert!(!may(&Role::Member, &Target::Channel(outside.clone())));
+        outside.visibility = ConversationVisibility::Public;
+        assert!(may(&Role::Member, &Target::Channel(outside)));
+      }
+    }
+
+    /// Owners, workspace admins and the admins of that space, nobody else.
+    #[test]
+    fn who_may_delete_a_space() {
+      let space = |maybe_role| {
+        Target::Space(SpaceContext {
+          maybe_role,
+          maybe_space_id: None,
+        })
+      };
+      let may = |role: &Role, target: &Target| check(role, &Permission::DeleteSpace, target);
+      assert!(may(&Role::Owner, &space(None)));
+      assert!(may(&Role::Admin, &space(None)));
+      assert!(may(&Role::Member, &space(Some(SpaceRole::SpaceAdmin))));
+      assert!(!may(&Role::Member, &space(Some(SpaceRole::Member))));
+      assert!(!may(&Role::Member, &space(None)));
+      assert!(!may(&Role::Guest, &space(Some(SpaceRole::Guest))));
     }
 
     #[test]

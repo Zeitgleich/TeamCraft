@@ -364,7 +364,7 @@ fn BrowseRow(channel: BrowsableChannel) -> impl IntoView {
       {if channel.is_member {
         view! {
           <button class="btn btn-small" on:click=move |_| { state.open_conversation(id); state.close_overlay(); }>{move || i18n.t("browse-open")}</button>
-          <button class="btn btn-small" on:click=move |_| state.leave_with_undo(id, left_text(state, i18n, id))>{move || i18n.t("browse-leave")}</button>
+          <button class="btn btn-small" on:click=move |_| state.leave_with_undo(id, left_text(state, i18n, id), false)>{move || i18n.t("browse-leave")}</button>
         }
         .into_any()
       } else {
@@ -457,7 +457,8 @@ pub fn ChannelSettingsDialog(
       .iter()
       .any(|found| found.id == space && found.can_manage_space)
   });
-  let has_advanced = can_manage_space || untrack(|| access.can(&Permission::ManageChannelProperties));
+  let has_advanced = can_manage_space
+    || untrack(|| access.can(&Permission::ManageChannelProperties) || access.can(&Permission::DeleteChannel));
   let sections = channel_settings_sections(info.kind, has_advanced);
   let first = maybe_section
     .and_then(|slug| sections.iter().copied().find(|section| section.slug == slug))
@@ -1012,14 +1013,20 @@ fn ChannelAdvanced(conversation: ConversationId, space: Option<SpaceId>) -> impl
       })
     });
   };
+  let is_archived = Memo::new(move |_| {
+    state
+      .read(|backend| backend.conversation(conversation))
+      .is_some_and(|found| found.is_archived)
+  });
   let archive = move |_| {
+    let is_archiving = !is_archived.get_untracked();
     archive_pending.run_and_then(
       || {
         state.write(|backend| {
           backend.update_channel(
             conversation,
             ChannelChanges {
-              maybe_is_archived: Some(true),
+              maybe_is_archived: Some(is_archiving),
               ..ChannelChanges::default()
             },
           )
@@ -1046,18 +1053,52 @@ fn ChannelAdvanced(conversation: ConversationId, space: Option<SpaceId>) -> impl
     <MoveChannel conversation=conversation current_space=space />
     <Show when=move || can_edit.get() fallback=|| ()>
       <h3>{move || i18n.t("channel-archive")}</h3>
-      <p class="hint">{move || i18n.t("channel-archive-hint")}</p>
+      <p class="hint">{move || i18n.t(if is_archived.get() { "channel-restore-hint" } else { "channel-archive-hint" })}</p>
       <Show
         when=move || is_confirming_archive.get()
-        fallback=move || view! { <button type="button" class="btn btn-danger" on:click=move |_| is_confirming_archive.set(true)>{move || i18n.t("channel-archive-action")}</button> }
+        fallback=move || view! { <button type="button" class="btn btn-danger" on:click=move |_| is_confirming_archive.set(true)>{move || i18n.t(if is_archived.get() { "channel-restore-action" } else { "channel-archive-action" })}</button> }
       >
-        <p role="alert">{move || i18n.t("channel-archive-confirm")}</p>
+        <p role="alert">{move || i18n.t(if is_archived.get() { "channel-restore-confirm" } else { "channel-archive-confirm" })}</p>
         <div class="inline-actions">
           <button type="button" class="btn btn-danger" prop:disabled=move || archive_pending.is_pending() on:click=archive>{move || i18n.t("confirm")}</button>
           <button type="button" class="btn" on:click=move |_| is_confirming_archive.set(false)>{move || i18n.t("cancel")}</button>
         </div>
         <FailureNote pending=archive_pending />
       </Show>
+    </Show>
+    <Show when=move || access.can(&Permission::DeleteChannel) fallback=|| ()>
+      <DeleteChannelSection conversation=conversation on_deleted=Callback::new(move |()| state.close_overlay()) />
+    </Show>
+  }
+}
+
+/// "Delete this channel" with its confirmation, which says what happens to whom. The server checks
+/// `delete_channel` again; shown only to those who hold it.
+#[component]
+pub fn DeleteChannelSection(conversation: ConversationId, on_deleted: Callback<()>) -> impl IntoView {
+  let state = use_app_state();
+  let i18n = use_i18n();
+  let is_confirming = RwSignal::new(false);
+  let pending = PendingAction::new();
+  let delete = move |_| {
+    pending.run_and_then(
+      || state.write(|backend| backend.delete_channel(conversation)),
+      move || on_deleted.run(()),
+    );
+  };
+  view! {
+    <h3>{move || i18n.t("channel-delete")}</h3>
+    <p class="hint">{move || i18n.t("channel-delete-hint")}</p>
+    <Show
+      when=move || is_confirming.get()
+      fallback=move || view! { <button type="button" class="btn btn-danger" on:click=move |_| is_confirming.set(true)>{move || i18n.t("channel-delete-action")}</button> }
+    >
+      <p role="alert">{move || i18n.t("channel-delete-confirm")}</p>
+      <div class="inline-actions">
+        <button type="button" class="btn btn-danger" prop:disabled=move || pending.is_pending() on:click=delete>{move || i18n.t("channel-delete-action")}</button>
+        <button type="button" class="btn" on:click=move |_| is_confirming.set(false)>{move || i18n.t("cancel")}</button>
+      </div>
+      <FailureNote pending=pending />
     </Show>
   }
 }
@@ -1764,12 +1805,22 @@ fn ChannelCategoryRow(
   }
 }
 
-/// Archiving, at the bottom and confirmed first.
+/// Archiving and deleting, at the bottom and confirmed first.
 #[component]
 fn SpaceAdvanced(space: Space) -> impl IntoView {
   let state = use_app_state();
   let i18n = use_i18n();
   let id = space.id;
+  let can_delete = space.can_delete_space;
+  let channel_count = space.deleted_channel_count;
+  let is_confirming_delete = RwSignal::new(false);
+  let delete_pending = PendingAction::new();
+  let delete = move |_| {
+    delete_pending.run_and_then(
+      || state.write(|backend| backend.delete_space(id)),
+      move || state.close_overlay(),
+    );
+  };
   let is_confirming = RwSignal::new(false);
   let pending = PendingAction::new();
   let archive = move |_| {
@@ -1808,6 +1859,21 @@ fn SpaceAdvanced(space: Space) -> impl IntoView {
     } else {
       view! { <p class="hint">{move || i18n.t("space-settings-read-only")}</p> }.into_any()
     }}
+    {can_delete.then(|| view! {
+      <h3>{move || i18n.t("channel-delete")}</h3>
+      <p class="hint">{move || i18n.t("space-delete-hint")}</p>
+      <Show
+        when=move || is_confirming_delete.get()
+        fallback=move || view! { <button type="button" class="btn btn-danger" on:click=move |_| is_confirming_delete.set(true)>{move || i18n.t("space-delete-action")}</button> }
+      >
+        <p role="alert">{move || i18n.t_with("space-delete-confirm", &[("count", &channel_count.to_string())])}</p>
+        <div class="inline-actions">
+          <button type="button" class="btn btn-danger" prop:disabled=move || delete_pending.is_pending() on:click=delete>{move || i18n.t("space-delete-action")}</button>
+          <button type="button" class="btn" on:click=move |_| is_confirming_delete.set(false)>{move || i18n.t("cancel")}</button>
+        </div>
+        <FailureNote pending=delete_pending />
+      </Show>
+    })}
   }
 }
 
@@ -2144,6 +2210,8 @@ mod tests {
       can_add_members: true,
       can_invite_guests: true,
       can_manage_space: true,
+      can_delete_space: false,
+      deleted_channel_count: 0,
       can_create_channels: true,
     }
   }

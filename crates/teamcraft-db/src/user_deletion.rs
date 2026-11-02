@@ -154,7 +154,8 @@ impl Database {
     Ok(())
   }
 
-  /// Direct conversations deleted with another user that this user's devices should drop.
+  /// Conversations deleted (a channel, or a direct message with a deleted user) that this user's
+  /// devices should drop.
   pub async fn deleted_conversations_of(&self, user: UserId) -> Result<Vec<ConversationId>, DbError> {
     let ids = sqlx::query_scalar!(
       "SELECT conversation_id FROM deleted_conversations WHERE user_id = $1 ORDER BY conversation_id",

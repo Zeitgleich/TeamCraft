@@ -26,6 +26,9 @@ pub struct ConversationMenu {
   /// The address to share; `None` where the app has no web address (a desktop without a server).
   pub maybe_link: Option<String>,
   pub leave: LeaveChoice,
+  /// "Delete channel" is offered (`delete_channel`).
+  pub can_delete: bool,
+  pub name: String,
 }
 
 /// The menu of a space.
@@ -35,6 +38,10 @@ pub struct SpaceMenu {
   pub has_unread: bool,
   pub is_muted: bool,
   pub leave: LeaveChoice,
+  /// "Delete space" is offered (`delete_space`).
+  pub can_delete: bool,
+  /// How many channels go with the space.
+  pub channel_count: u32,
 }
 
 impl ConversationMenu {
@@ -52,6 +59,8 @@ impl ConversationMenu {
       is_muted,
       maybe_link: maybe_origin.and_then(|origin| conversation_link(origin, conversation)),
       leave: channel_leave(&found, state.me().id, &roles),
+      can_delete: found.can_delete_channel(),
+      name: found.name,
     })
   }
 }
@@ -77,6 +86,8 @@ impl SpaceMenu {
       SpaceRoster::Loading
     };
     Some(Self {
+      can_delete: found.can_delete_space,
+      channel_count: found.deleted_channel_count,
       name: found.name,
       has_unread,
       is_muted,

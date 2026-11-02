@@ -154,6 +154,8 @@ pub enum LeaveChoice {
   Allowed,
   /// The user is the last admin: the entry is disabled and says to hand the role on first.
   LastAdmin,
+  /// Nobody else is in the channel: leaving deletes it, and the confirmation says so.
+  LastMember,
 }
 
 impl From<teamcraft_client_api::entry_rules::LeaveChoice> for LeaveChoice {
@@ -163,6 +165,7 @@ impl From<teamcraft_client_api::entry_rules::LeaveChoice> for LeaveChoice {
       Rule::Hidden => Self::Hidden,
       Rule::Allowed => Self::Allowed,
       Rule::LastAdmin => Self::LastAdmin,
+      Rule::LastMember => Self::LastMember,
     }
   }
 }
@@ -173,6 +176,12 @@ pub struct SpaceMenuItem {
   pub name: String,
   pub has_unread: bool,
   pub leave: LeaveChoice,
+  /// "Delete space" is offered (`delete_space`).
+  #[uniffi(default = false)]
+  pub can_delete: bool,
+  /// How many channels go with the space.
+  #[uniffi(default = 0)]
+  pub channel_count: u32,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
@@ -203,6 +212,9 @@ pub struct ConversationItem {
   /// Change the channel itself, such as archiving it (`manage_channel_properties`); never in DMs.
   #[uniffi(default = true)]
   pub can_manage_channel: bool,
+  /// Delete the channel for everybody (`delete_channel`); never in DMs.
+  #[uniffi(default = false)]
+  pub can_delete_channel: bool,
   /// The other person in a one-to-one DM, so the list can show their profile picture.
   #[uniffi(default = None)]
   pub maybe_peer_id: Option<String>,
@@ -600,6 +612,7 @@ impl ConversationItem {
       can_react: conversation.can_react(),
       can_manage_bookmarks: conversation.can_manage_bookmarks(is_guest),
       can_manage_channel: conversation.can_manage_channel(),
+      can_delete_channel: conversation.can_delete_channel(),
       id: conversation.id.to_string(),
       maybe_space_id: conversation.maybe_space.map(|space| space.to_string()),
       maybe_space_name,
@@ -1152,6 +1165,8 @@ mod tests {
         is_catching_up: false,
         maybe_image_version: None,
         is_notes_to_self: false,
+        is_archived: false,
+        is_imported: false,
         maybe_permissions,
         has_only_deactivated_others: false,
       };
@@ -1211,6 +1226,8 @@ mod tests {
       is_catching_up: false,
       maybe_image_version: None,
       is_notes_to_self: false,
+      is_archived: false,
+      is_imported: false,
       maybe_permissions: None,
       has_only_deactivated_others: false,
     };
@@ -1366,6 +1383,8 @@ mod tests {
       is_catching_up: false,
       maybe_image_version: None,
       is_notes_to_self: false,
+      is_archived: false,
+      is_imported: false,
       maybe_permissions: None,
       has_only_deactivated_others: false,
     }

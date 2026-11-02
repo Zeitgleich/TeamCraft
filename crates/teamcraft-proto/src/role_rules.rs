@@ -237,6 +237,16 @@ mod tests {
     ];
 
     #[test]
+    fn deleting_a_channel_is_offered_to_channel_admins_and_up_only() {
+      let scheme = PermissionScheme::default();
+      let may = |actor: &RoleActor| can_in_channel(&scheme, actor, &Permission::DeleteChannel);
+      assert!(may(&actor(Role::Member, false, Some(ChannelRole::Admin))));
+      assert!(!may(&actor(Role::Member, false, Some(ChannelRole::Moderator))));
+      assert!(!may(&actor(Role::Member, false, Some(ChannelRole::Member))));
+      assert!(!may(&actor(Role::Guest, false, Some(ChannelRole::Member))));
+    }
+
+    #[test]
     fn every_role_gets_exactly_its_actions_in_a_channel_it_is_in() {
       // post, react, bookmarks/pins, share links, members, roles, properties, privacy
       let table: [(&str, RoleActor, [bool; 8]); 6] = [

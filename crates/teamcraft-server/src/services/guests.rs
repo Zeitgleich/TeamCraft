@@ -34,7 +34,7 @@ pub async fn expire_once(state: &AppState, now: OffsetDateTime) -> Result<usize,
       .collect();
     audience.extend(guest.maybe_sponsor);
 
-    if let Err(error) = remove_everywhere(state, guest.space, guest.user).await {
+    if let Err(error) = remove_everywhere(state, guest.space, guest.user, false).await {
       warn!(%error, space_id = %guest.space, "removing an expired guest failed");
       continue;
     }

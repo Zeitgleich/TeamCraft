@@ -688,8 +688,24 @@ impl<C: ChatBackend + 'static> ChatBackend for Hybrid<C> {
     self.chat.join_space(space);
   }
 
-  fn leave_channel(&self, conversation: ConversationId) {
-    self.chat.leave_channel(conversation);
+  fn leave_channel(&self, conversation: ConversationId, deletes_if_last: bool) {
+    self.chat.leave_channel(conversation, deletes_if_last);
+  }
+
+  fn suspect_deletions(&self) -> u32 {
+    self.chat.suspect_deletions()
+  }
+
+  fn dismiss_suspect_deletions(&self) {
+    self.chat.dismiss_suspect_deletions();
+  }
+
+  fn delete_channel(&self, conversation: ConversationId) {
+    self.chat.delete_channel(conversation);
+  }
+
+  fn delete_space(&self, space: SpaceId) {
+    self.chat.delete_space(space);
   }
 
   fn categories(&self, space: SpaceId) -> Vec<CategoryInfo> {

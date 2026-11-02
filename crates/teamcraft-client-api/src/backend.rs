@@ -573,7 +573,18 @@ pub trait ChatBackend {
     Vec::new()
   }
   fn join_space(&self, _space: SpaceId) {}
-  fn leave_channel(&self, _conversation: ConversationId) {}
+  /// `_deletes_if_last`: the user confirmed that this deletes the channel if nobody else is in it.
+  fn leave_channel(&self, _conversation: ConversationId, _deletes_if_last: bool) {}
+  /// How many conversations the server claimed deleted at once, if that looks suspect (e2ee.md
+  /// §4.6): told to the user once, then [`Self::dismiss_suspect_deletions`].
+  fn suspect_deletions(&self) -> u32 {
+    0
+  }
+  fn dismiss_suspect_deletions(&self) {}
+  /// Deletes a channel for everybody (`delete_channel`), after the user confirmed it.
+  fn delete_channel(&self, _conversation: ConversationId) {}
+  /// Deletes a space with its channels for everybody (`delete_space`), after the user confirmed it.
+  fn delete_space(&self, _space: SpaceId) {}
   fn categories(&self, _space: SpaceId) -> Vec<CategoryInfo> {
     Vec::new()
   }

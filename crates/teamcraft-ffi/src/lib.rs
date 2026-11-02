@@ -487,6 +487,14 @@ impl TeamCraft {
       .await
   }
 
+  /// How many conversations the server just claimed deleted at once, if that looks suspect (e2ee.md
+  /// §4.6); 0 otherwise. The app tells the user once.
+  pub async fn take_suspect_deletions(&self) -> Result<u32, TeamCraftError> {
+    self
+      .call(move |engine| Box::pin(engine.take_suspect_deletions()))
+      .await
+  }
+
   /// Whether the conversation's long-press menu offers "Leave" (#1105).
   pub async fn conversation_leave_choice(
     &self,
@@ -1187,6 +1195,7 @@ mod tests {
       assert_eq!(LeaveChoice::from(Rule::Hidden), LeaveChoice::Hidden);
       assert_eq!(LeaveChoice::from(Rule::Allowed), LeaveChoice::Allowed);
       assert_eq!(LeaveChoice::from(Rule::LastAdmin), LeaveChoice::LastAdmin);
+      assert_eq!(LeaveChoice::from(Rule::LastMember), LeaveChoice::LastMember);
     }
 
     #[test]

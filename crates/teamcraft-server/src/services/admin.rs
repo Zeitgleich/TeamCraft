@@ -482,27 +482,12 @@ async fn delete_direct_conversations(state: &AppState, user: UserId) -> Result<u
     let conversation_id = direct.conversation;
     super::calls::evict_from_call(state, conversation_id, user).await;
     // Storage first: a failure leaves the rows, so a retry finds the objects again.
-    for key in state.database.conversation_object_keys(conversation_id).await? {
-      super::retention::delete_object(state, &key).await?;
-    }
+    super::conversations::delete_stored_objects(state, conversation_id).await?;
     state
       .database
       .delete_direct_conversation(conversation_id, &direct.remaining)
       .await?;
-    state.hub.publish(
-      direct.remaining.iter().copied(),
-      &GatewayEvent::ConversationDelete { conversation_id },
-    );
-    // Clients that don't know `conversation_delete` yet drop a conversation they were removed from.
-    for other in &direct.remaining {
-      state.hub.publish(
-        [*other],
-        &GatewayEvent::MembershipRemove {
-          conversation_id,
-          user_id: *other,
-        },
-      );
-    }
+    super::conversations::announce_deleted_direct(state, conversation_id, &direct.remaining);
   }
   Ok(conversations.len())
 }

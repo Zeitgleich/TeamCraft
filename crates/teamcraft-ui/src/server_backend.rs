@@ -218,6 +218,8 @@ pub fn build_snapshot(
       can_add_members: space.can_add_members,
       can_invite_guests: space.can_invite_guests,
       can_manage_space: space.can_manage_space,
+      can_delete_space: space.can_delete_space,
+      deleted_channel_count: space.deleted_channel_count,
       can_create_channels: space.can_create_channels,
       maybe_my_role: space.maybe_my_role.clone(),
     })
@@ -293,6 +295,8 @@ fn to_conversation(conversation: &ConversationResponse, member_ids: Vec<UserId>,
     bookmarks: Vec::new(),
     is_catching_up: false,
     is_notes_to_self: conversation.is_notes_to_self(me),
+    is_archived: conversation.is_archived,
+    is_imported: conversation.maybe_imported_through.is_some(),
     maybe_permissions: conversation.maybe_my_permissions.clone(),
     has_only_deactivated_others: conversation
       .has_only_deactivated_others(me, |participant| participant.is_deactivated),

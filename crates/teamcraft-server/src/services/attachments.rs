@@ -350,6 +350,18 @@ async fn own_attachment(
   if attachment.maybe_uploader != Some(caller.user.id) {
     return Err(ApiError::attachment_not_found());
   }
+  // An upload that lands in a deleted channel doesn't finish: the sweep of unfinished uploads frees it.
+  let is_there = match attachment.maybe_conversation {
+    Some(conversation) => state
+      .database
+      .get_conversation(conversation, caller.user.id)
+      .await?
+      .is_some(),
+    None => attachment.is_complete,
+  };
+  if !is_there {
+    return Err(ApiError::attachment_not_found());
+  }
   Ok(attachment)
 }
 

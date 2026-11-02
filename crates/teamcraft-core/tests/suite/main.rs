@@ -14,6 +14,7 @@ mod background_work;
 mod backgrounds;
 mod calls;
 mod catch_up;
+mod channel_deletion;
 mod channel_roles;
 mod chat_actions;
 #[path = "../common/mod.rs"]

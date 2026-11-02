@@ -546,6 +546,48 @@ impl<T: AccessTokenSource> ServerApi for HttpServerApi<T> {
       .await
   }
 
+  async fn check_leave(
+    &self,
+    conversation: ConversationId,
+    me: UserId,
+    deletes_if_last: bool,
+  ) -> Result<(), ApiError> {
+    self
+      .send_without_response::<()>(
+        Method::GET,
+        &format!("/conversations/{conversation}/members/{me}/removal?delete_if_last={deletes_if_last}"),
+        None,
+      )
+      .await
+  }
+
+  async fn leave_conversation(
+    &self,
+    conversation: ConversationId,
+    me: UserId,
+    deletes_if_last: bool,
+  ) -> Result<(), ApiError> {
+    self
+      .send_without_response::<()>(
+        Method::DELETE,
+        &format!("/conversations/{conversation}/members/{me}?delete_if_last={deletes_if_last}"),
+        None,
+      )
+      .await
+  }
+
+  async fn delete_space(&self, space: SpaceId) -> Result<(), ApiError> {
+    self
+      .send_without_response::<()>(Method::DELETE, &format!("/spaces/{space}"), None)
+      .await
+  }
+
+  async fn delete_conversation(&self, conversation: ConversationId) -> Result<(), ApiError> {
+    self
+      .send_without_response::<()>(Method::DELETE, &format!("/conversations/{conversation}"), None)
+      .await
+  }
+
   async fn admin_channels_of(&self, user: UserId) -> Result<Vec<ConversationId>, ApiError> {
     let mut channels = Vec::new();
     loop {
@@ -1072,7 +1114,12 @@ impl<T: AccessTokenSource> ServerApi for HttpServerApi<T> {
 
   async fn remove_space_member(&self, space: SpaceId, user: UserId) -> Result<(), ApiError> {
     self
-      .send_without_response::<()>(Method::DELETE, &format!("/spaces/{space}/members/{user}"), None)
+      // Honoured only when leaving: the confirmation said that channels only they are in go.
+      .send_without_response::<()>(
+        Method::DELETE,
+        &format!("/spaces/{space}/members/{user}?delete_if_last=true"),
+        None,
+      )
       .await
   }
 

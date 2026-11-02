@@ -100,17 +100,18 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     }
     self.trace_lap("unlisted people");
     let listing = conversations?;
-    // Direct messages deleted with a deleted account while this device was away: they go with
-    // their local history, as on the gateway's `conversation_delete`.
+    // Channels deleted, and direct messages deleted with a deleted account, while this device was
+    // away. The server's word, so they are hidden and their history stays for a while. A claim
+    // about what it lists all the same is forged or replayed. `server_deletions`.
+    self.lift_quarantines(&listing.conversations)?;
     for deleted in &listing.deleted_conversation_ids {
-      if self
-        .store
-        .get(Table::Conversations, &deleted.to_string())?
-        .is_some()
-      {
-        self.purge_conversation(*deleted)?;
+      if listing.conversations.iter().any(|listed| listed.id == *deleted) {
+        tracing::warn!(conversation_id = %deleted, "the server claims a deletion of a conversation it still lists; ignored");
+        continue;
       }
+      self.note_server_deletion(*deleted)?;
     }
+    self.purge_expired_quarantines()?;
     let conversations = listing.conversations;
     let known = self.cached_conversations()?;
     for stale in known
@@ -463,6 +464,20 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
 
   /// The user's spaces, and their members as the people the user can find and message (a new
   /// member shares no conversation with anyone yet).
+  /// Everything this device kept per space.
+  pub(crate) fn forget_space(&mut self, space: &str) -> Result<(), CoreError> {
+    for table in [
+      Table::Spaces,
+      Table::Categories,
+      Table::ChannelBrowser,
+      Table::SpaceRosters,
+      Table::SpaceInvites,
+    ] {
+      self.store.delete(table, space)?;
+    }
+    Ok(())
+  }
+
   pub(crate) async fn refresh_spaces(&mut self) -> Result<(), CoreError> {
     self.refresh_spaces_listing().await.map(drop)
   }
@@ -478,6 +493,13 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
   async fn store_spaces(&mut self, spaces: Vec<SpaceResponse>) -> Result<HashSet<UserId>, CoreError> {
     let mut listed = HashSet::new();
     let mut due = Vec::new();
+    // A space the server no longer lists was deleted, or the user can't see it any more.
+    let still_listed: HashSet<String> = spaces.iter().map(|space| space.id.to_string()).collect();
+    for (key, _) in self.store.list(Table::Spaces)? {
+      if !still_listed.contains(&key) {
+        self.forget_space(&key)?;
+      }
+    }
     for space in spaces {
       records::put_json(&self.store, Table::Spaces, &space.id.to_string(), &space)?;
       if space.maybe_my_role.is_none() || self.is_space_unlisted(space.id) {

@@ -249,6 +249,24 @@ pub trait ServerApi {
     conversation: ConversationId,
     user: UserId,
   ) -> impl Future<Output = Result<(), ApiError>>;
+  /// Asks whether this user may leave (`…/members/{me}/removal`); see [`Self::leave_conversation`].
+  fn check_leave(
+    &self,
+    conversation: ConversationId,
+    me: UserId,
+    deletes_if_last: bool,
+  ) -> impl Future<Output = Result<(), ApiError>>;
+  /// This user leaves, saying what to do if they are the last member of a private channel:
+  /// `deletes_if_last` deletes it, otherwise the server refuses with `last_member`.
+  fn leave_conversation(
+    &self,
+    conversation: ConversationId,
+    me: UserId,
+    deletes_if_last: bool,
+  ) -> impl Future<Output = Result<(), ApiError>>;
+  /// Deletes a channel for everybody (`DELETE /conversations/{id}`, `delete_channel`); not found
+  /// once it is gone (e2ee.md §4.6).
+  fn delete_conversation(&self, conversation: ConversationId) -> impl Future<Output = Result<(), ApiError>>;
   /// Every channel `user` is a member of (`GET /admin/conversations?user_id=`, all pages; instance
   /// admins): the admin's client signs a removal from each (admin.md §3.2.1).
   fn admin_channels_of(&self, user: UserId) -> impl Future<Output = Result<Vec<ConversationId>, ApiError>>;
@@ -286,6 +304,9 @@ pub trait ServerApi {
     &self,
     space: SpaceId,
   ) -> impl Future<Output = Result<ListConversationsResponse, ApiError>>;
+  /// Deletes a space with its channels for everybody (`DELETE /spaces/{id}`, `delete_space`); not
+  /// found once it is gone.
+  fn delete_space(&self, space: SpaceId) -> impl Future<Output = Result<(), ApiError>>;
   fn create_space(
     &self,
     request: &CreateSpaceRequest,

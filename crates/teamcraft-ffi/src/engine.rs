@@ -1014,6 +1014,17 @@ impl Engine {
     Ok(channel_leave(&conversation, backend.me().id, &roles).into())
   }
 
+  /// How many conversations the server claimed deleted at once, if suspect; told once.
+  pub(crate) async fn take_suspect_deletions(&mut self) -> Result<u32, TeamCraftError> {
+    let backend = self.backend()?;
+    let count = backend.suspect_deletions();
+    if count > 0 {
+      backend.dismiss_suspect_deletions();
+      self.dispatch_commands().await?;
+    }
+    Ok(count)
+  }
+
   pub(crate) fn space_menu(&self, space_id: &str) -> Result<Option<SpaceMenuItem>, TeamCraftError> {
     let backend = self.backend()?;
     let id = parse_id(space_id)?;
@@ -1038,6 +1049,8 @@ impl Engine {
       name: space.name,
       has_unread,
       leave: space_leave(space.maybe_my_role.as_ref(), backend.me().id, &roster).into(),
+      can_delete: space.can_delete_space,
+      channel_count: space.deleted_channel_count,
     }))
   }
 

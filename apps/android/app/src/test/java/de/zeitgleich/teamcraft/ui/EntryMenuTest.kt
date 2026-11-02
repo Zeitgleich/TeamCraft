@@ -42,6 +42,20 @@ class EntryMenuTest {
   }
 
   @Test
+  fun theLastMemberCanLeave() {
+    val leave = conversationMenu(item(ConversationKind.PUBLIC), LeaveChoice.LAST_MEMBER, hasLink = false)
+      .single { it.action == EntryAction.LeaveChannel }
+    assertTrue(leave.isEnabled)
+  }
+
+  @Test
+  fun deleteOnlyForThoseWhoMay() {
+    assertFalse(conversationMenu(item(ConversationKind.PUBLIC), LeaveChoice.ALLOWED, hasLink = false).any { it.action == EntryAction.DeleteChannel })
+    val allowed = item(ConversationKind.PUBLIC).copy(canDeleteChannel = true)
+    assertTrue(conversationMenu(allowed, LeaveChoice.ALLOWED, hasLink = false).any { it.action == EntryAction.DeleteChannel })
+  }
+
+  @Test
   fun markReadOnlyWhereSomethingIsUnread() {
     assertFalse(conversationMenu(item(ConversationKind.PUBLIC), LeaveChoice.ALLOWED, hasLink = false).any { it.action == EntryAction.MarkRead })
     assertTrue(conversationMenu(item(ConversationKind.PUBLIC, unread = 3u), LeaveChoice.ALLOWED, hasLink = false).any { it.action == EntryAction.MarkRead })

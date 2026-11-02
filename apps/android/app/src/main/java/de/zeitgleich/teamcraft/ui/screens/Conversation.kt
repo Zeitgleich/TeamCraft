@@ -130,6 +130,7 @@ import de.zeitgleich.teamcraft.ui.typingLine
 import de.zeitgleich.teamcraft.ui.entry
 import de.zeitgleich.teamcraft.ui.sensitiveClip
 import de.zeitgleich.teamcraft.ui.requestsIn
+import uniffi.teamcraft_ffi.LeaveChoice
 import uniffi.teamcraft_ffi.ConnectionState
 import uniffi.teamcraft_ffi.JoinRequestItem
 import uniffi.teamcraft_ffi.KeyCatchUpItem
@@ -205,6 +206,15 @@ fun ConversationScreen(
     if (isConnected) viewModel.readChat { act(ChatActions.refreshReadReceipts(conversationId)) }
   }
   val conversation = snapshot?.conversation(conversationId)
+  // Deleted or left elsewhere while open: back to the list, not a screen that keeps loading.
+  var wasKnown by remember(conversationId) { mutableStateOf(false) }
+  LaunchedEffect(conversationId, conversation != null, snapshot != null) {
+    if (conversation != null) {
+      wasKnown = true
+    } else if (wasKnown && snapshot != null) {
+      onBack()
+    }
+  }
   ChatScaffold(
     viewModel = viewModel,
     topBar = {
@@ -427,7 +437,10 @@ private fun ConversationMenu(
   val name = maybeConversation?.name.orEmpty()
   // Archiving changes the channel itself; DMs have none to archive.
   val canArchive = maybeConversation?.isDirect == false && rights.canManageChannel
+  val canDelete = maybeConversation?.isDirect == false && rights.canDeleteChannel
+  var leave by remember(conversationId) { mutableStateOf(LeaveChoice.HIDDEN) }
   var isOpen by remember { mutableStateOf(false) }
+  LaunchedEffect(conversationId, isOpen) { leave = viewModel.leaveChoice(conversationId) }
   var isNotifying by remember { mutableStateOf(false) }
   var isShowingBookmarks by remember { mutableStateOf(false) }
   var maybeConfirming by remember { mutableStateOf<ChannelConfirmation?>(null) }
@@ -474,10 +487,25 @@ private fun ConversationMenu(
         maybeConfirming = ChannelConfirmation.Archive
       })
     }
-    DropdownMenuItem(text = { Text(stringResource(R.string.leave_channel)) }, onClick = {
-      isOpen = false
-      maybeConfirming = ChannelConfirmation.Leave
-    })
+    // The core's rule, as in the list's menu: the last admin of an active channel is told why not.
+    when (leave) {
+      LeaveChoice.HIDDEN -> Unit
+      LeaveChoice.LAST_ADMIN -> DropdownMenuItem(
+        text = { Text(stringResource(if (canDelete) R.string.entry_leave_last_channel_admin_or_delete else R.string.entry_leave_last_channel_admin)) },
+        enabled = false,
+        onClick = {},
+      )
+      LeaveChoice.ALLOWED, LeaveChoice.LAST_MEMBER -> DropdownMenuItem(text = { Text(stringResource(R.string.leave_channel)) }, onClick = {
+        isOpen = false
+        maybeConfirming = ChannelConfirmation.Leave
+      })
+    }
+    if (canDelete) {
+      DropdownMenuItem(text = { Text(stringResource(R.string.channel_delete)) }, onClick = {
+        isOpen = false
+        maybeConfirming = ChannelConfirmation.Delete
+      })
+    }
   }
   if (isNotifying) ConversationNotificationsDialog(viewModel, conversationId) { isNotifying = false }
   if (isShowingBookmarks) {
@@ -491,10 +519,12 @@ private fun ConversationMenu(
     ChannelConfirmationDialog(
       confirmation = confirmation,
       name = name,
+      leave = leave,
       onConfirm = {
         when (confirmation) {
           ChannelConfirmation.Archive -> viewModel.act(ChatActions.archiveChannel(conversationId))
-          ChannelConfirmation.Leave -> viewModel.act(ChatActions.leaveChannel(conversationId))
+          ChannelConfirmation.Leave -> viewModel.act(ChatActions.leaveChannel(conversationId, leave == LeaveChoice.LAST_MEMBER))
+          ChannelConfirmation.Delete -> viewModel.act(ChatActions.deleteChannel(conversationId))
         }
       },
       onDismiss = { maybeConfirming = null },
@@ -503,12 +533,13 @@ private fun ConversationMenu(
 }
 
 /** A channel menu action that asks before it runs. */
-private enum class ChannelConfirmation { Archive, Leave }
+private enum class ChannelConfirmation { Archive, Leave, Delete }
 
 @Composable
 private fun ChannelConfirmationDialog(
   confirmation: ChannelConfirmation,
   name: String,
+  leave: LeaveChoice,
   onConfirm: () -> Unit,
   onDismiss: () -> Unit,
 ) {
@@ -520,8 +551,13 @@ private fun ChannelConfirmationDialog(
     )
     ChannelConfirmation.Leave -> Triple(
       stringResource(R.string.channel_leave_title, name),
-      stringResource(R.string.channel_leave_text),
+      stringResource(leaveText(leave)),
       stringResource(R.string.channel_leave_confirm),
+    )
+    ChannelConfirmation.Delete -> Triple(
+      stringResource(R.string.channel_delete_title, name),
+      stringResource(R.string.channel_delete_text),
+      stringResource(R.string.channel_delete_confirm),
     )
   }
   AlertDialog(

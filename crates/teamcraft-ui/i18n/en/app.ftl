@@ -217,3 +217,10 @@ tab-close-hint = You can close this tab now.
 
 # Errors at a form field (forms.md)
 form-error-name = Enter a name.
+error-last-channel-admin = Make someone else channel admin in the channel's settings first, or delete the channel.
+error-last-member = Nobody else is in this channel, so leaving deletes it. Choose Leave in its menu to confirm.
+error-import-in-progress = An import is running into this channel. Delete it once the import is done.
+error-space-has-hidden-channels = This space holds private channels you aren't in. Ask a workspace admin to delete it.
+error-channel-needs-admin = This channel has no admin. A workspace admin assigns one before it can be restored.
+error-not-a-channel = This only works for channels, not for direct messages.
+deletions-suspect = The server says { $count } of your conversations were deleted at once. They are hidden, and their messages stay on this device for now. Tell your administrator.

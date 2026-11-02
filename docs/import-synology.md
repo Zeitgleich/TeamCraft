@@ -232,3 +232,11 @@ come), stop it, choose **End import** in Administration → Import and deactivat
 | Waiting for a member's device | Somebody of that channel or DM has to open the app once, with `admin_self_join` visible; then run again    |
 | `import_window_full`          | Far more posts after the merged conversation's first message than fit before it; reported per conversation |
 | A file is missing             | The message names it; finish the transfer before the run next time                                         |
+
+## Deleting what an import holds
+
+While the import account holds a channel, deleting it or its space is refused (409 `import_in_progress`).
+Run the import to its end first. Once it holds history, a channel isn't deleted when its last member
+leaves: it stays without members, for an admin. Deleting it on purpose (admin.md §3.1.1) still works
+and removes the imported history for good. An import run again for it stops with an error while the
+server remembers the channel's create key: leave the channel out of the run.

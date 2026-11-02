@@ -24,6 +24,9 @@ use crate::auth::AuthenticatedUser;
 use crate::error::ApiError;
 use crate::state::AppState;
 
+/// Channels and spaces cleared in one round of [`sweep_deleted`].
+const DELETED_SWEEP_BATCH: i64 = 20;
+
 /// Result of an operation that may create the conversation (DMs are created once per pair).
 pub struct Created<T> {
   pub value: T,
@@ -284,6 +287,15 @@ pub async fn update_conversation(
     && access.view.conversation.visibility == ConversationVisibility::Public
   {
     return Err(ApiError::Conflict(INTEGRATION_STAYS_PRIVATE.into()));
+  }
+
+  // A restored channel needs somebody who can run it; roles are signed, so the server can't just make
+  // the restorer one. A workspace admin assigns an owner first (admin.md §3.1.1).
+  if request.maybe_is_archived == Some(false) && access.view.conversation.is_archived {
+    let members = state.database.conversation_member_ids(id).await?;
+    if !members.is_empty() && state.database.count_channel_admins(id).await? == 0 {
+      return Err(ApiError::ChannelNeedsAdmin);
+    }
   }
 
   let kinds = visible_changes(
@@ -641,6 +653,118 @@ async fn ensure_guest_may_start(
   }
   if is_refused {
     return Err(ApiError::GuestDmNotAllowed);
+  }
+  Ok(())
+}
+
+/// Deletes a channel for everybody, archived or not, also with members in it (`delete_channel`:
+/// channel admins, workspace admins and owners, and a space admin where they reach it; admin.md
+/// §3.1.1). Marks it, then background work clears it ([`sweep_deleted`]): a big channel would outlast
+/// the request. What this means on the members' devices: e2ee.md §4.6. Answers 404 once it is gone,
+/// which clients take as done, so a retry leaves no second audit row.
+pub async fn delete_channel(
+  state: &AppState,
+  caller: &AuthenticatedUser,
+  id: ConversationId,
+) -> Result<(), ApiError> {
+  let access = load_conversation(state, caller, id).await?;
+  if access.view.conversation.kind != ConversationKind::Channel {
+    return Err(ApiError::NotAChannel);
+  }
+  require(state, caller, Permission::DeleteChannel, &access.target())?;
+  let audit_target = AuditTarget::new("conversation", id);
+  let audit = audit::prepared(state, caller.user.id, "channel_deleted", &audit_target)?;
+  let maybe_members = state
+    .database
+    .delete_channel_locked(id, &audit, |facts| {
+      // docs/import-synology.md: an import running into it would lose its place.
+      if facts.maybe_importer.is_some() {
+        return Err(ApiError::ImportInProgress);
+      }
+      Ok(())
+    })
+    .await?;
+  let Some(members) = maybe_members else {
+    return Err(ApiError::conversation_not_found());
+  };
+  announce_deleted(state, id, &members).await;
+  Ok(())
+}
+
+/// Tells the people concerned that the conversation is gone, ends its calls, and starts clearing it.
+pub(crate) async fn announce_deleted(state: &AppState, conversation_id: ConversationId, users: &[UserId]) {
+  for user in users {
+    super::calls::evict_from_call(state, conversation_id, *user).await;
+  }
+  announce_deleted_direct(state, conversation_id, users);
+  wake_sweep(state);
+}
+
+/// Announces a deleted conversation without clearing anything more.
+pub(crate) fn announce_deleted_direct(state: &AppState, conversation_id: ConversationId, users: &[UserId]) {
+  state.hub.publish(
+    users.iter().copied(),
+    &GatewayEvent::ConversationDelete { conversation_id },
+  );
+  // Clients that don't know `conversation_delete` yet drop a conversation they were removed from.
+  for user in users {
+    state.hub.publish(
+      [*user],
+      &GatewayEvent::MembershipRemove {
+        conversation_id,
+        user_id: *user,
+      },
+    );
+  }
+}
+
+/// Starts clearing what is marked deleted now; the housekeeping does it after a restart or a failure.
+pub(crate) fn wake_sweep(state: &AppState) {
+  let state = state.clone();
+  tokio::spawn(async move {
+    if let Err(error) = sweep_deleted(&state).await {
+      tracing::warn!(%error, "clearing deleted channels failed; the housekeeping tries again");
+    }
+  });
+}
+
+/// Clears channels and spaces marked deleted: their objects in storage, then their rows, in bounded
+/// rounds. Survives a restart, since a mark stays until its rows go, and running twice is harmless:
+/// deleting what is gone succeeds. A failing storage leaves the mark for the next round. Returns how
+/// many channels went.
+pub async fn sweep_deleted(state: &AppState) -> Result<usize, ApiError> {
+  let mut cleared = 0;
+  loop {
+    let batch = state
+      .database
+      .marked_deleted_conversations(DELETED_SWEEP_BATCH)
+      .await?;
+    let batch_len = batch.len();
+    for (conversation, maybe_image) in batch {
+      delete_stored_objects(state, conversation).await?;
+      if let Some(image) = maybe_image {
+        super::retention::delete_object(state, &image).await?;
+      }
+      state.database.clear_deleted_conversation(conversation).await?;
+      cleared += 1;
+    }
+    if i64::try_from(batch_len).unwrap_or(i64::MAX) < DELETED_SWEEP_BATCH {
+      break;
+    }
+  }
+  for (space, maybe_image) in state.database.cleared_deleted_spaces(DELETED_SWEEP_BATCH).await? {
+    if let Some(image) = maybe_image {
+      super::retention::delete_object(state, &image).await?;
+    }
+    state.database.clear_deleted_space(space).await?;
+  }
+  Ok(cleared)
+}
+
+/// Deletes the conversation's attachments, stored ciphertext and search segments in storage.
+pub(crate) async fn delete_stored_objects(state: &AppState, id: ConversationId) -> Result<(), ApiError> {
+  for key in state.database.conversation_object_keys(id).await? {
+    super::retention::delete_object(state, &key).await?;
   }
   Ok(())
 }

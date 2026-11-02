@@ -16,6 +16,8 @@ data class ConversationRights(
   val canManageBookmarks: Boolean = true,
   /** Change the channel itself, such as archiving it. */
   val canManageChannel: Boolean = true,
+  /** Delete the channel for everybody; offered only on the server's word. */
+  val canDeleteChannel: Boolean = false,
 ) {
   companion object {
     fun of(maybeItem: ConversationItem?): ConversationRights = maybeItem?.let { item ->
@@ -24,6 +26,7 @@ data class ConversationRights(
         canReact = item.canReact,
         canManageBookmarks = item.canManageBookmarks,
         canManageChannel = item.canManageChannel,
+        canDeleteChannel = item.canDeleteChannel,
       )
     } ?: ConversationRights()
   }

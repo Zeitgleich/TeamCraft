@@ -805,6 +805,8 @@ mod tests {
       can_add_members,
       can_invite_guests,
       can_manage_space: false,
+      can_delete_space: false,
+      deleted_channel_count: 0,
       can_create_channels: false,
       maybe_my_role: None,
     }

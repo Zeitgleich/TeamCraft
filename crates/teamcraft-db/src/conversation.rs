@@ -243,7 +243,8 @@ impl Database {
                 m.reactions_seen_through_message_id, m.reactions_seen_message_ids AS "reactions_seen_message_ids?"
          FROM conversations c
          LEFT JOIN memberships m ON m.conversation_id = c.id AND m.user_id = $1
-         WHERE ($2::bigint IS NULL OR c.id = $2)
+         WHERE c.deleted_at IS NULL
+           AND ($2::bigint IS NULL OR c.id = $2)
            AND ($3::bigint IS NULL OR c.space_id = $3)
            AND (NOT $4 OR m.user_id IS NOT NULL)
            AND (NOT $5 OR (c.kind = 'channel' AND (c.visibility = 'public' OR $6)
@@ -480,7 +481,9 @@ impl Database {
     role: ChannelRole,
   ) -> Result<bool, DbError> {
     let result = sqlx::query!(
-      r#"INSERT INTO memberships (conversation_id, user_id, role) VALUES ($1, $2, $3)
+      // Waits for a deletion running now and then finds the conversation gone: nobody joins one.
+      r#"INSERT INTO memberships (conversation_id, user_id, role)
+         SELECT c.id, $2, $3 FROM conversations c WHERE c.id = $1 AND c.deleted_at IS NULL FOR SHARE
          ON CONFLICT DO NOTHING"#,
       to_db(conversation),
       to_db(user),

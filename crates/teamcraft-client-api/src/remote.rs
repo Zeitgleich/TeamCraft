@@ -873,6 +873,15 @@ pub enum ChatAction {
   },
   LeaveChannel {
     conversation: ConversationId,
+    #[serde(default)]
+    deletes_if_last: bool,
+  },
+  DismissSuspectDeletions,
+  DeleteChannel {
+    conversation: ConversationId,
+  },
+  DeleteSpace {
+    space: SpaceId,
   },
   CreateCategory {
     space: SpaceId,
@@ -1210,7 +1219,13 @@ impl ChatAction {
       } => backend.update_channel(conversation, changes),
       Self::JoinChannel { conversation } => backend.join_channel(conversation),
       Self::JoinSpace { space } => backend.join_space(space),
-      Self::LeaveChannel { conversation } => backend.leave_channel(conversation),
+      Self::LeaveChannel {
+        conversation,
+        deletes_if_last,
+      } => backend.leave_channel(conversation, deletes_if_last),
+      Self::DismissSuspectDeletions => backend.dismiss_suspect_deletions(),
+      Self::DeleteChannel { conversation } => backend.delete_channel(conversation),
+      Self::DeleteSpace { space } => backend.delete_space(space),
       Self::CreateCategory { space, name } => backend.create_category(space, &name),
       Self::RenameCategory {
         space,
@@ -1355,6 +1370,7 @@ pub enum ChatQuery {
   },
   UnconfirmedRemovals,
   GroupLeftovers,
+  SuspectDeletions,
   Draft {
     conversation: ConversationId,
     #[serde(default)]
@@ -1586,6 +1602,9 @@ pub enum ChatAnswer {
   UnconfirmedRemovals {
     removals: Vec<(ConversationId, UserId)>,
   },
+  SuspectDeletions {
+    count: u32,
+  },
   GroupLeftovers {
     leftovers: Vec<(ConversationId, UserId)>,
   },
@@ -1646,6 +1665,9 @@ impl ChatQuery {
       },
       Self::UnconfirmedRemovals => ChatAnswer::UnconfirmedRemovals {
         removals: backend.unconfirmed_removals(),
+      },
+      Self::SuspectDeletions => ChatAnswer::SuspectDeletions {
+        count: backend.suspect_deletions(),
       },
       Self::GroupLeftovers => ChatAnswer::GroupLeftovers {
         leftovers: backend.group_leftovers(),

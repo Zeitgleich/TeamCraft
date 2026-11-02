@@ -19,7 +19,10 @@ use crate::store::{LocalStore, Table};
 
 /// Tables keyed by the conversation (`{conversation}` or `{conversation}/…`) that a deleted
 /// conversation leaves nothing in.
-const PER_CONVERSATION_TABLES: [Table; 8] = [
+const PER_CONVERSATION_TABLES: [Table; 11] = [
+  Table::PendingUploads,
+  Table::PendingPreviews,
+  Table::RemovedSenders,
   Table::ContentKeys,
   Table::Outbox,
   Table::Undecrypted,
@@ -185,24 +188,80 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     Ok(())
   }
 
-  /// The conversation was deleted on the server (a direct message deleted with a deleted account,
-  /// admin.md §3.2.1): unlike a removal, its local history goes too, with everything this device
-  /// kept for it (keys, outbox, read state, search segments).
+  /// The conversation's history goes from this device: the user deleted it here, or the retention of
+  /// a deletion the server claimed ran out (`server_deletions`). With everything kept for it (keys,
+  /// outbox, read state, search segments, staged files, drafts). Crash-safe: all of it goes in one
+  /// group of writes, after the group, and a later round finds what is left by the marker.
   pub(crate) fn purge_conversation(&mut self, conversation: ConversationId) -> Result<(), CoreError> {
-    self.forget_conversation(conversation)?;
-    self.clear_leftovers(conversation)?;
-    self.store.delete_messages(conversation)?;
-    crate::unseen_reactions::forget(&self.store, conversation)?;
+    self.drop_group(conversation)?;
+    self.update_account_data(|data, now| data.forget_conversation(conversation, now))?;
+    self.atomically(|client| {
+      client.store.delete(Table::Members, &conversation.to_string())?;
+      client.clear_leftovers(conversation)?;
+      client.drop_pending_work(conversation)?;
+      client.store.delete_messages(conversation)?;
+      crate::unseen_reactions::forget(&client.store, conversation)?;
+      let id = conversation.to_string();
+      let prefix = format!("{conversation}/");
+      for table in PER_CONVERSATION_TABLES {
+        for (key, _) in client.store.list(table)? {
+          if key == id || key.starts_with(&prefix) {
+            client.store.delete(table, &key)?;
+          }
+        }
+      }
+      for record in crate::client::disk_downloads::download_records(&client.store)? {
+        if record.conversation_id == conversation {
+          let attachment = record.attachment_id.to_string();
+          client.store.delete(Table::Downloads, &attachment)?;
+          client.store.delete(Table::FileTransfers, &attachment)?;
+        }
+      }
+      for marker in super::server_deletions::purge_markers(conversation) {
+        client.store.delete(Table::AppliedChanges, &marker)?;
+      }
+      // Last: a conversation without a record is otherwise found by its messages or its marker.
+      client.store.delete(Table::Conversations, &id)?;
+      Ok(())
+    })?;
+    tracing::info!(conversation_id = %conversation, "dropped a deleted conversation with its local history");
+    Ok(())
+  }
+
+  /// Work that waits for the server about this conversation; it would only be refused now. The
+  /// plaintext of files staged for upload goes with it.
+  pub(crate) fn drop_pending_work(&mut self, conversation: ConversationId) -> Result<(), CoreError> {
     let id = conversation.to_string();
     let prefix = format!("{conversation}/");
-    for table in PER_CONVERSATION_TABLES {
+    for table in [Table::Outbox, Table::PendingUploads, Table::PendingPreviews] {
       for (key, _) in self.store.list(table)? {
         if key == id || key.starts_with(&prefix) {
           self.store.delete(table, &key)?;
         }
       }
     }
-    tracing::info!(conversation_id = %conversation, "dropped a deleted conversation with its local history");
+    let is_about_it = |key: &str, kinds: &[&str]| {
+      let mut parts = key.split('/');
+      parts.next().is_some_and(|kind| kinds.contains(&kind)) && parts.next() == Some(id.as_str())
+    };
+    for (key, _) in self.store.list(Table::PendingChanges)? {
+      if is_about_it(
+        &key,
+        &["removal", "rejoin", "add_user", "share_current", "share_missed"],
+      ) {
+        self.store.delete(Table::PendingChanges, &key)?;
+      }
+    }
+    for (key, _) in self.store.list(Table::PendingActions)? {
+      if is_about_it(&key, &["read", "thread_read", "reactions_seen", "ack", "pin"]) {
+        self.store.delete(Table::PendingActions, &key)?;
+      }
+    }
+    for (key, _) in self.store.list(Table::FileTransfers)? {
+      if key.starts_with(&format!("failed/{prefix}")) {
+        self.store.delete(Table::FileTransfers, &key)?;
+      }
+    }
     Ok(())
   }
 

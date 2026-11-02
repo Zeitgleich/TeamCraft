@@ -24,6 +24,12 @@
   <string name="channel_archive_confirm">Archive</string>
   <string name="channel_leave_title">Leave %1$s?</string>
   <string name="channel_leave_text">You will no longer receive messages from this conversation.</string>
+  <string name="channel_leave_last_member_text">Nobody else is in this channel, so leaving deletes it with its messages and files. This can\'t be undone.</string>
+  <string name="entry_leave_last_channel_admin_or_delete">Make someone else channel admin in the channel\'s settings first, or delete the channel.</string>
+  <string name="channel_delete">Delete channel</string>
+  <string name="channel_delete_title">Delete %1$s for everyone?</string>
+  <string name="channel_delete_text">All members lose this channel and its messages and files. This can\'t be undone.</string>
+  <string name="channel_delete_confirm">Delete</string>
   <string name="channel_leave_confirm">Leave</string>
   <string name="channels">Channels</string>
   <string name="search">Search</string>
@@ -70,6 +76,10 @@
   <string name="entry_space_menu">Space menu</string>
   <string name="space_mute_title">Mute %1$s</string>
   <string name="space_leave_title">Leave %1$s?</string>
-  <string name="space_leave_text">You also leave all of its channels.</string>
+  <string name="space_leave_text">You also leave all of its channels. Channels only you are in are deleted.</string>
+  <string name="deletions_suspect">The server says %1$d of your conversations were deleted at once. They are hidden, and their messages stay on this device for now. Tell your administrator.</string>
+  <string name="space_delete">Delete space</string>
+  <string name="space_delete_title">Delete %1$s for everyone?</string>
+  <string name="space_delete_text">Channels that go with it: %1$d, with their messages and files, for all their members. This can\'t be undone.</string>
   <string name="space_leave_confirm">Leave</string>
 </resources>
