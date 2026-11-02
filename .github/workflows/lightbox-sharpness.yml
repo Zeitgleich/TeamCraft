@@ -1,0 +1,40 @@
+# A zoomed picture in the lightbox stays sharp (#1089): renders the lightbox's stylesheet and DOM in
+# WebKitGTK, the Linux desktop app's engine, and measures the pixels with
+# scripts/check-lightbox-sharpness.py. Chromium doesn't show the bug this guards against, so the e2e
+# browser can't. Only changes to the stylesheet's lightbox rules or the check itself run it.
+name: Lightbox sharpness
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "crates/teamcraft-ui/style/main/380-lightbox.css"
+      - "scripts/check-lightbox-sharpness.py"
+      - ".github/workflows/lightbox-sharpness.yml"
+  pull_request:
+    paths:
+      - "crates/teamcraft-ui/style/main/380-lightbox.css"
+      - "scripts/check-lightbox-sharpness.py"
+      - ".github/workflows/lightbox-sharpness.yml"
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+permissions:
+  contents: read
+
+jobs:
+  rendered:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Install WebKitGTK and a display
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends gir1.2-gtk-3.0 gir1.2-webkit2-4.1 python3-gi python3-gi-cairo python3-numpy xvfb xauth
+      - name: Measure
+        # The system's Python: it is the one with the GObject bindings.
+        run: xvfb-run -a -s "-screen 0 1600x1000x24" /usr/bin/python3 scripts/check-lightbox-sharpness.py

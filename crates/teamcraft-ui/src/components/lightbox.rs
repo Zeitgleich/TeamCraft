@@ -50,8 +50,9 @@ use crate::components::video_player::VideoPlayer;
 use crate::feedback::{ActionFailure, FailureKind, PendingAction};
 use crate::i18n::use_i18n;
 use crate::lightbox::{
-  Arrival, Command, Direction, Gesture, LightboxScope, MediaKey, MediaKind, MediaPages, ModifierStyle, Point,
-  Pointers, Release, Size, Viewport, album_len, images_in_scope, neighbor, position, wheel_zoom_factor,
+  Arrival, Command, Direction, Gesture, LightboxScope, MediaKey, MediaKind, MediaPages, ModifierStyle,
+  Picture, Point, Pointers, Release, Size, Viewport, album_len, fitted_layout, images_in_scope, neighbor,
+  position, wheel_zoom_factor,
 };
 use crate::media_cache::{self, Rendition};
 use crate::model::{ConversationId, ConversationKind, thread_id_of};
@@ -643,7 +644,9 @@ fn Stage(
   let toggle_at = move |anchor: Point| {
     let (image_size, stage_size) = sizes(image, stage);
     motion.stop_view();
-    viewport.update(|viewport| viewport.toggle_zoom(anchor, image_size, stage_size));
+    let (scale, offset) =
+      viewport.with_untracked(|viewport| viewport.toggled(anchor, image_size, stage_size));
+    motion.settle_view_to(scale, offset);
   };
   let on_wheel = move |ev: web_sys::WheelEvent| {
     if !can_transform() {
@@ -730,18 +733,51 @@ fn Stage(
       toggle_at(anchor_of(f64::from(ev.client_x()), f64::from(ev.client_y())));
     }
   };
-  let transform = move || {
+  // Bumped measurements become the viewport's picture; the stage may change without the window (the
+  // thread panel).
+  Effect::new(move |_| {
     layout.track();
+    let picture = measure_picture(image, stage);
+    viewport.try_update(|viewport| viewport.set_picture(picture));
+  });
+  observe_stage_size(stage, layout);
+  // The display scale the picture is laid out at (#1089). A gesture holds it and only transforms, so
+  // a frame costs no layout; once it settles the picture is laid out at its real size and painted
+  // sharp in place, in every engine. `None` at fit, where the stylesheet fits it.
+  let laid_at = Memo::new(move |previous: Option<&Option<f64>>| {
+    let is_live = motion.is_live().get();
     let viewport = viewport.get();
-    let offset = viewport.offset();
-    let (image_size, stage_size) = sizes(image, stage);
+    match previous {
+      Some(held) if is_live => *held,
+      _ => viewport.is_zoomed().then(|| viewport.shown_scale()),
+    }
+  });
+  let picture_layout = Memo::new(move |_| viewport.with(|viewport| viewport.layout_at(laid_at.get())));
+  let transform = move || {
+    let viewport = viewport.get();
+    let offset = match motion.is_live().get() {
+      true => viewport.offset(),
+      false => viewport.snapped_offset(),
+    };
     format!(
-      "translate({:.1}px, {:.1}px) rotate({}deg) scale({:.4})",
+      "translate({:.3}px, {:.3}px) rotate({}deg) scale({:.4})",
       offset.x,
       offset.y,
       viewport.rotation().degrees(),
-      viewport.display_scale(image_size, stage_size),
+      picture_layout.get().scale,
     )
+  };
+  let laid_width = move || {
+    picture_layout
+      .get()
+      .maybe_size
+      .map(|size| format!("{:.3}px", size.width))
+  };
+  let laid_height = move || {
+    picture_layout
+      .get()
+      .maybe_size
+      .map(|size| format!("{:.3}px", size.height))
   };
   let name = move || current_file.get().map(|file| file.file_name).unwrap_or_default();
   let still = still_frame_of(full, kind, is_paused);
@@ -752,6 +788,7 @@ fn Stage(
       class:zoomed=move || viewport.get().is_zoomed()
       class:is-video=move || kind.get() == Some(MediaKind::Video)
       class:is-live=motion.is_live()
+      class:is-turning=motion.is_turning()
       node_ref=stage
       on:pointerdown=on_pointerdown
       on:pointermove=on_pointermove
@@ -829,12 +866,15 @@ fn Stage(
                 <img
                   class="lightbox-image"
                   class:is-arriving=move || !key.is_some_and(|key| arrival.with(|arrival| arrival.is_full_shown(key)))
+                  class:is-laid-out=move || picture_layout.get().maybe_size.is_some()
                   src=src
                   alt=name
                   decoding="async"
                   draggable="false"
                   node_ref=image
                   style:transform=transform
+                  style:width=laid_width
+                  style:height=laid_height
                   on:load=move |ev| on_shown(&event_target::<web_sys::HtmlImageElement>(&ev))
                   on:error=move |_| {
                     // The still frame is made from the file; only the file itself failing counts.
@@ -1097,17 +1137,86 @@ fn thumbnail_url(file: &FileInfo) -> Option<Rc<ObjectUrl>> {
   ObjectUrl::from_thumbnail(png).map(Rc::new)
 }
 
-/// The image's laid-out size (before zoom and rotation) and the stage's size.
+/// The image's size at fit (before zoom and rotation) and the stage's size. Forces no layout of the
+/// picture: while zoomed the element itself has its zoomed size.
 pub fn sizes(image: NodeRef<html::Img>, stage: NodeRef<html::Div>) -> (Size, Size) {
-  let image = image
-    .get_untracked()
-    .map(|image| Size::new(f64::from(image.offset_width()), f64::from(image.offset_height())))
-    .unwrap_or_default();
-  let stage = stage
+  let stage_size = stage_size_of(stage);
+  let Some(image) = image.get_untracked() else {
+    return (Size::default(), stage_size);
+  };
+  let natural = Size::new(
+    f64::from(image.natural_width()),
+    f64::from(image.natural_height()),
+  );
+  if natural.width <= 0.0 || natural.height <= 0.0 {
+    return (
+      Size::new(f64::from(image.offset_width()), f64::from(image.offset_height())),
+      stage_size,
+    );
+  }
+  (fitted_layout(room_in(stage, stage_size), natural), stage_size)
+}
+
+/// The stage's own size.
+pub fn stage_size_of(stage: NodeRef<html::Div>) -> Size {
+  stage
     .get_untracked()
     .map(|stage| Size::new(f64::from(stage.client_width()), f64::from(stage.client_height())))
-    .unwrap_or_default();
-  (image, stage)
+    .unwrap_or_default()
+}
+
+/// What the stage leaves a picture inside its padding.
+fn room_in(stage: NodeRef<html::Div>, stage_size: Size) -> Size {
+  let maybe_style = stage
+    .get_untracked()
+    .and_then(|stage| window().get_computed_style(&stage).ok().flatten());
+  let padding = |side: &str| {
+    maybe_style
+      .as_ref()
+      .and_then(|style| style.get_property_value(side).ok())
+      .and_then(|value| value.trim_end_matches("px").parse::<f64>().ok())
+      .unwrap_or(0.0)
+  };
+  Size::new(
+    stage_size.width - padding("padding-left") - padding("padding-right"),
+    stage_size.height - padding("padding-top") - padding("padding-bottom"),
+  )
+}
+
+/// The full picture as it is now, `None` before it is decoded.
+fn measure_picture(image: NodeRef<html::Img>, stage: NodeRef<html::Div>) -> Option<Picture> {
+  let element = image.get_untracked()?;
+  let natural = Size::new(
+    f64::from(element.natural_width()),
+    f64::from(element.natural_height()),
+  );
+  let (laid_out, stage) = sizes(image, stage);
+  Some(Picture {
+    natural,
+    laid_out,
+    stage,
+    device_pixel_ratio: window().device_pixel_ratio(),
+  })
+}
+
+/// Bumps `layout` when the stage changes size, which the window's `resize` doesn't tell when the
+/// thread panel opens.
+fn observe_stage_size(stage: NodeRef<html::Div>, layout: RwSignal<u32>) {
+  let callback = Closure::<dyn FnMut()>::new(move || {
+    layout.try_update(|tick| *tick += 1);
+  });
+  let Ok(observer) = web_sys::ResizeObserver::new(callback.as_ref().unchecked_ref()) else {
+    return;
+  };
+  let handle = StoredValue::new_local((observer, callback));
+  Effect::new(move |_| {
+    if let Some(element) = stage.get() {
+      handle.with_value(|(observer, _)| observer.observe(&element));
+    }
+  });
+  on_cleanup(move || {
+    handle.try_with_value(|(observer, _)| observer.disconnect());
+  });
 }
 
 /// Keys typed into the thread's composer, a text field or the zoom slider are theirs, and the "…"

@@ -145,6 +145,7 @@
 
   /* The full file replaces its placeholder at once. */
   .lightbox-stage:not(.zoomed, .is-live) .lightbox-slot.is-current > .lightbox-image:not(.lightbox-placeholder),
+  .lightbox-stage.is-turning .lightbox-slot.is-current > .lightbox-image:not(.lightbox-placeholder),
   .lightbox-slot.is-current > .lightbox-placeholder.is-hidden {
     transition: none;
   }
