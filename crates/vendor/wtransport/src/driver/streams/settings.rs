@@ -1,5 +1,6 @@
 use crate::driver::streams::unilocal::StreamUniLocalH3;
 use crate::driver::streams::uniremote::StreamUniRemoteH3;
+use crate::driver::streams::FrameReadProgress;
 use crate::driver::streams::ProtoReadError;
 use crate::driver::streams::ProtoWriteError;
 use crate::driver::DriverError;
@@ -77,6 +78,7 @@ impl LocalSettingsStream {
 
 pub struct RemoteSettingsStream {
     stream: Option<StreamUniRemoteH3>,
+    progress: FrameReadProgress,
     settings: watch::Sender<Option<Settings>>,
 }
 
@@ -84,6 +86,7 @@ impl RemoteSettingsStream {
     pub fn empty() -> Self {
         Self {
             stream: None,
+            progress: FrameReadProgress::default(),
             settings: watch::channel(None).0,
         }
     }
@@ -130,7 +133,7 @@ impl RemoteSettingsStream {
             return pending().await;
         };
 
-        match stream.read_frame().await {
+        match stream.read_frame_resumable(&mut self.progress).await {
             Ok(frame) => Ok(frame),
             Err(ProtoReadError::H3(error_code)) => Err(DriverError::Proto(error_code)),
             Err(ProtoReadError::IO(io_error)) => match io_error {

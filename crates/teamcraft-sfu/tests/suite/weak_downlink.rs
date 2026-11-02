@@ -67,7 +67,7 @@ const MAX_GAP: Duration = Duration::from_millis(1500);
 async fn a_viewer_limited_below_360p_gets_the_180p_layer() {
   let (port, certificate_hash) = start_sfu().await;
   let sfu = SocketAddr::new(Ipv6Addr::LOCALHOST.into(), port);
-  let relay = Relay::start(sfu, std::time::Instant::now()).await;
+  let relay = Relay::start(sfu, std::time::Instant::now());
   relay.to_client.set_limit(Some(LIMIT_BPS));
   let presenter = join(sfu, certificate_hash, 1, 2).await;
   let mut viewer = join(relay.address, certificate_hash, 2, 1).await;

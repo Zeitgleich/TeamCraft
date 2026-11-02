@@ -42,9 +42,14 @@ const DEADLINE: Duration = Duration::from_secs(10);
 /// What `DEADLINE` is for a real capture: the portal, a camera starting up, a dark room's 10 fps.
 #[cfg(all(feature = "portal-e2e", target_os = "linux"))]
 const PORTAL_DEADLINE: Duration = Duration::from_secs(30);
-/// Luma PSNR a decoded picture keeps at least against what was captured (lossy, not black: a
-/// black picture against these scenes is below 10 dB).
-const MIN_PSNR_DB: f64 = 25.0;
+/// Luma PSNR every decoded picture keeps at least against what was captured: lossy, not black
+/// (a black picture against these scenes is below 10 dB). The first pictures of a camera's smallest
+/// layer (160x90) measure 24 to 30 dB, while its rate control settles.
+const MIN_PSNR_DB: f64 = 20.0;
+/// What the pictures keep once the stream has settled, from [`SETTLED_PICTURE`] on: the bound
+/// that notices a picture that only resembles what was captured.
+const MIN_SETTLED_PSNR_DB: f64 = 25.0;
+const SETTLED_PICTURE: usize = WANTED_PICTURES / 2;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_shared_screen_reaches_the_viewer_with_its_content() {
@@ -224,14 +229,38 @@ async fn check_content_arrives(
     assert_eq!(stats.content(), PictureContent::Detailed, "{kind:?}: {stats:?}");
   }
   let captured = captured.lock().unwrap();
-  for picture in decoded.iter() {
-    let source = captured_at(&captured, picture.timestamp_us())
-      .scaled(picture.resolution())
-      .unwrap();
-    let psnr = luma_psnr(&source, picture);
+  let judged: Vec<(&VideoFrame, f64)> = decoded
+    .iter()
+    .map(|picture| {
+      let source = captured_at(&captured, picture.timestamp_us())
+        .scaled(picture.resolution())
+        .unwrap();
+      (picture, luma_psnr(&source, picture))
+    })
+    .collect();
+  let timeline = judged
+    .iter()
+    .enumerate()
+    .map(|(index, (picture, psnr))| {
+      let size = picture.resolution();
+      format!(
+        "{index:3}: {:7} µs, {}x{}: {psnr:.1} dB",
+        picture.timestamp_us(),
+        size.width,
+        size.height
+      )
+    })
+    .collect::<Vec<_>>()
+    .join("\n");
+  for (index, (picture, psnr)) in judged.iter().enumerate() {
+    let min_psnr_db = if index < SETTLED_PICTURE {
+      MIN_PSNR_DB
+    } else {
+      MIN_SETTLED_PSNR_DB
+    };
     assert!(
-      psnr >= MIN_PSNR_DB,
-      "{kind:?} at {} µs, {:?}: PSNR {psnr:.1} dB",
+      *psnr >= min_psnr_db,
+      "{kind:?} at {} µs, {:?}: PSNR {psnr:.1} dB:\n{timeline}",
       picture.timestamp_us(),
       picture.resolution()
     );

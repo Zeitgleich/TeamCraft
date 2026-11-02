@@ -54,6 +54,10 @@ pub struct SfuConfig {
   /// moved between devices), so a leave the server never heard of can't keep a device in a call
   /// for good. One small request per interval; the server drops what the SFU no longer has.
   pub roster_interval: Duration,
+  /// The UDP socket's receive buffer. A big keyframe arrives as a burst of half a megabyte: a
+  /// socket with the system's default buffer loses part of it while the SFU is busy, and with it
+  /// the whole picture, for everyone watching.
+  pub udp_receive_buffer_bytes: usize,
 }
 
 impl Default for SfuConfig {
@@ -76,6 +80,7 @@ impl Default for SfuConfig {
       reconnect_grace: Duration::from_secs(30),
       shutdown_drain: Duration::from_secs(2),
       roster_interval: Duration::from_secs(30),
+      udp_receive_buffer_bytes: 4 * 1024 * 1024,
     }
   }
 }

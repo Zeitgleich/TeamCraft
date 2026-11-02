@@ -127,7 +127,12 @@ class ConnectionNoticeTest {
     val connection = MutableStateFlow<ConnectionState?>(ConnectionState.Connected)
     val online = MutableStateFlow(true)
     var now = 1_000L
-    val grace = ConnectionGrace(scope, connection, online) { now }
+    val isSyncStartFailing = MutableStateFlow(false)
+    val grace = ConnectionGrace(scope, connection, online, isSyncStartFailing) { now }
+    assertNull(grace.unsettled.value.maybeSinceMs)
+    isSyncStartFailing.value = true
+    assertEquals(1_000L, grace.unsettled.value.maybeSinceMs)
+    isSyncStartFailing.value = false
     assertNull(grace.unsettled.value.maybeSinceMs)
     connection.value = ConnectionState.Connecting
     assertEquals(1_000L, grace.unsettled.value.maybeSinceMs)
@@ -137,6 +142,20 @@ class ConnectionNoticeTest {
     connection.value = ConnectionState.Connected
     assertNull(grace.unsettled.value.maybeSinceMs)
     scope.cancel()
+  }
+
+  @Test
+  fun aSyncThatCouldNotStartIsNamedAfterTheGracePeriod() {
+    val unsettled = Unsettled(maybeSinceMs = 0)
+    assertNull(connectionNotice(true, ConnectionState.Connected, unsettled, CONNECTION_GRACE_MS - 1, isSyncStartFailing = true))
+    assertEquals(
+      ConnectionNotice.SyncNotStarted,
+      connectionNotice(true, ConnectionState.Connected, unsettled, CONNECTION_GRACE_MS, isSyncStartFailing = true),
+    )
+    assertEquals(
+      ConnectionNotice.DeviceOffline,
+      connectionNotice(false, ConnectionState.Connecting, unsettled, CONNECTION_GRACE_MS, isSyncStartFailing = true),
+    )
   }
 
   private fun offline(retryAtMs: Long) = ConnectionState.Offline(retryAtMs = retryAtMs, maybeInterception = null)
