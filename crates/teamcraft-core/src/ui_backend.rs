@@ -1976,10 +1976,12 @@ impl<S: LocalStore> ChatBackend for CoreChatBackend<S> {
     self.ui_refresh_share_links(conversation, message, file_id);
   }
 
+  #[cfg(not(target_arch = "wasm32"))]
   fn downloads(&self) -> Option<Vec<teamcraft_client_api::actions::DownloadEntry>> {
     self.ui_downloads()
   }
 
+  #[cfg(not(target_arch = "wasm32"))]
   fn control_download(&self, file_id: &str, control: teamcraft_client_api::actions::DownloadControl) {
     self.ui_control_download(file_id, control);
   }

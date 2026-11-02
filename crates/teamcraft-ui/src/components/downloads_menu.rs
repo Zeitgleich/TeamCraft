@@ -12,7 +12,6 @@ use teamcraft_client_api::actions::{DownloadControl, DownloadEntry, DownloadStat
 use teamcraft_client_api::admin::format_bytes;
 use wasm_bindgen::JsCast;
 
-use crate::auth::tauri;
 use crate::clock::now_ms;
 use crate::components::icons::{Icon, IconName};
 use crate::components::sheet::MenuSurface;
@@ -70,7 +69,7 @@ pub fn DownloadsButton() -> impl IntoView {
   };
 
   view! {
-    <Show when=move || tauri::is_available() && !entries.with(Vec::is_empty) fallback=|| ()>
+    <Show when=move || !entries.with(Vec::is_empty) fallback=|| ()>
       <div class="downloads">
         <button
           class="icon-btn on-dark downloads-btn"

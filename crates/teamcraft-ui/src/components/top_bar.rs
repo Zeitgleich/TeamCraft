@@ -6,7 +6,6 @@ use crate::brand::Brand;
 use crate::components::avatar::{Avatar, AvatarSize};
 use crate::components::brand_logo::BrandLogo;
 use crate::components::channel_glyph::ChannelGlyph;
-use crate::components::downloads_menu::DownloadsButton;
 use crate::components::icons::{Icon, IconName};
 use crate::components::window_controls::{ClickOrDrag, window_drag_handler};
 use crate::history::{Travel, travel};
@@ -61,7 +60,8 @@ pub fn TopBar() -> impl IntoView {
         <SearchField />
       </div>
       <div class="top-actions">
-        <DownloadsButton />
+        // The browser has its own downloads list and never loads this one.
+        {tauri::is_available().then(|| lazy_area(Place::Inline, || areas::downloads(())))}
         <button
           class="icon-btn on-dark"
           aria-label=move || i18n.t("shortcuts-title")

@@ -1,12 +1,15 @@
 //! Files in the UI adapter: attachments of messages, uploads, downloads and share links.
 
+#[cfg(not(target_arch = "wasm32"))]
+use teamcraft_client_api::actions::{DownloadControl, DownloadEntry, DownloadState};
 use teamcraft_client_api::actions::{
-  DownloadControl, DownloadEntry, DownloadState, FileFailure, FileInfo, FileSource, FileTransfer,
-  MediaAnchor, MediaPage, OutgoingFile, PixelSize, ShareLink, ShareLinkOptions,
+  FileFailure, FileInfo, FileSource, FileTransfer, MediaAnchor, MediaPage, OutgoingFile, PixelSize,
+  ShareLink, ShareLinkOptions,
 };
 use teamcraft_client_api::model::{ConversationId, MessageId, ThreadId, UserId};
 use teamcraft_proto::{AttachmentId, Base64Bytes};
 
+#[cfg(not(target_arch = "wasm32"))]
 use crate::client::disk_downloads::{DownloadRecord, DownloadStatus, download_records};
 use crate::client::files::{
   PendingFile, PendingUpload, RetryCause, TransferFailure, TransferState, UploadRetry, UploadSource,
@@ -419,6 +422,8 @@ impl<S: LocalStore> CoreChatBackend<S> {
   }
 
   /// The downloads list: every recorded save to disk, newest first, with the bytes that arrived.
+  /// The browser has its own list: none of this is in its build (a guest's download budget).
+  #[cfg(not(target_arch = "wasm32"))]
   pub(crate) fn ui_downloads(&self) -> Option<Vec<DownloadEntry>> {
     let records = self.read(download_records(self.store_ref()).map(Some))?;
     Some(
@@ -429,6 +434,7 @@ impl<S: LocalStore> CoreChatBackend<S> {
     )
   }
 
+  #[cfg(not(target_arch = "wasm32"))]
   pub(crate) fn ui_control_download(&self, file_id: &str, control: DownloadControl) {
     let Ok(attachment) = file_id.parse::<AttachmentId>() else {
       tracing::warn!("controlling a download that isn't one");
@@ -551,6 +557,7 @@ fn upload_transfer(file: &PendingFile, transfers: &Transfers) -> FileTransfer {
 
 /// A record as the list shows it: a running download's bytes from its transfer, a stopped one's
 /// from its partial file.
+#[cfg(not(target_arch = "wasm32"))]
 fn download_entry(record: DownloadRecord, transfers: &Transfers) -> DownloadEntry {
   let maybe_progress = transfers.progress(record.attachment_id);
   let state = match record.status {
@@ -592,11 +599,6 @@ fn partial_bytes(maybe_path: Option<&str>) -> u64 {
   maybe_path
     .and_then(|path| std::fs::metadata(path).ok())
     .map_or(0, |meta| meta.len())
-}
-
-#[cfg(target_arch = "wasm32")]
-fn partial_bytes(_maybe_path: Option<&str>) -> u64 {
-  0
 }
 
 fn failure_view(reason: TransferFailure) -> FileFailure {
