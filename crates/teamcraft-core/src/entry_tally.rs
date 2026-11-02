@@ -232,8 +232,8 @@ impl EntryTally {
     let bytes: &[u8; TALLY_BYTES] = bytes.try_into().ok()?;
     let (numbers, through_id) = bytes.split_at(TALLY_WORDS * 8);
     let mut words = [0u64; TALLY_WORDS];
-    for (word, number) in words.iter_mut().zip(numbers.chunks_exact(8)) {
-      *word = u64::from_le_bytes(number.try_into().ok()?);
+    for (word, number) in words.iter_mut().zip(numbers.as_chunks::<8>().0) {
+      *word = u64::from_le_bytes(*number);
     }
     if words[0] != TALLY_FORMAT {
       return None;
