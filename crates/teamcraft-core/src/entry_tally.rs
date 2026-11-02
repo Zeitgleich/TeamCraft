@@ -38,7 +38,9 @@ const PLACED_GROUP: u8 = 0;
 /// What [`EntryTally::to_bytes`] writes first. Another one reads as no tally, so it is counted again.
 const TALLY_FORMAT: u64 = 1;
 /// The numbers of a tally's record.
-const TALLY_WORDS: usize = 15;
+const TALLY_WORDS: usize = 13;
+/// A tally's record: the numbers and the last counted row's client message ID.
+const TALLY_BYTES: usize = TALLY_WORDS * 8 + 16;
 
 /// The counts of a conversation's rows up to [`Self::maybe_through`], as they were at
 /// [`Self::version`]. Sealed like every record; says nothing the messages don't. Stored as plain
@@ -197,7 +199,9 @@ impl EntryTally {
   }
 
   pub(crate) fn to_bytes(&self) -> Vec<u8> {
-    let through = self.maybe_through;
+    let (through_value, through_id) = self
+      .maybe_through
+      .map_or((0, [0; 16]), |through| (through.value, through.client_message_id));
     let words: [u64; TALLY_WORDS] = [
       TALLY_FORMAT,
       self.version.generation,
@@ -205,13 +209,9 @@ impl EntryTally {
       self.version.edited,
       self
         .maybe_importer
-        .map_or(0, |user| user.snowflake().get().unsigned_abs()),
-      u64::from(through.is_some()),
-      through.map_or(0, |through| through.value.cast_unsigned()),
-      through.map_or(0, |through| u128::from_be_bytes(through.client_message_id) as u64),
-      through.map_or(0, |through| {
-        (u128::from_be_bytes(through.client_message_id) >> 64) as u64
-      }),
+        .map_or(0, |user| user.snowflake().get().cast_unsigned()),
+      u64::from(self.maybe_through.is_some()),
+      through_value.cast_unsigned(),
       self.rows as u64,
       self.messages as u64,
       u64::from(self.maybe_last_activity.is_some()),
@@ -219,38 +219,46 @@ impl EntryTally {
       self.unread_key,
       u64::from(self.unread_messages) << 32 | u64::from(self.unread_mentions),
     ];
-    words.iter().flat_map(|word| word.to_le_bytes()).collect()
+    let mut bytes = Vec::with_capacity(TALLY_BYTES);
+    for word in words {
+      bytes.extend_from_slice(&word.to_le_bytes());
+    }
+    bytes.extend_from_slice(&through_id);
+    bytes
   }
 
   /// `None` for anything [`Self::to_bytes`] didn't write.
   fn from_bytes(bytes: &[u8]) -> Option<Self> {
-    let (words, rest) = bytes.as_chunks::<8>();
-    let word = |at: usize| words.get(at).map(|bytes| u64::from_le_bytes(*bytes));
-    if !rest.is_empty() || words.len() != TALLY_WORDS || word(0)? != TALLY_FORMAT {
+    let bytes: &[u8; TALLY_BYTES] = bytes.try_into().ok()?;
+    let (numbers, through_id) = bytes.split_at(TALLY_WORDS * 8);
+    let mut words = [0u64; TALLY_WORDS];
+    for (word, number) in words.iter_mut().zip(numbers.chunks_exact(8)) {
+      *word = u64::from_le_bytes(number.try_into().ok()?);
+    }
+    if words[0] != TALLY_FORMAT {
       return None;
     }
-    let maybe_importer = match word(4)? {
+    let maybe_importer = match words[4] {
       0 => None,
       raw => Some(UserId::from_snowflake(Snowflake::new(raw.cast_signed()).ok()?)),
     };
-    let client_message_id = (u128::from(word(8)?) << 64 | u128::from(word(7)?)).to_be_bytes();
     Some(Self {
       version: FeedVersion {
-        generation: word(1)?,
-        reshaped: word(2)?,
-        edited: word(3)?,
+        generation: words[1],
+        reshaped: words[2],
+        edited: words[3],
       },
       maybe_importer,
-      maybe_through: (word(5)? != 0).then_some(Through {
-        value: word(6)?.cast_signed(),
-        client_message_id,
+      maybe_through: (words[5] != 0).then_some(Through {
+        value: words[6].cast_signed(),
+        client_message_id: through_id.try_into().ok()?,
       }),
-      rows: usize::try_from(word(9)?).ok()?,
-      messages: usize::try_from(word(10)?).ok()?,
-      maybe_last_activity: (word(11)? != 0).then_some(word(12)?.cast_signed()),
-      unread_key: word(13)?,
-      unread_messages: (word(14)? >> 32) as u32,
-      unread_mentions: word(14)? as u32,
+      rows: words[7] as usize,
+      messages: words[8] as usize,
+      maybe_last_activity: (words[9] != 0).then_some(words[10].cast_signed()),
+      unread_key: words[11],
+      unread_messages: (words[12] >> 32) as u32,
+      unread_mentions: words[12] as u32,
     })
   }
 }
@@ -863,7 +871,6 @@ mod tests {
       .to_bytes();
       assert_eq!(EntryTally::from_bytes(&[]), None);
       assert_eq!(EntryTally::from_bytes(&bytes[..bytes.len() - 1]), None);
-      assert_eq!(EntryTally::from_bytes(&bytes[..bytes.len() - 8]), None);
       let mut other_format = bytes;
       other_format[0] = 2;
       assert_eq!(EntryTally::from_bytes(&other_format), None);
@@ -956,7 +963,6 @@ mod tests {
       let row = text(5, PEER, "text");
       let mut edited = row.clone();
       edited.content = text(5, PEER, "other").content;
-      assert_eq!(FeedChange::of(&row, Some(&row)), None);
       assert_eq!(FeedChange::of(&row, Some(&edited)), Some(FeedChange::Edited));
       assert_eq!(FeedChange::of(&row, None), Some(FeedChange::Reshaped));
       let mut tombstone = row.clone();

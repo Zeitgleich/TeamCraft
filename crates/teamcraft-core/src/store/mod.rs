@@ -610,9 +610,11 @@ pub enum FeedChange {
 
 impl FeedChange {
   /// What replacing `earlier` with `maybe_new` (`None`: removing it) changes. A pending message
-  /// changes nothing: it has no place yet that anything could have been counted up to.
+  /// changes nothing: it has no place yet that anything could have been counted up to. The same
+  /// row written again counts as an edit: comparing whole messages costs more download than the
+  /// rare second look at the unread rows.
   pub(crate) fn of(earlier: &StoredMessage, maybe_new: Option<&StoredMessage>) -> Option<Self> {
-    if earlier.order().group != 0 || maybe_new == Some(earlier) {
+    if earlier.order().group != 0 {
       return None;
     }
     let is_row_after = maybe_new.is_some_and(StoredMessage::is_feed_row);
