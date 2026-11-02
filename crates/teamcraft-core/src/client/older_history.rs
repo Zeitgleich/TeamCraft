@@ -50,7 +50,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     let key = record_key(conversation);
     let record = records::get_json::<OlderHistoryRecord>(&self.store, Table::SyncState, &key)?;
     let maybe_position = record.and_then(|record| record.maybe_position);
-    let outcome = self.read_older_page(conversation, maybe_position).await;
+    let outcome = self.read_page_before_held(conversation, maybe_position).await;
     let answer = match &outcome {
       Ok(position) => OlderHistoryRecord {
         maybe_position: Some(*position),
@@ -74,7 +74,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
   }
 
   /// Reads the page and stores it; returns where the next one starts.
-  async fn read_older_page(
+  async fn read_page_before_held(
     &mut self,
     conversation: ConversationId,
     maybe_position: Option<PagingPosition>,
