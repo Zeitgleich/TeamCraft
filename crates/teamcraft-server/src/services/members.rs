@@ -191,6 +191,12 @@ pub async fn remove_member(
   };
   // The import account leaves without a line in the conversation (e2ee.md §4.10).
   let was_importer = state.database.remove_importer(id, user_id).await?;
+  // Nobody stays: the channel goes with the last member (the client's confirmation says so). The
+  // import account is no last member: the people it imported for may not have joined yet.
+  if user_id == caller.user.id && members.len() == 1 && !was_importer {
+    return super::conversations::purge_channel(state, caller, id, &[user_id], "channel_deleted_last_member")
+      .await;
+  }
   state.database.remove_conversation_member(id, user_id).await?;
   if user_id != caller.user.id {
     audit::record(
@@ -433,12 +439,16 @@ async fn authorize_removal(
   if user_id != caller.user.id && is_privileged(&target.role) {
     require(state, caller, Permission::ManageChannelRoles, &access.target())?;
   }
+  // An archived channel takes no role changes, so its last admin could never get out otherwise; a
+  // workspace admin can still assign an owner (admin.md §3.1).
+  let is_leaving_archived = user_id == caller.user.id && access.view.conversation.is_archived;
   if target.role == ChannelRole::Admin
     && members.len() > 1
+    && !is_leaving_archived
     && state.database.count_channel_admins(id).await? <= 1
   {
     return Err(ApiError::Conflict(
-      "make another member channel admin first".into(),
+      "make another member channel admin first, or delete the channel".into(),
     ));
   }
   Ok(Some(members))

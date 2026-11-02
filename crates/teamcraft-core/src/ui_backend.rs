@@ -267,6 +267,10 @@ pub enum CoreCommand {
   LeaveChannel {
     conversation: ConversationId,
   },
+  /// Deletes a channel for everybody, after the user confirmed it.
+  DeleteChannel {
+    conversation: ConversationId,
+  },
   RefreshCategories {
     space: SpaceId,
   },
@@ -770,6 +774,7 @@ impl<S: LocalStore> CoreChatBackend<S> {
       bookmarks: self.bookmarks_of(response.id),
       is_catching_up: self.read(crate::client::is_catching_up(&self.store, response.id)),
       is_notes_to_self,
+      is_archived: response.is_archived,
       maybe_permissions: response.maybe_my_permissions.clone(),
       has_only_deactivated_others: response.has_only_deactivated_others(self.me, |participant| {
         users
@@ -2331,6 +2336,10 @@ impl<S: LocalStore> ChatBackend for CoreChatBackend<S> {
 
   fn leave_channel(&self, conversation: ConversationId) {
     self.command(CoreCommand::LeaveChannel { conversation });
+  }
+
+  fn delete_channel(&self, conversation: ConversationId) {
+    self.command(CoreCommand::DeleteChannel { conversation });
   }
 
   fn categories(&self, space: SpaceId) -> Vec<CategoryInfo> {

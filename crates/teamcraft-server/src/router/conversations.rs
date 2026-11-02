@@ -18,7 +18,8 @@ pub(super) fn routes() -> OpenApiRouter<AppState> {
     .routes(routes!(handlers::list_conversations_handler))
     .routes(routes!(
       handlers::get_conversation_handler,
-      handlers::update_conversation_handler
+      handlers::update_conversation_handler,
+      handlers::delete_conversation_handler
     ))
     .routes(routes!(handlers::request_admin_join_handler))
     .routes(routes!(handlers::close_admin_join_handler))

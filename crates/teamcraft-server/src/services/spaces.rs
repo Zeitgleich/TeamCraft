@@ -3,10 +3,10 @@ use teamcraft_db::{
   ExpiryChange, NewSpace, NewSpaceMember, SpaceChanges, SpaceListing, SpaceMember, SpaceView,
 };
 use teamcraft_proto::{
-  AddSpaceMemberRequest, CategoryId, CategoryResponse, CreateCategoryRequest, CreateSpaceRequest,
-  GatewayEvent, JoinPolicy, ListCategoriesResponse, ListSpaceMembersResponse, ListSpacesResponse, Permission,
-  SpaceId, SpaceMemberResponse, SpaceResponse, SpaceRole, UnixMillis, UpdateCategoryRequest,
-  UpdateSpaceMemberRequest, UpdateSpaceRequest, UserId, UserKind,
+  AddSpaceMemberRequest, CategoryId, CategoryResponse, ConversationId, CreateCategoryRequest,
+  CreateSpaceRequest, GatewayEvent, JoinPolicy, ListCategoriesResponse, ListSpaceMembersResponse,
+  ListSpacesResponse, Permission, SpaceId, SpaceMemberResponse, SpaceResponse, SpaceRole, UnixMillis,
+  UpdateCategoryRequest, UpdateSpaceMemberRequest, UpdateSpaceRequest, UserId, UserKind,
 };
 use time::OffsetDateTime;
 
@@ -361,7 +361,7 @@ pub async fn remove_space_member(
     ensure_not_last_admin(state, id).await?;
   }
 
-  remove_everywhere(state, id, user_id).await?;
+  let left_channels = remove_everywhere(state, id, user_id).await?;
   audit::record(
     state,
     Some(caller.user.id),
@@ -370,12 +370,31 @@ pub async fn remove_space_member(
     &json!({"user_id": user_id.to_string()}),
   )
   .await?;
+  // Leaving: a channel doesn't stay behind without members (the confirmation says so).
+  if user_id == caller.user.id {
+    for channel in left_channels {
+      if state.database.conversation_member_ids(channel).await?.is_empty() {
+        super::conversations::purge_channel(
+          state,
+          caller,
+          channel,
+          &[user_id],
+          "channel_deleted_last_member",
+        )
+        .await?;
+      }
+    }
+  }
   Ok(())
 }
 
 /// Removes the user from the space and its channels and tells everybody concerned. Used by the
-/// removal endpoint and by the guest expiry job.
-pub async fn remove_everywhere(state: &AppState, id: SpaceId, user_id: UserId) -> Result<(), ApiError> {
+/// removal endpoint and by the guest expiry job. Returns the channels they were in.
+pub async fn remove_everywhere(
+  state: &AppState,
+  id: SpaceId,
+  user_id: UserId,
+) -> Result<Vec<ConversationId>, ApiError> {
   let remaining_before = state.database.list_space_members(id).await?;
   let left_channels = state.database.remove_space_member(id, user_id).await?;
   state.hub.publish(
@@ -388,7 +407,8 @@ pub async fn remove_everywhere(state: &AppState, id: SpaceId, user_id: UserId) -
       user_id,
     },
   );
-  for channel in left_channels {
+  for channel in &left_channels {
+    let channel = *channel;
     super::calls::evict_from_call(state, channel, user_id).await;
     let members = state.database.conversation_member_ids(channel).await?;
     state.hub.publish(
@@ -399,7 +419,7 @@ pub async fn remove_everywhere(state: &AppState, id: SpaceId, user_id: UserId) -
       },
     );
   }
-  Ok(())
+  Ok(left_channels)
 }
 
 /// The expiry of a newly added member: guests get the given one or the configured default.

@@ -151,6 +151,7 @@ slash-missing-argument = Aufruf: { $usage }
 slash-bad-reminder = Sag wann: „in 10m“, „in 2h“, „in 1d“ oder „at 14:30“, dann der Text.
 slash-help-title = Befehle (mit // sendest du eine Nachricht, die mit einem Schrägstrich beginnt):
 slash-not-found = Nichts gefunden für „{ $name }“.
+slash-leave-last-member = Du bist als Einzige:r in diesem Kanal: Beim Verlassen wird er gelöscht. Bestätige das im Menü des Kanals.
 slash-status-set = Status gesetzt.
 slash-status-cleared = Status gelöscht.
 slash-status-presets-only = Dein Arbeitsbereich erlaubt nur seine vorgegebenen Status. Wähle einen im Kontomenü.

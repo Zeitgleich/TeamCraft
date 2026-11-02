@@ -1039,6 +1039,7 @@ mod tests {
       bookmarks: Vec::new(),
       is_catching_up: false,
       is_notes_to_self: false,
+      is_archived: false,
       maybe_permissions: None,
       has_only_deactivated_others: false,
       maybe_image_version: None,

@@ -294,6 +294,7 @@ audit-admin-joined-channel = Admin joined channel
 audit-owner-assigned = Owner assigned
 audit-guest-invited = Guest invited
 audit-channel-archived = Channel archived
+audit-channel-deleted = Channel deleted
 
 ## Device approval, linking and key changes
 admin-left-in-group-title = Still in encrypted groups, though the server no longer lists them
@@ -508,6 +509,8 @@ permission-manage_channel_properties = Edit channel properties
 permission-manage_channel_properties-hint = Name, topic, history policy.
 permission-convert_channel_privacy = Make channels public or private
 permission-convert_channel_privacy-hint = Change a channel's visibility.
+permission-delete_channel = Delete channels
+permission-delete_channel-hint = Delete a channel for everybody, with its messages and files.
 permission-create_dm = Start direct messages
 permission-create_dm-hint = Open a conversation with one person.
 permission-create_group_dm = Start group messages

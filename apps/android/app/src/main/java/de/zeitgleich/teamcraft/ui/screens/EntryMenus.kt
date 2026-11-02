@@ -9,6 +9,7 @@ import androidx.compose.material.icons.filled.Notifications
 import androidx.compose.material.icons.filled.Share
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
@@ -55,6 +56,7 @@ fun ConversationEntryMenu(
   var leave by remember(conversation.id) { mutableStateOf(LeaveChoice.HIDDEN) }
   var maybeLink by remember(conversation.id) { mutableStateOf<String?>(null) }
   var isConfirmingLeave by remember(conversation.id) { mutableStateOf(false) }
+  var isConfirmingDelete by remember(conversation.id) { mutableStateOf(false) }
   // Read when the menu opens, and again after the core has read the roles it was missing.
   LaunchedEffect(isOpen, conversation.id) {
     if (!isOpen) return@LaunchedEffect
@@ -63,7 +65,12 @@ fun ConversationEntryMenu(
   }
   DropdownMenu(expanded = isOpen, onDismissRequest = onDismiss) {
     for (entry in conversationMenu(conversation, leave, hasLink = maybeLink != null)) {
-      EntryMenuItem(entry, lastAdminHint = R.string.entry_leave_last_channel_admin) {
+      val lastAdminHint = if (conversation.canDeleteChannel) {
+        R.string.entry_leave_last_channel_admin_or_delete
+      } else {
+        R.string.entry_leave_last_channel_admin
+      }
+      EntryMenuItem(entry, lastAdminHint = lastAdminHint) {
         onDismiss()
         when (entry.action) {
           EntryAction.Select -> onSelect()
@@ -71,6 +78,7 @@ fun ConversationEntryMenu(
           EntryAction.Notifications -> onNotifications()
           EntryAction.CopyLink -> maybeLink?.let { copyLink(context, it) }
           EntryAction.LeaveChannel -> isConfirmingLeave = true
+          EntryAction.DeleteChannel -> isConfirmingDelete = true
           else -> Unit
         }
       }
@@ -79,10 +87,19 @@ fun ConversationEntryMenu(
   if (isConfirmingLeave) {
     ConfirmDialog(
       title = stringResource(R.string.channel_leave_title, conversation.name),
-      text = stringResource(R.string.channel_leave_text),
+      text = stringResource(leaveText(leave)),
       confirmLabel = stringResource(R.string.channel_leave_confirm),
       onConfirm = { viewModel.act(ChatActions.leaveChannel(conversation.id)) },
       onDismiss = { isConfirmingLeave = false },
+    )
+  }
+  if (isConfirmingDelete) {
+    ConfirmDialog(
+      title = stringResource(R.string.channel_delete_title, conversation.name),
+      text = stringResource(R.string.channel_delete_text),
+      confirmLabel = stringResource(R.string.channel_delete_confirm),
+      onConfirm = { viewModel.act(ChatActions.deleteChannel(conversation.id)) },
+      onDismiss = { isConfirmingDelete = false },
     )
   }
 }
@@ -159,12 +176,18 @@ private fun look(action: EntryAction): Pair<Int, MenuGlyph> = when (action) {
   EntryAction.Notifications -> R.string.notifications_conversation to MenuGlyph.Vector(Icons.Filled.Notifications)
   EntryAction.CopyLink -> R.string.entry_copy_link to MenuGlyph.Vector(Icons.Filled.Share)
   EntryAction.LeaveChannel -> R.string.leave_channel to MenuGlyph.Vector(Icons.Filled.Close)
+  EntryAction.DeleteChannel -> R.string.channel_delete to MenuGlyph.Vector(Icons.Filled.Delete)
   EntryAction.MuteSpace -> R.string.entry_mute_space to MenuGlyph.Drawable(R.drawable.ic_notifications_off)
   EntryAction.MarkSpaceRead -> R.string.entry_mark_all_read to MenuGlyph.Drawable(R.drawable.ic_done_all)
   EntryAction.LeaveSpace -> R.string.entry_leave_space to MenuGlyph.Vector(Icons.Filled.Close)
 }
 
-private fun isDestructive(action: EntryAction) = action == EntryAction.LeaveChannel || action == EntryAction.LeaveSpace
+private fun isDestructive(action: EntryAction) =
+  action == EntryAction.LeaveChannel || action == EntryAction.DeleteChannel || action == EntryAction.LeaveSpace
+
+/** What leaving means: the last member's leave deletes the channel, and the question says so. */
+internal fun leaveText(leave: LeaveChoice) =
+  if (leave == LeaveChoice.LAST_MEMBER) R.string.channel_leave_last_member_text else R.string.channel_leave_text
 
 @Composable
 private fun ConfirmDialog(title: String, text: String, confirmLabel: String, onConfirm: () -> Unit, onDismiss: () -> Unit) {

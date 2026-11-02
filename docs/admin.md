@@ -377,9 +377,26 @@ sign it yet (a follow-up of issue #380), so until then the new owner's role show
 | Set posting permissions (announcement channels), history policy, guest access                                               | v1    |
 | Retention per space/channel: last N days and/or last N messages; admin defaults and maximums, owners choose within them     | v1    |
 | Integration channels: who may create them, register bridges, default retention; allow server-readable mode (off by default) | v1    |
-| Delete a channel completely (all ciphertext + attachments)                                                                  | v1    |
+| Delete a channel completely (all ciphertext + attachments), members or not, archived or not; §3.1.1                         | v1    |
 | Default spaces/channels for new users (`policy.default_spaces` / `default_channels`, applied once at first sign-in)         | v1    |
 | Space templates                                                                                                             | later |
+
+#### 3.1.1 Leaving and deleting a channel (issue #1130)
+
+| Case                                              | Who                                                                  | What happens                                                                                                            |
+|---------------------------------------------------|----------------------------------------------------------------------|-------------------------------------------------------------------------------------------------------------------------|
+| Delete (`delete_channel`)                         | Channel admin, admin of its space, workspace admin, owner            | Gone for all members, also with people in it, active or archived; their devices drop it. Moderators and members may not |
+| Leave, archived channel                           | Anybody in it, also the last channel admin                           | Allowed: an archived channel takes no role changes. Removing the last admin by somebody else stays refused              |
+| Leave, last member                                | The last member (not the import account, e2ee.md §4.10)              | The channel is deleted; the confirmation says so. Leaving a space does the same for channels only the leaver is in       |
+| Leave, active channel, last admin, others present | Refused (409)                                                        | The refusal says the way out: make someone else channel admin, or delete the channel                                    |
+
+An archived channel left without an admin stays for its members: they read it and may leave; a
+workspace admin can assign a new owner (below) or delete it. Archiving and restoring take
+`manage_channel_properties`. None of this reaches content (e2ee.md §4.6). Deletions are in the audit
+log (`channel_deleted`, `channel_deleted_last_member`). The admin of a space reaches a private channel
+of the space they aren't in only for this; the apps offer it where they list the channel (see the
+channel's menu and settings, and the admin console for workspace admins), the API for any channel of
+the space.
 
 ### 3.2 Users and guests
 

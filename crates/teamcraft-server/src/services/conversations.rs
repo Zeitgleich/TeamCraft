@@ -645,6 +645,89 @@ async fn ensure_guest_may_start(
   Ok(())
 }
 
+/// Deletes a channel for everybody, archived or not, also with members in it (`delete_channel`:
+/// channel admins, the admins of its space, workspace admins and owners, who see no content by it;
+/// admin.md §3.1). What this means on the members' devices: e2ee.md §4.6. Answers 404 once it is
+/// gone, which clients take as done.
+pub async fn delete_channel(
+  state: &AppState,
+  caller: &AuthenticatedUser,
+  id: ConversationId,
+) -> Result<(), ApiError> {
+  let access = super::access::load_channel_to_delete(state, caller, id).await?;
+  if access.view.conversation.kind != ConversationKind::Channel {
+    return Err(ApiError::InvalidRequest(
+      "not allowed for DMs and group DMs".into(),
+    ));
+  }
+  require(state, caller, Permission::DeleteChannel, &access.target())?;
+  let members = state.database.conversation_member_ids(id).await?;
+  purge_channel(state, caller, id, &members, "channel_deleted").await
+}
+
+/// Takes a channel off the server: its calls, its objects in storage, its rows. The members'
+/// devices drop it with its history, live by the gateway, later by the next sync
+/// (`deleted_conversation_ids`). Only channels; anything else in a space stays. Storage first: a
+/// failure leaves the rows, so a retry finds the objects again.
+pub(crate) async fn purge_channel(
+  state: &AppState,
+  caller: &AuthenticatedUser,
+  id: ConversationId,
+  members: &[UserId],
+  audit_action: &str,
+) -> Result<(), ApiError> {
+  let Some(view) = state.database.get_conversation(id, caller.user.id).await? else {
+    return Ok(());
+  };
+  if view.conversation.kind != ConversationKind::Channel {
+    return Ok(());
+  }
+  audit::record(
+    state,
+    Some(caller.user.id),
+    audit_action,
+    Some(AuditTarget::new("conversation", id)),
+    &json!({}),
+  )
+  .await?;
+  for member in members {
+    super::calls::evict_from_call(state, id, *member).await;
+  }
+  delete_stored_objects(state, id).await?;
+  if let Some(image) = &view.conversation.maybe_image {
+    super::retention::delete_object(state, &image.key).await?;
+  }
+  state.database.delete_channel(id, members).await?;
+  announce_deleted(state, id, members);
+  Ok(())
+}
+
+/// Deletes the conversation's attachments, stored ciphertext and search segments in storage.
+pub(crate) async fn delete_stored_objects(state: &AppState, id: ConversationId) -> Result<(), ApiError> {
+  for key in state.database.conversation_object_keys(id).await? {
+    super::retention::delete_object(state, &key).await?;
+  }
+  Ok(())
+}
+
+/// Tells the people concerned that the conversation is gone.
+pub(crate) fn announce_deleted(state: &AppState, conversation_id: ConversationId, users: &[UserId]) {
+  state.hub.publish(
+    users.iter().copied(),
+    &GatewayEvent::ConversationDelete { conversation_id },
+  );
+  // Clients that don't know `conversation_delete` yet drop a conversation they were removed from.
+  for user in users {
+    state.hub.publish(
+      [*user],
+      &GatewayEvent::MembershipRemove {
+        conversation_id,
+        user_id: *user,
+      },
+    );
+  }
+}
+
 /// Checks the conversation is a channel that can still change (not a DM, not archived).
 pub fn ensure_open_channel(access: &ConversationAccess) -> Result<(), ApiError> {
   let conversation = &access.view.conversation;

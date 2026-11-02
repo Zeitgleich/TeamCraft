@@ -28,6 +28,8 @@ enum ChatAction {
   case joinChannel(conversationId: String)
   /// Leaves a channel (never a DM); the core sends it once the connection is back.
   case leaveChannel(conversationId: String)
+  /// Deletes a channel for everybody, after the user confirmed it.
+  case deleteChannel(conversationId: String)
   case createChannel(spaceId: String, name: String)
   /// The direct conversation with a person; created when there is none yet.
   case openDm(userId: String)
@@ -97,6 +99,8 @@ enum ChatAction {
       object = ["action": "refresh_read_receipts", "conversation": conversation]
     case .leaveChannel(let conversation):
       object = ["action": "leave_channel", "conversation": conversation]
+    case .deleteChannel(let conversation):
+      object = ["action": "delete_channel", "conversation": conversation]
     case .markReactionsSeen(let conversation, let messages):
       object = ["action": "mark_reactions_seen", "conversation": conversation, "messages": messages]
     case .setDraft(let conversation, let maybeThread, let body):

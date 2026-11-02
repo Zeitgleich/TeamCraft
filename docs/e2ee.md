@@ -885,6 +885,35 @@ on the gateway's `conversation_delete` or, offline, on the next full sync
 a direct message's local history; it can already withhold or delete the ciphertext it stores, so
 this adds no access to content.
 
+**Leaving an archived channel, or as the last member** (issue #1130). A channel's leave normally waits
+for a member's commit. It doesn't when the device knows the channel as archived (nothing new is
+written that the leaver could read) or the server lists nobody else (nobody would commit): the signed
+request is posted as always, then the server's membership is dropped at once, so nobody is stuck
+behind a device that may never come. The members' devices commit the request when they next read the
+queue, which rotates the keys before anyone writes again: unarchiving doesn't skip it, since a member
+reads the queue first. Waiting was never a protection against a leaver: a dishonest client wouldn't
+wait either. A hostile server claiming "archived" or "alone" can only make an honest leaver go
+earlier; if it then holds the request back, the leaver shows up as left in the group for an admin
+(above), as with a leave from a device outside the group. The goodbye message is left out in an
+archived channel, which takes no messages; the server's own line says who left. Active channels with
+other members still wait for the commit.
+
+**Deleting a channel** (issue #1130; `DELETE /conversations/{id}`, permission `delete_channel`: channel
+admins, the admins of its space, workspace admins and owners; admin.md §3.1). Possible with members in
+it, archived or not; the last member's leave does the same. The server deletes the ciphertext,
+attachments, picture and MLS state and audits who did it. Every member's devices drop the group, keys
+and local history on the gateway's `conversation_delete` or, offline, on the next full sync
+(`deleted_conversation_ids`, kept for `[policy] deleted_conversations_kept_days`). A deletion needs no
+key and reaches no content, so a workspace or space admin gains no access by it.
+
+What a deletion means: **it is the server's statement, not signed by anyone**, like whether a channel
+is archived (§4.9). Clients can't verify who asked, because signed channel properties don't exist yet
+(a follow-up of issues #380, #801). A compromised server could therefore claim a deletion and make
+members drop a channel with their local copies. That costs availability, not confidentiality: nothing
+is decrypted or revealed, nobody is added, and the server can already withhold or delete everything it
+stores. A device shows no separate warning: the channel simply disappears, for all members at once. A
+device's dropped local history is not recovered.
+
 A device that reads a commit late (it slept, or caught up after hours) verifies it against identities
 pinned before processing: of whom the server lists in the conversation now, and of the user the
 commit's signed change adds or removes and its signer, read from the commit's authenticated data

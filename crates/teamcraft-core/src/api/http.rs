@@ -546,6 +546,12 @@ impl<T: AccessTokenSource> ServerApi for HttpServerApi<T> {
       .await
   }
 
+  async fn delete_conversation(&self, conversation: ConversationId) -> Result<(), ApiError> {
+    self
+      .send_without_response::<()>(Method::DELETE, &format!("/conversations/{conversation}"), None)
+      .await
+  }
+
   async fn admin_channels_of(&self, user: UserId) -> Result<Vec<ConversationId>, ApiError> {
     let mut channels = Vec::new();
     loop {

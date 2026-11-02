@@ -1187,6 +1187,7 @@ mod tests {
       assert_eq!(LeaveChoice::from(Rule::Hidden), LeaveChoice::Hidden);
       assert_eq!(LeaveChoice::from(Rule::Allowed), LeaveChoice::Allowed);
       assert_eq!(LeaveChoice::from(Rule::LastAdmin), LeaveChoice::LastAdmin);
+      assert_eq!(LeaveChoice::from(Rule::LastMember), LeaveChoice::LastMember);
     }
 
     #[test]

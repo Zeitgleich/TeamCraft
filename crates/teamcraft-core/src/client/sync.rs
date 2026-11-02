@@ -100,8 +100,8 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     }
     self.trace_lap("unlisted people");
     let listing = conversations?;
-    // Direct messages deleted with a deleted account while this device was away: they go with
-    // their local history, as on the gateway's `conversation_delete`.
+    // Channels deleted, and direct messages deleted with a deleted account, while this device was
+    // away: they go with their local history, as on the gateway's `conversation_delete`.
     for deleted in &listing.deleted_conversation_ids {
       if self
         .store

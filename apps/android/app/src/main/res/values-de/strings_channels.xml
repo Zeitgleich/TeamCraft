@@ -24,6 +24,12 @@
   <string name="channel_archive_confirm">Archivieren</string>
   <string name="channel_leave_title">%1$s verlassen?</string>
   <string name="channel_leave_text">Du erhältst keine Nachrichten mehr aus dieser Unterhaltung.</string>
+  <string name="channel_leave_last_member_text">Sonst ist niemand in diesem Kanal, daher wird er beim Verlassen mit seinen Nachrichten und Dateien gelöscht. Das lässt sich nicht rückgängig machen.</string>
+  <string name="entry_leave_last_channel_admin_or_delete">Ernenne zuerst in den Kanaleinstellungen jemand anderen zum Kanal-Admin oder lösche den Kanal.</string>
+  <string name="channel_delete">Kanal löschen</string>
+  <string name="channel_delete_title">%1$s für alle löschen?</string>
+  <string name="channel_delete_text">Alle Mitglieder verlieren diesen Kanal mit seinen Nachrichten und Dateien. Das lässt sich nicht rückgängig machen.</string>
+  <string name="channel_delete_confirm">Löschen</string>
   <string name="channel_leave_confirm">Verlassen</string>
   <string name="channels">Kanäle</string>
   <string name="search">Suche</string>

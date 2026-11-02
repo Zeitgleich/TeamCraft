@@ -1347,6 +1347,7 @@ pub fn action_from_wire(action: &str) -> AuditAction {
       AuditAction::MemberRoleChanged
     },
     "conversation_updated" => AuditAction::ChannelUpdated,
+    "channel_deleted" | "channel_deleted_last_member" => AuditAction::ChannelDeleted,
     "space_created" => AuditAction::SpaceCreated,
     "space_updated" => AuditAction::SpaceUpdated,
     "oidc_backchannel_logout" => AuditAction::SessionEnded,

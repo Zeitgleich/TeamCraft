@@ -458,6 +458,9 @@ pub struct Conversation {
   pub is_muted: bool,
   /// Whether the signed-in user may post (announcement and integration channels may forbid it).
   pub can_post: bool,
+  /// An archived channel: read-only, and its last admin may leave (#1130).
+  #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+  pub is_archived: bool,
   pub bookmarks: Vec<Bookmark>,
   /// The client is still catching up this conversation's history after being away (issue #247):
   /// what it shows may be incomplete.
@@ -521,6 +524,12 @@ impl Conversation {
       && self
         .maybe_holds(&Permission::ManageChannelProperties)
         .unwrap_or(true)
+  }
+
+  /// Whether the user may delete the channel for everybody (`delete_channel`). Not undoable, so
+  /// unlike [`Self::can_manage_channel`] it is offered only on the server's word.
+  pub fn can_delete_channel(&self) -> bool {
+    !self.kind.is_direct_like() && self.maybe_holds(&Permission::DeleteChannel).unwrap_or(false)
   }
 
   /// Whether the server says the user holds `permission` here; `None` when it didn't say.
@@ -881,6 +890,7 @@ mod tests {
         is_catching_up: false,
         maybe_image_version: None,
         is_notes_to_self: false,
+        is_archived: false,
         maybe_permissions,
         has_only_deactivated_others: false,
       }

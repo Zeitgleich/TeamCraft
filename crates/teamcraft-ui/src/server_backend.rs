@@ -293,6 +293,7 @@ fn to_conversation(conversation: &ConversationResponse, member_ids: Vec<UserId>,
     bookmarks: Vec::new(),
     is_catching_up: false,
     is_notes_to_self: conversation.is_notes_to_self(me),
+    is_archived: conversation.is_archived,
     maybe_permissions: conversation.maybe_my_permissions.clone(),
     has_only_deactivated_others: conversation
       .has_only_deactivated_others(me, |participant| participant.is_deactivated),

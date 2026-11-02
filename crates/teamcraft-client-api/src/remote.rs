@@ -874,6 +874,9 @@ pub enum ChatAction {
   LeaveChannel {
     conversation: ConversationId,
   },
+  DeleteChannel {
+    conversation: ConversationId,
+  },
   CreateCategory {
     space: SpaceId,
     name: String,
@@ -1211,6 +1214,7 @@ impl ChatAction {
       Self::JoinChannel { conversation } => backend.join_channel(conversation),
       Self::JoinSpace { space } => backend.join_space(space),
       Self::LeaveChannel { conversation } => backend.leave_channel(conversation),
+      Self::DeleteChannel { conversation } => backend.delete_channel(conversation),
       Self::CreateCategory { space, name } => backend.create_category(space, &name),
       Self::RenameCategory {
         space,

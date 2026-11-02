@@ -48,9 +48,11 @@ struct ConversationListView: View {
           if let failure = maybeActionFailure { Text(failure.message) }
         }
         .confirmationDialog(leaveTitle, isPresented: isLeavingShown, titleVisibility: .visible) {
-          Button("entry_leave_confirm", role: .destructive) { confirmLeave() }
+          Button(maybeLeaving?.isDeletion == true ? "entry_delete_channel_confirm" : "entry_leave_confirm", role: .destructive) {
+            confirmLeave()
+          }
         } message: {
-          Text(maybeLeaving?.isSpace == true ? "entry_leave_space_text" : "entry_leave_channel_text")
+          Text(leaveMessage)
         }
         .toolbar {
           ToolbarItem(placement: .topBarLeading) {
@@ -176,6 +178,7 @@ struct ConversationListView: View {
                   favoriteButton(for: conversation)
                   copyLinkButton(for: conversation)
                   leaveButton(for: conversation)
+                  deleteButton(for: conversation)
                 }
             }
           }
@@ -308,9 +311,26 @@ struct ConversationListView: View {
       Button("entry_leave_channel", systemImage: "rectangle.portrait.and.arrow.right", role: .destructive) {
         maybeLeaving = .channel(id: conversation.id, name: conversation.name)
       }
+    case .lastMember:
+      Button("entry_leave_channel", systemImage: "rectangle.portrait.and.arrow.right", role: .destructive) {
+        maybeLeaving = .lastMember(id: conversation.id, name: conversation.name)
+      }
     case .lastAdmin:
-      Button("entry_leave_last_channel_admin", systemImage: "rectangle.portrait.and.arrow.right") {}
+      Button(
+        conversation.canDeleteChannel ? "entry_leave_last_channel_admin_or_delete" : "entry_leave_last_channel_admin",
+        systemImage: "rectangle.portrait.and.arrow.right"
+      ) {}
         .disabled(true)
+    }
+  }
+
+  /// Only for those who may; the confirmation says what happens to whom.
+  @ViewBuilder
+  private func deleteButton(for conversation: ConversationItem) -> some View {
+    if conversation.canDeleteChannel {
+      Button("entry_delete_channel", systemImage: "trash", role: .destructive) {
+        maybeLeaving = .deletion(id: conversation.id, name: conversation.name)
+      }
     }
   }
 
@@ -374,9 +394,19 @@ struct ConversationListView: View {
 
   private var leaveTitle: LocalizedStringKey {
     switch maybeLeaving {
-    case .channel(_, let name): return "entry_leave_channel_title \(name)"
+    case .channel(_, let name), .lastMember(_, let name): return "entry_leave_channel_title \(name)"
+    case .deletion(_, let name): return "entry_delete_channel_title \(name)"
     case .space(_, let name): return "entry_leave_space_title \(name)"
     case nil: return ""
+    }
+  }
+
+  private var leaveMessage: LocalizedStringKey {
+    switch maybeLeaving {
+    case .space: return "entry_leave_space_text"
+    case .lastMember: return "entry_leave_last_member_text"
+    case .deletion: return "entry_delete_channel_text"
+    case .channel, nil: return "entry_leave_channel_text"
     }
   }
 
@@ -385,7 +415,8 @@ struct ConversationListView: View {
     maybeLeaving = nil
     Task {
       switch target {
-      case .channel(let id, _): maybeActionFailure = await model.leaveChannel(id)
+      case .channel(let id, _), .lastMember(let id, _): maybeActionFailure = await model.leaveChannel(id)
+      case .deletion(let id, _): maybeActionFailure = await model.deleteChannel(id)
       case .space(let id, _): maybeActionFailure = await model.leaveSpace(id)
       }
     }
@@ -527,10 +558,13 @@ struct SearchResultsView: View {
 /// What a leave confirmation is about.
 private enum LeaveTarget {
   case channel(id: String, name: String)
+  /// Nobody else is in the channel: leaving deletes it.
+  case lastMember(id: String, name: String)
+  case deletion(id: String, name: String)
   case space(id: String, name: String)
 
-  var isSpace: Bool {
-    if case .space = self { return true }
+  var isDeletion: Bool {
+    if case .deletion = self { return true }
     return false
   }
 }

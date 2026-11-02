@@ -185,8 +185,8 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     Ok(())
   }
 
-  /// The conversation was deleted on the server (a direct message deleted with a deleted account,
-  /// admin.md §3.2.1): unlike a removal, its local history goes too, with everything this device
+  /// The conversation was deleted on the server (a channel deleted by an admin or its last member,
+  /// e2ee.md §4.6; a direct message deleted with a deleted account, admin.md §3.2.1): unlike a removal, its local history goes too, with everything this device
   /// kept for it (keys, outbox, read state, search segments).
   pub(crate) fn purge_conversation(&mut self, conversation: ConversationId) -> Result<(), CoreError> {
     self.forget_conversation(conversation)?;
@@ -200,6 +200,13 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
         if key == id || key.starts_with(&prefix) {
           self.store.delete(table, &key)?;
         }
+      }
+    }
+    // A leave or removal on its way has nothing left to do.
+    let removals = format!("removal/{conversation}/");
+    for (key, _) in self.store.list(Table::PendingChanges)? {
+      if key.starts_with(&removals) {
+        self.store.delete(Table::PendingChanges, &key)?;
       }
     }
     tracing::info!(conversation_id = %conversation, "dropped a deleted conversation with its local history");

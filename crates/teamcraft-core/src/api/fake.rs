@@ -2495,8 +2495,11 @@ impl ServerApi for FakeServerApi {
     Ok(())
   }
 
-  async fn check_member_removal(&self, conversation: ConversationId, _user: UserId) -> Result<(), ApiError> {
-    self.with(|state, me| state.removal_target(conversation, me).map(|_| ()))
+  async fn check_member_removal(&self, conversation: ConversationId, user: UserId) -> Result<(), ApiError> {
+    self.with(|state, me| {
+      let entry = state.removal_target(conversation, me)?;
+      refuse_last_admin(entry, user, me)
+    })
   }
 
   async fn remove_member(&self, conversation: ConversationId, user: UserId) -> Result<(), ApiError> {
@@ -2510,7 +2513,16 @@ impl ServerApi for FakeServerApi {
         ));
       }
       let entry = state.removal_target(conversation, me)?;
+      refuse_last_admin(entry, user, me)?;
       let mut recipients: Vec<UserId> = entry.members.keys().copied().collect();
+      let is_last_member_leaving = user == me
+        && recipients == [me]
+        && entry.response.kind == ConversationKind::Channel
+        && entry.response.maybe_importer_user_id != Some(me);
+      if is_last_member_leaving {
+        state.delete_channel(conversation, recipients);
+        return Ok(());
+      }
       if entry.members.remove(&user).is_none() {
         // Idempotent like the server: already gone.
         return Ok(());
@@ -2525,6 +2537,34 @@ impl ServerApi for FakeServerApi {
           user_id: user,
         },
       );
+      Ok(())
+    })
+  }
+
+  async fn delete_conversation(&self, conversation: ConversationId) -> Result<(), ApiError> {
+    self.with(|state, me| {
+      let is_instance_admin = state.admins.contains(&me);
+      let entry = state.actor_conversation_mut(conversation, me)?;
+      if entry.response.kind != ConversationKind::Channel {
+        return Err(ApiError::status(
+          400,
+          ErrorCode::InvalidRequest,
+          "not allowed for DMs and group DMs",
+        ));
+      }
+      let is_channel_admin = entry
+        .members
+        .get(&me)
+        .is_some_and(|(own, _)| *own == ChannelRole::Admin);
+      if !is_channel_admin && !is_instance_admin {
+        return Err(ApiError::status(
+          403,
+          ErrorCode::Forbidden,
+          "missing permission delete_channel",
+        ));
+      }
+      let members = entry.members.keys().copied().collect();
+      state.delete_channel(conversation, members);
       Ok(())
     })
   }
@@ -5604,6 +5644,24 @@ impl State {
 
   /// The conversation `me` may remove somebody from: as a member, or as a server admin (also in
   /// conversations they aren't in).
+  /// Like the server's `purge_channel`: gone for everybody, and recorded for devices that are away.
+  fn delete_channel(&mut self, conversation: ConversationId, members: Vec<UserId>) {
+    self.conversations.remove(&conversation);
+    for member in &members {
+      self
+        .deleted_conversations
+        .entry(*member)
+        .or_default()
+        .push(conversation);
+    }
+    self.publish(
+      members,
+      &GatewayEvent::ConversationDelete {
+        conversation_id: conversation,
+      },
+    );
+  }
+
   fn removal_target(
     &mut self,
     conversation: ConversationId,
@@ -6240,4 +6298,25 @@ fn default_notification_settings() -> NotificationSettings {
     maybe_level: None,
     maybe_default_level: None,
   }
+}
+
+/// The server's rule (`authorize_removal`): the last admin of an active channel with others in it
+/// hands the role on first; leaving an archived channel is always allowed.
+fn refuse_last_admin(entry: &Conversation, user: UserId, me: UserId) -> Result<(), ApiError> {
+  let is_admin = |role: &ChannelRole| *role == ChannelRole::Admin;
+  let is_last_admin = entry.members.get(&user).is_some_and(|(role, _)| is_admin(role))
+    && entry.members.values().filter(|(role, _)| is_admin(role)).count() <= 1;
+  let is_leaving_archived = user == me && entry.response.is_archived;
+  if entry.response.kind == ConversationKind::Channel
+    && is_last_admin
+    && entry.members.len() > 1
+    && !is_leaving_archived
+  {
+    return Err(ApiError::status(
+      409,
+      ErrorCode::Conflict,
+      "make another member channel admin first, or delete the channel",
+    ));
+  }
+  Ok(())
 }

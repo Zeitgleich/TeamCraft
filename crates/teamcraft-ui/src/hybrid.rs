@@ -688,6 +688,10 @@ impl<C: ChatBackend + 'static> ChatBackend for Hybrid<C> {
     self.chat.leave_channel(conversation);
   }
 
+  fn delete_channel(&self, conversation: ConversationId) {
+    self.chat.delete_channel(conversation);
+  }
+
   fn categories(&self, space: SpaceId) -> Vec<CategoryInfo> {
     self.chat.categories(space)
   }

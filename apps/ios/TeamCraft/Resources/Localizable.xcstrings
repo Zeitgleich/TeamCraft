@@ -10041,6 +10041,102 @@
         }
       }
     },
+    "entry_delete_channel": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Delete channel"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Kanal löschen"
+          }
+        }
+      }
+    },
+    "entry_delete_channel_confirm": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Delete"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Löschen"
+          }
+        }
+      }
+    },
+    "entry_delete_channel_title %@": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Delete %@ for everyone?"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%@ für alle löschen?"
+          }
+        }
+      }
+    },
+    "entry_delete_channel_text": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "All members lose this channel and its messages and files. This can't be undone."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Alle Mitglieder verlieren diesen Kanal mit seinen Nachrichten und Dateien. Das lässt sich nicht rückgängig machen."
+          }
+        }
+      }
+    },
+    "entry_leave_last_member_text": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Nobody else is in this channel, so leaving deletes it with its messages and files. This can't be undone."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Sonst ist niemand in diesem Kanal, daher wird er beim Verlassen mit seinen Nachrichten und Dateien gelöscht. Das lässt sich nicht rückgängig machen."
+          }
+        }
+      }
+    },
+    "entry_leave_last_channel_admin_or_delete": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Make someone else channel admin in the channel's settings first, or delete the channel."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Ernenne zuerst in den Kanaleinstellungen jemand anderen zum Kanal-Admin oder lösche den Kanal."
+          }
+        }
+      }
+    },
     "entry_leave_channel": {
       "localizations": {
         "en": {

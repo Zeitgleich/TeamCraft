@@ -22,6 +22,10 @@ extension AppModel {
     await performReporting(.leaveChannel(conversationId: conversationId))
   }
 
+  func deleteChannel(_ conversationId: String) async -> AppFailure? {
+    await performReporting(.deleteChannel(conversationId: conversationId))
+  }
+
   func markSpaceRead(_ spaceId: String) async -> AppFailure? {
     await reporting { try await core().markSpaceRead(spaceId: spaceId) }
   }

@@ -12,7 +12,10 @@ use std::collections::BTreeSet;
 use serde::{Deserialize, Serialize};
 use teamcraft_crypto::membership::MembershipAction;
 use teamcraft_crypto::mls::MAX_CHANGE_AGE_EPOCHS;
-use teamcraft_proto::{Base64Bytes, ConversationId, DeviceId, MlsMessageKind, PostMlsMessageRequest, UserId};
+use teamcraft_proto::{
+  Base64Bytes, ConversationId, DeviceId, ListConversationMembersResponse, MlsMessageKind,
+  PostMlsMessageRequest, UserId,
+};
 
 use super::Client;
 use super::groups::{ADMIN_CHANGE_MAGIC, ChangeSource};
@@ -190,8 +193,23 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     let me = self.account.user_id;
     // Asked first, so a leave the server refuses (the last channel admin) sends no goodbye.
     self.api.check_member_removal(conversation, me).await?;
-    let maybe_event = self.has_group(conversation)?.then_some(ConversationEvent::Left);
+    // An archived channel takes no messages; the server's own line says who left.
+    let can_say_goodbye = self.has_group(conversation)? && !self.is_archived(conversation)?;
+    let maybe_event = can_say_goodbye.then_some(ConversationEvent::Left);
     self.record_and_run_removal(conversation, me, maybe_event).await
+  }
+
+  /// Deletes a channel for everybody (e2ee.md §4.6, "Deleting a channel"), then drops it here with
+  /// its local history, as the other devices do on the server's word. Not queued while offline: a
+  /// deletion can't be undone, so it happens when the user asks or fails visibly. Done also when
+  /// the channel is gone already (a lost answer, a second admin).
+  pub async fn delete_channel(&mut self, conversation: ConversationId) -> Result<(), CoreError> {
+    match self.api.delete_conversation(conversation).await {
+      Ok(()) => {},
+      Err(error) if error.is_not_found() => {},
+      Err(error) => return Err(error.into()),
+    }
+    self.purge_conversation(conversation)
   }
 
   /// "Retry" on a removal or leave shown as failed, or "remove" on an admin's unconfirmed one
@@ -568,6 +586,13 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       // The others left meanwhile: nobody is left to commit it.
       return Ok(true);
     }
+    if self.is_archived(conversation)? || self.is_only_listed_member(conversation)? {
+      // Nothing new is written that the leaver could read, or nobody is listed who would commit:
+      // the leave doesn't wait for a device that may never come. The signed request stays in the
+      // queue for the members, as when leaving from a device outside the group; a hostile server
+      // claiming either only shows up as somebody left in the group (e2ee.md §4.6).
+      return Ok(true);
+    }
     if epoch.saturating_sub(signed_epoch) >= MAX_CHANGE_AGE_EPOCHS / 2 {
       let action = MembershipAction::RemoveUser {
         user_id: convert::user(self.account.user_id),
@@ -653,6 +678,25 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       Err(error) if error.is_forbidden() || error.is_not_found() => Ok(false),
       Err(error) => Err(error.into()),
     }
+  }
+
+  /// Whether this device knows the channel as archived.
+  fn is_archived(&self, conversation: ConversationId) -> Result<bool, CoreError> {
+    Ok(
+      self
+        .cached_conversations()?
+        .get(&conversation)
+        .is_some_and(|known| known.is_archived),
+    )
+  }
+
+  /// Whether the server lists nobody but this user in the conversation.
+  fn is_only_listed_member(&self, conversation: ConversationId) -> Result<bool, CoreError> {
+    let maybe_listed: Option<ListConversationMembersResponse> =
+      records::get_json(&self.store, Table::Members, &conversation.to_string())?;
+    Ok(maybe_listed.is_some_and(
+      |listed| matches!(listed.members.as_slice(), [only] if only.user.id == self.account.user_id),
+    ))
   }
 
   /// Whether the group has a device of a user other than this one.

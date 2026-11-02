@@ -17,6 +17,7 @@ use crate::components::message_actions::copy_and_confirm;
 use crate::components::sheet::{PopoverBackdrop, Sheet};
 use crate::components::space_invites::web_origin;
 use crate::entry_actions::{ConversationMenu, LeaveChoice, MenuEntry, SpaceMenu};
+use crate::feedback::PendingAction;
 use crate::i18n::use_i18n;
 use crate::model::{ConversationId, SpaceId, SpaceRole};
 use crate::prefs::MuteFor;
@@ -40,13 +41,14 @@ pub fn use_entry_menu() -> Option<RwSignal<Option<EntryMenuTarget>>> {
   use_context::<RwSignal<Option<EntryMenuTarget>>>()
 }
 
-/// What the menu shows: its actions, the notification choices, or the question before leaving a
-/// space.
+/// What the menu shows: its actions, the notification choices, or the question before leaving
+/// (a space, or a channel leaving deletes) or deleting a channel.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum MenuPage {
   Actions,
   Notifications,
   ConfirmLeave,
+  ConfirmDelete,
 }
 
 /// What a key pressed in the menu does.
@@ -290,63 +292,138 @@ fn ConversationItems(
   let has_unread = move || info.with(|menu| menu.as_ref().is_some_and(|menu| menu.has_unread));
   let leave = move || info.with(|menu| menu.as_ref().map_or(LeaveChoice::Hidden, |menu| menu.leave));
   let maybe_link = move || info.with(|menu| menu.as_ref().and_then(|menu| menu.maybe_link.clone()));
+  let can_delete = move || info.with(|menu| menu.as_ref().is_some_and(|menu| menu.can_delete));
+  let name = move || info.with(|menu| menu.as_ref().map(|menu| menu.name.clone()).unwrap_or_default());
   let hint_id = format!("entry-menu-leave-{conversation}");
+  let delete_pending = PendingAction::new();
   view! {
-    <Show
-      when=move || page.get() == MenuPage::Actions
-      fallback=move || view! { <NotificationsPage target=target page=page /> }
-    >
-      <NotifyItems target=target page=page close=close />
-      <button type="button" class="menu-item" role="menuitem" disabled=move || !has_unread() on:click=move |_| {
-        state.write(|backend| backend.mark_read(conversation));
-        close.run(());
-      }>
-        <Icon name=IconName::CheckDouble />
-        <span class="menu-label">{move || i18n.t("entry-menu-mark-read")}</span>
-      </button>
-      {move || maybe_link().map(|link| view! {
-        <button type="button" class="menu-item" role="menuitem" on:click=move |_| {
-          copy_and_confirm(link.clone());
-          close.run(());
-        }>
-          <Icon name=IconName::Link />
-          <span class="menu-label">{move || i18n.t("action-copy-link")}</span>
-        </button>
-      })}
-      {
-        let hint_id = hint_id.clone();
-        move || {
-          let hint_id = hint_id.clone();
-          match leave() {
-            LeaveChoice::Hidden => ().into_any(),
-            LeaveChoice::Allowed => view! {
-              <div class="menu-sep" role="separator"></div>
-              <button type="button" class="menu-item is-destructive" role="menuitem" on:click=move |_| {
-                close.run(());
-                state.leave_with_undo(conversation, left_text(state, i18n, conversation));
-              }>
-                <Icon name=IconName::Leave />
-                <span class="menu-label">{move || i18n.t("entry-menu-leave-channel")}</span>
-              </button>
-            }
-            .into_any(),
-            LeaveChoice::LastAdmin => view! {
-              <div class="menu-sep" role="separator"></div>
-              <LeaveRefused label_key="entry-menu-leave-channel" hint_key="entry-menu-leave-last-channel-admin" hint_id=hint_id />
-            }
-            .into_any(),
+    {move || match page.get() {
+      MenuPage::Notifications => view! { <NotificationsPage target=target page=page /> }.into_any(),
+      MenuPage::ConfirmLeave => view! {
+        <p class="menu-confirm" id=format!("entry-menu-confirm-{conversation}")>
+          {move || i18n.t_with("entry-menu-leave-last-member-confirm", &[("name", &name())])}
+        </p>
+        <button
+          type="button"
+          class="menu-item is-destructive"
+          role="menuitem"
+          aria-describedby=format!("entry-menu-confirm-{conversation}")
+          on:click=move |_| {
+            close.run(());
+            state.leave_with_undo(conversation, left_text(state, i18n, conversation));
           }
-        }
+        >
+          <Icon name=IconName::Leave />
+          <span class="menu-label">{move || i18n.t("entry-menu-leave-channel")}</span>
+        </button>
+        <button type="button" class="menu-item" role="menuitem" on:click=move |_| page.set(MenuPage::Actions)>
+          <span class="menu-label">{move || i18n.t("cancel")}</span>
+        </button>
       }
-      <div class="menu-sep" role="separator"></div>
-      <button type="button" class="menu-item" role="menuitem" on:click=move |_| {
-        close.run(());
-        state.overlay.set(Overlay::ChannelSettings(conversation));
-      }>
-        <Icon name=IconName::Sliders />
-        <span class="menu-label">{move || i18n.t("entry-menu-settings")}</span>
-      </button>
-    </Show>
+      .into_any(),
+      MenuPage::ConfirmDelete => view! {
+        <p class="menu-confirm" id=format!("entry-menu-confirm-{conversation}")>
+          {move || i18n.t_with("entry-menu-delete-channel-confirm", &[("name", &name())])}
+        </p>
+        <button
+          type="button"
+          class="menu-item is-destructive"
+          role="menuitem"
+          aria-describedby=format!("entry-menu-confirm-{conversation}")
+          disabled=move || delete_pending.is_pending()
+          on:click=move |_| {
+            delete_pending.run_and_then(
+              || state.write(|backend| backend.delete_channel(conversation)),
+              move || close.run(()),
+            );
+          }
+        >
+          <Icon name=IconName::Trash />
+          <span class="menu-label">{move || i18n.t("entry-menu-delete-channel")}</span>
+        </button>
+        <button type="button" class="menu-item" role="menuitem" on:click=move |_| page.set(MenuPage::Actions)>
+          <span class="menu-label">{move || i18n.t("cancel")}</span>
+        </button>
+      }
+      .into_any(),
+      MenuPage::Actions => {
+        let hint_id = hint_id.clone();
+        view! {
+          <NotifyItems target=target page=page close=close />
+          <button type="button" class="menu-item" role="menuitem" disabled=move || !has_unread() on:click=move |_| {
+            state.write(|backend| backend.mark_read(conversation));
+            close.run(());
+          }>
+            <Icon name=IconName::CheckDouble />
+            <span class="menu-label">{move || i18n.t("entry-menu-mark-read")}</span>
+          </button>
+          {move || maybe_link().map(|link| view! {
+            <button type="button" class="menu-item" role="menuitem" on:click=move |_| {
+              copy_and_confirm(link.clone());
+              close.run(());
+            }>
+              <Icon name=IconName::Link />
+              <span class="menu-label">{move || i18n.t("action-copy-link")}</span>
+            </button>
+          })}
+          {
+            let hint_id = hint_id.clone();
+            move || {
+              let hint_id = hint_id.clone();
+              match leave() {
+                LeaveChoice::Hidden => ().into_any(),
+                LeaveChoice::Allowed => view! {
+                  <div class="menu-sep" role="separator"></div>
+                  <button type="button" class="menu-item is-destructive" role="menuitem" on:click=move |_| {
+                    close.run(());
+                    state.leave_with_undo(conversation, left_text(state, i18n, conversation));
+                  }>
+                    <Icon name=IconName::Leave />
+                    <span class="menu-label">{move || i18n.t("entry-menu-leave-channel")}</span>
+                  </button>
+                }
+                .into_any(),
+                LeaveChoice::LastMember => view! {
+                  <div class="menu-sep" role="separator"></div>
+                  <button type="button" class="menu-item is-destructive" role="menuitem" on:click=move |_| page.set(MenuPage::ConfirmLeave)>
+                    <Icon name=IconName::Leave />
+                    <span class="menu-label">{move || i18n.t("entry-menu-leave-channel-ellipsis")}</span>
+                  </button>
+                }
+                .into_any(),
+                LeaveChoice::LastAdmin => {
+                  let hint_key = if can_delete() {
+                    "entry-menu-leave-last-channel-admin-or-delete"
+                  } else {
+                    "entry-menu-leave-last-channel-admin"
+                  };
+                  view! {
+                    <div class="menu-sep" role="separator"></div>
+                    <LeaveRefused label_key="entry-menu-leave-channel" hint_key=hint_key hint_id=hint_id />
+                  }
+                  .into_any()
+                },
+              }
+            }
+          }
+          {move || can_delete().then(|| view! {
+            <button type="button" class="menu-item is-destructive" role="menuitem" on:click=move |_| page.set(MenuPage::ConfirmDelete)>
+              <Icon name=IconName::Trash />
+              <span class="menu-label">{move || i18n.t("entry-menu-delete-channel-ellipsis")}</span>
+            </button>
+          })}
+          <div class="menu-sep" role="separator"></div>
+          <button type="button" class="menu-item" role="menuitem" on:click=move |_| {
+            close.run(());
+            state.overlay.set(Overlay::ChannelSettings(conversation));
+          }>
+            <Icon name=IconName::Sliders />
+            <span class="menu-label">{move || i18n.t("entry-menu-settings")}</span>
+          </button>
+        }
+        .into_any()
+      },
+    }}
   }
 }
 
@@ -377,6 +454,8 @@ fn SpaceItems(space: SpaceId, page: RwSignal<MenuPage>, close: Callback<()>) -> 
   view! {
     {move || match page.get() {
       MenuPage::Notifications => view! { <NotificationsPage target=target page=page /> }.into_any(),
+      // A space has no deletion from this menu.
+      MenuPage::ConfirmDelete => ().into_any(),
       MenuPage::ConfirmLeave => view! {
         <p class="menu-confirm" id=format!("entry-menu-confirm-{space}")>
           {move || i18n.t_with("entry-menu-leave-space-confirm", &[("name", &name())])}
@@ -414,7 +493,8 @@ fn SpaceItems(space: SpaceId, page: RwSignal<MenuPage>, close: Callback<()>) -> 
             let hint_id = hint_id.clone();
             match leave() {
               LeaveChoice::Hidden => ().into_any(),
-              LeaveChoice::Allowed => view! {
+              // `space_leave` doesn't answer this; the confirmation covers it either way.
+              LeaveChoice::Allowed | LeaveChoice::LastMember => view! {
                 <div class="menu-sep" role="separator"></div>
                 <button type="button" class="menu-item is-destructive" role="menuitem" on:click=move |_| page.set(MenuPage::ConfirmLeave)>
                   <Icon name=IconName::Leave />

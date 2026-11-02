@@ -26,6 +26,9 @@ pub struct ConversationMenu {
   /// The address to share; `None` where the app has no web address (a desktop without a server).
   pub maybe_link: Option<String>,
   pub leave: LeaveChoice,
+  /// "Delete channel" is offered (`delete_channel`).
+  pub can_delete: bool,
+  pub name: String,
 }
 
 /// The menu of a space.
@@ -52,6 +55,8 @@ impl ConversationMenu {
       is_muted,
       maybe_link: maybe_origin.and_then(|origin| conversation_link(origin, conversation)),
       leave: channel_leave(&found, state.me().id, &roles),
+      can_delete: found.can_delete_channel(),
+      name: found.name,
     })
   }
 }

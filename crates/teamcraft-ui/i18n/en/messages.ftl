@@ -151,6 +151,7 @@ slash-missing-argument = Usage: { $usage }
 slash-bad-reminder = Say when: "in 10m", "in 2h", "in 1d" or "at 14:30", then the text.
 slash-help-title = Commands (type // to send a message that starts with a slash):
 slash-not-found = Nothing found for "{ $name }".
+slash-leave-last-member = You are the only one in this channel: leaving deletes it. Use the channel's menu to confirm.
 slash-status-set = Status set.
 slash-status-cleared = Status cleared.
 slash-status-presets-only = Your workspace allows only its preset statuses. Pick one in the account menu.

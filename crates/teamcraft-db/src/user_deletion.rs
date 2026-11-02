@@ -154,7 +154,39 @@ impl Database {
     Ok(())
   }
 
-  /// Direct conversations deleted with another user that this user's devices should drop.
+  /// Deletes a channel with everything in it (messages, MLS state, attachments) and records it
+  /// for its members, whose devices drop it on their next sync. Its objects in storage are deleted
+  /// before ([`Self::conversation_object_keys`]). Idempotent.
+  pub async fn delete_channel(
+    &self,
+    conversation: ConversationId,
+    members: &[UserId],
+  ) -> Result<(), DbError> {
+    let mut tx = self.pool().begin().await?;
+    sqlx::query!(
+      r#"INSERT INTO deleted_conversations (user_id, conversation_id)
+         SELECT unnest($1::bigint[]), $2 ON CONFLICT DO NOTHING"#,
+      &to_db_all(members),
+      to_db(conversation),
+    )
+    .execute(&mut *tx)
+    .await?;
+    // Attachment rows would only lose their conversation (ON DELETE SET NULL).
+    sqlx::query!(
+      "DELETE FROM attachments WHERE conversation_id = $1",
+      to_db(conversation)
+    )
+    .execute(&mut *tx)
+    .await?;
+    sqlx::query!("DELETE FROM conversations WHERE id = $1", to_db(conversation))
+      .execute(&mut *tx)
+      .await?;
+    tx.commit().await?;
+    Ok(())
+  }
+
+  /// Conversations deleted (a channel, or a direct message with a deleted user) that this user's
+  /// devices should drop.
   pub async fn deleted_conversations_of(&self, user: UserId) -> Result<Vec<ConversationId>, DbError> {
     let ids = sqlx::query_scalar!(
       "SELECT conversation_id FROM deleted_conversations WHERE user_id = $1 ORDER BY conversation_id",

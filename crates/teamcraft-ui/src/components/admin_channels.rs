@@ -10,6 +10,7 @@ use crate::components::channel_view::UnconfirmedRemovalActions;
 use crate::components::icons::{Icon, IconName};
 use crate::components::pending_button::PendingButton;
 use crate::components::sliding_indicator::SlidingIndicator;
+use crate::components::workspace_dialogs::DeleteChannelSection;
 use crate::feedback::PendingAction;
 use crate::i18n::{I18n, use_i18n};
 use crate::model::{ConversationId, ConversationKind, MembershipIssue, UserId};
@@ -533,6 +534,7 @@ fn ChannelDetail(channel: AdminChannel, latest: Memo<Option<AdminChannel>>) -> i
     </div>
     {move || maybe_owner.get().is_none().then(|| view! { <OwnerAssign channel=id /> })}
     <ModerationEditor channel=id />
+    <DeleteChannelSection conversation=id on_deleted=Callback::new(move |()| state.write(|backend| backend.admin_refresh())) />
     <p class="status-line" role="status">
       {move || {
         outcome

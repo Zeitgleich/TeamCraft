@@ -14,17 +14,26 @@ pub enum LeaveChoice {
   Allowed,
   /// The user is the last admin: the server refuses until someone else is one.
   LastAdmin,
+  /// Nobody else is in the channel: leaving deletes it, so the user is asked first (#1130).
+  LastMember,
 }
 
-/// The channel rule of the server (`authorize_removal`): only channels can be left, and the last
-/// channel admin of a channel with others in it must hand the role on first. Roles not loaded yet
-/// leave the decision to the server.
+/// The channel rule of the server (`authorize_removal`, `remove_member`): only channels can be
+/// left; the last member's leave deletes the channel; the last channel admin of an active channel
+/// with others in it must hand the role on first (an archived channel takes no role changes, so
+/// there anybody may leave). Roles not loaded yet leave the decision to the server.
 pub fn channel_leave(conversation: &Conversation, me: UserId, roles: &[ChannelMember]) -> LeaveChoice {
   if !matches!(
     conversation.kind,
     ConversationKind::Public | ConversationKind::Private
   ) {
     return LeaveChoice::Hidden;
+  }
+  if conversation.member_ids == [me] {
+    return LeaveChoice::LastMember;
+  }
+  if conversation.is_archived {
+    return LeaveChoice::Allowed;
   }
   let is_admin = roles
     .iter()
@@ -107,10 +116,10 @@ mod tests {
         channel_leave(&conversation(ConversationKind::Public, 2), me(), &roles),
         LeaveChoice::LastAdmin
       );
-      // Alone in the channel, the last admin may go (the server allows it).
+      // Alone in the channel, the last admin may go; it deletes the channel (#1130).
       assert_eq!(
         channel_leave(&conversation(ConversationKind::Public, 1), me(), &roles[..1]),
-        LeaveChoice::Allowed
+        LeaveChoice::LastMember
       );
       // A second admin frees the first.
       let two_admins = [
@@ -121,6 +130,42 @@ mod tests {
         channel_leave(&conversation(ConversationKind::Public, 2), me(), &two_admins),
         LeaveChoice::Allowed
       );
+    }
+
+    /// #1130: every role × state × last admin / last member.
+    #[test]
+    fn every_role_and_state_gets_its_answer() {
+      use ChannelRole::{Admin, Member, Moderator};
+      let cases = [
+        // role, other admin, members, archived, answer
+        (Admin, false, 2, false, LeaveChoice::LastAdmin),
+        (Admin, false, 2, true, LeaveChoice::Allowed),
+        (Admin, true, 2, false, LeaveChoice::Allowed),
+        (Admin, true, 2, true, LeaveChoice::Allowed),
+        (Admin, false, 1, false, LeaveChoice::LastMember),
+        (Admin, false, 1, true, LeaveChoice::LastMember),
+        (Moderator, true, 2, false, LeaveChoice::Allowed),
+        (Moderator, true, 2, true, LeaveChoice::Allowed),
+        (Member, true, 2, false, LeaveChoice::Allowed),
+        (Member, true, 2, true, LeaveChoice::Allowed),
+        (Member, false, 1, false, LeaveChoice::LastMember),
+        (Member, false, 1, true, LeaveChoice::LastMember),
+      ];
+      for (role, has_other_admin, members, is_archived, answer) in cases {
+        let mut found = conversation(ConversationKind::Private, members);
+        found.is_archived = is_archived;
+        let mut roles = vec![member(me(), role.clone())];
+        if has_other_admin {
+          roles.push(member(other(), ChannelRole::Admin));
+        } else if members > 1 {
+          roles.push(member(other(), Member));
+        }
+        assert_eq!(
+          channel_leave(&found, me(), &roles),
+          answer,
+          "{role:?} other admin {has_other_admin} members {members} archived {is_archived}"
+        );
+      }
     }
 
     #[test]
@@ -230,6 +275,7 @@ mod tests {
       bookmarks: Vec::new(),
       is_catching_up: false,
       is_notes_to_self: false,
+      is_archived: false,
       maybe_permissions: None,
       has_only_deactivated_others: false,
       maybe_image_version: None,

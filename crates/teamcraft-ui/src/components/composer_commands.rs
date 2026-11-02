@@ -16,6 +16,7 @@ use crate::reminders::{Reminder, due_time, from_json, to_json};
 use crate::settings::{load_string, store_string};
 use crate::slash::{CommandContext, ReminderTime, SlashCommand, SlashError, StatusChange, Unavailable};
 use crate::state::{AppState, Overlay};
+use teamcraft_client_api::entry_rules::{LeaveChoice, channel_leave};
 
 // Markdown source: the backslash and both underscores are escaped so they show as typed.
 const SHRUG: &str = "¯\\\\\\_(ツ)\\_/¯";
@@ -164,6 +165,14 @@ pub fn run(state: AppState, i18n: I18n, conversation: ConversationId, command: S
       None => Outcome::Notice(Notice::Text(i18n.t_with("slash-not-found", &[("name", &name)]))),
     },
     SlashCommand::Leave => {
+      let roles = state.read(|backend| backend.channel_roles(conversation));
+      let leave = state
+        .read(|backend| backend.conversation(conversation))
+        .map(|found| channel_leave(&found, state.me().id, &roles));
+      // Leaving deletes the channel: that takes the menu's confirmation.
+      if leave == Some(LeaveChoice::LastMember) {
+        return Outcome::Notice(Notice::Text(i18n.t("slash-leave-last-member")));
+      }
       state.leave_with_undo(conversation, left_text(state, i18n, conversation));
       Outcome::Done
     },

@@ -12,6 +12,7 @@ enum class EntryAction {
   Notifications,
   CopyLink,
   LeaveChannel,
+  DeleteChannel,
   MuteSpace,
   MarkSpaceRead,
   LeaveSpace,
@@ -30,6 +31,7 @@ fun conversationMenu(conversation: ConversationItem, leave: LeaveChoice, hasLink
   add(EntryItem(EntryAction.Notifications))
   if (hasLink) add(EntryItem(EntryAction.CopyLink))
   leaveEntry(EntryAction.LeaveChannel, leave)?.let(::add)
+  if (conversation.canDeleteChannel) add(EntryItem(EntryAction.DeleteChannel))
 }
 
 /** The menu of a space's header. */
@@ -41,6 +43,6 @@ fun spaceMenu(hasUnread: Boolean, leave: LeaveChoice): List<EntryItem> = buildLi
 
 private fun leaveEntry(action: EntryAction, leave: LeaveChoice): EntryItem? = when (leave) {
   LeaveChoice.HIDDEN -> null
-  LeaveChoice.ALLOWED -> EntryItem(action)
+  LeaveChoice.ALLOWED, LeaveChoice.LAST_MEMBER -> EntryItem(action)
   LeaveChoice.LAST_ADMIN -> EntryItem(action, isEnabled = false)
 }
