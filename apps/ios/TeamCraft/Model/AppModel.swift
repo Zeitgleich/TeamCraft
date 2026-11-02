@@ -594,6 +594,11 @@ final class AppModel {
     (try? await core().notifiedConversation(conversationId: conversationId)) ?? nil
   }
 
+  /// How far the first sync of a newly set up device is; `nil` when none runs.
+  func firstSync() async -> FirstSyncItem? {
+    (try? await core().firstSync()) ?? nil
+  }
+
   /// How far conversations waiting for message keys have caught up (issue #888); `nil` while none
   /// waits.
   func keyCatchUp() async -> KeyCatchUpItem? {

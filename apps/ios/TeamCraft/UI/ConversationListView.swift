@@ -31,6 +31,8 @@ struct ConversationListView: View {
   @State private var leaveChoices: [String: LeaveChoice] = [:]
   @State private var spaceMenus: [String: SpaceMenuItem] = [:]
   @State private var maybeLeaving: LeaveTarget?
+  /// A first sync's progress, shown under the title.
+  @State private var maybeFirstSync: FirstSyncItem?
 
   var body: some View {
     NavigationSplitView {
@@ -38,6 +40,7 @@ struct ConversationListView: View {
         .safeAreaInset(edge: .top, spacing: 0) {
           VStack(spacing: 0) {
             OfflineBanner()
+            if let progress = maybeFirstSync { FirstSyncBar(progress: progress) }
             NotificationPromptCard()
             if !isSearching && !conversations.isEmpty { tabPicker }
           }
@@ -97,6 +100,7 @@ struct ConversationListView: View {
     .task(id: model.changeCount) {
       conversations = await model.conversations()
       hasLoaded = true
+      maybeFirstSync = await model.firstSync()
       previews = await model.chatPreviews(conversations, myId: account.userId)
     }
     .task(id: fullQuery) {
@@ -608,6 +612,42 @@ private enum NotifyLevel: String, CaseIterable, Identifiable {
     case .all: return "notify_all"
     case .mentions: return "notify_mentions"
     case .none: return "notify_none"
+    }
+  }
+}
+
+/// A first sync's progress under the title: what is loading, how far in conversations, and the bar.
+/// Numbers from the core; a spinner until it has one. Gone while the connection is down, where the
+/// banner above says why nothing moves.
+struct FirstSyncBar: View {
+  let progress: FirstSyncItem
+  @Environment(AppModel.self) private var model
+  private let network = NetworkMonitor.shared
+
+  var body: some View {
+    if !ConnectionNotice.isDown(isOnline: network.isOnline, connection: model.connection) {
+      VStack(spacing: 4) {
+        HStack {
+          Text(progress.stage == .newest ? "first_sync_newest" : "first_sync_older")
+          Spacer()
+          if progress.total > 0 {
+            Text("first_sync_count \(Int64(progress.done)) \(Int64(progress.total))")
+              .monospacedDigit()
+          } else {
+            ProgressView().controlSize(.mini)
+          }
+        }
+        .font(.footnote)
+        .foregroundStyle(.secondary)
+        if let fraction = progress.maybeFraction {
+          ProgressView(value: Double(fraction))
+            .progressViewStyle(.linear)
+            .animation(.smooth, value: fraction)
+        }
+      }
+      .padding(.horizontal)
+      .padding(.vertical, 6)
+      .accessibilityElement(children: .combine)
     }
   }
 }

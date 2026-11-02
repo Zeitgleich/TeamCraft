@@ -3,8 +3,8 @@
 .app {
   display: grid;
   /* Banners (unsigned bundle, offline, announcement, update) share the first row; it is empty
-     without them. */
-  grid-template-rows: auto var(--topbar-h) minmax(0, 1fr);
+     without them. The row below the top bar holds a first sync's progress, empty without one. */
+  grid-template-rows: auto var(--topbar-h) auto minmax(0, 1fr);
   /* Without it the column grows to the content's minimum and the page scrolls sideways (~1100px). */
   grid-template-columns: minmax(0, 1fr);
   height: 100dvh;

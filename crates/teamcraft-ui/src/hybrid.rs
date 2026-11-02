@@ -474,6 +474,10 @@ impl<C: ChatBackend + 'static> ChatBackend for Hybrid<C> {
     self.chat.is_waiting_for_device(conversation)
   }
 
+  fn first_sync(&self) -> Option<teamcraft_client_api::model::FirstSync> {
+    self.chat.first_sync()
+  }
+
   fn key_catch_up(&self) -> Option<teamcraft_client_api::model::KeyCatchUp> {
     self.chat.key_catch_up()
   }

@@ -17,6 +17,7 @@ use teamcraft_proto::{DeviceActivity, GatewayClientMessage, GatewayServerMessage
 use crate::api::{ApiError, ServerApi};
 use crate::client::Client;
 use crate::client::files::BlobUpload;
+use crate::client::notify_first_sync_during;
 use crate::connection::{ConnectionSettings, ConnectionStatus, ConnectionSupervisor, NetworkChanges};
 use crate::downloads::{Downloads, Finished};
 use crate::pending_work::PendingWork;
@@ -170,7 +171,16 @@ impl<A: ServerApi, S: LocalStore> SyncRunner<A, S> {
   pub async fn run(mut self) -> Client<A, S> {
     self.flush().await;
     loop {
-      if self.connection.connect_if_due(&mut self.client).await.is_some() {
+      // A first sync happens in here: the UI is told as the list and the progress grow.
+      let signal = self.client.first_sync_signal();
+      let notify = self.on_change.clone();
+      let connected = notify_first_sync_during(
+        &signal,
+        move || notify(),
+        self.connection.connect_if_due(&mut self.client),
+      )
+      .await;
+      if connected.is_some() {
         // A resumed session keeps what the server last knew, which may be an away timeout.
         self.report_activity().await;
         // Back online: what waited goes out now, not on the next tick.
@@ -194,7 +204,10 @@ impl<A: ServerApi, S: LocalStore> SyncRunner<A, S> {
             self.changed();
           }
         },
-        Wake::Tick => self.on_tick().await,
+        Wake::Tick => {
+          self.on_tick().await;
+          self.load_older_history().await;
+        },
       }
       self.report_progress();
       self.answer_drained();
@@ -215,6 +228,9 @@ impl<A: ServerApi, S: LocalStore> SyncRunner<A, S> {
     // Never longer than a tick: after the wall clock went back, deadlines lie in the "future" by
     // the jump, and the tick notices the jump and moves them (robustness.md, "Time").
     let until_ms = deadline.saturating_sub(now).clamp(0, millis(self.settings.tick));
+    // Older history of a first sync: at once, but only after everything the select below looks at
+    // first (commands, frames, network changes, transfers).
+    let until_ms = if self.is_older_history_due() { 0 } else { until_ms };
     let Self {
       commands,
       connection,
@@ -340,6 +356,25 @@ impl<A: ServerApi, S: LocalStore> SyncRunner<A, S> {
     let is_changed = self
       .connection
       .keep_alive(now, self.upkeep.tick(&mut self.client))
+      .await;
+    if is_changed {
+      self.changed();
+    }
+  }
+
+  fn is_older_history_due(&self) -> bool {
+    self.connection.is_connected() && self.client.is_older_history_due()
+  }
+
+  /// One page of a first sync's older history, so whatever arrives next is answered after it.
+  async fn load_older_history(&mut self) {
+    if !self.is_older_history_due() {
+      return;
+    }
+    let now = self.client.now_ms();
+    let is_changed = self
+      .connection
+      .keep_alive(now, self.client.load_older_history_page())
       .await;
     if is_changed {
       self.changed();

@@ -729,6 +729,29 @@ pub struct KeyCatchUp {
   pub waiting: Vec<ConversationId>,
 }
 
+/// How far the first sync of a newly set up device is, for the bar under the top bar. The core's
+/// numbers: conversations, the only total known up front.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct FirstSync {
+  pub stage: FirstSyncStage,
+  /// Conversations done in this stage.
+  pub done: usize,
+  /// Conversations in this stage; 0 until the list is here.
+  pub total: usize,
+  /// How far overall, from 0 to 1; `None` for an indeterminate bar (nothing finished yet).
+  pub maybe_fraction: Option<f32>,
+}
+
+/// What the first sync is reading.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FirstSyncStage {
+  /// The newest messages of every conversation.
+  Newest,
+  /// Older messages, in the background.
+  Older,
+}
+
 /// Why a message shows as a placeholder (issue #888, e2ee.md §5, "History on a new device").
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
