@@ -9,10 +9,10 @@ use std::path::Path;
 use std::sync::{Mutex, MutexGuard};
 use std::time::Duration;
 
-use rusqlite::{Connection, params};
+use rusqlite::{Connection, OptionalExtension, params};
 use teamcraft_crypto::local_store::{LOOKUP_ID_LEN, LookupId};
 
-use super::sealed::{RecordBackend, SealedStore};
+use super::sealed::{RecordBackend, SealedStore, SealedStoreLimits};
 use super::sql_group::{
   Migration, MigrationKind, WriteGroup, run_migrations, sqlite_error as database_error,
 };
@@ -34,6 +34,12 @@ pub(crate) const MIGRATIONS: &[Migration] = &[
   // The MLS state is stored per entry (issue #424); versions before would read none of it.
   Migration {
     version: 3,
+    kind: MigrationKind::Marker,
+  },
+  // The catalog (issue #155): versions before would write messages and entries it doesn't list.
+  // The store builds it when it opens (`SealedStore::open_backend`), resumably.
+  Migration {
+    version: 4,
     kind: MigrationKind::Marker,
   },
 ];
@@ -62,19 +68,39 @@ struct Inner {
 }
 
 impl SealedStore<SqliteRecords> {
-  /// Opens (or creates) the database at `path` and decrypts it into memory.
+  /// Opens (or creates) the database at `path`, with the default cache limits. Records are read
+  /// when they are asked for.
   pub fn open(path: &Path, key_source: &impl DatabaseKeySource) -> Result<Self, StoreError> {
-    Self::from_connection(Connection::open(path).map_err(database_error)?, key_source)
+    Self::open_with_limits(path, key_source, SealedStoreLimits::default())
+  }
+
+  /// [`Self::open`] with the caches bounded by `limits` (the iOS notification extension keeps
+  /// little: [`SealedStoreLimits::minimal`]).
+  pub fn open_with_limits(
+    path: &Path,
+    key_source: &impl DatabaseKeySource,
+    limits: SealedStoreLimits,
+  ) -> Result<Self, StoreError> {
+    Self::from_connection(
+      Connection::open(path).map_err(database_error)?,
+      key_source,
+      limits,
+    )
   }
 
   /// A database that lives only in memory, for tests.
   pub fn open_in_memory(key_source: &impl DatabaseKeySource) -> Result<Self, StoreError> {
-    Self::from_connection(Connection::open_in_memory().map_err(database_error)?, key_source)
+    Self::from_connection(
+      Connection::open_in_memory().map_err(database_error)?,
+      key_source,
+      SealedStoreLimits::default(),
+    )
   }
 
   fn from_connection(
     connection: Connection,
     key_source: &impl DatabaseKeySource,
+    limits: SealedStoreLimits,
   ) -> Result<Self, StoreError> {
     // secure_delete: freed pages are zeroed, so a deleted record's ciphertext doesn't linger in
     // them (issue #391); the write-ahead log is cleared by `purge_freed`.
@@ -83,10 +109,10 @@ impl SealedStore<SqliteRecords> {
       .map_err(database_error)?;
     connection.busy_timeout(BUSY_TIMEOUT).map_err(database_error)?;
     run_migrations(&connection, MIGRATIONS)?;
-    // Before the read: a commit of another connection after it counts (the cache doesn't hold it).
+    // Before anything is read: a commit of another connection after it counts (the caches drop
+    // what they hold).
     let mut group = WriteGroup::default();
     group.watch_other_connections(&connection)?;
-    let records = read_all(&connection)?;
     let backend = SqliteRecords {
       inner: Mutex::new(Inner {
         connection,
@@ -94,7 +120,7 @@ impl SealedStore<SqliteRecords> {
         purge: PurgeState::new(),
       }),
     };
-    Self::load(backend, &key_source.database_key()?, records)
+    SealedStore::open_backend(backend, &key_source.database_key()?, limits)
   }
 }
 
@@ -116,6 +142,50 @@ impl RecordBackend for SqliteRecords {
         params![id.0.as_slice()],
       )
     })
+  }
+
+  fn get_record(&self, id: &LookupId) -> Result<Option<Vec<u8>>, StoreError> {
+    self
+      .lock()
+      .connection
+      .prepare_cached("SELECT value FROM sealed_records WHERE id = ?1")
+      .and_then(|mut statement| {
+        statement
+          .query_row(params![id.0.as_slice()], |row| row.get(0))
+          .optional()
+      })
+      .map_err(database_error)
+  }
+
+  fn records_after(
+    &self,
+    maybe_after: Option<&LookupId>,
+    limit: usize,
+  ) -> Result<Vec<(LookupId, Vec<u8>)>, StoreError> {
+    let after: &[u8] = maybe_after.map_or(&[], |id| id.0.as_slice());
+    let limit = i64::try_from(limit).unwrap_or(i64::MAX);
+    let inner = self.lock();
+    let mut statement = inner
+      .connection
+      .prepare_cached("SELECT id, value FROM sealed_records WHERE id > ?1 ORDER BY id LIMIT ?2")
+      .map_err(database_error)?;
+    let rows = statement
+      .query_map(params![after, limit], |row| {
+        Ok((row.get::<_, Vec<u8>>(0)?, row.get::<_, Vec<u8>>(1)?))
+      })
+      .map_err(database_error)?;
+    rows
+      .map(|row| {
+        let (id, value) = row.map_err(database_error)?;
+        let id = <[u8; LOOKUP_ID_LEN]>::try_from(id.as_slice())
+          .map_err(|_| StoreError::Corrupt("record ID length".into()))?;
+        Ok((LookupId(id), value))
+      })
+      .collect()
+  }
+
+  fn fail_group(&self) {
+    self.lock().group.note_failure();
   }
 
   fn begin_writes(&self) -> Result<(), StoreError> {
@@ -216,25 +286,6 @@ impl SqliteRecords {
   }
 }
 
-fn read_all(connection: &Connection) -> Result<Vec<(LookupId, Vec<u8>)>, StoreError> {
-  let mut statement = connection
-    .prepare("SELECT id, value FROM sealed_records")
-    .map_err(database_error)?;
-  let rows = statement
-    .query_map([], |row| {
-      Ok((row.get::<_, Vec<u8>>(0)?, row.get::<_, Vec<u8>>(1)?))
-    })
-    .map_err(database_error)?;
-  rows
-    .map(|row| {
-      let (id, value) = row.map_err(database_error)?;
-      let id = <[u8; LOOKUP_ID_LEN]>::try_from(id.as_slice())
-        .map_err(|_| StoreError::Corrupt("record ID length".into()))?;
-      Ok((LookupId(id), value))
-    })
-    .collect()
-}
-
 #[cfg(test)]
 mod tests {
   use rand_core::OsRng;
@@ -292,7 +343,11 @@ mod tests {
     store.put(Table::MlsStorage, "state", &[7; 4096]).unwrap();
     let sealed: Vec<u8> = Connection::open(&path)
       .unwrap()
-      .query_row("SELECT value FROM sealed_records", [], |row| row.get(0))
+      .query_row(
+        "SELECT value FROM sealed_records ORDER BY length(value) DESC LIMIT 1",
+        [],
+        |row| row.get(0),
+      )
       .unwrap();
     let needle = &sealed[sealed.len() / 2..sealed.len() / 2 + 32];
 
@@ -319,7 +374,11 @@ mod tests {
     store.put(Table::MlsStorage, "state", &[7; 4096]).unwrap();
     let sealed: Vec<u8> = Connection::open(&path)
       .unwrap()
-      .query_row("SELECT value FROM sealed_records", [], |row| row.get(0))
+      .query_row(
+        "SELECT value FROM sealed_records ORDER BY length(value) DESC LIMIT 1",
+        [],
+        |row| row.get(0),
+      )
       .unwrap();
     let needle = &sealed[sealed.len() / 2..sealed.len() / 2 + 32];
 
@@ -370,7 +429,11 @@ mod tests {
     store.put(Table::MlsStorage, "state", &[7; 4096]).unwrap();
     let sealed: Vec<u8> = Connection::open(&path)
       .unwrap()
-      .query_row("SELECT value FROM sealed_records", [], |row| row.get(0))
+      .query_row(
+        "SELECT value FROM sealed_records ORDER BY length(value) DESC LIMIT 1",
+        [],
+        |row| row.get(0),
+      )
       .unwrap();
     let needle = sealed[sealed.len() / 2..sealed.len() / 2 + 32].to_vec();
     store.purge_freed_soon();
@@ -612,19 +675,19 @@ mod tests {
     );
   }
 
-  /// Issue #424 review, H1: 1.0.8 (its steps end before the marker) refuses the database.
+  /// Issue #424 review, H1: 1.0.8 (its steps end before the marker) refuses the database; so does
+  /// a version before the catalog (issue #155), which would write records it doesn't list.
   #[test]
-  fn a_version_before_the_mls_state_per_entry_refuses_the_database() {
+  fn versions_before_the_last_marker_refuse_the_database() {
     let store =
       SealedSqliteStore::open_in_memory(&StaticKeySource::new(SymmetricKey::generate(&mut OsRng))).unwrap();
-    let as_in_1_0_8 = &MIGRATIONS[..2];
-    assert!(matches!(
-      run_migrations(&store.backend().lock().connection, as_in_1_0_8),
-      Err(StoreError::NewerSchema {
-        found: 3,
-        supported: 2
-      })
-    ));
+    for steps in [2, 3] {
+      assert!(matches!(
+        run_migrations(&store.backend().lock().connection, &MIGRATIONS[..steps]),
+        Err(StoreError::NewerSchema { found: 4, supported })
+          if supported == i64::try_from(steps).unwrap()
+      ));
+    }
   }
 
   /// Lost deletes are forgotten once a later group that reached the disk deleted or wrote them.
@@ -669,16 +732,25 @@ mod tests {
         crate::store::sql_group::latest_version(MIGRATIONS)
       ))
       .unwrap();
-    // One record damaged, the others fine: not a wrong key but a damaged database.
+    // One record damaged, the others fine: not a wrong key but a damaged record, reported when
+    // it is read (issue #155: opening reads none of them).
+    let damaged_id = SealedSqliteStore::open(&path, &StaticKeySource::new(key.duplicate()))
+      .unwrap()
+      .entry_id(Table::Users.name(), "1");
     connection
       .execute(
-        "UPDATE sealed_records SET value = x'00' WHERE id = (SELECT id FROM sealed_records LIMIT 1)",
-        [],
+        "UPDATE sealed_records SET value = x'00' WHERE id = ?1",
+        params![damaged_id.0.as_slice()],
       )
       .unwrap();
     drop(connection);
-    let damaged = SealedSqliteStore::open(&path, &StaticKeySource::new(key));
-    assert!(matches!(damaged, Err(StoreError::Corrupt(_))), "{damaged:?}");
+    let damaged = SealedSqliteStore::open(&path, &StaticKeySource::new(key)).unwrap();
+    assert!(matches!(
+      damaged.get(Table::Users, "1"),
+      Err(StoreError::Corrupt(_))
+    ));
+    assert_eq!(damaged.get(Table::Users, "2").unwrap(), Some(b"two".to_vec()));
+    drop(damaged);
     std::fs::remove_dir_all(&directory).unwrap();
   }
 

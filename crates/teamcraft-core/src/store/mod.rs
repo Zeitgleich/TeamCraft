@@ -16,9 +16,12 @@ mod fixtures;
 mod key_source;
 #[cfg(not(target_arch = "wasm32"))]
 mod lock;
+mod lru;
 mod memory;
 mod message_cache;
 pub mod sealed;
+mod sealed_catalog;
+mod sealed_index;
 #[cfg(all(feature = "sealed-sqlite", not(target_arch = "wasm32")))]
 mod sealed_sqlite;
 #[cfg(all(
@@ -55,6 +58,7 @@ pub use key_source::{KeystoreThreadError, run_outside_runtime};
 #[cfg(not(target_arch = "wasm32"))]
 pub use lock::StoreLock;
 pub use memory::MemoryStore;
+pub use sealed::SealedStoreLimits;
 #[cfg(all(feature = "sealed-sqlite", not(target_arch = "wasm32")))]
 pub use sealed_sqlite::{SealedSqliteStore, SqliteRecords};
 #[cfg(all(feature = "sqlcipher", not(target_arch = "wasm32")))]
@@ -1656,7 +1660,7 @@ pub(crate) mod tests {
     assert_eq!(store.messages(other, MessageFilter::All).unwrap().len(), 1);
   }
 
-  fn message(
+  pub(crate) fn message(
     conversation: ConversationId,
     client: u8,
     maybe_server: Option<i64>,
@@ -1685,7 +1689,7 @@ pub(crate) mod tests {
     }
   }
 
-  fn id<T: Id>(raw: i64) -> T {
+  pub(crate) fn id<T: Id>(raw: i64) -> T {
     T::from_snowflake(Snowflake::new(raw).unwrap())
   }
 }
