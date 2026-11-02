@@ -67,6 +67,7 @@ import uniffi.teamcraft_ffi.LeaveChoice
 import uniffi.teamcraft_ffi.LinkPlatform
 import uniffi.teamcraft_ffi.LinkRequestItem
 import uniffi.teamcraft_ffi.LoginBrand
+import uniffi.teamcraft_ffi.FirstSyncItem
 import uniffi.teamcraft_ffi.KeyCatchUpItem
 import uniffi.teamcraft_ffi.MessageItem
 import uniffi.teamcraft_ffi.NotificationContent
@@ -507,6 +508,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
    */
   suspend fun notifiedConversation(conversationId: String): NotifiedConversation? =
     read { notifiedConversation(conversationId) }
+
+  /** How far the first sync of a newly set up device is; `null` when none runs. */
+  suspend fun firstSync(): FirstSyncItem? = read { firstSync() }
 
   /** How far conversations waiting for message keys have caught up (issue #888); `null` while none waits. */
   suspend fun keyCatchUp(): KeyCatchUpItem? = read { keyCatchUp() }

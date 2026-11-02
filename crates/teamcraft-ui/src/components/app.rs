@@ -25,6 +25,7 @@ use crate::components::bundle_banner::{BundleBanner, ReleaseBanner};
 use crate::components::channel_view::ChannelView;
 use crate::components::edge_swipe::EdgeSwipeBack;
 use crate::components::file_drop;
+use crate::components::first_sync_bar::FirstSyncBar;
 use crate::components::getting_started::GettingStarted;
 use crate::components::guest_join::GuestJoinPage;
 use crate::components::home::{HomeSidebar, HomeStart};
@@ -278,6 +279,7 @@ pub fn Shell(backend: Rc<dyn Backend>, settings: Settings) -> impl IntoView {
         <UpdateNotice />
       </div>
       <TopBar />
+      <FirstSyncBar />
       <div
         class="app-body"
         node_ref=app_body

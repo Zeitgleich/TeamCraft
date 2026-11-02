@@ -15,6 +15,12 @@ history-forward = Vor
 ## Seitenleiste
 catching-up = Wird nachgeladen…
 catching-up-detail = Nachrichten aus der Zeit, in der du weg warst, werden noch geladen.
+first-sync-newest = Lade Nachrichten…
+first-sync-older = Lade ältere Nachrichten…
+first-sync-count = { $count ->
+    [one] { $done } von { $count } Unterhaltung
+   *[other] { $done } von { $count } Unterhaltungen
+  }
 key-catch-up = Schlüssel für ältere Nachrichten werden geholt
 key-catch-up-detail = Nachrichten erscheinen, sobald eines deiner anderen Geräte oder ein Mitglied online ist.
 key-catch-up-progress = { $count ->

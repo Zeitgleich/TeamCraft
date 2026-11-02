@@ -205,7 +205,7 @@ mod tests {
       .expect(".app sets grid-template-rows");
     assert_eq!(
       rows.trim().trim_end_matches(';'),
-      "auto var(--topbar-h) minmax(0, 1fr)"
+      "auto var(--topbar-h) auto minmax(0, 1fr)"
     );
 
     let shell = include_str!("components/app.rs");
@@ -224,7 +224,11 @@ mod tests {
       .collect();
     assert_eq!(
       children,
-      ["<div class=\"app-banners\" node_ref=banners>", "<TopBar />"]
+      [
+        "<div class=\"app-banners\" node_ref=banners>",
+        "<TopBar />",
+        "<FirstSyncBar />"
+      ]
     );
     for banner in [
       "<BundleBanner />",

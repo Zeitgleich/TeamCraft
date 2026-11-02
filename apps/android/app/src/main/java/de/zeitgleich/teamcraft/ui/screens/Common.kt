@@ -8,6 +8,10 @@ import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Column
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
@@ -21,6 +25,8 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.platform.LocalContext
 import kotlinx.coroutines.delay
+import uniffi.teamcraft_ffi.FirstSyncItem
+import uniffi.teamcraft_ffi.FirstSyncStageItem
 import uniffi.teamcraft_ffi.NetworkInterception
 import androidx.compose.foundation.layout.RowScope
 import androidx.compose.foundation.layout.WindowInsets
@@ -28,6 +34,7 @@ import androidx.compose.foundation.layout.WindowInsetsSides
 import androidx.compose.foundation.layout.only
 import androidx.compose.foundation.layout.safeDrawing
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.res.pluralStringResource
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -38,6 +45,7 @@ import de.zeitgleich.teamcraft.TeamCraftApplication
 import de.zeitgleich.teamcraft.ui.CONNECTION_GRACE_MS
 import de.zeitgleich.teamcraft.ui.ConnectionNotice
 import de.zeitgleich.teamcraft.ui.connectionNotice
+import de.zeitgleich.teamcraft.ui.isConnectionDown
 import de.zeitgleich.teamcraft.ui.rememberIsOnline
 import de.zeitgleich.teamcraft.ui.theme.LocalTeamCraftColors
 import de.zeitgleich.teamcraft.ui.theme.darkStatusBarBackdrop
@@ -158,6 +166,53 @@ fun OfflineBanner(onSignInAgain: () -> Unit) {
       maybeAction?.let { (label, action) ->
         TextButton(onClick = action) { Text(label) }
       }
+    }
+  }
+}
+
+/**
+ * A first sync's progress under the top bar: what is loading, how far in conversations, and the bar.
+ * Numbers from the core; indeterminate until it has one. Gone while the connection is down, where
+ * the banner above says why nothing moves.
+ */
+@Composable
+fun FirstSyncBar(progress: FirstSyncItem) {
+  val graph = TeamCraftApplication.graph(LocalContext.current)
+  val isOnline = rememberIsOnline()
+  val maybeConnection by graph.core.connectionState.collectAsState()
+  if (isConnectionDown(isOnline, maybeConnection)) return
+  val text = stringResource(
+    when (progress.stage) {
+      FirstSyncStageItem.NEWEST -> R.string.first_sync_newest
+      FirstSyncStageItem.OLDER -> R.string.first_sync_older
+    },
+  )
+  Column(Modifier.fillMaxWidth().semantics(mergeDescendants = true) {}) {
+    Row(
+      verticalAlignment = Alignment.CenterVertically,
+      horizontalArrangement = Arrangement.SpaceBetween,
+      modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 6.dp),
+    ) {
+      Text(text, style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+      if (progress.total > 0u) {
+        Text(
+          pluralStringResource(
+            R.plurals.first_sync_count,
+            progress.total.toInt(),
+            progress.done.toInt(),
+            progress.total.toInt(),
+          ),
+          style = MaterialTheme.typography.labelMedium,
+          color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+      }
+    }
+    val maybeFraction = progress.maybeFraction
+    if (maybeFraction != null) {
+      val shown by animateFloatAsState(maybeFraction, label = "first sync progress")
+      LinearProgressIndicator(progress = { shown }, modifier = Modifier.fillMaxWidth())
+    } else {
+      LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
     }
   }
 }
