@@ -57,8 +57,12 @@ const STATES: usize = 6;
 const SOUND_ONLY: Duration = Duration::from_secs(4);
 /// The lossy moment on the viewer's downlink (every other packet from the SFU lost).
 const LOSSY_MOMENT: Duration = Duration::from_secs(2);
-/// The top layer has to reach the viewer within this time of the share's start.
+/// The top layer has to reach the viewer within this time of the share's start, not counting how
+/// long the top layer's encoder takes to start ([`Timeline::encoder_startup`]).
 const SHARP_DEADLINE: Duration = Duration::from_secs(8);
+/// What a run records after [`SHARP_DEADLINE`]: room for a slow encoder start, and then for seeing
+/// that the picture stays sharp.
+const AFTER_DEADLINE: Duration = Duration::from_secs(6);
 /// Luma PSNR (dB) of the viewer's picture against the shared screen, at the shared size, that
 /// keeps this text readable. The half-size layer scaled up stays far below.
 const MIN_SHARP_PSNR_DB: f64 = 30.0;
@@ -70,11 +74,7 @@ const STEP_DEADLINE: Duration = Duration::from_secs(10);
 /// viewer's downlink.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_shared_text_screen_is_sharp_at_the_viewer_within_seconds() {
-  let timeline = run(
-    Scenario::LossyDownlinkBefore,
-    SHARP_DEADLINE + Duration::from_secs(2),
-  )
-  .await;
+  let timeline = run(Scenario::LossyDownlinkBefore, SHARP_DEADLINE + AFTER_DEADLINE).await;
   let maybe_sharp_at = timeline
     .decoded
     .iter()
@@ -85,9 +85,11 @@ async fn a_shared_text_screen_is_sharp_at_the_viewer_within_seconds() {
   let Some(sharp_at) = maybe_sharp_at else {
     panic!("no sharp picture of the top layer reached the viewer:\n{summary}");
   };
+  // An encoder starting up on a busy machine says nothing about how the call adapts to its links.
+  let deadline = SHARP_DEADLINE + timeline.encoder_startup();
   assert!(
-    sharp_at <= SHARP_DEADLINE,
-    "the first sharp picture came after {sharp_at:?}:\n{summary}"
+    sharp_at <= deadline,
+    "the first sharp picture came after {sharp_at:?}, the deadline was {deadline:?}:\n{summary}"
   );
   // Once sharp, it stays: no picture of the top layer falls back to blur.
   let blurred: Vec<&Decoded> = timeline
@@ -285,6 +287,23 @@ async fn run(scenario: Scenario, duration: Duration) -> Timeline {
 }
 
 impl Timeline {
+  /// How long the top layer took to come out of its encoder once someone needed it: CPU time
+  /// only, a part of the wait no SFU or bandwidth estimate has a say in.
+  fn encoder_startup(&self) -> Duration {
+    let maybe_needed_at = self.heard.iter().find_map(|(at, heard)| match heard {
+      Heard::LayersNeeded(layers) if layers.contains(&1) => Some(*at),
+      _ => None,
+    });
+    let Some(needed_at) = maybe_needed_at else {
+      return Duration::ZERO;
+    };
+    self
+      .encoded
+      .iter()
+      .find(|picture| picture.width == SHARED.width && picture.at >= needed_at)
+      .map_or(Duration::ZERO, |picture| picture.at - needed_at)
+  }
+
   /// One line per second: the viewer's layers, pictures and PSNR; the presenter's output per
   /// layer (kbit/s, keyframes).
   fn summary(&self) -> String {
