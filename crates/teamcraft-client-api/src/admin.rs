@@ -157,6 +157,7 @@ pub enum AuditAction {
   GuestInvited,
   ChannelArchived,
   ChannelDeleted,
+  SpaceDeleted,
   MemberAdded,
   MemberRemoved,
   MemberRoleChanged,
@@ -180,7 +181,7 @@ pub enum AuditAction {
 }
 
 impl AuditAction {
-  pub const ALL: [AuditAction; 28] = [
+  pub const ALL: [AuditAction; 29] = [
     Self::PolicyChanged,
     Self::RetentionChanged,
     Self::DeviceRemoved,
@@ -194,6 +195,7 @@ impl AuditAction {
     Self::GuestInvited,
     Self::ChannelArchived,
     Self::ChannelDeleted,
+    Self::SpaceDeleted,
     Self::MemberAdded,
     Self::MemberRemoved,
     Self::MemberRoleChanged,
@@ -226,6 +228,7 @@ impl AuditAction {
       Self::GuestInvited => "guest-invited",
       Self::ChannelArchived => "channel-archived",
       Self::ChannelDeleted => "channel-deleted",
+      Self::SpaceDeleted => "space-deleted",
       Self::MemberAdded => "member-added",
       Self::MemberRemoved => "member-removed",
       Self::MemberRoleChanged => "member-role-changed",

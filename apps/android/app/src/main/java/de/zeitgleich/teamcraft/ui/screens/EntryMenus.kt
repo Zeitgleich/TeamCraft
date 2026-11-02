@@ -110,19 +110,21 @@ fun SpaceEntryMenu(viewModel: MainViewModel, spaceId: String, name: String, isOp
   var maybeMenu by remember(spaceId) { mutableStateOf<uniffi.teamcraft_ffi.SpaceMenuItem?>(null) }
   var isMuting by remember(spaceId) { mutableStateOf(false) }
   var isConfirmingLeave by remember(spaceId) { mutableStateOf(false) }
+  var isConfirmingDelete by remember(spaceId) { mutableStateOf(false) }
   LaunchedEffect(isOpen, spaceId) {
     if (isOpen) maybeMenu = viewModel.spaceMenu(spaceId)
   }
   val menu = maybeMenu
   DropdownMenu(expanded = isOpen && menu != null, onDismissRequest = onDismiss) {
     if (menu != null) {
-      for (entry in spaceMenu(menu.hasUnread, menu.leave)) {
+      for (entry in spaceMenu(menu.hasUnread, menu.leave, menu.canDelete)) {
         EntryMenuItem(entry, lastAdminHint = R.string.entry_leave_last_space_admin) {
           onDismiss()
           when (entry.action) {
             EntryAction.MuteSpace -> isMuting = true
             EntryAction.MarkSpaceRead -> viewModel.markSpaceRead(spaceId)
             EntryAction.LeaveSpace -> isConfirmingLeave = true
+            EntryAction.DeleteSpace -> isConfirmingDelete = true
             else -> Unit
           }
         }
@@ -130,6 +132,15 @@ fun SpaceEntryMenu(viewModel: MainViewModel, spaceId: String, name: String, isOp
     }
   }
   if (isMuting) SpaceMuteDialog(viewModel, spaceId, name) { isMuting = false }
+  if (isConfirmingDelete) {
+    ConfirmDialog(
+      title = stringResource(R.string.space_delete_title, name),
+      text = stringResource(R.string.space_delete_text),
+      confirmLabel = stringResource(R.string.channel_delete_confirm),
+      onConfirm = { viewModel.act(ChatActions.deleteSpace(spaceId)) },
+      onDismiss = { isConfirmingDelete = false },
+    )
+  }
   if (isConfirmingLeave) {
     ConfirmDialog(
       title = stringResource(R.string.space_leave_title, name),
@@ -180,10 +191,14 @@ private fun look(action: EntryAction): Pair<Int, MenuGlyph> = when (action) {
   EntryAction.MuteSpace -> R.string.entry_mute_space to MenuGlyph.Drawable(R.drawable.ic_notifications_off)
   EntryAction.MarkSpaceRead -> R.string.entry_mark_all_read to MenuGlyph.Drawable(R.drawable.ic_done_all)
   EntryAction.LeaveSpace -> R.string.entry_leave_space to MenuGlyph.Vector(Icons.Filled.Close)
+  EntryAction.DeleteSpace -> R.string.space_delete to MenuGlyph.Vector(Icons.Filled.Delete)
 }
 
 private fun isDestructive(action: EntryAction) =
-  action == EntryAction.LeaveChannel || action == EntryAction.DeleteChannel || action == EntryAction.LeaveSpace
+  action == EntryAction.LeaveChannel ||
+    action == EntryAction.DeleteChannel ||
+    action == EntryAction.LeaveSpace ||
+    action == EntryAction.DeleteSpace
 
 /** What leaving means: the last member's leave deletes the channel, and the question says so. */
 internal fun leaveText(leave: LeaveChoice) =

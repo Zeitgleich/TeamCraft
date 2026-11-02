@@ -478,6 +478,13 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
   async fn store_spaces(&mut self, spaces: Vec<SpaceResponse>) -> Result<HashSet<UserId>, CoreError> {
     let mut listed = HashSet::new();
     let mut due = Vec::new();
+    // A space the server no longer lists was deleted, or the user can't see it any more.
+    let still_listed: HashSet<String> = spaces.iter().map(|space| space.id.to_string()).collect();
+    for (key, _) in self.store.list(Table::Spaces)? {
+      if !still_listed.contains(&key) {
+        self.store.delete(Table::Spaces, &key)?;
+      }
+    }
     for space in spaces {
       records::put_json(&self.store, Table::Spaces, &space.id.to_string(), &space)?;
       if space.maybe_my_role.is_none() || self.is_space_unlisted(space.id) {

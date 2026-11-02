@@ -289,6 +289,9 @@ pub trait ServerApi {
     &self,
     space: SpaceId,
   ) -> impl Future<Output = Result<ListConversationsResponse, ApiError>>;
+  /// Deletes a space with its channels for everybody (`DELETE /spaces/{id}`, `delete_space`); not
+  /// found once it is gone.
+  fn delete_space(&self, space: SpaceId) -> impl Future<Output = Result<(), ApiError>>;
   fn create_space(
     &self,
     request: &CreateSpaceRequest,

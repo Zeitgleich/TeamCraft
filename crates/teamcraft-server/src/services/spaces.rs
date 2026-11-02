@@ -1,6 +1,7 @@
 use serde_json::json;
 use teamcraft_db::{
-  ExpiryChange, NewSpace, NewSpaceMember, SpaceChanges, SpaceListing, SpaceMember, SpaceView,
+  ConversationFilter, ExpiryChange, NewSpace, NewSpaceMember, SpaceChanges, SpaceListing, SpaceMember,
+  SpaceView,
 };
 use teamcraft_proto::{
   AddSpaceMemberRequest, CategoryId, CategoryResponse, ConversationId, CreateCategoryRequest,
@@ -12,6 +13,7 @@ use time::OffsetDateTime;
 
 use super::access::{is_guest, is_instance_admin, load_space, require, space_target};
 use super::audit::{self, Target as AuditTarget};
+use super::conversations::purge_channel;
 use super::convert::{category_response, offset_date_time, space_response, unix_millis, user_summary};
 use super::permission_scheme::announce_conversation_rights;
 use super::{validate_name, validate_text};
@@ -116,6 +118,7 @@ fn space_for_caller(state: &AppState, caller: &AuthenticatedUser, view: &SpaceVi
     can_add_members: may(Permission::ManageSpaceMembers),
     can_invite_guests: may(Permission::InviteGuest),
     can_manage_space: may(Permission::ManageSpaceProperties),
+    can_delete_space: require(state, caller, Permission::DeleteSpace, &target).is_ok(),
     can_create_channels: may(Permission::CreateChannel),
     ..space_response(view)
   }
@@ -176,6 +179,44 @@ pub async fn update_space(
   .await?;
   notify_space(state, id, &GatewayEvent::SpaceUpdate { space_id: id }).await?;
   get_space(state, caller, id).await
+}
+
+/// Deletes a space with all of its channels for everybody, archived or not, also with people in it
+/// (`delete_space`: the admins of the space, workspace admins and owners; admin.md §3.1). Channel by
+/// channel first, as [`purge_channel`] does, so a failure leaves a space a retry finishes. Answers
+/// 404 once it is gone, which clients take as done.
+pub async fn delete_space(state: &AppState, caller: &AuthenticatedUser, id: SpaceId) -> Result<(), ApiError> {
+  let access = load_space(state, caller, id).await?;
+  require(state, caller, Permission::DeleteSpace, &access.target())?;
+  let filter = ConversationFilter {
+    maybe_space: Some(id),
+    ..ConversationFilter::default()
+  };
+  for view in state.database.list_conversations(caller.user.id, &filter).await? {
+    let channel = view.conversation.id;
+    let members = state.database.conversation_member_ids(channel).await?;
+    purge_channel(state, caller, channel, &members, "channel_deleted").await?;
+  }
+  let members = state.database.list_space_members(id).await?;
+  if let Some(image) = &access.view.space.maybe_image {
+    super::retention::delete_object(state, &image.key).await?;
+  }
+  state.database.delete_space(id).await?;
+  audit::record(
+    state,
+    Some(caller.user.id),
+    "space_deleted",
+    Some(AuditTarget::new("space", id)),
+    &json!({}),
+  )
+  .await?;
+  // A device asks for the spaces again and finds this one gone; one that is away does at its next
+  // sync.
+  state.hub.publish(
+    members.iter().map(|member| member.user.id),
+    &GatewayEvent::SpaceUpdate { space_id: id },
+  );
+  Ok(())
 }
 
 /// Joins an open space as a member. Guests are never self-joining; they are invited.

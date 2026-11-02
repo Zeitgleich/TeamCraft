@@ -450,12 +450,37 @@ fn SpaceItems(space: SpaceId, page: RwSignal<MenuPage>, close: Callback<()>) -> 
   let has_unread = move || info.with(|menu| menu.as_ref().is_some_and(|menu| menu.has_unread));
   let leave = move || info.with(|menu| menu.as_ref().map_or(LeaveChoice::Hidden, |menu| menu.leave));
   let name = move || info.with(|menu| menu.as_ref().map(|menu| menu.name.clone()).unwrap_or_default());
+  let can_delete = move || info.with(|menu| menu.as_ref().is_some_and(|menu| menu.can_delete));
+  let delete_pending = PendingAction::new();
   let hint_id = format!("entry-menu-leave-space-{space}");
   view! {
     {move || match page.get() {
       MenuPage::Notifications => view! { <NotificationsPage target=target page=page /> }.into_any(),
-      // A space has no deletion from this menu.
-      MenuPage::ConfirmDelete => ().into_any(),
+      MenuPage::ConfirmDelete => view! {
+        <p class="menu-confirm" id=format!("entry-menu-confirm-{space}")>
+          {move || i18n.t_with("entry-menu-delete-space-confirm", &[("name", &name())])}
+        </p>
+        <button
+          type="button"
+          class="menu-item is-destructive"
+          role="menuitem"
+          aria-describedby=format!("entry-menu-confirm-{space}")
+          disabled=move || delete_pending.is_pending()
+          on:click=move |_| {
+            delete_pending.run_and_then(
+              || state.write(|backend| backend.delete_space(space)),
+              move || close.run(()),
+            );
+          }
+        >
+          <Icon name=IconName::Trash />
+          <span class="menu-label">{move || i18n.t("entry-menu-delete-space")}</span>
+        </button>
+        <button type="button" class="menu-item" role="menuitem" on:click=move |_| page.set(MenuPage::Actions)>
+          <span class="menu-label">{move || i18n.t("cancel")}</span>
+        </button>
+      }
+      .into_any(),
       MenuPage::ConfirmLeave => view! {
         <p class="menu-confirm" id=format!("entry-menu-confirm-{space}")>
           {move || i18n.t_with("entry-menu-leave-space-confirm", &[("name", &name())])}
@@ -509,6 +534,12 @@ fn SpaceItems(space: SpaceId, page: RwSignal<MenuPage>, close: Callback<()>) -> 
               .into_any(),
             }
           }}
+          {move || can_delete().then(|| view! {
+            <button type="button" class="menu-item is-destructive" role="menuitem" on:click=move |_| page.set(MenuPage::ConfirmDelete)>
+              <Icon name=IconName::Trash />
+              <span class="menu-label">{move || i18n.t("entry-menu-delete-space-ellipsis")}</span>
+            </button>
+          })}
           <div class="menu-sep" role="separator"></div>
           <button type="button" class="menu-item" role="menuitem" on:click=move |_| {
             close.run(());

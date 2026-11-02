@@ -1805,12 +1805,21 @@ fn ChannelCategoryRow(
   }
 }
 
-/// Archiving, at the bottom and confirmed first.
+/// Archiving and deleting, at the bottom and confirmed first.
 #[component]
 fn SpaceAdvanced(space: Space) -> impl IntoView {
   let state = use_app_state();
   let i18n = use_i18n();
   let id = space.id;
+  let can_delete = space.can_delete_space;
+  let is_confirming_delete = RwSignal::new(false);
+  let delete_pending = PendingAction::new();
+  let delete = move |_| {
+    delete_pending.run_and_then(
+      || state.write(|backend| backend.delete_space(id)),
+      move || state.close_overlay(),
+    );
+  };
   let is_confirming = RwSignal::new(false);
   let pending = PendingAction::new();
   let archive = move |_| {
@@ -1849,6 +1858,21 @@ fn SpaceAdvanced(space: Space) -> impl IntoView {
     } else {
       view! { <p class="hint">{move || i18n.t("space-settings-read-only")}</p> }.into_any()
     }}
+    {can_delete.then(|| view! {
+      <h3>{move || i18n.t("channel-delete")}</h3>
+      <p class="hint">{move || i18n.t("space-delete-hint")}</p>
+      <Show
+        when=move || is_confirming_delete.get()
+        fallback=move || view! { <button type="button" class="btn btn-danger" on:click=move |_| is_confirming_delete.set(true)>{move || i18n.t("space-delete-action")}</button> }
+      >
+        <p role="alert">{move || i18n.t("space-delete-confirm")}</p>
+        <div class="inline-actions">
+          <button type="button" class="btn btn-danger" prop:disabled=move || delete_pending.is_pending() on:click=delete>{move || i18n.t("space-delete-action")}</button>
+          <button type="button" class="btn" on:click=move |_| is_confirming_delete.set(false)>{move || i18n.t("cancel")}</button>
+        </div>
+        <FailureNote pending=delete_pending />
+      </Show>
+    })}
   }
 }
 
@@ -2185,6 +2209,7 @@ mod tests {
       can_add_members: true,
       can_invite_guests: true,
       can_manage_space: true,
+      can_delete_space: false,
       can_create_channels: true,
     }
   }

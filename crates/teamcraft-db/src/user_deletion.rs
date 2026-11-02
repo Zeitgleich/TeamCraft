@@ -3,7 +3,7 @@
 
 use std::collections::BTreeMap;
 
-use teamcraft_proto::{ConversationId, UserId};
+use teamcraft_proto::{ConversationId, SpaceId, UserId};
 use time::OffsetDateTime;
 
 use crate::admin::ChatRemovalEffects;
@@ -182,6 +182,15 @@ impl Database {
       .execute(&mut *tx)
       .await?;
     tx.commit().await?;
+    Ok(())
+  }
+
+  /// Deletes a space; its conversations were deleted before ([`Self::delete_channel`]), so a
+  /// conversation's cascade never skips its storage. Idempotent.
+  pub async fn delete_space(&self, space: SpaceId) -> Result<(), DbError> {
+    sqlx::query!("DELETE FROM spaces WHERE id = $1", to_db(space))
+      .execute(self.pool())
+      .await?;
     Ok(())
   }
 

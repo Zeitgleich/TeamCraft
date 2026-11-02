@@ -368,6 +368,11 @@ struct ConversationListView: View {
         Button("entry_leave_last_space_admin", systemImage: "rectangle.portrait.and.arrow.right") {}
           .disabled(true)
       }
+      if menu?.canDelete == true {
+        Button("entry_delete_space", systemImage: "trash", role: .destructive) {
+          maybeLeaving = .spaceDeletion(id: spaceId, name: name)
+        }
+      }
     }
   }
 
@@ -395,7 +400,7 @@ struct ConversationListView: View {
   private var leaveTitle: LocalizedStringKey {
     switch maybeLeaving {
     case .channel(_, let name), .lastMember(_, let name): return "entry_leave_channel_title \(name)"
-    case .deletion(_, let name): return "entry_delete_channel_title \(name)"
+    case .deletion(_, let name), .spaceDeletion(_, let name): return "entry_delete_channel_title \(name)"
     case .space(_, let name): return "entry_leave_space_title \(name)"
     case nil: return ""
     }
@@ -406,6 +411,7 @@ struct ConversationListView: View {
     case .space: return "entry_leave_space_text"
     case .lastMember: return "entry_leave_last_member_text"
     case .deletion: return "entry_delete_channel_text"
+    case .spaceDeletion: return "entry_delete_space_text"
     case .channel, nil: return "entry_leave_channel_text"
     }
   }
@@ -417,6 +423,7 @@ struct ConversationListView: View {
       switch target {
       case .channel(let id, _), .lastMember(let id, _): maybeActionFailure = await model.leaveChannel(id)
       case .deletion(let id, _): maybeActionFailure = await model.deleteChannel(id)
+      case .spaceDeletion(let id, _): maybeActionFailure = await model.deleteSpace(id)
       case .space(let id, _): maybeActionFailure = await model.leaveSpace(id)
       }
     }
@@ -561,11 +568,14 @@ private enum LeaveTarget {
   /// Nobody else is in the channel: leaving deletes it.
   case lastMember(id: String, name: String)
   case deletion(id: String, name: String)
+  case spaceDeletion(id: String, name: String)
   case space(id: String, name: String)
 
   var isDeletion: Bool {
-    if case .deletion = self { return true }
-    return false
+    switch self {
+    case .deletion, .spaceDeletion: return true
+    case .channel, .lastMember, .space: return false
+    }
   }
 }
 

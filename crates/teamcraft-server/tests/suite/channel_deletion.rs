@@ -235,6 +235,67 @@ async fn channel_of(app: &TestApp, admin: &TestUser, others: &[&TestUser]) -> St
   channel
 }
 
+mod deleting_a_space {
+  use super::*;
+
+  #[tokio::test]
+  async fn owners_admins_and_its_space_admin_delete_it_with_its_channels() {
+    let app = app!();
+    let (sam, ann, server_admin, server_owner) = (member("sam"), member("ann"), admin(), owner());
+    user_id(&app, &server_admin).await;
+    let sam_id = user_id(&app, &sam).await;
+    let ann_id = user_id(&app, &ann).await;
+    for (deleter, is_archived) in [(&sam, false), (&server_admin, true), (&server_owner, false)] {
+      let space = create_space(&app, &server_owner, "Project A", "open").await;
+      add_space_member(&app, &server_owner, &space, &sam_id, "space_admin").await;
+      add_space_member(&app, &server_owner, &space, &ann_id, "member").await;
+      let channel = create_channel(&app, &ann, &space, "secure", "private").await;
+      if is_archived {
+        let reply = app
+          .patch(
+            &server_owner,
+            &format!("/spaces/{space}"),
+            json!({"is_archived": true}),
+          )
+          .await;
+        assert!(reply.status.is_success(), "{}", reply.body);
+      }
+
+      let reply = app.delete(deleter, &format!("/spaces/{space}")).await;
+      assert_eq!(
+        reply.status,
+        StatusCode::NO_CONTENT,
+        "{}: {}",
+        deleter.username,
+        reply.body
+      );
+
+      assert_eq!(
+        app.get(&server_owner, &format!("/spaces/{space}")).await.status,
+        StatusCode::NOT_FOUND
+      );
+      assert_deleted_for(&app, &ann, &channel).await;
+    }
+    app.stop().await;
+  }
+
+  #[tokio::test]
+  async fn members_may_not() {
+    let app = app!();
+    let (server_owner, ann, stranger) = (owner(), member("ann"), member("stranger"));
+    let ann_id = user_id(&app, &ann).await;
+    user_id(&app, &stranger).await;
+    let space = create_space(&app, &server_owner, "Project A", "invite_only").await;
+    add_space_member(&app, &server_owner, &space, &ann_id, "member").await;
+
+    let refused = app.delete(&ann, &format!("/spaces/{space}")).await;
+    assert_eq!(refused.status, StatusCode::FORBIDDEN, "{}", refused.body);
+    let hidden = app.delete(&stranger, &format!("/spaces/{space}")).await;
+    assert_eq!(hidden.status, StatusCode::NOT_FOUND, "{}", hidden.body);
+    app.stop().await;
+  }
+}
+
 async fn archive(app: &TestApp, by: &TestUser, channel: &str) {
   let reply = app
     .patch(

@@ -191,6 +191,8 @@ object ChatActions {
 
   fun deleteChannel(conversation: String) = action("delete_channel") { put("conversation", conversation) }
 
+  fun deleteSpace(space: String) = action("delete_space") { put("space", space) }
+
   /** `update_channel` with only `maybe_is_archived` set; the other changes stay absent. */
   fun archiveChannel(conversation: String, isArchived: Boolean = true) = action("update_channel") {
     put("conversation", conversation)

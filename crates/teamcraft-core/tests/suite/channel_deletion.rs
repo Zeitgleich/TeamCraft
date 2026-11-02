@@ -272,6 +272,54 @@ mod deleting {
   }
 }
 
+mod deleting_a_space {
+  use super::*;
+
+  #[tokio::test]
+  async fn an_admin_deletes_it_and_a_device_that_was_away_converges() {
+    let server = FakeServer::new();
+    let (mut alice, mut bob) = two(&server).await;
+    let channel = channel_with(&mut alice, &mut bob).await;
+    alice.client.send_text(channel, None, "hello").await.unwrap();
+    settle(&mut [&mut alice, &mut bob]).await;
+    let space = alice.space().await;
+    server.set_admin(alice.client.user_id());
+
+    alice.client.delete_space(space).await.unwrap();
+    assert_gone(&alice, channel);
+    assert!(
+      alice
+        .store
+        .get(Table::Spaces, &space.to_string())
+        .unwrap()
+        .is_none()
+    );
+
+    // Bob's device doesn't read its gateway: only the sync.
+    bob.client.full_sync().await.unwrap();
+    assert_gone(&bob, channel);
+    assert!(
+      bob
+        .store
+        .get(Table::Spaces, &space.to_string())
+        .unwrap()
+        .is_none()
+    );
+  }
+
+  #[tokio::test]
+  async fn a_member_may_not() {
+    let server = FakeServer::new();
+    let (mut alice, mut bob) = two(&server).await;
+    let channel = channel_with(&mut alice, &mut bob).await;
+    let space = alice.space().await;
+
+    let error = bob.client.delete_space(space).await.unwrap_err();
+    assert!(!error.is_transient(), "{error}");
+    assert!(is_cached(&bob, channel));
+  }
+}
+
 async fn two(server: &FakeServer) -> (Peer, Peer) {
   (
     Peer::enroll(server, "Alice").await,

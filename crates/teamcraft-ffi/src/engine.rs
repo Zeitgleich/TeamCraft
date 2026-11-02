@@ -1038,6 +1038,7 @@ impl Engine {
       name: space.name,
       has_unread,
       leave: space_leave(space.maybe_my_role.as_ref(), backend.me().id, &roster).into(),
+      can_delete: space.can_delete_space,
     }))
   }
 

@@ -38,6 +38,8 @@ pub struct SpaceMenu {
   pub has_unread: bool,
   pub is_muted: bool,
   pub leave: LeaveChoice,
+  /// "Delete space" is offered (`delete_space`).
+  pub can_delete: bool,
 }
 
 impl ConversationMenu {
@@ -82,6 +84,7 @@ impl SpaceMenu {
       SpaceRoster::Loading
     };
     Some(Self {
+      can_delete: found.can_delete_space,
       name: found.name,
       has_unread,
       is_muted,

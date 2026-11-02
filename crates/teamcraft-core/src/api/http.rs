@@ -546,6 +546,12 @@ impl<T: AccessTokenSource> ServerApi for HttpServerApi<T> {
       .await
   }
 
+  async fn delete_space(&self, space: SpaceId) -> Result<(), ApiError> {
+    self
+      .send_without_response::<()>(Method::DELETE, &format!("/spaces/{space}"), None)
+      .await
+  }
+
   async fn delete_conversation(&self, conversation: ConversationId) -> Result<(), ApiError> {
     self
       .send_without_response::<()>(Method::DELETE, &format!("/conversations/{conversation}"), None)

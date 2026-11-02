@@ -16,6 +16,7 @@ enum class EntryAction {
   MuteSpace,
   MarkSpaceRead,
   LeaveSpace,
+  DeleteSpace,
 }
 
 /** One entry of the menu: [isEnabled] is false where the user is told why instead (last admin). */
@@ -35,10 +36,11 @@ fun conversationMenu(conversation: ConversationItem, leave: LeaveChoice, hasLink
 }
 
 /** The menu of a space's header. */
-fun spaceMenu(hasUnread: Boolean, leave: LeaveChoice): List<EntryItem> = buildList {
+fun spaceMenu(hasUnread: Boolean, leave: LeaveChoice, canDelete: Boolean = false): List<EntryItem> = buildList {
   add(EntryItem(EntryAction.MuteSpace))
   if (hasUnread) add(EntryItem(EntryAction.MarkSpaceRead))
   leaveEntry(EntryAction.LeaveSpace, leave)?.let(::add)
+  if (canDelete) add(EntryItem(EntryAction.DeleteSpace))
 }
 
 private fun leaveEntry(action: EntryAction, leave: LeaveChoice): EntryItem? = when (leave) {

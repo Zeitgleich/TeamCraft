@@ -430,8 +430,8 @@ private fun ConversationMenu(
   val canArchive = maybeConversation?.isDirect == false && rights.canManageChannel
   val canDelete = maybeConversation?.canDeleteChannel == true
   var leave by remember(conversationId) { mutableStateOf(LeaveChoice.HIDDEN) }
-  LaunchedEffect(conversationId, isOpen) { leave = viewModel.leaveChoice(conversationId) }
   var isOpen by remember { mutableStateOf(false) }
+  LaunchedEffect(conversationId, isOpen) { leave = viewModel.leaveChoice(conversationId) }
   var isNotifying by remember { mutableStateOf(false) }
   var isShowingBookmarks by remember { mutableStateOf(false) }
   var maybeConfirming by remember { mutableStateOf<ChannelConfirmation?>(null) }

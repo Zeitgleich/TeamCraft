@@ -904,7 +904,9 @@ it, archived or not; the last member's leave does the same. The server deletes t
 attachments, picture and MLS state and audits who did it. Every member's devices drop the group, keys
 and local history on the gateway's `conversation_delete` or, offline, on the next full sync
 (`deleted_conversation_ids`, kept for `[policy] deleted_conversations_kept_days`). A deletion needs no
-key and reaches no content, so a workspace or space admin gains no access by it.
+key and reaches no content, so a workspace or space admin gains no access by it. Deleting a space
+(`DELETE /spaces/{id}`, permission `delete_space`) deletes each of its channels this way, then the
+space; devices drop a space the server no longer lists.
 
 What a deletion means: **it is the server's statement, not signed by anyone**, like whether a channel
 is archived (§4.9). Clients can't verify who asked, because signed channel properties don't exist yet

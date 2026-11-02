@@ -55,6 +55,10 @@ pub struct SpaceResponse {
   /// A UI hint like `can_add_members`.
   #[serde(default)]
   pub can_manage_space: bool,
+  /// May delete the space with its channels (`delete_space`), also an archived one. A UI hint
+  /// like `can_add_members`.
+  #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+  pub can_delete_space: bool,
   /// Whether the caller may create channels in the space (`create_channel`, which guests don't
   /// have). A UI hint like `can_add_members`; servers that don't send it leave it to the request.
   #[serde(default = "unknown_is_allowed")]
@@ -301,6 +305,7 @@ mod tests {
       can_add_members: false,
       can_invite_guests: false,
       can_manage_space: false,
+      can_delete_space: false,
       // What an older server, which doesn't send it, is taken to mean.
       can_create_channels: true,
     }

@@ -1350,6 +1350,7 @@ pub fn action_from_wire(action: &str) -> AuditAction {
     "channel_deleted" | "channel_deleted_last_member" => AuditAction::ChannelDeleted,
     "space_created" => AuditAction::SpaceCreated,
     "space_updated" => AuditAction::SpaceUpdated,
+    "space_deleted" => AuditAction::SpaceDeleted,
     "oidc_backchannel_logout" => AuditAction::SessionEnded,
     "permission_scheme_changed" => AuditAction::PermissionsChanged,
     "channel_moderation_set" => AuditAction::ModerationChanged,

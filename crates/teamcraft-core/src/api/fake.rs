@@ -200,6 +200,8 @@ struct State {
   admins: HashSet<UserId>,
   /// Direct messages deleted with a deleted account, per remaining participant.
   deleted_conversations: HashMap<UserId, Vec<ConversationId>>,
+  /// Deleted spaces; the default one isn't made again.
+  deleted_spaces: HashSet<SpaceId>,
   attachments: HashMap<AttachmentId, FakeAttachment>,
   push_registrations: HashMap<DeviceId, RegisterPushRequest>,
   notification_settings: HashMap<UserId, NotificationSettings>,
@@ -2541,6 +2543,42 @@ impl ServerApi for FakeServerApi {
     })
   }
 
+  async fn delete_space(&self, space: SpaceId) -> Result<(), ApiError> {
+    self.with(|state, me| {
+      let is_space_admin = state.space_roles.get(&(space, me)) == Some(&SpaceRole::SpaceAdmin);
+      if !is_space_admin && !state.admins.contains(&me) {
+        return Err(ApiError::status(
+          403,
+          ErrorCode::Forbidden,
+          "missing permission delete_space",
+        ));
+      }
+      let channels: Vec<(ConversationId, Vec<UserId>)> = state
+        .conversations
+        .iter()
+        .filter(|(_, entry)| entry.response.maybe_space_id == Some(space))
+        .map(|(id, entry)| (*id, entry.members.keys().copied().collect()))
+        .collect();
+      let mut told: Vec<UserId> = state
+        .space_roles
+        .keys()
+        .filter(|(of, _)| *of == space)
+        .map(|(_, user)| *user)
+        .collect();
+      for (channel, members) in channels {
+        told.extend(members.iter().copied());
+        state.delete_channel(channel, members);
+      }
+      if state.spaces.remove(&space).is_none() {
+        return Err(ApiError::status(404, ErrorCode::SpaceNotFound, "no such space"));
+      }
+      state.deleted_spaces.insert(space);
+      state.space_roles.retain(|(of, _), _| *of != space);
+      state.publish(told, &GatewayEvent::SpaceUpdate { space_id: space });
+      Ok(())
+    })
+  }
+
   async fn delete_conversation(&self, conversation: ConversationId) -> Result<(), ApiError> {
     self.with(|state, me| {
       let is_instance_admin = state.admins.contains(&me);
@@ -3779,6 +3817,7 @@ impl ServerApi for FakeServerApi {
         can_add_members: true,
         can_invite_guests: true,
         can_manage_space: true,
+        can_delete_space: true,
         can_create_channels: true,
       };
       state.spaces.insert(id, space.clone());
@@ -5543,6 +5582,9 @@ impl State {
   /// The default space as an entry of `spaces`, created on first use.
   fn default_space_entry(&mut self) {
     let id = self.space();
+    if self.deleted_spaces.contains(&id) {
+      return;
+    }
     self.spaces.entry(id).or_insert_with(|| SpaceResponse {
       id,
       name: "Space A".into(),
@@ -5559,6 +5601,7 @@ impl State {
       can_add_members: false,
       can_invite_guests: false,
       can_manage_space: false,
+      can_delete_space: false,
       can_create_channels: false,
     });
   }

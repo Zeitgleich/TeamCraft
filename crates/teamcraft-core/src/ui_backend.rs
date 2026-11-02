@@ -271,6 +271,10 @@ pub enum CoreCommand {
   DeleteChannel {
     conversation: ConversationId,
   },
+  /// Deletes a space with its channels for everybody, after the user confirmed it.
+  DeleteSpace {
+    space: SpaceId,
+  },
   RefreshCategories {
     space: SpaceId,
   },
@@ -1489,6 +1493,7 @@ impl<S: LocalStore> ChatBackend for CoreChatBackend<S> {
         can_add_members: space.can_add_members,
         can_invite_guests: space.can_invite_guests,
         can_manage_space: space.can_manage_space,
+        can_delete_space: space.can_delete_space,
         // An older server leaves the hint out (taken as allowed); its guests still create nothing.
         can_create_channels: space.can_create_channels && space.maybe_my_role != Some(SpaceRole::Guest),
         maybe_my_role: space.maybe_my_role.clone(),
@@ -2340,6 +2345,10 @@ impl<S: LocalStore> ChatBackend for CoreChatBackend<S> {
 
   fn delete_channel(&self, conversation: ConversationId) {
     self.command(CoreCommand::DeleteChannel { conversation });
+  }
+
+  fn delete_space(&self, space: SpaceId) {
+    self.command(CoreCommand::DeleteSpace { space });
   }
 
   fn categories(&self, space: SpaceId) -> Vec<CategoryInfo> {
@@ -3427,6 +3436,7 @@ mod tests {
         can_add_members: false,
         can_invite_guests: false,
         can_manage_space: false,
+        can_delete_space: false,
         // `true` is also what a server that doesn't send it is taken to mean.
         can_create_channels,
       };

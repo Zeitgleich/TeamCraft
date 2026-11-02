@@ -49,6 +49,8 @@ wire_enum! {
     ManageBranding => "manage_branding",
     CreateSpace => "create_space",
     ManageSpaceProperties => "manage_space_properties",
+    /// Delete a space with all of its channels for everybody. Reaches no content (admin.md §3.1).
+    DeleteSpace => "delete_space",
     ManageSpaceMembers => "manage_space_members",
     /// Administration: all spaces and channels (metadata), users, devices, workspace policy (read).
     ManageWorkspace => "manage_workspace",
@@ -125,7 +127,11 @@ impl Permission {
       | P::ManageWorkspace
       | P::ManageUsers
       | P::SignWorkspace => S::Instance,
-      P::CreateChannel | P::InviteGuest | P::ManageSpaceProperties | P::ManageSpaceMembers => S::Space,
+      P::CreateChannel
+      | P::InviteGuest
+      | P::ManageSpaceProperties
+      | P::DeleteSpace
+      | P::ManageSpaceMembers => S::Space,
       P::CreatePost
       | P::AddReaction
       | P::RemoveOthersReactions
@@ -267,6 +273,7 @@ impl Default for PermissionScheme {
     let channel_moderator = [P::ManageMembers, P::DeleteOthersPosts, P::RemoveOthersReactions];
     let space_admin = [
       P::ManageSpaceProperties,
+      P::DeleteSpace,
       P::ManageSpaceMembers,
       P::InviteGuest,
       P::CreateUserGroup,
@@ -300,7 +307,7 @@ impl Default for PermissionScheme {
 }
 
 /// All permissions this version knows.
-pub const ALL_KNOWN: [Permission; 35] = [
+pub const ALL_KNOWN: [Permission; 36] = [
   Permission::CreatePost,
   Permission::AddReaction,
   Permission::RemoveOthersReactions,
@@ -332,6 +339,7 @@ pub const ALL_KNOWN: [Permission; 35] = [
   Permission::ManageBranding,
   Permission::CreateSpace,
   Permission::ManageSpaceProperties,
+  Permission::DeleteSpace,
   Permission::ManageSpaceMembers,
   Permission::ManageWorkspace,
   Permission::ManageUsers,
@@ -933,6 +941,24 @@ mod tests {
         });
         assert!(may(&Role::Member, &Target::Channel(outside)));
       }
+    }
+
+    /// Owners, workspace admins and the admins of that space, nobody else.
+    #[test]
+    fn who_may_delete_a_space() {
+      let space = |maybe_role| {
+        Target::Space(SpaceContext {
+          maybe_role,
+          maybe_space_id: None,
+        })
+      };
+      let may = |role: &Role, target: &Target| check(role, &Permission::DeleteSpace, target);
+      assert!(may(&Role::Owner, &space(None)));
+      assert!(may(&Role::Admin, &space(None)));
+      assert!(may(&Role::Member, &space(Some(SpaceRole::SpaceAdmin))));
+      assert!(!may(&Role::Member, &space(Some(SpaceRole::Member))));
+      assert!(!may(&Role::Member, &space(None)));
+      assert!(!may(&Role::Guest, &space(Some(SpaceRole::Guest))));
     }
 
     #[test]

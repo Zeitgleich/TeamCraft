@@ -667,8 +667,8 @@ pub async fn delete_channel(
 
 /// Takes a channel off the server: its calls, its objects in storage, its rows. The members'
 /// devices drop it with its history, live by the gateway, later by the next sync
-/// (`deleted_conversation_ids`). Only channels; anything else in a space stays. Storage first: a
-/// failure leaves the rows, so a retry finds the objects again.
+/// (`deleted_conversation_ids`). Only channels. Storage first: a failure leaves the rows, so a retry
+/// finds the objects again.
 pub(crate) async fn purge_channel(
   state: &AppState,
   caller: &AuthenticatedUser,

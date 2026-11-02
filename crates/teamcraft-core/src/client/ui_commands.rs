@@ -239,6 +239,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       CoreCommand::JoinSpace { space } => self.join_space(space).await,
       CoreCommand::LeaveChannel { conversation } => self.leave_channel(conversation).await,
       CoreCommand::DeleteChannel { conversation } => self.delete_channel(conversation).await,
+      CoreCommand::DeleteSpace { space } => self.delete_space(space).await,
       CoreCommand::RefreshCategories { space } => self.refresh_categories(space).await.map(|_| ()),
       CoreCommand::CreateCategory { space, name } => self.create_category(space, &name).await,
       CoreCommand::RenameCategory {

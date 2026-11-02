@@ -76,6 +76,9 @@
   <string name="entry_space_menu">Space-Menü</string>
   <string name="space_mute_title">%1$s stummschalten</string>
   <string name="space_leave_title">%1$s verlassen?</string>
-  <string name="space_leave_text">Du verlässt damit auch alle Kanäle darin.</string>
+  <string name="space_leave_text">Du verlässt damit auch alle Kanäle darin. Kanäle, in denen nur du bist, werden gelöscht.</string>
+  <string name="space_delete">Space löschen</string>
+  <string name="space_delete_title">%1$s für alle löschen?</string>
+  <string name="space_delete_text">Auch alle Kanäle darin verschwinden mit ihren Nachrichten und Dateien für alle ihre Mitglieder. Das lässt sich nicht rückgängig machen.</string>
   <string name="space_leave_confirm">Verlassen</string>
 </resources>

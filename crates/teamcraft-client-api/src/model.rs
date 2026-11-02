@@ -210,6 +210,9 @@ pub struct Space {
   /// server checks again).
   #[serde(default)]
   pub can_manage_space: bool,
+  /// May delete the space with its channels (`delete_space`); the server's word.
+  #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+  pub can_delete_space: bool,
   /// Whether the user may create channels in the space (guests may not; the server checks
   /// again).
   #[serde(default)]
@@ -358,6 +361,7 @@ impl JoinableSpace {
       can_add_members: false,
       can_invite_guests: false,
       can_manage_space: false,
+      can_delete_space: false,
       can_create_channels: false,
       maybe_my_role: None,
     }

@@ -569,6 +569,8 @@ pub trait ChatBackend {
   fn leave_channel(&self, _conversation: ConversationId) {}
   /// Deletes a channel for everybody (`delete_channel`), after the user confirmed it.
   fn delete_channel(&self, _conversation: ConversationId) {}
+  /// Deletes a space with its channels for everybody (`delete_space`), after the user confirmed it.
+  fn delete_space(&self, _space: SpaceId) {}
   fn categories(&self, _space: SpaceId) -> Vec<CategoryInfo> {
     Vec::new()
   }

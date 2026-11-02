@@ -295,6 +295,7 @@ audit-owner-assigned = Owner assigned
 audit-guest-invited = Guest invited
 audit-channel-archived = Channel archived
 audit-channel-deleted = Channel deleted
+audit-space-deleted = Space deleted
 
 ## Device approval, linking and key changes
 admin-left-in-group-title = Still in encrypted groups, though the server no longer lists them
@@ -547,6 +548,8 @@ permission-create_space = Create spaces
 permission-create_space-hint = Top-level groups of channels.
 permission-manage_space_properties = Edit space properties
 permission-manage_space_properties-hint = Name and settings of a space.
+permission-delete_space = Delete spaces
+permission-delete_space-hint = Delete a space for everybody, with its channels, messages and files.
 permission-manage_space_members = Manage space members
 permission-manage_space_members-hint = Add and remove people in a space.
 permission-manage_workspace = Administer the workspace

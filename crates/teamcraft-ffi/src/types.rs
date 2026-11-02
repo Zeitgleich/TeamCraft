@@ -176,6 +176,9 @@ pub struct SpaceMenuItem {
   pub name: String,
   pub has_unread: bool,
   pub leave: LeaveChoice,
+  /// "Delete space" is offered (`delete_space`).
+  #[uniffi(default = false)]
+  pub can_delete: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]

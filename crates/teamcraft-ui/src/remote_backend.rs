@@ -1329,6 +1329,10 @@ impl ChatBackend for RemoteChat {
     self.act(ChatAction::DeleteChannel { conversation });
   }
 
+  fn delete_space(&self, space: SpaceId) {
+    self.act(ChatAction::DeleteSpace { space });
+  }
+
   fn categories(&self, space: SpaceId) -> Vec<CategoryInfo> {
     match self.ask(ChatQuery::Categories { space }) {
       Some(ChatAnswer::Categories { categories }) => categories,

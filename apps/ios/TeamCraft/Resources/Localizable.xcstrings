@@ -10137,6 +10137,38 @@
         }
       }
     },
+    "entry_delete_space": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Delete space"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Space löschen"
+          }
+        }
+      }
+    },
+    "entry_delete_space_text": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "All of its channels go too, with their messages and files, for all their members. This can't be undone."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Auch alle Kanäle darin verschwinden mit ihren Nachrichten und Dateien für alle ihre Mitglieder. Das lässt sich nicht rückgängig machen."
+          }
+        }
+      }
+    },
     "entry_leave_channel": {
       "localizations": {
         "en": {
@@ -10254,13 +10286,13 @@
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "You also leave all of its channels."
+            "value": "You also leave all of its channels. Channels only you are in are deleted."
           }
         },
         "de": {
           "stringUnit": {
             "state": "translated",
-            "value": "Du verlässt damit auch alle Kanäle darin."
+            "value": "Du verlässt damit auch alle Kanäle darin. Kanäle, in denen nur du bist, werden gelöscht."
           }
         }
       }
