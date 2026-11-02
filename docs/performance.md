@@ -1234,15 +1234,17 @@ TEAMCRAFT_STORE_BUDGET_MESSAGES=100000 cargo test --release -p teamcraft-core --
 
 | 300 conversations, 100,000 messages                        | Before                        | After                |
 |------------------------------------------------------------|-------------------------------|----------------------|
-| Notification extension: open and show the message          | 461 ms, 148 MiB at its peak   | 0.6 ms, 0.03 MiB     |
+| Notification extension: open and show the message          | 461 ms, 148 MiB at its peak   | 0.7 ms, 0.06 MiB     |
 | App: open the store                                        | 414 ms                        | 0.3 ms               |
-| Newest and oldest message of the 50,000-message channel    | 96 ms                         | 0.3 ms               |
-| All 50,000 messages of the channel, first read             | 30 ms (all were in memory)    | 475 ms, 50 MiB       |
+| Newest and oldest message of the 50,000-message channel    | 96 ms                         | 0.6 ms               |
+| All 50,000 messages of the channel, first read             | 30 ms (all were in memory)    | 350–475 ms, 50 MiB   |
 
 - **The extension stays far under its limit**, independent of the history: its Rust heap is the
   index root and one page of the notified conversation plus a few entries (names, the push key, the
   policy). SQLite's own page cache comes on top (its default, 2 MiB at most; the counting allocator
-  doesn't see it). It opens the store with `SealedStoreLimits::minimal()` and keeps no message cache.
+  doesn't see it). It opens the store with `SealedStoreLimits::minimal()`, keeps no message cache and
+  never builds the catalog: on the first push after an update, before the app ran the migration, it
+  fetches the message instead.
 - **The app's memory for the store is bounded:** decrypted entries (8 MiB), decoded messages (4,096)
   and index nodes (256 each) by default, plus the message cache of the conversations read last
   (60,000 messages on every platform, as the desktop had). Before, the whole store was in memory:
@@ -1254,12 +1256,15 @@ TEAMCRAFT_STORE_BUDGET_MESSAGES=100000 cargo test --release -p teamcraft-core --
   machine; the message cache serves it from then on, and the feed's rows are derived once per change
   instead of once per row asked for. Paging the feed from the index itself is the next step.
 - **The browser** keeps the records' ciphertext in memory (IndexedDB has no synchronous reads) and
-  decrypts a record only when it is read: opening no longer decrypts the store (part of #778).
-- **Migration:** a store written before builds its catalog once, when it opens: every record is
-  decrypted once (what every start did before), in batches of 512 records, each a group of writes
-  that saves its progress, so a build that is killed goes on after its last batch. Tested on the
-  released 1.0.9 fixture and on a 4,500-message store stopped after two batches
-  (`store::sealed::tests::catalog`).
+  decrypts a record only when it is read: opening no longer decrypts the store (part of #778), but
+  it still reads all of the ciphertext, so its open time and memory stay O(store), and the first
+  catalog build runs on the main thread.
+- **Migration:** a store written before builds its catalog once, when the app opens it: every
+  record is decrypted once (what every start did before), in batches of 512 records, each a group of
+  writes that saves its progress, so a build that is killed goes on after its last batch. Tested on
+  the released 1.0.9 fixture and on a 4,500-message store stopped after two batches
+  (`store::sealed::tests::catalog`). A damaged or inconsistent catalog is built again the same way,
+  once, when it is noticed (`store::sealed::tests::repair`); that read takes as long as the build.
 - The desktop's SQLCipher store already read pages through its own index and is unchanged.
 
 ### Android (first numbers)

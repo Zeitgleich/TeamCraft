@@ -99,12 +99,13 @@ impl SealedStore<IndexedDbRecords> {
         return Err(error);
       },
     };
-    let is_current = idb::is_current(&database);
     let backend = IndexedDbRecords::new(database, records.into_iter().collect());
-    if is_current {
-      Self::open_backend(backend, database_key, SealedStoreLimits::default())
-    } else {
-      Self::open_without_catalog(backend, database_key, SealedStoreLimits::default())
+    match mode {
+      OpenMode::Upgrade => Self::open_backend(backend, database_key, SealedStoreLimits::default()),
+      // The service worker is a second writer beside the page that owns the store: it never builds.
+      OpenMode::AsIs => {
+        Self::open_backend_without_building(backend, database_key, SealedStoreLimits::default())
+      },
     }
   }
 
@@ -183,12 +184,19 @@ impl RecordBackend for IndexedDbRecords {
       Some(after) => records.range((std::ops::Bound::Excluded(*after), std::ops::Bound::Unbounded)),
       None => records.range(..),
     };
-    Ok(
-      range
-        .take(limit)
-        .map(|(id, sealed)| (*id, sealed.clone()))
-        .collect(),
-    )
+    let mut writes = self.inner.writes.borrow_mut();
+    let mut batch = Vec::with_capacity(limit.min(1024));
+    for (id, sealed) in range {
+      match writes.latest(&format_id(id))? {
+        Some(OpenValue::Put(latest)) => batch.push((*id, latest)),
+        Some(OpenValue::Delete) => {},
+        None => batch.push((*id, sealed.clone())),
+      }
+      if batch.len() == limit {
+        break;
+      }
+    }
+    Ok(batch)
   }
 
   fn begin_writes(&self) -> Result<(), StoreError> {

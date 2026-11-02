@@ -19,7 +19,11 @@
 //! place in the index reach the disk together.
 //!
 //! When the disk may no longer hold what the caches do (a group of writes rolled back, or another
-//! process committed: the iOS notification extension) the caches are dropped and read again. The
+//! process committed: the iOS notification extension) the caches are dropped and read again; it is
+//! checked once a group of writes holds the database's write lock, and reads that walk several
+//! catalog nodes see one snapshot ([`RecordBackend::begin_read`]). The catalog is derived data: a
+//! node that is damaged or disagrees with the records makes the store build it again (a new
+//! generation) instead of failing, and the read or write is tried once more. The
 //! entries a rolled-back group deleted are remembered ([`LocalStore::lost_deletes`]) for a backend
 //! that kept them ([`RecordBackend::write_tally`] `None`, the browser's): a caller that writes its
 //! state again (the MLS state) deletes them again.
@@ -39,7 +43,7 @@ use zeroize::Zeroizing;
 use super::lru::Lru;
 use super::sealed_catalog::{
   CATALOG_TABLE, CatalogState, META_KEY, MessageEntry, MessageKey, NodeCache, NodeChange, ScopedNodes,
-  decode, encode, messages_scope,
+  decode, encode, is_current_node, messages_scope,
 };
 use super::sealed_index::{self, Direction};
 use super::{
@@ -51,6 +55,9 @@ const ENTRY_NAMESPACE: &str = "entry";
 const MESSAGE_NAMESPACE: &str = "message";
 /// Records decrypted per batch while an old store's catalog is built: one group of writes each.
 const CATALOG_BATCH: usize = 512;
+/// Entries of an index checked against their records for the edge of a conversation; all of them
+/// failing means the catalog is built again anyway.
+const EDGE_CANDIDATES: usize = 8;
 
 /// The encrypted store over a record backend; see the module docs.
 pub struct SealedStore<B> {
@@ -87,6 +94,15 @@ struct State {
   depth: u32,
   /// The backend's tally when last looked at: a change means the disk moved under the caches.
   maybe_tally: Option<WriteTally>,
+  /// The catalog's current generation and whether it is complete; `None`: never started.
+  maybe_catalog: Option<CatalogState>,
+  /// A catalog node turned out damaged, or the catalog disagreed with the records: it is built
+  /// again once no group of writes is open.
+  is_catalog_damaged: bool,
+  /// The catalog is being built: damage found meanwhile fails the build instead of starting another.
+  is_building: bool,
+  /// This process may build the catalog ([`SealedStore::open_without_building`]: it may not).
+  can_build: bool,
 }
 
 /// The entries the open group of writes touched, and deletes the backend rolled back.
@@ -132,6 +148,14 @@ pub trait RecordBackend {
     let sealed = seal()?;
     self.put_record(id, &sealed)
   }
+
+  /// Starts a read that sees one snapshot of the records until [`Self::end_read`], outside a group of
+  /// writes; backends with one writer keep the default.
+  fn begin_read(&self) -> Result<(), StoreError> {
+    Ok(())
+  }
+  /// Ends the read [`Self::begin_read`] started.
+  fn end_read(&self) {}
 
   /// [`LocalStore::begin_writes`] for the records.
   fn begin_writes(&self) -> Result<(), StoreError> {
@@ -220,17 +244,24 @@ impl<B: RecordBackend> SealedStore<B> {
     Ok(store)
   }
 
-  /// Opens the store over a database an older version still owns (the service worker beside an
-  /// older page, which writes without keeping the catalog): the catalog is not built, so what isn't
-  /// in it yet is not listed (a message the preview doesn't find is fetched), and nothing marks it
-  /// complete for the version that takes the database over and builds it.
-  #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
-  pub(crate) fn open_without_catalog(
+  /// Opens the store without ever building its catalog: for a process that doesn't own the store
+  /// (the browser's service worker) or must stay small (the iOS notification extension). It keeps
+  /// the current generation up to date as it writes, so the owner's interrupted build misses
+  /// nothing. A catalog that isn't complete lists less: a message it lacks is fetched instead. With
+  /// no catalog yet it writes none: the owner's build reads every record anyway.
+  pub(crate) fn open_backend_without_building(
     backend: B,
     database_key: &SymmetricKey,
     limits: SealedStoreLimits,
   ) -> Result<Self, StoreError> {
-    Self::unbuilt(backend, database_key, limits)
+    let store = Self::unbuilt(backend, database_key, limits)?;
+    let maybe_catalog = store.read_catalog_state()?;
+    {
+      let mut state = store.lock();
+      state.set_catalog(maybe_catalog);
+      state.can_build = false;
+    }
+    Ok(store)
   }
 
   /// The store before its catalog is checked: tests interrupt the build.
@@ -248,6 +279,10 @@ impl<B: RecordBackend> SealedStore<B> {
         epoch: 0,
         depth: 0,
         maybe_tally,
+        maybe_catalog: None,
+        is_catalog_damaged: false,
+        is_building: false,
+        can_build: true,
       }),
       entries: Mutex::default(),
     })
@@ -258,20 +293,74 @@ impl<B: RecordBackend> SealedStore<B> {
     &self.backend
   }
 
-  /// Builds the catalog of a store written before it existed (issue #155): every record is
-  /// decrypted once and noted in its table's directory or its conversation's message index, a
-  /// batch per group of writes with the progress saved in the same group, so a build that is
-  /// killed goes on after its last batch. At most `maybe_batches` batches (tests).
+  /// Builds the catalog of a store written before it existed, or goes on with a build that was
+  /// interrupted (issue #155). Damage to a catalog found on the way starts it over under a new
+  /// generation: it is derived data, so it never makes the store unreadable. At most `maybe_batches`
+  /// batches (tests).
   fn build_catalog(&self, maybe_batches: Option<usize>) -> Result<BuildProgress, StoreError> {
-    let mut maybe_after = match self.read_catalog_state()? {
-      Some(CatalogState::Complete) => return Ok(BuildProgress::Complete),
-      Some(CatalogState::Building { after }) => {
-        Some(parse_id(&after).ok_or_else(|| StoreError::Corrupt("catalog progress".into()))?)
+    let (generation, maybe_after) = match self.read_catalog_state()? {
+      Some(CatalogState::Complete { generation }) => {
+        self
+          .lock()
+          .set_catalog(Some(CatalogState::Complete { generation }));
+        return Ok(BuildProgress::Complete);
       },
-      None => None,
+      Some(CatalogState::Building {
+        generation,
+        maybe_after,
+      }) => match maybe_after.as_deref().map(parse_id) {
+        Some(None) => (new_generation(), None),
+        Some(Some(after)) => (generation, Some(after)),
+        None => (generation, None),
+      },
+      None => (new_generation(), None),
     };
+    match self.run_build(generation, maybe_after, maybe_batches) {
+      Err(StoreError::Corrupt(reason)) if self.take_catalog_damage() => {
+        tracing::warn!(%reason, "the local store's catalog is damaged; building it again");
+        self.run_build(new_generation(), None, maybe_batches)
+      },
+      progress => progress,
+    }
+  }
+
+  /// Builds the catalog again under a new generation: it was found damaged while the store is open.
+  fn rebuild_catalog(&self) -> Result<(), StoreError> {
+    tracing::warn!("the local store's catalog disagrees with its records; building it again");
+    self.lock().forget_all();
+    self.run_build(new_generation(), None, None).map(|_| ())
+  }
+
+  fn run_build(
+    &self,
+    generation: u64,
+    maybe_after: Option<LookupId>,
+    maybe_batches: Option<usize>,
+  ) -> Result<BuildProgress, StoreError> {
+    {
+      let mut state = self.lock();
+      state.set_catalog(Some(CatalogState::Building {
+        generation,
+        maybe_after: maybe_after.as_ref().map(format_id),
+      }));
+      state.is_building = true;
+    }
+    let progress = self.build_batches(generation, maybe_after, maybe_batches);
+    self.lock().is_building = false;
+    progress
+  }
+
+  /// Every record is decrypted once and noted in its table's directory or its conversation's
+  /// message index, a batch per group of writes with the progress saved in the same group, so a
+  /// build that is killed goes on after its last batch.
+  fn build_batches(
+    &self,
+    generation: u64,
+    mut maybe_after: Option<LookupId>,
+    maybe_batches: Option<usize>,
+  ) -> Result<BuildProgress, StoreError> {
     let is_resumed = maybe_after.is_some();
-    let (mut opened, mut batches) = (0usize, 0usize);
+    let (mut opened, mut skipped, mut batches) = (0usize, 0usize, 0usize);
     loop {
       if maybe_batches.is_some_and(|allowed| batches == allowed) {
         return Ok(BuildProgress::Interrupted);
@@ -281,43 +370,49 @@ impl<B: RecordBackend> SealedStore<B> {
         break;
       };
       let last = *last;
+      let (opened_before, skipped_before) = (opened, skipped);
       self.grouped(|state| {
-        let mut maybe_failure = None;
+        (opened, skipped) = (opened_before, skipped_before);
         for (id, sealed) in &batch {
           match self.open_record(id, sealed) {
             Ok(record) => {
               opened += 1;
-              self.note_in_catalog(state, record)?;
+              self.note_in_catalog(state, generation, id, record)?;
             },
-            Err(error) => {
-              maybe_failure.get_or_insert(error);
-            },
+            Err(_) => skipped += 1,
           }
         }
-        match maybe_failure {
-          None => {},
-          // No record opened: the key is wrong (issue #160 handles a store whose every record is
-          // damaged the same way).
-          Some(_) if opened == 0 && !is_resumed => return Err(StoreError::WrongKey),
-          Some(error) => return Err(error),
+        // No record opened: the key is wrong (issue #160 handles a store whose every record is
+        // damaged the same way). One that doesn't open beside others may be a node of the catalog
+        // being replaced; if it is a message or an entry, reading it reports it.
+        if opened == 0 && skipped > 0 && !is_resumed {
+          return Err(StoreError::WrongKey);
         }
         let progress = CatalogState::Building {
-          after: format_id(&last),
+          generation,
+          maybe_after: Some(format_id(&last)),
         };
         self.write_named(CATALOG_TABLE, META_KEY, &encode(&progress)?)
       })?;
       batches += 1;
       maybe_after = Some(last);
     }
-    self.grouped(|_| self.write_named(CATALOG_TABLE, META_KEY, &encode(&CatalogState::Complete)?))?;
+    let complete = CatalogState::Complete { generation };
+    self.grouped(|_| self.write_named(CATALOG_TABLE, META_KEY, &encode(&complete)?))?;
+    self.lock().set_catalog(Some(complete));
     if batches > 0 {
-      tracing::info!(batches, records = opened, "built the local store's catalog");
+      tracing::info!(
+        batches,
+        records = opened,
+        skipped,
+        "built the local store's catalog"
+      );
     }
     Ok(BuildProgress::Complete)
   }
 
-  /// How far the catalog is built. A damaged state builds it again: the build only adds what is
-  /// missing. (Under another key the state has another lookup ID and is simply not there.)
+  /// How far the catalog is built. A damaged state builds it again, under a new generation. (Under
+  /// another key the state has another lookup ID and is simply not there.)
   fn read_catalog_state(&self) -> Result<Option<CatalogState>, StoreError> {
     let decoded = self
       .read_named(CATALOG_TABLE, META_KEY)
@@ -331,17 +426,33 @@ impl<B: RecordBackend> SealedStore<B> {
     }
   }
 
-  /// Notes a record of an old store in the catalog. The catalog's own records (of a build that was
-  /// interrupted) and entries of tables this version doesn't know are left out.
-  fn note_in_catalog(&self, state: &mut State, record: Record) -> Result<(), StoreError> {
+  /// Notes a record in the catalog being built. Nodes of older generations go; the current one's
+  /// (of a build that was interrupted) and entries of tables this version doesn't know are left out.
+  fn note_in_catalog(
+    &self,
+    state: &mut State,
+    generation: u64,
+    id: &LookupId,
+    record: Record,
+  ) -> Result<(), StoreError> {
     match record {
-      Record::Entry { table, key, .. } => match Table::from_name(&table) {
-        Some(table) => self.directory(state, table, |nodes| sealed_index::upsert(nodes, key, ())),
-        None if table == CATALOG_TABLE => Ok(()),
-        None => {
-          tracing::warn!(table = %table, "skipping a record of an unknown table");
-          Ok(())
-        },
+      Record::Entry { table, key, value } => {
+        // Entries hold the MLS state, and this copy isn't kept.
+        zeroize::Zeroize::zeroize(&mut value.into_vec());
+        match Table::from_name(&table) {
+          Some(table) => self.directory(state, table, |nodes| sealed_index::upsert(nodes, key, ())),
+          None if table == CATALOG_TABLE => {
+            if is_current_node(&key, generation) {
+              Ok(())
+            } else {
+              self.backend.delete_record(id)
+            }
+          },
+          None => {
+            tracing::warn!(table = %table, "skipping a record of an unknown table");
+            Ok(())
+          },
+        }
       },
       Record::Message { message } => self.index(state, message.conversation_id, |nodes| {
         sealed_index::upsert(nodes, MessageKey::of(&message), MessageEntry::of(&message))
@@ -350,8 +461,20 @@ impl<B: RecordBackend> SealedStore<B> {
   }
 
   /// Runs `write` as a group of writes ([`LocalStore::begin_writes`]); a failed step fails the
-  /// group where the backend can undo it.
-  fn grouped<T>(&self, write: impl FnOnce(&mut State) -> Result<T, StoreError>) -> Result<T, StoreError> {
+  /// group where the backend can undo it. Damage to the catalog found on the way builds it again
+  /// (once no group is open) and runs `write` once more.
+  fn grouped<T>(&self, mut write: impl FnMut(&mut State) -> Result<T, StoreError>) -> Result<T, StoreError> {
+    let result = self.group_once(&mut write);
+    if self.repair_catalog()? {
+      return self.group_once(&mut write);
+    }
+    result
+  }
+
+  fn group_once<T>(
+    &self,
+    write: &mut impl FnMut(&mut State) -> Result<T, StoreError>,
+  ) -> Result<T, StoreError> {
     self.begin_writes()?;
     let result = write(&mut self.lock());
     if result.is_err() {
@@ -363,19 +486,67 @@ impl<B: RecordBackend> SealedStore<B> {
     Ok(value)
   }
 
-  /// The state, after dropping the caches if the disk moved under them since the last look
-  /// (another process committed, or a group of writes rolled back). Inside a group nobody else
-  /// commits, and the group's own changes must stay.
-  fn fresh(&self) -> MutexGuard<'_, State> {
+  /// Runs `read` on one snapshot of the records, after dropping the caches if the disk moved under
+  /// them. Damage to the catalog found on the way builds it again and runs `read` once more.
+  fn reading<T>(&self, mut read: impl FnMut(&mut State) -> Result<T, StoreError>) -> Result<T, StoreError> {
+    let result = self.read_once(&mut read);
+    if self.repair_catalog()? {
+      return self.read_once(&mut read);
+    }
+    result
+  }
+
+  /// Holds the state's lock throughout: a group of writes, which needs it, can't start on this
+  /// connection in the middle of the snapshot.
+  fn read_once<T>(
+    &self,
+    read: &mut impl FnMut(&mut State) -> Result<T, StoreError>,
+  ) -> Result<T, StoreError> {
     let mut state = self.lock();
-    if state.depth == 0 {
-      let maybe_tally = self.backend.write_tally();
-      if maybe_tally != state.maybe_tally {
-        state.forget_all();
-        state.maybe_tally = maybe_tally;
+    let is_snapshot = state.depth == 0;
+    if is_snapshot {
+      self.backend.begin_read()?;
+      self.follow_disk(&mut state);
+    }
+    let result = read(&mut state);
+    if is_snapshot {
+      self.backend.end_read();
+    }
+    result
+  }
+
+  /// Drops the caches if the disk moved under them since the last look (another process committed,
+  /// or a group of writes rolled back). Not inside a group: its own changes must stay, and nobody
+  /// else commits while it holds the write lock.
+  fn follow_disk(&self, state: &mut State) {
+    let maybe_tally = self.backend.write_tally();
+    if maybe_tally != state.maybe_tally {
+      state.forget_all();
+      state.maybe_tally = maybe_tally;
+    }
+  }
+
+  /// Builds the catalog again if it was found damaged and no group of writes is open; whether it
+  /// did, so the caller tries again. A process that may not build goes on without a catalog.
+  fn repair_catalog(&self) -> Result<bool, StoreError> {
+    {
+      let mut state = self.lock();
+      if !state.is_catalog_damaged || state.depth > 0 || state.is_building {
+        return Ok(false);
+      }
+      state.is_catalog_damaged = false;
+      if !state.can_build {
+        state.set_catalog(None);
+        return Ok(true);
       }
     }
-    state
+    self.rebuild_catalog()?;
+    Ok(true)
+  }
+
+  /// Whether damage was found, forgetting it.
+  fn take_catalog_damage(&self) -> bool {
+    std::mem::take(&mut self.lock().is_catalog_damaged)
   }
 
   fn lock(&self) -> MutexGuard<'_, State> {
@@ -396,11 +567,13 @@ impl<B: RecordBackend> SealedStore<B> {
         .read_named(CATALOG_TABLE, key)
         .map(|value| value.map(|value| value.to_vec()))
     };
-    step(&mut ScopedNodes {
+    let result = step(&mut ScopedNodes {
       cache: &mut state.directory_nodes,
       scope: table.name(),
       read: &read,
-    })
+    });
+    state.note_catalog_result(&result);
+    result
   }
 
   /// Runs `step` on `conversation`'s message index.
@@ -416,11 +589,13 @@ impl<B: RecordBackend> SealedStore<B> {
         .map(|value| value.map(|value| value.to_vec()))
     };
     let scope = messages_scope(conversation);
-    step(&mut ScopedNodes {
+    let result = step(&mut ScopedNodes {
       cache: &mut state.message_nodes,
       scope: &scope,
       read: &read,
-    })
+    });
+    state.note_catalog_result(&result);
+    result
   }
 
   /// The keys of `conversation`'s index that `keep` picks, walking from `from` in `direction`
@@ -452,7 +627,8 @@ impl<B: RecordBackend> SealedStore<B> {
     Ok(keys)
   }
 
-  /// The messages of `keys` in that order; one the index lists but the disk lacks is left out.
+  /// The messages of `keys` in that order, each checked against its key: one the index lists but
+  /// the disk lacks, or holds at another place, is left out and the catalog is built again.
   fn load_messages(
     &self,
     state: &mut State,
@@ -460,10 +636,20 @@ impl<B: RecordBackend> SealedStore<B> {
     keys: &[MessageKey],
   ) -> Result<Vec<StoredMessage>, StoreError> {
     let mut messages = Vec::with_capacity(keys.len());
+    let mut mismatched = 0usize;
     for key in keys {
-      if let Some(message) = self.cached_message(state, conversation, key.client_message_id())? {
-        messages.push(message);
+      match self.cached_message(state, conversation, key.client_message_id())? {
+        Some(message) if MessageKey::of(&message) == *key => messages.push(message),
+        Some(_) | None => mismatched += 1,
       }
+    }
+    if mismatched > 0 {
+      tracing::warn!(
+        conversation_id = %conversation,
+        mismatched,
+        "the local store's message index disagrees with its records"
+      );
+      state.is_catalog_damaged = true;
     }
     Ok(messages)
   }
@@ -513,9 +699,13 @@ impl<B: RecordBackend> SealedStore<B> {
         key: found_key,
         value,
       } if found_table == table && found_key == key => Ok(Some(Zeroizing::new(value.into_vec()))),
-      _ => Err(StoreError::Corrupt(
-        "a record holds something else than its name".into(),
-      )),
+      Record::Entry { value, .. } => {
+        zeroize::Zeroize::zeroize(&mut value.into_vec());
+        Err(StoreError::Corrupt(
+          "a record holds another entry than its name".into(),
+        ))
+      },
+      Record::Message { .. } => Err(StoreError::Corrupt("an entry's record holds a message".into())),
     }
   }
 
@@ -574,6 +764,34 @@ impl<B: RecordBackend> SealedStore<B> {
     self.keys.lookup_id(MESSAGE_NAMESPACE, &name)
   }
 
+  /// Deletes the message records of `conversation` still on the disk. The index lists all of them
+  /// unless it is damaged; this reads every record, so a conversation that goes away leaves nothing
+  /// behind even then. Rare (a conversation removed for this user).
+  fn sweep_messages(&self, state: &mut State, conversation: ConversationId) -> Result<(), StoreError> {
+    let (mut maybe_after, mut swept) = (None, 0usize);
+    loop {
+      let batch = self.backend.records_after(maybe_after.as_ref(), CATALOG_BATCH)?;
+      let Some((last, _)) = batch.last() else {
+        break;
+      };
+      maybe_after = Some(*last);
+      for (id, sealed) in &batch {
+        // One that doesn't open is no reason to keep the others.
+        if let Ok(Record::Message { message }) = self.open_record(id, sealed)
+          && message.conversation_id == conversation
+        {
+          self.backend.delete_record(id)?;
+          swept += 1;
+        }
+      }
+    }
+    if swept > 0 {
+      tracing::warn!(conversation_id = %conversation, swept, "deleted messages the index didn't list");
+      state.is_catalog_damaged = true;
+    }
+    Ok(())
+  }
+
   /// Removes a stored message from the disk, its index and the cache.
   fn remove_message(&self, state: &mut State, message: &StoredMessage) -> Result<(), StoreError> {
     let conversation = message.conversation_id;
@@ -623,6 +841,21 @@ impl State {
     self.epoch += 1;
   }
 
+  /// Switches to the generation `maybe_catalog` names.
+  fn set_catalog(&mut self, maybe_catalog: Option<CatalogState>) {
+    let maybe_generation = maybe_catalog.as_ref().map(CatalogState::generation);
+    self.message_nodes.set_generation(maybe_generation);
+    self.directory_nodes.set_generation(maybe_generation);
+    self.maybe_catalog = maybe_catalog;
+  }
+
+  /// An index step reads and writes only catalog nodes: a record it calls corrupt is the catalog's.
+  fn note_catalog_result<T>(&mut self, result: &Result<T, StoreError>) {
+    if matches!(result, Err(StoreError::Corrupt(_))) {
+      self.is_catalog_damaged = true;
+    }
+  }
+
   fn bump(&mut self, conversation: ConversationId) {
     let writes = self.revisions.entry(conversation).or_default();
     *writes = writes.wrapping_add(1);
@@ -631,7 +864,7 @@ impl State {
 
 impl<B: RecordBackend> LocalStore for SealedStore<B> {
   fn get(&self, table: Table, key: &str) -> Result<Option<Vec<u8>>, StoreError> {
-    self.cached_value(&mut self.fresh(), table, key)
+    self.reading(|state| self.cached_value(state, table, key))
   }
 
   fn put(&self, table: Table, key: &str, value: &[u8]) -> Result<(), StoreError> {
@@ -725,7 +958,7 @@ impl<B: RecordBackend> LocalStore for SealedStore<B> {
     conversation: ConversationId,
     client_message_id: ClientMessageId,
   ) -> Result<Option<StoredMessage>, StoreError> {
-    self.cached_message(&mut self.fresh(), conversation, client_message_id)
+    self.reading(|state| self.cached_message(state, conversation, client_message_id))
   }
 
   /// One place of the index: server messages sort by their ID.
@@ -734,24 +967,25 @@ impl<B: RecordBackend> LocalStore for SealedStore<B> {
     conversation: ConversationId,
     server_id: MessageId,
   ) -> Result<Option<StoredMessage>, StoreError> {
-    let mut state = self.fresh();
-    let keys = self.index_keys(
-      &mut state,
-      conversation,
-      Bound::Included(&MessageKey::first_at(server_id)),
-      Direction::Forward,
-      &mut |key, entry| {
-        key
-          .is_at(server_id)
-          .then_some(entry.server_id() == Some(server_id))
-      },
-    )?;
-    Ok(
-      self
-        .load_messages(&mut state, conversation, &keys)?
-        .into_iter()
-        .next(),
-    )
+    self.reading(|state| {
+      let keys = self.index_keys(
+        state,
+        conversation,
+        Bound::Included(&MessageKey::first_at(server_id)),
+        Direction::Forward,
+        &mut |key, entry| {
+          key
+            .is_at(server_id)
+            .then_some(entry.server_id() == Some(server_id))
+        },
+      )?;
+      Ok(
+        self
+          .load_messages(state, conversation, &keys)?
+          .into_iter()
+          .find(|message| message.maybe_server_id == Some(server_id)),
+      )
+    })
   }
 
   /// Walks the index from that end; lines, pending messages and placeholders don't count.
@@ -764,21 +998,31 @@ impl<B: RecordBackend> LocalStore for SealedStore<B> {
       MessageEdge::Oldest => Direction::Forward,
       MessageEdge::Newest => Direction::Backward,
     };
-    let mut maybe_found = None;
-    self.index_keys(
-      &mut self.fresh(),
-      conversation,
-      Bound::Unbounded,
-      direction,
-      &mut |_, entry| match entry.readable_server_id() {
-        Some(id) => {
-          maybe_found = Some(id);
-          None
+    self.reading(|state| {
+      let mut found = 0usize;
+      let keys = self.index_keys(
+        state,
+        conversation,
+        Bound::Unbounded,
+        direction,
+        &mut |_, entry| {
+          if found == EDGE_CANDIDATES {
+            return None;
+          }
+          let is_candidate = entry.readable_server_id().is_some();
+          found += usize::from(is_candidate);
+          Some(is_candidate)
         },
-        None => Some(false),
-      },
-    )?;
-    Ok(maybe_found)
+      )?;
+      // The cursor of a catch-up: an entry without its message must not move it past a gap.
+      Ok(
+        self
+          .load_messages(state, conversation, &keys)?
+          .iter()
+          .filter(|message| message.maybe_unreadable.is_none())
+          .find_map(|message| message.maybe_server_id),
+      )
+    })
   }
 
   fn messages_at(
@@ -786,24 +1030,25 @@ impl<B: RecordBackend> LocalStore for SealedStore<B> {
     conversation: ConversationId,
     slot: MessageSlot,
   ) -> Result<Vec<StoredMessage>, StoreError> {
-    let mut state = self.fresh();
-    let keys = match slot {
-      MessageSlot::At(position) => self.index_keys(
-        &mut state,
-        conversation,
-        Bound::Included(&MessageKey::first_at(position)),
-        Direction::Forward,
-        &mut |key, _| key.is_at(position).then_some(true),
-      )?,
-      MessageSlot::Pending => self.index_keys(
-        &mut state,
-        conversation,
-        Bound::Included(&MessageKey::first_pending()),
-        Direction::Forward,
-        &mut |_, _| Some(true),
-      )?,
-    };
-    self.load_messages(&mut state, conversation, &keys)
+    self.reading(|state| {
+      let keys = match slot {
+        MessageSlot::At(position) => self.index_keys(
+          state,
+          conversation,
+          Bound::Included(&MessageKey::first_at(position)),
+          Direction::Forward,
+          &mut |key, _| key.is_at(position).then_some(true),
+        )?,
+        MessageSlot::Pending => self.index_keys(
+          state,
+          conversation,
+          Bound::Included(&MessageKey::first_pending()),
+          Direction::Forward,
+          &mut |_, _| Some(true),
+        )?,
+      };
+      self.load_messages(state, conversation, &keys)
+    })
   }
 
   fn messages(
@@ -811,21 +1056,25 @@ impl<B: RecordBackend> LocalStore for SealedStore<B> {
     conversation: ConversationId,
     filter: MessageFilter,
   ) -> Result<Vec<StoredMessage>, StoreError> {
-    let mut state = self.fresh();
-    let keys = self.index_keys(
-      &mut state,
-      conversation,
-      Bound::Unbounded,
-      Direction::Forward,
-      &mut |_, entry| Some(entry.may_match(filter)),
-    )?;
-    let mut messages = self.load_messages(&mut state, conversation, &keys)?;
-    messages.retain(|message| message.matches(filter));
-    Ok(messages)
+    self.reading(|state| {
+      let keys = self.index_keys(
+        state,
+        conversation,
+        Bound::Unbounded,
+        Direction::Forward,
+        &mut |_, entry| Some(entry.may_match(filter)),
+      )?;
+      let mut messages = self.load_messages(state, conversation, &keys)?;
+      messages.retain(|message| message.matches(filter));
+      Ok(messages)
+    })
   }
 
   fn message_revision(&self, conversation: ConversationId) -> Option<u64> {
-    let state = self.fresh();
+    let mut state = self.lock();
+    if state.depth == 0 {
+      self.follow_disk(&mut state);
+    }
     let writes = state.revisions.get(&conversation).copied().unwrap_or(0);
     Some((state.epoch << 32) | (writes & u64::from(u32::MAX)))
   }
@@ -842,25 +1091,20 @@ impl<B: RecordBackend> LocalStore for SealedStore<B> {
       MediaRange::Older(None) => (Bound::Unbounded, Direction::Backward),
       MediaRange::Newer(from) => (Bound::Excluded(MessageKey::last_at(from)), Direction::Forward),
     };
-    let mut state = self.fresh();
-    let mut found = 0;
-    let keys = self.index_keys(
-      &mut state,
-      conversation,
-      from.as_ref(),
-      direction,
-      &mut |_, entry| {
+    self.reading(|state| {
+      let mut found = 0;
+      let keys = self.index_keys(state, conversation, from.as_ref(), direction, &mut |_, entry| {
         if found == limit {
           return None;
         }
         let is_media = entry.has_media();
         found += usize::from(is_media);
         Some(is_media)
-      },
-    )?;
-    let mut messages = self.load_messages(&mut state, conversation, &keys)?;
-    messages.retain(StoredMessage::has_media);
-    Ok(messages)
+      })?;
+      let mut messages = self.load_messages(state, conversation, &keys)?;
+      messages.retain(StoredMessage::has_media);
+      Ok(messages)
+    })
   }
 
   fn delete_messages(&self, conversation: ConversationId) -> Result<(), StoreError> {
@@ -878,6 +1122,7 @@ impl<B: RecordBackend> LocalStore for SealedStore<B> {
           .delete_record(&self.message_id(conversation, key.client_message_id()))?;
       }
       self.index(state, conversation, |nodes| sealed_index::clear(nodes))?;
+      self.sweep_messages(state, conversation)?;
       state.messages.retain(|(held, _)| *held != conversation);
       state.bump(conversation);
       Ok(())
@@ -908,9 +1153,13 @@ impl<B: RecordBackend> LocalStore for SealedStore<B> {
   }
 
   fn begin_writes(&self) -> Result<(), StoreError> {
-    // Looked at before the group starts: once it is open nobody else commits.
-    let mut state = self.fresh();
+    let mut state = self.lock();
     self.backend.begin_writes()?;
+    if state.depth == 0 {
+      // Looked at once the group holds the write lock: a commit of another process it waited for
+      // counts, and nobody else commits from here on.
+      self.follow_disk(&mut state);
+    }
     state.depth += 1;
     drop(state);
     self.entry_log().depth += 1;
@@ -929,10 +1178,12 @@ impl<B: RecordBackend> LocalStore for SealedStore<B> {
     }
     let ended = self.backend.end_writes();
     if state.depth == 0 {
-      if ended.is_err() {
+      // What moved here is a rollback or another process: this one's commits don't count.
+      let maybe_tally = self.backend.write_tally();
+      if ended.is_err() || maybe_tally != state.maybe_tally {
         state.forget_all();
       }
-      state.maybe_tally = self.backend.write_tally();
+      state.maybe_tally = maybe_tally;
     }
     drop(state);
     let mut log = self.entry_log();
@@ -972,30 +1223,31 @@ impl<B: RecordBackend> LocalStore for SealedStore<B> {
 impl<B: RecordBackend> SealedStore<B> {
   /// The entries of `table` whose key starts with `prefix`, through the table's directory.
   fn list_from(&self, table: Table, prefix: &str) -> Result<Vec<(String, Vec<u8>)>, StoreError> {
-    let mut state = self.fresh();
-    let mut keys = Vec::new();
-    let start = prefix.to_string();
-    self.directory(&mut state, table, |nodes| {
-      sealed_index::scan(
-        nodes,
-        Bound::Included(&start),
-        Direction::Forward,
-        &mut |key, ()| {
-          let is_inside = key.starts_with(prefix);
-          if is_inside {
-            keys.push(key.clone());
-          }
-          is_inside
-        },
-      )
-    })?;
-    let mut entries = Vec::with_capacity(keys.len());
-    for key in keys {
-      if let Some(value) = self.cached_value(&mut state, table, &key)? {
-        entries.push((key, value));
+    self.reading(|state| {
+      let mut keys = Vec::new();
+      let start = prefix.to_string();
+      self.directory(state, table, |nodes| {
+        sealed_index::scan(
+          nodes,
+          Bound::Included(&start),
+          Direction::Forward,
+          &mut |key, ()| {
+            let is_inside = key.starts_with(prefix);
+            if is_inside {
+              keys.push(key.clone());
+            }
+            is_inside
+          },
+        )
+      })?;
+      let mut entries = Vec::with_capacity(keys.len());
+      for key in keys {
+        if let Some(value) = self.cached_value(state, table, &key)? {
+          entries.push((key, value));
+        }
       }
-    }
-    Ok(entries)
+      Ok(entries)
+    })
   }
 }
 
@@ -1031,6 +1283,11 @@ impl<B> std::fmt::Debug for SealedStore<B> {
   fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
     f.debug_struct("SealedStore").finish_non_exhaustive()
   }
+}
+
+/// A random generation for a catalog about to be built.
+fn new_generation() -> u64 {
+  rand_core::RngCore::next_u64(&mut OsRng)
 }
 
 /// What a cached entry counts towards [`SealedStoreLimits::max_entry_bytes`].
@@ -1222,7 +1479,10 @@ mod tests {
         records.reads.get()
       );
       check(&store);
-      assert_eq!(store.read_catalog_state().unwrap(), Some(CatalogState::Complete));
+      assert!(matches!(
+        store.read_catalog_state().unwrap(),
+        Some(CatalogState::Complete { .. })
+      ));
     }
 
     /// Records as the versions before the catalog wrote them: the same records, no catalog.
@@ -1284,6 +1544,240 @@ mod tests {
       let users = store.list(Table::Users).unwrap();
       assert_eq!(users.len(), 100);
       assert_eq!(store.get(Table::Users, "42").unwrap(), Some(vec![42; 8]));
+    }
+  }
+
+  /// The catalog is derived data: whatever happens to it, the records decide and the store goes on.
+  mod repair {
+    use super::*;
+
+    const CHANNEL: i64 = 1;
+    const MESSAGES: i64 = 100;
+
+    #[test]
+    fn a_tampered_index_page_is_built_again() {
+      let (records, key) = filled();
+      let page = page_id(&records, &key);
+      records.map.lock().unwrap().insert(page, vec![1; 64]);
+      assert_all_listed(&open(&records, &key));
+    }
+
+    #[test]
+    fn a_missing_index_page_is_built_again() {
+      let (records, key) = filled();
+      let page = page_id(&records, &key);
+      records.map.lock().unwrap().remove(&page);
+      assert_all_listed(&open(&records, &key));
+    }
+
+    /// An older copy of a page is sealed correctly but lists less than its root says.
+    #[test]
+    fn a_rolled_back_index_page_is_built_again() {
+      let (records, key) = filled();
+      let page = page_id(&records, &key);
+      let old = records.map.lock().unwrap()[&page].clone();
+      open(&records, &key)
+        .upsert_message(&numbered(CHANNEL, MESSAGES))
+        .unwrap();
+      records.map.lock().unwrap().insert(page, old);
+      let store = open(&records, &key);
+      assert_eq!(
+        store.messages(id(CHANNEL), MessageFilter::All).unwrap().len(),
+        usize::try_from(MESSAGES + 1).unwrap()
+      );
+    }
+
+    #[test]
+    fn a_damaged_catalog_state_never_makes_the_store_unreadable() {
+      let (records, key) = filled();
+      let meta = open(&records, &key).entry_id(CATALOG_TABLE, META_KEY);
+      records.map.lock().unwrap().insert(meta, vec![1; 64]);
+      assert_all_listed(&open(&records, &key));
+    }
+
+    /// The cursor of a catch-up must not move past a message that isn't there.
+    #[test]
+    fn an_entry_without_its_record_is_no_edge() {
+      let (records, key) = filled();
+      let store = open(&records, &key);
+      let newest = store.message_id(id(CHANNEL), client_id(CHANNEL, MESSAGES - 1));
+      drop(store);
+      records.map.lock().unwrap().remove(&newest);
+      let store = open(&records, &key);
+      assert_eq!(
+        store.edge_server_id(id(CHANNEL), MessageEdge::Newest).unwrap(),
+        Some(id(server_id(CHANNEL, MESSAGES - 2)))
+      );
+      assert_eq!(
+        store.messages(id(CHANNEL), MessageFilter::All).unwrap().len(),
+        usize::try_from(MESSAGES - 1).unwrap()
+      );
+    }
+
+    #[test]
+    fn a_record_at_another_place_than_its_entry_says_is_not_answered_for_it() {
+      let (records, key) = filled();
+      let keys = LocalStoreKeys::derive(&key);
+      let store = open(&records, &key);
+      let moved_id = store.message_id(id(CHANNEL), client_id(CHANNEL, 5));
+      let mut moved = numbered(CHANNEL, 5);
+      moved.maybe_server_id = Some(id(server_id(CHANNEL, MESSAGES + 50)));
+      let sealed = seal_record(
+        &keys,
+        &moved_id,
+        &Record::Message {
+          message: Box::new(moved),
+        },
+      )
+      .unwrap();
+      drop(store);
+      records.map.lock().unwrap().insert(moved_id, sealed);
+
+      let store = open(&records, &key);
+      let at_old_place = store
+        .message_by_server_id(id(CHANNEL), id(server_id(CHANNEL, 5)))
+        .unwrap();
+      assert!(at_old_place.is_none());
+      assert_eq!(
+        store.edge_server_id(id(CHANNEL), MessageEdge::Newest).unwrap(),
+        Some(id(server_id(CHANNEL, MESSAGES + 50))),
+        "built again from the records"
+      );
+    }
+
+    #[test]
+    fn a_new_generation_leaves_no_node_of_the_old_one() {
+      let (records, key) = filled();
+      let page = page_id(&records, &key);
+      let store = open(&records, &key);
+      let root = store.entry_id(CATALOG_TABLE, &root_key_of(&store));
+      drop(store);
+      records.map.lock().unwrap().insert(page, vec![1; 64]);
+      assert_all_listed(&open(&records, &key));
+      // The damaged page opens no more, so nobody can tell it from a damaged record: it stays,
+      // never read again.
+      assert!(!records.map.lock().unwrap().contains_key(&root));
+    }
+
+    #[test]
+    fn deleting_a_conversation_also_takes_records_its_index_doesnt_list() {
+      let (records, key) = filled();
+      let keys = LocalStoreKeys::derive(&key);
+      let store = open(&records, &key);
+      let stray = numbered(CHANNEL, MESSAGES + 1);
+      let stray_id = store.message_id(stray.conversation_id, stray.client_message_id);
+      let sealed = seal_record(
+        &keys,
+        &stray_id,
+        &Record::Message {
+          message: Box::new(stray),
+        },
+      )
+      .unwrap();
+      records.map.lock().unwrap().insert(stray_id, sealed);
+
+      store.delete_messages(id(CHANNEL)).unwrap();
+
+      assert!(!records.map.lock().unwrap().contains_key(&stray_id));
+      assert!(
+        store
+          .messages(id(CHANNEL), MessageFilter::All)
+          .unwrap()
+          .is_empty()
+      );
+    }
+
+    /// The notification extension and the service worker never run the build.
+    #[test]
+    fn a_process_that_may_not_build_leaves_an_old_store_alone() {
+      let records = Records::default();
+      let key = SymmetricKey::generate(&mut OsRng);
+      let keys = LocalStoreKeys::derive(&key);
+      let store = SealedStore::unbuilt(&records, &key, SealedStoreLimits::minimal()).unwrap();
+      let stored = numbered(CHANNEL, 0);
+      let message_id = store.message_id(stored.conversation_id, stored.client_message_id);
+      let sealed = seal_record(
+        &keys,
+        &message_id,
+        &Record::Message {
+          message: Box::new(stored),
+        },
+      )
+      .unwrap();
+      let entry_id = store.entry_id(Table::Users.name(), "1");
+      let entry = seal_record(
+        &keys,
+        &entry_id,
+        &Record::Entry {
+          table: Table::Users.name().into(),
+          key: "1".into(),
+          value: Base64Bytes::new(vec![7]),
+        },
+      )
+      .unwrap();
+      drop(store);
+      records
+        .map
+        .lock()
+        .unwrap()
+        .extend([(message_id, sealed), (entry_id, entry)]);
+
+      let store =
+        SealedStore::open_backend_without_building(&records, &key, SealedStoreLimits::minimal()).unwrap();
+      assert_eq!(store.get(Table::Users, "1").unwrap(), Some(vec![7]));
+      assert_eq!(
+        store
+          .message_by_server_id(id(CHANNEL), id(server_id(CHANNEL, 0)))
+          .unwrap(),
+        None,
+        "not found, so it is fetched"
+      );
+      store.put(Table::Users, "2", &[8]).unwrap();
+      assert_eq!(store.get(Table::Users, "2").unwrap(), Some(vec![8]));
+      assert_eq!(
+        store.read_catalog_state().unwrap(),
+        None,
+        "the owner still builds it"
+      );
+      assert_eq!(records.map.lock().unwrap().len(), 3, "no catalog record written");
+    }
+
+    fn filled() -> (Records, SymmetricKey) {
+      let records = Records::default();
+      let key = SymmetricKey::generate(&mut OsRng);
+      let store = open(&records, &key);
+      crate::store::write_group(&store, || {
+        for n in 0..MESSAGES {
+          store.upsert_message(&numbered(CHANNEL, n))?;
+        }
+        Ok::<_, StoreError>(())
+      })
+      .unwrap();
+      drop(store);
+      (records, key)
+    }
+
+    fn open<'a>(records: &'a Records, key: &SymmetricKey) -> SealedStore<&'a Records> {
+      SealedStore::open_backend(records, key, SealedStoreLimits::default()).unwrap()
+    }
+
+    fn assert_all_listed(store: &SealedStore<&Records>) {
+      assert_eq!(
+        store.messages(id(CHANNEL), MessageFilter::All).unwrap().len(),
+        usize::try_from(MESSAGES).unwrap()
+      );
+    }
+
+    /// The record of the channel's first (here its only) index page.
+    fn page_id(records: &Records, key: &SymmetricKey) -> LookupId {
+      let store = open(records, key);
+      let root = root_key_of(&store);
+      store.entry_id(CATALOG_TABLE, &format!("{}0", root.trim_end_matches('r')))
+    }
+
+    fn root_key_of(store: &SealedStore<&Records>) -> String {
+      let generation = store.lock().maybe_catalog.as_ref().unwrap().generation();
+      format!("{generation:016x}/m/{CHANNEL}/r")
     }
   }
 

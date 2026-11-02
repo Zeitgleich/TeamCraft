@@ -67,6 +67,8 @@ struct Inner {
   connection: Connection,
   group: WriteGroup,
   purge: PurgeState,
+  /// A read transaction is open ([`RecordBackend::begin_read`]).
+  is_reading: bool,
 }
 
 impl SealedStore<SqliteRecords> {
@@ -90,6 +92,17 @@ impl SealedStore<SqliteRecords> {
     )
   }
 
+  /// [`Self::open_with_limits`] for a process that must stay small (the iOS notification
+  /// extension): it never builds the catalog of a store that lacks one, however long the history.
+  pub fn open_without_building(
+    path: &Path,
+    key_source: &impl DatabaseKeySource,
+    limits: SealedStoreLimits,
+  ) -> Result<Self, StoreError> {
+    let backend = Self::backend_of(Connection::open(path).map_err(database_error)?)?;
+    SealedStore::open_backend_without_building(backend, &key_source.database_key()?, limits)
+  }
+
   /// A database that lives only in memory, for tests.
   pub fn open_in_memory(key_source: &impl DatabaseKeySource) -> Result<Self, StoreError> {
     Self::from_connection(
@@ -104,6 +117,11 @@ impl SealedStore<SqliteRecords> {
     key_source: &impl DatabaseKeySource,
     limits: SealedStoreLimits,
   ) -> Result<Self, StoreError> {
+    let backend = Self::backend_of(connection)?;
+    SealedStore::open_backend(backend, &key_source.database_key()?, limits)
+  }
+
+  fn backend_of(connection: Connection) -> Result<SqliteRecords, StoreError> {
     // secure_delete: freed pages are zeroed, so a deleted record's ciphertext doesn't linger in
     // them (issue #391); the write-ahead log is cleared by `purge_freed`. Records are read one by
     // one under pseudorandom IDs (issue #155): mapped, a read is no system call, and the pages
@@ -119,14 +137,14 @@ impl SealedStore<SqliteRecords> {
     // what they hold).
     let mut group = WriteGroup::default();
     group.watch_other_connections(&connection)?;
-    let backend = SqliteRecords {
+    Ok(SqliteRecords {
       inner: Mutex::new(Inner {
         connection,
         group,
         purge: PurgeState::new(),
+        is_reading: false,
       }),
-    };
-    SealedStore::open_backend(backend, &key_source.database_key()?, limits)
+    })
   }
 }
 
@@ -194,6 +212,26 @@ impl RecordBackend for SqliteRecords {
     self.lock().group.note_failure();
   }
 
+  /// A read transaction: another process's commit between two reads of a walk through the catalog
+  /// is not seen until it ends.
+  fn begin_read(&self) -> Result<(), StoreError> {
+    let mut inner = self.lock();
+    if inner.group.is_open() || inner.is_reading {
+      return Ok(());
+    }
+    inner.connection.execute_batch("BEGIN").map_err(database_error)?;
+    inner.is_reading = true;
+    Ok(())
+  }
+
+  fn end_read(&self) {
+    let mut inner = self.lock();
+    if std::mem::take(&mut inner.is_reading) {
+      // Deliberately ignored: nothing was written, and the next statement reports a broken connection.
+      let _ = inner.connection.execute_batch("COMMIT");
+    }
+  }
+
   fn begin_writes(&self) -> Result<(), StoreError> {
     let mut inner = self.lock();
     let Inner {
@@ -208,6 +246,7 @@ impl RecordBackend for SqliteRecords {
       connection,
       group,
       purge,
+      ..
     } = &mut *inner;
     group.end(connection)?;
     // The group is committed whatever happens to the purge: a failed one stays due and must not
@@ -227,6 +266,7 @@ impl RecordBackend for SqliteRecords {
       connection,
       group,
       purge,
+      ..
     } = &mut *inner;
     purge.force();
     if !group.is_open() {
@@ -241,6 +281,7 @@ impl RecordBackend for SqliteRecords {
       connection,
       group,
       purge,
+      ..
     } = &mut *inner;
     purge.is_due = true;
     if !group.is_open() {
@@ -298,7 +339,7 @@ mod tests {
   use teamcraft_crypto::secret::SymmetricKey;
 
   use super::*;
-  use crate::store::tests::exercise_store;
+  use crate::store::tests::{exercise_store, id, message};
   use crate::store::{LocalStore, StaticKeySource, Table};
 
   #[test]
@@ -346,7 +387,7 @@ mod tests {
     let path = directory.join("store.db");
     let store =
       SealedSqliteStore::open(&path, &StaticKeySource::new(SymmetricKey::generate(&mut OsRng))).unwrap();
-    store.put(Table::MlsStorage, "state", &[7; 4096]).unwrap();
+    store.put(Table::MlsStorage, "state", &[7; 64 * 1024]).unwrap();
     let sealed: Vec<u8> = Connection::open(&path)
       .unwrap()
       .query_row(
@@ -377,7 +418,7 @@ mod tests {
     let path = directory.join("store.db");
     let store =
       SealedSqliteStore::open(&path, &StaticKeySource::new(SymmetricKey::generate(&mut OsRng))).unwrap();
-    store.put(Table::MlsStorage, "state", &[7; 4096]).unwrap();
+    store.put(Table::MlsStorage, "state", &[7; 64 * 1024]).unwrap();
     let sealed: Vec<u8> = Connection::open(&path)
       .unwrap()
       .query_row(
@@ -389,7 +430,7 @@ mod tests {
     let needle = &sealed[sealed.len() / 2..sealed.len() / 2 + 32];
 
     store.begin_writes().unwrap();
-    store.put(Table::MlsStorage, "state", &[9; 4096]).unwrap();
+    store.put(Table::MlsStorage, "state", &[9; 64 * 1024]).unwrap();
     store.purge_freed().unwrap();
     store.end_writes().unwrap();
 
@@ -432,7 +473,7 @@ mod tests {
     let path = directory.join("store.db");
     let store =
       SealedSqliteStore::open(&path, &StaticKeySource::new(SymmetricKey::generate(&mut OsRng))).unwrap();
-    store.put(Table::MlsStorage, "state", &[7; 4096]).unwrap();
+    store.put(Table::MlsStorage, "state", &[7; 64 * 1024]).unwrap();
     let sealed: Vec<u8> = Connection::open(&path)
       .unwrap()
       .query_row(
@@ -443,7 +484,7 @@ mod tests {
       .unwrap();
     let needle = sealed[sealed.len() / 2..sealed.len() / 2 + 32].to_vec();
     store.purge_freed_soon();
-    store.put(Table::MlsStorage, "state", &[9; 4096]).unwrap();
+    store.put(Table::MlsStorage, "state", &[9; 64 * 1024]).unwrap();
     store.purge_freed_soon();
     assert!(is_purge_due(&store));
     drop(store);
@@ -758,6 +799,182 @@ mod tests {
     assert_eq!(damaged.get(Table::Users, "2").unwrap(), Some(b"two".to_vec()));
     drop(damaged);
     std::fs::remove_dir_all(&directory).unwrap();
+  }
+
+  /// Issue #155 review: the extension's commit lands while this process waits for the write lock,
+  /// after it last looked. The catalog nodes it holds are stale then; writing them would drop what
+  /// the other process listed.
+  #[test]
+  fn a_commit_met_while_waiting_for_the_write_lock_drops_the_caches() {
+    let directory = scratch_dir();
+    let path = directory.join("store.db");
+    let key = SymmetricKey::generate(&mut OsRng);
+    let source = StaticKeySource::new(key.duplicate());
+    let conversation = id(7);
+    let other = SealedSqliteStore::open(&path, &source).unwrap();
+    let records = SealedSqliteStore::backend_of(Connection::open(&path).unwrap()).unwrap();
+    let store = SealedStore::open_backend(
+      Waiting {
+        records,
+        on_begin: std::cell::RefCell::new(None),
+      },
+      &key,
+      SealedStoreLimits::default(),
+    )
+    .unwrap();
+    store
+      .upsert_message(&message(conversation, 1, Some(10), None, 1))
+      .unwrap();
+    assert_eq!(listed(&store, conversation), [1]);
+
+    *store.backend().on_begin.borrow_mut() = Some(Box::new(|| {
+      other
+        .upsert_message(&message(conversation, 2, Some(20), None, 2))
+        .unwrap();
+    }));
+    store
+      .upsert_message(&message(conversation, 3, Some(30), None, 3))
+      .unwrap();
+
+    assert_eq!(listed(&store, conversation), [1, 2, 3]);
+    drop(store);
+    let reopened = SealedSqliteStore::open(&path, &source).unwrap();
+    assert_eq!(listed(&reopened, conversation), [1, 2, 3], "the disk's index too");
+    drop((reopened, other));
+    std::fs::remove_dir_all(&directory).unwrap();
+  }
+
+  /// What another connection wrote, nodes rewritten and split, is read here at once.
+  #[test]
+  fn another_connections_writes_reach_the_caches() {
+    let directory = scratch_dir();
+    let path = directory.join("store.db");
+    let source = StaticKeySource::new(SymmetricKey::generate(&mut OsRng));
+    let conversation = id(7);
+    let mine = SealedSqliteStore::open(&path, &source).unwrap();
+    let other = SealedSqliteStore::open(&path, &source).unwrap();
+    mine
+      .upsert_message(&message(conversation, 0, Some(1), None, 0))
+      .unwrap();
+    mine.put(Table::Users, "1", b"before").unwrap();
+    assert_eq!(listed(&mine, conversation).len(), 1);
+
+    crate::store::write_group(&other, || {
+      for n in 1..=255u8 {
+        other.upsert_message(&message(conversation, n, Some(i64::from(n) + 1), None, 0))?;
+      }
+      other.put(Table::Users, "1", b"after")
+    })
+    .unwrap();
+
+    assert_eq!(listed(&mine, conversation).len(), 256);
+    assert_eq!(mine.get(Table::Users, "1").unwrap(), Some(b"after".to_vec()));
+    drop((mine, other));
+    std::fs::remove_dir_all(&directory).unwrap();
+  }
+
+  /// The extension opens with a store that was never migrated: no build, the messages stay as they
+  /// are for the app's build, and its point reads work.
+  #[test]
+  fn the_extension_opens_a_store_without_a_catalog_and_builds_none() {
+    let directory = scratch_dir();
+    let copy = directory.join("store.db");
+    std::fs::copy(
+      std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/store/v1.0.9-sealed.db"),
+      &copy,
+    )
+    .unwrap();
+    let source = StaticKeySource::new(SymmetricKey::from_bytes([0x5a; 32]));
+    let count = |path: &std::path::Path| -> i64 {
+      Connection::open(path)
+        .unwrap()
+        .query_row("SELECT count(*) FROM sealed_records", [], |row| row.get(0))
+        .unwrap()
+    };
+    let before = count(&copy);
+    let store =
+      SealedSqliteStore::open_without_building(&copy, &source, SealedStoreLimits::minimal()).unwrap();
+    assert!(crate::records::load_account(&store).unwrap().is_some());
+    assert_eq!(
+      store
+        .message_by_server_id(id(70), id(900))
+        .unwrap()
+        .map(|found| found.sent_at_ms),
+      None,
+      "not found, so it is fetched"
+    );
+    drop(store);
+    assert_eq!(count(&copy), before);
+
+    let app = SealedSqliteStore::open(&copy, &source).unwrap();
+    assert!(app.message_by_server_id(id(70), id(900)).unwrap().is_some());
+    drop(app);
+    std::fs::remove_dir_all(&directory).unwrap();
+  }
+
+  /// Records on SQLite, running `on_begin` before the next group takes the write lock: what another
+  /// process commits while this one waits for it.
+  struct Waiting<'a> {
+    records: SqliteRecords,
+    on_begin: std::cell::RefCell<Option<Box<dyn FnOnce() + 'a>>>,
+  }
+
+  impl RecordBackend for Waiting<'_> {
+    fn put_record(&self, id: &LookupId, sealed: &[u8]) -> Result<(), StoreError> {
+      self.records.put_record(id, sealed)
+    }
+
+    fn delete_record(&self, id: &LookupId) -> Result<(), StoreError> {
+      self.records.delete_record(id)
+    }
+
+    fn get_record(&self, id: &LookupId) -> Result<Option<Vec<u8>>, StoreError> {
+      self.records.get_record(id)
+    }
+
+    fn records_after(
+      &self,
+      maybe_after: Option<&LookupId>,
+      limit: usize,
+    ) -> Result<Vec<(LookupId, Vec<u8>)>, StoreError> {
+      self.records.records_after(maybe_after, limit)
+    }
+
+    fn begin_read(&self) -> Result<(), StoreError> {
+      self.records.begin_read()
+    }
+
+    fn end_read(&self) {
+      self.records.end_read();
+    }
+
+    fn begin_writes(&self) -> Result<(), StoreError> {
+      if let Some(commit) = self.on_begin.borrow_mut().take() {
+        commit();
+      }
+      self.records.begin_writes()
+    }
+
+    fn end_writes(&self) -> Result<(), StoreError> {
+      self.records.end_writes()
+    }
+
+    fn fail_group(&self) {
+      self.records.fail_group();
+    }
+
+    fn write_tally(&self) -> Option<WriteTally> {
+      self.records.write_tally()
+    }
+  }
+
+  fn listed(store: &impl LocalStore, conversation: teamcraft_proto::ConversationId) -> Vec<u8> {
+    store
+      .messages(conversation, crate::store::MessageFilter::All)
+      .unwrap()
+      .iter()
+      .map(|stored| stored.client_message_id.as_bytes()[0])
+      .collect()
   }
 
   fn scratch_dir() -> std::path::PathBuf {
