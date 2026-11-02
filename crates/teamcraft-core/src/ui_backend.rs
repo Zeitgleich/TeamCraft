@@ -3732,7 +3732,10 @@ mod tests {
   }
 
   /// Issue #155: a store's feed index shows what a whole read of the conversation shows.
-  #[cfg(any(feature = "sqlcipher", feature = "sealed-sqlite"))]
+  #[cfg(all(
+    any(feature = "sqlcipher", feature = "sealed-sqlite"),
+    not(target_arch = "wasm32")
+  ))]
   mod indexed_feed {
     use rand_core::OsRng;
     use teamcraft_crypto::secret::SymmetricKey;
