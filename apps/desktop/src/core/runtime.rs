@@ -1594,6 +1594,9 @@ impl Core {
     {
       self.changed();
     }
+    for request in self.downloads.take_opens() {
+      super::saved_files::open_saved(&request);
+    }
   }
 
   async fn background_picture(&mut self, id: BackgroundId) -> Result<Vec<u8>, String> {
@@ -2090,6 +2093,10 @@ impl Core {
           attachment,
         } => {
           self.downloads.save(*conversation, *attachment);
+          false
+        },
+        CoreCommand::ControlDownload { attachment, control } => {
+          self.downloads.control(*attachment, *control);
           false
         },
         _ => true,

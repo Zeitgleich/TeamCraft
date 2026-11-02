@@ -195,6 +195,11 @@ pub enum CoreCommand {
     conversation: ConversationId,
     attachment: AttachmentId,
   },
+  /// The user paused, continued, cancelled, cleared, opened or showed a download in the list.
+  ControlDownload {
+    attachment: AttachmentId,
+    control: crate::downloads::DownloadControl,
+  },
   CreateShareLink {
     conversation: ConversationId,
     attachment: AttachmentId,
@@ -1969,6 +1974,16 @@ impl<S: LocalStore> ChatBackend for CoreChatBackend<S> {
   }
   fn refresh_share_links(&self, conversation: ConversationId, message: MessageId, file_id: &str) {
     self.ui_refresh_share_links(conversation, message, file_id);
+  }
+
+  #[cfg(not(target_arch = "wasm32"))]
+  fn downloads(&self) -> Option<Vec<teamcraft_client_api::actions::DownloadEntry>> {
+    self.ui_downloads()
+  }
+
+  #[cfg(not(target_arch = "wasm32"))]
+  fn control_download(&self, file_id: &str, control: teamcraft_client_api::actions::DownloadControl) {
+    self.ui_control_download(file_id, control);
   }
 
   fn max_upload_bytes(&self) -> Option<u64> {

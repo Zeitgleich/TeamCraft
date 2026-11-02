@@ -60,6 +60,8 @@ pub fn TopBar() -> impl IntoView {
         <SearchField />
       </div>
       <div class="top-actions">
+        // The browser has its own downloads list and never loads this one.
+        {tauri::is_available().then(|| lazy_area(Place::Inline, || areas::downloads(())))}
         <button
           class="icon-btn on-dark"
           aria-label=move || i18n.t("shortcuts-title")

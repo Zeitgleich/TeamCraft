@@ -5,19 +5,22 @@
 //! their retry is due, and those an app left running when it stopped continue once it starts
 //! again (issue #153, `client::disk_downloads`).
 
-use std::collections::{HashSet, VecDeque};
+use std::collections::{HashMap, VecDeque};
 use std::future::Future;
 use std::path::PathBuf;
 use std::pin::Pin;
 
-use futures_util::StreamExt;
+use futures_util::future::{AbortHandle, Abortable};
 use futures_util::stream::FuturesUnordered;
+use futures_util::{FutureExt, StreamExt};
 use teamcraft_crypto::secret::SecretBytes;
 use teamcraft_proto::{AttachmentId, ConversationId};
 
 use crate::api::ServerApi;
 use crate::client::Client;
-use crate::client::disk_downloads::{DownloadTarget, due_downloads};
+use crate::client::disk_downloads::{
+  DownloadStatus, DownloadTarget, download_record, due_downloads, forget_download,
+};
 use crate::client::files::failure_of;
 use crate::error::CoreError;
 use crate::store::{AttachmentRef, LocalStore};
@@ -31,8 +34,13 @@ pub struct Downloads {
   limit: usize,
   waiting: VecDeque<Job>,
   running: FuturesUnordered<Pin<Box<dyn Future<Output = Finished>>>>,
-  /// Files being saved: one transfer per file, so two never write the same partial file.
-  saving: HashSet<AttachmentId>,
+  /// Files being saved, with what stops their transfer: one transfer per file, so two never write
+  /// the same partial file.
+  saving: HashMap<AttachmentId, AbortHandle>,
+  /// What the user asked of downloads in the list, applied on the next [`Self::start_due`].
+  controls: Vec<(AttachmentId, DownloadControl)>,
+  /// Saved files to open or show, for the host (only an app with a desktop can).
+  opens: Vec<OpenRequest>,
   /// When to look for saves to continue (client clock): at the start, after a save finished and
   /// when the next retry is due.
   maybe_next_scan_ms: Option<i64>,
@@ -49,6 +57,33 @@ pub enum Finished {
     attachment: AttachmentId,
     saved: Result<String, CoreError>,
   },
+  /// A save the user paused or cancelled; its record says so already.
+  Stopped,
+}
+
+/// What the user does with a download in the downloads list.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DownloadControl {
+  /// Stops the transfer and keeps what arrived.
+  Pause,
+  /// Continues a paused download, or tries a failed or cancelled one again.
+  Resume,
+  /// Stops the transfer and deletes what arrived.
+  Cancel,
+  /// Takes a finished download off the list (the saved file stays).
+  Forget,
+  /// Opens the saved file with its app.
+  Open,
+  /// Shows the saved file in the file manager.
+  Reveal,
+}
+
+/// A saved file the host opens (or shows in its folder). The path comes from the core's record,
+/// never from the page.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct OpenRequest {
+  pub path: PathBuf,
+  pub is_reveal: bool,
 }
 
 /// Called with the opened file (or why it couldn't be opened).
@@ -95,7 +130,9 @@ impl Downloads {
       limit: limit.max(1),
       waiting: VecDeque::new(),
       running: FuturesUnordered::new(),
-      saving: HashSet::new(),
+      saving: HashMap::new(),
+      controls: Vec::new(),
+      opens: Vec::new(),
       maybe_next_scan_ms: Some(i64::MIN),
       has_resumed: false,
     }
@@ -173,12 +210,29 @@ impl Downloads {
     !self.running.is_empty()
   }
 
+  /// Applies what the user asked of a download in the list. A pause or cancel stops the transfer
+  /// at once; the rest happens on the next [`Self::start_due`].
+  pub fn control(&mut self, attachment: AttachmentId, control: DownloadControl) {
+    if matches!(control, DownloadControl::Pause | DownloadControl::Cancel) {
+      if let Some(abort) = self.saving.remove(&attachment) {
+        abort.abort();
+      }
+      self.waiting.retain(|job| !job.saves(attachment));
+    }
+    self.controls.push((attachment, control));
+  }
+
+  /// The saved files the user asked to open or show since the last call.
+  pub fn take_opens(&mut self) -> Vec<OpenRequest> {
+    std::mem::take(&mut self.opens)
+  }
+
   /// Starts waiting downloads while fewer than the limit run. Starting asks the server for the
   /// download URL (a short request); a failure goes to whoever waits. Returns whether the store
   /// changed (a file to save is marked as downloading).
   pub async fn start_due<A: ServerApi, S: LocalStore>(&mut self, client: &mut Client<A, S>) -> bool {
+    let mut is_changed = self.apply_controls(client);
     self.queue_due_saves(client);
-    let mut is_changed = false;
     // What the user opened has one slot beyond the limit, so it never waits for previews.
     while self.running.len() < self.limit
       || (self.running.len() <= self.limit && self.waiting.front().is_some_and(Job::is_urgent))
@@ -213,13 +267,17 @@ impl Downloads {
             .await
           {
             Ok(download) => {
-              self.saving.insert(attachment);
-              self.running.push(Box::pin(async move {
+              let (abort, registration) = AbortHandle::new_pair();
+              self.saving.insert(attachment, abort);
+              let save = async move {
                 Finished::Saved {
                   attachment,
                   saved: download.save().await,
                 }
-              }));
+              };
+              self.running.push(Box::pin(
+                Abortable::new(save, registration).map(|finished| finished.unwrap_or(Finished::Stopped)),
+              ));
             },
             Err(error) => {
               // A retry may have come due: look again.
@@ -277,7 +335,7 @@ impl Downloads {
 impl Downloads {
   /// Queues a save unless the file is being saved or waits already.
   fn queue_save(&mut self, conversation: ConversationId, attachment: AttachmentId, target: DownloadTarget) {
-    if self.saving.contains(&attachment) || self.waiting.iter().any(|job| job.saves(attachment)) {
+    if self.saving.contains_key(&attachment) || self.waiting.iter().any(|job| job.saves(attachment)) {
       tracing::debug!(attachment_id = %attachment, "the file is being saved already");
       return;
     }
@@ -286,6 +344,48 @@ impl Downloads {
       attachment,
       target,
     });
+  }
+
+  /// Applies the queued controls; returns whether the store changed.
+  fn apply_controls<A: ServerApi, S: LocalStore>(&mut self, client: &mut Client<A, S>) -> bool {
+    let mut is_changed = false;
+    for (attachment, control) in std::mem::take(&mut self.controls) {
+      if let Err(error) = self.apply_control(client, attachment, control) {
+        tracing::warn!(%error, attachment_id = %attachment, ?control, "a download control failed");
+      }
+      is_changed = true;
+    }
+    is_changed
+  }
+
+  fn apply_control<A: ServerApi, S: LocalStore>(
+    &mut self,
+    client: &mut Client<A, S>,
+    attachment: AttachmentId,
+    control: DownloadControl,
+  ) -> Result<(), CoreError> {
+    match control {
+      DownloadControl::Pause => client.stop_download_to_disk(attachment, DownloadStatus::Paused),
+      DownloadControl::Cancel => client.stop_download_to_disk(attachment, DownloadStatus::Cancelled),
+      DownloadControl::Forget => forget_download(client.store(), attachment).map(|_| ()),
+      DownloadControl::Resume => {
+        if let Some(record) = download_record(client.store(), attachment)? {
+          self.queue_save(record.conversation_id, attachment, record.target);
+        }
+        Ok(())
+      },
+      DownloadControl::Open | DownloadControl::Reveal => {
+        if let Some(record) = download_record(client.store(), attachment)?
+          && let DownloadStatus::Saved { path } = record.status
+        {
+          self.opens.push(OpenRequest {
+            path: PathBuf::from(path),
+            is_reveal: control == DownloadControl::Reveal,
+          });
+        }
+        Ok(())
+      },
+    }
   }
 
   /// Queues the saves whose retry came due (and, the first time, those an app left running).

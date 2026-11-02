@@ -260,3 +260,43 @@ files-filter-all = Alle
 files-filter-media = Bilder und Videos
 files-filter-documents = Dokumente
 files-all-empty = Dateien und Bilder aus allen deinen Unterhaltungen erscheinen hier.
+
+# Download-Liste der Desktop-App (obere Leiste)
+downloads-title = Downloads
+downloads-label-active = { $count ->
+    [one] Downloads, { $count } läuft
+   *[other] Downloads, { $count } laufen
+}
+downloads-recent = Letzte Downloads
+downloads-close = Schließen
+downloads-pause = Pausieren
+downloads-resume = Fortsetzen
+downloads-cancel = Abbrechen
+downloads-retry = Erneut versuchen
+downloads-reveal = Im Ordner zeigen
+downloads-open = Öffnen
+downloads-forget = Aus der Liste entfernen
+downloads-speed = { $speed }/s
+downloads-left-seconds = { $count ->
+    [one] noch { $count } Sekunde
+   *[other] noch { $count } Sekunden
+}
+downloads-left-minutes = { $count ->
+    [one] noch { $count } Minute
+   *[other] noch { $count } Minuten
+}
+downloads-left-hours = { $count ->
+    [one] noch { $count } Stunde
+   *[other] noch { $count } Stunden
+}
+downloads-paused = Pausiert
+downloads-retrying = Verbindung unterbrochen, neuer Versuch…
+downloads-done = Fertig
+downloads-cancelled = Abgebrochen
+downloads-unknown = In dieser Version nicht verfügbar
+downloads-failed-network = Fehlgeschlagen: Netzwerkfehler
+downloads-failed-storage = Fehlgeschlagen: Dateispeicher nicht erreichbar
+downloads-failed-missing = Fehlgeschlagen: nicht mehr auf dem Server
+downloads-failed-corrupted = Fehlgeschlagen: Datei beschädigt angekommen
+downloads-failed-disk = Fehlgeschlagen: konnte nicht geschrieben werden
+downloads-failed-too-large = Fehlgeschlagen: Datei zu groß

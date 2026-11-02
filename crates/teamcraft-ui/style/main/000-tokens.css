@@ -57,6 +57,12 @@
   --lvl-info: #1b6fb4;
   --lvl-warn: #a86400;
   --lvl-error: #c0392b;
+  /* The downloads button's bar (#153): a download that broke off, and one that just finished. Bright
+     enough on the dark top bar and on the popover's surface alike. */
+  --download-attention: #f2a900;
+  --download-done: #30b64f;
+  /* The progress in the top bar's dark chrome, in both themes. */
+  --download-progress: #5c9dff;
 
   --online: #2eb67d;
   --away: #e8a317;

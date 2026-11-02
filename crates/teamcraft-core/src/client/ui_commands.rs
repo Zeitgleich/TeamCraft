@@ -182,6 +182,11 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
         .download_attachment_to_disk(conversation, attachment)
         .await
         .map(|_| ()),
+      // Downloads run inline here: there is no transfer in flight to control.
+      CoreCommand::ControlDownload { attachment, control } => {
+        tracing::debug!(attachment_id = %attachment, ?control, "no download list without a host");
+        Ok(())
+      },
       CoreCommand::CreateShareLink {
         conversation,
         attachment,
