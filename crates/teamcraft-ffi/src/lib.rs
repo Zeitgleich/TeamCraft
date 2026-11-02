@@ -430,9 +430,7 @@ impl TeamCraft {
   /// How far the first sync of a newly set up device is; `None` when none runs. Read again after
   /// each change notification.
   pub async fn first_sync(&self) -> Result<Option<FirstSyncItem>, TeamCraftError> {
-    self
-      .call(|engine| Box::pin(async move { engine.first_sync() }))
-      .await
+    self.read(|reads| reads.first_sync()).await
   }
 
   /// How far conversations with messages waiting for keys have caught up (a newly linked device,

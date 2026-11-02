@@ -14,7 +14,9 @@ use std::time::Instant;
 
 use teamcraft_client_api::backend::{ChatBackend as _, SearchBackend as _};
 use teamcraft_client_api::entry_rules::{channel_leave, space_leave};
-use teamcraft_client_api::model::{FirstSyncStage, Message as MessageView, SpaceRole, SpaceRoster, is_pending};
+use teamcraft_client_api::model::{
+  FirstSyncStage, Message as MessageView, SpaceRole, SpaceRoster, is_pending,
+};
 use teamcraft_client_api::search::parse_query;
 use teamcraft_core::TypingState;
 use teamcraft_core::client::CatchUpFocus;
@@ -36,9 +38,9 @@ use crate::engine::{Job, Store, direct_peer, feed_anchor, older_len, parse_id};
 use crate::error::TeamCraftError;
 use crate::logging;
 use crate::types::{
-  AccountState, ConversationItem, FirstSyncItem, FirstSyncStageItem, KeyCatchUpItem, LeaveChoice, MentionSettings, MessageItem, MessagePage,
-  NotificationContentSettings, NotifiedConversation, Presence, PushDiagnosticsInfo, SearchHitItem,
-  SegmentPrefetchMode, SpaceMenuItem, share_targets,
+  AccountState, ConversationItem, FirstSyncItem, FirstSyncStageItem, KeyCatchUpItem, LeaveChoice,
+  MentionSettings, MessageItem, MessagePage, NotificationContentSettings, NotifiedConversation, Presence,
+  PushDiagnosticsInfo, SearchHitItem, SegmentPrefetchMode, SpaceMenuItem, share_targets,
 };
 
 /// Work for the read thread.

@@ -20,8 +20,8 @@ use teamcraft_core::api::{AccessTokenSource, ApiError, HttpRendezvous, HttpServe
 use teamcraft_core::client::NewDeviceLink;
 use teamcraft_core::client::files::sweep_staged_copies;
 use teamcraft_core::client::{
-  CatchUpFocus, HistoryBackfill, LinkAnnouncement, LinkApproval, LinkRequestList, PushRegistrar, ReceiptCancel,
-  SIGN_OUT_REVOKE_PATIENCE,
+  CatchUpFocus, HistoryBackfill, LinkAnnouncement, LinkApproval, LinkRequestList, PushRegistrar,
+  ReceiptCancel, SIGN_OUT_REVOKE_PATIENCE,
 };
 use teamcraft_core::clock::{Clock as _, SystemClock};
 use teamcraft_core::connection::{ConnectionStatus, NetworkChanges};
