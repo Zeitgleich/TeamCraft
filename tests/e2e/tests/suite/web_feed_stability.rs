@@ -6,7 +6,9 @@
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
-use chromiumoxide::cdp::browser_protocol::network::EmulateNetworkConditionsParams;
+use chromiumoxide::cdp::browser_protocol::network::{
+  EmulateNetworkConditionsByRuleParams, NetworkConditions, OverrideNetworkStateParams,
+};
 use chromiumoxide::cdp::js_protocol::runtime::EvaluateParams;
 use chromiumoxide::page::Page;
 use teamcraft_core::api::GatewayConnection;
@@ -475,8 +477,17 @@ fn assert_still_while_reading(stats: FeedStats) {
 }
 
 async fn set_offline(page: &Page, is_offline: bool) {
+  // An empty pattern applies to every request.
+  let every_request = NetworkConditions::new("", 0.0, -1.0, -1.0);
   page
-    .execute(EmulateNetworkConditionsParams::new(is_offline, 0.0, -1.0, -1.0))
+    .execute(EmulateNetworkConditionsByRuleParams::new(
+      is_offline,
+      vec![every_request],
+    ))
+    .await
+    .unwrap();
+  page
+    .execute(OverrideNetworkStateParams::new(is_offline, 0.0, -1.0, -1.0))
     .await
     .unwrap();
 }
