@@ -185,6 +185,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       .store
       .delete(Table::Conversations, &conversation.to_string())?;
     self.store.delete(Table::Members, &conversation.to_string())?;
+    self.forget_older_history(conversation)?;
     Ok(())
   }
 
@@ -200,6 +201,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       client.clear_leftovers(conversation)?;
       client.drop_pending_work(conversation)?;
       client.store.delete_messages(conversation)?;
+      client.forget_older_history(conversation)?;
       crate::unseen_reactions::forget(&client.store, conversation)?;
       let id = conversation.to_string();
       let prefix = format!("{conversation}/");

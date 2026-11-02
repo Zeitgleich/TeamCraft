@@ -8,6 +8,34 @@ import org.junit.Test
 
 class PagedFeedTest {
   @Test
+  fun theServerIsOnlyAskedOnceTheStoreHasNoMoreRows() {
+    assertEquals(
+      OlderState(hasOlder = true, isLoading = false, isFailed = false),
+      olderState(hasLocalOlder = true, isReading = false, serverHistory = ServerHistory.FAILED),
+    )
+    assertEquals(
+      OlderState(hasOlder = true, isLoading = false, isFailed = false),
+      olderState(hasLocalOlder = false, isReading = false, serverHistory = ServerHistory.AVAILABLE),
+    )
+    assertEquals(
+      OlderState(hasOlder = true, isLoading = true, isFailed = false),
+      olderState(hasLocalOlder = false, isReading = false, serverHistory = ServerHistory.LOADING),
+    )
+  }
+
+  @Test
+  fun aFailureShowsAndTheBeginningEndsThePaging() {
+    assertEquals(
+      OlderState(hasOlder = false, isLoading = false, isFailed = true),
+      olderState(hasLocalOlder = false, isReading = false, serverHistory = ServerHistory.FAILED),
+    )
+    assertEquals(
+      OlderState(hasOlder = false, isLoading = false, isFailed = false),
+      olderState(hasLocalOlder = false, isReading = false, serverHistory = ServerHistory.COMPLETE),
+    )
+  }
+
+  @Test
   fun theFirstReadAsksForTheNewestPage() = runBlocking {
     val reads = mutableListOf<Pair<String?, Int>>()
     val feed = PagedFeed(firstPage = 200, pageBack = 100) { maybeOldest, older ->

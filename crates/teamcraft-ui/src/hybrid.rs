@@ -252,6 +252,14 @@ impl<C: ChatBackend + 'static> ChatBackend for Hybrid<C> {
     self.chat.rows_prepended(conversation)
   }
 
+  fn older_history(&self, conversation: ConversationId) -> teamcraft_client_api::model::OlderHistory {
+    self.chat.older_history(conversation)
+  }
+
+  fn load_older_history(&self, conversation: ConversationId) {
+    self.chat.load_older_history(conversation);
+  }
+
   fn prefetch_messages(&self, conversation: ConversationId, start: usize, len: usize) {
     self.chat.prefetch_messages(conversation, start, len);
   }

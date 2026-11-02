@@ -126,6 +126,7 @@ import de.zeitgleich.teamcraft.core.MessageExtras
 import de.zeitgleich.teamcraft.core.ReplyPreview
 import de.zeitgleich.teamcraft.core.User
 import de.zeitgleich.teamcraft.core.UnseenReactions
+import de.zeitgleich.teamcraft.ui.OlderState
 import de.zeitgleich.teamcraft.ui.DividerOnScreen
 import de.zeitgleich.teamcraft.ui.FeedItem
 import de.zeitgleich.teamcraft.ui.FeedScrollAction
@@ -371,6 +372,7 @@ fun MessageFeed(
       }
       // Above the oldest row: seen only when the reader is faster than the core.
       if (older.hasOlder && older.isLoading) item(key = OLDER_LOADING_KEY) { OlderLoadingRow() }
+      if (older.isFailed) item(key = OLDER_FAILED_KEY) { OlderFailedRow(older.onRetry) }
     }
     FloatingDay(listState, items, Modifier.align(Alignment.TopCenter))
     Column(
@@ -405,13 +407,18 @@ fun MessageFeed(
 }
 
 /** Whether a feed can page further back (issue #1058); threads and searches show all they have. */
-class OlderMessages(val hasOlder: Boolean, val isLoading: Boolean, val onNearOldest: () -> Unit) {
+class OlderMessages(state: OlderState, val onRetry: () -> Unit, val onNearOldest: () -> Unit) {
+  val hasOlder = state.hasOlder
+  val isLoading = state.isLoading
+  val isFailed = state.isFailed
+
   companion object {
-    val None = OlderMessages(hasOlder = false, isLoading = false) {}
+    val None = OlderMessages(OlderState(hasOlder = false, isLoading = false, isFailed = false), onRetry = {}) {}
   }
 }
 
 private const val OLDER_LOADING_KEY = "older-loading"
+private const val OLDER_FAILED_KEY = "older-failed"
 
 /** Asks for older messages once the oldest loaded row comes within [OLDER_AHEAD_ROWS] of the screen. */
 @Composable
@@ -434,6 +441,24 @@ private fun OlderLoadingRow() {
   val label = stringResource(R.string.loading_older_messages)
   Box(Modifier.fillMaxWidth().padding(vertical = 12.dp).semantics { contentDescription = label }, contentAlignment = Alignment.Center) {
     CircularProgressIndicator(Modifier.size(20.dp), strokeWidth = 2.dp)
+  }
+}
+
+/** Older messages could not be read: says so where they would be, and the next connection asks again. */
+@Composable
+private fun OlderFailedRow(onRetry: () -> Unit) {
+  Row(
+    Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp),
+    horizontalArrangement = Arrangement.Center,
+    verticalAlignment = Alignment.CenterVertically,
+  ) {
+    Text(
+      stringResource(R.string.older_history_failed),
+      Modifier.weight(1f, fill = false),
+      style = MaterialTheme.typography.bodySmall,
+      color = MaterialTheme.colorScheme.onSurfaceVariant,
+    )
+    TextButton(onClick = onRetry) { Text(stringResource(R.string.older_history_retry)) }
   }
 }
 

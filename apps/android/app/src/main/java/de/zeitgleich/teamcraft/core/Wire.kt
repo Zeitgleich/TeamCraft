@@ -421,6 +421,7 @@ data class ChatAnswer(
   val threads: List<ThreadSummary> = emptyList(),
   val users: List<String> = emptyList(),
   val unseen: UnseenReactions? = null,
+  @SerialName("older_history") val olderHistory: String? = null,
 )
 
 /**

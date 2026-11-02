@@ -3577,6 +3577,38 @@
         }
       }
     },
+    "older_history_failed": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Older messages could not be loaded."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Ältere Nachrichten konnten nicht geladen werden."
+          }
+        }
+      }
+    },
+    "older_history_retry": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Try again"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Erneut versuchen"
+          }
+        }
+      }
+    },
     "profile_name_change": {
       "localizations": {
         "en": {

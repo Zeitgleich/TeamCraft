@@ -703,6 +703,10 @@ final class AppModel {
 
   /// Others' reactions to the user's messages in the conversation not seen yet (offline from the
   /// local store).
+  func olderHistory(conversationId: String) async -> OlderHistory? {
+    await answer(.olderHistory(conversationId: conversationId))?.olderHistory
+  }
+
   func unseenReactions(conversationId: String) async -> UnseenReactions {
     await answer(.unseenReactions(conversationId: conversationId))?.unseen ?? UnseenReactions()
   }

@@ -114,6 +114,8 @@ import de.zeitgleich.teamcraft.core.MessageExtras
 import de.zeitgleich.teamcraft.core.PickedFile
 import de.zeitgleich.teamcraft.core.SendOptions
 import de.zeitgleich.teamcraft.core.UnseenReactions
+import de.zeitgleich.teamcraft.ui.ServerHistory
+import de.zeitgleich.teamcraft.ui.olderState
 import de.zeitgleich.teamcraft.ui.ComposerPrefs
 import de.zeitgleich.teamcraft.ui.ConversationRights
 import de.zeitgleich.teamcraft.ui.MainViewModel
@@ -175,6 +177,9 @@ fun ConversationScreen(
   }
   var hasOlder by remember(conversationId) { mutableStateOf(false) }
   var isLoadingOlder by remember(conversationId) { mutableStateOf(false) }
+  // Older history the store doesn't hold: read when the feed reaches the store's end.
+  var serverHistory by remember(conversationId) { mutableStateOf(ServerHistory.COMPLETE) }
+  var isAskingServer by remember(conversationId) { mutableStateOf(false) }
   val scope = rememberCoroutineScope()
   val rights = rememberRights(viewModel, conversationId, changes)
   LaunchedEffect(conversationId) {
@@ -187,6 +192,8 @@ fun ConversationScreen(
     val maybeTail = feed.reread()
     messages = maybeTail?.messages ?: emptyList()
     hasOlder = maybeTail?.hasOlder ?: false
+    serverHistory = viewModel.readChat { query(ChatQueries.olderHistory(conversationId)).olderHistory } ?: serverHistory
+    isAskingServer = false
     maybeKeyCatchUp = viewModel.keyCatchUp()
     // After the messages: once the store has the notified one, the core no longer names it.
     maybeNotified = viewModel.notifiedConversation(conversationId)
@@ -255,8 +262,17 @@ fun ConversationScreen(
       onOpenPermalink = onOpenPermalink,
       unseenReactions = unseenReactions,
       onReactionsSeen = { seen -> viewModel.act(ChatActions.markReactionsSeen(conversationId, seen)) },
-      older = OlderMessages(hasOlder, isLoadingOlder) {
-        if (isLoadingOlder) return@OlderMessages
+      older = OlderMessages(
+        olderState(hasOlder, isLoadingOlder || isAskingServer, serverHistory),
+        onRetry = { viewModel.act(ChatActions.loadOlderHistory(conversationId)) },
+      ) {
+        if (isLoadingOlder || isAskingServer) return@OlderMessages
+        if (!hasOlder) {
+          // The core answers in the store: the change that follows says how it went.
+          isAskingServer = true
+          viewModel.act(ChatActions.loadOlderHistory(conversationId))
+          return@OlderMessages
+        }
         isLoadingOlder = true
         scope.launch {
           // A failed read leaves the rows as they are; the next scroll near the top asks again.

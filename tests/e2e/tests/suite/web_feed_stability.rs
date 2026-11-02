@@ -3,8 +3,10 @@
 //! per frame, with the composer idle, with the other person typing and while imported history is
 //! read into the conversation page by page (#1083).
 
+use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
+use chromiumoxide::cdp::browser_protocol::network::EmulateNetworkConditionsParams;
 use chromiumoxide::cdp::js_protocol::runtime::EvaluateParams;
 use chromiumoxide::page::Page;
 use teamcraft_core::api::GatewayConnection;
@@ -44,6 +46,24 @@ const SCROLL_UP: &str = r#"(() => {
   list.dispatchEvent(new WheelEvent('wheel', { deltaY: -300, bubbles: true }));
   list.scrollTop -= 300;
 })()"#;
+/// More than the newest page the browser holds, and more than one further page.
+const OLDER_HISTORY_MESSAGES: usize = 400;
+/// How long a page of older history may take once the reader is at the top.
+const OLDER_PAGE_WAIT: Duration = Duration::from_secs(10);
+/// Goes to the very top like a wheel would, and starts the probe's count from there.
+const SCROLL_TO_TOP: &str = r#"(() => {
+  const list = document.querySelector('.message-list');
+  list.dispatchEvent(new WheelEvent('wheel', { deltaY: -3000, bubbles: true }));
+  list.scrollTop = 0;
+})()"#;
+/// What a message on screen may end up from where it was: rounding, not a move.
+const MAX_DRIFT_PX: f64 = 1.5;
+/// Two frames on, the list has followed the jump: the probe starts counting from there.
+const AFTER_THE_JUMP: &str = r#"new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(() => {
+  window.feedProbe.forgetPlaces();
+  window.feedProbe.take();
+  done();
+})))"#;
 /// Watches the feed once per frame. Reading layout per frame is the probe's, not the app's. A row
 /// counts as visible when it intersects the list; its message's distance from the list's top
 /// must not change, unless the reader scrolled, and there is no reader in this test.
@@ -60,13 +80,17 @@ window.feedProbe = (() => {
   let lastScrollHeight = list.scrollHeight;
   let lastPlaces = new Map();
   let visible = new Set();
+  const seen = new WeakSet(list.querySelectorAll('.row'));
   const observer = new MutationObserver((records) => {
     for (const record of records) {
+      // A row that went and came back only moved (`For` reorders): it kept its state and its pixels.
       for (const node of record.addedNodes) {
-        if (node.nodeType === 1 && node.classList.contains('row')) stats.rows_added += 1;
+        if (node.nodeType !== 1 || !node.classList.contains('row') || seen.has(node)) continue;
+        seen.add(node);
+        stats.rows_added += 1;
       }
       for (const node of record.removedNodes) {
-        if (node.nodeType !== 1) continue;
+        if (node.nodeType !== 1 || node.isConnected) continue;
         if (node.classList.contains('row')) stats.rows_removed += 1;
         const removed = node.matches('[data-msg-id]') ? [node] : [...node.querySelectorAll('[data-msg-id]')];
         for (const message of removed) {
@@ -97,7 +121,8 @@ window.feedProbe = (() => {
       for (const message of list.querySelectorAll('[data-msg-id]')) {
         const rect = message.getBoundingClientRect();
         if (rect.bottom > box.top && rect.top < box.bottom) {
-          places.set(message.getAttribute('data-msg-id'), rect.top - box.top);
+          // The bottom: a row whose header goes (older rows came, same author) keeps its text there.
+          places.set(message.getAttribute('data-msg-id'), rect.bottom - box.top);
         }
       }
       for (const row of list.querySelectorAll('.row[data-idx]')) {
@@ -119,10 +144,29 @@ window.feedProbe = (() => {
       lastPlaces = places;
       visible = new Set(places.keys());
     }
-    requestAnimationFrame(frame);
+    next();
   };
-  requestAnimationFrame(frame);
-  return { take: () => { const taken = stats; stats = empty(); return taken; } };
+  // Sampled from a resize observer of a sentinel that changes size every frame: it runs after all
+  // of the frame's callbacks and after the list's own observer (created earlier), right before the
+  // paint. What it sees is what gets painted; any earlier or later it isn't.
+  const sentinel = document.createElement('div');
+  sentinel.style.position = 'fixed';
+  sentinel.style.height = '1px';
+  sentinel.style.visibility = 'hidden';
+  document.body.appendChild(sentinel);
+  let tick = 0;
+  new ResizeObserver(frame).observe(sentinel);
+  const next = () => requestAnimationFrame(() => {
+    tick = (tick + 1) % 2;
+    sentinel.style.width = `${tick + 1}px`;
+  });
+  next();
+  return {
+    take: () => { const taken = stats; stats = empty(); return taken; },
+    // The reader moved the list: the next frame is what later ones compare with.
+    forgetPlaces: () => { lastPlaces = new Map(); visible = new Set(); },
+    places: () => JSON.stringify([...lastPlaces]),
+  };
 })();
 "#;
 
@@ -210,7 +254,7 @@ async fn scenario() {
   sign_in_as_alice(&page).await;
   wait_for_text(&page, "browser-channel").await;
   page.goto(format!("{WEB_ORIGIN}/dm/{dm}")).await.unwrap();
-  wait_until_readable(&mut rig.alice, &mut rig.carol, &page).await;
+  wait_until_readable(&mut rig.alice, &mut rig.carol, &page, "live 0").await;
   // It opens at the "New messages" divider; the reader goes on to the newest message.
   page
     .evaluate("document.querySelector('.jump-latest').click()")
@@ -274,6 +318,169 @@ async fn scenario() {
   rig.finish().await;
 }
 
+/// A device that holds only the newest page reads the rest while the reader scrolls up, and what is
+/// on screen stays where it is; a failed page says so at the top of the list and can be asked again.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn scrolling_above_what_the_device_holds_reads_the_server_and_nothing_moves() {
+  // Boxed for the same reason as the scenario above.
+  Box::pin(older_history_scenario()).await;
+}
+
+async fn older_history_scenario() {
+  // Many messages in a row; the limits are not what this test looks at.
+  let unlimited =
+    |builder: StackBuilder| builder.with_env("TEAMCRAFT_SECURITY__RATE_LIMITS__IS_ENABLED", "false");
+  let Some(mut rig) = Rig::start_with(unlimited, &[]).await else {
+    return;
+  };
+  let dm = rig.alice.client.open_dm(rig.carol.user_id()).await.unwrap();
+  rig.carol.wait_joined(dm).await;
+  rig
+    .carol
+    .client
+    .send_text(dm, None, "the very first")
+    .await
+    .unwrap();
+  for index in 0..OLDER_HISTORY_MESSAGES {
+    rig
+      .carol
+      .client
+      .send_text(dm, None, &format!("live {index}"))
+      .await
+      .unwrap();
+  }
+  rig
+    .carol
+    .client
+    .send_text(dm, None, "hello from carol")
+    .await
+    .unwrap();
+  rig.alice.wait_for_text(dm, "hello from carol").await;
+  rig.alice.client.sync_account_data().await.unwrap();
+
+  let page = rig.browser.page.clone();
+  sign_in_as_alice(&page).await;
+  wait_for_text(&page, "browser-channel").await;
+  page.goto(format!("{WEB_ORIGIN}/dm/{dm}")).await.unwrap();
+  // It opens at the "New messages" divider, far from the first message and from the newest one.
+  wait_until_readable(&mut rig.alice, &mut rig.carol, &page, "live ").await;
+  page.evaluate(PROBE).await.unwrap();
+
+  // A page that fails says so at the top, and the reader stays there: no scrolling from here on,
+  // so whatever moves on screen moved because rows arrived. A page of the server answers faster
+  // than a scroll settles; this way it can't arrive before the probe looks.
+  let deadline = Instant::now() + PAGING_DEADLINE;
+  let mut total = FeedStats::default();
+  while !body_text(&page).await.contains("the very first") {
+    assert!(
+      Instant::now() < deadline,
+      "the beginning was not reached: {total:?}"
+    );
+    set_offline(&page, true).await;
+    page.evaluate(SCROLL_TO_TOP).await.unwrap();
+    if !wait_for_failure_or_beginning(&page).await {
+      break;
+    }
+    page.evaluate(AFTER_THE_JUMP).await.unwrap();
+    let round = read_one_page(&page).await;
+    eprintln!("older history, one page: {round:?}");
+    assert_still_while_reading(round);
+    total = total.plus(round);
+  }
+  set_offline(&page, false).await;
+  assert!(
+    total.count_changes > 0,
+    "the list never grew while the probe watched: {total:?}"
+  );
+  rig.finish().await;
+}
+
+/// Whether the page failed, as it should while offline; `false` when none was needed any more.
+async fn wait_for_failure_or_beginning(page: &Page) -> bool {
+  let deadline = Instant::now() + OLDER_PAGE_WAIT;
+  loop {
+    let text = body_text(page).await;
+    if text.contains("Older messages could not be loaded") {
+      return true;
+    }
+    if text.contains("the very first") {
+      return false;
+    }
+    assert!(Instant::now() < deadline, "no failure shown:\n{text}");
+    tokio::time::sleep(Duration::from_millis(100)).await;
+  }
+}
+
+/// Back online, the page is asked for again; watches until the list grew.
+async fn read_one_page(page: &Page) -> FeedStats {
+  // A few painted frames, so the probe knows what is on screen.
+  tokio::time::sleep(Duration::from_millis(200)).await;
+  let before = places_on_screen(page).await;
+  assert!(!before.is_empty(), "no message on screen before the page");
+  set_offline(page, false).await;
+  page
+    .evaluate("document.querySelector('.older-history-retry')?.click()")
+    .await
+    .unwrap();
+  let deadline = Instant::now() + OLDER_PAGE_WAIT;
+  let mut round = FeedStats::default();
+  while Instant::now() < deadline && round.rows_added == 0 && round.count_changes == 0 {
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    round = round.plus(take_stats(page).await);
+  }
+  // What the rows above settle to, measured after they arrived.
+  tokio::time::sleep(SCROLL_SETTLE).await;
+  let after = places_on_screen(page).await;
+  let drift = before
+    .iter()
+    .filter_map(|(id, place)| after.get(id).map(|now| (now - place).abs()))
+    .collect::<Vec<_>>();
+  assert!(
+    !drift.is_empty(),
+    "nothing that was on screen still is: {before:?} became {after:?}"
+  );
+  assert!(
+    drift.iter().all(|moved| *moved <= MAX_DRIFT_PX),
+    "messages on screen went elsewhere: {before:?} became {after:?}"
+  );
+  round.plus(take_stats(page).await)
+}
+
+/// Where each message on screen ends, from the list's top, as the probe last saw it.
+async fn places_on_screen(page: &Page) -> HashMap<String, f64> {
+  let params = EvaluateParams::builder()
+    .expression("window.feedProbe.places()")
+    .return_by_value(true)
+    .build()
+    .unwrap();
+  let json: String = page.evaluate(params).await.unwrap().into_value().unwrap();
+  let places: Vec<(String, f64)> = serde_json::from_str(&json).unwrap();
+  places.into_iter().collect()
+}
+
+/// [`assert_still`] for a list that the reader scrolled and that grows on purpose.
+fn assert_still_while_reading(stats: FeedStats) {
+  assert_eq!(stats.list_replaced, 0, "the list was replaced: {stats:?}");
+  // One at most: the row that was the oldest, which loses its header to the rows before it.
+  assert!(
+    stats.visible_removed <= 1,
+    "messages on screen were rebuilt: {stats:?}"
+  );
+  assert_eq!(stats.blank_frames, 0, "frames without any message: {stats:?}");
+  assert_eq!(
+    stats.skeleton_frames, 0,
+    "placeholders showed on screen: {stats:?}"
+  );
+  assert_eq!(stats.moved_frames, 0, "messages on screen moved: {stats:?}");
+}
+
+async fn set_offline(page: &Page, is_offline: bool) {
+  page
+    .execute(EmulateNetworkConditionsParams::new(is_offline, 0.0, -1.0, -1.0))
+    .await
+    .unwrap();
+}
+
 /// Nothing on screen was rebuilt, blanked or moved.
 fn assert_still(phase: &str, stats: FeedStats) {
   assert!(stats.frames > 0, "{phase}: no frame was drawn");
@@ -300,12 +507,12 @@ fn assert_still(phase: &str, stats: FeedStats) {
 }
 
 /// Pumps Alice's other device (and Carol's) until it added the browser to the conversation's group.
-async fn wait_until_readable(alice: &mut Peer, carol: &mut Peer, page: &Page) {
+async fn wait_until_readable(alice: &mut Peer, carol: &mut Peer, page: &Page, shown: &str) {
   let deadline = Instant::now() + SET_UP_DEADLINE;
   let mut maybe_clear_since = None;
   loop {
     let text = body_text(page).await;
-    if text.contains("live 0") && !text.contains("isn't fully set up") {
+    if text.contains(shown) && !text.contains("isn't fully set up") {
       let since: Instant = *maybe_clear_since.get_or_insert_with(Instant::now);
       if since.elapsed() >= Duration::from_secs(3) {
         return;

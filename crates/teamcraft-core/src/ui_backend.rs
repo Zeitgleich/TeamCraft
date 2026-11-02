@@ -24,9 +24,9 @@ use teamcraft_client_api::live::LiveSnapshot;
 use teamcraft_client_api::model::{
   Bookmark, BookmarkKind, Conversation, ConversationId, ConversationKind, CustomStatus, DeviceSetup,
   ImportedAuthorView, ImportedFrom, ImportedMark, JoinableSpace, MembershipIssue, Message, MessageKind,
-  PENDING_ID_BIT, PendingInvite, Placeholder, PresenceStatus, Reaction, SidebarCategory, Space, SpaceId,
-  SpaceMember, SpaceRoster, SystemEvent, ThreadId, ThreadSummary, TimestampMs, TypingNow, UnseenReactions,
-  User, UserId, hue_from_hex,
+  OlderHistory, PENDING_ID_BIT, PendingInvite, Placeholder, PresenceStatus, Reaction, SidebarCategory, Space,
+  SpaceId, SpaceMember, SpaceRoster, SystemEvent, ThreadId, ThreadSummary, TimestampMs, TypingNow,
+  UnseenReactions, User, UserId, hue_from_hex,
 };
 use teamcraft_proto::{
   AttachmentId, ClientMessageId, ConversationKind as ConversationKindProto, ConversationResponse,
@@ -43,6 +43,7 @@ use teamcraft_client_api::notify::{MentionRules, is_mentioned};
 use teamcraft_client_api::receipts::{ReadIndicator, seen_by};
 
 use crate::client::bookmarks_key;
+use crate::client::older_history::{is_failure_current, older_history_record};
 use crate::client::workspace_admin::{ChannelOptions, StoredRoster};
 use crate::clock::Clock;
 use crate::error::CoreError;
@@ -423,11 +424,48 @@ pub enum CoreCommand {
     conversation: ConversationId,
     at_ms: i64,
   },
+  /// The reader came near the oldest row held: one more page from the server. `request` tells the
+  /// answer in the store from those of earlier requests and earlier runs of the app.
+  LoadOlderHistory {
+    conversation: ConversationId,
+    request: u64,
+  },
 }
 
 /// Where the engine notes (in the sync state) which "jump to date" request it answered last.
 pub(crate) fn history_jump_key(conversation: ConversationId) -> String {
   format!("history-jump/{conversation}")
+}
+
+/// How the reading back through `conversation` stands, given the last request of this run.
+fn older_history_of(
+  store: &impl LocalStore,
+  conversation: ConversationId,
+  maybe_request: Option<u64>,
+) -> Result<OlderHistory, CoreError> {
+  let maybe_record = older_history_record(store, conversation)?;
+  let is_beginning = maybe_record.is_some_and(|record| record.is_at_beginning());
+  let Some(request) = maybe_request else {
+    // Nothing is on its way, and how an earlier run's request ended is no matter now.
+    return Ok(if is_beginning {
+      OlderHistory::Complete
+    } else {
+      OlderHistory::Available
+    });
+  };
+  let Some(record) = maybe_record.filter(|record| record.answered == request) else {
+    return Ok(OlderHistory::Loading);
+  };
+  if let Some(failed_in) = record.maybe_failed_in
+    && is_failure_current(store, failed_in)?
+  {
+    return Ok(OlderHistory::Failed);
+  }
+  Ok(if is_beginning {
+    OlderHistory::Complete
+  } else {
+    OlderHistory::Available
+  })
 }
 
 /// Text that must not show up in logs (a share link password); `Debug` prints `[redacted]`.
@@ -465,6 +503,8 @@ pub struct CoreChatBackend<S> {
   feeds: RefCell<Vec<(ConversationId, FeedView)>>,
   /// What paging an indexed feed needs of the conversations read last, kept likewise.
   layouts: RefCell<Vec<(ConversationId, Rc<FeedLayout>)>>,
+  /// The last request for older history per conversation since this backend started.
+  older_requests: RefCell<HashMap<ConversationId, u64>>,
   #[cfg(not(target_arch = "wasm32"))]
   pub(crate) search: RefCell<crate::ui_search::UiSearchState>,
 }
@@ -500,6 +540,7 @@ impl<S: LocalStore> CoreChatBackend<S> {
       activity: RefCell::default(),
       feeds: RefCell::default(),
       layouts: RefCell::default(),
+      older_requests: RefCell::default(),
       #[cfg(not(target_arch = "wasm32"))]
       search: RefCell::new(Default::default()),
     }
@@ -2283,6 +2324,31 @@ impl<S: LocalStore> ChatBackend for CoreChatBackend<S> {
     let key = history_jump_key(conversation);
     let answered: Option<i64> = self.read(records::get_json(&self.store, Table::SyncState, &key));
     answered == Some(at)
+  }
+
+  fn older_history(&self, conversation: ConversationId) -> OlderHistory {
+    let maybe_request = self.older_requests.borrow().get(&conversation).copied();
+    self.read(older_history_of(&self.store, conversation, maybe_request))
+  }
+
+  fn load_older_history(&self, conversation: ConversationId) {
+    if !matches!(
+      self.older_history(conversation),
+      OlderHistory::Available | OlderHistory::Failed
+    ) {
+      return;
+    }
+    let now = u64::try_from(self.clock.now_ms()).unwrap_or(0);
+    let request = {
+      let mut requests = self.older_requests.borrow_mut();
+      let last = requests.entry(conversation).or_default();
+      *last = now.max(*last + 1);
+      *last
+    };
+    self.command(CoreCommand::LoadOlderHistory {
+      conversation,
+      request,
+    });
   }
 
   fn join_channel(&self, conversation: ConversationId) {

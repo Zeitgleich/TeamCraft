@@ -31,3 +31,20 @@ class PagedFeed(
     return tail
   }
 }
+
+/** What the core says of the history beyond what this device holds (`OlderHistory` in Rust). */
+object ServerHistory {
+  const val AVAILABLE = "available"
+  const val LOADING = "loading"
+  const val FAILED = "failed"
+  const val COMPLETE = "complete"
+}
+
+/** What the top of a feed offers: the rows the store holds come first, then the server's. */
+data class OlderState(val hasOlder: Boolean, val isLoading: Boolean, val isFailed: Boolean)
+
+fun olderState(hasLocalOlder: Boolean, isReading: Boolean, serverHistory: String): OlderState = OlderState(
+  hasOlder = hasLocalOlder || serverHistory == ServerHistory.AVAILABLE || serverHistory == ServerHistory.LOADING,
+  isLoading = isReading || (!hasLocalOlder && serverHistory == ServerHistory.LOADING),
+  isFailed = !hasLocalOlder && serverHistory == ServerHistory.FAILED,
+)

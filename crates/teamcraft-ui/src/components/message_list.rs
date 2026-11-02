@@ -23,7 +23,7 @@ use crate::components::reaction_jump::ReactionJump;
 use crate::components::skeleton::MessageSkeleton;
 use crate::feed_motion::{FeedMotion, Shown, newest_confirmed};
 use crate::i18n::{I18n, use_i18n};
-use crate::model::{ConversationId, ConversationKind, Message, TimestampMs, as_chat_message};
+use crate::model::{ConversationId, ConversationKind, Message, OlderHistory, TimestampMs, as_chat_message};
 use crate::reactive::SetIfAlive;
 use crate::state::{AppState, Overlay, use_app_state};
 use crate::unread_divider::{DividerEvent, DwellClock, ReadMarkerGate};
@@ -56,6 +56,11 @@ const ESTIMATED_PILL_HEIGHT_PX: f64 = 22.0;
 const DIVIDER_CONTEXT_PX: f64 = 48.0;
 /// Heights differing by less than this are treated as equal, which ends the measure loop.
 const MEASURE_EPSILON: f32 = 0.5;
+/// Rows above the first one on screen at which the list asks for older history: a few screens
+/// ahead, so a reader scrolling back doesn't meet the end of what is here.
+const OLDER_AHEAD_ROWS: usize = 40;
+/// Rows above the first one on screen at which the state of that request shows.
+const OLDER_STATUS_ROWS: usize = 2;
 
 thread_local! {
   /// IDs of the lists that are mounted: usually one, two while a call's chat panel (#936) shows
@@ -81,6 +86,20 @@ fn defer_while_alive(list_id: u64, callback: impl FnOnce() + 'static) {
       callback();
     }
   });
+}
+
+/// Runs `callback` in a task of its own, between two frames, unless the list was unmounted. What it
+/// renders is measured by the next frame's callback, before that frame is painted; from inside a
+/// frame's callback it would be painted first, unmeasured.
+fn defer_between_frames_while_alive(list_id: u64, callback: impl FnOnce() + 'static) {
+  set_timeout(
+    move || {
+      if is_live(list_id) {
+        callback();
+      }
+    },
+    Duration::ZERO,
+  );
 }
 
 /// The slice of rows to render plus the spacer sizes around it.
@@ -369,7 +388,9 @@ pub fn MessageList(
         if let Some(slot) = heights.get_mut(index)
           && (*slot - measured).abs() > MEASURE_EPSILON
         {
-          if index < anchor {
+          // The row at the top too: it loses its header when older rows of its author arrive, and
+          // what follows it stays where it is.
+          if index <= anchor {
             shift_above_anchor += f64::from(measured - *slot);
           }
           *slot = measured;
@@ -390,8 +411,15 @@ pub fn MessageList(
       if shift_above_anchor != 0.0 {
         container_element.scroll_by_with_x_and_y(0.0, shift_above_anchor);
       }
-      note_position(&container_element);
-      layout_rev.update(|rev| *rev += 1);
+      // The next scroll event compares with this at once; the window follows between frames, so
+      // the rows it adds are measured and corrected before they are painted.
+      last_top.set_value(exact_scroll_top(&container_element));
+      defer_between_frames_while_alive(list_id, move || {
+        if let Some(element) = container.get_untracked() {
+          note_position(&element);
+        }
+        layout_rev.update(|rev| *rev += 1);
+      });
     }
   };
   // After a jump the target row's real height and the rows above it are only known once rendered:
@@ -467,6 +495,27 @@ pub fn MessageList(
     }
     now
   });
+  // Near the oldest row, older history comes from the server. Nothing is asked for at the bottom of
+  // a list that scrolls, so opening a conversation costs no extra request; a list too short to
+  // scroll could never get there. Read again when a request ends, so a page without a visible row
+  // (or the next connection after a failure) goes on by itself.
+  let older_history = Memo::new(move |_| state.read(|backend| backend.older_history(conversation)));
+  // Until the list took its opening position it stands at the top, whatever the reader will see.
+  let is_positioned = RwSignal::new(false);
+  Effect::new(move |_| {
+    if !is_positioned.get() || older_history.get() != OlderHistory::Available {
+      return;
+    }
+    let first_visible = window.get().first_visible;
+    let fits = heights.with_value(|heights| f64::from(heights.iter().sum::<f32>())) <= viewport.get();
+    if asks_for_older(first_visible, stick_to_bottom.get(), fits) {
+      state.write(|backend| backend.load_older_history(conversation));
+    }
+  });
+  let older_status = move || {
+    let is_near = window.get().first_visible < OLDER_STATUS_ROWS;
+    is_near.then(|| older_history.get())
+  };
   // The pages beyond the rendered rows load ahead, so scrolling into them doesn't wait (#1050).
   // Asked again after every change too, like the rows read theirs: a backend keeps what is read.
   Effect::new(move |_| {
@@ -537,6 +586,7 @@ pub fn MessageList(
           defer_while_alive(list_id, scroll_to_bottom);
         },
       }
+      is_positioned.set(true);
     }
   });
   // Remember where the reader left the bottom; back at the bottom, everything counts as seen.
@@ -743,6 +793,27 @@ pub fn MessageList(
         })
       }}
       <DateJumpPopover conversation=conversation menu=date_menu />
+      // Over the list, not in it: a row that comes and goes would move what the reader looks at.
+      {move || match older_status() {
+        Some(OlderHistory::Loading) => Some(view! {
+          <div class="older-history" role="status">
+            <span class="spinner" aria-hidden="true"></span>
+            <span>{move || i18n.t("older-history-loading")}</span>
+          </div>
+        }.into_any()),
+        Some(OlderHistory::Failed) => Some(view! {
+          <div class="older-history" role="alert">
+            <span>{move || i18n.t("older-history-failed")}</span>
+            <button
+              class="older-history-retry"
+              on:click=move |_| state.write(|backend| backend.load_older_history(conversation))
+            >
+              {move || i18n.t("older-history-retry")}
+            </button>
+          </div>
+        }.into_any()),
+        _ => None,
+      }}
       <div
         class="message-list"
         class:log-view=is_log
@@ -816,6 +887,11 @@ pub fn MessageList(
 }
 
 /// The name of the round "jump to latest" button, which has no text of its own.
+/// Whether the list asks for older history with `first_visible` as the first row on screen.
+fn asks_for_older(first_visible: usize, is_following: bool, fits_on_screen: bool) -> bool {
+  first_visible < OLDER_AHEAD_ROWS && (!is_following || fits_on_screen)
+}
+
 fn jump_latest_label(i18n: I18n, new_below: usize) -> String {
   match new_below {
     0 => i18n.t("jump-to-latest"),
@@ -1218,19 +1294,25 @@ fn RowSlot(
       .is_some_and(|marker| marker.conversation == conversation && marker.index == index())
   };
   // Compared by value: a row whose index moved with its message doesn't render again.
-  let data = Memo::new(move |_| -> Option<(Message, Option<Message>)> {
+  let data = Memo::new(move |previous: Option<&Option<(Message, Option<Message>)>>| {
     let index = index();
     let start = index.saturating_sub(1);
     let mut messages = state.read(|backend| backend.messages(conversation, start, 2));
     if is_chat {
       messages.iter_mut().for_each(as_chat_message);
     }
-    if index == 0 {
-      let message = messages.into_iter().next()?;
-      return Some((message, None));
+    // Not all read yet. A row that shows its message keeps it: older rows arrived and the one before
+    // it is still on its way, and a placeholder here would move what the reader looks at.
+    let is_complete = if index == 0 {
+      !messages.is_empty()
+    } else {
+      messages.len() == 2
+    };
+    if !is_complete {
+      return previous.cloned().flatten();
     }
-    if messages.len() < 2 {
-      return None;
+    if index == 0 {
+      return messages.into_iter().next().map(|message| (message, None));
     }
     let message = messages.remove(1);
     Some((message, messages.into_iter().next()))
@@ -1357,6 +1439,20 @@ pub(crate) fn handle_list_keys(
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  #[test]
+  fn older_history_is_asked_for_near_the_oldest_row_once_the_reader_left_the_bottom() {
+    assert!(asks_for_older(OLDER_AHEAD_ROWS - 1, false, false));
+    assert!(!asks_for_older(OLDER_AHEAD_ROWS, false, false));
+    assert!(
+      !asks_for_older(10, true, false),
+      "opening a conversation at its bottom costs no request"
+    );
+    assert!(
+      asks_for_older(0, true, true),
+      "a list too short to scroll can't get any nearer"
+    );
+  }
 
   #[test]
   fn a_log_opens_at_the_newest_line_not_at_the_unread_divider() {

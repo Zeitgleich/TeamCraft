@@ -206,6 +206,17 @@ struct ChatAnswer: Decodable, Sendable {
   let channels: [BrowsableChannel]?
   let unseen: UnseenReactions?
   let maybeBody: String?
+  let olderHistory: OlderHistory?
+}
+
+/// How far a conversation's history reaches beyond what this device holds.
+enum OlderHistory: String, Decodable, Sendable {
+  /// More may be on the server: a reader near the oldest row asks for it.
+  case available
+  case loading
+  /// The last request failed; the user can ask again, and the next connection does.
+  case failed
+  case complete
 }
 
 /// Others' reactions to the user's own messages in a conversation that the user hasn't seen: the

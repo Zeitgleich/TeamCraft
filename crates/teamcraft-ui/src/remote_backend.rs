@@ -246,6 +246,12 @@ struct Feed {
   /// The core's total jumped and the newest rows are being read to see where the rows held went:
   /// until then the feed keeps its total, so the UI never reads the old rows by the new length.
   is_moving: bool,
+  /// A page of older history was asked for and hasn't moved the rows yet: its last page can be a
+  /// single row, which a look at the total alone takes for a new message.
+  is_expecting_older: bool,
+  /// A page of older history was asked for and no answer read since says how that stands. What is
+  /// cached from before still says "available", and asking again on it would read on and on.
+  is_asking_older: bool,
 }
 
 struct Mirror {
@@ -330,6 +336,7 @@ impl Feed {
   /// Without any of them among these rows (more new messages than a page) they stay where they are.
   fn take_newest(&mut self, window: MessageWindow) -> bool {
     self.is_moving = false;
+    self.is_expecting_older = false;
     if let Some(shift) = self.shift_in(&window) {
       self.move_rows(shift);
     }
@@ -684,7 +691,8 @@ impl RemoteChat {
         if applied.touches(*conversation)
           && let Some(total) = mirror.snapshot.message_count(*conversation)
         {
-          if feed.is_used && !feed.rows.is_empty() && total > feed.total + 1 {
+          let is_jump = total > feed.total + 1 || (feed.is_expecting_older && total > feed.total);
+          if feed.is_used && !feed.rows.is_empty() && is_jump {
             feed.is_moving = true;
             plan.moved.push((*conversation, total));
           } else {
@@ -1956,6 +1964,53 @@ impl ChatBackend for RemoteChat {
     mirror.feeds.get(&conversation).map_or(0, |feed| feed.prepended)
   }
 
+  fn older_history(&self, conversation: ConversationId) -> teamcraft_client_api::model::OlderHistory {
+    let is_asking = self
+      .mirror
+      .borrow()
+      .feeds
+      .get(&conversation)
+      .is_some_and(|feed| feed.is_asking_older);
+    if is_asking {
+      return teamcraft_client_api::model::OlderHistory::Loading;
+    }
+    match self.ask(ChatQuery::OlderHistory { conversation }) {
+      // The page is in the core, its rows not here yet: asking again now, with the list's old
+      // position, would read on and on.
+      Some(ChatAnswer::OlderHistory { total, .. }) if total > self.feed_total(conversation) => {
+        teamcraft_client_api::model::OlderHistory::Loading
+      },
+      Some(ChatAnswer::OlderHistory { older_history, .. }) => older_history,
+      // Not read yet: nothing to show and nothing to ask for until it is.
+      _ => teamcraft_client_api::model::OlderHistory::Complete,
+    }
+  }
+
+  fn load_older_history(&self, conversation: ConversationId) {
+    if let Some(feed) = self.mirror.borrow_mut().feeds.get_mut(&conversation) {
+      feed.is_expecting_older = true;
+      feed.is_asking_older = true;
+    }
+    let backend = self.clone();
+    spawn_local(async move {
+      let action = ChatAction::LoadOlderHistory { conversation };
+      match call::<()>("core_action", &json!({ "action": action })).await {
+        Ok(()) => {
+          // Read after the core took the action, so it says how this request stands.
+          let query = ChatQuery::OlderHistory { conversation };
+          if let Ok(key) = serde_json::to_string(&query) {
+            backend.fetch_answer(key, query).await;
+          }
+        },
+        Err(error) => report_failure(ActionFailure::from_wire(&error)),
+      }
+      if let Some(feed) = backend.mirror.borrow_mut().feeds.get_mut(&conversation) {
+        feed.is_asking_older = false;
+      }
+      backend.changed();
+    });
+  }
+
   fn last_activity(&self, conversation: ConversationId) -> Option<teamcraft_client_api::model::TimestampMs> {
     self.mirror.borrow().snapshot.last_activity_of(conversation)
   }
@@ -2341,7 +2396,7 @@ mod tests {
       assert!(plan.threads.is_empty() && plan.pages.is_empty());
     }
 
-    fn backend() -> RemoteChat {
+    pub(super) fn backend() -> RemoteChat {
       let snapshot = ChatSnapshot::read(&crate::mock::MockBackend::new(0), Default::default());
       RemoteChat {
         mirror: Rc::new(RefCell::new(Mirror {
@@ -2358,6 +2413,62 @@ mod tests {
         refresh_queued: Rc::new(Cell::new(false)),
         answers: Rc::new(RefCell::new(HashMap::new())),
       }
+    }
+  }
+
+  mod older_history {
+    use teamcraft_client_api::model::OlderHistory;
+
+    use super::*;
+
+    #[test]
+    fn asking_says_loading_whatever_the_cached_answer_says() {
+      let (backend, conversation) = backend_with_answer(OlderHistory::Available, 3);
+      backend
+        .mirror
+        .borrow_mut()
+        .feeds
+        .entry(conversation)
+        .or_default()
+        .is_asking_older = true;
+      assert_eq!(backend.older_history(conversation), OlderHistory::Loading);
+    }
+
+    #[test]
+    fn a_page_the_feed_has_not_got_yet_still_counts_as_loading() {
+      let (backend, conversation) = backend_with_answer(OlderHistory::Available, 53);
+      assert_eq!(backend.older_history(conversation), OlderHistory::Loading);
+    }
+
+    #[test]
+    fn with_the_rows_here_the_answer_stands() {
+      let (backend, conversation) = backend_with_answer(OlderHistory::Available, 3);
+      assert_eq!(backend.older_history(conversation), OlderHistory::Available);
+      let (backend, conversation) = backend_with_answer(OlderHistory::Failed, 3);
+      assert_eq!(backend.older_history(conversation), OlderHistory::Failed);
+    }
+
+    /// A feed of 3 rows, and a fresh answer of the core with `total` rows.
+    fn backend_with_answer(older_history: OlderHistory, total: usize) -> (RemoteChat, ConversationId) {
+      let backend = super::refresh_plan::backend();
+      let conversation = id_from_raw(1);
+      backend
+        .mirror
+        .borrow_mut()
+        .feeds
+        .entry(conversation)
+        .or_default()
+        .apply(window(3, &["a", "b", "c"]));
+      let query = ChatQuery::OlderHistory { conversation };
+      let key = serde_json::to_string(&query).unwrap();
+      let answer = ChatAnswer::OlderHistory { older_history, total };
+      backend
+        .answers
+        .borrow_mut()
+        .entry(key)
+        .or_default()
+        .settle(answer);
+      (backend, conversation)
     }
   }
 
