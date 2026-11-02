@@ -241,6 +241,11 @@ struct Feed {
   /// The pages of rows the UI showed since that change (read, not only asked ahead for): a page
   /// loaded ahead tells the UI only when one of its rows is waiting for it.
   shown_pages: BTreeSet<usize>,
+  /// Rows that arrived before the ones held ([`ChatBackend::rows_prepended`]).
+  prepended: usize,
+  /// The core's total jumped and the newest rows are being read to see where the rows held went:
+  /// until then the feed keeps its total, so the UI never reads the old rows by the new length.
+  is_moving: bool,
 }
 
 struct Mirror {
@@ -262,6 +267,9 @@ struct Mirror {
 struct RefreshPlan {
   is_snapshot_changed: bool,
   pages: Vec<(ConversationId, usize)>,
+  /// Open feeds whose total jumped, with the new total: their pages are planned once the rows
+  /// held moved to where they are now.
+  moved: Vec<(ConversationId, usize)>,
   threads: Vec<(ConversationId, ThreadId)>,
   queries: Vec<(String, ChatQuery)>,
 }
@@ -304,8 +312,64 @@ pub struct RemoteChat {
 }
 
 impl Feed {
-  /// Takes a page read from the core; returns whether any row or the total changed.
+  /// Takes a page read from the core; returns whether any row or the total changed. A page from
+  /// after a jump of the total that shows none of the rows held can't say where those went, and
+  /// its rows would land among them at the wrong places: it is left out until the newest rows
+  /// have told ([`Self::take_newest`]).
   fn apply(&mut self, window: MessageWindow) -> bool {
+    if self.is_jump(&window) {
+      match self.shift_in(&window) {
+        Some(shift) => self.move_rows(shift),
+        None => return false,
+      }
+    }
+    self.store(window)
+  }
+
+  /// Takes the newest rows after the total jumped: what arrived before the rows held moved them.
+  /// Without any of them among these rows (more new messages than a page) they stay where they are.
+  fn take_newest(&mut self, window: MessageWindow) -> bool {
+    self.is_moving = false;
+    if let Some(shift) = self.shift_in(&window) {
+      self.move_rows(shift);
+    }
+    self.store(window)
+  }
+
+  fn is_jump(&self, window: &MessageWindow) -> bool {
+    window.total > self.total + 1 && !self.rows.is_empty()
+  }
+
+  /// How far the newest held row that is in `window` moved; `None` when none of them is in it.
+  fn shift_in(&self, window: &MessageWindow) -> Option<usize> {
+    let places: HashMap<MessageId, usize> = window
+      .messages
+      .iter()
+      .enumerate()
+      .map(|(offset, message)| (message.id, window.start + offset))
+      .collect();
+    self
+      .rows
+      .iter()
+      .rev()
+      .find_map(|(index, row)| places.get(&row.id).map(|place| place.saturating_sub(*index)))
+  }
+
+  /// `shift` rows arrived before the rows held: they and the pages read follow.
+  fn move_rows(&mut self, shift: usize) {
+    if shift == 0 {
+      return;
+    }
+    self.rows = std::mem::take(&mut self.rows)
+      .into_iter()
+      .map(|(index, row)| (index + shift, row))
+      .collect();
+    self.read_pages = moved_pages(&self.read_pages, shift);
+    self.shown_pages = moved_pages(&self.shown_pages, shift);
+    self.prepended += shift;
+  }
+
+  fn store(&mut self, window: MessageWindow) -> bool {
     let mut is_changed = self.total != window.total;
     self.total = window.total;
     for (offset, message) in window.messages.into_iter().enumerate() {
@@ -364,6 +428,14 @@ impl Feed {
     let pages: BTreeSet<usize> = self.rows.keys().map(|index| index / PAGE).chain([last]).collect();
     pages.into_iter().collect()
   }
+}
+
+/// Where the rows of `pages` are once `shift` rows arrived before them.
+fn moved_pages(pages: &BTreeSet<usize>, shift: usize) -> BTreeSet<usize> {
+  pages
+    .iter()
+    .flat_map(|page| (page * PAGE + shift) / PAGE..=((page + 1) * PAGE - 1 + shift) / PAGE)
+    .collect()
 }
 
 impl Slot {
@@ -554,7 +626,16 @@ impl RemoteChat {
         return;
       },
     };
-    let plan = self.plan_refresh(changes);
+    let mut plan = self.plan_refresh(changes);
+    // First, and before the pages: their numbers are valid once the rows held moved.
+    let moves = join_all(
+      plan
+        .moved
+        .iter()
+        .map(|(conversation, total)| self.follow_moved_rows(*conversation, *total)),
+    )
+    .await;
+    plan.pages.extend(self.pages_of_moved_feeds(&plan.moved));
     let pages = join_all(
       plan
         .pages
@@ -575,6 +656,7 @@ impl RemoteChat {
     );
     let (pages, threads, answers) = join3(pages, threads, answers).await;
     let is_changed = plan.is_snapshot_changed
+      || moves.into_iter().any(|is_changed| is_changed)
       || pages.into_iter().any(|is_changed| is_changed)
       || threads.into_iter().any(|is_changed| is_changed)
       || answers.into_iter().any(|is_changed| is_changed);
@@ -595,12 +677,19 @@ impl RemoteChat {
       mirror.cursor = changes.cursor;
       let applied = mirror.snapshot.apply(changes);
       plan.is_snapshot_changed = applied.is_changed;
-      // The feeds the UI opened, not every conversation's count (issue #246).
+      // The feeds the UI opened, not every conversation's count (issue #246). A jump in an open
+      // one may be older history arriving (#1132): its rows are moved before anything reads them.
+      // One new row, the common case, needs no look and no extra read.
       for (conversation, feed) in &mut mirror.feeds {
         if applied.touches(*conversation)
           && let Some(total) = mirror.snapshot.message_count(*conversation)
         {
-          feed.total = total;
+          if feed.is_used && !feed.rows.is_empty() && total > feed.total + 1 {
+            feed.is_moving = true;
+            plan.moved.push((*conversation, total));
+          } else {
+            feed.total = total;
+          }
         }
       }
       let touched_threads: Vec<(ConversationId, ThreadId)> = mirror
@@ -619,6 +708,9 @@ impl RemoteChat {
       plan.threads = touched_threads;
       for (conversation, feed) in &mut mirror.feeds {
         if !applied.touches(*conversation) {
+          continue;
+        }
+        if feed.is_moving {
           continue;
         }
         if feed.is_used {
@@ -660,6 +752,39 @@ impl RemoteChat {
       }
     }
     plan
+  }
+
+  /// Reads the newest rows of a feed whose total jumped to `total`, which tell where the rows held
+  /// are now; returns whether anything changed.
+  async fn follow_moved_rows(&self, conversation: ConversationId, total: usize) -> bool {
+    let args = json!({ "conversation": conversation, "start": total.saturating_sub(PAGE), "len": PAGE });
+    let outcome = call::<MessageWindow>("core_messages", &args).await;
+    let mut mirror = self.mirror.borrow_mut();
+    let feed = mirror.feeds.entry(conversation).or_default();
+    match outcome {
+      Ok(window) => feed.take_newest(window),
+      Err(error) => {
+        tracing::warn!(%error, %conversation, "could not load messages");
+        feed.is_moving = false;
+        feed.total = total;
+        true
+      },
+    }
+  }
+
+  /// What a refresh reloads of the feeds whose rows just moved.
+  fn pages_of_moved_feeds(&self, moved: &[(ConversationId, usize)]) -> Vec<(ConversationId, usize)> {
+    let mut mirror = self.mirror.borrow_mut();
+    moved
+      .iter()
+      .flat_map(|(conversation, _)| {
+        let pages = mirror
+          .feeds
+          .get_mut(conversation)
+          .map_or_else(Vec::new, Feed::pages_to_refresh);
+        pages.into_iter().map(|page| (*conversation, page))
+      })
+      .collect()
   }
 
   fn load_page(&self, conversation: ConversationId, page: usize) {
@@ -1793,11 +1918,20 @@ impl ChatBackend for RemoteChat {
 
   fn message_count(&self, conversation: ConversationId) -> usize {
     let mirror = self.mirror.borrow();
+    let maybe_feed = mirror.feeds.get(&conversation);
+    if let Some(feed) = maybe_feed.filter(|feed| feed.is_moving) {
+      return feed.total;
+    }
     mirror
       .snapshot
       .message_count(conversation)
       .unwrap_or(0)
-      .max(mirror.feeds.get(&conversation).map_or(0, |feed| feed.total))
+      .max(maybe_feed.map_or(0, |feed| feed.total))
+  }
+
+  fn rows_prepended(&self, conversation: ConversationId) -> usize {
+    let mirror = self.mirror.borrow();
+    mirror.feeds.get(&conversation).map_or(0, |feed| feed.prepended)
   }
 
   fn last_activity(&self, conversation: ConversationId) -> Option<teamcraft_client_api::model::TimestampMs> {
@@ -2203,6 +2337,108 @@ mod tests {
         answers: Rc::new(RefCell::new(HashMap::new())),
       }
     }
+  }
+
+  mod moved_rows {
+    use super::*;
+
+    #[test]
+    fn older_history_moves_the_rows_held_and_the_pages_read() {
+      let mut feed = feed_of(&["a", "b", "c"]);
+      feed.read_pages.insert(0);
+      feed.shown_pages.insert(0);
+      // 200 older rows: the newest rows are now c at 202.
+      let newest = MessageWindow {
+        start: 202,
+        total: 203,
+        ..window(203, &[])
+      };
+      let newest = with_rows(newest, &[3]);
+      assert!(feed.take_newest(newest));
+      assert_eq!(feed.prepended, 200);
+      assert_eq!(feed.total, 203);
+      assert_eq!(feed.rows.keys().copied().collect::<Vec<_>>(), vec![200, 201, 202]);
+      assert_eq!(feed.read_pages, BTreeSet::from([2]));
+      assert_eq!(feed.shown_pages, BTreeSet::from([2]));
+    }
+
+    #[test]
+    fn a_shift_within_a_page_keeps_both_pages_it_now_spans() {
+      assert_eq!(moved_pages(&BTreeSet::from([0]), 50), BTreeSet::from([0, 1]));
+    }
+
+    #[test]
+    fn new_messages_at_the_end_move_nothing() {
+      let mut feed = feed_of(&["a", "b", "c"]);
+      let newest = with_rows(window(5, &[]), &[1, 2, 3, 4, 5]);
+      assert!(feed.take_newest(newest));
+      assert_eq!(feed.prepended, 0);
+      assert_eq!(feed.rows.len(), 5);
+    }
+
+    #[test]
+    fn a_page_from_after_the_jump_that_shows_no_held_row_is_left_out() {
+      let mut feed = feed_of(&["a", "b", "c"]);
+      let elsewhere = MessageWindow {
+        start: 100,
+        ..with_rows(window(203, &[]), &[50])
+      };
+      assert!(!feed.apply(elsewhere));
+      assert_eq!(feed.total, 3);
+      assert_eq!(feed.rows.len(), 3);
+    }
+
+    #[test]
+    fn a_page_from_after_the_jump_that_shows_a_held_row_moves_them() {
+      let mut feed = feed_of(&["a", "b", "c"]);
+      let newest = MessageWindow {
+        start: 202,
+        ..with_rows(window(203, &[]), &[3])
+      };
+      assert!(feed.apply(newest));
+      assert_eq!(feed.prepended, 200);
+    }
+
+    #[test]
+    fn the_first_page_of_a_feed_is_no_jump() {
+      let mut feed = Feed::default();
+      assert!(feed.apply(window(500, &["a"])));
+      assert_eq!(feed.prepended, 0);
+      assert_eq!(feed.total, 500);
+    }
+
+    #[test]
+    fn one_new_row_is_no_jump() {
+      let mut feed = feed_of(&["a", "b", "c"]);
+      let elsewhere = MessageWindow {
+        start: 3,
+        ..with_rows(window(4, &[]), &[4])
+      };
+      assert!(feed.apply(elsewhere));
+      assert_eq!(feed.total, 4);
+      assert_eq!(feed.prepended, 0);
+    }
+
+    fn feed_of(bodies: &[&str]) -> Feed {
+      let mut feed = Feed::default();
+      feed.apply(window(bodies.len(), bodies));
+      feed
+    }
+
+    /// `window` with rows that have these IDs (the helper numbers its rows from 1).
+    fn with_rows(mut window: MessageWindow, ids: &[u64]) -> MessageWindow {
+      let template = self::window(1, &["x"]).messages.remove(0);
+      window.messages = ids
+        .iter()
+        .map(|id| Message {
+          id: id_from_raw(*id),
+          ..template.clone()
+        })
+        .collect();
+      window
+    }
+
+    use super::window;
   }
 
   mod slot {

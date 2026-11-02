@@ -87,6 +87,13 @@ pub trait ChatBackend {
   /// also sent to the conversation.
   fn message_count(&self, conversation: ConversationId) -> usize;
 
+  /// How many rows arrived before the ones this backend held, since it first read the feed:
+  /// older history (#1132). A row that was at `index` is then at `index + rows_prepended`, so a
+  /// list can keep what it shows in place. Backends that never move rows have none.
+  fn rows_prepended(&self, _conversation: ConversationId) -> usize {
+    0
+  }
+
   /// Messages of the conversation received but not readable on this device yet (their keys have
   /// not arrived). Backends without end-to-end encryption have none.
   fn undecrypted_count(&self, _conversation: ConversationId) -> usize {

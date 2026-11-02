@@ -211,6 +211,7 @@ pub fn MessageList(
   on_cleanup(move || LIVE_LISTS.with_borrow_mut(|lists| lists.retain(|live| *live != list_id)));
   let container = NodeRef::<html::Div>::new();
   let rows = NodeRef::<html::Div>::new();
+  let top_spacer = NodeRef::<html::Div>::new();
   let toolbar = ToolbarHost::provide(container);
 
   let is_log = state
@@ -279,11 +280,28 @@ pub fn MessageList(
   // newer is announced on the "Jump to latest" bar.
   let away_from = RwSignal::new(maybe_marker);
 
+  // Older history arrives before what the list shows while it is open (#1132): every row's index
+  // grows. The rows stay as they are, with their messages and heights, and the position follows,
+  // before the next frame is painted (WebKit has no scroll anchoring).
+  let prepended = Memo::new(move |_| state.read(|backend| backend.rows_prepended(conversation)));
+  let prepended_in_heights = StoredValue::new(prepended.get_untracked());
+  // What the top spacer grew by and the scroll position has not followed yet.
+  let unfollowed_px = StoredValue::new(0.0_f64);
+
   let window = Memo::new(move |_| {
     layout_rev.track();
     let count = count.get();
+    let shift = prepended.get().saturating_sub(prepended_in_heights.get_value());
+    if shift > 0 {
+      prepended_in_heights.update_value(|applied| *applied += shift);
+      heights.update_value(|heights| {
+        heights.splice(0..0, std::iter::repeat_n(estimate, shift));
+      });
+      unfollowed_px.update_value(|unfollowed| *unfollowed += shift as f64 * f64::from(estimate));
+    }
     heights.update_value(|heights| heights.resize(count, estimate));
-    heights.with_value(|heights| compute_window(heights, scroll_top.get(), viewport.get()))
+    let top = scroll_top.get() + unfollowed_px.get_value();
+    heights.with_value(|heights| compute_window(heights, top, viewport.get()))
   });
 
   // After a programmatic scroll: the window follows, and the next scroll event compares against it.
@@ -407,7 +425,47 @@ pub fn MessageList(
   // Re-measure whenever the rendered range changes.
   Effect::new(move |_| {
     window.track();
+    let unfollowed = unfollowed_px.get_value();
+    if unfollowed != 0.0 {
+      unfollowed_px.set_value(0.0);
+      scroll_top.update(|top| *top += unfollowed);
+      // Together, before anything can be painted: the spacer's own effect may run after this one.
+      if let (Some(element), Some(spacer)) = (container.get_untracked(), top_spacer.get_untracked()) {
+        let height = format!("{}px", window.get_untracked().pad_top);
+        // Refused only for a malformed property; the spacer's effect sets it anyway.
+        let _ = web_sys::HtmlElement::style(&spacer).set_property("height", &height);
+        element.scroll_by_with_x_and_y(0.0, unfollowed);
+        note_position(&element);
+      }
+    }
     schedule_measure();
+  });
+  // What is kept by index moves along with the rows.
+  Effect::new(move |previous: Option<usize>| {
+    let now = prepended.get();
+    let shift = now.saturating_sub(previous.unwrap_or(now));
+    if shift > 0 {
+      pending_align.update_value(|align| {
+        if let Some((index, _)) = align {
+          *index += shift;
+        }
+      });
+      if away_from.get_untracked().is_some() {
+        away_from.update(|from| *from = from.map(|from| from + shift));
+      }
+      let is_marker_here = state
+        .unread_marker
+        .get_untracked()
+        .is_some_and(|marker| marker.conversation == conversation);
+      if is_marker_here {
+        state.unread_marker.update(|maybe_marker| {
+          if let Some(marker) = maybe_marker {
+            marker.index += shift;
+          }
+        });
+      }
+    }
+    now
   });
   // The pages beyond the rendered rows load ahead, so scrolling into them doesn't wait (#1050).
   // Asked again after every change too, like the rows read theirs: a backend keeps what is read.
@@ -578,8 +636,11 @@ pub fn MessageList(
     let bottom_gap = f64::from(element.scroll_height()) - top - f64::from(element.client_height());
     scroll_top.set(top);
     viewport.set(f64::from(element.client_height()));
-    // Fades the floating day out 1 s after the last scroll event (opacity only).
-    is_scrolling.set(true);
+    // Fades the floating day out 1 s after the last scroll event (opacity only). A position the
+    // list set itself (`note_position`) is no scrolling to show the day for.
+    if (top - last_top.get_value()).abs() > f64::from(MEASURE_EPSILON) {
+      is_scrolling.set(true);
+    }
     let generation = scroll_generation.try_update_value(|generation| {
       *generation += 1;
       *generation
@@ -617,12 +678,17 @@ pub fn MessageList(
   };
   listen_to_user_scrolls(list_id, container, intent, leave_bottom);
 
-  let indices = move || {
+  // A row is known by its place apart from the older history that arrived, which that history
+  // doesn't change, so it keeps its DOM when its index moves (#1132).
+  let positions = move || {
     let window = window.get();
-    (window.first..window.end).collect::<Vec<usize>>()
+    let opened_at = prepended_in_heights.get_value() as i64;
+    (window.first..window.end)
+      .map(|index| index as i64 - opened_at)
+      .collect::<Vec<i64>>()
   };
 
-  let is_watched = track_unread_divider(conversation, count, stick_to_bottom);
+  let is_watched = track_unread_divider(conversation, count, prepended, stick_to_bottom);
   let visible = Memo::new(move |_| {
     let window = window.get();
     heights.with_value(|heights| visible_rows(heights, &window, scroll_top.get(), viewport.get()))
@@ -716,10 +782,10 @@ pub fn MessageList(
             view! { <EmptyState icon=icon title_key=title_key body_key=body_key maybe_action=maybe_action /> }
           }}
         </Show>
-        <div class="spacer" style:height=move || format!("{}px", window.get().pad_top)></div>
+        <div class="spacer" node_ref=top_spacer style:height=move || format!("{}px", window.get().pad_top)></div>
         <div class="rows" node_ref=rows>
-          <For each=indices key=|index| *index let:index>
-            <RowSlot conversation=conversation index=index is_chat=is_chat motion=motion />
+          <For each=positions key=|position| *position let:position>
+            <RowSlot conversation=conversation position=position prepended=prepended is_chat=is_chat motion=motion />
           </For>
         </div>
         <div class="spacer" style:height=move || format!("{}px", window.get().pad_bottom)></div>
@@ -796,6 +862,7 @@ fn remember_reading(
 fn track_unread_divider(
   conversation: ConversationId,
   count: Memo<usize>,
+  prepended: Memo<usize>,
   is_at_bottom: RwSignal<bool>,
 ) -> Signal<bool> {
   let state = use_app_state();
@@ -823,9 +890,11 @@ fn track_unread_divider(
   on_cleanup(move || listeners.into_iter().for_each(|listener| listener.remove()));
 
   // News while the user looks elsewhere.
-  Effect::new(move |previous: Option<usize>| {
+  Effect::new(move |previous: Option<(usize, usize)>| {
     let total = count.get();
-    if let Some(previous) = previous
+    let older = prepended.get();
+    // Older history is no news: only what came after the rows the list had.
+    if let Some(previous) = previous.map(|(total, was_older)| total + older - was_older)
       && total > previous
       && !is_watched.get_untracked()
     {
@@ -844,7 +913,7 @@ fn track_unread_divider(
         },
       );
     }
-    total
+    (total, older)
   });
 
   let maybe_dwell = Memo::new(move |_| {
@@ -1132,19 +1201,25 @@ fn observe_size_changes<const N: usize>(
 #[component]
 fn RowSlot(
   conversation: ConversationId,
-  index: usize,
+  /// Its place in the feed apart from older history that arrives ([`ChatBackend::rows_prepended`]).
+  position: i64,
+  prepended: Memo<usize>,
   is_chat: bool,
   motion: StoredValue<FeedMotion, LocalStorage>,
 ) -> impl IntoView {
   let state = use_app_state();
   let i18n = use_i18n();
+  // Invariant: the rows rendered start at index 0 or later, and `prepended` only grows.
+  let index = move || (position + prepended.get() as i64).max(0) as usize;
   let has_divider = move || {
     state
       .unread_marker
       .get()
-      .is_some_and(|marker| marker.conversation == conversation && marker.index == index)
+      .is_some_and(|marker| marker.conversation == conversation && marker.index == index())
   };
+  // Compared by value: a row whose index moved with its message doesn't render again.
   let data = Memo::new(move |_| -> Option<(Message, Option<Message>)> {
+    let index = index();
     let start = index.saturating_sub(1);
     let mut messages = state.read(|backend| backend.messages(conversation, start, 2));
     if is_chat {
@@ -1163,7 +1238,7 @@ fn RowSlot(
   // What this row showed last, so a re-render knows what changed (feed_motion.rs).
   let shown = StoredValue::new(None::<Shown>);
   view! {
-    <div class="row" data-idx=index.to_string()>
+    <div class="row" data-idx=move || index().to_string()>
       <Show when=has_divider fallback=|| ()>
         <div class="new-divider" role="separator">
           <span>{move || i18n.t("new-messages")}</span>
