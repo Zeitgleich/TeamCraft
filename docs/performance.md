@@ -1258,7 +1258,9 @@ TEAMCRAFT_STORE_BUDGET_MESSAGES=100000 cargo test --release -p teamcraft-core --
 - **The browser** keeps the records' ciphertext in memory (IndexedDB has no synchronous reads) and
   decrypts a record only when it is read: opening no longer decrypts the store (part of #778), but
   it still reads all of the ciphertext, so its open time and memory stay O(store), and the first
-  catalog build runs on the main thread.
+  catalog build runs on the main thread. The catalog costs download size: about 28 kB gzip in the
+  app and 25 kB in the service worker, which doesn't carry the build (27 kB less). It is needed
+  from the first page on, so it can't move to a chunk; the guest budget went from 5.6 to 5.7 MB.
 - **Migration:** a store written before builds its catalog once, when the app opens it: every
   record is decrypted once (what every start did before), in batches of 512 records, each a group of
   writes that saves its progress, so a build that is killed goes on after its last batch. Tested on
@@ -1298,7 +1300,7 @@ the chunks that load later. The limit:
 
 | Limit                                   | Value       | Above it                         |
 |-----------------------------------------|-------------|----------------------------------|
-| A guest in a meeting: gzip -9 total     | 5,600,000 B | fails; warns from 95 % (5.32 MB) |
+| A guest in a meeting: gzip -9 total     | 5,700,000 B | fails; warns from 95 % (5.42 MB) |
 | Signed-in first visit: gzip -9 total    | 5,200,000 B | fails; warns from 95 % (4.94 MB) |
 | The call module: gzip -9                | 1,000,000 B | fails                            |
 
