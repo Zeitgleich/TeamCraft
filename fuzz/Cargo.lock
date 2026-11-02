@@ -951,6 +951,7 @@ dependencies = [
  "fiat-crypto 0.3.0",
  "rustc_version",
  "subtle",
+ "zeroize",
 ]
 
 [[package]]
@@ -4950,6 +4951,7 @@ dependencies = [
  "openmls_traits",
  "p256",
  "rand_chacha 0.10.0",
+ "rand_core 0.10.1",
  "rand_core 0.6.4",
  "serde",
  "serde_json",
@@ -4959,7 +4961,7 @@ dependencies = [
  "thiserror",
  "tls_codec",
  "vsss-rs",
- "x25519-dalek 2.0.1",
+ "x25519-dalek 3.0.0",
  "zeroize",
 ]
 
@@ -5007,6 +5009,7 @@ dependencies = [
  "serde",
  "thiserror",
  "utoipa",
+ "zeroize",
 ]
 
 [[package]]
@@ -5017,6 +5020,7 @@ dependencies = [
  "aws-lc-rs",
  "axum",
  "base64 0.23.1",
+ "chrono",
  "chrono-tz",
  "figment",
  "jsonwebtoken",
@@ -6054,6 +6058,7 @@ checksum = "e7e8131a03190127fb2263afc72b322ecadae46b6ff8c6f399ff5d02f5559af6"
 dependencies = [
  "curve25519-dalek 5.0.0",
  "rand_core 0.10.1",
+ "zeroize",
 ]
 
 [[package]]

@@ -36,3 +36,4 @@ pub mod workspace;
 
 mod aead;
 mod domain;
+mod rng;
