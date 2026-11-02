@@ -37,6 +37,7 @@ use crate::components::calls_view::CallsView;
 use crate::components::composer_toolbar::{ActiveFormats, FormatAction, FormatToolbarPanel};
 use crate::components::date_jump::{DateJumpMenu, DateJumpPanel};
 use crate::components::directory_view::DirectoryView;
+use crate::components::downloads_menu::DownloadsButton;
 use crate::components::emoji_picker::EmojiPickerPanel;
 use crate::components::file_preview::FilePreview;
 use crate::components::files_view::FilesView;
@@ -212,6 +213,8 @@ areas! {
   };
   /// The desktop app's update banner; the browser has no updates to show and never loads it.
   update_notice(_unit: ()) => dialogs: view! { <UpdateNoticeBanner /> };
+  /// The desktop app's downloads button and list; the browser has its own and never loads them.
+  downloads(_unit: ()) => dialogs: view! { <DownloadsButton /> };
   /// The emoji picker and the date pills' menu, the first time they open.
   emoji_picker(anchor: web_sys::Element, on_pick: Callback<String>, on_close: Callback<()>, returns_focus: bool) => dialogs: view! {
     <EmojiPickerPanel anchor=anchor on_pick=on_pick on_close=on_close returns_focus=returns_focus />

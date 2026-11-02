@@ -202,6 +202,8 @@ pub enum Overlay {
   None,
   QuickSwitcher,
   StatusMenu,
+  /// The desktop app's recent downloads under their button in the top bar.
+  Downloads,
   CustomStatus,
   Settings,
   Shortcuts,

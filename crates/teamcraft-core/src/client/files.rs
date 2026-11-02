@@ -608,6 +608,31 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     saved
   }
 
+  /// The user paused (`Paused`) or cancelled (`Cancelled`) an unfinished download to disk; the
+  /// host stopped its transfer. A cancelled one's partial file is deleted, a paused one continues
+  /// from it when saved again. The file's card goes back to "on the server".
+  pub fn stop_download_to_disk(
+    &mut self,
+    attachment: AttachmentId,
+    status: disk_downloads::DownloadStatus,
+  ) -> Result<(), CoreError> {
+    let is_cancel = status == disk_downloads::DownloadStatus::Cancelled;
+    let Some(before) = disk_downloads::record_stop(&self.store, attachment, status)? else {
+      return Ok(());
+    };
+    #[cfg(not(target_arch = "wasm32"))]
+    if is_cancel
+      && let Some(partial) = &before.maybe_partial_path
+      && let Err(error) = std::fs::remove_file(partial)
+      && error.kind() != std::io::ErrorKind::NotFound
+    {
+      tracing::debug!(%error, "a cancelled download's partial file could not be deleted");
+    }
+    #[cfg(target_arch = "wasm32")]
+    let _ = (is_cancel, before);
+    Ok(self.store.delete(Table::FileTransfers, &attachment.to_string())?)
+  }
+
   /// Requests the file's blob: natively from where its partial file ends, in the browser whole.
   #[cfg(not(target_arch = "wasm32"))]
   async fn start_disk_transfer(&self, reference: &AttachmentRef) -> Result<DiskTransfer, CoreError> {
@@ -626,6 +651,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       .transfers
       .start(reference.attachment_id, reference.size_bytes);
     let partial = disk_downloads::native::partial_path(&staging, reference.attachment_id);
+    disk_downloads::record_partial(&self.store, reference.attachment_id, &partial.to_string_lossy())?;
     Ok(disk_downloads::RangedDownload::start(
       reference.clone(),
       partial,

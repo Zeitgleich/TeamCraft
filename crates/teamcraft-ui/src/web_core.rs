@@ -2368,6 +2368,10 @@ impl Core {
           self.downloads.save(*conversation, *attachment);
           false
         },
+        CoreCommand::ControlDownload { attachment, control } => {
+          self.downloads.control(*attachment, *control);
+          false
+        },
         _ => true,
       })
       .collect()

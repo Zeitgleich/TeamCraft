@@ -541,6 +541,13 @@ pub trait ChatBackend {
   fn max_upload_bytes(&self) -> Option<u64> {
     None
   }
+  /// Files saved to disk, newest first: the app's downloads list. `None` where there is no list
+  /// (the browser keeps its own) and while a backend that asks the core waits for the answer.
+  fn downloads(&self) -> Option<Vec<crate::actions::DownloadEntry>> {
+    None
+  }
+  /// Pauses, continues, cancels, clears, opens or shows a download of [`Self::downloads`].
+  fn control_download(&self, _file_id: &str, _control: crate::actions::DownloadControl) {}
 
   // Spaces and channels.
 
