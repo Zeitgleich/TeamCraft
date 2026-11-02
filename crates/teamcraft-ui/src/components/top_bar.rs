@@ -6,6 +6,7 @@ use crate::brand::Brand;
 use crate::components::avatar::{Avatar, AvatarSize};
 use crate::components::brand_logo::BrandLogo;
 use crate::components::channel_glyph::ChannelGlyph;
+use crate::components::downloads_menu::DownloadsButton;
 use crate::components::icons::{Icon, IconName};
 use crate::components::window_controls::{ClickOrDrag, window_drag_handler};
 use crate::history::{Travel, travel};
@@ -60,6 +61,7 @@ pub fn TopBar() -> impl IntoView {
         <SearchField />
       </div>
       <div class="top-actions">
+        <DownloadsButton />
         <button
           class="icon-btn on-dark"
           aria-label=move || i18n.t("shortcuts-title")

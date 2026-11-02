@@ -644,6 +644,14 @@ impl<C: ChatBackend + 'static> ChatBackend for Hybrid<C> {
     self.chat.max_upload_bytes()
   }
 
+  fn downloads(&self) -> Option<Vec<teamcraft_client_api::actions::DownloadEntry>> {
+    self.chat.downloads()
+  }
+
+  fn control_download(&self, file_id: &str, control: teamcraft_client_api::actions::DownloadControl) {
+    self.chat.control_download(file_id, control);
+  }
+
   fn create_space(&self, space: NewSpace) {
     self.chat.create_space(space);
   }

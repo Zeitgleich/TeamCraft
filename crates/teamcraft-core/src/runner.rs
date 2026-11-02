@@ -295,6 +295,10 @@ impl<A: ServerApi, S: LocalStore> SyncRunner<A, S> {
         attachment,
       }) => self.downloads.save(conversation, attachment),
       #[cfg(feature = "ui")]
+      RunnerCommand::Ui(CoreCommand::ControlDownload { attachment, control }) => {
+        self.downloads.control(attachment, control);
+      },
+      #[cfg(feature = "ui")]
       RunnerCommand::Ui(command) => {
         let now = self.client.now_ms();
         // A command can take long (an upload, a big history page); heartbeats go on meanwhile.
