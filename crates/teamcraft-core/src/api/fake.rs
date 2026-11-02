@@ -226,6 +226,12 @@ struct State {
   /// Message sends still to be lost after the server stored the message (a timeout, or the app
   /// killed before the answer came).
   send_answers_to_lose: u32,
+  /// The next ranged downloads break after this many bytes each (a dropped connection).
+  download_cuts: std::collections::VecDeque<u64>,
+  /// Ranged downloads answer the whole blob, like a storage without `Range` support.
+  ignores_ranges: bool,
+  /// The offset of every ranged download asked for, in order.
+  download_starts: Vec<u64>,
   roster_log: Vec<WorkspaceLogEntryResponse>,
   policy_log: Vec<WorkspaceLogEntryResponse>,
   /// Larger attachments are refused like the server's `max_attachment_bytes`; `None`: no limit.
@@ -1466,6 +1472,22 @@ impl FakeServer {
   /// Sealed tokens revoked so far.
   pub fn revoked_gateway_tokens(&self) -> Vec<Vec<u8>> {
     self.lock().revoked_gateway_tokens.clone()
+  }
+
+  /// The next ranged blob download breaks with a network error after `bytes` bytes, as a dropped
+  /// connection would; several calls cut several downloads in turn.
+  pub fn cut_next_download_after(&self, bytes: u64) {
+    self.lock().download_cuts.push_back(bytes);
+  }
+
+  /// Ranged downloads answer the whole blob from its start, like a storage that ignores `Range`.
+  pub fn ignore_download_ranges(&self, is_ignoring: bool) {
+    self.lock().ignores_ranges = is_ignoring;
+  }
+
+  /// The offsets ranged downloads asked for so far, in order.
+  pub fn download_starts(&self) -> Vec<u64> {
+    self.lock().download_starts.clone()
   }
 
   /// Flips a byte in every stored blob, as a malicious storage backend could.
@@ -4697,6 +4719,60 @@ impl ServerApi for FakeServerApi {
       };
       received.add(blob.len() as u64);
       Ok(blob)
+    })
+  }
+
+  #[cfg(not(target_arch = "wasm32"))]
+  fn get_blob_from_detached(&self, url: &str, start: u64) -> super::DetachedRange {
+    /// Pieces as small as a network read; each is copied out of the stored blob only when read,
+    /// so a test of the reader's memory sees the reader's buffers alone.
+    const PIECE_BYTES: u64 = 16 * 1024;
+    let (api, url) = (self.clone(), url.to_owned());
+    Box::pin(async move {
+      let (start, end) = api.with(|state, _| {
+        state.download_starts.push(start);
+        let start = if state.ignores_ranges { 0 } else { start };
+        let length = blob_entry(state, &url)?
+          .maybe_blob
+          .as_ref()
+          .map(|blob| blob.len() as u64)
+          .ok_or(ApiError::Status {
+            status: 404,
+            maybe_body: None,
+            maybe_retry_after: None,
+          })?;
+        let maybe_cut = state.download_cuts.pop_front();
+        let end = maybe_cut.map_or(length, |cut| length.min(start.saturating_add(cut)));
+        Ok((start.min(length), (end, length)))
+      })?;
+      let (stop, length) = end;
+      let pieces = futures_util::stream::unfold(Some(start), move |maybe_at| {
+        let (api, url) = (api.clone(), url.clone());
+        async move {
+          let at = maybe_at?;
+          if at >= stop {
+            // Cut short: the connection drops where the cut was.
+            return (stop < length).then(|| (Err(ApiError::Network("the connection dropped".into())), None));
+          }
+          let next = stop.min(at + PIECE_BYTES);
+          let piece = api.with(|state, _| {
+            let blob = blob_entry(state, &url)?
+              .maybe_blob
+              .as_ref()
+              .ok_or(ApiError::Status {
+                status: 404,
+                maybe_body: None,
+                maybe_retry_after: None,
+              })?;
+            Ok(blob[at as usize..next as usize].to_vec())
+          });
+          Some((piece, Some(next)))
+        }
+      });
+      Ok(super::RangedBlob {
+        start,
+        pieces: Box::pin(pieces),
+      })
     })
   }
 

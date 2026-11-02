@@ -17,6 +17,7 @@ mod channel_roles;
 mod custom_status;
 pub mod devices;
 pub mod direct_uploads;
+pub mod disk_downloads;
 mod enroll;
 pub mod files;
 mod gateway;
@@ -513,6 +514,11 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
 
   pub fn store(&self) -> &S {
     &self.store
+  }
+
+  #[cfg(not(target_arch = "wasm32"))]
+  pub(crate) fn settings(&self) -> &ClientSettings {
+    &self.settings
   }
 
   /// The file transfers in flight; a clone stays current (the UI adapter reads their progress).

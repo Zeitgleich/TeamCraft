@@ -463,6 +463,17 @@ upload: sizes, part numbers and `ETag`s of ciphertext. In the browser, a picked 
 upload is kept as a `File` in IndexedDB (plaintext, like the mobile staging copy) and deleted once the
 upload is done or cancelled; the desktop app stages such files in its data directory the same way.
 
+Saving a file to disk on desktop and mobile streams too (issue #153): the ciphertext arrives piece by
+piece into a partial file named after the attachment, in the app's staging directory (ciphertext only,
+never plaintext). An interrupted download, also one an app that was killed left behind, continues
+with an HTTP `Range` request from where the partial file ends; the presigned download URL is asked for
+again each time. Only once the whole blob matches the hash in the message is it decrypted, chunk by
+chunk, into the target file, which a failed decryption removes again: no unverified plaintext reaches
+the disk, and the client writes at most the largest blob the announced size allows
+(`encrypted_len` at the smallest chunk size), so a hostile storage can't fill the disk. The blob
+format is unchanged; every attachment ever sent downloads this way. The browser still saves through
+memory (up to 256 MiB).
+
 The message list shows the encrypted thumbnail at once. On web and desktop it then loads the full
 picture inline (up to 16 MiB, a few at a time), and the lightbox does for any image or video: the
 client core downloads the blob, checks its hash and decrypts it in memory (desktop: `core_attachment`,

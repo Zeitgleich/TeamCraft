@@ -199,6 +199,7 @@ impl BlobDownload {
     Ok(decrypt_attachment(&AttachmentKey::from_key(key), &ciphertext)?)
   }
 
+  #[cfg(target_arch = "wasm32")]
   pub(crate) fn reference(&self) -> &AttachmentRef {
     &self.reference
   }

@@ -71,6 +71,8 @@ use super::{
   ApiError, DetachedDownload, DetachedPart, DetachedRequest, GatewayConnection, Interception,
   RendezvousConnection, RendezvousFrame, ServerApi,
 };
+#[cfg(not(target_arch = "wasm32"))]
+use super::{DetachedRange, RangedBlob};
 use crate::clock::{Clock, SystemClock};
 use crate::retry::parse_retry_after;
 use crate::transfers::ByteCounter;
@@ -1386,6 +1388,54 @@ impl<T: AccessTokenSource> ServerApi for HttpServerApi<T> {
     Box::pin(async move { super::xhr::get(&url, maybe_max_bytes, received).await })
   }
 
+  #[cfg(not(target_arch = "wasm32"))]
+  fn get_blob_from_detached(&self, url: &str, start: u64) -> DetachedRange {
+    let mut request = self.http().get(url);
+    if start > 0 {
+      request = request.header(reqwest::header::RANGE, format!("bytes={start}-"));
+    }
+    Box::pin(async move {
+      // Per phase: the answer within the API's answer timeout, then each piece within the stall
+      // timeout; no total timeout, a big file on a slow link is slow, not dead.
+      let answer = tokio::time::timeout(API_ANSWER_TIMEOUT, send(request))
+        .await
+        .map_err(|_| ApiError::Network(format!("no answer within {} s", API_ANSWER_TIMEOUT.as_secs())))?;
+      let response = match answer {
+        Ok(response) => response,
+        // 416: nothing from `start` on, the blob ended there (all of it was received before).
+        Err(ApiError::Status { status: 416, .. }) if start > 0 => {
+          return Ok(RangedBlob {
+            start,
+            pieces: Box::pin(futures_util::stream::empty()),
+          });
+        },
+        Err(error) => return Err(error),
+      };
+      let start = if response.status() == reqwest::StatusCode::PARTIAL_CONTENT {
+        content_range_start(response.headers())
+          .ok_or_else(|| ApiError::Decode("the storage answered a range without Content-Range".into()))?
+      } else {
+        0
+      };
+      let pieces = futures_util::stream::try_unfold(response, |mut response| async move {
+        let piece = tokio::time::timeout(TRANSFER_STALL_TIMEOUT, response.chunk())
+          .await
+          .map_err(|_| {
+            ApiError::Network(format!(
+              "the transfer made no progress for {} s",
+              TRANSFER_STALL_TIMEOUT.as_secs()
+            ))
+          })?
+          .map_err(network_error)?;
+        Ok(piece.map(|piece| (piece.to_vec(), response)))
+      });
+      Ok(RangedBlob {
+        start,
+        pieces: Box::pin(pieces),
+      })
+    })
+  }
+
   async fn get_blob(&self, url: &str) -> Result<Vec<u8>, ApiError> {
     let response = send(self.http().get(url)).await?;
     response
@@ -1564,6 +1614,14 @@ async fn read_capped(mut response: reqwest::Response, max_bytes: u64) -> Result<
     blob.extend_from_slice(&chunk);
   }
   Ok(blob)
+}
+
+/// The first byte of a `206 Partial Content` answer, from `Content-Range: bytes 100-999/1000`.
+#[cfg(not(target_arch = "wasm32"))]
+fn content_range_start(headers: &reqwest::header::HeaderMap) -> Option<u64> {
+  let value = headers.get(reqwest::header::CONTENT_RANGE)?.to_str().ok()?;
+  let (first, _) = value.strip_prefix("bytes ")?.split_once('-')?;
+  first.trim().parse().ok()
 }
 
 /// An upload body in chunks of 64 KiB, each counted into `sent` as the connection takes it.
@@ -2193,6 +2251,22 @@ fn query_string(parameters: &[(&str, Option<String>)]) -> String {
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  #[cfg(not(target_arch = "wasm32"))]
+  #[test]
+  fn a_ranged_answer_names_where_it_starts() {
+    let mut headers = reqwest::header::HeaderMap::new();
+    assert_eq!(content_range_start(&headers), None);
+    headers.insert(
+      reqwest::header::CONTENT_RANGE,
+      "bytes 100-999/1000".parse().unwrap(),
+    );
+    assert_eq!(content_range_start(&headers), Some(100));
+    headers.insert(reqwest::header::CONTENT_RANGE, "bytes */1000".parse().unwrap());
+    assert_eq!(content_range_start(&headers), None);
+    headers.insert(reqwest::header::CONTENT_RANGE, "items 1-2/3".parse().unwrap());
+    assert_eq!(content_range_start(&headers), None);
+  }
 
   #[cfg(not(target_arch = "wasm32"))]
   #[test]
