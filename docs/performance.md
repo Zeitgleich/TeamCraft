@@ -1236,16 +1236,18 @@ TEAMCRAFT_STORE_BUDGET_MESSAGES=100000 cargo test --release -p teamcraft-core --
 
 | 300 conversations, 100,000 messages                        | Before                        | After                |
 |------------------------------------------------------------|-------------------------------|----------------------|
-| Notification extension: open and show the message          | 461 ms, 148 MiB at its peak   | 0.6 ms, 0.03 MiB     |
+| Notification extension: open and show the message          | 461 ms, 148 MiB at its peak   | 0.7 ms, 0.06 MiB     |
 | App: open the store                                        | 414 ms                        | 0.3 ms               |
-| Newest and oldest message of the 50,000-message channel    | 96 ms                         | 0.3 ms               |
-| All 50,000 messages of the channel, first read             | 30 ms (all were in memory)    | 475 ms, 50 MiB       |
-| Newest 50 feed rows of that channel, first read            | 475 ms, 50 MiB (a whole read) | 1.2 ms, 0.11 MiB     |
+| Newest and oldest message of the 50,000-message channel    | 96 ms                         | 0.6 ms               |
+| All 50,000 messages of the channel, first read             | 30 ms (all were in memory)    | 350–475 ms, 50 MiB   |
+| Newest 50 feed rows of that channel, first read            | 350–475 ms, 50 MiB (whole)    | 1.1 ms, 0.11 MiB     |
 
 - **The extension stays far under its limit**, independent of the history: its Rust heap is the
   index root and one page of the notified conversation plus a few entries (names, the push key, the
   policy). SQLite's own page cache comes on top (its default, 2 MiB at most; the counting allocator
-  doesn't see it). It opens the store with `SealedStoreLimits::minimal()` and keeps no message cache.
+  doesn't see it). It opens the store with `SealedStoreLimits::minimal()`, keeps no message cache and
+  never builds the catalog: on the first push after an update, before the app ran the migration, it
+  fetches the message instead.
 - **The app's memory for the store is bounded:** decrypted entries (8 MiB), decoded messages (4,096)
   and index nodes (256 each) by default, plus the message cache of the conversations read last
   (60,000 messages on every platform, as the desktop had). Before, the whole store was in memory:
@@ -1260,21 +1262,25 @@ TEAMCRAFT_STORE_BUDGET_MESSAGES=100000 cargo test --release -p teamcraft-core --
   (`the_first_page_of_a_large_channel_reads_that_page` counts them). A channel with an import account
   also reads its events once per change, the only messages the import's additions can be. The memory
   store keeps the whole-read view, which costs it no decryption.
-- **Writes pay for it:** filling this account took 14.4 s instead of 13.2 s (+9 %). A message outside
-  a group of writes seals the feed index's root and page as well.
+- **Writes pay for it:** filling this account took 12.0 s instead of 9.7 s (+24 %, one run each; an
+  earlier pair differed by 9 %). A message outside a group of writes seals the feed index's root and
+  page as well.
 - **What still reads a conversation whole:** a sidebar entry's counts (`entry_counts`), the last
   activity, the activity feed, a thread, toggling a reaction and the other actions that look a message
   up. The message cache serves those after their first read, so opening a big channel is only as fast
   as these numbers once none of them runs for it. Not measured end to end in an app.
 - **The browser** keeps the records' ciphertext in memory (IndexedDB has no synchronous reads) and
-  decrypts a record only when it is read: opening no longer decrypts the store (part of #778).
-- **Migration:** a store written before builds its catalog once, when it opens: every record is
-  decrypted once (what every start did before), in batches of 512 records, each a group of writes
-  that saves its progress, so a build that is killed goes on after its last batch. Tested on the
-  released 1.0.9 fixture and on a 4,500-message store stopped after two batches
-  (`store::sealed::tests::catalog`). A catalog from before the feed indexes is built again the same
-  way, and what it already lists stays. SQLCipher fills its new columns from every record in one
-  layout step when it opens.
+  decrypts a record only when it is read: opening no longer decrypts the store (part of #778), but
+  it still reads all of the ciphertext, so its open time and memory stay O(store), and the first
+  catalog build runs on the main thread.
+- **Migration:** a store written before builds its catalog once, when the app opens it: every
+  record is decrypted once (what every start did before), in batches of 512 records, each a group of
+  writes that saves its progress, so a build that is killed goes on after its last batch. Tested on
+  the released 1.0.9 fixture and on a 4,500-message store stopped after two batches
+  (`store::sealed::tests::catalog`). A damaged or inconsistent catalog is built again the same way,
+  once, when it is noticed (`store::sealed::tests::repair`); that read takes as long as the build.
+  A catalog from before the feed indexes is built again under a new generation too, and SQLCipher
+  fills its new columns from every record in one layout step when it opens.
 
 ### Android (first numbers)
 

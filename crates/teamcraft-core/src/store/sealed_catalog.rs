@@ -3,12 +3,15 @@
 //!
 //! The catalog is a set of [`super::sealed_index`] indexes whose nodes are sealed records like any
 //! other: entries of [`CATALOG_TABLE`], a table name no version uses for data (versions before
-//! skip it as unknown), keyed `d/<table>/…` (a table's keys), `m/<conversation>/…` (a
-//! conversation's messages), `f/<conversation>/…` (the rows of its feed, whose page lengths count
-//! positions) and `x/<conversation>/…` (its reactions by target, replies by thread, and events),
-//! plus the record [`META_KEY`] saying whether the catalog is complete.
-//! Nothing about the catalog is readable without the database key: its records look like all
-//! others (e2ee.md §9.1).
+//! skip it as unknown), keyed `<generation>/d/<table>/…` (a table's keys),
+//! `<generation>/m/<conversation>/…` (a conversation's messages), `<generation>/f/<conversation>/…`
+//! (the rows of its feed, whose page lengths count positions) and `<generation>/x/<conversation>/…`
+//! (its reactions by target, replies by thread, and events), plus the record [`META_KEY`] saying
+//! which generation is current, what it holds and whether it is complete. The catalog is derived
+//! from the records: a damaged or older one is built again under a new generation, and the build
+//! deletes the nodes of older ones. Nothing about the catalog is readable without the database key:
+//! its records look like all others, and their values are padded to a power of two (at least
+//! [`MIN_NODE_BYTES`]), so their sizes tell little of how many entries they hold (e2ee.md §9.1).
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -25,6 +28,8 @@ use super::{MessageFilter, MessageOrder, StoreError, StoredMessage};
 pub(crate) const CATALOG_TABLE: &str = "_catalog";
 /// The catalog record saying how far the catalog is built ([`CatalogState`]).
 pub(crate) const META_KEY: &str = "meta";
+/// The smallest size a catalog node's value is padded to.
+const MIN_NODE_BYTES: usize = 4 * 1024;
 /// Prefix of a conversation's message index.
 pub(crate) const MESSAGES_KIND: &str = "m";
 /// Prefix of a table's key directory.
@@ -37,22 +42,34 @@ pub(crate) const RELATIONS_KIND: &str = "x";
 /// build only adds what is missing. 1: tables and messages; 2: feeds and relations.
 pub(crate) const CATALOG_VERSION: u32 = 2;
 
-/// How far the catalog of a store is built. A store written before the catalog existed builds it
-/// when it is opened, in batches; one killed midway goes on after the last batch it saved.
+/// How far the catalog of a store is built, and its generation (random, so a catalog built again
+/// never meets nodes of an earlier one). A store written before the catalog existed builds it when
+/// it is opened, in batches; one killed midway goes on after the last batch it saved.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "state", rename_all = "snake_case")]
 pub(crate) enum CatalogState {
-  /// Built up to the record with this lookup ID (in ID order), as hex.
+  /// Built up to the record with this lookup ID (in ID order, as hex), or not yet started.
   Building {
-    after: String,
+    generation: u64,
+    #[serde(rename = "after", default, skip_serializing_if = "Option::is_none")]
+    maybe_after: Option<String>,
     /// [`CATALOG_VERSION`] of the build; the first version wrote none.
     #[serde(default = "first_catalog_version")]
     version: u32,
   },
   Complete {
+    generation: u64,
     #[serde(default = "first_catalog_version")]
     version: u32,
   },
+}
+
+impl CatalogState {
+  pub(crate) fn generation(&self) -> u64 {
+    match self {
+      Self::Building { generation, .. } | Self::Complete { generation, .. } => *generation,
+    }
+  }
 }
 
 /// A message's place in its conversation's index: its display order ([`StoredMessage::sort_key`]),
@@ -106,9 +123,12 @@ pub(crate) struct NodeChange {
 }
 
 /// The roots and pages of one kind of index, cached, with the changes of the open group of writes
-/// until it ends ([`Self::take_dirty`]).
+/// until it ends ([`Self::take_dirty`]). Without a generation (a store whose catalog was never
+/// started, opened by a process that doesn't build it) every index is empty and writes to it are
+/// dropped: the build later reads every record anyway.
 pub(crate) struct NodeCache<K, V> {
   kind: &'static str,
+  maybe_generation: Option<u64>,
   roots: Lru<String, Arc<IndexRoot<K>>>,
   pages: Lru<PageId, SharedPage<K, V>>,
   /// Written in the open group; an empty root removes the index.
@@ -273,6 +293,7 @@ impl<K, V> NodeCache<K, V> {
   pub(crate) fn new(kind: &'static str, max_nodes: usize) -> Self {
     Self {
       kind,
+      maybe_generation: None,
       roots: Lru::new(max_nodes),
       pages: Lru::new(max_nodes),
       dirty_roots: BTreeMap::new(),
@@ -288,6 +309,14 @@ impl<K, V> NodeCache<K, V> {
     self.dirty_pages.clear();
   }
 
+  /// Switches to `maybe_generation`'s nodes, forgetting the others'.
+  pub(crate) fn set_generation(&mut self, maybe_generation: Option<u64>) {
+    if self.maybe_generation != maybe_generation {
+      self.clear();
+      self.maybe_generation = maybe_generation;
+    }
+  }
+
   pub(crate) fn has_dirty(&self) -> bool {
     !self.dirty_roots.is_empty() || !self.dirty_pages.is_empty()
   }
@@ -298,21 +327,35 @@ impl<K: Serialize, V: Serialize> NodeCache<K, V> {
   pub(crate) fn take_dirty(&mut self) -> Result<Vec<NodeChange>, StoreError> {
     let mut changes = Vec::with_capacity(self.dirty_roots.len() + self.dirty_pages.len());
     for (scope, root) in std::mem::take(&mut self.dirty_roots) {
-      let key = root_key(self.kind, &scope);
-      let maybe_value = (!root.is_empty()).then(|| encode(&*root)).transpose()?;
+      let key = root_key(self.prefix(), &scope);
+      let maybe_value = (!root.is_empty()).then(|| encode_node(&*root)).transpose()?;
       changes.push(NodeChange { key, maybe_value });
     }
     for ((scope, id), maybe_page) in std::mem::take(&mut self.dirty_pages) {
-      let key = page_key(self.kind, &scope, id);
-      let maybe_value = maybe_page.map(|page| encode(&*page)).transpose()?;
+      let key = page_key(self.prefix(), &scope, id);
+      let maybe_value = maybe_page.map(|page| encode_node(&*page)).transpose()?;
       changes.push(NodeChange { key, maybe_value });
     }
     Ok(changes)
   }
 }
 
+impl<K, V> NodeCache<K, V> {
+  /// `<generation>/<kind>`, the start of every node key of this cache.
+  fn prefix(&self) -> String {
+    format!(
+      "{}/{}",
+      generation_prefix(self.maybe_generation.unwrap_or(0)),
+      self.kind
+    )
+  }
+}
+
 impl<K: DeserializeOwned, V: DeserializeOwned> IndexNodes<K, V> for ScopedNodes<'_, K, V> {
   fn root(&mut self) -> Result<Arc<IndexRoot<K>>, StoreError> {
+    if self.cache.maybe_generation.is_none() {
+      return Ok(Arc::new(IndexRoot::empty()));
+    }
     if let Some(root) = self.cache.dirty_roots.get(self.scope) {
       return Ok(Arc::clone(root));
     }
@@ -320,7 +363,7 @@ impl<K: DeserializeOwned, V: DeserializeOwned> IndexNodes<K, V> for ScopedNodes<
     if let Some(root) = self.cache.roots.get(&scope) {
       return Ok(Arc::clone(root));
     }
-    let root = match (self.read)(&root_key(self.cache.kind, self.scope))? {
+    let root = match (self.read)(&root_key(self.cache.prefix(), self.scope))? {
       Some(bytes) => decode(&bytes)?,
       None => IndexRoot::empty(),
     };
@@ -339,7 +382,7 @@ impl<K: DeserializeOwned, V: DeserializeOwned> IndexNodes<K, V> for ScopedNodes<
     if let Some(page) = self.cache.pages.get(&key) {
       return Ok(Arc::clone(page));
     }
-    let bytes = (self.read)(&page_key(self.cache.kind, self.scope, id))?
+    let bytes = (self.read)(&page_key(self.cache.prefix(), self.scope, id))?
       .ok_or_else(|| StoreError::Corrupt("an index page of the local database is missing".into()))?;
     let page = Arc::new(decode::<IndexPage<K, V>>(&bytes)?);
     self.cache.pages.insert(key, Arc::clone(&page), 1);
@@ -347,6 +390,9 @@ impl<K: DeserializeOwned, V: DeserializeOwned> IndexNodes<K, V> for ScopedNodes<
   }
 
   fn put_root(&mut self, root: IndexRoot<K>) {
+    if self.cache.maybe_generation.is_none() {
+      return;
+    }
     let root = Arc::new(root);
     let scope = self.scope.to_string();
     self.cache.roots.insert(scope.clone(), Arc::clone(&root), 1);
@@ -354,6 +400,9 @@ impl<K: DeserializeOwned, V: DeserializeOwned> IndexNodes<K, V> for ScopedNodes<
   }
 
   fn put_page(&mut self, id: u64, maybe_page: Option<IndexPage<K, V>>) {
+    if self.cache.maybe_generation.is_none() {
+      return;
+    }
     let key = (self.scope.to_string(), id);
     let maybe_page = maybe_page.map(Arc::new);
     match &maybe_page {
@@ -379,12 +428,33 @@ pub(crate) fn decode<T: DeserializeOwned>(bytes: &[u8]) -> Result<T, StoreError>
   serde_json::from_slice(bytes).map_err(|error| StoreError::Corrupt(error.to_string()))
 }
 
-fn root_key(kind: &str, scope: &str) -> String {
-  format!("{kind}/{scope}/r")
+/// The start of the keys of a generation's nodes.
+pub(crate) fn generation_prefix(generation: u64) -> String {
+  format!("{generation:016x}")
 }
 
-fn page_key(kind: &str, scope: &str, id: u64) -> String {
-  format!("{kind}/{scope}/{id}")
+/// Whether a catalog record's key belongs to `generation` (or is the catalog's state).
+pub(crate) fn is_current_node(key: &str, generation: u64) -> bool {
+  key == META_KEY
+    || key
+      .strip_prefix(&generation_prefix(generation))
+      .is_some_and(|rest| rest.starts_with('/'))
+}
+
+/// A node's value, padded with spaces (which JSON ignores) to a power of two.
+fn encode_node<T: Serialize>(node: &T) -> Result<Vec<u8>, StoreError> {
+  let mut bytes = encode(node)?;
+  let padded = bytes.len().next_power_of_two().max(MIN_NODE_BYTES);
+  bytes.resize(padded, b' ');
+  Ok(bytes)
+}
+
+fn root_key(prefix: String, scope: &str) -> String {
+  format!("{prefix}/{scope}/r")
+}
+
+fn page_key(prefix: String, scope: &str, id: u64) -> String {
+  format!("{prefix}/{scope}/{id}")
 }
 
 fn first_catalog_version() -> u32 {
@@ -402,13 +472,20 @@ mod tests {
   /// What versions before wrote stays readable, as an older catalog.
   #[test]
   fn a_state_without_a_version_is_of_the_first_catalog() {
-    let decoded: CatalogState = decode(br#"{"state":"complete"}"#).unwrap();
-    assert_eq!(decoded, CatalogState::Complete { version: 1 });
-    let decoded: CatalogState = decode(br#"{"state":"building","after":"00"}"#).unwrap();
+    let decoded: CatalogState = decode(br#"{"state":"complete","generation":7}"#).unwrap();
+    assert_eq!(
+      decoded,
+      CatalogState::Complete {
+        generation: 7,
+        version: 1
+      }
+    );
+    let decoded: CatalogState = decode(br#"{"state":"building","generation":7,"after":"00"}"#).unwrap();
     assert_eq!(
       decoded,
       CatalogState::Building {
-        after: "00".into(),
+        generation: 7,
+        maybe_after: Some("00".into()),
         version: 1
       }
     );

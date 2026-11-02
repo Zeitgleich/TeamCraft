@@ -107,6 +107,28 @@ impl<K: Ord> IndexRoot<K> {
   }
 }
 
+/// The page the root lists at `at`, checked against what the root says of it: a page rolled back
+/// or swapped for another is reported, not read.
+fn checked_page<K: Ord, V>(
+  nodes: &mut impl IndexNodes<K, V>,
+  root: &IndexRoot<K>,
+  at: usize,
+) -> Result<Arc<IndexPage<K, V>>, StoreError> {
+  let listed = &root.pages[at];
+  let page = nodes.page(listed.id)?;
+  let is_as_listed = usize::try_from(listed.len).is_ok_and(|len| len == page.entries.len())
+    && page
+      .entries
+      .first()
+      .is_some_and(|(first, _)| *first == listed.first);
+  if !is_as_listed {
+    return Err(StoreError::Corrupt(
+      "an index page disagrees with its root".into(),
+    ));
+  }
+  Ok(page)
+}
+
 /// The value of `key`.
 #[cfg(test)]
 pub(crate) fn get<K: Ord, V: Clone>(
@@ -117,7 +139,7 @@ pub(crate) fn get<K: Ord, V: Clone>(
   if root.is_empty() {
     return Ok(None);
   }
-  let page = nodes.page(root.pages[root.locate(key)].id)?;
+  let page = checked_page(nodes, &root, root.locate(key))?;
   Ok(
     page
       .entries
@@ -142,7 +164,7 @@ pub(crate) fn upsert<K: Ord + Clone, V: Clone + PartialEq>(
   }
   let at = root.locate(&key);
   let id = root.pages[at].id;
-  let page = nodes.page(id)?;
+  let page = checked_page(nodes, &root, at)?;
   let mut entries = page.entries.clone();
   match entries.binary_search_by(|(entry, _)| entry.cmp(&key)) {
     Ok(found) => {
@@ -187,7 +209,7 @@ pub(crate) fn remove<K: Ord + Clone, V: Clone>(
   }
   let at = root.locate(key);
   let id = root.pages[at].id;
-  let page = nodes.page(id)?;
+  let page = checked_page(nodes, &root, at)?;
   let Ok(found) = page.entries.binary_search_by(|(entry, _)| entry.cmp(key)) else {
     return Ok(None);
   };
@@ -235,7 +257,7 @@ pub(crate) fn scan<K: Ord, V>(
     Direction::Backward => Box::new((0..=start).rev()),
   };
   for at in order {
-    let page = nodes.page(root.pages[at].id)?;
+    let page = checked_page(nodes, &root, at)?;
     let entries: Box<dyn Iterator<Item = &(K, V)>> = match direction {
       Direction::Forward => Box::new(page.entries.iter()),
       Direction::Backward => Box::new(page.entries.iter().rev()),

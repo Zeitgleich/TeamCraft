@@ -423,13 +423,21 @@ impl Engine {
       is_memory_constrained,
       ..
     } = start;
-    let (limits, cached_messages) = if is_memory_constrained {
-      (SealedStoreLimits::minimal(), 0)
+    let key_source = StaticKeySource::new(key);
+    let (store, cached_messages) = if is_memory_constrained {
+      // Never the catalog's build: a first push after an update would run it under the limit.
+      let limits = SealedStoreLimits::minimal();
+      (
+        SealedSqliteStore::open_without_building(&path, &key_source, limits),
+        0,
+      )
     } else {
-      (SealedStoreLimits::default(), MESSAGE_CACHE_MESSAGES)
+      (
+        SealedSqliteStore::open(&path, &key_source),
+        MESSAGE_CACHE_MESSAGES,
+      )
     };
-    let store = SealedSqliteStore::open_with_limits(&path, &StaticKeySource::new(key), limits)
-      .map_err(|error| open_error(error.into()))?;
+    let store = store.map_err(|error| open_error(error.into()))?;
     let store = TrackedStore::with_message_cache(Arc::new(store), cached_messages);
     // Plaintext copies of files that were never sent (taken out of the composer, app stopped).
     if let Err(error) = sweep_staged_copies(&store, &upload_staging_dir) {

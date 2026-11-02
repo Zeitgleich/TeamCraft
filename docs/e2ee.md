@@ -2661,10 +2661,17 @@ The browser has neither SQLCipher nor an OS keystore. The web client keeps the s
    messages in display order with server ID, thread and a few flags (hidden, media, unreadable), the
    rows of its feed, and its reactions by target, replies by thread and events.
    Each is a paged index: a root listing pages of up to 256 entries. Table, conversation and message
-   IDs stay inside the sealed plaintext. What a copy of the files shows is unchanged (the number and
-   sizes of records). Somebody who compares copies taken over time sees which records are rewritten
-   together: a message record together with its conversation's index pages, so they can group
-   message records by conversation, which before only their write times hinted at.
+   IDs stay inside the sealed plaintext. The catalog is derived from the records: a node that is
+   damaged, or disagrees with them, is built again under a new random generation, and never makes
+   the store unreadable.
+
+   What this adds for somebody who holds the files without the key: the record count grows by the
+   catalog's nodes, about one per 256 messages. Node values are padded to a power of two (at least
+   4 KiB), so a node's size tells only roughly how many entries it holds; a large root still hints
+   at a long conversation. Somebody who compares copies taken over time sees which records are
+   rewritten together: a message record with its conversation's index nodes, so they can group
+   message records by conversation, which before only their write times hinted at. Contents, names
+   and IDs stay hidden.
 5. **Where the database key lives:** wrapped (AES-256-GCM) by a **non-extractable Web Crypto key**,
    both stored in the same IndexedDB database. The wrapping key's own bytes can never be read by a
    script, but any script of the origin can *use* it: unwrapping the database key is one
