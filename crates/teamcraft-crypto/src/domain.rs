@@ -44,6 +44,8 @@ pub(crate) const LOCAL_STORE_LOOKUP: &str = "TeamCraft-v1 local store lookup";
 pub(crate) const LOCAL_STORE_RECORD: &str = "TeamCraft-v1 local store record";
 /// HKDF info of the persistent media cache's root key, derived from the local database key.
 pub(crate) const MEDIA_CACHE_ROOT_KEY: &str = "TeamCraft-v1 media cache root key";
+/// Associated data of the desktop's sealed file of local secrets (e2ee.md §9).
+pub(crate) const LOCAL_SECRETS_FILE: &str = "TeamCraft-v1 local secrets file";
 pub(crate) const SHARE_LINK_KEY_WRAP: &str = "TeamCraft-v1 share link key wrap";
 pub(crate) const SHARE_LINK_NAME: &str = "TeamCraft-v1 share link name";
 pub(crate) const SERVER_SETTING_KEY: &str = "TeamCraft-v1 server setting key";
@@ -72,7 +74,7 @@ pub(crate) fn labeled(label: &str, body: &[u8]) -> Vec<u8> {
 mod tests {
   use super::*;
 
-  const ALL_LABELS: [&str; 40] = [
+  const ALL_LABELS: [&str; 41] = [
     DEVICE_CERTIFICATE,
     IDENTITY_FINGERPRINT,
     MESSAGE_AAD,
@@ -108,6 +110,7 @@ mod tests {
     LOCAL_STORE_LOOKUP,
     LOCAL_STORE_RECORD,
     MEDIA_CACHE_ROOT_KEY,
+    LOCAL_SECRETS_FILE,
     SHARE_LINK_KEY_WRAP,
     SHARE_LINK_NAME,
     SERVER_SETTING_KEY,

@@ -10865,7 +10865,6 @@ dependencies = [
  "futures-util",
  "gtk",
  "image",
- "keyring",
  "oauth2",
  "objc2",
  "objc2-core-graphics",
@@ -10905,6 +10904,7 @@ dependencies = [
  "windows",
  "wtransport",
  "zbus",
+ "zeroize",
 ]
 
 [[package]]

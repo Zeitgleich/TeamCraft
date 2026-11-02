@@ -13,6 +13,7 @@ use teamcraft_client_api::remote::{
   CoreStatus, EnrollRequest, LinkStatus, MessageWindow, PhoneLinkStatus,
 };
 use teamcraft_client_api::snapshot_changes::{SnapshotChanges, SnapshotCursor};
+use teamcraft_core::store::SecretVault;
 use teamcraft_crypto::backup::Argon2Settings;
 use teamcraft_media::effects::normalize_background_file;
 use teamcraft_proto::{ConversationId, MessageId, UserId};
@@ -148,6 +149,7 @@ pub async fn core_start(
   host: State<'_, CoreHost>,
   calls: State<'_, Arc<CallHost>>,
   service: State<'_, Arc<Service>>,
+  vault: State<'_, Arc<SecretVault>>,
   user: UserId,
 ) -> Result<CoreStatus, CommandError> {
   let server = service
@@ -166,8 +168,8 @@ pub async fn core_start(
         maybe_download_dir: app.path().download_dir().ok(),
         argon2: Argon2Settings::default(),
       };
-      let key = KeyChoice::Keyring {
-        service: "de.zeitgleich.teamcraft.db".to_owned(),
+      let key = KeyChoice::Vault {
+        vault: vault.inner().clone(),
         account: format!("{}|{user}", config.keystore_scope),
       };
       let emitter = app.clone();

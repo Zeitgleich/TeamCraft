@@ -52,7 +52,7 @@ use callback_page::CallbackOutcome;
 use local::{LOCAL_LOGIN_PATH, LOCAL_LOGOUT_PATH, LocalRefusal, LocalSession};
 #[cfg(test)]
 pub(crate) use store::MemoryStore;
-pub use store::{KeyringStore, TokenStore};
+pub use store::{TokenStore, VaultStore};
 
 /// How long the browser may take to come back.
 const LOGIN_TIMEOUT: Duration = Duration::from_secs(300);
@@ -1623,6 +1623,9 @@ mod tests {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::{TcpListener, TcpStream};
 
+    use teamcraft_core::store::{KeySourceError, Keystore, SecretVault};
+    use zeroize::Zeroizing;
+
     use super::*;
     use crate::auth::store::MemoryStore;
 
@@ -1719,6 +1722,58 @@ mod tests {
         asked,
         "a refused token is not tried again"
       );
+    }
+
+    /// Issue #1150: on macOS every keychain call can raise a dialog, and the token rotates every
+    /// few minutes. A start reads the keychain once; refreshing never touches it.
+    #[tokio::test]
+    async fn a_start_reads_the_keychain_once_and_a_refresh_not_at_all() {
+      let provider = FakeProvider::start().await;
+      provider.set(PROVIDER_UP);
+      let keystore = Arc::new(CountingKeystore::default());
+      let directory = std::env::temp_dir().join(format!("teamcraft-auth-vault-{}", std::process::id()));
+      let open_vault = || {
+        let vault = Arc::new(SecretVault::new(Arc::clone(&keystore) as Arc<dyn Keystore>));
+        vault.set_directory(&directory);
+        vault
+      };
+      let first_run = VaultStore::new(open_vault());
+      first_run
+        .save(&provider.config().token_key(), "refresh")
+        .await
+        .unwrap();
+      first_run
+        .clear_local_session(&provider.config().server_url)
+        .await
+        .unwrap();
+      keystore.calls.store(0, Ordering::SeqCst);
+
+      let clock = Arc::new(AtomicI64::new(START_MS));
+      let reading = Arc::clone(&clock);
+      let service = AuthService::with_clock(
+        Some(provider.config()),
+        VaultStore::new(open_vault()),
+        Arc::new(move || reading.load(Ordering::SeqCst)),
+      );
+      assert!(service.restore().await.unwrap());
+      assert_eq!(keystore.calls.load(Ordering::SeqCst), 1, "one read per start");
+
+      let requests = provider.token_requests.load(Ordering::SeqCst);
+      keystore.calls.store(0, Ordering::SeqCst);
+      for round in 1..=5 {
+        clock.store(START_MS + round * 10 * HOUR_MS, Ordering::SeqCst);
+        service.access_token(&provider.config()).await.unwrap();
+      }
+      assert!(
+        provider.token_requests.load(Ordering::SeqCst) > requests,
+        "it did refresh"
+      );
+      assert_eq!(
+        keystore.calls.load(Ordering::SeqCst),
+        0,
+        "no access while running"
+      );
+      drop(std::fs::remove_dir_all(&directory));
     }
 
     #[tokio::test]
@@ -1995,6 +2050,55 @@ mod tests {
         body.len()
       );
       drop(socket.write_all(response.as_bytes()).await);
+    }
+
+    /// A keychain in memory that counts every access.
+    #[derive(Default)]
+    struct CountingKeystore {
+      calls: AtomicUsize,
+      entries: std::sync::Mutex<std::collections::HashMap<String, Vec<u8>>>,
+    }
+
+    impl Keystore for CountingKeystore {
+      fn read_secret(
+        &self,
+        service: &str,
+        account: &str,
+      ) -> Result<Option<Zeroizing<Vec<u8>>>, KeySourceError> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        let entries = self.entries.lock().unwrap();
+        Ok(
+          entries
+            .get(&format!("{service}/{account}"))
+            .cloned()
+            .map(Zeroizing::new),
+        )
+      }
+
+      fn read_text(&self, service: &str, account: &str) -> Result<Option<Zeroizing<String>>, KeySourceError> {
+        Ok(
+          self
+            .read_secret(service, account)?
+            .map(|bytes| Zeroizing::new(String::from_utf8(bytes.to_vec()).unwrap())),
+        )
+      }
+
+      fn write_secret(&self, service: &str, account: &str, secret: &[u8]) -> Result<(), KeySourceError> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        let mut entries = self.entries.lock().unwrap();
+        entries.insert(format!("{service}/{account}"), secret.to_vec());
+        Ok(())
+      }
+
+      fn delete(&self, service: &str, account: &str) -> Result<(), KeySourceError> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        self
+          .entries
+          .lock()
+          .unwrap()
+          .remove(&format!("{service}/{account}"));
+        Ok(())
+      }
     }
 
     /// A service signed in at [`START_MS`] with a token for [`LIFETIME_MS`], and its clock.

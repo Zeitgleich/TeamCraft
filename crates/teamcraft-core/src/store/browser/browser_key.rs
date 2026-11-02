@@ -1,7 +1,7 @@
 //! The database key in the browser (e2ee.md §9): a random 256-bit key, kept in IndexedDB wrapped
 //! by a non-extractable Web Crypto AES-GCM key.
 //!
-//! This is the browser's stand-in for the OS keystore ([`super::super::KeyringKeySource`]): the
+//! This is the browser's stand-in for the OS keystore ([`super::super::SecretVault`]): the
 //! wrapping key's bytes can't be read by any script, so a copy of the IndexedDB files alone does not
 //! reveal the database key. It does **not** keep the key from script running on the origin: pages
 //! and the service worker unwrap it without a user gesture (push notifications need that), and one

@@ -26,7 +26,7 @@ use teamcraft_client_api::updates::{
 use teamcraft_proto::{ClientCompatibilityResponse, ClientUpdatePolicy};
 use tokio::sync::Notify;
 
-use crate::auth::{AuthService, KeyringStore};
+use crate::auth::{AuthService, VaultStore};
 use crate::calls::CallHost;
 use crate::core::commands::CoreHost;
 
@@ -679,7 +679,7 @@ fn can_replace_app_image() -> bool {
 
 /// The server's minimum client version, if it answers (older servers don't know the endpoint).
 async fn server_minimum(app: &AppHandle) -> Option<String> {
-  let service = app.state::<Arc<AuthService<KeyringStore>>>();
+  let service = app.state::<Arc<AuthService<VaultStore>>>();
   let response = service
     .public_get(COMPATIBILITY_PATH)
     .await

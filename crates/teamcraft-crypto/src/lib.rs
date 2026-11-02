@@ -28,6 +28,7 @@ pub mod push_gateway;
 pub mod recovery_key;
 pub mod rendezvous;
 pub mod secret;
+pub mod secret_file;
 pub mod server_secret;
 pub mod service_key;
 pub mod share_link;

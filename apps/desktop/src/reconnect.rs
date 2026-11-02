@@ -15,7 +15,7 @@ use teamcraft_core::connection::ConnectionState;
 use teamcraft_core::retry::{Jitter, RetryPolicy};
 use tokio::sync::Notify;
 
-use crate::auth::{AuthError, AuthService, KeyringStore};
+use crate::auth::{AuthError, AuthService, VaultStore};
 use crate::calls::CallHost;
 use crate::core::commands::CoreHost;
 
@@ -57,7 +57,7 @@ impl RefreshNow {
 /// keep-alive gives up), the token is checked against the wall clock and refreshed if it ran out
 /// meanwhile, and the gateway and a running call reconnect at once instead of after the backoff.
 pub fn network_back(app: &tauri::AppHandle) {
-  app.state::<Arc<AuthService<KeyringStore>>>().drop_connections();
+  app.state::<Arc<AuthService<VaultStore>>>().drop_connections();
   app.state::<RefreshNow>().notify();
   app.state::<CoreHost>().network_changed();
   app.state::<Arc<CallHost>>().network_changed();
@@ -67,7 +67,7 @@ pub fn network_back(app: &tauri::AppHandle) {
 /// expiry; the core reads the result from the session), at once on [`RefreshNow`], and with a
 /// growing pause while the identity provider can't be reached. A refused refresh token ends the
 /// session in [`AuthService`]; nothing here retries a refusal.
-pub fn keep_tokens_fresh(service: Arc<AuthService<KeyringStore>>, now: RefreshNow) {
+pub fn keep_tokens_fresh(service: Arc<AuthService<VaultStore>>, now: RefreshNow) {
   tauri::async_runtime::spawn(async move {
     let mut pacing = RefreshPacing::new(seed());
     loop {
@@ -107,7 +107,7 @@ pub fn probe_while_offline(app: tauri::AppHandle) {
         Some(ConnectionState::Offline { .. })
       );
       let maybe_server = app
-        .state::<Arc<AuthService<KeyringStore>>>()
+        .state::<Arc<AuthService<VaultStore>>>()
         .active_server()
         .map(|server| server.server_url);
       let (true, Some(server_url)) = (is_offline, maybe_server) else {

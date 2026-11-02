@@ -56,10 +56,8 @@ tauri-plugin-window-state = "2"
 # Self-update of the Windows, macOS and AppImage builds from a signed manifest (docs/updates.md).
 tauri-plugin-updater = "2"
 # One running instance on every OS: a second process would fork the encrypted store (e2ee.md §9.4).
-# Same Tauri plugin family; on Linux it adds zbus, already in the tree through the keyring.
+# Same Tauri plugin family; on Linux it adds zbus, already in the tree through the keyring (teamcraft-core).
 tauri-plugin-single-instance = "2"
-# Refresh token in the OS keyring (Secret Service on Linux, Keychain on macOS).
-keyring = "4"
 reqwest = { workspace = true, features = ["form"] }
 # PKCE, state and token requests; HTTP goes through our own reqwest client.
 oauth2 = { version = "5", default-features = false }
@@ -142,6 +140,8 @@ teamcraft-media = { path = "../../crates/teamcraft-media", features = ["openh264
 # The media task's tests run a real call against a local SFU (as the SFU's own call tests do).
 teamcraft-sfu = { path = "../../crates/teamcraft-sfu" }
 wtransport = { version = "0.7.2", features = ["self-signed"] }
+# The counting fake keychain of the sign-in tests implements `Keystore`; already in the tree.
+zeroize = "1.9.1"
 
 [target.'cfg(target_os = "linux")'.dev-dependencies]
 # A fake notification service on a peer-to-peer connection, so tests see what a ringing call sends

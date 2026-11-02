@@ -16,12 +16,10 @@ use base64::Engine;
 
 use super::avatars::MAX_AVATAR_BYTES;
 use super::servers::ServerState;
-use super::{
-  ApiBytesResponse, ApiResponse, AuthError, AuthService, DesktopConfig, HTTP_POLICY, KeyringStore,
-};
+use super::{ApiBytesResponse, ApiResponse, AuthError, AuthService, DesktopConfig, HTTP_POLICY, VaultStore};
 use teamcraft_client_api::oidc_login::LoginRequest;
 
-pub type Service = AuthService<KeyringStore>;
+pub type Service = AuthService<VaultStore>;
 
 #[derive(Debug, Serialize)]
 pub struct CommandError {

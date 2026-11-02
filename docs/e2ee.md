@@ -2209,13 +2209,16 @@ desktop and web have no camera scanner and take the file or the typed key.
 The desktop app keeps the account's **backup key** in the OS keychain through the maintained
 `keyring` crate, which it already uses for the database key: macOS Keychain, Windows Credential
 Manager, Linux Secret Service (GNOME Keyring, KWallet). This is §6.1's "wrapped by devices": the
-keychain is the wrap, nothing is uploaded.
+keychain is the wrap, nothing is uploaded. Normal starts read a copy from the sealed file of local
+secrets (§9.7), so the entry itself is touched only when the key is new or changed, or the file
+lost it.
 
 - Entry: service `de.zeitgleich.teamcraft.backup-key`, account `<server URL>|<user ID>`, the same
   scope as the database key; the value is the 32-byte backup key.
-- Written when the device is set up (enrolled, linked, recovered) and on every start when it is
-  missing or differs (a backup key switched by an org recovery, §6.3.1); written through
-  `run_outside_runtime` like the database key (§9).
+- Written when the device is set up (enrolled, linked, recovered) and when a start finds that the
+  file's copy is missing or differs (a backup key switched by an org recovery, §6.3.1); written
+  through `run_outside_runtime` like the database key (§9). The file takes the key first, so a
+  keychain that refuses the write is asked once, not at every start.
 - Used when this computer must set up the same account again (the local database was lost, or set
   aside as unreadable, §9.5): the core opens the server's key bag with it as with a recovery key
   and checks the identity. A key that no longer opens the bag (the account's backup key changed)
@@ -2230,7 +2233,8 @@ keychain is the wrap, nothing is uploaded.
 
 What it costs: the entry is as strong as the OS account's keychain. Software running as the user
 that may read the keychain gets the backup key without the database file (today it needs both the
-database key from the keychain and the file). Windows may roam Credential Manager entries with a
+database key from the keychain and the file). The file's copy (§9.7) changes nothing here: it is
+sealed under a key from the same keychain. Windows may roam Credential Manager entries with a
 domain profile; there the entry reaches other computers of the profile, which is the "known
 platform" convenience of the issue, but also what a domain administrator can read. The server's
 key bag is still needed to read anything.
@@ -2696,7 +2700,8 @@ Add it to meeting chats and to the channels where it is used, not everywhere.
 
 ## 9. Local storage
 
-- Local database: SQLite with SQLCipher; key in the OS keystore (desktop).
+- Local database: SQLite with SQLCipher; key in the OS keystore (desktop), read through the sealed
+  file of local secrets (§9.7).
 - Android: plain SQLite with records sealed like the browser store (§9.1), because SQLCipher needs
   a libcrypto the NDK doesn't ship. The database key is random, wrapped by an AES-GCM key in the
   Android Keystore (hardware-backed where available); see §9.2.
@@ -3101,6 +3106,47 @@ start and remain visible while the server or its object storage is unavailable.
   (notifications.md, "Desktop notifications").
 - The mobile apps don't use it: Android keeps avatars in its own file cache and opens pictures from
   the decrypted downloads (§4.5).
+
+### 9.7 Desktop: one keychain read per start (issue #1150, implemented)
+
+Every keychain access can raise a password dialog on macOS, and an ad hoc signed build has no
+identity the keychain could remember across updates. So the desktop app reads the keychain **once
+per start** and not while it runs. Linux (also in the Flatpak) and Windows use the same code.
+
+- **The file.** `secrets.sealed` in the app's data directory holds refresh tokens, local sessions
+  and copies of the database and backup keys, for all servers and accounts of this computer. It is
+  sealed with XChaCha20-Poly1305 (`teamcraft_crypto::secret_file`): `version (1) || nonce (24) ||
+  ciphertext || tag (16)`, a fresh random nonce per write, the version bound in as associated data.
+- **The key** is random, 256 bits, used for nothing else, and lives in the OS keychain: service
+  `de.zeitgleich.teamcraft`, account `secrets-file-key`. It is read once per run when a secret is
+  first asked for and held in memory (zeroized on drop), like the decrypted contents.
+- **Tokens and sessions live only in the file.** A token refresh writes the file and doesn't touch
+  the keychain. Sign-out and leaving a server delete them from it; as with the keychain entry
+  before, the database and its keys stay, so signing in again finds the local data.
+- **Database and backup keys stay in the keychain too.** The file's copies save the reads; a new
+  key is written to the keychain first. So a damaged file costs a sign-in, never the database.
+- **Writes** go to a temporary file (owner only, `0600` on Unix; the per-user data directory on
+  Windows), which is synced and renamed over the file, so a crash leaves the old file or the new one.
+- **Damaged file.** One that doesn't open is renamed to `secrets.sealed.damaged`, never deleted and
+  never read again. The user signs in again; the keys come back from their keychain entries. A new
+  key for the file is made only when the keychain says the entry doesn't exist.
+- **Locked, denied or no keychain.** Nothing is wiped and no key is made: the caller gets an error
+  (sign-in shows it, the core stays in its "try again" failure, §9.5). The failure stands for 60
+  seconds, because the UI asks for the core's status again and again and each attempt would raise
+  another dialog. Nothing is kept without a keychain, as before.
+- **Migration.** The old entries (`oidc-refresh-token@<key>`, `local-session@<server>`) can't be
+  listed, so each moves the first time it is asked for: the file takes the token, the entry is
+  deleted, the file records that it went. A crash in between finds the token in the file, whose
+  copy wins, and finishes the deletion. The file remembers moved entries, so nothing looks again.
+  The database and backup keys are read once per account into the file and their entries stay.
+
+What it costs: tokens were protected by the keychain's per-item access rules, and now by one key:
+whoever may read that item and the file gets every token, database key and backup key of this
+computer. On the platforms in question the items had the same owner and the same access rules, so
+this is no new reader. A process of the user can read the app's memory on most systems, as before.
+An attacker who can write the file can put an older version back, which brings back an older
+refresh token (rotated ones are refused by the provider) but nothing they could not read already;
+a keychain-held counter would cost a write per refresh, which is what this design removes.
 
 ## 10. Search
 
