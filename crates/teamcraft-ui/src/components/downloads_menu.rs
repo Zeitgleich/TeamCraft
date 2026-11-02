@@ -79,7 +79,7 @@ pub fn DownloadsButton() -> impl IntoView {
           aria-haspopup="dialog"
           aria-expanded=move || is_open().to_string()
           aria-label=move || button_label(i18n, summary.get())
-          data-tip=move || i18n.t("downloads-title")
+          title=move || i18n.t("downloads-title")
           on:click=toggle
           on:animationend=move |event: web_sys::AnimationEvent| {
             if event.animation_name() == "downloads-done" {
@@ -87,7 +87,7 @@ pub fn DownloadsButton() -> impl IntoView {
             }
           }
         >
-          <svg class="downloads-arrow" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true" focusable="false">
+          <svg class="downloads-arrow" viewBox="5 2 14 14" width="14" height="14" aria-hidden="true" focusable="false">
             <path d="M12 3v11 M7 9.5l5 5 5-5" />
           </svg>
           <span class="downloads-bar" aria-hidden="true">
