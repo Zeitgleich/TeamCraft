@@ -830,6 +830,10 @@ pub enum ChatAction {
     message: MessageId,
     file_id: String,
   },
+  ControlDownload {
+    file_id: String,
+    control: crate::actions::DownloadControl,
+  },
   CreateShareLink {
     conversation: ConversationId,
     message: MessageId,
@@ -1179,6 +1183,7 @@ impl ChatAction {
         message,
         file_id,
       } => backend.download_attachment(conversation, message, &file_id),
+      Self::ControlDownload { file_id, control } => backend.control_download(&file_id, control),
       Self::CreateShareLink {
         conversation,
         message,
@@ -1369,6 +1374,7 @@ pub enum ChatQuery {
     file_id: String,
   },
   MaxUploadBytes,
+  Downloads,
   BrowseChannels {
     space: SpaceId,
   },
@@ -1499,6 +1505,9 @@ pub enum ChatAnswer {
   },
   Bytes {
     maybe_bytes: Option<u64>,
+  },
+  Downloads {
+    entries: Vec<crate::actions::DownloadEntry>,
   },
   Channels {
     channels: Vec<BrowsableChannel>,
@@ -1678,6 +1687,10 @@ impl ChatQuery {
       },
       Self::MaxUploadBytes => ChatAnswer::Bytes {
         maybe_bytes: backend.max_upload_bytes(),
+      },
+      Self::Downloads => match backend.downloads() {
+        Some(entries) => ChatAnswer::Downloads { entries },
+        None => ChatAnswer::Unsupported,
       },
       Self::BrowseChannels { space } => ChatAnswer::Channels {
         channels: backend.browse_channels(space),

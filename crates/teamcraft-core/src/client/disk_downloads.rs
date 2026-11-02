@@ -39,6 +39,10 @@ pub struct DownloadRecord {
   /// Failed attempts since the user asked; a network failure waits with backoff and continues.
   #[serde(default)]
   pub retry: UploadRetry,
+  /// The partial file (ciphertext) while the download is unfinished, so the list can say how far
+  /// a paused or waiting one got.
+  #[serde(rename = "partial", default, skip_serializing_if = "Option::is_none")]
+  pub maybe_partial_path: Option<String>,
 }
 
 /// Where a saved file goes.
@@ -61,6 +65,10 @@ pub enum DownloadStatus {
   Running,
   /// Failed on the network; continues once [`DownloadRecord::retry`] is due.
   Waiting,
+  /// The user paused it; what arrived stays until they continue.
+  Paused,
+  /// The user cancelled it; what arrived was deleted.
+  Cancelled,
   Saved {
     path: String,
   },
@@ -122,7 +130,10 @@ pub fn due_downloads(
         }
         false
       },
-      DownloadStatus::Saved { .. } | DownloadStatus::Failed { .. } => false,
+      DownloadStatus::Paused
+      | DownloadStatus::Cancelled
+      | DownloadStatus::Saved { .. }
+      | DownloadStatus::Failed { .. } => false,
     };
     if is_due {
       due.push(DueDownload {
@@ -159,10 +170,52 @@ pub(super) fn record_start(
       target: target.clone(),
       status: DownloadStatus::Running,
       retry: UploadRetry::Fresh,
+      maybe_partial_path: None,
     },
   };
   save(store, &record)?;
   prune(store)
+}
+
+/// Records where the download's partial file is.
+#[cfg(not(target_arch = "wasm32"))]
+pub(super) fn record_partial(
+  store: &impl LocalStore,
+  attachment: AttachmentId,
+  partial: &str,
+) -> Result<(), CoreError> {
+  let Some(mut record) = download_record(store, attachment)? else {
+    return Ok(());
+  };
+  record.maybe_partial_path = Some(partial.to_owned());
+  save(store, &record)
+}
+
+/// Records that the user paused or cancelled an unfinished download; returns the record before,
+/// `None` when there is none or it already finished.
+pub(super) fn record_stop(
+  store: &impl LocalStore,
+  attachment: AttachmentId,
+  status: DownloadStatus,
+) -> Result<Option<DownloadRecord>, CoreError> {
+  let Some(record) = download_record(store, attachment)?.filter(|record| !record.is_finished()) else {
+    return Ok(None);
+  };
+  let is_cancel = status == DownloadStatus::Cancelled;
+  save(
+    store,
+    &DownloadRecord {
+      status,
+      retry: UploadRetry::Fresh,
+      maybe_partial_path: if is_cancel {
+        None
+      } else {
+        record.maybe_partial_path.clone()
+      },
+      ..record.clone()
+    },
+  )?;
+  Ok(Some(record))
 }
 
 /// Records how an attempt ended and returns what the file's card shows: saved or failed (also while
@@ -180,6 +233,7 @@ pub(super) fn record_finish(
   let state = match saved {
     Ok(path) => {
       record.status = DownloadStatus::Saved { path: path.clone() };
+      record.maybe_partial_path = None;
       TransferState::Local { path: path.clone() }
     },
     Err(error) => {
@@ -207,7 +261,7 @@ impl DownloadRecord {
   pub fn is_finished(&self) -> bool {
     matches!(
       self.status,
-      DownloadStatus::Saved { .. } | DownloadStatus::Failed { .. }
+      DownloadStatus::Saved { .. } | DownloadStatus::Failed { .. } | DownloadStatus::Cancelled
     )
   }
 }
@@ -274,7 +328,7 @@ pub(super) mod native {
   use teamcraft_crypto::secret::SymmetricKey;
   use teamcraft_proto::AttachmentId;
 
-  use super::{DownloadStatus, PARTIAL_DIR, download_records};
+  use super::{PARTIAL_DIR, download_records};
   use crate::api::{ApiError, DetachedRange, RangedBlob};
   use crate::error::CoreError;
   use crate::store::{AttachmentRef, LocalStore};
@@ -311,7 +365,7 @@ pub(super) mod native {
   pub fn sweep_partial_downloads(store: &impl LocalStore, staging: &Path) -> Result<usize, CoreError> {
     let unfinished: std::collections::HashSet<PathBuf> = download_records(store)?
       .iter()
-      .filter(|record| matches!(record.status, DownloadStatus::Running | DownloadStatus::Waiting))
+      .filter(|record| !record.is_finished())
       .map(|record| partial_path(staging, record.attachment_id))
       .collect();
     let Ok(entries) = std::fs::read_dir(partial_dir(staging)) else {
@@ -675,6 +729,7 @@ mod tests {
         reason: TransferFailure::Missing,
       },
       retry: UploadRetry::Fresh,
+      maybe_partial_path: None,
     };
     let json = serde_json::to_value(&record).unwrap();
     assert_eq!(

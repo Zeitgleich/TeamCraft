@@ -339,7 +339,60 @@ pub enum FileTransfer {
   },
 }
 
+/// A download to disk in the app's downloads list, newest first
+/// ([`crate::backend::ChatBackend::downloads`]).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DownloadEntry {
+  /// The file, as the list's key and what [`crate::backend::ChatBackend::control_download`] names.
+  pub file_id: String,
+  pub conversation: ConversationId,
+  pub file_name: String,
+  /// The size the message announced.
+  pub total_bytes: u64,
+  /// What arrived so far (of the encrypted file, which is a little larger than `total_bytes`).
+  pub done_bytes: u64,
+  /// When it was asked for (the device's clock, only for the order).
+  pub started_at_ms: i64,
+  pub state: DownloadState,
+}
+
+/// Where a download in the list stands.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum DownloadState {
+  Active,
+  /// Failed for `reason`; tries again by itself shortly.
+  Retrying {
+    reason: FileFailure,
+  },
+  Paused,
+  Saved,
+  Failed {
+    reason: FileFailure,
+  },
+  Cancelled,
+  /// A state a newer core knows.
+  #[serde(other)]
+  Unknown,
+}
+
+/// What the user does with a download in the list.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DownloadControl {
+  Pause,
+  /// Continues a paused download, or tries a failed or cancelled one again.
+  Resume,
+  Cancel,
+  /// Takes a finished download off the list; the saved file stays.
+  Forget,
+  /// Opens the saved file with its app.
+  Open,
+  /// Shows the saved file in the file manager.
+  Reveal,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum FileFailure {
   TooLarge,

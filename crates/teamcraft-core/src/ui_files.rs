@@ -1,12 +1,13 @@
 //! Files in the UI adapter: attachments of messages, uploads, downloads and share links.
 
 use teamcraft_client_api::actions::{
-  FileFailure, FileInfo, FileSource, FileTransfer, MediaAnchor, MediaPage, OutgoingFile, PixelSize,
-  ShareLink, ShareLinkOptions,
+  DownloadControl, DownloadEntry, DownloadState, FileFailure, FileInfo, FileSource, FileTransfer,
+  MediaAnchor, MediaPage, OutgoingFile, PixelSize, ShareLink, ShareLinkOptions,
 };
 use teamcraft_client_api::model::{ConversationId, MessageId, ThreadId, UserId};
 use teamcraft_proto::{AttachmentId, Base64Bytes};
 
+use crate::client::disk_downloads::{DownloadRecord, DownloadStatus, download_records};
 use crate::client::files::{
   PendingFile, PendingUpload, RetryCause, TransferFailure, TransferState, UploadRetry, UploadSource,
   attachments_of, cancel_pending_file, failed_uploads, pending_upload, save_pending_upload, share_links,
@@ -417,6 +418,33 @@ impl<S: LocalStore> CoreChatBackend<S> {
       .collect()
   }
 
+  /// The downloads list: every recorded save to disk, newest first, with the bytes that arrived.
+  pub(crate) fn ui_downloads(&self) -> Option<Vec<DownloadEntry>> {
+    let records = self.read(download_records(self.store_ref()).map(Some))?;
+    Some(
+      records
+        .into_iter()
+        .map(|record| download_entry(record, self.transfers()))
+        .collect(),
+    )
+  }
+
+  pub(crate) fn ui_control_download(&self, file_id: &str, control: DownloadControl) {
+    let Ok(attachment) = file_id.parse::<AttachmentId>() else {
+      tracing::warn!("controlling a download that isn't one");
+      return;
+    };
+    let control = match control {
+      DownloadControl::Pause => crate::downloads::DownloadControl::Pause,
+      DownloadControl::Resume => crate::downloads::DownloadControl::Resume,
+      DownloadControl::Cancel => crate::downloads::DownloadControl::Cancel,
+      DownloadControl::Forget => crate::downloads::DownloadControl::Forget,
+      DownloadControl::Open => crate::downloads::DownloadControl::Open,
+      DownloadControl::Reveal => crate::downloads::DownloadControl::Reveal,
+    };
+    self.command(CoreCommand::ControlDownload { attachment, control });
+  }
+
   pub(crate) fn ui_max_upload_bytes(&self) -> Option<u64> {
     self.read(records::get_json(
       self.store_ref(),
@@ -519,6 +547,56 @@ fn upload_transfer(file: &PendingFile, transfers: &Transfers) -> FileTransfer {
     total_bytes: file.size_bytes,
     failed_attempts: file.retry.failed_attempts(),
   }
+}
+
+/// A record as the list shows it: a running download's bytes from its transfer, a stopped one's
+/// from its partial file.
+fn download_entry(record: DownloadRecord, transfers: &Transfers) -> DownloadEntry {
+  let maybe_progress = transfers.progress(record.attachment_id);
+  let state = match record.status {
+    DownloadStatus::Running => DownloadState::Active,
+    DownloadStatus::Waiting => DownloadState::Retrying {
+      reason: match record.retry {
+        UploadRetry::Waiting {
+          cause: RetryCause::StorageUnavailable,
+          ..
+        } => FileFailure::StorageUnavailable,
+        _ => FileFailure::Network,
+      },
+    },
+    DownloadStatus::Paused => DownloadState::Paused,
+    DownloadStatus::Cancelled => DownloadState::Cancelled,
+    DownloadStatus::Saved { .. } => DownloadState::Saved,
+    DownloadStatus::Failed { reason } => DownloadState::Failed {
+      reason: failure_view(reason),
+    },
+  };
+  let done_bytes = match (&state, maybe_progress) {
+    (DownloadState::Saved, _) => record.size_bytes,
+    (_, Some(progress)) => progress.done_bytes,
+    _ => partial_bytes(record.maybe_partial_path.as_deref()),
+  };
+  DownloadEntry {
+    file_id: record.attachment_id.to_string(),
+    conversation: record.conversation_id,
+    file_name: record.file_name,
+    total_bytes: record.size_bytes,
+    done_bytes,
+    started_at_ms: record.started_at_ms,
+    state,
+  }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn partial_bytes(maybe_path: Option<&str>) -> u64 {
+  maybe_path
+    .and_then(|path| std::fs::metadata(path).ok())
+    .map_or(0, |meta| meta.len())
+}
+
+#[cfg(target_arch = "wasm32")]
+fn partial_bytes(_maybe_path: Option<&str>) -> u64 {
+  0
 }
 
 fn failure_view(reason: TransferFailure) -> FileFailure {

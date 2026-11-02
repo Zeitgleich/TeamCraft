@@ -1,0 +1,211 @@
+/* ---- Downloads of the desktop app (#153): the top bar's button and its list ---- */
+
+.downloads {
+  position: relative;
+}
+
+/* The arrow drops onto a bar, like a browser's: the bar is the tray it lands in and the progress. */
+.downloads-btn {
+  position: relative;
+  grid-auto-flow: row;
+  gap: 1px;
+}
+
+.downloads-arrow {
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.8;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.downloads-bar {
+  position: relative;
+  width: 16px;
+  height: 2px;
+  border-radius: 1px;
+  overflow: hidden;
+  background: currentColor;
+}
+
+/* The fill grows with scaleX (the compositor runs it), from the left edge. */
+.downloads-bar-fill {
+  position: absolute;
+  inset: 0;
+  background: var(--download-progress);
+  transform: scaleX(var(--downloads-progress, 0));
+  transform-origin: left center;
+  opacity: 0;
+  transition:
+    transform var(--dur-slow) var(--ease-standard),
+    opacity var(--dur-base) var(--ease-standard);
+}
+
+.downloads-btn.is-active .downloads-bar {
+  background: color-mix(in srgb, currentColor 35%, transparent);
+}
+
+.downloads-btn.is-active .downloads-bar-fill {
+  opacity: 1;
+}
+
+/* A download broke off since the list was last opened. */
+.downloads-btn.is-attention {
+  color: var(--download-attention);
+}
+
+.downloads-btn.is-attention .downloads-bar-fill {
+  background: var(--download-attention);
+}
+
+/* One finished: the bar fills green and the arrow nods once, then everything settles back. */
+.downloads-btn.is-done {
+  animation: downloads-done 1.2s var(--ease-standard);
+}
+
+.downloads-btn.is-done .downloads-arrow {
+  animation: downloads-nod 420ms var(--ease-pop);
+}
+
+@keyframes downloads-done {
+  0%,
+  70% {
+    color: var(--download-done);
+  }
+}
+
+@keyframes downloads-nod {
+  40% {
+    transform: translateY(2px);
+  }
+}
+
+/* ---- The list ---- */
+
+.popover.downloads-menu {
+  width: 24rem;
+  max-width: calc(100vw - 16px);
+  padding: 4px 0 6px;
+}
+
+.downloads-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 6px 8px 6px 14px;
+}
+
+.downloads-heading {
+  margin: 0;
+  font-size: var(--text-sm);
+  font-weight: var(--weight-semibold);
+}
+
+.downloads-list {
+  max-height: min(24rem, calc(100dvh - 120px));
+  margin: 0;
+  padding: 0 6px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  list-style: none;
+}
+
+.download-row {
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  align-items: center;
+  gap: 10px;
+  padding: 8px;
+  border-radius: var(--radius-sm);
+}
+
+.download-icon {
+  display: grid;
+  place-items: center;
+  color: var(--text-muted);
+}
+
+.download-row.is-broken .download-icon {
+  color: var(--lvl-warn);
+}
+
+.download-main {
+  min-width: 0;
+}
+
+.download-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-weight: var(--weight-semibold);
+}
+
+.download-status {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: var(--text-xs);
+  letter-spacing: var(--tracking-xs);
+  color: var(--text-muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.download-progress {
+  position: relative;
+  display: block;
+  height: 3px;
+  margin-top: 6px;
+  border-radius: 2px;
+  overflow: hidden;
+  background: var(--surface-2);
+}
+
+.download-progress-fill {
+  position: absolute;
+  inset: 0;
+  background: var(--accent);
+  transform: scaleX(var(--downloads-progress, 0));
+  transform-origin: left center;
+  transition: transform var(--dur-slow) var(--ease-standard);
+}
+
+.download-row.is-paused .download-progress-fill {
+  background: var(--text-muted);
+}
+
+.download-actions {
+  display: flex;
+  gap: 2px;
+}
+
+/* The actions come up under the pointer or the keyboard; on touch screens they always show. */
+@media (hover: hover) and (pointer: fine) {
+  .download-row:hover {
+    background: var(--surface-2);
+  }
+
+  .download-actions {
+    opacity: 0;
+    transition: opacity var(--dur-fast) var(--ease-standard);
+  }
+
+  .download-row:hover .download-actions,
+  .download-row:focus-within .download-actions {
+    opacity: 1;
+  }
+}
+
+.download-row:focus-within {
+  background: var(--surface-2);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .downloads-bar-fill,
+  .download-progress-fill {
+    transition: opacity var(--dur-base) var(--ease-standard);
+  }
+
+  .downloads-btn.is-done .downloads-arrow {
+    animation: none;
+  }
+}
