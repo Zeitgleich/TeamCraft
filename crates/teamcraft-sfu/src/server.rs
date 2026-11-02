@@ -282,6 +282,15 @@ fn bind_socket(config: &SfuConfig) -> std::io::Result<UdpSocket> {
     socket.set_only_v6(false)?;
   }
   socket.set_recv_buffer_size(config.udp_receive_buffer_bytes)?;
+  let got_bytes = socket.recv_buffer_size()?;
+  if got_bytes < config.udp_receive_buffer_bytes {
+    warn!(
+      wanted_bytes = config.udp_receive_buffer_bytes,
+      got_bytes,
+      "the system caps the UDP receive buffer, big keyframes may get lost while the SFU is busy: \
+       raise net.core.rmem_max"
+    );
+  }
   socket.bind(&config.bind_addr.into())?;
   Ok(socket.into())
 }

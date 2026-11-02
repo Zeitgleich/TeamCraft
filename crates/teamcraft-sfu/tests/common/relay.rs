@@ -7,6 +7,7 @@
 
 use std::net::{Ipv6Addr, SocketAddr, UdpSocket};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::mpsc as std_mpsc;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -167,6 +168,49 @@ pub fn receive_on_thread(
       on_packet(&buffer[..len], from);
     }
   });
+}
+
+/// Sends what goes into the returned queue at `rate_bps` from a thread of its own, until the
+/// queue is dropped: a link's rate instead of loopback's, where a keyframe arrives in one burst
+/// and a socket whose buffer the system caps (`net.core.rmem_max`) overflows however idle the
+/// machine is. No packet is dropped here.
+pub fn paced_on_thread(
+  rate_bps: u64,
+  mut send: impl FnMut(&[u8]) + Send + 'static,
+) -> std_mpsc::Sender<Vec<u8>> {
+  let (packets, queue) = std_mpsc::channel::<Vec<u8>>();
+  std::thread::spawn(move || {
+    let mut next_free = Instant::now();
+    while let Ok(packet) = queue.recv() {
+      let now = Instant::now();
+      std::thread::sleep(next_free.saturating_duration_since(now));
+      send(&packet);
+      next_free = next_free.max(now) + Duration::from_secs_f64(packet.len() as f64 * 8.0 / rate_bps as f64);
+    }
+  });
+  packets
+}
+
+/// What the system allows a socket's receive buffer to be (`net.core.rmem_max`), where it tells.
+pub fn receive_buffer_cap_bytes() -> Option<u64> {
+  std::fs::read_to_string("/proc/sys/net/core/rmem_max")
+    .ok()?
+    .trim()
+    .parse()
+    .ok()
+}
+
+/// What the kernel dropped for lack of room at all of this network namespace's UDP sockets: the
+/// SFU's and the clients' too. A test that runs alone has them to itself.
+pub fn dropped_by_kernel_everywhere() -> Option<u64> {
+  let table = std::fs::read_to_string("/proc/net/udp6").ok()?;
+  Some(
+    table
+      .lines()
+      .skip(1)
+      .filter_map(|line| line.split_whitespace().last()?.parse::<u64>().ok())
+      .sum(),
+  )
 }
 
 /// What the kernel dropped at `sockets` for lack of room: a test's bottleneck that is no network's.

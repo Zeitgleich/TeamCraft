@@ -41,7 +41,10 @@ use teamcraft_sfu::config::SfuConfig;
 use teamcraft_sfu::server::{CALL_PATH, Sfu};
 use wtransport::Identity;
 
-use crate::common::relay::{bind_sockets, dropped_by_kernel, receive_on_thread};
+use crate::common::relay::{
+  bind_sockets, dropped_by_kernel, dropped_by_kernel_everywhere, paced_on_thread, receive_buffer_cap_bytes,
+  receive_on_thread,
+};
 
 /// A 14" Retina display (3024×1964) fitted into the detail mode's 1440p, as ScreenCaptureKit
 /// captures it.
@@ -66,6 +69,9 @@ const AFTER_DEADLINE: Duration = Duration::from_secs(6);
 /// Luma PSNR (dB) of the viewer's picture against the shared screen, at the shared size, that
 /// keeps this text readable. The half-size layer scaled up stays far below.
 const MIN_SHARP_PSNR_DB: f64 = 30.0;
+/// The rate of the links the relays play: far above the share's bitrate, so they limit nothing,
+/// but not loopback's, which no network has.
+const LINK_BPS: u64 = 100_000_000;
 /// Bounds the steps before the share starts (securing, the lossy moment).
 const STEP_DEADLINE: Duration = Duration::from_secs(10);
 
@@ -144,6 +150,11 @@ struct Timeline {
   /// Packets the kernel dropped at the test's relays: a sign of a starved machine, not of a
   /// regression.
   dropped_at_relays: u64,
+  /// The same at all UDP sockets of the test, the SFU's and the clients' too: where a lost
+  /// keyframe shows. `None` where the system doesn't tell.
+  maybe_dropped_everywhere: Option<u64>,
+  /// `net.core.rmem_max`.
+  maybe_buffer_cap_bytes: Option<u64>,
 }
 
 #[derive(Debug, Clone)]
@@ -283,6 +294,8 @@ async fn run(scenario: Scenario, duration: Duration) -> Timeline {
     encoded,
     heard,
     dropped_at_relays: presenter_relay.dropped_by_kernel() + viewer_relay.dropped_by_kernel(),
+    maybe_dropped_everywhere: dropped_by_kernel_everywhere(),
+    maybe_buffer_cap_bytes: receive_buffer_cap_bytes(),
   }
 }
 
@@ -390,8 +403,8 @@ impl Timeline {
       ));
     }
     lines.push(format!(
-      "packets dropped at the relays: {}",
-      self.dropped_at_relays
+      "packets dropped by the kernel: {} at the relays, {:?} at all sockets; receive buffer cap: {:?} bytes",
+      self.dropped_at_relays, self.maybe_dropped_everywhere, self.maybe_buffer_cap_bytes
     ));
     lines.join("\n")
   }
@@ -668,28 +681,32 @@ impl Relay {
     let (to_sfu_losing, to_client_losing) =
       (Arc::new(AtomicBool::new(false)), Arc::new(AtomicBool::new(false)));
     let client: Arc<Mutex<Option<SocketAddr>>> = Arc::default();
-    let (to_sfu, known_client, losing) = (
-      Arc::clone(&sfu_side),
-      Arc::clone(&client),
-      Arc::clone(&to_sfu_losing),
-    );
+    let socket = Arc::clone(&sfu_side);
+    let to_sfu = paced_on_thread(LINK_BPS, move |packet| {
+      let _ = socket.send(packet);
+    });
+    let (known_client, losing) = (Arc::clone(&client), Arc::clone(&to_sfu_losing));
     let mut is_odd = false;
     receive_on_thread(Arc::clone(&client_side), move |packet, from| {
       *known_client.lock().unwrap() = Some(from);
       is_odd = !is_odd;
       if !(losing.load(Ordering::Relaxed) && is_odd) {
-        let _ = to_sfu.send(packet);
+        let _ = to_sfu.send(packet.to_vec());
       }
     });
-    let (to_client, losing) = (Arc::clone(&client_side), Arc::clone(&to_client_losing));
+    let socket = Arc::clone(&client_side);
+    let to_client = paced_on_thread(LINK_BPS, move |packet| {
+      let maybe_client = *client.lock().unwrap();
+      if let Some(client) = maybe_client {
+        let _ = socket.send_to(packet, client);
+      }
+    });
+    let losing = Arc::clone(&to_client_losing);
     let mut is_odd = false;
     receive_on_thread(Arc::clone(&sfu_side), move |packet, _| {
       is_odd = !is_odd;
-      let maybe_client = *client.lock().unwrap();
-      if let Some(client) = maybe_client
-        && !(losing.load(Ordering::Relaxed) && is_odd)
-      {
-        let _ = to_client.send_to(packet, client);
+      if !(losing.load(Ordering::Relaxed) && is_odd) {
+        let _ = to_client.send(packet.to_vec());
       }
     });
     Self {
