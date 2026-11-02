@@ -48,7 +48,10 @@ struct ConversationListView: View {
           if let failure = maybeActionFailure { Text(failure.message) }
         }
         .confirmationDialog(leaveTitle, isPresented: isLeavingShown, titleVisibility: .visible) {
-          Button(maybeLeaving?.isDeletion == true ? "entry_delete_channel_confirm" : "entry_leave_confirm", role: .destructive) {
+          Button(
+            LocalizedStringKey(maybeLeaving?.isDeletion == true ? "entry_delete_channel_confirm" : "entry_leave_confirm"),
+            role: .destructive
+          ) {
             confirmLeave()
           }
         } message: {
@@ -317,7 +320,9 @@ struct ConversationListView: View {
       }
     case .lastAdmin:
       Button(
-        conversation.canDeleteChannel ? "entry_leave_last_channel_admin_or_delete" : "entry_leave_last_channel_admin",
+        LocalizedStringKey(
+          conversation.canDeleteChannel ? "entry_leave_last_channel_admin_or_delete" : "entry_leave_last_channel_admin"
+        ),
         systemImage: "rectangle.portrait.and.arrow.right"
       ) {}
         .disabled(true)
@@ -360,7 +365,8 @@ struct ConversationListView: View {
       switch menu?.leave ?? .hidden {
       case .hidden:
         EmptyView()
-      case .allowed:
+      // `space_leave` doesn't answer `.lastMember`; the confirmation covers it either way.
+      case .allowed, .lastMember:
         Button("entry_leave_space", systemImage: "rectangle.portrait.and.arrow.right", role: .destructive) {
           maybeLeaving = .space(id: spaceId, name: name)
         }
