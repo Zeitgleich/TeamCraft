@@ -26,6 +26,7 @@
     "allow-server-confirm",
     "allow-server-forget",
     "allow-core-start",
+    "allow-core-retry-keychain",
     "allow-core-status",
     "allow-core-connection",
     "allow-core-network-changed",

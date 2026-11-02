@@ -198,6 +198,13 @@ pub async fn core_start(
   Ok(status)
 }
 
+/// The user pressed "try again" after a failure: the OS keychain may be asked again at once, even
+/// if it refused moments ago. Separate from `core_start`, which the UI also polls with.
+#[tauri::command(rename_all = "snake_case")]
+pub fn core_retry_keychain(vault: State<'_, Arc<SecretVault>>) {
+  vault.allow_retry();
+}
+
 #[tauri::command(rename_all = "snake_case")]
 pub async fn core_status(host: State<'_, CoreHost>) -> Result<CoreStatus, CommandError> {
   Ok(host.current()?.status().await)

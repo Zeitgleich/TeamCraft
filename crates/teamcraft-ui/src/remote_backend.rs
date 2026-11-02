@@ -61,6 +61,11 @@ pub async fn core_status(user: UserId) -> Result<CoreStatus, String> {
   call("core_start", &json!({ "user": user })).await
 }
 
+/// The user asked to try again: the desktop shell may ask the OS keychain again at once.
+pub async fn retry_keychain() -> Result<(), String> {
+  call("core_retry_keychain", &json!({})).await
+}
+
 /// Where the core's gateway connection stands (answered without waiting for the core).
 pub async fn connection_state() -> Result<CoreConnection, String> {
   call("core_connection", &json!({})).await

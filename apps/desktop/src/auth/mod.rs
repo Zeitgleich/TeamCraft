@@ -580,12 +580,21 @@ impl<S: TokenStore> AuthService<S> {
         session.maybe_local.take(),
       )
     };
-    self.logout_local(&server, maybe_local).await?;
+    let local = self.logout_local(&server, maybe_local).await;
     let refresh = match in_memory {
       Some(token) => Some(token),
-      None => self.store.load(&server.token_key()).await?,
+      None => self
+        .store
+        .load(&server.token_key())
+        .await
+        .unwrap_or_else(|error| {
+          tracing::warn!(%error, "could not read the refresh token to end the provider session");
+          None
+        }),
     };
-    self.store.clear(&server.token_key()).await?;
+    // Whatever happens to the local copy, the provider still hears of the sign-out: the token was
+    // taken above, and a retry couldn't end the session any more.
+    let cleared = self.store.clear(&server.token_key()).await;
     if let (Some(refresh), Some(endpoint)) = (refresh, discovery.and_then(|found| found.end_session_endpoint))
     {
       let form = [
@@ -597,7 +606,11 @@ impl<S: TokenStore> AuthService<S> {
         tracing::warn!(%error, "could not end the provider session");
       }
     }
-    Ok(())
+    let purged = self
+      .store
+      .purge_after_sign_out(&server.token_key(), &server.server_url)
+      .await;
+    local.and(cleared).and(purged)
   }
 
   /// `GET {server}{path}` with a fresh access token.
@@ -828,7 +841,11 @@ impl<S: TokenStore> AuthService<S> {
   /// settings changed).
   pub async fn forget_tokens(&self, server: &DesktopConfig) -> Result<(), AuthError> {
     self.store.clear(&server.token_key()).await?;
-    self.store.clear_local_session(&server.server_url).await
+    self.store.clear_local_session(&server.server_url).await?;
+    self
+      .store
+      .purge_after_sign_out(&server.token_key(), &server.server_url)
+      .await
   }
 
   /// The access token of `server`, refreshed when needed; refused when the active server is
@@ -1035,9 +1052,9 @@ impl<S: TokenStore> AuthService<S> {
         .await?
         .and_then(|stored| LocalSession::decode(&stored)),
     };
-    self.store.clear_local_session(&server.server_url).await?;
+    let cleared = self.store.clear_local_session(&server.server_url).await;
     let Some(session) = maybe_session.filter(|session| session.is_live(local::now_ms())) else {
-      return Ok(());
+      return cleared;
     };
     let url = format!("{}{LOCAL_LOGOUT_PATH}", server.server_url.trim_end_matches('/'));
     if let Err(error) = self
@@ -1050,7 +1067,7 @@ impl<S: TokenStore> AuthService<S> {
       // The local session is gone either way; the server's token expires on its own.
       tracing::warn!(%error, "could not end the local session on the server");
     }
-    Ok(())
+    cleared
   }
 
   fn server(&self) -> Result<DesktopConfig, AuthError> {
@@ -1746,6 +1763,7 @@ mod tests {
         .clear_local_session(&provider.config().server_url)
         .await
         .unwrap();
+      drop(first_run);
       keystore.calls.store(0, Ordering::SeqCst);
 
       let clock = Arc::new(AtomicI64::new(START_MS));
@@ -1774,6 +1792,26 @@ mod tests {
         "no access while running"
       );
       drop(std::fs::remove_dir_all(&directory));
+    }
+
+    /// The stored token could not be cleared (a full disk): the sign-out says so, and the provider
+    /// still ends the session, because the token is taken and a retry would have none to send.
+    #[tokio::test]
+    async fn a_failed_local_clear_still_ends_the_provider_session() {
+      let provider = FakeProvider::start().await;
+      provider.set(PROVIDER_UP);
+      let store = RefusesClear::default();
+      store
+        .0
+        .save(&provider.config().token_key(), "refresh")
+        .await
+        .unwrap();
+      let service = AuthService::new(Some(provider.config()), store).unwrap();
+      assert!(service.restore().await.unwrap());
+
+      assert!(service.logout().await.is_err());
+
+      assert_eq!(provider.logout_requests.load(Ordering::SeqCst), 1);
     }
 
     #[tokio::test]
@@ -1961,6 +1999,7 @@ mod tests {
       base: String,
       mode: Arc<AtomicU8>,
       token_requests: Arc<AtomicUsize>,
+      logout_requests: Arc<AtomicUsize>,
     }
 
     impl FakeProvider {
@@ -1971,17 +2010,21 @@ mod tests {
         let base = format!("http://{}", listener.local_addr().unwrap());
         let mode = Arc::new(AtomicU8::new(PROVIDER_DOWN));
         let token_requests = Arc::new(AtomicUsize::new(0));
+        let logout_requests = Arc::new(AtomicUsize::new(0));
         let (serving, answer, counted) = (base.clone(), Arc::clone(&mode), Arc::clone(&token_requests));
+        let logouts = Arc::clone(&logout_requests);
         tokio::spawn(async move {
           while let Ok((socket, _)) = listener.accept().await {
             let (base, mode, counted) = (serving.clone(), Arc::clone(&answer), Arc::clone(&counted));
-            tokio::spawn(async move { serve(socket, &base, &mode, &counted).await });
+            let logouts = Arc::clone(&logouts);
+            tokio::spawn(async move { serve(socket, &base, &mode, &counted, &logouts).await });
           }
         });
         Self {
           base,
           mode,
           token_requests,
+          logout_requests,
         }
       }
 
@@ -2003,7 +2046,13 @@ mod tests {
       }
     }
 
-    async fn serve(mut socket: TcpStream, base: &str, mode: &AtomicU8, counted: &AtomicUsize) {
+    async fn serve(
+      mut socket: TcpStream,
+      base: &str,
+      mode: &AtomicU8,
+      counted: &AtomicUsize,
+      logouts: &AtomicUsize,
+    ) {
       let mut request = Vec::new();
       let mut chunk = [0_u8; 4096];
       while !request.windows(4).any(|window| window == b"\r\n\r\n") {
@@ -2013,11 +2062,15 @@ mod tests {
         }
       }
       let head = String::from_utf8_lossy(&request).into_owned();
-      let (status, body) = if head.starts_with("GET /.well-known/openid-configuration") {
+      let (status, body) = if head.starts_with("POST /logout") {
+        logouts.fetch_add(1, Ordering::SeqCst);
+        ("200 OK", String::new())
+      } else if head.starts_with("GET /.well-known/openid-configuration") {
         let discovery = serde_json::json!({
           "issuer": base,
           "authorization_endpoint": format!("{base}/auth"),
           "token_endpoint": format!("{base}/token"),
+          "end_session_endpoint": format!("{base}/logout"),
         });
         if mode.load(Ordering::SeqCst) == PROVIDER_DOWN {
           return;
@@ -2050,6 +2103,36 @@ mod tests {
         body.len()
       );
       drop(socket.write_all(response.as_bytes()).await);
+    }
+
+    /// A store whose refresh token can't be deleted.
+    #[derive(Default)]
+    struct RefusesClear(MemoryStore);
+
+    impl TokenStore for RefusesClear {
+      async fn load(&self, server: &str) -> Result<Option<SecretString>, AuthError> {
+        self.0.load(server).await
+      }
+
+      async fn save(&self, server: &str, refresh_token: &str) -> Result<(), AuthError> {
+        self.0.save(server, refresh_token).await
+      }
+
+      async fn clear(&self, _server: &str) -> Result<(), AuthError> {
+        Err(AuthError::Unsupported("the disk is full".to_owned()))
+      }
+
+      async fn load_local_session(&self, server: &str) -> Result<Option<SecretString>, AuthError> {
+        self.0.load_local_session(server).await
+      }
+
+      async fn save_local_session(&self, server: &str, session: &SecretString) -> Result<(), AuthError> {
+        self.0.save_local_session(server, session).await
+      }
+
+      async fn clear_local_session(&self, server: &str) -> Result<(), AuthError> {
+        self.0.clear_local_session(server).await
+      }
     }
 
     /// A keychain in memory that counts every access.

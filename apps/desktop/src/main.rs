@@ -248,6 +248,7 @@ fn main() -> anyhow::Result<()> {
       auth::commands::server_confirm,
       auth::commands::server_forget,
       core::commands::core_start,
+      core::commands::core_retry_keychain,
       core::commands::core_status,
       core::commands::core_connection,
       core::commands::core_network_changed,

@@ -10,6 +10,7 @@ use teamcraft_client_api::brand::BrandView;
 use teamcraft_client_api::remote::ApiMethod;
 use teamcraft_client_api::server_entry::{ServerOrigin, ServerProfile, is_provider_endpoint};
 use teamcraft_client_api::sign_in_look::SignInLook;
+use teamcraft_core::store::SecretVault;
 use teamcraft_proto::{AvatarContentType, BrandResponse, UserId};
 
 use base64::Engine;
@@ -269,9 +270,12 @@ pub async fn auth_restore(service: State<'_, Arc<Service>>) -> Result<bool, Comm
 pub async fn auth_login(
   look: Option<SignInLook>,
   app: AppHandle,
+  vault: State<'_, Arc<SecretVault>>,
   servers: State<'_, Arc<ServerState>>,
   service: State<'_, Arc<Service>>,
 ) -> Result<(), CommandError> {
+  // The user asked: a keychain that refused moments ago is asked again.
+  vault.allow_retry();
   let look = look.unwrap_or_default();
   let maybe_profile = servers.directory.active();
   // The sign-in screen's fresh answer wins over the profile saved at the last server check, so a
@@ -319,8 +323,10 @@ pub async fn auth_login_local(
   login: String,
   password: String,
   totp_code: Option<String>,
+  vault: State<'_, Arc<SecretVault>>,
   service: State<'_, Arc<Service>>,
 ) -> Result<(), CommandError> {
+  vault.allow_retry();
   let password = SecretString::from(password);
   let maybe_totp_code = totp_code
     .as_deref()

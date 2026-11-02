@@ -2217,8 +2217,9 @@ lost it.
   scope as the database key; the value is the 32-byte backup key.
 - Written when the device is set up (enrolled, linked, recovered) and when a start finds that the
   file's copy is missing or differs (a backup key switched by an org recovery, §6.3.1); written
-  through `run_outside_runtime` like the database key (§9). The file takes the key first, so a
-  keychain that refuses the write is asked once, not at every start.
+  through `run_outside_runtime` like the database key (§9). The file takes the key first and marks
+  it as missing from the keychain, so a keychain that refuses is asked again once per start, until
+  the entry is there.
 - Used when this computer must set up the same account again (the local database was lost, or set
   aside as unreadable, §9.5): the core opens the server's key bag with it as with a recovery key
   and checks the identity. A key that no longer opens the bag (the account's backup key changed)
@@ -3122,31 +3123,57 @@ per start** and not while it runs. Linux (also in the Flatpak) and Windows use t
   first asked for and held in memory (zeroized on drop), like the decrypted contents.
 - **Tokens and sessions live only in the file.** A token refresh writes the file and doesn't touch
   the keychain. Sign-out and leaving a server delete them from it; as with the keychain entry
-  before, the database and its keys stay, so signing in again finds the local data.
+  before, the database and its keys stay, so signing in again finds the local data. They also delete
+  a set-aside file and the old keychain entries, which an older version of the app, run after the
+  move, may have written again and which a normal start doesn't look at. Deleting an entry that
+  isn't there raises no dialog.
 - **Database and backup keys stay in the keychain too.** The file's copies save the reads; a new
   key is written to the keychain first. So a damaged file costs a sign-in, never the database.
 - **Writes** go to a temporary file (owner only, `0600` on Unix; the per-user data directory on
   Windows), which is synced and renamed over the file, so a crash leaves the old file or the new one.
-- **Damaged file.** One that doesn't open is renamed to `secrets.sealed.damaged`, never deleted and
-  never read again. The user signs in again; the keys come back from their keychain entries. A new
-  key for the file is made only when the keychain says the entry doesn't exist.
+  A write that fails stays due: the caller hears of it and the next call writes again, so nothing
+  reports success while the disk has the old state. The buffers that hold the plaintext are wiped.
+- **One process.** A lock next to the file keeps a second process (the old app during an update, a
+  second build) from overwriting rotated tokens with its stale copy. It is a backstop behind the
+  app's single instance; a file system that can't lock doesn't stop the app.
+- **Damaged file.** One that doesn't open or is over 4 MiB is renamed to `secrets.sealed.damaged`,
+  replacing an earlier one, and never read again; sign-out deletes it. The user signs in again; the
+  keys come back from their keychain entries. A new key for the file is made only when the keychain
+  says twice, two seconds apart, that the entry doesn't exist: a service still starting may say so
+  for a moment. The database key has no such file to compare with, so a keychain that wrongly
+  reports it missing still makes a new one, as before; since the file's key was read first in the
+  same run, the keychain has by then shown that it works.
 - **Locked, denied or no keychain.** Nothing is wiped and no key is made: the caller gets an error
   (sign-in shows it, the core stays in its "try again" failure, §9.5). The failure stands for 60
   seconds, because the UI asks for the core's status again and again and each attempt would raise
-  another dialog. Nothing is kept without a keychain, as before.
+  another dialog. The user pressing "try again", signing in or signing out ends it at once. Nothing
+  is kept without a keychain, as before.
 - **Migration.** The old entries (`oidc-refresh-token@<key>`, `local-session@<server>`) can't be
   listed, so each moves the first time it is asked for: the file takes the token, the entry is
   deleted, the file records that it went. A crash in between finds the token in the file, whose
   copy wins, and finishes the deletion. The file remembers moved entries, so nothing looks again.
   The database and backup keys are read once per account into the file and their entries stay.
 
-What it costs: tokens were protected by the keychain's per-item access rules, and now by one key:
-whoever may read that item and the file gets every token, database key and backup key of this
-computer. On the platforms in question the items had the same owner and the same access rules, so
-this is no new reader. A process of the user can read the app's memory on most systems, as before.
-An attacker who can write the file can put an older version back, which brings back an older
-refresh token (rotated ones are refused by the provider) but nothing they could not read already;
-a keychain-held counter would cost a write per refresh, which is what this design removes.
+What it costs, and what it gains:
+
+- **One approval reaches everything.** On macOS, one approved dialog for `secrets-file-key` now
+  reaches every token, database key and backup key of all accounts and servers on this computer,
+  where each approval gave one item before. The prompts were the only per-item boundary against the
+  same user's software, and that is the trade this design makes.
+- **Longer in memory.** All accounts' secrets and the file's key stay in the process's memory for the
+  whole run, not just while one is in use. They are wiped on drop and at replacement, but a process
+  of the user that can read this process's memory gets them all at any time.
+- **Rollback and forced sign-in.** A process running as the user can't read the file without the key,
+  but it can write it. It can put an older copy back, which brings back older tokens: a token of a
+  signed-out session comes back unless the provider revoked it (sign-out asks it to), and a rotated
+  one is refused by the provider. It can also corrupt or delete the file, which forces a sign-in. The
+  file has no protection against that; a counter in the keychain per refresh is what this design
+  removes.
+- **Better for the keychain's other readers.** On Linux any application with access to the Secret
+  Service can read all its items, including other Flatpak apps with
+  `--talk-name=org.freedesktop.secrets`. Tokens were readable there directly. Now the keychain alone
+  gives the file's key and not the tokens: the file is in the app's private data directory, which
+  another Flatpak's sandbox can't reach. The database and backup key entries stay readable as before.
 
 ## 10. Search
 

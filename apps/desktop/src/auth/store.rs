@@ -21,6 +21,16 @@ pub trait TokenStore: Send + Sync + 'static {
     session: &SecretString,
   ) -> impl Future<Output = Result<(), AuthError>> + Send;
   fn clear_local_session(&self, server: &str) -> impl Future<Output = Result<(), AuthError>> + Send;
+  /// The user signed out or left: deletes what a normal start doesn't look at, such as secrets an
+  /// older version of the app wrote or a damaged file set aside. `token_key` and `server` name the
+  /// server's refresh token and local session.
+  fn purge_after_sign_out(
+    &self,
+    _token_key: &str,
+    _server: &str,
+  ) -> impl Future<Output = Result<(), AuthError>> + Send {
+    async { Ok(()) }
+  }
 }
 
 /// The sealed file of local secrets (`SecretVault`, e2ee.md §9), one token of each kind per server
@@ -92,6 +102,18 @@ impl TokenStore for VaultStore {
 
   async fn clear_local_session(&self, server: &str) -> Result<(), AuthError> {
     self.clear_token(TokenKind::LocalSession, server).await
+  }
+
+  async fn purge_after_sign_out(&self, token_key: &str, server: &str) -> Result<(), AuthError> {
+    let (token_key, server) = (token_key.to_owned(), server.to_owned());
+    self
+      .run(move |vault| {
+        vault.purge_after_sign_out(&[
+          (TokenKind::RefreshToken, &token_key),
+          (TokenKind::LocalSession, &server),
+        ])
+      })
+      .await
   }
 }
 
