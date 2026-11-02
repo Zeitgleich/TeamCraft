@@ -1936,6 +1936,20 @@ impl<S: LocalStore> ChatBackend for CoreChatBackend<S> {
     crate::client::is_waiting_for_device(&self.store, conversation).unwrap_or(false)
   }
 
+  fn first_sync(&self) -> Option<teamcraft_client_api::model::FirstSync> {
+    self
+      .read(crate::client::first_sync_progress(&self.store))
+      .map(|progress| teamcraft_client_api::model::FirstSync {
+        stage: match progress.stage {
+          crate::client::FirstSyncStage::Newest => teamcraft_client_api::model::FirstSyncStage::Newest,
+          crate::client::FirstSyncStage::Older => teamcraft_client_api::model::FirstSyncStage::Older,
+        },
+        done: progress.done,
+        total: progress.total,
+        maybe_fraction: progress.maybe_fraction,
+      })
+  }
+
   fn key_catch_up(&self) -> Option<teamcraft_client_api::model::KeyCatchUp> {
     self
       .read(crate::client::key_catch_up(&self.store))

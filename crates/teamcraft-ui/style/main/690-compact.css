@@ -37,7 +37,7 @@
   left: 0;
   right: 0;
   height: var(--vv-height, auto);
-  grid-template-rows: auto auto minmax(0, 1fr) auto;
+  grid-template-rows: auto auto auto minmax(0, 1fr) auto;
   padding: env(safe-area-inset-top) env(safe-area-inset-right) 0 env(safe-area-inset-left);
   background: var(--chrome);
 }
@@ -62,13 +62,17 @@
   height: var(--topbar-h);
 }
 
-:root[data-layout="compact"] .app > .app-body {
+:root[data-layout="compact"] .app > .first-sync-row {
   grid-row: 3;
+}
+
+:root[data-layout="compact"] .app > .app-body {
+  grid-row: 4;
   background: var(--surface);
 }
 
 :root[data-layout="compact"] .app > .bottom-nav {
-  grid-row: 4;
+  grid-row: 5;
 }
 
 /* Pages without the bottom navigation end above the home indicator. */

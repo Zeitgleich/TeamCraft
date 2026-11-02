@@ -230,6 +230,7 @@ impl PendingEnrollment {
       are_welcomes_synced: false,
       maybe_waiting_checked_at_ms: None,
       catch_up_focus: super::CatchUpFocus::default(),
+      first_sync: Default::default(),
       is_welcome_cursor_held: false,
       sync_trace: Default::default(),
       maybe_heads: None,

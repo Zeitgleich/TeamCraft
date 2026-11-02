@@ -20,8 +20,8 @@ use teamcraft_client_api::snapshot_changes::{SnapshotChanges, SnapshotCursor};
 use teamcraft_core::api::{AccessTokenSource, ApiError, HttpServerApi, ServerApi};
 use teamcraft_core::client::files::{BlobUpload, sweep_staged_copies};
 use teamcraft_core::client::{
-  CatchUpFocus, LinkAnnouncement, LinkApproval, LinkReceipt, LinkWait, LinkWaitCancel, LinkedSecrets,
-  ReceiptCancel, SIGN_OUT_REVOKE_PATIENCE,
+  CatchUpFocus, HistoryBackfill, LinkAnnouncement, LinkApproval, LinkReceipt, LinkWait, LinkWaitCancel,
+  LinkedSecrets, ReceiptCancel, SIGN_OUT_REVOKE_PATIENCE, notify_first_sync_during,
 };
 use teamcraft_core::clock::{Clock, SystemClock};
 use teamcraft_core::connection::{
@@ -1058,6 +1058,12 @@ impl Core {
           self.open().await;
           self.changed();
         },
+        // A first sync's older history: one page per turn, so what else is ready gets its turn.
+        () = std::future::ready(()), if self.is_older_history_due() => {
+          if self.load_older_history(&mut requests).await == Flow::Stop {
+            break;
+          }
+        },
       }
       if std::mem::take(&mut self.has_queued_sends) && self.send_queued(&mut requests).await == Flow::Stop {
         break;
@@ -1263,6 +1269,7 @@ impl Core {
       maybe_upload_staging_dir: Some(staging_dir(&self.config, self.user)),
       maybe_download_dir: self.config.maybe_download_dir.clone(),
       creates_notes_to_self: true,
+      history_backfill: HistoryBackfill::KEEP_RECENT,
       ..ClientSettings::default()
     }
   }
@@ -2214,6 +2221,44 @@ impl Core {
     self.changed();
   }
 
+  fn is_older_history_due(&self) -> bool {
+    self.connection.is_connected() && self.client.as_ref().is_some_and(Client::is_older_history_due)
+  }
+
+  /// One page of a first sync's older history; the UI's reads are answered meanwhile.
+  async fn load_older_history(&mut self, requests: &mut mpsc::UnboundedReceiver<Request>) -> Flow {
+    let Self {
+      client: Some(client),
+      connection,
+      backend,
+      store,
+      snapshots,
+      status,
+      catch_up_focus,
+      on_change,
+      ..
+    } = self
+    else {
+      return Flow::Go;
+    };
+    let mut reads = ReadsWhileBusy {
+      backend: backend.as_ref(),
+      store: store.as_ref(),
+      snapshots,
+      status,
+      focus: catch_up_focus,
+      maybe_security: security_of(client).ok(),
+      on_change: on_change.as_ref(),
+    };
+    let reading = Box::pin(connection.keep_alive(SystemClock.now_ms(), client.load_older_history_page()));
+    let served = serve_reads_during(reading, requests, &mut reads).await;
+    self.has_queued_sends |= served.has_queued;
+    if served.output {
+      self.changed();
+    }
+    self.handle_later(served.later, served.is_closed).await
+  }
+
   /// The periodic work besides the gateway, the same as in the other apps (teamcraft-core upkeep).
   async fn upkeep(&mut self) {
     let Some(client) = self.client.as_mut() else {
@@ -2248,6 +2293,9 @@ impl Core {
     else {
       return Flow::Go;
     };
+    // A first sync happens in the connect: the UI is told as the list and the progress grow.
+    let signal = client.first_sync_signal();
+    let notify = on_change.clone();
     let mut reads = ReadsWhileBusy {
       backend: backend.as_ref(),
       store: store.as_ref(),
@@ -2259,7 +2307,11 @@ impl Core {
       on_change: on_change.as_ref(),
     };
     // On the heap: the connection's future holds the whole sync, too big for the core thread's stack.
-    let connecting = Box::pin(connection.connect_if_due(client));
+    let connecting = Box::pin(notify_first_sync_during(
+      &signal,
+      move || notify(),
+      connection.connect_if_due(client),
+    ));
     let served = serve_reads_during(connecting, requests, &mut reads).await;
     self.has_queued_sends |= served.has_queued;
     if served.output.is_some() {

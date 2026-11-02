@@ -153,6 +153,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
   ) -> Result<(), CoreError> {
     // A catch-up dropped while it held the cursor (the app went away) must not keep it held.
     self.is_welcome_cursor_held = false;
+    self.note_first_sync_due(conversations)?;
     for conversation in conversations {
       records::put_json(&self.store, Table::SyncState, &marker_key(*conversation), &true)?;
     }
@@ -240,6 +241,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
           self.unmark_resync(conversation, ResyncPart::Content)?;
         }
         self.store.delete(Table::SyncState, &marker_key(conversation))?;
+        self.note_first_sync_caught_up(conversation)?;
         if self.catch_up_focus.get() == Some(conversation) {
           self.catch_up_focus.note_caught_up();
           tracing::info!(
@@ -343,6 +345,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       self.unmark_resync(focus, ResyncPart::Content)?;
     }
     self.store.delete(Table::SyncState, &marker_key(focus))?;
+    self.note_first_sync_caught_up(focus)?;
     ahead.done.insert(focus);
     self.catch_up_focus.note_caught_up();
     tracing::info!(

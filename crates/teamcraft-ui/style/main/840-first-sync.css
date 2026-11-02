@@ -1,0 +1,64 @@
+/* ---- A first sync's progress under the top bar ---- */
+
+.first-sync-bar {
+  background: var(--surface);
+  border-bottom: 1px solid var(--border);
+}
+
+.first-sync-text {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 4px 12px;
+  font-size: var(--text-xs);
+  color: var(--text-muted);
+}
+
+.first-sync-count {
+  flex: none;
+  font-variant-numeric: tabular-nums;
+}
+
+.first-sync-track {
+  height: 2px;
+  overflow: hidden;
+}
+
+.first-sync-fill {
+  /* The core's number, set on the element. */
+  --first-sync-fraction: 0;
+  height: 100%;
+  background: var(--accent);
+  transform: scaleX(var(--first-sync-fraction));
+  transform-origin: left;
+  transition: transform var(--dur-fast) var(--ease-standard);
+}
+
+.first-sync-bar.is-indeterminate .first-sync-fill {
+  width: 30%;
+  transform: none;
+  transition: none;
+  animation: first-sync-slide 1.4s var(--ease-standard) infinite;
+}
+
+/* While the connection is down the banner above says why nothing moves. */
+.app:has(.connection-hint:not(.is-slow), .connection-notice) .first-sync-row {
+  display: none;
+}
+
+@keyframes first-sync-slide {
+  from {
+    transform: translateX(-100%);
+  }
+  to {
+    transform: translateX(340%);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .first-sync-bar.is-indeterminate .first-sync-fill {
+    width: 100%;
+    opacity: 0.4;
+    animation: none;
+  }
+}

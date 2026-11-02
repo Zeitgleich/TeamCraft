@@ -118,6 +118,20 @@ impl Peer {
 
 /// Links a second device of `owner` over the relay (e2ee.md §5) and enrolls it.
 pub async fn link_device(owner: &mut Peer) -> TestClient {
+  link_device_with(owner, settings()).await
+}
+
+/// Links a further device of `owner` with other client settings.
+pub async fn link_device_with(owner: &mut Peer, client_settings: ClientSettings) -> TestClient {
+  link_device_on_clock(owner, client_settings, clock()).await
+}
+
+/// Links a further device of `owner` with other client settings, on `device_clock`.
+pub async fn link_device_on_clock(
+  owner: &mut Peer,
+  client_settings: ClientSettings,
+  device_clock: Box<dyn teamcraft_core::clock::Clock>,
+) -> TestClient {
   let api = owner.api.clone();
   let offer = teamcraft_core::LinkOffer::generate();
   let code = offer.to_code();
@@ -137,7 +151,7 @@ pub async fn link_device(owner: &mut Peer) -> TestClient {
   approved.unwrap();
   let link_options = linked_options(received.unwrap());
   PendingEnrollment::new()
-    .complete(api, new_store, clock(), settings(), link_options)
+    .complete(api, new_store, device_clock, client_settings, link_options)
     .await
     .unwrap()
 }

@@ -1355,6 +1355,8 @@ pub enum ChatQuery {
   },
   /// [`ChatBackend::key_catch_up`].
   KeyCatchUp,
+  /// [`ChatBackend::first_sync`].
+  FirstSync,
   /// The `#fragment` values of a guest link to the meeting, once the core made them.
   GuestLinkFragment {
     meeting: teamcraft_proto::MeetingId,
@@ -1476,6 +1478,9 @@ pub enum ChatAnswer {
   },
   KeyCatchUp {
     maybe_progress: Option<crate::model::KeyCatchUp>,
+  },
+  FirstSync {
+    maybe_progress: Option<crate::model::FirstSync>,
   },
   CallMoveOffer {
     maybe_offer: Option<CallMoveOffer>,
@@ -1659,6 +1664,9 @@ impl ChatQuery {
       },
       Self::KeyCatchUp => ChatAnswer::KeyCatchUp {
         maybe_progress: backend.key_catch_up(),
+      },
+      Self::FirstSync => ChatAnswer::FirstSync {
+        maybe_progress: backend.first_sync(),
       },
       Self::MembershipIssues { conversation } => ChatAnswer::MembershipIssues {
         issues: backend.membership_issues(conversation),

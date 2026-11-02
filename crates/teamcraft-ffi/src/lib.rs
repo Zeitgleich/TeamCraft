@@ -59,12 +59,13 @@ use teamcraft_media::openh264_library::{self, OpenH264Binary};
 use tokio::sync::{mpsc, oneshot};
 pub use types::{
   AccountState, AppActivity, AppConfig, BrandAccent, BrandLinks, ConnectionState, ConversationItem,
-  ConversationKind, EmojiSuggestion, KeyCatchUpItem, LeaveChoice, LinkPlatform, LinkRequestItem, LoginBrand,
-  MentionSettings, MessageItem, MessagePage, NetworkInterception, NetworkProxy, NotificationAttachmentKind,
-  NotificationContent, NotificationContentSettings, NotificationGap, NotificationSuppression,
-  NotifiedConversation, NotifiedMessage, OrgRecoveryStart, PendingWorkItem, PlaceholderItem, Presence,
-  PushDiagnosticsInfo, PushNotification, PushNotificationKind, PushService, ReactionItem, SearchHitItem,
-  SegmentPrefetchMode, SegmentPrefetchResult, SpaceMenuItem, StoreProblem, TestPushOutcome, TestPushResult,
+  ConversationKind, EmojiSuggestion, FirstSyncItem, FirstSyncStageItem, KeyCatchUpItem, LeaveChoice,
+  LinkPlatform, LinkRequestItem, LoginBrand, MentionSettings, MessageItem, MessagePage, NetworkInterception,
+  NetworkProxy, NotificationAttachmentKind, NotificationContent, NotificationContentSettings,
+  NotificationGap, NotificationSuppression, NotifiedConversation, NotifiedMessage, OrgRecoveryStart,
+  PendingWorkItem, PlaceholderItem, Presence, PushDiagnosticsInfo, PushNotification, PushNotificationKind,
+  PushService, ReactionItem, SearchHitItem, SegmentPrefetchMode, SegmentPrefetchResult, SpaceMenuItem,
+  StoreProblem, TestPushOutcome, TestPushResult,
 };
 
 pub use video::{CameraFrame, VideoFrameRgba};
@@ -424,6 +425,14 @@ impl TeamCraft {
   /// first, then by last activity (issue #829).
   pub async fn share_targets(&self) -> Result<Vec<ConversationItem>, TeamCraftError> {
     self.read(|reads| reads.share_targets()).await
+  }
+
+  /// How far the first sync of a newly set up device is; `None` when none runs. Read again after
+  /// each change notification.
+  pub async fn first_sync(&self) -> Result<Option<FirstSyncItem>, TeamCraftError> {
+    self
+      .call(|engine| Box::pin(async move { engine.first_sync() }))
+      .await
   }
 
   /// How far conversations with messages waiting for keys have caught up (a newly linked device,

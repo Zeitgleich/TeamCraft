@@ -54,6 +54,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     // own (also from older versions) reach the others.
     self.apply_shared_removals()?;
     self.share_removed_senders()?;
+    self.note_first_sync_starting()?;
     self.finish_enrollment().await?;
     self.trace_lap("enrollment");
     // The reads that need nothing from each other go out at once (issue #714): one round trip
@@ -138,6 +139,8 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       "full sync: conversation list stored"
     );
     self.trace_lap("conversation list");
+    let listed: Vec<ConversationId> = conversations.iter().map(|conversation| conversation.id).collect();
+    self.note_first_sync_listed(&listed)?;
     // Only what moved since the last sync (issue #714); everything when the server gave no heads.
     let parked = self.parked_conversations()?;
     let mut content_due = Vec::new();
@@ -160,7 +163,8 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     );
     self.keep_listed_heads(conversations.iter().map(|conversation| conversation.id));
     self.trace_lap("what is due");
-    self.catch_up_conversations(&content_due, &members_due).await
+    self.catch_up_conversations(&content_due, &members_due).await?;
+    self.finish_first_sync_newest(&listed)
   }
 
   /// The rest of [`Self::full_sync`]: settings, waiting additions and revocations, what was queued

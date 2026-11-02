@@ -15,6 +15,12 @@ history-forward = Forward
 ## Sidebar
 catching-up = Catching up…
 catching-up-detail = Messages from while you were away are still loading.
+first-sync-newest = Loading messages…
+first-sync-older = Loading older messages…
+first-sync-count = { $count ->
+    [one] { $done } of { $count } conversation
+   *[other] { $done } of { $count } conversations
+  }
 key-catch-up = Getting the keys for older messages
 key-catch-up-detail = Messages fill in when one of your other devices or a member comes online.
 key-catch-up-progress = { $count ->

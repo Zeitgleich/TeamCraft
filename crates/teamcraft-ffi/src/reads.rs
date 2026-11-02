@@ -14,7 +14,7 @@ use std::time::Instant;
 
 use teamcraft_client_api::backend::{ChatBackend as _, SearchBackend as _};
 use teamcraft_client_api::entry_rules::{channel_leave, space_leave};
-use teamcraft_client_api::model::{Message as MessageView, SpaceRole, SpaceRoster, is_pending};
+use teamcraft_client_api::model::{FirstSyncStage, Message as MessageView, SpaceRole, SpaceRoster, is_pending};
 use teamcraft_client_api::search::parse_query;
 use teamcraft_core::TypingState;
 use teamcraft_core::client::CatchUpFocus;
@@ -36,7 +36,7 @@ use crate::engine::{Job, Store, direct_peer, feed_anchor, older_len, parse_id};
 use crate::error::TeamCraftError;
 use crate::logging;
 use crate::types::{
-  AccountState, ConversationItem, KeyCatchUpItem, LeaveChoice, MentionSettings, MessageItem, MessagePage,
+  AccountState, ConversationItem, FirstSyncItem, FirstSyncStageItem, KeyCatchUpItem, LeaveChoice, MentionSettings, MessageItem, MessagePage,
   NotificationContentSettings, NotifiedConversation, Presence, PushDiagnosticsInfo, SearchHitItem,
   SegmentPrefetchMode, SpaceMenuItem, share_targets,
 };
@@ -304,6 +304,18 @@ impl Reads {
       })
       .collect();
     Ok(share_targets(items))
+  }
+
+  pub(crate) fn first_sync(&self) -> Result<Option<FirstSyncItem>, TeamCraftError> {
+    Ok(self.backend()?.first_sync().map(|progress| FirstSyncItem {
+      stage: match progress.stage {
+        FirstSyncStage::Newest => FirstSyncStageItem::Newest,
+        FirstSyncStage::Older => FirstSyncStageItem::Older,
+      },
+      done: u32::try_from(progress.done).unwrap_or(u32::MAX),
+      total: u32::try_from(progress.total).unwrap_or(u32::MAX),
+      maybe_fraction: progress.maybe_fraction,
+    }))
   }
 
   pub(crate) fn key_catch_up(&self) -> Result<Option<KeyCatchUpItem>, TeamCraftError> {
