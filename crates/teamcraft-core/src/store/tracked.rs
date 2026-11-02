@@ -22,8 +22,8 @@ use teamcraft_proto::{AttachmentId, ClientMessageId, ConversationId, MessageId, 
 
 use super::message_cache::MessageCache;
 use super::{
-  AttachmentRef, LocalStore, MediaRange, MessageContent, MessageEdge, MessageFilter, MessageOrder,
-  MessageSlot, StoreError, StoredMessage, Table, WriteTally,
+  AttachmentRef, FeedVersion, LocalStore, MediaRange, MessageContent, MessageEdge, MessageFilter,
+  MessageOrder, MessageSlot, StoreError, StoredMessage, Table, WriteTally,
 };
 
 /// Records of [`Table::Account`] every conversation entry reads (unread marks, mention rules).
@@ -239,6 +239,9 @@ impl<S: LocalStore> LocalStore for TrackedStore<S> {
       // Only the cache's cleanup is lost; its age limit still ends the renditions.
       tracing::debug!(%error, "could not list the pictures of a conversation that went away");
     }
+    if table == Table::Conversations {
+      self.inner.delete(Table::EntryTallies, key)?;
+    }
     self.inner.delete(table, key)?;
     self.note(classify(table, key));
     Ok(())
@@ -418,9 +421,16 @@ impl<S: LocalStore> LocalStore for TrackedStore<S> {
     self.inner.reply_counts(conversation, threads)
   }
 
+  fn feed_version(&self, conversation: ConversationId) -> Result<Option<FeedVersion>, StoreError> {
+    self.inner.feed_version(conversation)
+  }
+
   fn delete_messages(&self, conversation: ConversationId) -> Result<(), StoreError> {
     self.note_removed(self.inner.messages(conversation, MessageFilter::All)?);
     self.inner.delete_messages(conversation)?;
+    self
+      .inner
+      .delete(Table::EntryTallies, &conversation.to_string())?;
     self.cache().remove_conversation(conversation);
     self.note(Change::Conversation(conversation));
     Ok(())
@@ -519,6 +529,7 @@ fn classify(table: Table, key: &str) -> Change {
     | Table::SavedSearches
     | Table::FileTransfers
     | Table::Downloads
+    | Table::EntryTallies
     | Table::ShareLinks
     | Table::ChannelBrowser
     | Table::DeviceLists

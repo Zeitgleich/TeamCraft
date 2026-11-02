@@ -53,7 +53,9 @@ async fn measure_start_and_channel_switch() {
   seed(&directory, messages).await;
   eprintln!("seeded {messages} messages in {:?}", started.elapsed());
 
-  eprintln!("-- signed in, token valid");
+  eprintln!("-- signed in, token valid, first start: every conversation's counts are read and kept");
+  measure(&directory, Arc::new(ValidToken)).await;
+  eprintln!("-- signed in, token valid, next start: the kept counts");
   measure(&directory, Arc::new(ValidToken)).await;
   eprintln!("-- signed in, the access token ran out: the refresh takes {SLOW_REFRESH:?}");
   measure(&directory, Arc::new(SlowRefresh(Mutex::new(())))).await;

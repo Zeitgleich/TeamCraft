@@ -18,8 +18,8 @@ use super::sql_group::{
 use super::sqlite_log::{LOG_PRAGMAS, PurgeState};
 use super::sqlite_wipe::wipe_free_pages;
 use super::{
-  DatabaseKeySource, LocalStore, MediaRange, MessageEdge, MessageFilter, MessageOrder, MessageSlot,
-  StoreError, StoredMessage, Table, WriteTally,
+  DatabaseKeySource, FeedChange, FeedVersion, LocalStore, MediaRange, MessageEdge, MessageFilter,
+  MessageOrder, MessageSlot, StoreError, StoredMessage, Table, WriteTally,
 };
 
 /// The layout steps of this store, in order ([`run_migrations`]). Released 1.0 databases carry
@@ -43,6 +43,11 @@ pub(crate) const MIGRATIONS: &[Migration] = &[
   Migration {
     version: 4,
     kind: MigrationKind::Layout(migrate_to_v4),
+  },
+  // How far each conversation's feed was rewritten (`LocalStore::feed_version`).
+  Migration {
+    version: 5,
+    kind: MigrationKind::Layout(migrate_to_v5),
   },
 ];
 /// How a message record spells the media type of a picture or a video (`AttachmentRef`, compact JSON):
@@ -70,6 +75,14 @@ const FEED_COLUMNS_V4: &str = "
   CREATE INDEX messages_reactions ON messages (conversation_id, reaction_target)
     WHERE reaction_target IS NOT NULL;
   CREATE INDEX messages_replies ON messages (conversation_id, thread_id) WHERE is_reply = 1;
+";
+/// [`FeedVersion`]'s counts per conversation; none is zero.
+const FEED_VERSIONS_V5: &str = "
+  CREATE TABLE feed_versions (
+    conversation_id INTEGER PRIMARY KEY,
+    reshaped INTEGER NOT NULL DEFAULT 0,
+    edited INTEGER NOT NULL DEFAULT 0
+  );
 ";
 /// The feed's display order, ties broken as [`super::MessageOrder`] does.
 const FEED_ORDER: &str = "ORDER BY sort_group, sort_value, client_message_id";
@@ -317,6 +330,12 @@ impl LocalStore for SqlCipherStore {
     let (sort_group, sort_value) = message.sort_key();
     let feed = FeedColumns::of(message);
     self.write(|connection| {
+      note_feed_change(
+        connection,
+        message.conversation_id,
+        message.client_message_id,
+        Some(message),
+      )?;
       connection.execute(
         "INSERT INTO messages
            (conversation_id, client_message_id, sort_group, sort_value, thread_id, is_hidden, in_channel, record,
@@ -733,8 +752,30 @@ impl LocalStore for SqlCipherStore {
     Ok(counts)
   }
 
+  fn feed_version(&self, conversation: ConversationId) -> Result<Option<FeedVersion>, StoreError> {
+    self
+      .lock()
+      .connection
+      .query_row(
+        "SELECT reshaped, edited FROM feed_versions WHERE conversation_id = ?1",
+        params![conversation.snowflake().get()],
+        |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)),
+      )
+      .optional()
+      .map_err(database_error)
+      .map(|maybe_counts| {
+        let (reshaped, edited) = maybe_counts.unwrap_or_default();
+        Some(FeedVersion {
+          generation: 0,
+          reshaped: reshaped.unsigned_abs(),
+          edited: edited.unsigned_abs(),
+        })
+      })
+  }
+
   fn delete_messages(&self, conversation: ConversationId) -> Result<(), StoreError> {
     self.write(|connection| {
+      bump_feed_version(connection, conversation, FeedChange::Reshaped)?;
       connection.execute(
         "DELETE FROM messages WHERE conversation_id = ?1",
         params![conversation.snowflake().get()],
@@ -748,6 +789,7 @@ impl LocalStore for SqlCipherStore {
     client_message_id: ClientMessageId,
   ) -> Result<(), StoreError> {
     self.write(|connection| {
+      note_feed_change(connection, conversation, client_message_id, None)?;
       connection.execute(
         "DELETE FROM messages WHERE conversation_id = ?1 AND client_message_id = ?2",
         params![
@@ -843,6 +885,60 @@ impl std::fmt::Debug for SqlCipherStore {
 
 fn decode_message(record: &[u8]) -> Result<StoredMessage, StoreError> {
   serde_json::from_slice(record).map_err(|error| StoreError::Corrupt(error.to_string()))
+}
+
+fn migrate_to_v5(connection: &Connection) -> Result<(), StoreError> {
+  connection.execute_batch(FEED_VERSIONS_V5).map_err(database_error)
+}
+
+/// Counts what replacing the stored message with `maybe_new` (`None`: removing it) changes of the
+/// feed. Before the write it counts: a crash between the two only makes a reader count again. A
+/// record that doesn't decode counts as a change, whatever it was.
+fn note_feed_change(
+  connection: &Connection,
+  conversation: ConversationId,
+  client_message_id: ClientMessageId,
+  maybe_new: Option<&StoredMessage>,
+) -> rusqlite::Result<()> {
+  let maybe_record: Option<Vec<u8>> = connection
+    .query_row(
+      "SELECT record FROM messages WHERE conversation_id = ?1 AND client_message_id = ?2",
+      params![
+        conversation.snowflake().get(),
+        client_message_id.as_bytes().as_slice()
+      ],
+      |row| row.get(0),
+    )
+    .optional()?;
+  let Some(record) = maybe_record else {
+    return Ok(());
+  };
+  let maybe_change = match decode_message(&record) {
+    Ok(earlier) => FeedChange::of(&earlier, maybe_new),
+    Err(_) => Some(FeedChange::Reshaped),
+  };
+  match maybe_change {
+    Some(change) => bump_feed_version(connection, conversation, change),
+    None => Ok(()),
+  }
+}
+
+fn bump_feed_version(
+  connection: &Connection,
+  conversation: ConversationId,
+  change: FeedChange,
+) -> rusqlite::Result<()> {
+  let (reshaped, edited) = match change {
+    FeedChange::Reshaped => (1, 0),
+    FeedChange::Edited => (0, 1),
+  };
+  connection.execute(
+    "INSERT INTO feed_versions (conversation_id, reshaped, edited) VALUES (?1, ?2, ?3)
+     ON CONFLICT (conversation_id) DO UPDATE SET
+       reshaped = reshaped + excluded.reshaped, edited = edited + excluded.edited",
+    params![conversation.snowflake().get(), reshaped, edited],
+  )?;
+  Ok(())
 }
 
 /// Version 4: the feed's columns and indexes, filled from every record (issue #155). A record that
@@ -1265,6 +1361,27 @@ mod tests {
     );
     drop(reopened);
     std::fs::remove_dir_all(&directory).unwrap();
+  }
+
+  #[test]
+  fn a_rolled_back_group_takes_its_feed_version_along() {
+    let store =
+      SqlCipherStore::open_in_memory(&StaticKeySource::new(SymmetricKey::generate(&mut OsRng))).unwrap();
+    let conversation = crate::store::tests::id(10);
+    let row = crate::store::tests::message(conversation, 1, Some(10), None, 1);
+    store.upsert_message(&row).unwrap();
+    let before = store.feed_version(conversation).unwrap();
+    store.begin_writes().unwrap();
+    store
+      .upsert_message(&crate::store::StoredMessage {
+        is_edited: true,
+        ..row
+      })
+      .unwrap();
+    assert_ne!(store.feed_version(conversation).unwrap(), before);
+    store.lock().connection.execute_batch("ROLLBACK").unwrap();
+    store.end_writes().unwrap_err();
+    assert_eq!(store.feed_version(conversation).unwrap(), before);
   }
 
   #[test]

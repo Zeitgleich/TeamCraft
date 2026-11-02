@@ -2734,6 +2734,10 @@ The browser has neither SQLCipher nor an OS keystore. The web client keeps the s
    rewritten together: a message record with its conversation's index nodes, so they can group
    message records by conversation, which before only their write times hinted at. Contents, names
    and IDs stay hidden.
+   The same goes for a conversation's kept sidebar counts: message count, last activity and unread
+   counts as a sealed entry (`entry_tallies`), how far its feed was rewritten as a catalog record, so
+   a start doesn't decrypt every message for them. Both say nothing the sealed messages don't, and a
+   lost or damaged one means counting again (`core/entry_tally.rs`).
 5. **Where the database key lives:** wrapped (AES-256-GCM) by a **non-extractable Web Crypto key**,
    both stored in the same IndexedDB database. The wrapping key's own bytes can never be read by a
    script, but any script of the origin can *use* it: unwrapping the database key is one
