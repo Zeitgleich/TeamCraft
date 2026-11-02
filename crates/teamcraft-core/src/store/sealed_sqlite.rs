@@ -529,6 +529,117 @@ mod tests {
     std::fs::remove_dir_all(&directory).unwrap();
   }
 
+  /// The sync loop's group of writes on one thread, the app's reads and writes on another: they
+  /// share the connection, so the reader must neither see the group's records nor write into it.
+  mod groups_of_another_thread {
+    use std::sync::mpsc;
+    use std::sync::{Arc, Barrier};
+
+    use super::*;
+
+    #[test]
+    fn a_read_waits_for_the_commit_and_sees_it() {
+      let (store, directory) = shared_store();
+      let in_group = Arc::new(Barrier::new(2));
+      let (reader, answer) = read_after(&store, &in_group);
+      store.begin_writes().unwrap();
+      store.put(Table::Users, "key", b"new").unwrap();
+      in_group.wait();
+      // The reader may be anywhere up to its wait; it can't get past before the group ended.
+      assert!(answer.try_recv().is_err(), "no answer inside the group");
+      store.end_writes().unwrap();
+      assert_eq!(answer.recv().unwrap(), Some(b"new".to_vec()));
+      reader.join().unwrap();
+      finish(store, directory);
+    }
+
+    #[test]
+    fn a_read_never_sees_what_a_failed_group_rolled_back() {
+      let (store, directory) = shared_store();
+      store.put(Table::Users, "key", b"old").unwrap();
+      let in_group = Arc::new(Barrier::new(2));
+      let (reader, answer) = read_after(&store, &in_group);
+      store.begin_writes().unwrap();
+      store.put(Table::Users, "key", b"new").unwrap();
+      in_group.wait();
+      store.backend().fail_group();
+      store.end_writes().unwrap_err();
+      assert_eq!(answer.recv().unwrap(), Some(b"old".to_vec()));
+      reader.join().unwrap();
+      finish(store, directory);
+    }
+
+    #[test]
+    fn a_write_stays_out_of_the_group_and_survives_its_rollback() {
+      let (store, directory) = shared_store();
+      let in_group = Arc::new(Barrier::new(2));
+      let writer = {
+        let store = store.clone();
+        let in_group = in_group.clone();
+        std::thread::spawn(move || {
+          in_group.wait();
+          store.put(Table::Users, "other_thread", b"sent").unwrap();
+        })
+      };
+      store.begin_writes().unwrap();
+      store.put(Table::Users, "group", b"lost").unwrap();
+      in_group.wait();
+      store.backend().fail_group();
+      store.end_writes().unwrap_err();
+      writer.join().unwrap();
+      assert_eq!(store.get(Table::Users, "group").unwrap(), None);
+      assert_eq!(
+        store.get(Table::Users, "other_thread").unwrap(),
+        Some(b"sent".to_vec())
+      );
+      finish(store, directory);
+    }
+
+    #[test]
+    fn nested_groups_keep_the_others_out_until_the_outermost_ends() {
+      let (store, directory) = shared_store();
+      let in_group = Arc::new(Barrier::new(2));
+      let (reader, answer) = read_after(&store, &in_group);
+      store.begin_writes().unwrap();
+      store.begin_writes().unwrap();
+      store.put(Table::Users, "key", b"new").unwrap();
+      store.end_writes().unwrap();
+      in_group.wait();
+      assert!(answer.try_recv().is_err(), "the outer group is still open");
+      store.end_writes().unwrap();
+      assert_eq!(answer.recv().unwrap(), Some(b"new".to_vec()));
+      reader.join().unwrap();
+      finish(store, directory);
+    }
+
+    fn shared_store() -> (Arc<SealedSqliteStore>, std::path::PathBuf) {
+      let directory = scratch_dir();
+      let key = StaticKeySource::new(SymmetricKey::generate(&mut OsRng));
+      let store = SealedSqliteStore::open(&directory.join("store.db"), &key).unwrap();
+      (Arc::new(store), directory)
+    }
+
+    /// Reads `key` on another thread once `in_group` releases it, and answers with what it read.
+    fn read_after(
+      store: &Arc<SealedSqliteStore>,
+      in_group: &Arc<Barrier>,
+    ) -> (std::thread::JoinHandle<()>, mpsc::Receiver<Option<Vec<u8>>>) {
+      let (answer, answered) = mpsc::channel();
+      let store = store.clone();
+      let in_group = in_group.clone();
+      let reader = std::thread::spawn(move || {
+        in_group.wait();
+        answer.send(store.get(Table::Users, "key").unwrap()).unwrap();
+      });
+      (reader, answered)
+    }
+
+    fn finish(store: Arc<SealedSqliteStore>, directory: std::path::PathBuf) {
+      drop(store);
+      std::fs::remove_dir_all(&directory).unwrap();
+    }
+  }
+
   #[test]
   fn migration_steps_are_numbered() {
     crate::store::sql_group::tests::assert_numbered(MIGRATIONS);
