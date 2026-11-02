@@ -248,6 +248,10 @@ impl<C: ChatBackend + 'static> ChatBackend for Hybrid<C> {
     self.chat.message_count(conversation)
   }
 
+  fn rows_prepended(&self, conversation: ConversationId) -> usize {
+    self.chat.rows_prepended(conversation)
+  }
+
   fn prefetch_messages(&self, conversation: ConversationId, start: usize, len: usize) {
     self.chat.prefetch_messages(conversation, start, len);
   }
