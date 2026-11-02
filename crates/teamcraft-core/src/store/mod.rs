@@ -142,6 +142,10 @@ pub enum Table {
   /// Downloads to disk, keyed by attachment ID: how far each got and the recent ones the app lists
   /// (`client::disk_downloads`).
   Downloads,
+  /// What each conversation's sidebar entry counted, keyed by conversation
+  /// (`crate::entry_tally`). Derived: checked against [`LocalStore::feed_version`], so a lost or
+  /// stale record only means counting again.
+  EntryTallies,
 }
 
 /// A decrypted (or own, not yet sent) message, or a line this device derived itself: from a
@@ -566,6 +570,73 @@ pub struct MessageOrder {
   pub client_message_id: [u8; 16],
 }
 
+/// How far a conversation's feed was rewritten since the store began ([`LocalStore::feed_version`]).
+/// A new message changes neither count: a reader finds those by their position.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FeedVersion {
+  /// Changes when the store's indexes are built again, which starts the counts over.
+  pub generation: u64,
+  /// Writes of [`FeedChange::Reshaped`].
+  pub reshaped: u64,
+  /// Writes of [`FeedChange::Edited`].
+  pub edited: u64,
+}
+
+impl FeedVersion {
+  /// This version after `change`.
+  pub(crate) fn after(self, change: FeedChange) -> Self {
+    match change {
+      FeedChange::Reshaped => Self {
+        reshaped: self.reshaped.wrapping_add(1),
+        ..self
+      },
+      FeedChange::Edited => Self {
+        edited: self.edited.wrapping_add(1),
+        ..self
+      },
+    }
+  }
+}
+
+/// What rewriting or removing a stored message does to its conversation's feed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FeedChange {
+  /// A row left, came back, moved, or changed what is counted of it (its time, sender, whether it
+  /// is readable), or an event changed, which can change what the import's additions hide.
+  Reshaped,
+  /// A row stays where it is and only what it says changed (an edit, which can add a mention).
+  Edited,
+}
+
+impl FeedChange {
+  /// What replacing `earlier` with `maybe_new` (`None`: removing it) changes. A pending message
+  /// changes nothing: it has no place yet that anything could have been counted up to.
+  pub(crate) fn of(earlier: &StoredMessage, maybe_new: Option<&StoredMessage>) -> Option<Self> {
+    if earlier.order().group != 0 || maybe_new == Some(earlier) {
+      return None;
+    }
+    let is_row_after = maybe_new.is_some_and(StoredMessage::is_feed_row);
+    if !earlier.is_feed_row() && !is_row_after {
+      return None;
+    }
+    let is_same_place = maybe_new.is_some_and(|new| {
+      is_row_after
+        && earlier.is_feed_row()
+        && !earlier.is_event()
+        && !new.is_event()
+        && new.order() == earlier.order()
+        && new.sent_at_ms == earlier.sent_at_ms
+        && new.sender_user_id == earlier.sender_user_id
+        && new.maybe_unreadable.is_none() == earlier.maybe_unreadable.is_none()
+    });
+    Some(if is_same_place {
+      Self::Edited
+    } else {
+      Self::Reshaped
+    })
+  }
+}
+
 /// Which messages with a picture or video [`LocalStore::media_messages`] lists, from a message
 /// outwards (the image viewer pages through them).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -703,6 +774,13 @@ pub trait LocalStore {
   fn message_revision(&self, conversation: ConversationId) -> Option<u64> {
     let _ = conversation;
     None
+  }
+  /// How far `conversation`'s feed was rewritten, kept with the messages: written in the same group
+  /// as what it counts and still there after a restart, so what a reader derived from the feed and
+  /// kept is checked against it. `None`: the store doesn't keep it (or its indexes aren't complete).
+  fn feed_version(&self, conversation: ConversationId) -> Result<Option<FeedVersion>, StoreError> {
+    let _ = conversation;
+    Ok(None)
   }
   /// The oldest or newest server message ID stored in `conversation`: the cursor of a catch-up, of
   /// older history and of the read position. Placeholders don't count (issue #888): their IDs are
@@ -1024,6 +1102,10 @@ macro_rules! forward_local_store {
         (**self).indexes_feed()
       }
 
+      fn feed_version(&self, conversation: ConversationId) -> Result<Option<FeedVersion>, StoreError> {
+        (**self).feed_version(conversation)
+      }
+
       fn feed_len(&self, conversation: ConversationId) -> Result<usize, StoreError> {
         (**self).feed_len(conversation)
       }
@@ -1323,7 +1405,7 @@ pub fn pick_media(messages: Vec<StoredMessage>, range: MediaRange, limit: usize)
 
 impl Table {
   /// Every table; a new variant goes here too (stores that load by name skip unknown tables).
-  pub const ALL: [Self; 35] = [
+  pub const ALL: [Self; 36] = [
     Self::Account,
     Self::Spaces,
     Self::Conversations,
@@ -1359,6 +1441,7 @@ impl Table {
     Self::PendingActions,
     Self::AnnouncedPresence,
     Self::Downloads,
+    Self::EntryTallies,
   ];
 
   /// The table with this [`Self::name`], if this version knows it.
@@ -1404,6 +1487,7 @@ impl Table {
       Self::PendingActions => "pending_actions",
       Self::AnnouncedPresence => "announced_presence",
       Self::Downloads => "downloads",
+      Self::EntryTallies => "entry_tallies",
     }
   }
 }

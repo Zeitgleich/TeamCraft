@@ -175,6 +175,7 @@ impl SnapshotCache {
     if let (Some(parts), Some(security)) = (&mut self.maybe_parts, maybe_security) {
       is_changed |= parts.security.set(security, next);
     }
+    backend.flush_entry_tallies();
     if is_changed {
       self.revision = next;
     }

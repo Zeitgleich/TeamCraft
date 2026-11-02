@@ -11,6 +11,8 @@ pub mod clock;
 pub mod connection;
 pub mod device_activity;
 pub mod downloads;
+#[cfg(feature = "ui")]
+pub(crate) mod entry_tally;
 pub mod error;
 pub mod imported;
 pub mod integration_sources;
