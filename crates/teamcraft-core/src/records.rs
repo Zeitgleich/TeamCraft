@@ -21,7 +21,7 @@ use crate::store::{LocalStore, MessageContent, StoredMessage, Table, write_group
 
 const ACCOUNT_KEY: &str = "account";
 const KEY_BAG_KEY: &str = "key_bag";
-const SYNC_KEY: &str = "sync";
+pub const SYNC_KEY: &str = "sync";
 const PENDING_DEVICE_KEY: &str = "pending_device";
 const PENDING_LINK_KEY: &str = "pending_link";
 const ABANDONED_DEVICES_KEY: &str = "abandoned_devices";

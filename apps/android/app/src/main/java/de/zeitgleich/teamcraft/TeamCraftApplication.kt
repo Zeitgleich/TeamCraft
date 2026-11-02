@@ -115,6 +115,9 @@ class TeamCraftApplication : Application() {
       maybeStopping = null
       graph.connectionGrace.appReturned()
       maybeStarting?.cancel()
+      // An access token that ran out is renewed while the core opens, so the connection doesn't
+      // start with waiting for it.
+      graph.scope.launch(Dispatchers.IO) { runCatching { graph.auth.accessToken() } }
       maybeStarting = graph.scope.launch { keepStarting() }
     }
 

@@ -32,7 +32,7 @@ object NetworkTrust {
    * and CAs a user or the device management installed only when the organization's MDM turns on
    * [RESTRICTION_TRUST_USER_CERTIFICATES] (a TLS-inspecting company proxy). Android apps ignore user
    * CAs by default, so a CA someone talked the user into installing reads nothing. Must run before
-   * the first core connection; the core keeps the first list it gets.
+   * the first connection of the core; the core keeps the first list it gets.
    */
   fun installTrustedCertificates(context: Context) {
     val isUserTrusted = runCatching {
@@ -57,8 +57,8 @@ object NetworkTrust {
   private val installed = CompletableDeferred<Unit>()
 
   /**
-   * Reads the CAs off the main thread ([installTrustedCertificates]); the core waits for it with
-   * [awaitTrustedCertificates] before it opens.
+   * Reads the CAs off the main thread ([installTrustedCertificates]); the core's connections wait
+   * for it with [awaitTrustedCertificates], what it reads from its store doesn't.
    */
   fun startInstalling(context: Context, scope: CoroutineScope) {
     scope.launch(Dispatchers.IO) {

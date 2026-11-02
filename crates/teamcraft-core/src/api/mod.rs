@@ -697,7 +697,7 @@ pub trait ServerApi {
   /// Opens the device-linking relay (`/api/v1/rendezvous`). The caller sends `join` first.
   fn connect_rendezvous(&self) -> impl Future<Output = Result<Self::Rendezvous, ApiError>>;
   /// The token for the gateway's `identify`/`resume` frame.
-  fn gateway_token(&self) -> Result<String, ApiError>;
+  fn gateway_token(&self) -> impl Future<Output = Result<String, ApiError>>;
 }
 
 /// One open gateway connection.

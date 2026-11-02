@@ -1,8 +1,8 @@
-//! The engine thread: owns the store, the client and the sync loop, and runs the jobs the
-//! [`crate::TeamCraft`] handle posts, one at a time, on a current-thread runtime.
+//! The engine thread: owns the client and the sync loop, and runs the jobs the [`crate::TeamCraft`]
+//! handle posts, one at a time, on a current-thread runtime. What the app reads from the local store
+//! doesn't wait for it ([`crate::reads`]).
 
 use std::cell::RefCell;
-use std::collections::BTreeMap;
 use std::future::Future;
 use std::panic::AssertUnwindSafe;
 use std::path::{Path, PathBuf};
@@ -11,14 +11,11 @@ use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use teamcraft_client_api::backend::{ChatBackend, SearchBackend};
-use teamcraft_client_api::entry_rules::{channel_leave, space_leave};
+use teamcraft_client_api::backend::ChatBackend;
 use teamcraft_client_api::model::{
-  Conversation as ConversationView, ConversationKind as ConversationKindView, Message as MessageView,
-  SpaceRole, SpaceRoster, UserId, is_pending,
+  Conversation as ConversationView, ConversationKind as ConversationKindView, UserId,
 };
 use teamcraft_client_api::notify::{MentionRules, is_mentioned};
-use teamcraft_client_api::search::parse_query;
 use teamcraft_core::api::{AccessTokenSource, ApiError, HttpRendezvous, HttpServerApi, ServerApi};
 use teamcraft_core::client::NewDeviceLink;
 use teamcraft_core::client::files::sweep_staged_copies;
@@ -33,9 +30,8 @@ use teamcraft_core::notify_rules::{load_mention_preferences, save_mention_prefer
 use teamcraft_core::pending_work::PendingWork;
 use teamcraft_core::prefetch::{load_segment_prefetch, save_segment_prefetch};
 use teamcraft_core::push_guard;
-use teamcraft_core::push_preview::{
-  PreviewGap, PushPreview, device_push_content, push_content_mode, push_preview, save_device_push_content,
-};
+use teamcraft_core::push_preview::{PreviewGap, PushPreview, push_preview, save_device_push_content};
+use teamcraft_core::records;
 use teamcraft_core::runner::{RunnerCommand, RunnerHandle, RunnerSettings, SyncRunner};
 use teamcraft_core::store::{
   LocalStore as _, SealedSqliteStore, SealedStoreLimits, StaticKeySource, TrackedStore,
@@ -48,19 +44,18 @@ use teamcraft_core::{
 use teamcraft_crypto::backup::Argon2Settings;
 use teamcraft_crypto::secret::{SecretBytes, SymmetricKey};
 use teamcraft_proto::{
-  CallJoinTokenResponse, ConversationId, CreateCallJoinTokenRequest, DeviceActivity, DeviceId, Id, ThreadId,
+  CallJoinTokenResponse, ConversationId, CreateCallJoinTokenRequest, DeviceActivity, DeviceId, Id,
 };
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::{JoinHandle, LocalSet};
 
 use crate::calls::{CallHub, CallPreparation};
 use crate::error::TeamCraftError;
+use crate::reads::ReadQueue;
 use crate::types::{
-  AccountState, AppConfig, ConversationItem, DirectPeer, KeyCatchUpItem, LeaveChoice, LinkPlatform,
-  LinkRequestItem, MentionSettings, MessageItem, MessagePage, NotificationContent,
-  NotificationContentSettings, NotifiedConversation, Presence, PushDiagnosticsInfo, PushNotification,
-  PushService, SearchHitItem, SegmentPrefetchMode, SegmentPrefetchResult, SpaceMenuItem, StoreProblem,
-  TestPushResult, share_targets,
+  AccountState, AppConfig, DirectPeer, LinkPlatform, LinkRequestItem, MentionSettings, NotificationContent,
+  Presence, PushNotification, PushService, SegmentPrefetchMode, SegmentPrefetchResult, StoreProblem,
+  TestPushResult,
 };
 use crate::{EventListener, TokenProvider};
 
@@ -109,11 +104,16 @@ pub(crate) struct Engine {
   maybe_push_gateway_url: Option<String>,
   /// Where the app copies files to upload; the core deletes each copy once it went up.
   upload_staging_dir: PathBuf,
+  /// The folder of downloads older versions shared between accounts.
+  shared_downloads: PathBuf,
   tokens: ForeignTokens,
   listener: Arc<dyn EventListener>,
   pub(crate) store: Store,
   pub(crate) client: ClientSlot,
+  /// Who the user is, once enrolled. Everything else the backend knows the app reads on the read
+  /// thread, which has its own ([`ReadQueue`]).
   maybe_backend: Option<CoreChatBackend<Store>>,
+  reads: ReadQueue,
   /// This device, once enrolled; readable while the sync loop owns the client.
   maybe_device_id: Option<DeviceId>,
   /// One push registration at a time, beside the sync loop and the jobs ([`PushRegistrar`]).
@@ -188,6 +188,17 @@ pub(crate) struct EngineStart {
   is_memory_constrained: bool,
 }
 
+/// The queues of an opened engine.
+#[derive(Clone)]
+pub(crate) struct EngineThreads {
+  pub(crate) jobs: mpsc::UnboundedSender<Job>,
+  pub(crate) reads: ReadQueue,
+}
+
+/// Told when the client finds the store unreadable after the engine started: why, and what opens the
+/// engine again after a reset (issue #414).
+pub(crate) type LateProblem = Box<dyn FnOnce(StoreProblem, EngineStart, Box<dyn FnOnce()>) + Send>;
+
 /// Why the engine didn't open.
 #[derive(Debug)]
 pub(crate) enum OpenError {
@@ -246,7 +257,11 @@ impl PushReader {
 
 /// The app's [`TokenProvider`] as the core's token source.
 #[derive(Clone)]
-pub(crate) struct ForeignTokens(Arc<dyn TokenProvider>);
+pub(crate) struct ForeignTokens {
+  provider: Arc<dyn TokenProvider>,
+  /// The thread that asks the app for a token where a request shouldn't wait on its own thread.
+  asks: std::sync::mpsc::Sender<oneshot::Sender<Result<String, ApiError>>>,
+}
 
 /// [`CoreClient::catch_up_for_push`] within `deadline`, cutting only the cancel-safe steps short.
 /// Following the groups (welcomes, MLS) is never dropped halfway: it starts only with
@@ -271,9 +286,15 @@ async fn catch_up_for_push(
   Ok(())
 }
 
-/// Starts the engine thread for `start` and waits until the store is open.
-pub(crate) fn spawn(start: &EngineStart) -> Result<mpsc::UnboundedSender<Job>, OpenError> {
+/// Starts the engine thread for `start` and waits until the store is open and readable: the client
+/// (the MLS state, which grows with the groups) opens after that, ahead of the first job, so what
+/// the store holds can be read at once. A process short of memory (the iOS notification extension)
+/// has no reads to hurry and waits for the client too. Should the client then find the store
+/// unreadable, `late_problem` is told and the engine ends.
+pub(crate) fn spawn(start: &EngineStart, late_problem: LateProblem) -> Result<EngineThreads, OpenError> {
   let start = start.duplicate();
+  let waits_for_client = start.is_memory_constrained;
+  let recovery_start = start.duplicate();
   let (ready, opened) = std::sync::mpsc::channel();
   let (jobs, mut queue) = mpsc::unbounded_channel::<Job>();
   let own_jobs = jobs.downgrade();
@@ -291,7 +312,7 @@ pub(crate) fn spawn(start: &EngineStart) -> Result<mpsc::UnboundedSender<Job>, O
       LocalSet::new().block_on(&runtime, async move {
         // A panic while opening would otherwise only show as `EngineStopped`; Rust's panic output
         // goes nowhere on Android, so the error carries the message and location instead.
-        let mut engine = match open_reporting_panics(start) {
+        let mut engine = match reporting_panics(|| Engine::open(start, own_jobs.clone())) {
           Ok(engine) => engine,
           Err(error) => {
             let _ = ready.send(Err(error));
@@ -299,7 +320,29 @@ pub(crate) fn spawn(start: &EngineStart) -> Result<mpsc::UnboundedSender<Job>, O
           },
         };
         engine.maybe_jobs = Some(own_jobs);
-        let _ = ready.send(Ok(()));
+        if waits_for_client {
+          if let Err(error) = reporting_panics(|| engine.open_client()) {
+            let _ = ready.send(Err(error));
+            return;
+          }
+          drop(recovery_start);
+          let _ = ready.send(Ok(engine.reads.clone()));
+        } else {
+          let _ = ready.send(Ok(engine.reads.clone()));
+          if let Err(problem) = engine.finish_opening() {
+            // The store closes first: a reset sets its files aside, and a connection closing after
+            // that would delete the log of the new database, which has the old one's name.
+            let listener = engine.listener.clone();
+            let close_store = Box::new(move || {
+              engine.reads.close();
+              drop(engine);
+            });
+            late_problem(problem, recovery_start, close_store);
+            listener.on_change();
+            return;
+          }
+          drop(recovery_start);
+        }
         while let Some(job) = queue.recv().await {
           job(&mut engine).await;
         }
@@ -307,24 +350,30 @@ pub(crate) fn spawn(start: &EngineStart) -> Result<mpsc::UnboundedSender<Job>, O
       });
     })
     .map_err(|error| OpenError::Failed(TeamCraftError::Core(error.to_string())))?;
-  opened
+  let reads = opened
     .recv()
     .map_err(|_| OpenError::Failed(TeamCraftError::EngineStopped))??;
-  Ok(jobs)
+  Ok(EngineThreads { jobs, reads })
 }
 
-/// [`Engine::open`], with a panic turned into an error that says where it happened.
-fn open_reporting_panics(start: EngineStart) -> Result<Engine, OpenError> {
+/// A step of opening the engine, with a panic turned into an error that says where it happened.
+fn reporting_panics<T>(open: impl FnOnce() -> Result<T, OpenError>) -> Result<T, OpenError> {
   let report = Arc::new(Mutex::new(String::new()));
-  let previous_hook = std::panic::take_hook();
+  let previous_hook = Arc::new(std::panic::take_hook());
+  let own_hook_previous = previous_hook.clone();
   let hook_report = report.clone();
+  let opening_thread = std::thread::current().id();
+  // The hook is global and the client opens while the read thread already answers: a panic of any
+  // other thread goes where it always went.
   std::panic::set_hook(Box::new(move |info| {
-    if let Ok(mut report) = hook_report.lock() {
+    if std::thread::current().id() != opening_thread {
+      own_hook_previous(info);
+    } else if let Ok(mut report) = hook_report.lock() {
       *report = info.to_string();
     }
   }));
-  let opened = std::panic::catch_unwind(AssertUnwindSafe(|| Engine::open(start)));
-  std::panic::set_hook(previous_hook);
+  let opened = std::panic::catch_unwind(AssertUnwindSafe(open));
+  std::panic::set_hook(Box::new(move |info| previous_hook(info)));
   opened.unwrap_or_else(|_| {
     let message = report.lock().map(|report| report.clone()).unwrap_or_default();
     Err(OpenError::Failed(TeamCraftError::Core(format!(
@@ -428,11 +477,13 @@ impl EngineStart {
 }
 
 impl Engine {
-  fn open(start: EngineStart) -> Result<Self, OpenError> {
+  /// Opens the store and the read thread on it. Records that don't decode, or a key bag its own key
+  /// doesn't open, make the store unreadable here already.
+  fn open(start: EngineStart, own_jobs: mpsc::WeakUnboundedSender<Job>) -> Result<Self, OpenError> {
     std::fs::create_dir_all(&start.data_dir)
       .map_err(|error| OpenError::Failed(TeamCraftError::Storage(error.to_string())))?;
-    remove_shared_downloads(&start.data_dir.join(DOWNLOADS_DIR));
     let [download_dir, upload_staging_dir] = start.plaintext_dirs();
+    let shared_downloads = start.data_dir.join(DOWNLOADS_DIR);
     let path = start.store_path();
     let EngineStart {
       server_url,
@@ -460,23 +511,29 @@ impl Engine {
     };
     let store = store.map_err(|error| open_error(error.into()))?;
     let store = TrackedStore::with_message_cache(Arc::new(store), cached_messages);
-    // Plaintext copies of files that were never sent (taken out of the composer, app stopped).
-    if let Err(error) = sweep_staged_copies(&store, &upload_staging_dir) {
-      tracing::debug!(%error, "stray staged upload copies could not be listed");
-    }
     // A broken record only costs the preferences, not the store.
     let mentions: MentionSettings = load_mention_preferences(&store).unwrap_or_default().into();
-    trim_downloads(&download_dir, MAX_DOWNLOADS_BYTES);
+    let maybe_account = records::load_account(&store).map_err(open_error)?;
+    let reads = ReadQueue::start(
+      store.clone(),
+      listener.clone(),
+      signals.catch_up_focus.clone(),
+      own_jobs,
+    )
+    .map_err(OpenError::Failed)?;
+    let tokens = ForeignTokens::new(tokens).map_err(OpenError::Failed)?;
     let mut engine = Self {
       server_url,
       maybe_push_gateway_url,
       download_dir,
       upload_staging_dir,
-      tokens: ForeignTokens(tokens),
+      tokens,
       listener,
       store,
       client: ClientSlot::Missing,
       maybe_backend: None,
+      reads,
+      shared_downloads,
       maybe_device_id: None,
       push_turn: Rc::default(),
       loop_deaths: 0,
@@ -496,19 +553,44 @@ impl Engine {
       active_drains: 0,
       maybe_jobs: None,
     };
-    // Records that don't decode, or a key bag its own key doesn't open, make the store unreadable
-    // too.
+    if let Some(account) = maybe_account {
+      engine.know_account(&account);
+    }
+    Ok(engine)
+  }
+
+  /// What opening leaves for after the app can read: the upkeep of the plaintext folders and the
+  /// client. Only a store the client can't read stops the engine; any other failure leaves the slot
+  /// empty on an enrolled device, which repairs itself on the next use (issue #1142).
+  fn finish_opening(&mut self) -> Result<(), StoreProblem> {
+    match reporting_panics(|| self.open_client()) {
+      Ok(()) => Ok(()),
+      Err(OpenError::Unreadable(problem)) => Err(problem),
+      Err(OpenError::Failed(error)) => {
+        tracing::warn!(%error, "the client did not open; trying again on its next use");
+        Ok(())
+      },
+    }
+  }
+
+  fn open_client(&mut self) -> Result<(), OpenError> {
+    remove_shared_downloads(&self.shared_downloads);
+    // Plaintext copies of files that were never sent (taken out of the composer, app stopped).
+    if let Err(error) = sweep_staged_copies(&self.store, &self.upload_staging_dir) {
+      tracing::debug!(%error, "stray staged upload copies could not be listed");
+    }
+    trim_downloads(&self.download_dir, MAX_DOWNLOADS_BYTES);
     let maybe_client = Client::open(
-      engine.api(),
-      engine.store.clone(),
+      self.api(),
+      self.store.clone(),
       Box::new(SystemClock),
-      engine.client_settings(),
+      self.client_settings(),
     )
     .map_err(open_error)?;
     if let Some(client) = maybe_client {
-      engine.adopt(client);
+      self.adopt(client);
     }
-    Ok(engine)
+    Ok(())
   }
 
   pub(crate) async fn account_state(&mut self) -> Result<AccountState, TeamCraftError> {
@@ -886,8 +968,7 @@ impl Engine {
     Ok(answered)
   }
 
-  /// What still waits for the server: the outbox, uploads and queued actions.
-  pub(crate) fn pending_work(&self) -> Result<PendingWork, TeamCraftError> {
+  fn pending_work(&self) -> Result<PendingWork, TeamCraftError> {
     PendingWork::read(&self.store).map_err(TeamCraftError::from)
   }
 
@@ -906,245 +987,6 @@ impl Engine {
       tracing::warn!(%error, "could not clear the local database log");
     }
     Ok(())
-  }
-
-  pub(crate) fn conversations(&self) -> Result<Vec<ConversationItem>, TeamCraftError> {
-    let backend = self.backend()?;
-    let spaces: BTreeMap<_, _> = backend
-      .spaces()
-      .into_iter()
-      .map(|space| (space.id, space.name))
-      .collect();
-    let mut conversations = Vec::new();
-    for space in spaces.keys() {
-      conversations.extend(backend.space_conversations(*space));
-    }
-    conversations.extend(backend.direct_conversations());
-    let me = backend.me();
-    Ok(
-      conversations
-        .into_iter()
-        .map(|conversation| {
-          let maybe_peer = direct_peer(backend, &conversation, me.id);
-          let maybe_space_name = conversation
-            .maybe_space
-            .and_then(|space| spaces.get(&space).cloned());
-          ConversationItem::from_view(conversation, maybe_space_name, maybe_peer, me.is_guest)
-        })
-        .collect(),
-    )
-  }
-
-  /// Where a share from another app can go ([`share_targets`]), each with its last activity.
-  pub(crate) fn share_targets(&self) -> Result<Vec<ConversationItem>, TeamCraftError> {
-    let backend = self.backend()?;
-    let items = self
-      .conversations()?
-      .into_iter()
-      .filter(|item| item.can_post)
-      .map(|item| {
-        let maybe_last_activity_ms = parse_id::<ConversationId>(&item.id)
-          .ok()
-          .and_then(|id| backend.last_activity(id));
-        ConversationItem {
-          maybe_last_activity_ms,
-          ..item
-        }
-      })
-      .collect();
-    Ok(share_targets(items))
-  }
-
-  pub(crate) fn key_catch_up(&self) -> Result<Option<KeyCatchUpItem>, TeamCraftError> {
-    Ok(self.backend()?.key_catch_up().map(|progress| KeyCatchUpItem {
-      caught_up: u32::try_from(progress.caught_up).unwrap_or(u32::MAX),
-      total: u32::try_from(progress.total).unwrap_or(u32::MAX),
-    }))
-  }
-
-  pub(crate) fn messages(
-    &self,
-    conversation_id: &str,
-    limit: u32,
-  ) -> Result<Vec<MessageItem>, TeamCraftError> {
-    let backend = self.backend()?;
-    let conversation: ConversationId = parse_id(conversation_id)?;
-    self.signals.catch_up_focus.set(conversation);
-    // One read for count and page: a separate count could change before the page is read and
-    // shift the window (issue #1060).
-    let tail = backend.feed_tail(conversation, None, usize::try_from(limit).unwrap_or(usize::MAX));
-    Ok(self.message_items(backend, &tail.messages))
-  }
-
-  pub(crate) fn messages_from(
-    &self,
-    conversation_id: &str,
-    maybe_oldest_id: Option<&str>,
-    oldest_sent_at_ms: i64,
-    older: u32,
-  ) -> Result<MessagePage, TeamCraftError> {
-    let backend = self.backend()?;
-    let conversation: ConversationId = parse_id(conversation_id)?;
-    self.signals.catch_up_focus.set(conversation);
-    let tail = backend.feed_tail(
-      conversation,
-      feed_anchor(maybe_oldest_id, oldest_sent_at_ms)?,
-      older_len(older),
-    );
-    Ok(MessagePage {
-      messages: self.message_items(backend, &tail.messages),
-      has_older: tail.has_older,
-    })
-  }
-
-  pub(crate) fn thread(
-    &self,
-    conversation_id: &str,
-    thread_id: &str,
-  ) -> Result<Vec<MessageItem>, TeamCraftError> {
-    let backend = self.backend()?;
-    let conversation = parse_id(conversation_id)?;
-    self.signals.catch_up_focus.set(conversation);
-    let messages = backend.thread(conversation, parse_id(thread_id)?);
-    Ok(self.message_items(backend, &messages))
-  }
-
-  pub(crate) async fn send_message(
-    &mut self,
-    conversation_id: String,
-    maybe_thread_id: Option<String>,
-    body: String,
-  ) -> Result<(), TeamCraftError> {
-    let conversation: ConversationId = parse_id(&conversation_id)?;
-    let maybe_thread: Option<ThreadId> = maybe_thread_id.as_deref().map(parse_id).transpose()?;
-    if body.trim().is_empty() {
-      return Err(TeamCraftError::InvalidInput("empty message".into()));
-    }
-    self.backend()?.post_message(conversation, maybe_thread, &body);
-    self.dispatch_commands().await
-  }
-
-  pub(crate) async fn mark_read(&mut self, conversation_id: String) -> Result<(), TeamCraftError> {
-    self.backend()?.mark_read(parse_id(&conversation_id)?);
-    self.dispatch_commands().await
-  }
-
-  /// Whether the conversation's menu offers "Leave" (#1105). Channel roles are read afresh while
-  /// they are not known, so a later ask has the last-admin answer.
-  pub(crate) fn conversation_leave_choice(
-    &self,
-    conversation_id: &str,
-  ) -> Result<LeaveChoice, TeamCraftError> {
-    let backend = self.backend()?;
-    let id = parse_id(conversation_id)?;
-    let Some(conversation) = backend.conversation(id) else {
-      return Ok(LeaveChoice::Hidden);
-    };
-    let roles = backend.channel_roles(id);
-    if roles.is_empty() {
-      backend.refresh_channel_roles(id);
-    }
-    Ok(channel_leave(&conversation, backend.me().id, &roles).into())
-  }
-
-  /// How many conversations the server claimed deleted at once, if suspect; told once.
-  pub(crate) async fn take_suspect_deletions(&mut self) -> Result<u32, TeamCraftError> {
-    let backend = self.backend()?;
-    let count = backend.suspect_deletions();
-    if count > 0 {
-      backend.dismiss_suspect_deletions();
-      self.dispatch_commands().await?;
-    }
-    Ok(count)
-  }
-
-  pub(crate) fn space_menu(&self, space_id: &str) -> Result<Option<SpaceMenuItem>, TeamCraftError> {
-    let backend = self.backend()?;
-    let id = parse_id(space_id)?;
-    let Some(space) = backend.spaces().into_iter().find(|space| space.id == id) else {
-      return Ok(None);
-    };
-    let is_admin = space.maybe_my_role == Some(SpaceRole::SpaceAdmin);
-    let roster = if is_admin {
-      let roster = backend.space_members(id);
-      if matches!(roster, SpaceRoster::Loading) {
-        backend.refresh_space_roster(id);
-      }
-      roster
-    } else {
-      SpaceRoster::Loading
-    };
-    let has_unread = backend
-      .space_conversations(id)
-      .iter()
-      .any(|conversation| conversation.unread_count > 0 || conversation.mention_count > 0);
-    Ok(Some(SpaceMenuItem {
-      name: space.name,
-      has_unread,
-      leave: space_leave(space.maybe_my_role.as_ref(), backend.me().id, &roster).into(),
-      can_delete: space.can_delete_space,
-      channel_count: space.deleted_channel_count,
-    }))
-  }
-
-  pub(crate) async fn mark_space_read(&mut self, space_id: String) -> Result<(), TeamCraftError> {
-    let backend = self.backend()?;
-    for conversation in backend.space_conversations(parse_id(&space_id)?) {
-      if conversation.unread_count > 0 || conversation.mention_count > 0 {
-        backend.mark_read(conversation.id);
-      }
-    }
-    self.dispatch_commands().await
-  }
-
-  /// Leaves the space and its channels, only where [`Self::space_menu`] offers it: the server's
-  /// last-admin refusal is told before the call, not after.
-  pub(crate) async fn leave_space(&mut self, space_id: String) -> Result<(), TeamCraftError> {
-    let Some(menu) = self.space_menu(&space_id)? else {
-      return Err(TeamCraftError::InvalidInput(format!(
-        "not a space of this account: {space_id}"
-      )));
-    };
-    if menu.leave != LeaveChoice::Allowed {
-      return Err(TeamCraftError::InvalidInput(
-        "leaving this space is not allowed".to_owned(),
-      ));
-    }
-    let backend = self.backend()?;
-    backend.remove_space_member(parse_id(&space_id)?, backend.me().id);
-    self.dispatch_commands().await
-  }
-
-  pub(crate) async fn set_favorite(
-    &mut self,
-    conversation_id: String,
-    is_favorite: bool,
-  ) -> Result<(), TeamCraftError> {
-    self
-      .backend()?
-      .set_favorite(parse_id(&conversation_id)?, is_favorite);
-    self.dispatch_commands().await
-  }
-
-  pub(crate) async fn set_presence(&mut self, presence: Presence) -> Result<(), TeamCraftError> {
-    self.backend()?.set_presence(presence.into());
-    self.dispatch_commands().await
-  }
-
-  pub(crate) fn search(&self, query: &str) -> Result<Vec<SearchHitItem>, TeamCraftError> {
-    let backend = self.backend()?;
-    let results = backend.search(&parse_query(query));
-    Ok(
-      results
-        .hits
-        .into_iter()
-        .map(|hit| SearchHitItem {
-          message: self.message_item(backend, &hit.message),
-          conversation_name: hit.conversation_name,
-          maybe_space_name: hit.maybe_space_name,
-        })
-        .collect(),
-    )
   }
 
   /// Registers the token beside the sync loop; the receiver gets the outcome.
@@ -1334,8 +1176,10 @@ impl Engine {
   ) -> Result<PushPreview, TeamCraftError> {
     let deadline = tokio::time::Instant::now() + PUSH_PREVIEW_BUDGET;
     let api = self.api();
-    // Without a token the preview still names conversation and sender.
-    let maybe_api = self.tokens.0.access_token().map(|_| &api);
+    // Without a token the preview still names conversation and sender, also when a refresh would
+    // use up the time for the fetch.
+    let maybe_token = tokio::time::timeout(PUSH_FETCH_BUDGET, self.tokens.fresh_token()).await;
+    let maybe_api = matches!(maybe_token, Ok(Ok(_))).then_some(&api);
     // Cancel-safe: the preview only reads the store.
     let fetched =
       tokio::time::timeout(PUSH_FETCH_BUDGET, push_preview(&self.store, maybe_api, payload)).await;
@@ -1380,20 +1224,6 @@ impl Engine {
     Ok(preview)
   }
 
-  /// What the newest notification showed of the conversation, while the store hasn't caught up
-  /// to it (see [`notified::notified_conversation`]).
-  pub(crate) fn notified_conversation(
-    &self,
-    conversation_id: &str,
-  ) -> Result<Option<NotifiedConversation>, TeamCraftError> {
-    let conversation: ConversationId = parse_id(conversation_id)?;
-    Ok(notified::notified_conversation(&self.store, conversation)?.map(Into::into))
-  }
-
-  pub(crate) fn push_diagnostics(&self) -> Result<PushDiagnosticsInfo, TeamCraftError> {
-    Ok(push_guard::push_diagnostics(&self.store)?.into())
-  }
-
   pub(crate) async fn send_test_push(&self) -> Result<TestPushResult, TeamCraftError> {
     let api = self.api();
     Ok(push_guard::send_test_push(&self.store, &api).await?.into())
@@ -1407,26 +1237,8 @@ impl Engine {
     Ok(())
   }
 
-  pub(crate) fn mention_settings(&self) -> MentionSettings {
-    self.mentions.clone()
-  }
-
-  /// This device's notification privacy setting and the workspace policy's limit; both stored, so
-  /// a notification extension reads them too.
-  pub(crate) fn notification_content(&self) -> NotificationContentSettings {
-    let store = &self.store;
-    NotificationContentSettings {
-      device: (&device_push_content(store)).into(),
-      workspace: (&push_content_mode(store)).into(),
-    }
-  }
-
   pub(crate) fn set_notification_content(&self, content: NotificationContent) -> Result<(), TeamCraftError> {
     Ok(save_device_push_content(&self.store, &content.into())?)
-  }
-
-  pub(crate) fn segment_prefetch(&self) -> Result<SegmentPrefetchMode, TeamCraftError> {
-    Ok(load_segment_prefetch(&self.store)?.into())
   }
 
   pub(crate) fn set_segment_prefetch(&self, mode: SegmentPrefetchMode) -> Result<(), TeamCraftError> {
@@ -1487,14 +1299,32 @@ impl Engine {
   fn adopt(&mut self, mut client: CoreClient) {
     self.attach_call_sink(&mut client);
     self.link_requests = client.link_request_list();
-    self.identity_fingerprint = client.identity_fingerprint();
-    self.maybe_device_id = Some(client.device_id());
-    self.maybe_backend = Some(
-      CoreChatBackend::new(self.store.clone(), client.user_id(), Box::new(SystemClock))
-        .with_typing(client.typing_state())
-        .with_transfers(client.transfers()),
+    self.set_account(
+      client.user_id(),
+      client.device_id(),
+      client.identity_fingerprint(),
     );
+    self
+      .reads
+      .follow_client(client.typing_state(), client.transfers());
     self.client = ClientSlot::Idle(Box::new(client));
+  }
+
+  /// The account the store holds, before its client is open: the app can read already.
+  fn know_account(&mut self, account: &records::Account) {
+    let fingerprint = account.identity_public_key().fingerprint().to_string();
+    self.set_account(account.user_id, account.device_id, fingerprint);
+  }
+
+  fn set_account(&mut self, user: UserId, device: DeviceId, fingerprint: String) {
+    self.identity_fingerprint = fingerprint.clone();
+    self.maybe_device_id = Some(device);
+    self.maybe_backend = Some(CoreChatBackend::new(
+      self.store.clone(),
+      user,
+      Box::new(SystemClock),
+    ));
+    self.reads.know_account(user, fingerprint);
   }
 
   /// Gateway call events (rings) of `client` go to the app's call listener.
@@ -1638,10 +1468,9 @@ impl Engine {
   }
 
   /// Hands the UI adapter's queued commands to the sync loop, or runs them right away.
-  pub(crate) async fn dispatch_commands(&mut self) -> Result<(), TeamCraftError> {
-    // Taken first: repairing the client replaces the backend that holds them.
-    let commands = self.backend()?.drain_commands();
-    self.repair_client()?;
+  /// Hands what an action queued to the client. The app is already told what it wrote locally
+  /// ([`ReadQueue`]).
+  pub(crate) async fn run_commands(&mut self, commands: Vec<CoreCommand>) -> Result<(), TeamCraftError> {
     match &mut self.client {
       ClientSlot::Running { handle, .. } => {
         for command in commands {
@@ -1650,9 +1479,6 @@ impl Engine {
         handle.send(RunnerCommand::Flush);
       },
       ClientSlot::Idle(client) => {
-        // What the action wrote locally (a new message in the outbox) shows before the server
-        // answers.
-        self.listener.on_change();
         for command in commands {
           run_offline_tolerant(client, command).await?;
         }
@@ -1678,18 +1504,6 @@ impl Engine {
 
   pub(crate) fn backend(&self) -> Result<&CoreChatBackend<Store>, TeamCraftError> {
     self.maybe_backend.as_ref().ok_or(TeamCraftError::NotEnrolled)
-  }
-
-  fn message_items(&self, backend: &CoreChatBackend<Store>, messages: &[MessageView]) -> Vec<MessageItem> {
-    messages
-      .iter()
-      .map(|message| self.message_item(backend, message))
-      .collect()
-  }
-
-  fn message_item(&self, backend: &CoreChatBackend<Store>, message: &MessageView) -> MessageItem {
-    let maybe_author = backend.user(message.author);
-    MessageItem::from_view(message, maybe_author.as_ref(), is_pending(message.id))
   }
 
   fn client_settings(&self) -> ClientSettings {
@@ -1779,13 +1593,52 @@ fn loop_restart_delay(deaths: u32) -> Duration {
   }
 }
 
+impl ForeignTokens {
+  /// The asking thread lives as long as a clone of this: a token refresh in the app (AppAuth blocks
+  /// for up to 10 s) holds it, never the engine thread with the sync loop (e2ee.md §7.2 is untouched:
+  /// no keys go through here, only the access token).
+  fn new(provider: Arc<dyn TokenProvider>) -> Result<Self, TeamCraftError> {
+    let (asks, asked) = std::sync::mpsc::channel::<oneshot::Sender<Result<String, ApiError>>>();
+    let asking = provider.clone();
+    std::thread::Builder::new()
+      .name("teamcraft-tokens".into())
+      .spawn(move || {
+        for answer in asked {
+          let token = std::panic::catch_unwind(AssertUnwindSafe(|| signed_in_token(asking.as_ref())));
+          // The request may have been dropped meanwhile; nobody needs the token then.
+          let _ = answer.send(token.unwrap_or_else(|_| {
+            Err(ApiError::Network(
+              "the app could not supply an access token".into(),
+            ))
+          }));
+        }
+      })
+      .map_err(|error| TeamCraftError::Core(error.to_string()))?;
+    Ok(Self { provider, asks })
+  }
+}
+
 impl AccessTokenSource for ForeignTokens {
   fn access_token(&self) -> Result<String, ApiError> {
-    self
-      .0
-      .access_token()
-      .ok_or_else(|| ApiError::Token("signed out".into()))
+    signed_in_token(self.provider.as_ref())
   }
+
+  async fn fresh_token(&self) -> Result<String, ApiError> {
+    let (answer, answered) = oneshot::channel();
+    if self.asks.send(answer).is_err() {
+      return self.access_token();
+    }
+    match answered.await {
+      Ok(token) => token,
+      Err(_) => self.access_token(),
+    }
+  }
+}
+
+fn signed_in_token(provider: &dyn TokenProvider) -> Result<String, ApiError> {
+  provider
+    .access_token()
+    .ok_or_else(|| ApiError::Token("signed out".into()))
 }
 
 /// Runs a UI command on an idle client; offline is fine (the outbox keeps messages).
@@ -1909,7 +1762,7 @@ fn trim_downloads(directory: &std::path::Path, max_bytes: u64) {
 }
 
 /// The other person's presence in a one-to-one DM; `None` for every other conversation.
-fn direct_peer(
+pub(crate) fn direct_peer(
   backend: &impl ChatBackend,
   conversation: &ConversationView,
   me: UserId,
@@ -2254,7 +2107,16 @@ mod tests {
         .await
         .unwrap();
       drop(client);
-      Engine::open(start).map_err(|_| "engine did not open").unwrap()
+      let mut engine = opened_store(start);
+      engine.open_client().map_err(|_| "client did not open").unwrap();
+      engine
+    }
+
+    fn opened_store(start: EngineStart) -> Engine {
+      let (jobs, _queue) = mpsc::unbounded_channel::<Job>();
+      Engine::open(start, jobs.downgrade())
+        .map_err(|_| "engine did not open")
+        .unwrap()
     }
 
     fn running_task(engine: &Engine) -> tokio::task::Id {

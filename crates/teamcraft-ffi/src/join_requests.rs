@@ -23,6 +23,7 @@ use teamcraft_proto::{ErrorCode, HistoryPolicy};
 use crate::TeamCraft;
 use crate::engine::{Engine, parse_id};
 use crate::error::TeamCraftError;
+use crate::reads::Reads;
 
 /// Where this device remembers which requests it notified about (`JoinRequestAlerts` as JSON), so
 /// a restart doesn't notify again. Device-local state next to the sync cursors; no screen reads it.
@@ -110,17 +111,13 @@ impl TeamCraft {
   /// The requests waiting for this user's decision as the owner of the channels they name, oldest
   /// first. Read it again when the app is told about a change.
   pub async fn join_requests(&self) -> Result<Vec<JoinRequestItem>, TeamCraftError> {
-    self
-      .call(|engine| Box::pin(async move { engine.join_requests() }))
-      .await
+    self.read(|reads| reads.join_requests()).await
   }
 
   /// The requests to notify about and the notifications to withdraw since the last call; this
   /// device remembers what it notified about. Call it on changes while the app runs.
   pub async fn join_request_alerts(&self) -> Result<JoinRequestAlertChanges, TeamCraftError> {
-    self
-      .call(|engine| Box::pin(async move { engine.join_request_alerts() }))
-      .await
+    self.read(|reads| reads.join_request_alerts()).await
   }
 
   /// This admin asks the owners of the private channel to let them in ("Ask to join"); asking
@@ -196,10 +193,10 @@ impl TeamCraft {
   }
 }
 
-impl Engine {
+impl Reads {
   /// Reads the stored list without the activity feed (cheap: the apps ask on every change), oldest
   /// first like Activity on desktop.
-  fn join_requests(&self) -> Result<Vec<JoinRequestItem>, TeamCraftError> {
+  pub(crate) fn join_requests(&self) -> Result<Vec<JoinRequestItem>, TeamCraftError> {
     let backend = self.backend()?;
     let mut requests = backend.join_requests();
     requests.sort_by_key(|request| (request.requested_at, request.conversation, request.user));
@@ -207,7 +204,7 @@ impl Engine {
     Ok(join_request_items(&requests, channel_name))
   }
 
-  fn join_request_alerts(&mut self) -> Result<JoinRequestAlertChanges, TeamCraftError> {
+  pub(crate) fn join_request_alerts(&self) -> Result<JoinRequestAlertChanges, TeamCraftError> {
     let backend = self.backend()?;
     let requests = backend.join_requests();
     let store = &self.store;
@@ -226,7 +223,9 @@ impl Engine {
     }
     Ok(changes)
   }
+}
 
+impl Engine {
   /// Runs `step` on the client with syncing paused (approving commits to the channel's group), so
   /// its failure reaches the app; a refusal the app words is an outcome ([`join_outcome`]).
   async fn run_join_step(&mut self, step: JoinStep) -> Result<JoinRequestOutcome, TeamCraftError> {

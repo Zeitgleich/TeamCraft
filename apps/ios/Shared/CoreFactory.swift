@@ -1,6 +1,6 @@
 import Foundation
 
-/// Hands the Rust core the access token of the keychain session (it asks on its engine thread).
+/// Hands the Rust core the access token of the keychain session (it asks on a thread of its own).
 final class VaultTokenProvider: TokenProvider, @unchecked Sendable {
   private let vault: SessionVault
 
@@ -13,7 +13,7 @@ final class VaultTokenProvider: TokenProvider, @unchecked Sendable {
   }
 }
 
-/// Forwards the core's change callbacks (called on the engine thread).
+/// Forwards the core's change callbacks (called on the core's threads).
 final class ClosureEventListener: EventListener, @unchecked Sendable {
   private let handler: () -> Void
 

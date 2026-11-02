@@ -44,6 +44,7 @@ import de.zeitgleich.teamcraft.auth.localSignInErrorText
 import de.zeitgleich.teamcraft.calls.CallOptions
 import de.zeitgleich.teamcraft.core.ChatClient
 import de.zeitgleich.teamcraft.core.ChatQueries
+import de.zeitgleich.teamcraft.core.NetworkTrust
 import de.zeitgleich.teamcraft.core.OwnProfile
 import de.zeitgleich.teamcraft.core.PermalinkTarget
 import de.zeitgleich.teamcraft.core.PickedFile
@@ -206,6 +207,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     refresh()
     retryServerWhenOnline()
     loadSignInPageWhenShown()
+    leaveWhenStoreTurnsUnreadable()
   }
 
   fun brandLogo(isDark: Boolean): Bitmap? = maybeBrandStore?.logo(isDark)
@@ -387,6 +389,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
   private fun startLink(waiting: AppState.LinkingThisDevice, peer: suspend (TeamCraft) -> String) {
     linkJob?.cancel()
     linkJob = launchBusy {
+      // The relay connects before any request asks for a token.
+      NetworkTrust.awaitTrustedCertificates()
       val core = graph.core.core()
       state.value = waiting
       try {
@@ -934,6 +938,18 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
       if (isOnline && !busy.value && maybeError != null && isRetryableWhenOnline(maybeError)) {
         submitServer(current.prefill)
       }
+    }
+  }
+
+  /**
+   * The app shows what the store holds before the core's client opened. Should that find the store
+   * unreadable after all, the core says so on the next change (issue #414).
+   */
+  private fun leaveWhenStoreTurnsUnreadable() = viewModelScope.launch {
+    changeCount.collect {
+      if (state.value !is AppState.Ready) return@collect
+      val maybeAccount = runCatching { graph.core.core().accountState() }.getOrNull()
+      if (maybeAccount is AccountState.StoreUnreadable) state.value = AppState.StoreUnreadable(maybeAccount.problem)
     }
   }
 
