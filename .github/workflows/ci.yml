@@ -118,19 +118,11 @@ jobs:
         - /usr/local/lib/android:/host/android
         - /opt/ghc:/host/ghc
         - /opt/hostedtoolcache:/host/toolcache
-      # To write the host's net.core.rmem_max below. A runner is a throwaway VM with sudo anyway.
-      options: --cap-add=NET_ADMIN --security-opt systempaths=unconfined
     env:
       SQLX_OFFLINE: "true"
       CARGO_PROFILE_DEV_DEBUG: "0"
       CARGO_PROFILE_DEV_STRIP: "debuginfo"
     steps:
-      - name: Let UDP sockets have the receive buffers they ask for
-        # The SFU tests' calls ask for 4 MiB, as a deployed SFU should get (docs/operations.md). With
-        # the default cap a 1440p keyframe's burst can overflow a socket and the keyframe is lost (#1139).
-        run: |
-          echo 8388608 > /proc/sys/net/core/rmem_max
-          cat /proc/sys/net/core/rmem_max
       - name: Free disk space on the runner
         # Deleting ~30 GB takes minutes; it runs in the background while the cache is restored and
         # the dependencies are fetched, and the build output only needs the space later.
