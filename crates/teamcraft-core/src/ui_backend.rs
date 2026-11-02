@@ -6,7 +6,7 @@
 //! app's sync task drains and runs against the server. After either, the sync task flushes.
 
 use std::cell::RefCell;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::rc::Rc;
 
 use teamcraft_client_api::actions::{
@@ -51,9 +51,12 @@ use crate::notify_rules::{MentionPreferences, load_mention_preferences};
 use crate::people_names::shown_name;
 use crate::records::{self, Draft};
 use crate::store::{
-  BookmarkItem, ConversationEvent, LocalStore, MessageContent, MessageEdge, MessageFilter, StoredMessage,
-  Table, Unreadable,
+  BookmarkItem, ConversationEvent, LocalStore, MessageContent, MessageEdge, MessageFilter, MessageSlot,
+  StoredMessage, Table, Unreadable,
 };
+
+/// Rows read at a time when a list's anchor is looked for by its time ([`FeedAnchor`]).
+const ANCHOR_WALK_ROWS: usize = 64;
 
 /// Requests from the UI that need the server; the sync task drains and runs them.
 #[derive(Clone, Debug, PartialEq)]
@@ -445,6 +448,8 @@ pub struct CoreChatBackend<S> {
   pub(crate) activity: RefCell<HashMap<ConversationId, crate::ui_activity::KeptActivity>>,
   /// The feed rows of the conversations read last, kept while their messages don't change.
   feeds: RefCell<Vec<(ConversationId, FeedView)>>,
+  /// What paging an indexed feed needs of the conversations read last, kept likewise.
+  layouts: RefCell<Vec<(ConversationId, Rc<FeedLayout>)>>,
   #[cfg(not(target_arch = "wasm32"))]
   pub(crate) search: RefCell<crate::ui_search::UiSearchState>,
 }
@@ -479,6 +484,7 @@ impl<S: LocalStore> CoreChatBackend<S> {
       mentions: RefCell::default(),
       activity: RefCell::default(),
       feeds: RefCell::default(),
+      layouts: RefCell::default(),
       #[cfg(not(target_arch = "wasm32"))]
       search: RefCell::new(Default::default()),
     }
@@ -1071,6 +1077,9 @@ impl<S: LocalStore> CoreChatBackend<S> {
     maybe_oldest: Option<FeedAnchor>,
     older: usize,
   ) -> FeedTail {
+    if self.store.indexes_feed() {
+      return self.indexed_feed_tail(conversation, maybe_oldest, older);
+    }
     let mut tail = FeedTail::default();
     let maybe_importer = self.importer();
     self.with_feed(conversation, &mut |all, view| {
@@ -1090,6 +1099,219 @@ impl<S: LocalStore> CoreChatBackend<S> {
       };
     });
     tail
+  }
+
+  /// [`Self::feed_tail`] from the store's feed index: reads the rows it returns, and those of
+  /// the anchor's place.
+  fn indexed_feed_tail(
+    &self,
+    conversation: ConversationId,
+    maybe_oldest: Option<FeedAnchor>,
+    older: usize,
+  ) -> FeedTail {
+    let layout = self.feed_layout(conversation);
+    let len = layout.len();
+    let anchor_at = maybe_oldest
+      .and_then(|anchor| self.anchor_position(conversation, &layout, anchor))
+      .unwrap_or(len);
+    let start = anchor_at.saturating_sub(older);
+    FeedTail {
+      messages: self.indexed_rows(conversation, &layout, start, len),
+      has_older: start > 0,
+    }
+  }
+
+  /// [`Self::message_page`] from the store's feed index.
+  fn indexed_page(&self, conversation: ConversationId, start: usize, len: usize) -> (usize, Vec<Message>) {
+    let layout = self.feed_layout(conversation);
+    let end = start.saturating_add(len).min(layout.len());
+    let messages = self.indexed_rows(conversation, &layout, start.min(end), end);
+    (layout.len(), messages)
+  }
+
+  /// The rows `start..end` of the feed as the lists show them, with their reactions and replies.
+  fn indexed_rows(
+    &self,
+    conversation: ConversationId,
+    layout: &FeedLayout,
+    start: usize,
+    end: usize,
+  ) -> Vec<Message> {
+    let rows = self.layout_rows(conversation, layout, start, end);
+    let targets: Vec<ClientMessageId> = rows.iter().map(|row| row.client_message_id).collect();
+    let threads: Vec<ThreadId> = rows
+      .iter()
+      .filter_map(|row| row.maybe_server_id)
+      .map(|server_id| ThreadId::from_snowflake(server_id.snowflake()))
+      .collect();
+    let reactions = self.read(
+      self
+        .store
+        .reactions_to(conversation, &targets)
+        .map_err(CoreError::from),
+    );
+    let counts = self.read(
+      self
+        .store
+        .reply_counts(conversation, &threads)
+        .map_err(CoreError::from),
+    );
+    let relations = Relations::indexed(&reactions, &threads, &counts, layout.maybe_importer);
+    rows
+      .iter()
+      .map(|row| self.to_message_among(row, &relations))
+      .collect()
+  }
+
+  /// The stored messages of the rows `start..end` of the feed.
+  fn layout_rows(
+    &self,
+    conversation: ConversationId,
+    layout: &FeedLayout,
+    start: usize,
+    end: usize,
+  ) -> Vec<StoredMessage> {
+    let Some(last) = end.checked_sub(1).filter(|last| *last >= start) else {
+      return Vec::new();
+    };
+    let first = layout.index_position(start);
+    let len = layout.index_position(last) + 1 - first;
+    let mut rows = self.read(
+      self
+        .store
+        .feed_rows(conversation, first, len)
+        .map_err(CoreError::from),
+    );
+    rows.retain(|row| !layout.hidden.contains(&row.client_message_id));
+    rows
+  }
+
+  /// Where the anchor row is in the feed, or the row its time puts it at
+  /// ([`FeedAnchor::position_in`]).
+  fn anchor_position(
+    &self,
+    conversation: ConversationId,
+    layout: &FeedLayout,
+    anchor: FeedAnchor,
+  ) -> Option<usize> {
+    let slot = if anchor.id.snowflake().get() & PENDING_ID_BIT != 0 {
+      MessageSlot::Pending
+    } else {
+      MessageSlot::At(anchor.id)
+    };
+    let candidates = self.read(
+      self
+        .store
+        .messages_at(conversation, slot)
+        .map_err(CoreError::from),
+    );
+    let maybe_row = candidates.iter().find(|message| {
+      message.is_feed_row()
+        && ui_message_id(message) == anchor.id
+        && !layout.hidden.contains(&message.client_message_id)
+    });
+    match maybe_row {
+      Some(row) => {
+        let ranks = self.read(
+          self
+            .store
+            .feed_ranks(conversation, &[row.order()])
+            .map_err(CoreError::from),
+        );
+        ranks.first().map(|rank| layout.row_position(*rank))
+      },
+      None => self.position_by_time(conversation, layout, anchor.sent_at),
+    }
+  }
+
+  /// The anchor row went away (deleted, hidden): the oldest row of the run of rows from the newest
+  /// back that were sent at or after `sent_at`. Reads as far back as the list held rows, in steps;
+  /// a whole read would find the same row unless clocks put an older row after a newer one.
+  fn position_by_time(
+    &self,
+    conversation: ConversationId,
+    layout: &FeedLayout,
+    sent_at: TimestampMs,
+  ) -> Option<usize> {
+    let mut maybe_found = None;
+    let mut end = layout.len();
+    while end > 0 {
+      let start = end.saturating_sub(ANCHOR_WALK_ROWS);
+      let rows = self.layout_rows(conversation, layout, start, end);
+      for (offset, row) in rows.iter().enumerate().rev() {
+        if row.sent_at_ms < sent_at {
+          return maybe_found;
+        }
+        maybe_found = Some(start + offset);
+      }
+      if rows.is_empty() {
+        break;
+      }
+      end = start;
+    }
+    maybe_found
+  }
+
+  /// A conversation's [`FeedLayout`], derived again only when its messages changed since it was
+  /// kept (a store without revisions derives it every time).
+  fn feed_layout(&self, conversation: ConversationId) -> Rc<FeedLayout> {
+    let maybe_revision = self.store.message_revision(conversation);
+    let maybe_importer = self.importer();
+    let mut layouts = self.layouts.borrow_mut();
+    let maybe_kept = layouts
+      .iter()
+      .position(|(held, _)| *held == conversation)
+      .map(|at| layouts.remove(at).1);
+    let layout = match maybe_kept {
+      Some(layout) if layout.is_for(maybe_revision, maybe_importer) => layout,
+      _ => Rc::new(self.derive_layout(conversation, maybe_revision, maybe_importer)),
+    };
+    if layout.maybe_revision.is_some() {
+      if layouts.len() >= FeedView::MAX_KEPT {
+        layouts.remove(0);
+      }
+      layouts.push((conversation, Rc::clone(&layout)));
+    }
+    layout
+  }
+
+  /// Reads what [`FeedLayout`] holds: only with an import account the events are read, the only
+  /// messages its additions can be.
+  fn derive_layout(
+    &self,
+    conversation: ConversationId,
+    maybe_revision: Option<u64>,
+    maybe_importer: Option<UserId>,
+  ) -> FeedLayout {
+    #[cfg(test)]
+    tests::FEED_LAYOUTS_DERIVED.with(|derived| derived.set(derived.get() + 1));
+    let index_len = self.read(self.store.feed_len(conversation).map_err(CoreError::from));
+    let mut hidden = HashSet::new();
+    let mut hidden_positions = Vec::new();
+    if maybe_importer.is_some() {
+      let events = self.read(self.store.event_messages(conversation).map_err(CoreError::from));
+      let additions = ImportAdditions::of(&events, maybe_importer);
+      let left_out: Vec<&StoredMessage> = events
+        .iter()
+        .filter(|message| message.is_feed_row() && additions.hides(message))
+        .collect();
+      let orders: Vec<_> = left_out.iter().map(|message| message.order()).collect();
+      hidden_positions = self.read(
+        self
+          .store
+          .feed_ranks(conversation, &orders)
+          .map_err(CoreError::from),
+      );
+      hidden_positions.sort_unstable();
+      hidden = left_out.iter().map(|message| message.client_message_id).collect();
+    }
+    FeedLayout {
+      maybe_revision,
+      maybe_importer,
+      index_len,
+      hidden,
+      hidden_positions,
+    }
   }
 
   /// Hands `read` a conversation's messages and its [`FeedView`], derived again only when the
@@ -1316,6 +1538,9 @@ impl<S: LocalStore> ChatBackend for CoreChatBackend<S> {
 
   /// The rows of the feed, as [`Self::message_page`] pages them.
   fn message_count(&self, conversation: ConversationId) -> usize {
+    if self.store.indexes_feed() {
+      return self.feed_layout(conversation).len();
+    }
     let mut count = 0;
     self.with_feed(conversation, &mut |_, view| count = view.rows.len());
     count
@@ -1343,6 +1568,9 @@ impl<S: LocalStore> ChatBackend for CoreChatBackend<S> {
   /// The conversation is lent, not copied: the feed asks again on every change of the open
   /// conversation, and a log channel changes all the time (issue #1000).
   fn message_page(&self, conversation: ConversationId, start: usize, len: usize) -> (usize, Vec<Message>) {
+    if self.store.indexes_feed() {
+      return self.indexed_page(conversation, start, len);
+    }
     let mut answer = (0, Vec::new());
     let maybe_importer = self.importer();
     self.with_feed(conversation, &mut |all, view| {
@@ -2482,6 +2710,53 @@ struct FeedView {
   replies: HashMap<ThreadId, usize>,
 }
 
+/// What paging a store's feed index ([`LocalStore::indexes_feed`]) takes besides the index (issue
+/// #155): which of its rows the lists leave out, the import account's additions
+/// ([`ImportAdditions`]). They depend on the verified policy, so the store can't leave them out
+/// itself. A list asks a position among the rows it shows; the index counts all of its own.
+struct FeedLayout {
+  /// As [`FeedView::maybe_revision`].
+  maybe_revision: Option<u64>,
+  maybe_importer: Option<UserId>,
+  /// Rows of the store's feed index.
+  index_len: usize,
+  /// The rows left out, by the message.
+  hidden: HashSet<ClientMessageId>,
+  /// Where they are among the index's rows, ascending.
+  hidden_positions: Vec<usize>,
+}
+
+impl FeedLayout {
+  /// The rows of the feed as the lists page them.
+  fn len(&self) -> usize {
+    self.index_len.saturating_sub(self.hidden_positions.len())
+  }
+
+  fn is_for(&self, maybe_revision: Option<u64>, maybe_importer: Option<UserId>) -> bool {
+    maybe_revision.is_some() && self.maybe_revision == maybe_revision && self.maybe_importer == maybe_importer
+  }
+
+  /// Where the feed's row at `position` is in the store's index.
+  fn index_position(&self, position: usize) -> usize {
+    let mut at = position;
+    for hidden in &self.hidden_positions {
+      if *hidden > at {
+        break;
+      }
+      at += 1;
+    }
+    at
+  }
+
+  /// Where the index's row at `index_position` is in the feed.
+  fn row_position(&self, index_position: usize) -> usize {
+    index_position
+      - self
+        .hidden_positions
+        .partition_point(|hidden| *hidden < index_position)
+  }
+}
+
 impl FeedView {
   /// Conversations whose views are kept (the open one, a thread or call beside it, a few recent).
   const MAX_KEPT: usize = 4;
@@ -2494,13 +2769,13 @@ impl FeedView {
     let mut reactions: HashMap<ClientMessageId, Vec<usize>> = HashMap::new();
     let mut replies: HashMap<ThreadId, usize> = HashMap::new();
     for (at, message) in all.iter().enumerate() {
-      if is_feed_row(message) && !additions.hides(message) {
+      if message.is_feed_row() && !additions.hides(message) {
         rows.push(at);
       }
       if let MessageContent::Reaction { target, .. } = &message.content {
         reactions.entry(*target).or_default().push(at);
       }
-      if counts_as_reply(message)
+      if message.counts_as_reply()
         && let Some(thread) = message.maybe_thread_id
       {
         *replies.entry(thread).or_default() += 1;
@@ -2568,7 +2843,7 @@ impl<'a> Relations<'a> {
       if let MessageContent::Reaction { target, .. } = &message.content {
         reactions.entry(*target).or_default().push(message);
       }
-      if counts_as_reply(message)
+      if message.counts_as_reply()
         && let Some(thread) = message.maybe_thread_id
       {
         *replies.entry(thread).or_default() += 1;
@@ -2577,6 +2852,27 @@ impl<'a> Relations<'a> {
     Self {
       reactions,
       replies,
+      maybe_importer,
+    }
+  }
+
+  /// From what the store's indexes say of a page's rows: `reactions` in display order, and the
+  /// replies of each of `threads`.
+  fn indexed(
+    reactions: &'a [StoredMessage],
+    threads: &[ThreadId],
+    counts: &[usize],
+    maybe_importer: Option<UserId>,
+  ) -> Self {
+    let mut by_target: HashMap<ClientMessageId, Vec<&'a StoredMessage>> = HashMap::new();
+    for message in reactions {
+      if let Some(target) = message.reaction_target() {
+        by_target.entry(target).or_default().push(message);
+      }
+    }
+    Self {
+      reactions: by_target,
+      replies: threads.iter().copied().zip(counts.iter().copied()).collect(),
       maybe_importer,
     }
   }
@@ -2730,24 +3026,6 @@ fn unread_position(message: &StoredMessage) -> Option<MessageId> {
 /// The ID the UI uses: the server's, for a line this device derived its place (a commit's ID, or
 /// where a line about a change the server reports sits; time-ordered like the messages', and no
 /// outbox message's), or a stable stand-in for outbox messages.
-/// Whether a stored message is a row of the conversation's feed: top level (or a reply also sent
-/// to the channel), not hidden, not deleted. The import account's additions are left out too
-/// ([`ImportAdditions`]).
-/// A shown reply of a thread. A placeholder (issue #888) may turn out to be no reply at all:
-/// counted once readable.
-fn counts_as_reply(message: &StoredMessage) -> bool {
-  message.maybe_thread_id.is_some()
-    && !message.is_hidden()
-    && !is_deleted(message)
-    && message.maybe_unreadable.is_none()
-}
-
-fn is_feed_row(message: &StoredMessage) -> bool {
-  (message.maybe_thread_id.is_none() || message.is_also_in_channel())
-    && !message.is_hidden()
-    && !is_deleted(message)
-}
-
 pub(crate) fn ui_message_id(message: &StoredMessage) -> MessageId {
   if let Some(id) = message.maybe_server_id {
     return id;
@@ -2850,6 +3128,8 @@ mod tests {
   thread_local! {
     /// How often a [`FeedView`] was derived on this thread.
     pub(super) static FEED_VIEWS_DERIVED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    /// How often a [`FeedLayout`] was derived on this thread.
+    pub(super) static FEED_LAYOUTS_DERIVED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
   }
 
   /// Issue #155: a list asking for its rows one at a time walks the conversation once per change.
@@ -3449,6 +3729,239 @@ mod tests {
   fn out_of_range_pages_are_clipped() {
     let backend = CoreChatBackend::new(MemoryStore::new(), id(1), Box::new(ManualClock::new(0)));
     assert!(backend.messages(id(10), 5, 10).is_empty());
+  }
+
+  /// Issue #155: a store's feed index shows what a whole read of the conversation shows.
+  #[cfg(any(feature = "sqlcipher", feature = "sealed-sqlite"))]
+  mod indexed_feed {
+    use rand_core::OsRng;
+    use teamcraft_crypto::secret::SymmetricKey;
+
+    use super::*;
+    use crate::store::StaticKeySource;
+    use crate::workspace::WorkspaceState;
+
+    const IMPORTER: i64 = 9;
+    const ADDED: i64 = 3;
+    const OTHER: i64 = 4;
+    const CONVERSATION: i64 = 10;
+
+    #[cfg(feature = "sqlcipher")]
+    #[test]
+    fn sqlcipher_pages_the_feed_like_a_whole_read() {
+      for maybe_importer in [None, Some(IMPORTER)] {
+        let key = StaticKeySource::new(SymmetricKey::generate(&mut OsRng));
+        let store = crate::store::SqlCipherStore::open_in_memory(&key).unwrap();
+        pages_like_a_whole_read(store, maybe_importer);
+      }
+    }
+
+    #[cfg(feature = "sealed-sqlite")]
+    #[test]
+    fn the_sealed_store_pages_the_feed_like_a_whole_read() {
+      for maybe_importer in [None, Some(IMPORTER)] {
+        let key = StaticKeySource::new(SymmetricKey::generate(&mut OsRng));
+        let store = crate::store::SealedSqliteStore::open_in_memory(&key).unwrap();
+        pages_like_a_whole_read(store, maybe_importer);
+      }
+    }
+
+    /// A layout is kept while the conversation doesn't change, so a list asking row by row reads
+    /// it once.
+    #[cfg(feature = "sealed-sqlite")]
+    #[test]
+    fn rows_asked_one_by_one_derive_the_layout_once_per_change() {
+      let key = StaticKeySource::new(SymmetricKey::generate(&mut OsRng));
+      let store = crate::store::SealedSqliteStore::open_in_memory(&key).unwrap();
+      let backend = with_policy(store, Some(IMPORTER));
+      fill(&backend.store);
+
+      let before = FEED_LAYOUTS_DERIVED.with(std::cell::Cell::get);
+      let count = backend.message_count(id(CONVERSATION));
+      for row in 0..count {
+        assert_eq!(backend.messages(id(CONVERSATION), row, 1).len(), 1);
+      }
+      assert_eq!(FEED_LAYOUTS_DERIVED.with(std::cell::Cell::get) - before, 1);
+
+      backend
+        .store
+        .upsert_message(&text(100, Some(2_000), 2_000, None))
+        .unwrap();
+      assert_eq!(backend.message_count(id(CONVERSATION)), count + 1);
+      assert_eq!(FEED_LAYOUTS_DERIVED.with(std::cell::Cell::get) - before, 2);
+    }
+
+    fn pages_like_a_whole_read<S: LocalStore>(store: S, maybe_importer: Option<i64>) {
+      let whole = with_policy(MemoryStore::new(), maybe_importer);
+      let indexed = with_policy(store, maybe_importer);
+      assert!(indexed.store.indexes_feed());
+      assert!(!whole.store.indexes_feed());
+      fill(&whole.store);
+      fill(&indexed.store);
+      let conversation = id(CONVERSATION);
+
+      let count = whole.message_count(conversation);
+      assert!(count > 10, "{count} rows");
+      assert_eq!(indexed.message_count(conversation), count);
+      for start in 0..=count + 1 {
+        for len in [0, 1, 3, count, usize::MAX] {
+          assert_eq!(
+            indexed.message_page(conversation, start, len),
+            whole.message_page(conversation, start, len),
+            "page {start}+{len}"
+          );
+        }
+      }
+
+      let rows = whole.messages(conversation, 0, count);
+      let mut anchors: Vec<Option<FeedAnchor>> = rows
+        .iter()
+        .map(|row| {
+          Some(FeedAnchor {
+            id: row.id,
+            sent_at: row.sent_at,
+          })
+        })
+        .collect();
+      anchors.push(None);
+      // Rows that went away: the row sent at or after the time takes the anchor's place.
+      anchors.push(Some(FeedAnchor {
+        id: id(1_055),
+        sent_at: 1_060,
+      }));
+      anchors.push(Some(FeedAnchor {
+        id: id(777_777),
+        sent_at: 999_999,
+      }));
+      for anchor in anchors {
+        for older in [0, 1, 4, count] {
+          assert_eq!(
+            indexed.feed_tail(conversation, anchor, older),
+            whole.feed_tail(conversation, anchor, older),
+            "from {anchor:?}, {older} older"
+          );
+        }
+      }
+    }
+
+    fn with_policy<S: LocalStore>(store: S, maybe_importer: Option<i64>) -> CoreChatBackend<S> {
+      let backend = CoreChatBackend::new(store, id(1), Box::new(ManualClock::new(0)));
+      let mut state = WorkspaceState::default();
+      state.policy.import.maybe_importer = maybe_importer.map(id);
+      records::put_json(
+        &backend.store,
+        Table::Workspace,
+        crate::client::WORKSPACE_KEY,
+        &state,
+      )
+      .unwrap();
+      backend
+    }
+
+    /// Rows with reactions and replies, the import account's additions among them, some deleted,
+    /// a line at a message's place and two messages not sent yet.
+    fn fill(store: &impl LocalStore) {
+      let added = |client: u8, sender: i64, server: i64, user: i64| {
+        let mut line = text(client, Some(server), server, None);
+        line.sender_user_id = id(sender);
+        line.content = MessageContent::Event {
+          event: ConversationEvent::MemberAdded {
+            user: id(user),
+            history: teamcraft_proto::HistoryPolicy::Full,
+          },
+        };
+        line
+      };
+      let joined = |client: u8, sender: i64, server: i64| {
+        let mut line = text(client, Some(server), server, None);
+        line.sender_user_id = id(sender);
+        line.content = MessageContent::Event {
+          event: ConversationEvent::Joined,
+        };
+        line
+      };
+      let mut messages = vec![
+        joined(1, IMPORTER, 1_000),
+        added(2, IMPORTER, 1_010, ADDED),
+        added(3, OTHER, 1_020, ADDED),
+        joined(4, ADDED, 1_030),
+        joined(5, OTHER, 1_040),
+      ];
+      for n in 0..40u8 {
+        let server = 1_100 + i64::from(n) * 10;
+        messages.push(text(10 + n, Some(server), server, None));
+      }
+      let target = ClientMessageId::from_bytes([10; 16]);
+      let reaction = |client: u8, sender: i64, server: i64, is_added: bool| {
+        let mut message = text(client, Some(server), server, None);
+        message.sender_user_id = id(sender);
+        message.content = MessageContent::Reaction {
+          target,
+          emoji: "+1".into(),
+          is_added,
+        };
+        message
+      };
+      messages.push(reaction(60, 2, 1_500, true));
+      messages.push(reaction(61, 1, 1_510, true));
+      messages.push(reaction(62, 2, 1_520, false));
+      messages.push(reaction(63, OTHER, 1_530, true));
+      messages.push(text(64, Some(1_540), 1_540, Some(1_100)));
+      messages.push(text(65, Some(1_550), 1_550, Some(1_100)));
+      let mut also_in_channel = text(66, Some(1_560), 1_560, Some(1_110));
+      if let MessageContent::Text { meta, .. } = &mut also_in_channel.content {
+        meta.is_also_in_channel = true;
+      }
+      messages.push(also_in_channel);
+      let mut deleted_reply = text(67, Some(1_570), 1_570, Some(1_100));
+      deleted_reply.content = MessageContent::Deleted;
+      messages.push(deleted_reply);
+      let mut deleted = text(68, Some(1_580), 1_580, None);
+      deleted.content = MessageContent::Deleted;
+      messages.push(deleted);
+      let mut waiting_reply = text(69, Some(1_590), 1_590, Some(1_100));
+      waiting_reply.maybe_unreadable = Some(Unreadable::Waiting { since_ms: 1 });
+      messages.push(waiting_reply);
+      messages.push(added(70, IMPORTER, 1_600, OTHER));
+      // A line sitting at the place of a message.
+      let mut line = joined(71, IMPORTER, 1_200);
+      line.maybe_server_id = None;
+      line.maybe_verified_commit = Some(id(1_200));
+      messages.push(line);
+      messages.push(text(72, None, 3_000, None));
+      messages.push(text(73, None, 3_100, None));
+      for message in &messages {
+        store.upsert_message(message).unwrap();
+      }
+    }
+
+    fn text(
+      client: u8,
+      maybe_server: Option<i64>,
+      sent_at_ms: i64,
+      maybe_thread: Option<i64>,
+    ) -> StoredMessage {
+      StoredMessage {
+        conversation_id: id(CONVERSATION),
+        client_message_id: ClientMessageId::from_bytes([client; 16]),
+        maybe_server_id: maybe_server.map(id),
+        sender_user_id: id(2),
+        maybe_thread_id: maybe_thread.map(id),
+        sent_at_ms,
+        content: MessageContent::Text {
+          body: format!("message {client}"),
+          mentions: Vec::new(),
+          meta: Default::default(),
+        },
+        is_edited: false,
+        edits: Vec::new(),
+        maybe_edit_id: None,
+        is_pinned: false,
+        maybe_verified_commit: None,
+        maybe_server_change: None,
+        maybe_unreadable: None,
+      }
+    }
   }
 
   mod imported {

@@ -557,6 +557,15 @@ pub enum MessageEdge {
   Newest,
 }
 
+/// A message's place in its conversation's display order ([`StoredMessage::sort_key`]), ties
+/// broken by client message ID: what the feed reads count positions in ([`LocalStore::feed_rows`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct MessageOrder {
+  pub group: u8,
+  pub value: i64,
+  pub client_message_id: [u8; 16],
+}
+
 /// Which messages with a picture or video [`LocalStore::media_messages`] lists, from a message
 /// outwards (the image viewer pages through them).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -729,6 +738,95 @@ pub trait LocalStore {
       range,
       limit,
     ))
+  }
+  /// Whether the feed reads below ([`Self::feed_len`] to [`Self::reply_counts`]) read only what
+  /// they return (issue #155): a reader then pages a conversation's feed with them instead of
+  /// reading the conversation whole. Their defaults read it whole every time.
+  fn indexes_feed(&self) -> bool {
+    false
+  }
+  /// How many of `conversation`'s messages are rows of its feed ([`StoredMessage::is_feed_row`]).
+  fn feed_len(&self, conversation: ConversationId) -> Result<usize, StoreError> {
+    let mut len = 0;
+    self.visit_messages(conversation, MessageFilter::TopLevel, &mut |message| {
+      len += usize::from(message.is_feed_row());
+    })?;
+    Ok(len)
+  }
+  /// The rows of the feed at positions `start..start + len`, in display order ([`MessageOrder`]).
+  fn feed_rows(
+    &self,
+    conversation: ConversationId,
+    start: usize,
+    len: usize,
+  ) -> Result<Vec<StoredMessage>, StoreError> {
+    let mut rows = self.messages(conversation, MessageFilter::TopLevel)?;
+    rows.retain(StoredMessage::is_feed_row);
+    rows.sort_by_key(StoredMessage::order);
+    Ok(rows.into_iter().skip(start).take(len).collect())
+  }
+  /// For each of `orders`, how many rows of the feed sort before it: where a row is, or would be.
+  fn feed_ranks(
+    &self,
+    conversation: ConversationId,
+    orders: &[MessageOrder],
+  ) -> Result<Vec<usize>, StoreError> {
+    let mut rows = Vec::new();
+    self.visit_messages(conversation, MessageFilter::TopLevel, &mut |message| {
+      if message.is_feed_row() {
+        rows.push(message.order());
+      }
+    })?;
+    rows.sort_unstable();
+    Ok(
+      orders
+        .iter()
+        .map(|order| rows.partition_point(|row| row < order))
+        .collect(),
+    )
+  }
+  /// `conversation`'s events and the lines this device derived ([`StoredMessage::is_event`]), in
+  /// display order: what decides which of the import account's additions the feed leaves out
+  /// (`crate::imported::ImportAdditions`). A conversation has few of them.
+  fn event_messages(&self, conversation: ConversationId) -> Result<Vec<StoredMessage>, StoreError> {
+    let mut events = self.messages(conversation, MessageFilter::All)?;
+    events.retain(StoredMessage::is_event);
+    events.sort_by_key(StoredMessage::order);
+    Ok(events)
+  }
+  /// The reactions to any of `targets`, in display order (the latest of a person's counts).
+  fn reactions_to(
+    &self,
+    conversation: ConversationId,
+    targets: &[ClientMessageId],
+  ) -> Result<Vec<StoredMessage>, StoreError> {
+    let mut reactions = self.messages(conversation, MessageFilter::All)?;
+    reactions.retain(|message| {
+      message
+        .reaction_target()
+        .is_some_and(|target| targets.contains(&target))
+    });
+    reactions.sort_by_key(StoredMessage::order);
+    Ok(reactions)
+  }
+  /// How many shown replies ([`StoredMessage::counts_as_reply`]) each of `threads` has, in the
+  /// same order.
+  fn reply_counts(
+    &self,
+    conversation: ConversationId,
+    threads: &[ThreadId],
+  ) -> Result<Vec<usize>, StoreError> {
+    let mut counts = vec![0; threads.len()];
+    self.visit_messages(conversation, MessageFilter::All, &mut |message| {
+      if message.counts_as_reply()
+        && let Some(at) = threads
+          .iter()
+          .position(|thread| Some(*thread) == message.maybe_thread_id)
+      {
+        counts[at] += 1;
+      }
+    })?;
+    Ok(counts)
   }
   fn delete_messages(&self, conversation: ConversationId) -> Result<(), StoreError>;
   /// Removes one message, e.g. an own one that was never sent and the user dropped.
@@ -922,6 +1020,51 @@ macro_rules! forward_local_store {
         (**self).media_messages(conversation, range, limit)
       }
 
+      fn indexes_feed(&self) -> bool {
+        (**self).indexes_feed()
+      }
+
+      fn feed_len(&self, conversation: ConversationId) -> Result<usize, StoreError> {
+        (**self).feed_len(conversation)
+      }
+
+      fn feed_rows(
+        &self,
+        conversation: ConversationId,
+        start: usize,
+        len: usize,
+      ) -> Result<Vec<StoredMessage>, StoreError> {
+        (**self).feed_rows(conversation, start, len)
+      }
+
+      fn feed_ranks(
+        &self,
+        conversation: ConversationId,
+        orders: &[MessageOrder],
+      ) -> Result<Vec<usize>, StoreError> {
+        (**self).feed_ranks(conversation, orders)
+      }
+
+      fn event_messages(&self, conversation: ConversationId) -> Result<Vec<StoredMessage>, StoreError> {
+        (**self).event_messages(conversation)
+      }
+
+      fn reactions_to(
+        &self,
+        conversation: ConversationId,
+        targets: &[ClientMessageId],
+      ) -> Result<Vec<StoredMessage>, StoreError> {
+        (**self).reactions_to(conversation, targets)
+      }
+
+      fn reply_counts(
+        &self,
+        conversation: ConversationId,
+        threads: &[ThreadId],
+      ) -> Result<Vec<usize>, StoreError> {
+        (**self).reply_counts(conversation, threads)
+      }
+
       fn delete_messages(&self, conversation: ConversationId) -> Result<(), StoreError> {
         (**self).delete_messages(conversation)
       }
@@ -1049,6 +1192,48 @@ impl StoredMessage {
 
   pub fn is_reaction(&self) -> bool {
     matches!(self.content, MessageContent::Reaction { .. })
+  }
+
+  /// [`Self::sort_key`] with the tie broken.
+  pub fn order(&self) -> MessageOrder {
+    let (group, value) = self.sort_key();
+    MessageOrder {
+      group,
+      value,
+      client_message_id: *self.client_message_id.as_bytes(),
+    }
+  }
+
+  /// The message a reaction reacts to.
+  pub fn reaction_target(&self) -> Option<ClientMessageId> {
+    match &self.content {
+      MessageContent::Reaction { target, .. } => Some(*target),
+      _ => None,
+    }
+  }
+
+  /// A row of the conversation's feed: top level (or a reply also sent to the conversation), not
+  /// hidden, not deleted. The UI also leaves out the import account's additions
+  /// (`crate::imported::ImportAdditions`), which only events and lines are ([`Self::is_event`]).
+  pub fn is_feed_row(&self) -> bool {
+    (self.maybe_thread_id.is_none() || self.is_also_in_channel())
+      && !self.is_hidden()
+      && !matches!(self.content, MessageContent::Deleted)
+  }
+
+  /// A shown reply of a thread. A placeholder (issue #888) may turn out to be no reply at all:
+  /// counted once readable.
+  pub fn counts_as_reply(&self) -> bool {
+    self.maybe_thread_id.is_some()
+      && !self.is_hidden()
+      && !matches!(self.content, MessageContent::Deleted)
+      && self.maybe_unreadable.is_none()
+  }
+
+  /// An event of the conversation or a line this device derived: the messages that can tell of
+  /// the import account adding people, or be such an addition (`crate::imported`).
+  pub fn is_event(&self) -> bool {
+    self.line_position().is_some() || matches!(self.content, MessageContent::Event { .. })
   }
 
   /// Reactions, edits, deletes and pins act on other messages and aren't listed themselves. Nor
@@ -1249,6 +1434,110 @@ pub(crate) mod tests {
     edge_server_ids_skip_lines_pending_messages_and_placeholders(store);
     prefixes_list_only_their_keys(store);
     a_place_holds_its_message_and_lines_and_pending_ones_their_own(store);
+    feed_reads_follow_every_write(store);
+  }
+
+  /// Issue #155: the feed reads answer what a whole read of the conversation says, through sends,
+  /// deletes, a pending message that was sent, and reactions and replies coming and going.
+  fn feed_reads_follow_every_write(store: &impl LocalStore) {
+    let conversation = id(60);
+    let mut pending = message(conversation, 61, None, None, 9_000);
+    let mut root = message(conversation, 62, Some(1_000), None, 1_000);
+    let mut reply = message(conversation, 63, Some(1_100), Some(1_000), 1_100);
+    let mut reaction = message(conversation, 64, Some(1_200), None, 1_200);
+    reaction.content = MessageContent::Reaction {
+      target: root.client_message_id,
+      emoji: "+1".into(),
+      is_added: true,
+    };
+    let mut joined = message(conversation, 65, Some(1_300), None, 1_300);
+    joined.content = MessageContent::Event {
+      event: ConversationEvent::Joined,
+    };
+    let later = message(conversation, 66, Some(1_400), None, 1_400);
+    for stored in [&pending, &root, &reply, &reaction, &joined, &later] {
+      store.upsert_message(stored).unwrap();
+    }
+    check_feed_reads(
+      store,
+      conversation,
+      &[root.client_message_id, later.client_message_id],
+    );
+    assert_eq!(store.feed_len(conversation).unwrap(), 4);
+    assert_eq!(
+      store.reply_counts(conversation, &[id(1_000), id(1_400)]).unwrap(),
+      [1, 0]
+    );
+    assert_eq!(store.event_messages(conversation).unwrap(), vec![joined.clone()]);
+
+    pending.maybe_server_id = Some(id(1_050));
+    store.upsert_message(&pending).unwrap();
+    reply.content = MessageContent::Deleted;
+    store.upsert_message(&reply).unwrap();
+    reaction.content = MessageContent::Text {
+      body: "no reaction any more".into(),
+      mentions: Vec::new(),
+      meta: Default::default(),
+    };
+    store.upsert_message(&reaction).unwrap();
+    root.content = MessageContent::Deleted;
+    store.upsert_message(&root).unwrap();
+    store
+      .delete_message(conversation, joined.client_message_id)
+      .unwrap();
+    check_feed_reads(
+      store,
+      conversation,
+      &[root.client_message_id, later.client_message_id],
+    );
+    assert_eq!(store.reply_counts(conversation, &[id(1_000)]).unwrap(), [0]);
+    assert!(store.event_messages(conversation).unwrap().is_empty());
+    assert!(
+      store
+        .reactions_to(conversation, &[root.client_message_id])
+        .unwrap()
+        .is_empty()
+    );
+
+    store.delete_messages(conversation).unwrap();
+    assert_eq!(store.feed_len(conversation).unwrap(), 0);
+    assert!(store.feed_rows(conversation, 0, 10).unwrap().is_empty());
+  }
+
+  /// Compares every feed read of `conversation` with what its messages, read whole, say.
+  fn check_feed_reads(store: &impl LocalStore, conversation: ConversationId, targets: &[ClientMessageId]) {
+    let mut all = store.messages(conversation, MessageFilter::All).unwrap();
+    all.sort_by_key(StoredMessage::order);
+    let rows: Vec<StoredMessage> = all
+      .iter()
+      .filter(|message| message.is_feed_row())
+      .cloned()
+      .collect();
+    assert_eq!(store.feed_len(conversation).unwrap(), rows.len());
+    for start in 0..=rows.len() {
+      for len in [0, 1, 2, rows.len()] {
+        let expected: Vec<StoredMessage> = rows.iter().skip(start).take(len).cloned().collect();
+        assert_eq!(store.feed_rows(conversation, start, len).unwrap(), expected);
+      }
+    }
+    let orders: Vec<MessageOrder> = all.iter().map(StoredMessage::order).collect();
+    let ranks: Vec<usize> = orders
+      .iter()
+      .map(|order| rows.iter().filter(|row| row.order() < *order).count())
+      .collect();
+    assert_eq!(store.feed_ranks(conversation, &orders).unwrap(), ranks);
+    let events: Vec<StoredMessage> = all.iter().filter(|message| message.is_event()).cloned().collect();
+    assert_eq!(store.event_messages(conversation).unwrap(), events);
+    let reactions: Vec<StoredMessage> = all
+      .iter()
+      .filter(|message| {
+        message
+          .reaction_target()
+          .is_some_and(|target| targets.contains(&target))
+      })
+      .cloned()
+      .collect();
+    assert_eq!(store.reactions_to(conversation, targets).unwrap(), reactions);
   }
 
   /// Issue #818: a line about a change the server reports sits where it was put (or moved to) and

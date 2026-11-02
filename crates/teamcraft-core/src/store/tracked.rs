@@ -18,12 +18,12 @@
 use std::collections::{BTreeSet, VecDeque};
 use std::sync::{Arc, Mutex, PoisonError};
 
-use teamcraft_proto::{AttachmentId, ClientMessageId, ConversationId, MessageId, UserId};
+use teamcraft_proto::{AttachmentId, ClientMessageId, ConversationId, MessageId, ThreadId, UserId};
 
 use super::message_cache::MessageCache;
 use super::{
-  AttachmentRef, LocalStore, MediaRange, MessageContent, MessageEdge, MessageFilter, MessageSlot, StoreError,
-  StoredMessage, Table, WriteTally,
+  AttachmentRef, LocalStore, MediaRange, MessageContent, MessageEdge, MessageFilter, MessageOrder,
+  MessageSlot, StoreError, StoredMessage, Table, WriteTally,
 };
 
 /// Records of [`Table::Account`] every conversation entry reads (unread marks, mention rules).
@@ -371,6 +371,51 @@ impl<S: LocalStore> LocalStore for TrackedStore<S> {
     limit: usize,
   ) -> Result<Vec<StoredMessage>, StoreError> {
     self.inner.media_messages(conversation, range, limit)
+  }
+
+  fn indexes_feed(&self) -> bool {
+    self.inner.indexes_feed()
+  }
+
+  fn feed_len(&self, conversation: ConversationId) -> Result<usize, StoreError> {
+    self.inner.feed_len(conversation)
+  }
+
+  fn feed_rows(
+    &self,
+    conversation: ConversationId,
+    start: usize,
+    len: usize,
+  ) -> Result<Vec<StoredMessage>, StoreError> {
+    self.inner.feed_rows(conversation, start, len)
+  }
+
+  fn feed_ranks(
+    &self,
+    conversation: ConversationId,
+    orders: &[MessageOrder],
+  ) -> Result<Vec<usize>, StoreError> {
+    self.inner.feed_ranks(conversation, orders)
+  }
+
+  fn event_messages(&self, conversation: ConversationId) -> Result<Vec<StoredMessage>, StoreError> {
+    self.inner.event_messages(conversation)
+  }
+
+  fn reactions_to(
+    &self,
+    conversation: ConversationId,
+    targets: &[ClientMessageId],
+  ) -> Result<Vec<StoredMessage>, StoreError> {
+    self.inner.reactions_to(conversation, targets)
+  }
+
+  fn reply_counts(
+    &self,
+    conversation: ConversationId,
+    threads: &[ThreadId],
+  ) -> Result<Vec<usize>, StoreError> {
+    self.inner.reply_counts(conversation, threads)
   }
 
   fn delete_messages(&self, conversation: ConversationId) -> Result<(), StoreError> {

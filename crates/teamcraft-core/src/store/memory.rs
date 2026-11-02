@@ -4,10 +4,12 @@
 use std::collections::BTreeMap;
 use std::sync::{Mutex, MutexGuard};
 
-use teamcraft_proto::{ClientMessageId, ConversationId, MessageId};
+use teamcraft_proto::{ClientMessageId, ConversationId, MessageId, ThreadId};
 use zeroize::Zeroize as _;
 
-use super::{LocalStore, MediaRange, MessageFilter, StoreError, StoredMessage, Table, pick_media};
+use super::{
+  LocalStore, MediaRange, MessageFilter, MessageOrder, StoreError, StoredMessage, Table, pick_media,
+};
 
 #[derive(Debug, Default)]
 pub struct MemoryStore {
@@ -25,6 +27,23 @@ struct Inner {
 impl MemoryStore {
   pub fn new() -> Self {
     Self::default()
+  }
+
+  /// The messages of `conversation` that `keep` picks, in display order.
+  fn picked(
+    &self,
+    conversation: ConversationId,
+    keep: impl Fn(&StoredMessage) -> bool,
+  ) -> Vec<StoredMessage> {
+    let mut picked: Vec<StoredMessage> = self
+      .lock()
+      .messages
+      .values()
+      .filter(|message| message.conversation_id == conversation && keep(message))
+      .cloned()
+      .collect();
+    picked.sort_by_key(StoredMessage::order);
+    picked
   }
 
   fn lock(&self) -> MutexGuard<'_, Inner> {
@@ -153,6 +172,94 @@ impl LocalStore for MemoryStore {
     let mut media = media;
     media.sort_by_key(StoredMessage::sort_key);
     Ok(pick_media(media, range, limit))
+  }
+
+  // The feed reads copy only what they return. `indexes_feed` stays false: every read still walks
+  // the conversation, which a reader that keeps what it derived (the UI's feed view) does once.
+  fn feed_len(&self, conversation: ConversationId) -> Result<usize, StoreError> {
+    Ok(
+      self
+        .lock()
+        .messages
+        .values()
+        .filter(|message| message.conversation_id == conversation && message.is_feed_row())
+        .count(),
+    )
+  }
+
+  fn feed_rows(
+    &self,
+    conversation: ConversationId,
+    start: usize,
+    len: usize,
+  ) -> Result<Vec<StoredMessage>, StoreError> {
+    let inner = self.lock();
+    let mut rows: Vec<&StoredMessage> = inner
+      .messages
+      .values()
+      .filter(|message| message.conversation_id == conversation && message.is_feed_row())
+      .collect();
+    rows.sort_by_key(|message| message.order());
+    Ok(rows.into_iter().skip(start).take(len).cloned().collect())
+  }
+
+  fn feed_ranks(
+    &self,
+    conversation: ConversationId,
+    orders: &[MessageOrder],
+  ) -> Result<Vec<usize>, StoreError> {
+    let mut rows: Vec<MessageOrder> = self
+      .lock()
+      .messages
+      .values()
+      .filter(|message| message.conversation_id == conversation && message.is_feed_row())
+      .map(StoredMessage::order)
+      .collect();
+    rows.sort_unstable();
+    Ok(
+      orders
+        .iter()
+        .map(|order| rows.partition_point(|row| row < order))
+        .collect(),
+    )
+  }
+
+  fn event_messages(&self, conversation: ConversationId) -> Result<Vec<StoredMessage>, StoreError> {
+    Ok(self.picked(conversation, StoredMessage::is_event))
+  }
+
+  fn reactions_to(
+    &self,
+    conversation: ConversationId,
+    targets: &[ClientMessageId],
+  ) -> Result<Vec<StoredMessage>, StoreError> {
+    Ok(self.picked(conversation, |message| {
+      message
+        .reaction_target()
+        .is_some_and(|target| targets.contains(&target))
+    }))
+  }
+
+  fn reply_counts(
+    &self,
+    conversation: ConversationId,
+    threads: &[ThreadId],
+  ) -> Result<Vec<usize>, StoreError> {
+    let inner = self.lock();
+    let replies = inner
+      .messages
+      .values()
+      .filter(|message| message.conversation_id == conversation && message.counts_as_reply());
+    let mut counts = vec![0; threads.len()];
+    for reply in replies {
+      if let Some(at) = threads
+        .iter()
+        .position(|thread| Some(*thread) == reply.maybe_thread_id)
+      {
+        counts[at] += 1;
+      }
+    }
+    Ok(counts)
   }
 
   fn delete_messages(&self, conversation: ConversationId) -> Result<(), StoreError> {

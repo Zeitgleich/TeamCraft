@@ -3,8 +3,10 @@
 //!
 //! The catalog is a set of [`super::sealed_index`] indexes whose nodes are sealed records like any
 //! other: entries of [`CATALOG_TABLE`], a table name no version uses for data (versions before
-//! skip it as unknown), keyed `d/<table>/…` (a table's keys) and `m/<conversation>/…` (a
-//! conversation's messages), plus the record [`META_KEY`] saying whether the catalog is complete.
+//! skip it as unknown), keyed `d/<table>/…` (a table's keys), `m/<conversation>/…` (a
+//! conversation's messages), `f/<conversation>/…` (the rows of its feed, whose page lengths count
+//! positions) and `x/<conversation>/…` (its reactions by target, replies by thread, and events),
+//! plus the record [`META_KEY`] saying whether the catalog is complete.
 //! Nothing about the catalog is readable without the database key: its records look like all
 //! others (e2ee.md §9.1).
 
@@ -17,16 +19,23 @@ use teamcraft_proto::{ClientMessageId, ConversationId, Id, MessageId, ThreadId};
 
 use super::lru::Lru;
 use super::sealed_index::{IndexNodes, IndexPage, IndexRoot};
-use super::{MessageFilter, StoreError, StoredMessage};
+use super::{MessageFilter, MessageOrder, StoreError, StoredMessage};
 
 /// The reserved table the catalog's records are entries of.
 pub(crate) const CATALOG_TABLE: &str = "_catalog";
 /// The catalog record saying how far the catalog is built ([`CatalogState`]).
 pub(crate) const META_KEY: &str = "meta";
 /// Prefix of a conversation's message index.
-const MESSAGES_KIND: &str = "m";
+pub(crate) const MESSAGES_KIND: &str = "m";
 /// Prefix of a table's key directory.
-const DIRECTORY_KIND: &str = "d";
+pub(crate) const DIRECTORY_KIND: &str = "d";
+/// Prefix of a conversation's feed index.
+pub(crate) const FEED_KIND: &str = "f";
+/// Prefix of a conversation's relations index.
+pub(crate) const RELATIONS_KIND: &str = "x";
+/// What a complete catalog holds. A store with an older one builds it again when it opens: the
+/// build only adds what is missing. 1: tables and messages; 2: feeds and relations.
+pub(crate) const CATALOG_VERSION: u32 = 2;
 
 /// How far the catalog of a store is built. A store written before the catalog existed builds it
 /// when it is opened, in batches; one killed midway goes on after the last batch it saved.
@@ -36,8 +45,14 @@ pub(crate) enum CatalogState {
   /// Built up to the record with this lookup ID (in ID order), as hex.
   Building {
     after: String,
+    /// [`CATALOG_VERSION`] of the build; the first version wrote none.
+    #[serde(default = "first_catalog_version")]
+    version: u32,
   },
-  Complete,
+  Complete {
+    #[serde(default = "first_catalog_version")]
+    version: u32,
+  },
 }
 
 /// A message's place in its conversation's index: its display order ([`StoredMessage::sort_key`]),
@@ -58,6 +73,22 @@ impl MessageFlags {
   const ALSO_IN_CHANNEL: u8 = 2;
   const MEDIA: u8 = 4;
   const UNREADABLE: u8 = 8;
+}
+
+/// An entry of a conversation's relations index: what a message relates to, then the message.
+/// All messages of one relation are neighbours, in display order.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub(crate) struct RelationKey(u8, u128, MessageKey);
+
+/// Which relation a [`RelationKey`] notes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Relation {
+  /// Reacts to this message.
+  ReactionTo(ClientMessageId),
+  /// A shown reply of this thread ([`StoredMessage::counts_as_reply`]).
+  ReplyIn(ThreadId),
+  /// An event or derived line ([`StoredMessage::is_event`]).
+  Event,
 }
 
 /// A page of an index: its scope (the conversation or table) and its number.
@@ -90,6 +121,61 @@ pub(crate) struct ScopedNodes<'a, K, V> {
   pub(crate) cache: &'a mut NodeCache<K, V>,
   pub(crate) scope: &'a str,
   pub(crate) read: NodeRead<'a>,
+}
+
+impl Relation {
+  /// The relations `message` has.
+  pub(crate) fn of(message: &StoredMessage) -> Vec<Self> {
+    let mut relations = Vec::new();
+    relations.extend(message.reaction_target().map(Self::ReactionTo));
+    if message.counts_as_reply() {
+      relations.extend(message.maybe_thread_id.map(Self::ReplyIn));
+    }
+    if message.is_event() {
+      relations.push(Self::Event);
+    }
+    relations
+  }
+
+  fn parts(self) -> (u8, u128) {
+    match self {
+      Self::ReactionTo(target) => (0, u128::from_be_bytes(*target.as_bytes())),
+      Self::ReplyIn(thread) => (1, u128::from(raw_thread(thread).cast_unsigned())),
+      Self::Event => (2, 0),
+    }
+  }
+
+  /// The smallest key of this relation.
+  pub(crate) fn first_key(self) -> RelationKey {
+    let (kind, target) = self.parts();
+    RelationKey(kind, target, MessageKey(0, i64::MIN, 0))
+  }
+
+  pub(crate) fn key_of(self, message: MessageKey) -> RelationKey {
+    let (kind, target) = self.parts();
+    RelationKey(kind, target, message)
+  }
+
+  /// Whether `key` notes this relation.
+  pub(crate) fn holds(self, key: &RelationKey) -> bool {
+    (key.0, key.1) == self.parts()
+  }
+}
+
+impl RelationKey {
+  pub(crate) fn message_key(self) -> MessageKey {
+    self.2
+  }
+}
+
+impl From<MessageOrder> for MessageKey {
+  fn from(order: MessageOrder) -> Self {
+    Self(
+      order.group,
+      order.value,
+      u128::from_be_bytes(order.client_message_id),
+    )
+  }
 }
 
 impl MessageKey {
@@ -182,15 +268,11 @@ impl MessageEntry {
 }
 
 impl<K, V> NodeCache<K, V> {
-  /// A cache of messages indexes (`is_messages`) or table directories, keeping up to
-  /// `max_nodes` roots and as many pages.
-  pub(crate) fn new(is_messages: bool, max_nodes: usize) -> Self {
+  /// A cache of the indexes of one `kind` (the prefix of their records), keeping up to `max_nodes`
+  /// roots and as many pages.
+  pub(crate) fn new(kind: &'static str, max_nodes: usize) -> Self {
     Self {
-      kind: if is_messages {
-        MESSAGES_KIND
-      } else {
-        DIRECTORY_KIND
-      },
+      kind,
       roots: Lru::new(max_nodes),
       pages: Lru::new(max_nodes),
       dirty_roots: BTreeMap::new(),
@@ -305,6 +387,30 @@ fn page_key(kind: &str, scope: &str, id: u64) -> String {
   format!("{kind}/{scope}/{id}")
 }
 
+fn first_catalog_version() -> u32 {
+  1
+}
+
 fn raw_thread(thread: ThreadId) -> i64 {
   thread.snowflake().get()
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  /// What versions before wrote stays readable, as an older catalog.
+  #[test]
+  fn a_state_without_a_version_is_of_the_first_catalog() {
+    let decoded: CatalogState = decode(br#"{"state":"complete"}"#).unwrap();
+    assert_eq!(decoded, CatalogState::Complete { version: 1 });
+    let decoded: CatalogState = decode(br#"{"state":"building","after":"00"}"#).unwrap();
+    assert_eq!(
+      decoded,
+      CatalogState::Building {
+        after: "00".into(),
+        version: 1
+      }
+    );
+  }
 }
