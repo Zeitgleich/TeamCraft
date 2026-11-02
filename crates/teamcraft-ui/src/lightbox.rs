@@ -26,6 +26,14 @@ use crate::model::MessageId;
 pub const DEFAULT_MAX_SCALE: f64 = MAX_ZOOM;
 /// Zoom of a double-click or double-tap on a fitted image.
 pub const DOUBLE_CLICK_SCALE: f64 = DOUBLE_TAP_ZOOM;
+/// A picture with more pixels than the fit-relative maximum reaches can go to this multiple of its
+/// own pixels.
+const MAX_OWN_PIXEL_RATIO: f64 = 4.0;
+/// ...but it is never laid out larger than this on its longer side: the engine paints only the
+/// visible part, this keeps its layout and tile bookkeeping in sane numbers.
+const MAX_LAID_OUT_SIDE_PX: f64 = 32_000.0;
+/// A double-click goes to the picture's own pixels only when that is a real zoom-in.
+const MIN_ACTUAL_SIZE_ZOOM: f64 = KEY_ZOOM_STEP;
 /// Zoom step of the `+` and `-` keys and buttons.
 pub const KEY_ZOOM_STEP: f64 = 1.25;
 /// Two taps closer than this in time and space are a double-tap.
@@ -120,6 +128,27 @@ pub struct Viewport {
   offset: Point,
   max_scale: f64,
   rotation: Rotation,
+  maybe_picture: Option<Picture>,
+}
+
+/// What the viewport shows: what a zoom means in the picture's own pixels and on the screen.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Picture {
+  /// The picture's own pixels.
+  pub natural: Size,
+  /// Its size at fit before a turn, see [`fitted_layout`].
+  pub laid_out: Size,
+  pub stage: Size,
+  pub device_pixel_ratio: f64,
+}
+
+/// How the picture's element is drawn at one moment (#1089).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PictureLayout {
+  /// The element's real size; `None` leaves it to the stylesheet, which fits it.
+  pub maybe_size: Option<Size>,
+  /// What a transform still has to scale it by.
+  pub scale: f64,
 }
 
 /// Follows the pointers on the stage and turns them into pans, pinches, swipes and taps.
@@ -214,6 +243,21 @@ impl Arrival {
   /// Whether `key`'s full picture is on screen, so its placeholder fades out.
   pub fn is_full_shown(&self, key: MediaKey) -> bool {
     self.maybe_key == Some(key) && self.is_full_shown
+  }
+}
+
+impl Picture {
+  /// Device pixels per picture pixel at fit, before a turn's shrinking.
+  fn fitted_own_pixel_ratio(&self) -> f64 {
+    self.laid_out.width * self.device_pixel_ratio / self.natural.width
+  }
+
+  fn is_usable(&self) -> bool {
+    self.natural.width > 0.0
+      && self.natural.height > 0.0
+      && self.laid_out.width > 0.0
+      && self.laid_out.height > 0.0
+      && self.device_pixel_ratio > 0.0
   }
 }
 
@@ -400,6 +444,17 @@ impl Viewport {
       offset: Point::ORIGIN,
       max_scale: max_scale.max(MIN_SCALE),
       rotation: Rotation::Upright,
+      maybe_picture: None,
+    }
+  }
+
+  /// The picture is known, or the window or stage changed. Without usable sizes (not decoded yet)
+  /// the zoom says nothing about its own pixels.
+  pub fn set_picture(&mut self, maybe_picture: Option<Picture>) {
+    self.maybe_picture = maybe_picture.filter(Picture::is_usable);
+    self.scale = self.scale.min(self.max_scale());
+    if let Some(picture) = self.maybe_picture {
+      self.clamp_offset(picture.laid_out, picture.stage);
     }
   }
 
@@ -418,11 +473,66 @@ impl Viewport {
     self.scale * self.fit_factor(image, stage)
   }
 
+  /// [`Self::display_scale`] of the known picture.
+  pub fn shown_scale(&self) -> f64 {
+    match self.maybe_picture {
+      Some(picture) => self.display_scale(picture.laid_out, picture.stage),
+      None => self.scale,
+    }
+  }
+
+  /// Device pixels per picture pixel on screen, as other image viewers mean their percentage: 1 is
+  /// one picture pixel on one device pixel. `None` until the picture is known.
+  pub fn own_pixel_ratio(&self) -> Option<f64> {
+    self
+      .maybe_picture
+      .map(|picture| self.shown_scale() * picture.fitted_own_pixel_ratio())
+  }
+
+  /// The zoom ([`Self::scale`]) that shows one picture pixel on one device pixel.
+  pub fn actual_size_scale(&self) -> Option<f64> {
+    let picture = self.maybe_picture?;
+    let at_fit = self.display_scale(picture.laid_out, picture.stage) / self.scale;
+    Some(1.0 / (at_fit * picture.fitted_own_pixel_ratio()))
+  }
+
+  /// How the element is drawn when it was last laid out at the display scale `maybe_laid_at`:
+  /// painted at its real size, nothing depends on how an engine rasterises a transformed image, and
+  /// only what a running gesture added since is a transform. `None` is the stylesheet's fit.
+  pub fn layout_at(&self, maybe_laid_at: Option<f64>) -> PictureLayout {
+    let shown = self.shown_scale();
+    match (maybe_laid_at, self.maybe_picture) {
+      (Some(laid_at), Some(picture)) if laid_at > 0.0 => PictureLayout {
+        maybe_size: Some(Size::new(
+          snap_to_device(picture.laid_out.width * laid_at, picture.device_pixel_ratio),
+          snap_to_device(picture.laid_out.height * laid_at, picture.device_pixel_ratio),
+        )),
+        scale: shown / laid_at,
+      },
+      _ => PictureLayout {
+        maybe_size: None,
+        scale: shown,
+      },
+    }
+  }
+
+  /// The offset on whole device pixels: at rest a half pixel would resample the whole picture.
+  pub fn snapped_offset(&self) -> Point {
+    let ratio = self
+      .maybe_picture
+      .map_or(1.0, |picture| picture.device_pixel_ratio);
+    Point::new(
+      snap_to_device(self.offset.x, ratio),
+      snap_to_device(self.offset.y, ratio),
+    )
+  }
+
   /// The zoom slider's position for the current zoom, from 0 (fit) to 1 (the maximum). The slider
   /// is logarithmic, so every step zooms by the same factor.
   pub fn slider_position(&self) -> f64 {
-    match self.max_scale > MIN_SCALE {
-      true => (self.scale.ln() / self.max_scale.ln()).clamp(0.0, 1.0),
+    let max_scale = self.max_scale();
+    match max_scale > MIN_SCALE {
+      true => (self.scale.ln() / max_scale.ln()).clamp(0.0, 1.0),
       false => 0.0,
     }
   }
@@ -432,7 +542,7 @@ impl Viewport {
     if !position.is_finite() {
       return;
     }
-    let target = self.max_scale.powf(position.clamp(0.0, 1.0));
+    let target = self.max_scale().powf(position.clamp(0.0, 1.0));
     self.zoom_by(target / self.scale, Point::ORIGIN, image, stage);
   }
 
@@ -451,7 +561,7 @@ impl Viewport {
   }
 
   pub fn can_zoom_in(&self) -> bool {
-    self.scale < self.max_scale
+    self.scale < self.max_scale()
   }
 
   /// Back to the fitted image.
@@ -466,7 +576,7 @@ impl Viewport {
     if !factor.is_finite() || factor <= 0.0 {
       return;
     }
-    let scale = (self.scale * factor).clamp(MIN_SCALE, self.max_scale);
+    let scale = (self.scale * factor).clamp(MIN_SCALE, self.max_scale());
     let applied = scale / self.scale;
     self.offset = Point::new(
       anchor.x - (anchor.x - self.offset.x) * applied,
@@ -476,17 +586,32 @@ impl Viewport {
     self.clamp_offset(image, stage);
   }
 
-  /// Double-click or double-tap: a fitted image zooms in at `anchor`, a zoomed one goes back to fit.
-  pub fn toggle_zoom(&mut self, anchor: Point, image: Size, stage: Size) {
+  /// Double-click or double-tap: where it leads. A fitted image goes to its own pixels at `anchor`
+  /// (when that is a zoom-in, else by [`DOUBLE_CLICK_SCALE`]), a zoomed one back to fit.
+  pub fn toggled(&self, anchor: Point, image: Size, stage: Size) -> (f64, Point) {
     if self.is_zoomed() {
-      self.reset();
-    } else {
-      self.zoom_by(DOUBLE_CLICK_SCALE, anchor, image, stage);
+      return (MIN_SCALE, Point::ORIGIN);
     }
+    let factor = self
+      .actual_size_scale()
+      .filter(|scale| *scale >= MIN_ACTUAL_SIZE_ZOOM)
+      .unwrap_or(DOUBLE_CLICK_SCALE);
+    let mut zoomed = *self;
+    zoomed.zoom_by(factor, anchor, image, stage);
+    (zoomed.scale, zoomed.offset)
   }
 
+  /// The fit-relative maximum, or further for a picture whose own pixels lie beyond it. Bounded in
+  /// the size it lays the picture out at.
   pub fn max_scale(&self) -> f64 {
-    self.max_scale
+    let Some(picture) = self.maybe_picture else {
+      return self.max_scale;
+    };
+    let longer_side = picture.laid_out.width.max(picture.laid_out.height);
+    let at_fit = self.display_scale(picture.laid_out, picture.stage) / self.scale;
+    let side_limit = MAX_LAID_OUT_SIDE_PX / (longer_side * at_fit);
+    let own_pixels = self.actual_size_scale().unwrap_or(MIN_SCALE) * MAX_OWN_PIXEL_RATIO;
+    self.max_scale.max(own_pixels.min(side_limit))
   }
 
   /// Shows `scale` and `offset` as they are, also past their limits: the frames of a pinch or pan
@@ -510,7 +635,7 @@ impl Viewport {
   /// Where a pinch or pan released here comes to rest: the zoom back inside its limits around
   /// `anchor` (the last pinch centre), and the offset back inside the stage.
   pub fn settled(&self, anchor: Point, image: Size, stage: Size) -> (f64, Point) {
-    let scale = self.scale.clamp(MIN_SCALE, self.max_scale);
+    let scale = self.scale.clamp(MIN_SCALE, self.max_scale());
     let applied = scale / self.scale;
     let limits = self.pan_limits(scale, image, stage);
     let offset = Point::new(
@@ -685,6 +810,20 @@ pub fn wheel_zoom_factor(delta_y_px: f64, is_pinch: bool) -> f64 {
   (-delta_y_px * sensitivity).exp()
 }
 
+/// The size the stylesheet gives a picture at fit: `max-width` and `max-height` of `room`, keeping
+/// its proportions, never larger than its own pixels. Computed, as the element itself is laid out at
+/// its zoom while zoomed.
+pub fn fitted_layout(room: Size, natural: Size) -> Size {
+  let scale = (room.width / natural.width)
+    .min(room.height / natural.height)
+    .min(1.0);
+  Size::new(natural.width * scale, natural.height * scale)
+}
+
+fn snap_to_device(css_px: f64, device_pixel_ratio: f64) -> f64 {
+  (css_px * device_pixel_ratio).round() / device_pixel_ratio
+}
+
 #[cfg(test)]
 mod tests {
   use super::*;
@@ -699,16 +838,6 @@ mod tests {
     width: 800.0,
     height: 600.0,
   };
-  /// The lightbox's rules, checked for what keeps a zoomed picture sharp (#1089).
-  const STYLESHEET: &str = include_str!("../style/main/380-lightbox.css");
-
-  #[test]
-  fn the_picture_is_a_layer_only_while_a_gesture_moves_it() {
-    // A permanent layer is rasterised once at the fitted size and then enlarged as a bitmap.
-    assert!(!rule(".lightbox-image {").contains("will-change"));
-    assert!(rule(".lightbox-stage.is-live .lightbox-image {").contains("will-change: transform"));
-    assert!(!STYLESHEET.contains("image-rendering"));
-  }
 
   mod navigation {
     use super::*;
@@ -897,10 +1026,16 @@ mod tests {
     #[test]
     fn double_click_toggles_between_fit_and_zoomed() {
       let mut viewport = Viewport::default();
-      viewport.toggle_zoom(Point::ORIGIN, IMAGE, STAGE);
+      toggle(&mut viewport, Point::ORIGIN);
       assert_eq!(viewport.scale(), DOUBLE_CLICK_SCALE);
-      viewport.toggle_zoom(Point::new(100.0, 100.0), IMAGE, STAGE);
-      assert_eq!(viewport, Viewport::default());
+      toggle(&mut viewport, Point::new(100.0, 100.0));
+      assert_eq!(viewport.scale(), 1.0);
+      assert_eq!(viewport.offset(), Point::ORIGIN);
+    }
+
+    fn toggle(viewport: &mut Viewport, anchor: Point) {
+      let (scale, offset) = viewport.toggled(anchor, IMAGE, STAGE);
+      viewport.present(scale, offset);
     }
 
     #[test]
@@ -908,6 +1043,197 @@ mod tests {
       assert!(wheel_zoom_factor(100.0, false) < 1.0);
       assert!(wheel_zoom_factor(-100.0, false) > 1.0);
       assert!(wheel_zoom_factor(-10.0, true) > wheel_zoom_factor(-10.0, false));
+    }
+  }
+
+  mod own_pixels {
+    use super::*;
+
+    /// 2000×1400 own pixels, fitted to 1000×700 in a 1000×800 stage.
+    const LARGE: Picture = Picture {
+      natural: Size {
+        width: 2000.0,
+        height: 1400.0,
+      },
+      laid_out: Size {
+        width: 1000.0,
+        height: 700.0,
+      },
+      stage: STAGE,
+      device_pixel_ratio: 1.0,
+    };
+
+    fn viewport_of(picture: Picture) -> Viewport {
+      let mut viewport = Viewport::default();
+      viewport.set_picture(Some(picture));
+      viewport
+    }
+
+    #[test]
+    fn the_fit_says_its_real_percentage() {
+      assert_eq!(viewport_of(LARGE).own_pixel_ratio(), Some(0.5));
+    }
+
+    #[test]
+    fn a_device_pixel_ratio_counts() {
+      let picture = Picture {
+        device_pixel_ratio: 2.0,
+        ..LARGE
+      };
+      assert_eq!(viewport_of(picture).own_pixel_ratio(), Some(1.0));
+      assert_eq!(viewport_of(picture).actual_size_scale(), Some(1.0));
+    }
+
+    #[test]
+    fn a_small_picture_at_fit_is_at_its_own_size() {
+      let picture = Picture {
+        natural: IMAGE,
+        laid_out: IMAGE,
+        ..LARGE
+      };
+      assert_eq!(viewport_of(picture).own_pixel_ratio(), Some(1.0));
+    }
+
+    #[test]
+    fn a_turn_that_shrinks_the_picture_counts() {
+      // Turned, 1000×700 is 700 wide and 1000 tall in an 800 tall stage: shrunk to 0.8.
+      let mut viewport = viewport_of(LARGE);
+      viewport.rotate_clockwise();
+      assert_eq!(viewport.own_pixel_ratio(), Some(0.4));
+      assert_eq!(viewport.actual_size_scale(), Some(2.5));
+    }
+
+    #[test]
+    fn nothing_is_said_before_the_picture_is_known() {
+      assert_eq!(Viewport::default().own_pixel_ratio(), None);
+      let unknown = Picture {
+        natural: Size::default(),
+        ..LARGE
+      };
+      assert_eq!(viewport_of(unknown).own_pixel_ratio(), None);
+      assert_eq!(viewport_of(unknown).max_scale(), DEFAULT_MAX_SCALE);
+    }
+
+    #[test]
+    fn double_click_on_a_large_picture_goes_to_its_own_pixels() {
+      let viewport = viewport_of(LARGE);
+      let (scale, offset) = viewport.toggled(Point::ORIGIN, LARGE.laid_out, STAGE);
+      assert_eq!((scale, offset), (2.0, Point::ORIGIN));
+    }
+
+    #[test]
+    fn double_click_where_own_pixels_are_no_zoom_in_zooms_as_before() {
+      for natural in [IMAGE, Size::new(1000.0, 700.0), Size::new(1100.0, 770.0)] {
+        let picture = Picture {
+          natural,
+          laid_out: fitted_layout(STAGE, natural),
+          ..LARGE
+        };
+        let viewport = viewport_of(picture);
+        let (scale, _) = viewport.toggled(Point::ORIGIN, picture.laid_out, STAGE);
+        assert_eq!(scale, DOUBLE_CLICK_SCALE, "{natural:?}");
+      }
+    }
+
+    #[test]
+    fn a_picture_beyond_the_fit_relative_maximum_can_reach_its_own_pixels() {
+      // 12000 own pixels on a 1000 wide fit: the maximum of 8 would stop at 67 %.
+      let natural = Size::new(12_000.0, 8_400.0);
+      let viewport = viewport_of(Picture { natural, ..LARGE });
+      assert!(viewport.actual_size_scale().unwrap() < viewport.max_scale());
+      assert_eq!(viewport.max_scale(), 32.0, "bounded by the laid-out side");
+    }
+
+    #[test]
+    fn the_maximum_never_falls_below_the_shared_one() {
+      assert_eq!(viewport_of(LARGE).max_scale(), DEFAULT_MAX_SCALE);
+      let small = Picture {
+        natural: Size::new(100.0, 70.0),
+        laid_out: Size::new(100.0, 70.0),
+        ..LARGE
+      };
+      assert_eq!(viewport_of(small).max_scale(), DEFAULT_MAX_SCALE);
+    }
+
+    #[test]
+    fn a_new_picture_takes_back_a_zoom_past_its_maximum() {
+      let mut viewport = viewport_of(Picture {
+        natural: Size::new(12_000.0, 8_400.0),
+        ..LARGE
+      });
+      viewport.present(30.0, Point::ORIGIN);
+      viewport.set_picture(Some(LARGE));
+      assert_eq!(viewport.scale(), DEFAULT_MAX_SCALE);
+    }
+
+    #[test]
+    fn at_rest_the_element_has_its_real_size_and_no_scale() {
+      let mut viewport = viewport_of(LARGE);
+      viewport.present(2.0, Point::ORIGIN);
+      assert_eq!(
+        viewport.layout_at(Some(2.0)),
+        PictureLayout {
+          maybe_size: Some(Size::new(2000.0, 1400.0)),
+          scale: 1.0,
+        }
+      );
+    }
+
+    #[test]
+    fn a_gesture_scales_what_was_last_laid_out() {
+      let mut viewport = viewport_of(LARGE);
+      viewport.present(3.0, Point::ORIGIN);
+      assert_eq!(
+        viewport.layout_at(Some(2.0)),
+        PictureLayout {
+          maybe_size: Some(Size::new(2000.0, 1400.0)),
+          scale: 1.5,
+        }
+      );
+    }
+
+    #[test]
+    fn at_fit_the_stylesheet_lays_it_out() {
+      assert_eq!(
+        viewport_of(LARGE).layout_at(None),
+        PictureLayout {
+          maybe_size: None,
+          scale: 1.0,
+        }
+      );
+    }
+
+    #[test]
+    fn sizes_and_offsets_land_on_device_pixels() {
+      let mut viewport = viewport_of(Picture {
+        device_pixel_ratio: 2.0,
+        ..LARGE
+      });
+      viewport.present(1.0, Point::new(10.3, -10.3));
+      assert_eq!(viewport.snapped_offset(), Point::new(10.5, -10.5));
+      viewport.present(1.0, Point::new(10.2, 0.0));
+      assert_eq!(viewport.snapped_offset(), Point::new(10.0, 0.0));
+      assert_eq!(
+        viewport.layout_at(Some(1.0001)).maybe_size,
+        Some(Size::new(1000.0, 700.0))
+      );
+    }
+
+    #[test]
+    fn the_fit_is_what_the_stylesheet_does() {
+      let room = Size::new(1272.0, 900.0);
+      assert_eq!(
+        fitted_layout(room, Size::new(636.0, 450.0)),
+        Size::new(636.0, 450.0)
+      );
+      assert_eq!(
+        fitted_layout(room, Size::new(2544.0, 900.0)),
+        Size::new(1272.0, 450.0)
+      );
+      assert_eq!(
+        fitted_layout(room, Size::new(900.0, 1800.0)),
+        Size::new(450.0, 900.0)
+      );
     }
   }
 
@@ -1310,12 +1636,5 @@ mod tests {
 
   fn id(message: i64) -> MessageId {
     message.to_string().parse().expect("valid id")
-  }
-
-  /// The declarations of the stylesheet's rule whose line starts with `selector`.
-  fn rule(selector: &str) -> &'static str {
-    let start = STYLESHEET.find(&format!("\n{selector}")).expect("the rule");
-    let rest = &STYLESHEET[start..];
-    &rest[..rest.find('}').expect("its end")]
   }
 }

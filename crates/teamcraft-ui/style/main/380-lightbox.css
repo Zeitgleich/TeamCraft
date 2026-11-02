@@ -51,11 +51,14 @@
 .lightbox-stage.is-video { cursor: default; touch-action: auto; }
 /* No box behind the picture (#727): a transparent PNG or SVG floats on the backdrop. Its shadow is a
    `drop-shadow`, which follows the picture's alpha, not a `box-shadow` around its rectangle. */
-.lightbox-image { max-width: 100%; max-height: 100%; background: none; transform-origin: center; -webkit-user-drag: none; filter: drop-shadow(0 8px 28px rgba(0, 0, 0, .4)); transition: transform var(--dur-fast) var(--ease-out); }
-.lightbox-stage.zoomed .lightbox-image, .lightbox-stage.is-live .lightbox-image { transition: none; }
-/* A layer only while a gesture moves the picture: a promoted layer is rasterised once, at the size
-   it had then, and scaled as a bitmap, so a permanent one shows a zoomed picture as enlarged pixels
-   (#1089). Once the gesture settles the picture is painted again at its zoom, sharp, in place. */
+.lightbox-image { max-width: 100%; max-height: 100%; background: none; transform-origin: center; -webkit-user-drag: none; filter: drop-shadow(0 8px 28px rgba(0, 0, 0, .4)); }
+/* Zoomed, the picture is laid out at its real size, set from Rust (#1089). A transform of an image
+   with a `filter` is a magnified bitmap in WebKit, about half as sharp (measured in the PR), and a
+   filter's buffer of a picture this large would be huge; the shadow is off-stage anyway. */
+.lightbox-stage.zoomed .lightbox-image:not(.lightbox-placeholder) { filter: none; }
+.lightbox-image.is-laid-out { max-width: none; max-height: none; }
+/* A layer only while a gesture moves the picture, rasterised at the size it is laid out at, so a pan
+   stays sharp and a pinch scales only what it added. Afterwards it is laid out and painted anew. */
 .lightbox-stage.is-live .lightbox-image { will-change: transform; }
 /* The previous, current and next picture side by side; the track moves as one while paging, and
    carries the picture into and out of its tile. Its transform and opacity are written per frame. */
@@ -68,7 +71,9 @@
 /* One cell: the current file lies over its placeholder until it is decoded, then they cross-fade. */
 .lightbox-slot { position: absolute; inset: 0; box-sizing: border-box; padding: inherit; display: grid; grid-template: minmax(0, 1fr) / minmax(0, 1fr); place-items: center; }
 .lightbox-slot > * { grid-area: 1 / 1; }
-.lightbox-stage:not(.zoomed, .is-live) .lightbox-slot.is-current > .lightbox-image:not(.lightbox-placeholder) { transition: transform var(--dur-fast) var(--ease-out), opacity var(--dur-base) var(--ease-standard); }
+.lightbox-stage:not(.zoomed, .is-live) .lightbox-slot.is-current > .lightbox-image:not(.lightbox-placeholder) { transition: opacity var(--dur-base) var(--ease-standard); }
+/* Zoom follows its spring; only a quarter turn of the fitted picture is the stylesheet's to animate. */
+.lightbox-stage.is-turning .lightbox-slot.is-current > .lightbox-image:not(.lightbox-placeholder) { transition: transform var(--dur-fast) var(--ease-out), opacity var(--dur-base) var(--ease-standard); }
 .lightbox-slot.is-current > .lightbox-image.is-arriving { opacity: 0; }
 .lightbox-slot.is-current > .lightbox-placeholder.is-hidden { opacity: 0; visibility: hidden; transition: opacity var(--dur-base) var(--ease-standard), visibility 0s linear var(--dur-base); }
 .lightbox-slot.is-previous { transform: translateX(calc(-100% - 24px)); }
@@ -205,7 +210,6 @@
   .lightbox-main [data-tip]::after { display: none; }
 }
 @media (prefers-reduced-motion: reduce) {
-  .lightbox-image { transition: none; }
   .lightbox-nav { transition: none; }
 }
 .composer-error { color: var(--danger); margin: .25rem 0; }

@@ -20,7 +20,7 @@ use leptos::html;
 use leptos::prelude::*;
 use wasm_bindgen::JsCast;
 
-use crate::components::lightbox::{prefers_reduced_motion, sizes};
+use crate::components::lightbox::{prefers_reduced_motion, sizes, stage_size_of};
 use crate::lightbox::physics::{
   Animated, DRAG_HYSTERESIS_PX, DragAxis, PAGE_GAP_PX, PageOutcome, Rect, VelocityTracker, contained_size,
   dismiss_backdrop_opacity, dismiss_progress, dismiss_scale, drag_axis, flip_from, page_offset, page_outcome,
@@ -39,6 +39,8 @@ const ARRIVED_PX: f64 = 1.0;
 const ARRIVED_FRACTION: f64 = 0.01;
 /// What the current slot's picture is, whichever is shown (the file once decoded, else its
 /// placeholder, or a video in its player). The file comes first in the slot.
+/// A quarter turn's transition takes this long, plus some air (`--dur-fast` in the stylesheet).
+const TURN_MS: u64 = 300;
 const CURRENT_MEDIA: &str = ".lightbox-slot.is-current .lightbox-image:not(.is-arriving):not(.is-hidden), \
                              .lightbox-slot.is-current .lightbox-video > video";
 
@@ -50,6 +52,7 @@ pub struct StageMotion {
   hooks: MotionHooks,
   viewport: RwSignal<Viewport>,
   is_live: RwSignal<bool>,
+  is_turning: RwSignal<bool>,
 }
 
 /// The elements the motion writes to.
@@ -95,6 +98,10 @@ struct Inner {
   pending: Pending,
   is_frame_requested: bool,
   maybe_wheel_end: Option<TimeoutHandle>,
+  maybe_turn_end: Option<TimeoutHandle>,
+  /// The picture's and the stage's size when the press went down: a gesture reads no layout per
+  /// move.
+  press_sizes: (Size, Size),
   last_wheel_ms: f64,
   opened_at_ms: f64,
   has_shown: bool,
@@ -175,6 +182,7 @@ impl StageMotion {
       hooks,
       viewport,
       is_live: RwSignal::new(false),
+      is_turning: RwSignal::new(false),
     }
   }
 
@@ -184,13 +192,20 @@ impl StageMotion {
     self.is_live.into()
   }
 
+  /// Whether a quarter turn is running: the one change of the picture's transform that the
+  /// stylesheet animates.
+  pub fn is_turning(&self) -> Signal<bool> {
+    self.is_turning.into()
+  }
+
   /// A pointer went down on the stage; `pointers` are now pressed. Catches whatever moves.
   pub fn press(self, at: Point, time_ms: f64, pointers: usize) {
     let is_reduced = prefers_reduced_motion();
     let viewport = self.viewport.get_untracked();
-    let stage = stage_size(self.nodes);
+    let (image, stage) = sizes(self.nodes.image, self.nodes.stage);
     self.inner.update_value(|inner| {
       inner.is_reduced = is_reduced;
+      inner.press_sizes = (image, stage);
       let is_view_caught = inner.view.is_moving();
       inner.has_caught = inner.pending != Pending::None || inner.track.is_moving() || is_view_caught;
       inner.maybe_caught_page = match inner.pending {
@@ -212,7 +227,7 @@ impl StageMotion {
         _ => {
           // A second finger on a picture that was paging or lifted: the track goes back.
           inner.settle_track(Point::ORIGIN, time_ms);
-          inner.begin_zoom(&viewport, image_size(self.nodes), stage);
+          inner.begin_zoom(&viewport, image, stage);
           Mode::Zoom
         },
       };
@@ -224,7 +239,9 @@ impl StageMotion {
   /// A pressed pointer moved to `at`, which the pointers turned into `gesture`.
   pub fn drag(self, gesture: Gesture, at: Point, time_ms: f64) {
     let viewport = self.viewport.get_untracked();
-    let (image, stage) = sizes(self.nodes.image, self.nodes.stage);
+    let Some((image, stage)) = self.inner.try_with_value(|inner| inner.press_sizes) else {
+      return;
+    };
     let (has_previous, has_next) = self.hooks.neighbours.get_untracked();
     let page_width = stage.width + PAGE_GAP_PX;
     let maybe_paint = self.inner.try_update_value(|inner| {
@@ -498,6 +515,47 @@ impl StageMotion {
     }
   }
 
+  /// A double-click or the fit button: the picture springs there as a gesture's release would, and
+  /// is laid out at its real size when it arrives. With reduced motion it is there at once.
+  pub fn settle_view_to(self, scale: f64, offset: Point) {
+    if prefers_reduced_motion() {
+      self.viewport.update(|viewport| viewport.present(scale, offset));
+      return;
+    }
+    let viewport = self.viewport.get_untracked();
+    let now = now_ms();
+    self.inner.update_value(|inner| {
+      inner.view.stop();
+      inner.view.scale.set(viewport.scale());
+      inner.view.x.set(viewport.offset().x);
+      inner.view.y.set(viewport.offset().y);
+      inner.view.settle_to(scale, offset, Point::ORIGIN, now);
+    });
+    self.is_live.set(true);
+    self.request_frame();
+  }
+
+  /// A quarter turn starts, for as long as the stylesheet's transition runs. Zoomed there is nothing
+  /// to animate: the picture changes its layout too, and goes to fit at once.
+  pub fn turn(self) {
+    if self.viewport.get_untracked().is_zoomed() {
+      return;
+    }
+    self.is_turning.set(true);
+    let handle = set_timeout_with_handle(
+      move || {
+        self.is_turning.try_set(false);
+      },
+      std::time::Duration::from_millis(TURN_MS),
+    );
+    self.inner.update_value(|inner| {
+      if let Some(previous) = inner.maybe_turn_end.take() {
+        previous.clear();
+      }
+      inner.maybe_turn_end = handle.ok();
+    });
+  }
+
   /// The wheel, a key or a button zooms: a settling zoom gives way.
   pub fn stop_view(self) {
     self.inner.update_value(|inner| inner.view.stop());
@@ -553,7 +611,11 @@ impl StageMotion {
     let classes = media.class_list();
     let is_picture = classes.contains("lightbox-image") && !classes.contains("lightbox-placeholder");
     let fitted = match is_picture {
-      true => self.viewport.get_untracked().fitted_size(laid_out, stage_size),
+      // Zoomed, the element has its zoomed size; a close flies back from the fit.
+      true => {
+        let (image, _) = sizes(self.nodes.image, self.nodes.stage);
+        self.viewport.get_untracked().fitted_size(image, stage_size)
+      },
       false => contained_size(laid_out, natural_size(&media)),
     };
     let center = rect_of(&stage).center();
@@ -614,9 +676,14 @@ impl StageMotion {
     let Some((paint, commit, is_moving, is_held)) = self.inner.try_update_value(|inner| {
       inner.is_frame_requested = false;
       let is_track_moving = inner.track.tick(now);
+      let was_view_moving = inner.view.is_moving();
       let is_view_moving = inner.view.tick(now);
       let commit = inner.arrival();
-      let paint = inner.paint();
+      let mut paint = inner.paint();
+      if was_view_moving {
+        // The frame it arrives on shows exactly where it was going.
+        paint.maybe_view = Some(inner.view.current());
+      }
       let is_held = inner.mode != Mode::Idle;
       (paint, commit, is_track_moving || is_view_moving, is_held)
     }) else {
@@ -687,6 +754,8 @@ impl Inner {
       pending: Pending::None,
       is_frame_requested: false,
       maybe_wheel_end: None,
+      maybe_turn_end: None,
+      press_sizes: (Size::default(), Size::default()),
       last_wheel_ms: 0.0,
       opened_at_ms: now,
       has_shown: false,
@@ -881,7 +950,7 @@ impl Inner {
       backdrop: track.backdrop.value(),
       is_lifted: self.mode == Mode::Dismiss || matches!(self.pending, Pending::Close { .. }),
       is_flying: self.is_flying(),
-      maybe_view: is_view_owned.then(|| (view.scale.value(), Point::new(view.x.value(), view.y.value()))),
+      maybe_view: is_view_owned.then(|| view.current()),
     }
   }
 
@@ -979,6 +1048,10 @@ impl ViewMotion {
     self.scale.is_moving() || self.x.is_moving() || self.y.is_moving()
   }
 
+  fn current(&self) -> (f64, Point) {
+    (self.scale.value(), Point::new(self.x.value(), self.y.value()))
+  }
+
   fn tick(&mut self, now: f64) -> bool {
     let scale = self.scale.tick(now);
     let x = self.x.tick(now);
@@ -1073,11 +1146,7 @@ fn rect_of(element: &web_sys::Element) -> Rect {
 }
 
 fn stage_size(nodes: MotionNodes) -> Size {
-  sizes(nodes.image, nodes.stage).1
-}
-
-fn image_size(nodes: MotionNodes) -> Size {
-  sizes(nodes.image, nodes.stage).0
+  stage_size_of(nodes.stage)
 }
 
 /// The clock of event time stamps and animation frames.
