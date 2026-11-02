@@ -2655,7 +2655,16 @@ The browser has neither SQLCipher nor an OS keystore. The web client keeps the s
 3. **Records:** the plaintext name and value are sealed with XChaCha20-Poly1305 under the record key,
    with the record ID as associated data, so records can't be swapped or moved unnoticed. Opening the
    database with another key fails on the first record.
-4. **Where the database key lives:** wrapped (AES-256-GCM) by a **non-extractable Web Crypto key**,
+4. **Catalog (issue #155):** so a record is decrypted when it is read instead of all of them when
+   the store opens, the store keeps a catalog, sealed like every other record (entries of a reserved
+   table name that versions before skip): per table the keys it holds, and per conversation its
+   messages in display order with server ID, thread and a few flags (hidden, media, unreadable).
+   Each is a paged index: a root listing pages of up to 256 entries. Table, conversation and message
+   IDs stay inside the sealed plaintext. What a copy of the files shows is unchanged (the number and
+   sizes of records). Somebody who compares copies taken over time sees which records are rewritten
+   together: a message record together with its conversation's index pages, so they can group
+   message records by conversation, which before only their write times hinted at.
+5. **Where the database key lives:** wrapped (AES-256-GCM) by a **non-extractable Web Crypto key**,
    both stored in the same IndexedDB database. The wrapping key's own bytes can never be read by a
    script, but any script of the origin can *use* it: unwrapping the database key is one
    `crypto.subtle.decrypt` call that returns the raw key. The wrapping only protects the key at rest
