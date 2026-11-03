@@ -4,13 +4,18 @@
 //! Each setting is a last-writer-wins register ordered by a logical version, never by a clock: a
 //! change takes the version after the one its device saw. A key this build doesn't know is an
 //! entry like any other, so it is kept, merged and uploaded again for the newer client that wrote
-//! it.
+//! it. An entry that can't be read at all stays as raw JSON ([`StoredSettings`]): settings travel in
+//! the key bag with the keys and pins, and must never be what stops those from syncing.
 
 use std::cmp::Ordering;
 use std::collections::BTreeMap;
+use std::ops::{Deref, DerefMut};
 
+use serde::de::Deserializer;
+use serde::ser::{Error as _, SerializeMap, Serializer};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use serde_json::value::RawValue;
 
 use crate::DeviceId;
 
@@ -20,9 +25,20 @@ pub const MAX_SYNCED_SETTINGS_BYTES: usize = 32 * 1024;
 /// The version of a seed: a value a device already had when settings first synced. Only a seed
 /// has it, so a device can tell somebody's existing setup from a change made on purpose.
 pub const SEED_VERSION: u64 = 0;
+/// How deeply a value may nest to count as readable. No setting comes close; deeper ones stay raw
+/// JSON, so they can't exceed the decoders' recursion limits on the way to the UI.
+const MAX_VALUE_DEPTH: usize = 16;
 
 /// All synced settings, by key. Ordered, so that the same settings encode to the same bytes.
 pub type SyncedSettings = BTreeMap<String, SettingEntry>;
+
+/// The settings as the account data stores them: readable entries, and entries this build can't
+/// read kept as they came (raw JSON, by key). Reads like its entries; those are what clients use.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct StoredSettings {
+  pub entries: SyncedSettings,
+  opaque: BTreeMap<String, String>,
+}
 
 /// A setting's value and who wrote which version of it.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -65,6 +81,118 @@ pub struct SettingsWritten {
   /// Keys whose new value would take the settings over [`MAX_SYNCED_SETTINGS_BYTES`]; their entries
   /// stay as they were.
   pub refused: Vec<String>,
+}
+
+impl StoredSettings {
+  pub fn is_empty(&self) -> bool {
+    self.entries.is_empty() && self.opaque.is_empty()
+  }
+
+  /// How many entries this build couldn't read. Their content is not for logs.
+  pub fn opaque_count(&self) -> usize {
+    self.opaque.len()
+  }
+
+  /// Takes the winner of every readable setting, and every unreadable one this side lacks; a
+  /// readable entry replaces an unreadable one of its key. Returns whether anything changed.
+  pub fn merge(&mut self, theirs: &Self) -> bool {
+    let mut is_changed = merge_settings(&mut self.entries, &theirs.entries);
+    for (key, raw) in &theirs.opaque {
+      let is_taken = !self.entries.contains_key(key) && self.opaque.get(key).is_none_or(|mine| mine < raw);
+      if is_taken {
+        self.opaque.insert(key.clone(), raw.clone());
+        is_changed = true;
+      }
+    }
+    let entries = &self.entries;
+    self.opaque.retain(|key, _| !entries.contains_key(key));
+    is_changed
+  }
+
+  fn from_raw(raw: &RawValue) -> Self {
+    let Ok(items) = serde_json::from_str::<BTreeMap<String, Box<RawValue>>>(raw.get()) else {
+      // Not even a map: kept whole under the empty key, which is no setting, and counted like the
+      // other unreadable entries.
+      return Self {
+        entries: SyncedSettings::new(),
+        opaque: [(String::new(), raw.get().to_owned())].into(),
+      };
+    };
+    let mut settings = Self::default();
+    for (key, item) in items {
+      match readable_entry(&item) {
+        Some(entry) => {
+          settings.entries.insert(key, entry);
+        },
+        None => {
+          settings.opaque.insert(key, item.get().to_owned());
+        },
+      }
+    }
+    settings
+  }
+}
+
+impl Deref for StoredSettings {
+  type Target = SyncedSettings;
+
+  fn deref(&self) -> &SyncedSettings {
+    &self.entries
+  }
+}
+
+impl DerefMut for StoredSettings {
+  fn deref_mut(&mut self) -> &mut SyncedSettings {
+    &mut self.entries
+  }
+}
+
+impl From<SyncedSettings> for StoredSettings {
+  fn from(entries: SyncedSettings) -> Self {
+    Self {
+      entries,
+      opaque: BTreeMap::new(),
+    }
+  }
+}
+
+impl Serialize for StoredSettings {
+  fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+    let raw_items = self
+      .opaque
+      .iter()
+      .filter(|(key, _)| !self.entries.contains_key(*key));
+    let mut items: BTreeMap<&str, StoredItem<'_>> = self
+      .entries
+      .iter()
+      .map(|(key, entry)| (key.as_str(), StoredItem::Entry(entry)))
+      .collect();
+    for (key, raw) in raw_items {
+      let raw = RawValue::from_string(raw.clone()).map_err(S::Error::custom)?;
+      items.insert(key, StoredItem::Raw(raw));
+    }
+    let mut map = serializer.serialize_map(Some(items.len()))?;
+    for (key, item) in &items {
+      map.serialize_entry(key, item)?;
+    }
+    map.end()
+  }
+}
+
+impl<'de> Deserialize<'de> for StoredSettings {
+  fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+    // Raw first: skipping over JSON has no recursion limit, parsing into values has.
+    let raw = Box::<RawValue>::deserialize(deserializer)?;
+    Ok(Self::from_raw(&raw))
+  }
+}
+
+/// One stored setting on its way out.
+#[derive(Serialize)]
+#[serde(untagged)]
+enum StoredItem<'a> {
+  Entry(&'a SettingEntry),
+  Raw(Box<RawValue>),
 }
 
 impl SettingEntry {
@@ -150,6 +278,20 @@ fn written_entry(
     version,
     writer,
   })
+}
+
+fn readable_entry(item: &RawValue) -> Option<SettingEntry> {
+  let entry = serde_json::from_str::<SettingEntry>(item.get()).ok()?;
+  (depth(&entry.value) <= MAX_VALUE_DEPTH).then_some(entry)
+}
+
+/// The nesting of a JSON value, which was decoded within the recursion limit.
+fn depth(value: &Value) -> usize {
+  match value {
+    Value::Array(items) => 1 + items.iter().map(depth).max().unwrap_or(0),
+    Value::Object(items) => 1 + items.values().map(depth).max().unwrap_or(0),
+    _ => 0,
+  }
 }
 
 fn encoded_size(settings: &SyncedSettings) -> usize {
@@ -288,6 +430,64 @@ mod tests {
       let written = write_settings(&mut held, &[change("keywords", "short")], device(2));
       assert!(written.refused.is_empty());
       assert_eq!(held["keywords"].value, json!("short"));
+    }
+  }
+
+  mod unreadable_entries {
+    use super::*;
+
+    const WITH_BAD_ENTRY: &str =
+      r#"{"bad":{"version":"not a number"},"theme":{"value":"dark","version":1,"writer":"7"}}"#;
+
+    #[test]
+    fn one_bad_entry_leaves_the_others_and_is_kept_as_it_came() {
+      let stored: StoredSettings = serde_json::from_str(WITH_BAD_ENTRY).unwrap();
+      assert_eq!(stored["theme"].value, json!("dark"));
+      assert!(!stored.contains_key("bad"));
+      assert_eq!(stored.opaque_count(), 1);
+      assert_eq!(serde_json::to_string(&stored).unwrap(), WITH_BAD_ENTRY);
+    }
+
+    #[test]
+    fn a_value_nested_past_the_decoders_limit_is_kept_too() {
+      let deep = format!("{}{}", "[".repeat(5000), "]".repeat(5000));
+      let text = format!(r#"{{"deep":{{"value":{deep},"version":1,"writer":"7"}}}}"#);
+      let stored: StoredSettings = serde_json::from_str(&text).unwrap();
+      assert!(stored.entries.is_empty());
+      assert_eq!(stored.opaque_count(), 1);
+      assert_eq!(serde_json::to_string(&stored).unwrap(), text);
+    }
+
+    #[test]
+    fn a_value_too_deep_for_the_way_to_the_ui_stays_out_of_the_entries() {
+      let nested = format!("{}{}", "[".repeat(40), "]".repeat(40));
+      let text = format!(r#"{{"deep":{{"value":{nested},"version":1,"writer":"7"}}}}"#);
+      let stored: StoredSettings = serde_json::from_str(&text).unwrap();
+      assert!(stored.entries.is_empty());
+      assert_eq!(stored.opaque_count(), 1);
+    }
+
+    #[test]
+    fn something_that_is_no_map_counts_as_unreadable_and_breaks_nothing() {
+      let stored: StoredSettings = serde_json::from_str("7").unwrap();
+      assert!(stored.entries.is_empty());
+      assert_eq!(stored.opaque_count(), 1);
+    }
+
+    #[test]
+    fn they_merge_to_the_same_on_both_sides_and_a_readable_entry_replaces_them() {
+      let bad_a: StoredSettings = serde_json::from_str(r#"{"bad":{"a":1}}"#).unwrap();
+      let bad_b: StoredSettings = serde_json::from_str(r#"{"bad":{"b":1}}"#).unwrap();
+      let (mut left, mut right) = (bad_a.clone(), bad_b.clone());
+      left.merge(&bad_b);
+      right.merge(&bad_a);
+      assert_eq!(left, right);
+
+      let readable: StoredSettings = settings(&[("bad", "good", 1, 1)]).into();
+      assert!(left.merge(&readable));
+      assert_eq!(left.opaque_count(), 0);
+      assert_eq!(left["bad"].value, json!("good"));
+      assert!(!right.clone().merge(&right));
     }
   }
 

@@ -48,7 +48,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     let device = self.device_id();
     let mut written = SettingsWritten::default();
     self.update_account_data(|data, _now| {
-      written = write_settings(&mut data.settings, writes, device);
+      written = write_settings(&mut data.settings.entries, writes, device);
       written.is_changed
     })?;
     if written.is_changed {
@@ -116,6 +116,14 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       read_state::update_marks(&self.store, |marks| marks.settings = 1)?;
     }
     Ok(())
+  }
+
+  /// Tells the UI that the server refuses this device's key bag as too large. A failure to record it
+  /// is only logged: the upload is tried again anyway.
+  pub(crate) fn note_key_bag_refused(&self) {
+    if let Err(error) = read_state::update_marks(&self.store, |marks| marks.key_bag_refused += 1) {
+      tracing::warn!(%error, "the refused key bag could not be recorded");
+    }
   }
 
   /// Accepts a changed identity key the server reported for `user` (after the user compared it):
@@ -216,11 +224,18 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     }
     let remote_data = AccountData::from_bytes(decrypted.account_data())
       .map_err(|error| CoreError::Corrupt(error.to_string()))?;
+    if remote_data.settings.opaque_count() > 0 {
+      // Kept for whoever can read them; the keys and pins in this bag go on as usual.
+      tracing::warn!(
+        count = remote_data.settings.opaque_count(),
+        "the key bag holds synced settings this version can't read"
+      );
+    }
     let mut data = self.account_data();
-    let settings_before = data.settings.clone();
+    let settings_before = data.settings.entries.clone();
     data.merge(&remote_data, self.now_ms());
     self.store_account_data(&data)?;
-    if data.settings != settings_before {
+    if data.settings.entries != settings_before {
       read_state::update_marks(&self.store, |marks| marks.settings += 1)?;
     }
     // Removals another device of the user saw count here before the next message is decrypted.

@@ -212,8 +212,8 @@ pub fn Shell(backend: Rc<dyn Backend>, settings: Settings) -> impl IntoView {
   let call_prefs = Memo::new(move |_| settings.prefs.get().calls);
   Effect::new(move |previous: Option<CallPrefs>| {
     let calls = call_prefs.get();
-    apply_call_prefs(state.call, previous.as_ref(), &calls);
-    calls
+    state.call.phase.track();
+    apply_call_prefs(state.call, previous.as_ref(), &calls)
   });
 
   let listener = window_event_listener(ev::keydown, move |ev| handle_global_shortcut(&ev, state));
@@ -1184,9 +1184,15 @@ pub(crate) fn connect_calls(state: AppState) {
     });
   });
   // The status sounds setting reaches the call backend at start and on every change (not on
-  // every settings write: the same value again is no change).
+  // every settings write: the same value again is no change). It can change from another device
+  // (issue #945), so a running call keeps what it started with.
   Effect::new(move |previous: Option<CallStatusSounds>| {
     let sounds = state.settings.prefs.with(|prefs| prefs.calls.status_sounds);
+    if let Some(previous) = previous
+      && call.phase.get() == CallPhase::Active
+    {
+      return previous;
+    }
     if previous != Some(sounds) {
       call.emit(CallEvent::StatusSounds(sounds));
     }

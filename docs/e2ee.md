@@ -2311,18 +2311,34 @@ restored together with them on a new device.
     overwrite each other, whichever uploads first. Defaults aren't stored. A device starts only
     after it has merged the key bag from the server once, since before that it can't tell an empty
     account from one it hasn't heard of.
+  - *Whose settings:* the device records which account its settings belong to. When another account
+    opens, before anything shows or applies a setting, the synced ones go back to the defaults. On
+    a device with no owner on record (the first run after the update) a customized value is only
+    offered to the account if that account is the only one known to have used the device, by the
+    per-account "last open" records. Otherwise it may be somebody else's, and keywords are private:
+    it stays on the device, held, and doesn't enter the key bag unless the user changes it.
+  - *Running calls:* a synced default (start muted, camera off, background, mirror, status sounds)
+    never changes a call or pre-join screen that is open. It applies once the call is over.
   - *On the device:* the client keeps, next to the settings, what it last agreed on with the account
     per setting (value and stamp), in the same place as the settings themselves. A value
     that differs from that is a local change; so one made offline, or before a restart, goes out
     later. An account's value this build can't read leaves the local one in place and isn't
-    overwritten.
+    overwritten; that includes a value it would only read as something else (an unknown background,
+    an enum's catch-all). A failed read of the settings is tried again with a backoff of 5 s to 5
+    min.
+  - *Broken entries:* an entry that can't be decoded, or nests too deep, never fails the decoding
+    of the account data, since keys and pins travel with it. It stays as raw JSON under its key,
+    is uploaded again unchanged, and is logged as a count at warn; a readable entry of that key
+    replaces it.
   - *Cost and bounds:* writes are debounced by 1.5 s in the UI, and a write of the value the account
     already holds does nothing. Each change that gets through is one key bag upload on the next sync
     round, as for a saved item: the whole bag is encrypted again. The settings add a few KiB to it.
     A device's writes can't take them past 32 KiB (`MAX_SYNCED_SETTINGS_BYTES`); what doesn't fit
     stays on the device and is shown as a failure. A merge never drops entries, so two devices can
     exceed that together; then only writes that shrink them pass, and the server's
-    `limits.max_key_bag_bytes` stays the hard limit.
+    `limits.max_key_bag_bytes` stays the hard limit. A bag the server refuses at that limit (413)
+    is shown to the user once per run of the core on web and desktop, since keys aren't being backed
+    up then either; retries go on.
   - *Propagation:* the `key_bag_update` gateway event brings a change to the user's other devices,
     which merge and apply it live; there is no polling for it.
 - **The activity feed has no read mark of its own** (issue #534): an entry is read when the read

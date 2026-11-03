@@ -258,6 +258,11 @@ impl CoreError {
     matches!(self, Self::Api(error) if error.is_sign_in_required())
   }
 
+  /// The server won't take the key bag at its size (`limits.max_key_bag_bytes`).
+  pub fn is_key_bag_refused(&self) -> bool {
+    matches!(self, Self::Api(error) if error.error_code() == Some(&teamcraft_proto::ErrorCode::PayloadTooLarge))
+  }
+
   /// The failure as the UI words it (issue #322): the server's error code, an unreachable server,
   /// or anything else with this error's text as the detail.
   #[cfg(feature = "ui")]

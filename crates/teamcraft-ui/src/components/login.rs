@@ -1370,6 +1370,8 @@ fn DataGate(me: GetMeResponse, settings: Settings, control: SessionControl) -> i
   let backend = RwSignal::new_local(None::<Result<Rc<dyn Backend>, LoadError>>);
   let attempt = RwSignal::new(0_u32);
   crate::persisted_media::use_account(me.id);
+  // Before anything shows or applies a setting: another account's don't carry over (issue #945).
+  crate::settings_sync::prepare_account(settings, me.id);
   let me = StoredValue::new(me);
 
   Effect::new(move |_| {

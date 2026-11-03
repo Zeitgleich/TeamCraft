@@ -983,6 +983,10 @@ impl<C: ChatBackend + 'static> ChatBackend for Hybrid<C> {
     self.chat.settings_mark()
   }
 
+  fn key_bag_refused_mark(&self) -> u64 {
+    self.chat.key_bag_refused_mark()
+  }
+
   fn account_settings(&self) -> teamcraft_proto::synced_settings::SyncedSettings {
     self.chat.account_settings()
   }

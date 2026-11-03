@@ -65,6 +65,19 @@ pub fn remember_last_open(user: UserId, place: LastOpenPlace) {
   store_json(&last_open_key(user), &last);
 }
 
+/// The accounts that opened a conversation on this device, as their IDs in text. It tells who used
+/// the device before anything else recorded that.
+pub(crate) fn accounts_seen_on_device() -> Vec<String> {
+  let Some(storage) = local_storage() else {
+    return Vec::new();
+  };
+  let count = storage.length().unwrap_or(0);
+  (0..count)
+    .filter_map(|index| storage.key(index).ok().flatten())
+    .filter_map(|key| key.strip_prefix(KEY_LAST_OPEN_PREFIX).map(str::to_owned))
+    .collect()
+}
+
 fn last_open_key(user: UserId) -> String {
   format!("{KEY_LAST_OPEN_PREFIX}{user}")
 }

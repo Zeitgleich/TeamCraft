@@ -10,7 +10,7 @@
 use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
-use teamcraft_proto::synced_settings::{SyncedSettings, merge_settings};
+use teamcraft_proto::synced_settings::StoredSettings;
 use teamcraft_proto::{
   BackgroundId, Base64Bytes, ClientMessageId, ConversationId, MessageId, ThreadId, UserId,
 };
@@ -86,9 +86,10 @@ pub struct AccountData {
   pub maybe_recovery_key_set_at: Option<i64>,
   /// User settings that follow the account (issue #945), with their own merge rule: logical
   /// versions, no clock, and keys of newer clients are kept. An older app drops the field on
-  /// upload, and the next newer device puts it back.
-  #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-  pub settings: SyncedSettings,
+  /// upload, and the next newer device puts it back. An unreadable entry never fails the decoding
+  /// of the rest (e2ee.md §6.4).
+  #[serde(default, skip_serializing_if = "StoredSettings::is_empty")]
+  pub settings: StoredSettings,
 }
 
 /// When a device last left a conversation, and when it was last added back, in server times.
@@ -253,7 +254,7 @@ impl AccountData {
     self.maybe_recovery_key_set_at = self
       .maybe_recovery_key_set_at
       .max(other.maybe_recovery_key_set_at);
-    merge_settings(&mut self.settings, &other.settings);
+    self.settings.merge(&other.settings);
     self.forget_tombstones(now_ms);
   }
 
@@ -807,14 +808,15 @@ mod tests {
     #[test]
     fn they_merge_with_the_rest_of_the_account_data() {
       let mut mine = AccountData {
-        settings: entry("theme", "dark", 2, 1),
+        settings: entry("theme", "dark", 2, 1).into(),
         ..AccountData::default()
       };
       let theirs = AccountData {
         settings: entry("theme", "light", 3, 2)
           .into_iter()
           .chain(entry("from.a.newer.client", "x", 1, 2))
-          .collect(),
+          .collect::<SyncedSettings>()
+          .into(),
         ..AccountData::default()
       };
       mine.merge(&theirs, NOW);
@@ -825,12 +827,12 @@ mod tests {
     #[test]
     fn the_clock_of_the_merging_device_plays_no_part() {
       let theirs = AccountData {
-        settings: entry("theme", "light", 3, 2),
+        settings: entry("theme", "light", 3, 2).into(),
         ..AccountData::default()
       };
       for now_ms in [0, NOW, i64::MAX] {
         let mut mine = AccountData {
-          settings: entry("theme", "dark", 2, 1),
+          settings: entry("theme", "dark", 2, 1).into(),
           ..AccountData::default()
         };
         mine.merge(&theirs, now_ms);
@@ -842,7 +844,7 @@ mod tests {
     #[test]
     fn storage_is_stable_and_absent_settings_are_left_out() {
       let data = AccountData {
-        settings: entry("display.density", "compact", 3, 42),
+        settings: entry("display.density", "compact", 3, 42).into(),
         ..AccountData::default()
       };
       let bytes = data.to_bytes().unwrap();
@@ -862,13 +864,27 @@ mod tests {
     #[test]
     fn a_bag_from_an_older_app_does_not_take_the_settings_away() {
       let mut mine = AccountData {
-        settings: entry("theme", "dark", 2, 1),
+        settings: entry("theme", "dark", 2, 1).into(),
         ..AccountData::default()
       };
       let from_old_app = AccountData::from_bytes(br#"{"saved":{}}"#).unwrap();
       mine.merge(&from_old_app, NOW);
       assert_eq!(mine.settings["theme"].value, json!("dark"));
       assert_ne!(mine, from_old_app, "so the merging device uploads again");
+    }
+
+    /// Settings travel with keys and pins: a broken one must not take those down with it.
+    #[test]
+    fn a_broken_setting_leaves_the_rest_of_the_account_data_readable() {
+      let deep = format!("{}{}", "[".repeat(5000), "]".repeat(5000));
+      let text = format!(
+        r#"{{"group_epochs":{{"7":3}},"settings":{{"bad":{{"version":"x"}},"deep":{{"value":{deep},"version":1,"writer":"1"}},"theme":{{"value":"dark","version":1,"writer":"1"}}}}}}"#
+      );
+      let data = AccountData::from_bytes(text.as_bytes()).unwrap();
+      assert_eq!(data.group_epochs["7"], 3);
+      assert_eq!(data.settings["theme"].value, json!("dark"));
+      assert_eq!(data.settings.opaque_count(), 2);
+      assert_eq!(AccountData::from_bytes(&data.to_bytes().unwrap()).unwrap(), data);
     }
 
     const NOW: i64 = 1_800_000_000_000;

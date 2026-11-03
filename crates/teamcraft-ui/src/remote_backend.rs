@@ -1953,6 +1953,16 @@ impl ChatBackend for RemoteChat {
       .map_or(0, |live| live.marks.settings)
   }
 
+  fn key_bag_refused_mark(&self) -> u64 {
+    self
+      .mirror
+      .borrow()
+      .snapshot
+      .maybe_live
+      .as_ref()
+      .map_or(0, |live| live.marks.key_bag_refused)
+  }
+
   fn write_settings(&self, writes: Vec<teamcraft_proto::synced_settings::SettingWrite>) {
     self.act(ChatAction::WriteSettings { writes });
   }

@@ -697,24 +697,41 @@ fn DeviceRow(
 /// them first (`maybe_previous` is `None`), then only the ones that changed. A setting saved during
 /// a call (a camera picked in the call, the share options) must not reset the microphone, the
 /// camera or the device the call uses now.
+///
+/// The defaults for the next call wait while a call or its pre-join screen is open: they can change
+/// from another device (issue #945), and a running call must not lose its background blur or show
+/// a microphone state it doesn't have. Returns what was applied, to pass as `maybe_previous` next
+/// time, so a default that waited applies once the call is over. The caller re-runs on
+/// `call.phase`.
 pub fn apply_call_prefs(
   call: crate::calls::CallState,
   maybe_previous: Option<&CallPrefs>,
   calls: &CallPrefs,
-) {
+) -> CallPrefs {
   let is_new =
     |same: fn(&CallPrefs, &CallPrefs) -> bool| maybe_previous.is_none_or(|previous| !same(previous, calls));
-  if is_new(|a, b| a.start_muted == b.start_muted) {
-    call.is_mic_on.set(!calls.start_muted);
-  }
-  if is_new(|a, b| a.start_camera_off == b.start_camera_off) {
-    call.is_camera_on.set(!calls.start_camera_off);
-  }
-  if is_new(|a, b| a.mirror_self_view == b.mirror_self_view) {
-    call.mirror_self_view.set(calls.mirror_self_view);
-  }
-  if is_new(|a, b| a.background == b.background) {
-    call.effect.set(effect_from_slug(&calls.background));
+  let mut applied = calls.clone();
+  match maybe_previous {
+    Some(previous) if call.phase.get_untracked() != crate::calls::CallPhase::Idle => {
+      applied.start_muted = previous.start_muted;
+      applied.start_camera_off = previous.start_camera_off;
+      applied.mirror_self_view = previous.mirror_self_view;
+      applied.background = previous.background.clone();
+    },
+    _ => {
+      if is_new(|a, b| a.start_muted == b.start_muted) {
+        call.is_mic_on.set(!calls.start_muted);
+      }
+      if is_new(|a, b| a.start_camera_off == b.start_camera_off) {
+        call.is_camera_on.set(!calls.start_camera_off);
+      }
+      if is_new(|a, b| a.mirror_self_view == b.mirror_self_view) {
+        call.mirror_self_view.set(calls.mirror_self_view);
+      }
+      if is_new(|a, b| a.background == b.background) {
+        call.effect.set(effect_from_slug(&calls.background));
+      }
+    },
   }
   if is_new(|a, b| a.camera_id == b.camera_id) {
     call.camera_id.set(calls.camera_id.clone());
@@ -734,6 +751,7 @@ pub fn apply_call_prefs(
   if is_new(|a, b| a.screen_resolution == b.screen_resolution) {
     call.screen_resolution.set(calls.screen_resolution.clone());
   }
+  applied
 }
 
 /// Help & about: versions of the app and the server, debug info for a support request, the
@@ -1019,6 +1037,92 @@ mod tests {
       assert_eq!(call.camera_id.get_untracked(), "built-in");
       assert!(!call.is_mic_on.get_untracked(), "still muted");
       assert!(!call.is_camera_on.get_untracked(), "camera still off");
+    });
+  }
+
+  /// #945: the default background changed on another device must not strip the blur of a running
+  /// call, and the media layer must not hear of it.
+  #[test]
+  fn a_new_default_background_waits_for_the_end_of_the_call() {
+    let owner = leptos::prelude::Owner::new();
+    owner.with(|| {
+      let call = crate::calls::CallState::new();
+      let blurred = CallPrefs {
+        background: "blur-light".into(),
+        ..CallPrefs::default()
+      };
+      let applied = apply_call_prefs(call, None, &blurred);
+      let shown = call.effect.get_untracked();
+      call.phase.set(crate::calls::CallPhase::Active);
+      let none = CallPrefs {
+        background: "none".into(),
+        ..blurred.clone()
+      };
+      let applied = apply_call_prefs(call, Some(&applied), &none);
+      assert_eq!(
+        call.effect.get_untracked(),
+        shown,
+        "the running call keeps its blur"
+      );
+      let applied = apply_call_prefs(call, Some(&applied), &none);
+      assert_eq!(call.effect.get_untracked(), shown, "and on another run as well");
+
+      call.phase.set(crate::calls::CallPhase::Idle);
+      apply_call_prefs(call, Some(&applied), &none);
+      assert_eq!(
+        call.effect.get_untracked(),
+        effect_from_slug("none"),
+        "the next call has it"
+      );
+    });
+  }
+
+  /// #945: "start muted" from another device must not show the button as muted while the
+  /// microphone keeps sending.
+  #[test]
+  fn new_start_defaults_leave_the_running_call_as_it_is() {
+    for phase in [crate::calls::CallPhase::Active, crate::calls::CallPhase::PreJoin] {
+      let owner = leptos::prelude::Owner::new();
+      owner.with(|| {
+        let call = crate::calls::CallState::new();
+        let events = std::rc::Rc::new(std::cell::Cell::new(0));
+        let counted = events.clone();
+        call.set_handler(move |_| counted.set(counted.get() + 1));
+        let saved = CallPrefs::default();
+        let applied = apply_call_prefs(call, None, &saved);
+        call.phase.set(phase);
+        let changed = CallPrefs {
+          start_muted: true,
+          start_camera_off: true,
+          mirror_self_view: !saved.mirror_self_view,
+          ..saved.clone()
+        };
+        let applied = apply_call_prefs(call, Some(&applied), &changed);
+        assert!(call.is_mic_on.get_untracked(), "{phase:?}");
+        assert!(call.is_camera_on.get_untracked(), "{phase:?}");
+        assert_eq!(call.mirror_self_view.get_untracked(), saved.mirror_self_view);
+        assert_eq!(events.get(), 0, "nothing reaches the media layer");
+
+        call.phase.set(crate::calls::CallPhase::Idle);
+        apply_call_prefs(call, Some(&applied), &changed);
+        assert!(!call.is_mic_on.get_untracked(), "the next call starts muted");
+        assert!(!call.is_camera_on.get_untracked(), "and with the camera off");
+      });
+    }
+  }
+
+  #[test]
+  fn the_first_run_applies_the_defaults_whatever_the_phase() {
+    let owner = leptos::prelude::Owner::new();
+    owner.with(|| {
+      let call = crate::calls::CallState::new();
+      call.phase.set(crate::calls::CallPhase::PreJoin);
+      let muted = CallPrefs {
+        start_muted: true,
+        ..CallPrefs::default()
+      };
+      apply_call_prefs(call, None, &muted);
+      assert!(!call.is_mic_on.get_untracked());
     });
   }
 }

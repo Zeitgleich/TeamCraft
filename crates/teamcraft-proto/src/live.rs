@@ -26,6 +26,9 @@ pub struct LiveMarks {
   /// bag from the server once: only then it knows what the account holds.
   #[serde(default)]
   pub settings: u64,
+  /// The server refused this device's key bag as too large (once per run of the core).
+  #[serde(default)]
+  pub key_bag_refused: u64,
 }
 
 /// How far another member of a DM has read, from `read_receipt` events.

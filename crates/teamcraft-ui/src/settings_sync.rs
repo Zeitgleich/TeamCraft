@@ -21,14 +21,20 @@ use leptos::task::spawn_local;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use teamcraft_client_api::emoji_catalog::SkinTone;
-use teamcraft_client_api::settings_sync::{SettingBases, SyncedValues, reconcile};
+use teamcraft_client_api::failure::{ActionFailure, FailureKind};
+use teamcraft_client_api::settings_sync::{SettingBases, SyncedValues, hold_inherited, reconcile};
+use teamcraft_proto::ErrorCode;
 use teamcraft_proto::synced_settings::SyncedSettings;
 
+use crate::components::background_picker::{effect_from_slug, effect_slug};
+use crate::feedback::report_failure;
 use crate::i18n::Locale;
 use crate::model::{ConversationId, UserId};
 use crate::prefs::Preferences;
 use crate::remote_backend;
-use crate::settings::{SendMode, Settings, Theme, browser_locale, load_json, store_json};
+use crate::settings::{
+  SendMode, Settings, Theme, accounts_seen_on_device, browser_locale, load_json, store_json,
+};
 use crate::state::AppState;
 
 /// Where this device keeps what it last agreed on with the account. One account at a time, like the
@@ -37,6 +43,10 @@ const KEY_SYNC_STATE: &str = "teamcraft.settings_sync";
 /// How long the settings have to rest before they go to the core. A write re-encodes the account
 /// data and the next sync round encrypts and uploads the whole key bag.
 const WRITE_DEBOUNCE: Duration = Duration::from_millis(1500);
+/// A failed read of the account's settings is tried again after this long, doubling up to
+/// [`MAX_READ_RETRY`]; one timer at a time, and none once a read went through.
+const FIRST_READ_RETRY: Duration = Duration::from_secs(5);
+const MAX_READ_RETRY: Duration = Duration::from_secs(300);
 
 const KEY_THEME: &str = "theme";
 const KEY_LOCALE: &str = "locale";
@@ -44,6 +54,7 @@ const KEY_SEND_MODE: &str = "send_mode";
 const KEY_SHOW_JOIN_LEAVE: &str = "show_join_leave";
 const KEY_SKIN_TONE: &str = "emoji_skin_tone";
 const KEY_FAVORITE_ORDER: &str = "favorite_order";
+const KEY_BACKGROUND: &str = "calls.background";
 /// Synced settings outside [`Preferences`], which have signals of their own.
 const SYNCED_TOP_LEVEL: [&str; 6] = [
   KEY_THEME,
@@ -68,15 +79,20 @@ macro_rules! synced_prefs {
       }
     }
 
-    /// Sets a preference from the account; `false` if the value isn't one this build can read.
+    /// Sets a preference from the account; `false` if this build can't read the value. That
+    /// includes one it would read as something else: enums take unknown names as a catch-all, and a
+    /// value of a newer client must leave the local one in place.
     fn write_pref(prefs: &mut Preferences, key: &str, value: &Value) -> bool {
+      if !is_known_value(key, value) {
+        return false;
+      }
       match key {
         $($key => match serde_json::from_value(value.clone()) {
-          Ok(parsed) => {
+          Ok(parsed) if serde_json::to_value(&parsed).as_ref().ok() == Some(value) => {
             prefs.$($field).+ = parsed;
             true
           },
-          Err(_) => false,
+          _ => false,
         },)*
         _ => false,
       }
@@ -188,6 +204,8 @@ struct SettingsSync {
   newest_read: Cell<u64>,
   /// Only the last change of a burst goes out.
   newest_change: Cell<u64>,
+  /// How long the next retry of a failed read waits.
+  next_read_retry: Cell<Duration>,
 }
 
 /// Starts following the account: reads its settings whenever the core says they changed, and offers
@@ -200,7 +218,9 @@ pub fn start(state: AppState, settings: Settings) {
     maybe_sync_state: RefCell::new(None),
     newest_read: Cell::new(0),
     newest_change: Cell::new(0),
+    next_read_retry: Cell::new(FIRST_READ_RETRY),
   });
+  tell_when_key_bag_is_refused(state);
   let mark = Memo::new(move |_| state.read(|backend| backend.settings_mark()));
   let reader = sync.clone();
   Effect::new(move |_| {
@@ -227,18 +247,40 @@ impl SettingsSync {
     self.newest_read.set(ticket);
     let sync = self.clone();
     spawn_local(async move {
-      match remote_backend::account_settings().await {
-        // async-ok: a Cell the task owns, not a signal
-        Ok(account) if sync.newest_read.get() == ticket => {
+      let outcome = remote_backend::account_settings().await;
+      // async-ok: a Cell the task owns, not a signal
+      if sync.newest_read.get() != ticket {
+        return;
+      }
+      match outcome {
+        Ok(account) => {
+          sync.next_read_retry.set(FIRST_READ_RETRY); // async-ok: a Cell, not a signal
           *sync.maybe_account.borrow_mut() = Some(account);
           sync.reconcile_now();
         },
-        Ok(_) => {},
-        // The next change of the mark, or of a setting, reads again. Nothing is lost: changes wait
-        // in the settings until the three-way merge sees them.
-        Err(error) => tracing::debug!(%error, "account settings not read"),
+        Err(error) => {
+          tracing::warn!(%error, "account settings not read, trying again");
+          sync.plan_read_retry(ticket);
+        },
       }
     });
+  }
+
+  /// Changes wait in the settings until the three-way merge sees them, so a failed read loses
+  /// nothing; it only must not stay the last word. A newer read makes this one moot.
+  fn plan_read_retry(self: &Rc<Self>, ticket: u64) {
+    let wait = self.next_read_retry.get(); // async-ok: a Cell, not a signal
+    self.next_read_retry.set(next_retry(wait)); // async-ok: a Cell, not a signal
+    let sync = self.clone();
+    set_timeout(
+      move || {
+        // async-ok: a Cell the timer owns, not a signal
+        if sync.state.is_alive() && sync.newest_read.get() == ticket {
+          sync.read_account();
+        }
+      },
+      wait,
+    );
   }
 
   fn plan_write(self: &Rc<Self>) {
@@ -263,9 +305,6 @@ impl SettingsSync {
     let Some(account) = account_guard.as_ref() else {
       return;
     };
-    let Some(user) = self.state.try_read(|backend| backend.me().id) else {
-      return;
-    };
     let Some(mut local) = LocalValues::capture(self.settings) else {
       return;
     };
@@ -274,7 +313,6 @@ impl SettingsSync {
     let sync_state =
       sync_state_guard.get_or_insert_with(|| load_json::<SyncState>(KEY_SYNC_STATE).unwrap_or_default());
     let stored_state = sync_state.clone();
-    prepare_for_user(&mut local, sync_state, user);
     let writes = reconcile(&mut local, account, &mut sync_state.bases);
     if local != before {
       local.apply(self.settings);
@@ -288,15 +326,77 @@ impl SettingsSync {
   }
 }
 
+/// Call when an account opens, before anything shows or applies its settings.
+pub fn prepare_account(settings: Settings, user: UserId) {
+  let mut sync_state = load_json::<SyncState>(KEY_SYNC_STATE).unwrap_or_default();
+  if sync_state.maybe_user == Some(user) {
+    return;
+  }
+  let Some(mut local) = LocalValues::capture(settings) else {
+    return;
+  };
+  let before = local.clone();
+  begin_account(&mut local, &mut sync_state, user, &accounts_seen_on_device());
+  if local != before {
+    local.apply(settings);
+  }
+  store_json(KEY_SYNC_STATE, &sync_state);
+}
+
 /// Another account's settings don't carry over: its synced values go back to the defaults, and this
-/// account's are taken from the account as on a new install. A first run after the update has no
-/// owner on record and keeps what the device has.
-fn prepare_for_user(local: &mut LocalValues, sync_state: &mut SyncState, user: UserId) {
-  if sync_state.maybe_user.is_some_and(|known| known != user) {
-    local.reset();
-    sync_state.bases.clear();
+/// account's come from the account, as on a new install.
+///
+/// With no owner on record (the first run after the update, or a new install), settings found on
+/// the device are only offered to this account if it is the only one known to have used the device.
+/// Otherwise they might be somebody else's keywords, on their way into this account's key bag; they
+/// stay on the device as they are, as before the update, until the user changes them.
+fn begin_account(
+  local: &mut LocalValues,
+  sync_state: &mut SyncState,
+  user: UserId,
+  accounts_seen: &[String],
+) {
+  match sync_state.maybe_user {
+    Some(_) => {
+      local.reset();
+      sync_state.bases.clear();
+    },
+    None => {
+      if accounts_seen != [user.to_string()] {
+        hold_inherited(local, &mut sync_state.bases);
+      }
+    },
   }
   sync_state.maybe_user = Some(user);
+}
+
+/// A failed key bag upload means the keys aren't backed up, and no retry can help until something
+/// is removed: said once per refusal mark the core records, not on every start.
+fn tell_when_key_bag_is_refused(state: AppState) {
+  let mark = Memo::new(move |_| state.read(|backend| backend.key_bag_refused_mark()));
+  Effect::new(move |previous: Option<u64>| {
+    let current = mark.get();
+    if previous.is_some_and(|previous| previous != current) {
+      report_failure(ActionFailure::new(
+        FailureKind::Server(ErrorCode::PayloadTooLarge),
+        "the server refuses the key bag as too large",
+      ));
+    }
+    current
+  });
+}
+
+fn next_retry(wait: Duration) -> Duration {
+  wait.saturating_mul(2).min(MAX_READ_RETRY)
+}
+
+/// Checks that strings can't express in their type. A background is a free-form slug, and an
+/// unknown one would read as no background at all.
+fn is_known_value(key: &str, value: &Value) -> bool {
+  key != KEY_BACKGROUND
+    || value
+      .as_str()
+      .is_some_and(|slug| effect_slug(effect_from_slug(slug)) == slug)
 }
 
 impl LocalValues {
@@ -496,6 +596,31 @@ mod tests {
       assert_eq!(local, values());
     }
 
+    /// A background is a plain string, so the type doesn't refuse an unknown one; it would read as
+    /// no background.
+    #[test]
+    fn an_unknown_background_keeps_the_local_one() {
+      let mut local = values();
+      local.prefs.calls.background = "blur-light".to_owned();
+      assert!(!local.adopt(KEY_BACKGROUND, &json!("blur-from-the-future")));
+      assert!(!local.adopt(KEY_BACKGROUND, &json!(7)));
+      assert_eq!(local.prefs.calls.background, "blur-light");
+      assert!(local.adopt(KEY_BACKGROUND, &json!("none")));
+      assert_eq!(local.prefs.calls.background, "none");
+    }
+
+    /// Enums with a catch-all take any name; a sound setting of a newer client isn't "all".
+    #[test]
+    fn a_value_the_catch_all_would_swallow_keeps_the_local_one() {
+      let mut local = values();
+      local.prefs.calls.status_sounds = teamcraft_client_api::calls::CallStatusSounds::Off;
+      assert!(!local.adopt("calls.status_sounds", &json!("only_on_tuesdays")));
+      assert_eq!(
+        local.prefs.calls.status_sounds,
+        teamcraft_client_api::calls::CallStatusSounds::Off
+      );
+    }
+
     #[test]
     fn stored_names_stay_stable() {
       let mut local = values();
@@ -562,12 +687,10 @@ mod tests {
 
     #[test]
     fn its_synced_settings_dont_carry_over() {
-      let mut local = values();
-      local.theme = Theme::Dark;
-      local.prefs.notifications.keywords = vec!["private".to_owned()];
+      let mut local = customized();
       local.prefs.display.zoom = Zoom::from_percent(150);
       let mut state = state_of(1);
-      prepare_for_user(&mut local, &mut state, user(2));
+      begin_account(&mut local, &mut state, user(2), &[]);
       assert_eq!(local.theme, Theme::System);
       assert!(local.prefs.notifications.keywords.is_empty());
       assert_eq!(local.prefs.display.zoom.percent(), 150, "the device's own stay");
@@ -576,22 +699,71 @@ mod tests {
     }
 
     #[test]
-    fn the_same_account_keeps_everything() {
-      let mut local = values();
-      local.theme = Theme::Dark;
+    fn nothing_of_the_other_account_reaches_this_one() {
+      let mut local = customized();
       let mut state = state_of(1);
-      prepare_for_user(&mut local, &mut state, user(1));
-      assert_eq!(local.theme, Theme::Dark);
-      assert_eq!(state.bases.len(), 1);
+      begin_account(&mut local, &mut state, user(2), &[]);
+      assert!(reconcile(&mut local, &SyncedSettings::new(), &mut state.bases).is_empty());
     }
 
-    #[test]
-    fn the_first_run_after_the_update_keeps_what_the_device_has() {
+    mod no_owner_on_record {
+      use super::*;
+
+      /// The old build recorded no owner: somebody else used this browser, and this account comes
+      /// first after the update.
+      #[test]
+      fn with_another_account_seen_nothing_is_seeded_and_the_device_stays() {
+        let mut local = customized();
+        let mut state = SyncState::default();
+        begin_account(&mut local, &mut state, user(2), &["1".to_owned()]);
+        assert_eq!(local.theme, Theme::Dark);
+        assert!(reconcile(&mut local, &SyncedSettings::new(), &mut state.bases).is_empty());
+        assert_eq!(local.prefs.notifications.keywords, ["private"]);
+      }
+
+      #[test]
+      fn with_several_accounts_seen_nothing_is_seeded() {
+        let mut local = customized();
+        let mut state = SyncState::default();
+        begin_account(&mut local, &mut state, user(2), &["1".to_owned(), "2".to_owned()]);
+        assert!(reconcile(&mut local, &SyncedSettings::new(), &mut state.bases).is_empty());
+      }
+
+      #[test]
+      fn with_nobody_seen_nothing_is_seeded() {
+        let mut local = customized();
+        let mut state = SyncState::default();
+        begin_account(&mut local, &mut state, user(2), &[]);
+        assert!(reconcile(&mut local, &SyncedSettings::new(), &mut state.bases).is_empty());
+      }
+
+      /// The issue's case: the only account of this browser takes its setup along.
+      #[test]
+      fn with_only_this_account_seen_its_settings_are_offered() {
+        let mut local = customized();
+        let mut state = SyncState::default();
+        begin_account(&mut local, &mut state, user(2), &["2".to_owned()]);
+        let writes = reconcile(&mut local, &SyncedSettings::new(), &mut state.bases);
+        assert_eq!(writes.len(), 2, "{writes:?}");
+      }
+
+      #[test]
+      fn a_change_by_the_user_afterwards_is_theirs() {
+        let mut local = customized();
+        let mut state = SyncState::default();
+        begin_account(&mut local, &mut state, user(2), &["1".to_owned()]);
+        local.theme = Theme::Light;
+        let writes = reconcile(&mut local, &SyncedSettings::new(), &mut state.bases);
+        assert_eq!(writes.len(), 1, "the keywords stay back: {writes:?}");
+        assert_eq!(writes[0].key, KEY_THEME);
+      }
+    }
+
+    fn customized() -> LocalValues {
       let mut local = values();
       local.theme = Theme::Dark;
-      let mut state = SyncState::default();
-      prepare_for_user(&mut local, &mut state, user(1));
-      assert_eq!(local.theme, Theme::Dark);
+      local.prefs.notifications.keywords = vec!["private".to_owned()];
+      local
     }
 
     fn state_of(raw: i64) -> SyncState {
@@ -602,6 +774,7 @@ mod tests {
           SettingBase {
             value: json!("dark"),
             maybe_stamp: None,
+            is_held: false,
           },
         )]
         .into(),
@@ -611,6 +784,12 @@ mod tests {
     fn user(raw: i64) -> UserId {
       UserId::from_snowflake(Snowflake::new(raw).unwrap())
     }
+  }
+
+  #[test]
+  fn read_retries_back_off_up_to_a_limit() {
+    assert_eq!(next_retry(FIRST_READ_RETRY), Duration::from_secs(10));
+    assert_eq!(next_retry(MAX_READ_RETRY), MAX_READ_RETRY);
   }
 
   fn values() -> LocalValues {

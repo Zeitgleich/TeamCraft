@@ -6,6 +6,8 @@
 
 use crate::common;
 
+use std::time::Duration;
+
 use common::{Peer, link_device, settle};
 use serde_json::{Value, json};
 use teamcraft_client_api::backend::ChatBackend;
@@ -13,6 +15,7 @@ use teamcraft_core::api::fake::FakeServer;
 use teamcraft_core::clock::ManualClock;
 use teamcraft_core::error::CoreError;
 use teamcraft_core::ui_backend::{CoreChatBackend, CoreCommand};
+use teamcraft_core::upkeep::Upkeep;
 use teamcraft_proto::synced_settings::{
   MAX_SYNCED_SETTINGS_BYTES, SEED_VERSION, SettingWrite, SettingWriteKind,
 };
@@ -265,6 +268,70 @@ async fn writing_the_same_value_again_does_not_upload() {
     !phone.client.is_key_bag_dirty(),
     "a repeated write costs no key bag"
   );
+}
+
+/// Written straight into the bag, as a device with a bug would: keys and pins go on regardless.
+#[tokio::test]
+async fn a_broken_entry_in_the_key_bag_does_not_stop_the_sync() {
+  let server = FakeServer::new();
+  let mut phone = Peer::enroll(&server, "Alice").await;
+  let mut laptop = link_device(&mut phone).await;
+  let mut data = phone.client.account_data();
+  data.settings =
+    serde_json::from_str(r#"{"bad":{"version":"x"},"theme":{"value":"dark","version":1,"writer":"1"}}"#)
+      .unwrap();
+  phone
+    .client
+    .update_account_data(|stored, _now| {
+      *stored = data;
+      true
+    })
+    .unwrap();
+  phone.client.sync_account_data().await.unwrap();
+
+  laptop.sync_account_data().await.unwrap();
+
+  let on_laptop = laptop.account_data().settings;
+  assert_eq!(on_laptop["theme"].value, json!("dark"));
+  assert_eq!(on_laptop.opaque_count(), 1, "kept for whoever can read it");
+  laptop
+    .write_synced_settings(&[change("density", json!("compact"))])
+    .unwrap();
+  laptop.sync_account_data().await.unwrap();
+  phone.client.sync_account_data().await.unwrap();
+  assert_eq!(
+    phone.client.account_data().settings["density"].value,
+    json!("compact")
+  );
+  assert_eq!(phone.client.account_data().settings.opaque_count(), 1);
+}
+
+/// #945: more account data can take the bag over the server's limit, and then keys aren't backed up
+/// either. The user hears of it once per run, not on every retry.
+#[tokio::test]
+async fn a_key_bag_the_server_refuses_is_told_once_until_it_goes_through() {
+  let server = FakeServer::new();
+  let mut phone = Peer::enroll(&server, "Alice").await;
+  let backend = backend_of(&phone);
+  // Retries on every tick.
+  let mut upkeep = Upkeep::new(Duration::ZERO);
+  phone.client.sync_account_data().await.unwrap();
+  server.limit_key_bags(Some(1));
+  phone
+    .client
+    .write_synced_settings(&[change("theme", json!("dark"))])
+    .unwrap();
+  assert_eq!(backend.key_bag_refused_mark(), 0);
+
+  assert!(upkeep.tick(&mut phone.client).await, "the UI reads the mark");
+  assert_eq!(backend.key_bag_refused_mark(), 1);
+  assert!(phone.client.is_key_bag_dirty(), "still waiting for upload");
+  assert!(!upkeep.tick(&mut phone.client).await);
+  assert_eq!(backend.key_bag_refused_mark(), 1, "a retry says nothing new");
+
+  server.limit_key_bags(None);
+  phone.client.sync_account_data().await.unwrap();
+  assert!(!phone.client.is_key_bag_dirty());
 }
 
 fn change(key: &str, value: Value) -> SettingWrite {

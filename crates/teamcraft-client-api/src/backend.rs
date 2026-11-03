@@ -462,6 +462,10 @@ pub trait ChatBackend {
   fn settings_mark(&self) -> u64 {
     0
   }
+  /// Moves when the server refused this device's key bag as too large; the UI says so.
+  fn key_bag_refused_mark(&self) -> u64 {
+    0
+  }
   /// The settings that follow the account (encrypted, e2ee.md §6.4), with keys of newer clients.
   fn account_settings(&self) -> SyncedSettings {
     SyncedSettings::new()

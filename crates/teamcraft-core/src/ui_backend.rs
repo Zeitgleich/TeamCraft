@@ -2284,10 +2284,15 @@ impl<S: LocalStore> ChatBackend for CoreChatBackend<S> {
     self.read(crate::read_state::marks(&self.store)).settings
   }
 
+  fn key_bag_refused_mark(&self) -> u64 {
+    self.read(crate::read_state::marks(&self.store)).key_bag_refused
+  }
+
   fn account_settings(&self) -> SyncedSettings {
     self
       .read(crate::client::stored_account_data(&self.store))
       .settings
+      .entries
   }
 
   fn write_settings(&self, writes: Vec<SettingWrite>) {

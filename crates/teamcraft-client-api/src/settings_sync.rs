@@ -22,6 +22,10 @@ pub struct SettingBase {
   /// `None` until the account's copy of this device's first value is read back.
   #[serde(rename = "stamp", default, skip_serializing_if = "Option::is_none")]
   pub maybe_stamp: Option<SettingStamp>,
+  /// Found on the device when nobody could tell whose it is ([`hold_inherited`]): it stays here and
+  /// isn't offered to the account, unless the user changes it.
+  #[serde(rename = "held", default, skip_serializing_if = "std::ops::Not::not")]
+  pub is_held: bool,
 }
 
 /// The settings of this device that follow the account.
@@ -37,6 +41,27 @@ pub trait SyncedValues {
   fn adopt(&mut self, key: &str, value: &Value) -> bool;
 }
 
+/// Marks every customized value as held: the device stays as it is, but nothing goes to the account.
+/// For values whose owner isn't known, since a value in the account's key bag follows that account
+/// to all its devices, and keywords are private.
+pub fn hold_inherited(local: &impl SyncedValues, bases: &mut SettingBases) {
+  for key in local.keys() {
+    if local.is_default(key) {
+      continue;
+    }
+    if let Some(value) = local.read(key) {
+      bases.insert(
+        key.to_owned(),
+        SettingBase {
+          value,
+          maybe_stamp: None,
+          is_held: true,
+        },
+      );
+    }
+  }
+}
+
 /// Brings `local` and `bases` up to date with the account's `account` and returns what the account
 /// has to take from this device. Safe to run at any time and again with the same input; a write
 /// that was lost is simply sent again.
@@ -49,6 +74,7 @@ pub trait SyncedValues {
 ///   until somebody changes the setting on purpose; then that change applies everywhere.
 /// - A customized setting the account has none of becomes a seed. Seeds never replace a value a
 ///   device already has, so two existing installs don't overwrite each other.
+/// - A held value ([`hold_inherited`]) acts as customized, but never becomes a seed.
 pub fn reconcile(
   local: &mut impl SyncedValues,
   account: &SyncedSettings,
@@ -82,6 +108,7 @@ pub fn reconcile(
         kind: SettingWriteKind::Change,
       }),
       Some(base) if base.maybe_stamp == Some(stamp) => {},
+      Some(base) if base.is_held => settle(bases, key, mine, stamp),
       Some(_) => {
         // Seeds compete for the first upload; none of them is a change the user made since.
         let is_taken = entry.version != SEED_VERSION && local.adopt(key, &entry.value);
@@ -101,14 +128,17 @@ fn seed_for_empty_account(
   mine: Value,
   bases: &mut SettingBases,
 ) -> Option<SettingWrite> {
-  if !bases.contains_key(key) && local.is_default(key) {
-    return None;
+  match bases.get(key) {
+    None if local.is_default(key) => return None,
+    Some(base) if base.is_held && base.value == mine => return None,
+    _ => {},
   }
   bases.insert(
     key.to_owned(),
     SettingBase {
       value: mine.clone(),
       maybe_stamp: None,
+      is_held: false,
     },
   );
   Some(SettingWrite {
@@ -124,6 +154,7 @@ fn settle(bases: &mut SettingBases, key: &str, value: Value, stamp: SettingStamp
     SettingBase {
       value,
       maybe_stamp: Some(stamp),
+      is_held: false,
     },
   );
 }
@@ -221,6 +252,53 @@ mod tests {
       assert_eq!(writes[0].kind, SettingWriteKind::Change);
       assert_eq!(writes[0].value, json!(DEFAULT));
       assert_eq!(phone.value("theme"), json!(DEFAULT));
+    }
+  }
+
+  mod held_values {
+    use super::*;
+
+    #[test]
+    fn nothing_held_goes_to_the_account() {
+      let mut device = held_device();
+      assert!(device.sync(&SyncedSettings::new()).is_empty());
+      assert!(device.sync(&SyncedSettings::new()).is_empty());
+      assert_eq!(device.value("theme"), json!("dark"), "the device stays as it is");
+    }
+
+    #[test]
+    fn a_change_by_the_user_is_theirs_and_goes_out() {
+      let mut device = held_device();
+      device.sync(&SyncedSettings::new());
+      device.set("theme", "light");
+      let writes = device.sync(&SyncedSettings::new());
+      assert_eq!(writes.len(), 1);
+      assert_eq!(writes[0].value, json!("light"));
+    }
+
+    #[test]
+    fn the_account_doesnt_replace_a_held_value_at_first_but_later_changes_do() {
+      let mut device = held_device();
+      let writes = device.sync(&account_with("theme", "light", 3, 9));
+      assert!(writes.is_empty());
+      assert_eq!(device.value("theme"), json!("dark"));
+      device.sync(&account_with("theme", "sepia", 4, 9));
+      assert_eq!(device.value("theme"), json!("sepia"));
+    }
+
+    #[test]
+    fn a_default_value_is_not_held_and_takes_the_account() {
+      let mut device = held_device();
+      device.sync(&account_with("density", "compact", 1, 9));
+      assert_eq!(device.value("density"), json!("compact"));
+    }
+
+    fn held_device() -> Device {
+      let mut device = Device::new(2).with("theme", "dark");
+      let mut bases = SettingBases::new();
+      hold_inherited(&device, &mut bases);
+      device.bases = bases;
+      device
     }
   }
 
@@ -357,6 +435,7 @@ mod tests {
         SettingBase {
           value: json!("dark"),
           maybe_stamp: None,
+          is_held: true,
         },
       );
       bases.insert(
@@ -367,12 +446,13 @@ mod tests {
             version: 2,
             writer: device(7),
           }),
+          is_held: false,
         },
       );
       let encoded = serde_json::to_string(&bases).unwrap();
       assert_eq!(
         encoded,
-        r#"{"density":{"value":"compact","stamp":{"version":2,"writer":"7"}},"theme":{"value":"dark"}}"#
+        r#"{"density":{"value":"compact","stamp":{"version":2,"writer":"7"}},"theme":{"value":"dark","held":true}}"#
       );
       assert_eq!(serde_json::from_str::<SettingBases>(&encoded).unwrap(), bases);
     }
