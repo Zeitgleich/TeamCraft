@@ -1610,8 +1610,8 @@ its group with the admin in, unannounced (§4.6.2, finding 2).
 
 ### 4.6.2 Signed membership commits (issue #878, design for review)
 
-**Status: design, not implemented.** Nothing below is in the code. It needs the owner's decisions
-(D1 to D6, at the end) and a crypto review first. It extends stage 2 (§4.6.1), which restricts only
+**Status: design, not implemented.** Nothing below is in the code. The owner has decided D1 to D6 (at
+the end); it needs a crypto review first. It extends stage 2 (§4.6.1), which restricts only
 the addition of a workspace admin under `owner_approval`. Everything else in a channel still follows
 §4.6: every member of the group may sign membership changes (security review A11).
 
@@ -1819,9 +1819,9 @@ before anybody else was in it, not who created the channel. The space half is un
 - A device that fell out and whose user takes a member's word after the wait can be brought into a
   tree nobody authorized. It shows who is in it first.
 
-**Decisions for the owner.** Each with the recommendation; the design above assumes it.
+**The owner's decisions.** The owner chose the middle column for all six; the design above assumes it.
 
-| No. | Decision                                                                | Recommendation                                                                                                                                                  | Alternatives                                                                                                |
+| No. | Decision                                                                | Chosen                                                                                                                                                          | Alternatives                                                                                                |
 |-----|-------------------------------------------------------------------------|-----------------------------------------------------------------------------------------------------------------------------------------------------------------|-------------------------------------------------------------------------------------------------------------|
 | D1  | What moderators may do                                                  | Remove plain members; add nobody. Whether a target is a workspace admin is roster data, which devices can see differently, and adding is what discloses content | The built-in scheme's add and remove (then `owner_approval` can't hold against a moderator); nothing at all |
 | D2  | Space admins and holders of a custom scheme                             | No commit rights from those: they aren't signed. Whoever needs them gets a signed channel role. Opting in lists who loses what                                  | Refuse to opt in where a scheme grants `manage_members`; sign the schemes (much larger)                     |
