@@ -223,7 +223,9 @@ reads "Request access again" and is gone once the admin is in. That is allowed, 
   owners) is the server's record until channel roles are signed (issues #380, #801), so a hostile
   server can let any member add an admin. And an admin outside the channel can still add somebody
   who isn't an admin (§2.2), who can then add an admin as a member: each step is a signed addition
-  members verify, and the line of §2.4.2 names who let the admin in, but neither is refused.
+  members verify, and the line of §2.4.2 names who let the admin in, but neither is refused. A refusal
+  under `owner_approval` doesn't hold against a modified client either; the design that closes these
+  per channel is e2ee.md §4.6.2 (issue #878), not implemented.
 - **Members on older versions.** Clients before 1.0.9 still commit another admin's addition of an
   admin whatever the setting says. A member on 1.0.9 or later refuses that commit like any it
   can't verify, falls out of the group, asks to be added back and is added back into it, with the

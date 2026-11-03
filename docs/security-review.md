@@ -249,7 +249,7 @@ Rollback below an applied version is prevented (lines 145-148 and 182-185). That
 
 **Location:** `crates/teamcraft-core/src/trust.rs:78-80`. This is documented at lines 23-24 as a gap: "signed per-channel roles aren't in the roster yet". Any single member can add arbitrary users with full history, or remove anyone, which amplifies #3 and #8. It matches the stated interim design. Track it so it is closed before release.
 
-**Status: partly addressed** (issue #380). Channel roles are a signed, chained log per channel that every member verifies (e2ee.md §4.6.1, `teamcraft-core::channel_roles`). Commits don't depend on them yet: every group member may still sign membership changes until channels from before signed roles are signed, so legitimate admins aren't locked out and older clients don't split from the group.
+**Status: partly addressed** (issue #380). Channel roles are a signed, chained log per channel that every member verifies (e2ee.md §4.6.1, `teamcraft-core::channel_roles`). Commits don't depend on them yet: every group member may still sign membership changes until channels from before signed roles are signed, so legitimate admins aren't locked out and older clients don't split from the group. The design for closing it per channel is e2ee.md §4.6.2 (issue #878), not implemented.
 
 #### 12. Low: org recovery shares are sealed to device keys whose device ID is not bound
 

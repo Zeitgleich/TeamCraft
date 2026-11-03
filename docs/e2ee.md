@@ -1591,7 +1591,8 @@ workspace roster (admin.md §2.3):
   may sign membership changes (security review A11), since custom permission schemes and space
   admins are not signed facts and would be locked out. Integration sources still need a workspace
   admin (§13.1). Both are tracked as follow-ups of #380 (restricting commits further, signed
-  channel admins as source admins; a withheld demotion is tracked there as well).
+  channel admins as source admins; a withheld demotion is tracked there as well). The design for
+  restricting commits is §4.6.2 (issue #878), not implemented.
 - **Workspace admins and channel admins.** `role_rules` lets a workspace admin of the fresh roster
   sign any snapshot, so a workspace admin can appoint a channel admin who then approves a workspace
   admin's join. This is kept on purpose: orphaned channels need it (admin.md §2.5); a policy switch for it is tracked as a follow-up.
@@ -1603,7 +1604,253 @@ roles they hold shown as not signed). A demotion the server withholds is noticed
 heads members exchange; channel roles have no freshness window like the roster's. A device that
 verifies a log from scratch judges a workspace admin's old entry by the roster it has now, so an
 entry by an admin who lost the role since is skipped there (and the entries built on it) until a
-workspace admin signs a checkpoint.
+workspace admin signs a checkpoint. The stage 2 rule holds only against honest clients: a member who
+commits an admin's addition anyway is refused by every honest device, and then adds them all back into
+its group with the admin in, unannounced (§4.6.2, finding 2).
+
+### 4.6.2 Signed membership commits (issue #878, design for review)
+
+**Status: design, not implemented.** Nothing below is in the code. It needs the owner's decisions
+(D1 to D6, at the end) and a crypto review first. It extends stage 2 (§4.6.1), which restricts only
+the addition of a workspace admin under `owner_approval`. Everything else in a channel still follows
+§4.6: every member of the group may sign membership changes (security review A11).
+
+**Why stage 2's rule can't simply be widened.** Four things in today's code:
+
+1. **Devices judge from different data.** The rule reads this device's copy of the role log,
+   `role_state.is_signed()` being its switch. The log isn't ordered against the group's epochs, and
+   the server decides who sees which entry. So the server can make the rule apply on one device and
+   not on another, or let one device see a promotion another doesn't. Stage 2 lives with this for
+   one rare commit. Applied to every addition and removal, one withheld entry splits the group.
+2. **A refusal isn't final.** A device that refuses a commit skips it, sees later entries, falls out
+   and asks to be added back; any member's welcome then brings it back, with the refused change in
+   its tree (§4.6, "Falling out and coming back"). If every honest member refuses a malicious
+   member's commit, that member is the only one left to answer. Everybody returns to a group holding
+   the person they refused, and no line tells them, because nobody merged the addition (admin.md
+   §2.4). This holds for stage 2 today. Widening the rule as it stands would be worse than no rule:
+   today members merge such a commit and at least see who added whom.
+3. **The server takes a commit from any member.** `POST …/mls/commit` checks that the caller is a
+   member with their own device, not `manage_members`, since a member commits on behalf of admins
+   who aren't members (admin.md §2.2). It can't read who signed. So a member with a modified client
+   needs no hostile server to place a commit that removes somebody; it takes one only to get a welcome to
+   somebody the server doesn't list.
+4. **A commit from a group a member founded alone is not an authorization failure.** A member can
+   found a new group under the same ID and post its commit for the current epoch (the mechanism of
+   "Re-founding the notes"). Members fail on it with a decryption error, fall out, ask, and that
+   member answers: a way around any rule that only judges commits it can read.
+
+**What it guarantees.** In a channel that opted in: no honest device rotates keys to, shares keys with
+or counts as a member anybody whom a person without the right added, and nobody without the right
+takes a person out for honest devices. It doesn't stop a member from passing on what they can read:
+no group can. It doesn't help against a real channel admin acting badly or a stolen device of one;
+that is who the rule trusts, and the line names them.
+
+**The switch and the roles live in the group context.** MLS makes every member of an epoch agree on
+exactly one thing besides the tree: the group context, which goes into the key schedule. So a device
+that holds another context than the others can't read the epoch at all. A device can't be in an
+epoch and not know the rule, and no server can show two versions of it.
+
+- A private-use **group context extension** (RFC 9420 §17.3) holds the format version, the role log's
+  version and entry hash, and the channel's admins and moderators, each with their identity key, at
+  most `max_strict_roles` (client, 64) since it travels in every welcome and `GroupInfo`.
+- The extension present means **strict**, absent means §4.6. Nothing else switches it: not the role
+  log, not a server field. A server may get a hint for the UI; no decision reads it.
+- The same `required_capabilities` extension names it, so openmls refuses any leaf that doesn't announce
+  it: in the commit that turns it on, and in every later addition. That is the answer to older clients
+  (below).
+- Only channels. A DM, meeting chat or the notes never gets it, and a public channel can't take it
+  (§4.7, below).
+
+**Who may do what.** The verdict reads the context, the tree and the signed change, nothing the server
+says, so every member decides alike. For a channel role it is a pure function:
+
+| Signer                                         | Add a user | Remove a member | Remove a moderator or admin | Remove another's device | Own removal, own devices |
+|------------------------------------------------|------------|-----------------|-----------------------------|-------------------------|--------------------------|
+| Channel admin in the tree                      | yes        | yes             | yes                         | yes                     | yes                      |
+| Moderator in the tree (D1)                     | no         | yes             | no                          | no                      | yes                      |
+| Member, guest, space admin, scheme holder (D2) | no         | no              | no                          | no                      | yes                      |
+| Workspace owner or admin, in the group or not  | see below  | yes             | yes                         | yes                     | yes                      |
+| A user outside the group                       | no         | no              | no                          | no                      | –                        |
+
+- **A role counts only with a leaf.** The signing device must have a leaf in the tree with the signing
+  key in its certificate, and that certificate must verify against the key the context names. So an
+  admin who left has no authority, and a revoked device loses it with its leaf, without a look at a
+  device list the server could hold back.
+- **Workspace signers** keep §4.6: any change for the members to commit, except bringing a workspace
+  admin in against `admin_self_join` (#816). This is the one part that isn't in the context, since the
+  roster and the policy aren't. A device reads the roster before it judges such a signer (only then,
+  one request), so lag costs a read. A failed read holds the entry back and tries again; the entry
+  isn't refused for a network error. The commit's authenticated data is readable before anything is
+  decrypted, so the handshake key isn't spent. The import account (§4.10) joins as such a signer.
+- **Leaving is always allowed.** `RemoveUser` of oneself, signed by any of the user's devices, also one
+  that isn't in the group, and `RemoveDevice` of one's own device. Nobody is ever held in a group, the
+  last admin included; the honest server's `last_channel_admin` check stays in front of that.
+- **A device's further devices don't change.** Unsigned additions, external commits and add-backs of
+  a user already in the group stay as in §4.6: they change nobody's membership. Their leaf must announce
+  the capability, so an old app of a member can't join and is told to update; the user's other devices
+  go on.
+- **No self-add.** The public channel exception reads the server's word, so a strict channel doesn't
+  have it. Converting to public (§4.7) needs strict turned off first, which is signed.
+- **The server's word is out.** The checks that read it (`is_guest`, `for_public_channel`,
+  `maybe_vouched_in_meeting`) don't apply in strict channels: guests hold no signed role, and who
+  committed a signed change doesn't matter, only who signed it.
+- **The server's roles can only refuse more.** An honest server still checks `manage_members` before
+  its own step. The app offers an action only if both allow it, so nobody gets an error after the click
+  (admin.md §1.1).
+
+**Turning it on.** Off by default, per channel, and only for a private channel.
+
+1. A workspace owner or admin asks (D3), in the channel's settings or the console.
+2. Devices of this version answer with a signed "ready" in the group's queue, like a device-add
+   request. Nothing changes yet and older clients pass over both. The asker's app lists whoever hasn't answered: "3 devices
+   are on an older version or haven't been online", with removing a stale device on offer.
+3. Once all have answered, each device refreshes its leaf to announce the capability: an empty commit,
+   ranked like any commit (`device_add_stagger`). Today's clients refuse an empty commit
+   (`MissingSignedChange`), which is why this can't start before step 2.
+4. The asker signs a role entry, with its version and `prev_hash` as in §4.6.1, and any member commits
+   it: one group context extensions proposal, with the signed entry in the authenticated data. Every
+   member verifies the signer (fresh roster at the commit's server time), that the proposed roles are
+   those of the entry, that at least one admin has a leaf, and that the commit does nothing else.
+
+**Role changes while strict.** A change takes effect for commits when it is committed the same way: a
+role entry signed by an admin of the context with a leaf, built on the context's hash exactly, or by a
+workspace admin with a higher version. The log stays for the UI and the history, but the context wins
+for commits. Any member may commit an entry in version order, so an admin outside the group can sign
+one. It needs no age limit: a replay has a lower version or the wrong `prev_hash`. Turning strict off is such an entry with no roles, and removes the extension. This closes
+the withheld demotion (§4.6.1, residual risks) for strict channels: the server can delay the commit,
+but can't let a member follow the group without it.
+
+**A commit that is refused** (D4). A strict channel refuses without coming back:
+
+- A commit a device can't accept under the rule, or at its own epoch can't read at all (finding 4),
+  stops that device at the epoch. It records the commit and doesn't ask to be added back. It passes
+  over entries of later epochs, which build on what it refused, and takes the next commit for its own
+  epoch.
+- It keeps writing with its current content key and shows: "A change to this channel's members was
+  refused. Messages still reach the people who were in it. An admin has to decide." Its outbox counts
+  as caught up. Keys don't rotate and removals wait in the meantime.
+- **An admin continues the group from the last good epoch.** A channel admin or workspace admin
+  chooses "Remove {name} and continue" or "Continue": a rewind request carries their commit for that
+  epoch, and the server drops the queue's entries and the group information from there on, sets the
+  epoch back and takes the commit, in one transaction, with an audit row, under
+  `manage_channel_roles`. Nothing about it is signed or needs
+  to be: the first commit per epoch has always been the server's word, so a rewind gives a server no
+  power it hasn't got. Members judge that commit like any other. A device already past that epoch
+  ignores it and stops at the next entry it can't read: a hostile server gets a denial of service it
+  already has, not a way to take back a real change.
+- Whoever followed the refused commit (the committer, somebody it added, a new device that read its
+  `GroupInfo`) can't read on after the rewind, and falls out.
+
+A member with a modified client can thus pause a channel's membership changes, also without a hostile
+server (finding 3). Messages keep flowing and an admin ends it with one click. That is the price of a
+refusal that holds. A later version of the server could refuse such a commit earlier by reading the
+signer from the authenticated data.
+
+**Falling out in a strict channel.** A device that missed commits for another reason (a restored
+backup, a bug) still asks to be added back, since it has nothing to refuse. Its welcome now has to
+come from a channel admin or workspace admin of its newest verified snapshot (the context it knew,
+carried forward along the role log's signatures), or it isn't opened: anything else is finding 2 again.
+Other members answer only after `strict_rejoin_wait` (client, 7 days), and then the device asks its
+user: it shows who is in that tree against its last tree, and joins on their word. It does this at
+once when its own user is the only admin it knows of, because nobody else could answer. A welcome
+without the extension is taken only if the role log shows a signed "off". After any add-back the
+device shows a line for everyone new or gone since its last tree.
+
+**Expired or lost admins, no admin left** (D5).
+
+- Channel roles have no expiry. An admin who lost all devices has no leaf that signs anything; another
+  admin or a workspace admin demotes them. A deactivated account is the server's word and changes
+  nothing here until somebody removes it (§4.6, "Deactivation suspends").
+- "No admin left" means no admin of the context has a leaf. Then only workspace signers can change
+  membership or appoint a new admin (admin.md §2.5), which they do from outside the group; the
+  members' clients commit it. Prerequisite: the console's assignment must sign, which it doesn't yet
+  (admin.md §2.5).
+- With no fresh roster either (all owners lost, admin.md §2.3.1), membership stays frozen. People can
+  leave and devices come and go, and chat goes on. The channel never falls back to "every member":
+  a rule that a member can trigger by waiting is no rule.
+
+**Older clients.** They can't be in a strict channel, so there is no mixed group to reason about:
+capability and rule ship together, and a client announces the capability only if it implements the
+rule.
+
+- A channel that didn't opt in behaves exactly as today, with any mix of versions, on every version.
+- A client of today refuses the commit that turns strict on (`UnsupportedProposal`), so it must not be
+  in the group by then. Steps 2 and 3 and `required_capabilities` make sure of it. A device of this
+  version downgraded later stops at the next role commit and falls out.
+- Somebody whose only app is older can't be added (`InsufficientCapabilities`, before anything is
+  sent); the adder is told that person has to update. Key packages in the server's stock from before
+  the update can't be used for this: a device replaces its stock when it updates.
+- It can't start in one release. Before anyone can opt in, every device in the channel needs the
+  version with the refresh of step 3, so the first opt-in is possible only once a channel's devices have
+  updated. Nothing depends on a date: step 2 shows how far a channel is.
+
+**Epoch conflicts and convergence.** Commits are linear: the server takes the first for each epoch, and
+each commit is judged against the context of the epoch it is for, which every member holds alike.
+
+| Situation                                          | What happens                                                                                              |
+|----------------------------------------------------|-----------------------------------------------------------------------------------------------------------|
+| Two admins' changes race                           | One wins, the other discards its commit, catches up and commits again (§4.6, Freshness)                   |
+| A demotion races the demoted admin's change        | Their order decides. If the change is first it stands; if not, its commit refuses it locally              |
+| A change was signed, then its signer was demoted   | Judged at the commit's epoch: refused, and the admin's app is told                                        |
+| Two role entries race                              | The server's `version_conflict`, and the second has the wrong `prev_hash` if it gets through              |
+| A device of the committer's user is offline        | Reads the same queue and context later, with the same verdict                                             |
+| A device's roster lags behind a workspace signer's | It reads the roster first; if that is withheld it refuses and is brought back like a device that fell out |
+
+Honest clients never commit what they would refuse, since the committer runs the same check first.
+
+**Relation to issue #1171.** Founders aren't anchored: a founder's claim is trust on first use, so a member
+and a hostile server can make one up. That must not be able to switch a channel to strict, or the member
+would lock the real admins out. So only workspace signers turn it on for an existing channel (D3), and
+this doesn't wait for #1171. It helps #1171 in return: once a channel is strict, its context says who is
+admin in a way every member verifiably shares, so a channel admin of the context could purge at once
+(§4.6, "A signed deletion"). A channel founded with the extension in its very first epoch would have its
+founder bound to the group from the start, for the founder half of #1171; it proves the roles were set
+before anybody else was in it, not who created the channel. The space half is untouched.
+
+**Residual risks.**
+
+- A new device or a new member who joins while a refused commit stands, from its `GroupInfo` or the
+  committer's welcome, is on the wrong side until the rewind and can't tell. Before opening a welcome,
+  it can only check the leaves.
+- A hostile server can show different commits for an epoch to different devices. That forks a group
+  today too, with or without this design, and shows up as devices falling out.
+- Workspace signers depend on each device's roster and policy, so a withheld roster or policy can
+  still make one device differ (admin.md §2.3 bounds how long).
+- A device that fell out and whose user takes a member's word after the wait can be brought into a
+  tree nobody authorized. It shows who is in it first.
+
+**Decisions for the owner.** Each with the recommendation; the design above assumes it.
+
+| No. | Decision                                                                | Recommendation                                                                                                                                                  | Alternatives                                                                                                |
+|-----|-------------------------------------------------------------------------|-----------------------------------------------------------------------------------------------------------------------------------------------------------------|-------------------------------------------------------------------------------------------------------------|
+| D1  | What moderators may do                                                  | Remove plain members; add nobody. Whether a target is a workspace admin is roster data, which devices can see differently, and adding is what discloses content | The built-in scheme's add and remove (then `owner_approval` can't hold against a moderator); nothing at all |
+| D2  | Space admins and holders of a custom scheme                             | No commit rights from those: they aren't signed. Whoever needs them gets a signed channel role. Opting in lists who loses what                                  | Refuse to opt in where a scheme grants `manage_members`; sign the schemes (much larger)                     |
+| D3  | Who may turn it on                                                      | Workspace owners and admins only, for now; a channel admin asks them                                                                                            | Channel admins of a workspace-anchored snapshot (per device today, so not alike without #1171)              |
+| D4  | A refused commit: stop, or come back                                    | Stop, and an admin continues from the last good epoch. Coming back makes the rule worth little (finding 2); then rather not build it                            | Come back as today, with an alarm: detection only, and no better than today's line                          |
+| D5  | No admin left, and no fresh roster                                      | Membership frozen, people can leave                                                                                                                             | Moderators with a leaf may sign the next admin                                                              |
+| D6  | One old or stale device blocks opting in, and an old app can't be added | Accept it: a group with an old client has no rule. Removing a stale device is offered                                                                           | None that keeps the guarantee                                                                               |
+
+**What implementing it takes** (not moderate, so not started):
+
+- `teamcraft-crypto`: the extension and its parser (with a fuzz target), capabilities in key packages,
+  group creation and external joins, the role commit, the pure verdict, a separate refusal from an
+  unreadable entry.
+- `teamcraft-core`: reading the context instead of the log for commits, the ready and refresh steps,
+  stopping at a refused commit, the outbox while stopped, the welcome's sender and tree checks.
+- `teamcraft-server`: the rewind in one transaction, with its audit row and permission; stock replacement
+  of key packages if it isn't there.
+- Clients: the setting, the list of who blocks it, the notice, the admin's decision, permission gates,
+  and the console's signed assignment, on desktop, web, Android and iOS.
+- Tests: every role and action combination against the pure verdict; malicious commits refused alike on
+  all members; a fresh-group commit; older and capable clients in one group; race and rewind convergence.
+
+What the design relies on from openmls 0.9 was tried in a throwaway test against `ConversationGroup`, not
+kept in the tree: a required-capabilities proposal fails while a leaf lacks it
+(`RequiredExtensionNotSupportedByAllMembers`); after a refresh with `leaf_node_parameters` it works and
+both sides hold the same extensions; a joiner's welcome carries them; a package without the capability
+can't be added (`InsufficientCapabilities`); an empty extension list turns it off; today's clients refuse
+the switch (`UnsupportedProposal`) and an empty commit (`MissingSignedChange`); a commit from a group
+founded alone fails on decryption.
 
 ### 4.7 Converting a channel between private and public
 
