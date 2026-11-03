@@ -12,6 +12,13 @@
 //! viewer asks for the top layer, as the desktop's stage does. Per slide: how long until the
 //! viewer shows it (at any size, and sharp at the shared size).
 //!
+//! The asserting test judges the link, not the machine: from the slide's first picture out of
+//! the encoder to the viewer showing it. OpenH264 in a debug build on a CI runner encoded the
+//! Retina-size screen at a picture every few seconds, and the slides waited for the encoder, not
+//! the link (5 to 9 s, nothing dropped). So it also shares a smaller window ([`WINDOW`],
+//! 1108×720), through an uplink that is a fixed multiple of the share's layers
+//! ([`LIMIT_SHARE`]). The measurement shares the Retina-size screen.
+//!
 //! `measure_screen_share_bursts_on_a_limited_uplink` (ignored) prints the numbers per uplink:
 //! `cargo test --release -p teamcraft-sfu --test suite measure_screen_share_bursts -- --ignored
 //! --nocapture` (add `--features teamcraft-media/gstreamer` for VideoToolbox).
@@ -28,20 +35,21 @@ use std::time::{Duration, Instant};
 
 use teamcraft_media::call_engine::CallEngineEvent;
 use teamcraft_media::capture_convert::{PixelFormat, RawPicture};
-use teamcraft_media::video::{VideoFrame, VideoResolution, screen_layers, screen_limits};
+use teamcraft_media::video::{VideoFrame, VideoResolution, screen_layers};
 use teamcraft_media::video_capture::{CaptureError, CaptureFormat, FrameSender, VideoCapture};
-use teamcraft_media::video_pipeline::{VideoSendConfig, preferred_encoders};
-use teamcraft_proto::{ScreenContentMode, ScreenShareResolution, VideoLayerInfo, VideoTrackKind};
+use teamcraft_media::video_codec::{EncodedPicture, VideoCodecError, VideoEncoder};
+use teamcraft_media::video_pipeline::{EncoderFactory, VideoSendConfig, preferred_encoders};
+use teamcraft_proto::{ScreenContentMode, ScreenShareResolution, VideoCodec, VideoLayerInfo, VideoTrackKind};
 
 use crate::common::relay::Relay;
-use crate::screen_sharpness::{
-  Encoded, SHARED, counting, fill, join, pump_for, shown_at, start_sfu, text, wait_until_secured,
-};
+use crate::screen_sharpness::{SHARED, fill, join, pump_for, shown_at, start_sfu, text, wait_until_secured};
 
 /// How long a slide stays.
 const SLIDE_INTERVAL: Duration = Duration::from_secs(2);
 /// Distinct slides, shown in turn.
 const SLIDES: usize = 3;
+/// The share's frame rate (detail mode's).
+const FRAMERATE: u8 = 30;
 /// How long the call carries only sound before the share: the uplink estimate measures the link.
 const SOUND_ONLY: Duration = Duration::from_secs(4);
 /// How long the share is watched.
@@ -49,34 +57,61 @@ const SHARE: Duration = Duration::from_secs(24);
 /// The first slides go out while the estimate still grows and the viewer gets its layers: they
 /// aren't judged.
 const SETTLE: Duration = Duration::from_secs(8);
-/// The uplink of the asserting test: room for both layers of the share (8.3 Mbit/s of targets)
-/// and its sound, not for a keyframe of both at once within the bottleneck's queue.
-const LIMIT_BPS: u64 = 12_000_000;
-/// The longest a slide may take to reach the viewer once the share settled: 0.1 s on a laptop
-/// with VideoToolbox, 0.35 s with OpenH264 in a debug build; room for a slow CI runner.
-const MAX_SLIDE_DELAY: Duration = Duration::from_secs(3);
+/// The shared window of the asserting test: half the Retina-size screen, small enough for OpenH264
+/// in a debug build on a CI runner (two layers: 1108×720 and 554×360).
+const WINDOW: VideoResolution = VideoResolution {
+  width: SHARED.width / 2,
+  height: SHARED.height / 2,
+};
+/// The uplink of the asserting test, as a multiple of what the share's layers ask for: room for
+/// both layers and the sound (the uplink allocation wants 1.27 times the layers for all of
+/// them), not for a slide of both layers at once within the bottleneck's queue. A 1440p share at
+/// this multiple is the 12 Mbit/s row of the measurement.
+const LIMIT_SHARE: f64 = 1.45;
+/// The longest from a slide's first picture out of the encoder to the viewer showing it, once the
+/// share settled: under 0.25 s on a laptop in a debug build (0.3 s from the slide's capture);
+/// room for a slow CI runner's decoding and encryption.
+const MAX_LINK_DELAY: Duration = Duration::from_secs(2);
+/// Slides that have to be judged: some, also where the encoder can't keep up.
+const MIN_JUDGED_SLIDES: usize = 3;
 
 /// #1005: slides of text reach the viewer through an uplink with room for the share but not for
 /// its bursts at once, each within seconds, and the bottleneck drops next to nothing.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn slides_reach_the_viewer_through_a_limited_uplink() {
-  let run = run(Some(LIMIT_BPS)).await;
+  let layers_bps: u64 = share_layers(WINDOW)
+    .iter()
+    .map(|layer| u64::from(layer.max_bitrate_bps))
+    .sum();
+  let run = run(WINDOW, Some((layers_bps as f64 * LIMIT_SHARE) as u64)).await;
   let summary = run.summary();
   println!("{summary}");
-  let delays = run.slide_delays();
-  assert!(!delays.is_empty(), "no slide was judged:\n{summary}");
+  // Slides the encoder gave a picture of: each has to reach the viewer, soon after.
+  let arrivals: Vec<Arrival> = run
+    .link_delays()
+    .into_iter()
+    .filter(|arrival| *arrival != Arrival::NotEncoded)
+    .collect();
   assert!(
-    delays.iter().all(|(_, maybe_delay)| maybe_delay.is_some()),
-    "a slide never reached the viewer:\n{summary}"
+    arrivals.len() >= MIN_JUDGED_SLIDES,
+    "only {} slides were encoded:\n{summary}",
+    arrivals.len()
   );
-  let worst = delays
+  assert!(
+    !arrivals.contains(&Arrival::Lost),
+    "an encoded slide never reached the viewer:\n{summary}"
+  );
+  let worst = arrivals
     .iter()
-    .filter_map(|(_, maybe_delay)| *maybe_delay)
+    .filter_map(|arrival| match arrival {
+      Arrival::After(delay) => Some(*delay),
+      _ => None,
+    })
     .max()
     .unwrap();
   assert!(
-    worst <= MAX_SLIDE_DELAY,
-    "a slide took {worst:?} to reach the viewer:\n{summary}"
+    worst <= MAX_LINK_DELAY,
+    "a slide took {worst:?} from the encoder to the viewer:\n{summary}"
   );
   let dropped = run.dropped_share();
   assert!(
@@ -97,13 +132,15 @@ async fn measure_screen_share_bursts_on_a_limited_uplink() {
     Some(10_000_000),
     Some(4_000_000),
   ] {
-    let run = run(maybe_limit_bps).await;
+    let run = run(SHARED, maybe_limit_bps).await;
     println!("== uplink {maybe_limit_bps:?} bit/s\n{}", run.summary());
   }
 }
 
 /// What a run recorded, timed from the share's start.
 struct Run {
+  /// The shared screen's size.
+  size: VideoResolution,
   layers: Vec<VideoLayerInfo>,
   /// When each slide went up, and its capture timestamp.
   changes: Vec<(Duration, u64)>,
@@ -119,7 +156,18 @@ struct Run {
   started_at: Duration,
 }
 
-async fn run(maybe_limit_bps: Option<u64>) -> Run {
+/// The desktop's layers for a detail share of a screen of `size`.
+fn share_layers(size: VideoResolution) -> Vec<VideoLayerInfo> {
+  screen_layers(
+    size,
+    FRAMERATE,
+    ScreenContentMode::Detail,
+    &ScreenShareResolution::Standard,
+  )
+}
+
+/// Shares slides at `size` through an uplink limited to `maybe_limit_bps`.
+async fn run(size: VideoResolution, maybe_limit_bps: Option<u64>) -> Run {
   let (port, certificate_hash) = start_sfu().await;
   let sfu = SocketAddr::new(Ipv6Addr::LOCALHOST.into(), port);
   let start = Instant::now();
@@ -131,16 +179,10 @@ async fn run(maybe_limit_bps: Option<u64>) -> Run {
   wait_until_secured(&mut viewer).await;
   pump_for(&mut presenter, &mut viewer, SOUND_ONLY).await;
 
-  let slides = SlideShow::new(start);
+  let slides = SlideShow::new(start, size);
   let (shown, changes) = (Arc::clone(&slides.shown), Arc::clone(&slides.changes));
   let encoded: Arc<Mutex<Vec<Encoded>>> = Arc::default();
-  let (limit, framerate) = screen_limits(ScreenContentMode::Detail, &ScreenShareResolution::Standard);
-  let layers = screen_layers(
-    limit,
-    framerate,
-    ScreenContentMode::Detail,
-    &ScreenShareResolution::Standard,
-  );
+  let layers = share_layers(size);
   let started_at = start.elapsed();
   let config = VideoSendConfig {
     maybe_layer_plan: None,
@@ -189,6 +231,7 @@ async fn run(maybe_limit_bps: Option<u64>) -> Run {
   let encoded = encoded.lock().unwrap().clone();
   let link = relay.to_sfu.log.lock().unwrap().clone();
   Run {
+    size,
     layers,
     changes,
     received,
@@ -210,7 +253,7 @@ impl Run {
 
   /// The same, at the shared size.
   fn sharp_delays(&self) -> Vec<(Duration, Option<Duration>)> {
-    self.delays(|resolution| resolution == SHARED)
+    self.delays(|resolution| resolution == self.size)
   }
 
   fn delays(&self, is_counted: impl Fn(VideoResolution) -> bool) -> Vec<(Duration, Option<Duration>)> {
@@ -236,6 +279,41 @@ impl Run {
         })
         .map(|(at, ..)| at.saturating_sub(*changed_at));
       delays.push((changed_at.saturating_sub(self.started_at), maybe_delay));
+    }
+    delays
+  }
+
+  /// Per slide after [`SETTLE`]: how it went from its first picture out of the encoder (any
+  /// layer) to the viewer.
+  fn link_delays(&self) -> Vec<Arrival> {
+    let settled = self.started_at + SETTLE;
+    let in_window =
+      |picture_us: u64, from_us: u64, to_us: u64| picture_us + 100 >= from_us && picture_us + 100 < to_us;
+    let mut delays = Vec::new();
+    for pair in self.changes.windows(2) {
+      let [(changed_at, timestamp_us), (_, next_us)] = pair else {
+        continue;
+      };
+      if *changed_at < settled {
+        continue;
+      }
+      let maybe_encoded_at = self
+        .encoded
+        .iter()
+        .find(|picture| in_window(picture.timestamp_us, *timestamp_us, *next_us))
+        .map(|picture| picture.at);
+      let Some(encoded_at) = maybe_encoded_at else {
+        delays.push(Arrival::NotEncoded);
+        continue;
+      };
+      let maybe_shown_at = self
+        .received
+        .iter()
+        .find(|(_, picture_us, _)| in_window(*picture_us, *timestamp_us, *next_us))
+        .map(|(at, ..)| *at);
+      delays.push(maybe_shown_at.map_or(Arrival::Lost, |shown_at| {
+        Arrival::After(shown_at.saturating_sub(encoded_at))
+      }));
     }
     delays
   }
@@ -286,6 +364,19 @@ impl Run {
         format_delays(self.sharp_delays())
       ),
       format!(
+        "encoder to viewer (ms):      {}",
+        self
+          .link_delays()
+          .iter()
+          .map(|arrival| match arrival {
+            Arrival::NotEncoded => "not encoded".to_owned(),
+            Arrival::Lost => "-".to_owned(),
+            Arrival::After(delay) => delay.as_millis().to_string(),
+          })
+          .collect::<Vec<_>>()
+          .join(" ")
+      ),
+      format!(
         "uplink: {:.1} % of the bytes dropped after the first {} s; estimate {}–{} kbit/s after it; layers needed {:?}",
         self.dropped_share() * 100.0,
         SETTLE.as_secs(),
@@ -330,10 +421,81 @@ impl Run {
   }
 }
 
+/// How a slide went from the encoder to the viewer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Arrival {
+  /// The encoder gave no picture of it (a machine too slow for every slide).
+  NotEncoded,
+  /// The viewer never showed it.
+  Lost,
+  /// The viewer showed it this long after its first picture.
+  After(Duration),
+}
+
+/// A picture out of an encoder.
+#[derive(Debug, Clone, Copy)]
+struct Encoded {
+  at: Duration,
+  width: u16,
+  bytes: usize,
+  is_keyframe: bool,
+  /// The capture timestamp of its frame.
+  timestamp_us: u64,
+}
+
+/// `encoders`, recording every picture.
+fn counting(encoders: EncoderFactory, start: Instant, log: Arc<Mutex<Vec<Encoded>>>) -> EncoderFactory {
+  Arc::new(move |layer, content| {
+    Ok(Box::new(CountingEncoder {
+      inner: encoders(layer, content)?,
+      width: layer.width,
+      start,
+      log: Arc::clone(&log),
+    }) as Box<dyn VideoEncoder>)
+  })
+}
+
+struct CountingEncoder {
+  inner: Box<dyn VideoEncoder>,
+  width: u16,
+  start: Instant,
+  log: Arc<Mutex<Vec<Encoded>>>,
+}
+
+impl VideoEncoder for CountingEncoder {
+  fn codec(&self) -> VideoCodec {
+    self.inner.codec()
+  }
+
+  fn name(&self) -> &'static str {
+    self.inner.name()
+  }
+
+  fn encode(
+    &mut self,
+    frame: &VideoFrame,
+    is_keyframe_forced: bool,
+  ) -> Result<Option<EncodedPicture>, VideoCodecError> {
+    let maybe_picture = self.inner.encode(frame, is_keyframe_forced)?;
+    if let Some(picture) = &maybe_picture {
+      self.log.lock().unwrap().push(Encoded {
+        at: self.start.elapsed(),
+        width: self.width,
+        bytes: picture.data.len(),
+        is_keyframe: picture.is_keyframe,
+        timestamp_us: frame.timestamp_us(),
+      });
+    }
+    Ok(maybe_picture)
+  }
+}
+
 /// Slides of text, each a full change, delivered when they change (nothing between, as
 /// ScreenCaptureKit does with a still screen).
 struct SlideShow {
+  /// The slides, at the shared size.
   sources: Arc<Vec<VideoFrame>>,
+  size: VideoResolution,
   start: Instant,
   /// Which slide went up at which capture timestamp.
   shown: Arc<Mutex<BTreeMap<u64, usize>>>,
@@ -343,7 +505,8 @@ struct SlideShow {
 }
 
 impl SlideShow {
-  fn new(start: Instant) -> Self {
+  /// Slides drawn at the Retina size and shrunk to `size` where it is another.
+  fn new(start: Instant, size: VideoResolution) -> Self {
     let sources = (0..SLIDES)
       .map(|slide| {
         let bgrx = draw_slide(slide);
@@ -354,11 +517,17 @@ impl SlideShow {
           stride: 0,
           data: &bgrx,
         };
-        picture.to_i420(0).unwrap()
+        let frame = picture.to_i420(0).unwrap();
+        if size == SHARED {
+          frame
+        } else {
+          frame.scaled(size).unwrap()
+        }
       })
       .collect();
     Self {
       sources: Arc::new(sources),
+      size,
       start,
       shown: Arc::default(),
       changes: Arc::default(),
@@ -368,12 +537,10 @@ impl SlideShow {
 }
 
 impl VideoCapture for SlideShow {
-  /// As ScreenCaptureKit's capture: the largest picture asked for, not the display's size.
   fn format(&self) -> CaptureFormat {
-    let (resolution, framerate) = screen_limits(ScreenContentMode::Detail, &ScreenShareResolution::Standard);
     CaptureFormat {
-      resolution,
-      framerate,
+      resolution: self.size,
+      framerate: FRAMERATE,
     }
   }
 

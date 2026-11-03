@@ -193,11 +193,11 @@ impl Received {
 }
 
 #[derive(Debug, Clone, Copy)]
-pub(crate) struct Encoded {
-  pub(crate) at: Duration,
-  pub(crate) width: u16,
-  pub(crate) bytes: usize,
-  pub(crate) is_keyframe: bool,
+struct Encoded {
+  at: Duration,
+  width: u16,
+  bytes: usize,
+  is_keyframe: bool,
 }
 
 /// Runs `scenario` and records `duration` from the share's start.
@@ -412,11 +412,7 @@ impl Timeline {
 }
 
 /// `encoders`, recording every picture's size per layer.
-pub(crate) fn counting(
-  encoders: EncoderFactory,
-  start: Instant,
-  log: Arc<Mutex<Vec<Encoded>>>,
-) -> EncoderFactory {
+fn counting(encoders: EncoderFactory, start: Instant, log: Arc<Mutex<Vec<Encoded>>>) -> EncoderFactory {
   Arc::new(move |layer, content| {
     Ok(Box::new(CountingEncoder {
       inner: encoders(layer, content)?,
