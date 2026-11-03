@@ -302,6 +302,16 @@ pub fn effective(own: StoredRetention, space: StoredRetention, default: Retentio
   }
 }
 
+/// The retention that applies to an object: its own, its space's or the default, cut down to the
+/// workspace limit. The same value [`status`] reports as `effective`, without a request per object.
+pub fn effective_setting(
+  own: StoredRetention,
+  space: StoredRetention,
+  policy: &teamcraft_proto::RetentionPolicy,
+) -> RetentionSetting {
+  to_setting(limited(effective(own, space, policy.default), policy.limit))
+}
+
 async fn target(state: &AppState, conversation: ConversationId) -> Result<RetentionTarget, ApiError> {
   state
     .database
