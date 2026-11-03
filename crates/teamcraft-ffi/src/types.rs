@@ -1031,9 +1031,11 @@ impl From<teamcraft_core::connection::ConnectionState> for ConnectionState {
         maybe_interception,
       } => Self::Offline {
         retry_at_ms,
-        maybe_interception: maybe_interception.map(|kind| match kind {
-          Interception::CaptivePortal => NetworkInterception::CaptivePortal,
-          Interception::UntrustedCertificate => NetworkInterception::UntrustedCertificate,
+        // The mobile apps send no proofs yet, so a refused one doesn't reach them.
+        maybe_interception: maybe_interception.and_then(|kind| match kind {
+          Interception::CaptivePortal => Some(NetworkInterception::CaptivePortal),
+          Interception::UntrustedCertificate => Some(NetworkInterception::UntrustedCertificate),
+          Interception::ProofRefused => None,
         }),
       },
       Core::SignInRequired { .. } => Self::SignInRequired,

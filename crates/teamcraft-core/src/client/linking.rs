@@ -38,8 +38,8 @@ use teamcraft_crypto::key_bag::{EncryptedKeyBag, KeyBagBinding};
 use teamcraft_crypto::rendezvous::{Initiator, RendezvousChannel, RendezvousKey, Responder};
 use teamcraft_crypto::secret::SymmetricKey;
 use teamcraft_proto::{
-  Base64Bytes, CreateDeviceLinkRequest, DeviceLinkPlatform, DeviceLinkRequest, RendezvousClientMessage,
-  RendezvousServerMessage, UserId,
+  Base64Bytes, CreateDeviceLinkRequest, DeviceLinkPlatform, DeviceLinkRequest, ErrorCode, RENDEZVOUS_PATH,
+  RendezvousClientMessage, RendezvousServerMessage, UserId,
 };
 use zeroize::Zeroizing;
 
@@ -329,9 +329,9 @@ impl<R: RendezvousConnection> LinkWait<R> {
   /// Joins the relay of a code this device shows. Returns once the server took the join, before
   /// anyone scanned the code.
   pub async fn join<A: ServerApi<Rendezvous = R>>(api: &A, offer: &LinkOffer) -> Result<Self, CoreError> {
-    let mut connection = join(api, offer).await?;
+    let (connection, answer) = with_timeout(join(api, offer)).await?;
     let initiator = Initiator::new(&offer.key, &mut OsRng);
-    let maybe_expires_in = match connection.receive().await {
+    let maybe_expires_in = match answer {
       Some(Ok(RendezvousFrame::Control(RendezvousServerMessage::Joined {
         maybe_expires_in_secs,
         ..
@@ -775,8 +775,12 @@ async fn respond<A: ServerApi>(
   api: &A,
   offer: &LinkOffer,
 ) -> Result<(A::Rendezvous, RendezvousChannel), CoreError> {
-  let mut connection = join(api, offer).await?;
-  if !with_timeout(wait_joined(&mut connection)).await? {
+  let (mut connection, answer) = with_timeout(join(api, offer)).await?;
+  let is_peer_present = match answer {
+    Some(Ok(RendezvousFrame::Control(RendezvousServerMessage::Joined { peer_present, .. }))) => peer_present,
+    other => return Err(join_failure(other)),
+  };
+  if !is_peer_present {
     return Err(CoreError::LinkPeerGone);
   }
   let (responder, hello) = Responder::new(&offer.key, &mut OsRng).map_err(link_error)?;
@@ -789,26 +793,51 @@ async fn respond<A: ServerApi>(
   Ok((connection, channel))
 }
 
-async fn join<A: ServerApi>(api: &A, offer: &LinkOffer) -> Result<A::Rendezvous, CoreError> {
+/// Joins the relay and returns the connection with the server's answer. The relay refuses a proof
+/// with an old nonce like the gateway: a `dpop_nonce` frame, `use_dpop_nonce`, the end of the
+/// connection. That gets one more connection with the new nonce, never more (e2ee.md §3.1.2).
+async fn join<A: ServerApi>(
+  api: &A,
+  offer: &LinkOffer,
+) -> Result<(A::Rendezvous, Option<Result<RendezvousFrame, ApiError>>), CoreError> {
+  let (connection, answer) = join_once(api, offer).await?;
+  if is_nonce_refusal(&answer) {
+    return join_once(api, offer).await;
+  }
+  Ok((connection, answer))
+}
+
+async fn join_once<A: ServerApi>(
+  api: &A,
+  offer: &LinkOffer,
+) -> Result<(A::Rendezvous, Option<Result<RendezvousFrame, ApiError>>), CoreError> {
   let mut connection = api.connect_rendezvous().await?;
+  let token = api.gateway_token().await?;
   connection
     .send_control(&RendezvousClientMessage::Join {
-      maybe_dpop_proof: None,
-      token: api.gateway_token().await?,
+      maybe_dpop_proof: api.first_frame_proof(RENDEZVOUS_PATH, &token).await?,
+      token,
       rendezvous_id: offer.rendezvous_id.clone(),
     })
     .await?;
-  Ok(connection)
+  let answer = loop {
+    match connection.receive().await {
+      Some(Ok(RendezvousFrame::Control(RendezvousServerMessage::DpopNonce { nonce }))) => {
+        api.note_dpop_nonce(&nonce);
+      },
+      answer => break answer,
+    }
+  };
+  Ok((connection, answer))
 }
 
-/// Whether the other device was in the relay when this one joined (the server's `joined` answer).
-async fn wait_joined<R: RendezvousConnection>(connection: &mut R) -> Result<bool, CoreError> {
-  match connection.receive().await {
-    Some(Ok(RendezvousFrame::Control(RendezvousServerMessage::Joined { peer_present, .. }))) => {
-      Ok(peer_present)
-    },
-    other => Err(join_failure(other)),
-  }
+/// The relay's `use_dpop_nonce`.
+fn is_nonce_refusal(answer: &Option<Result<RendezvousFrame, ApiError>>) -> bool {
+  matches!(
+    answer,
+    Some(Ok(RendezvousFrame::Control(RendezvousServerMessage::Error { error })))
+      if error.error_code == ErrorCode::UseDpopNonce
+  )
 }
 
 /// What a first frame other than `joined` means.

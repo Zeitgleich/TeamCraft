@@ -51,7 +51,8 @@ mod write_queue;
 #[cfg(target_arch = "wasm32")]
 pub use browser::{
   IndexedDbRecords, IndexedDbStore, browser_database_key, browser_database_key_without_upgrade,
-  own_sound_delete, own_sound_get, own_sound_put, vault_delete, vault_get, vault_put,
+  browser_dpop_prover, browser_dpop_prover_or_new, own_sound_delete, own_sound_get, own_sound_put,
+  vault_delete, vault_get, vault_put,
 };
 pub use key_source::{DatabaseKeySource, KeySourceError, StaticKeySource};
 #[cfg(not(target_arch = "wasm32"))]

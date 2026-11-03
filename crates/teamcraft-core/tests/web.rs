@@ -15,11 +15,14 @@ use openmls_traits::OpenMlsProvider as _;
 use rand_core::{OsRng, RngCore};
 use teamcraft_core::api::ServerApi;
 use teamcraft_core::api::fake::FakeServer;
+use teamcraft_core::clock::{Clock, SystemClock};
 use teamcraft_core::store::{
   IndexedDbStore, LocalStore, MessageContent, MessageFilter, StoreError, StoredMessage, Table,
-  browser_database_key, browser_database_key_without_upgrade,
+  browser_database_key, browser_database_key_without_upgrade, browser_dpop_prover,
+  browser_dpop_prover_or_new,
 };
 use teamcraft_core::{PendingEnrollment, mls_storage};
+use teamcraft_crypto::dpop::{DpopExpectation, PublicOrigin, verify_proof};
 use teamcraft_crypto::local_store::LocalStoreKeys;
 use teamcraft_crypto::push::{open_wakeup, seal_wakeup};
 use teamcraft_crypto::secret::SymmetricKey;
@@ -111,6 +114,41 @@ async fn a_refused_write_is_reported_and_written_once_there_is_space() {
   drop(store);
   let reopened = IndexedDbStore::open(&name, &key).await.unwrap();
   assert_eq!(reopened.get(Table::Users, "1").unwrap(), Some(b"one".to_vec()));
+}
+
+/// e2ee.md §3.1.2: the DPoP key stays non-extractable and the same across page loads, and what Web
+/// Crypto signs is what the server takes.
+#[wasm_bindgen_test]
+async fn the_dpop_key_is_kept_and_its_proofs_verify() {
+  let origins = [PublicOrigin::parse("https://chat.example.com").unwrap()];
+  let prover = browser_dpop_prover_or_new().await.unwrap();
+  let again = browser_dpop_prover().await.unwrap().unwrap();
+  assert_eq!(prover.thumbprint(), again.thumbprint());
+  assert_eq!(
+    browser_dpop_prover_or_new().await.unwrap().thumbprint(),
+    prover.thumbprint()
+  );
+
+  let proof = again
+    .proof("GET", "https://chat.example.com/api/v1/me?x=1", Some("token"))
+    .await
+    .unwrap();
+  let now_unix = SystemClock.now_ms() / 1000;
+  let bound = prover.thumbprint();
+  verify_proof(
+    proof.as_str(),
+    &DpopExpectation {
+      method: "GET",
+      path: "/api/v1/me",
+      public_origins: &origins,
+      now_unix,
+      max_age_secs: 60,
+      leeway_secs: 60,
+      access_token: "token",
+      maybe_bound_key: Some(&bound),
+    },
+  )
+  .unwrap();
 }
 
 #[wasm_bindgen_test]

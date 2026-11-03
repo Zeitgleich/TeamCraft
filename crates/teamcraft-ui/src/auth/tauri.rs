@@ -303,6 +303,7 @@ fn map_kind(kind: &str, message: String) -> AuthError {
     "network" => AuthError::Network(message),
     "state_mismatch" => AuthError::StateMismatch,
     "not_signed_in" => AuthError::NotSignedIn,
+    "key_lost" => AuthError::KeyLost,
     "unsupported" => AuthError::Unsupported(message),
     // Refusals of the local sign-in keep their kind for the form's message.
     "refused" | "disabled" | "rate_limited" | "mfa_required" | "account_deactivated" => {

@@ -29,6 +29,7 @@ mod dependency_outages;
 mod device_gaps;
 mod directory;
 mod dpop;
+mod dpop_clients;
 mod first_sight;
 mod gateway;
 mod guests;

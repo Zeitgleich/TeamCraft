@@ -172,6 +172,8 @@ pub fn failure_message_key(failure: &ActionFailure) -> &'static str {
       ErrorCode::Forbidden | ErrorCode::NoTeamcraftRole => "error-forbidden",
       ErrorCode::Unauthorized | ErrorCode::InvalidToken | ErrorCode::AccountDeleted => "error-signed-out",
       ErrorCode::AccountDeactivated => "error-account-deactivated",
+      ErrorCode::DpopRequired => "error-device-binding-required",
+      ErrorCode::UseDpopNonce | ErrorCode::InvalidDpopProof => "error-proof-refused",
       ErrorCode::RateLimited => "error-rate-limited",
       ErrorCode::PayloadTooLarge => "error-too-large",
       ErrorCode::Unavailable | ErrorCode::Internal => "error-server-trouble",

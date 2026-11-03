@@ -34,6 +34,8 @@ use oauth2::{
   AuthUrl, AuthorizationCode, ClientId, CsrfToken, PkceCodeChallenge, PkceCodeVerifier, RedirectUrl,
   RefreshToken, RequestTokenError, StandardErrorResponse, TokenResponse, TokenUrl,
 };
+use reqwest::header::{AUTHORIZATION, DATE, HeaderMap};
+use secrecy::zeroize::Zeroizing;
 use secrecy::{ExposeSecret, SecretString};
 use serde::{Deserialize, Serialize};
 use tokio::net::TcpListener;
@@ -49,8 +51,14 @@ use teamcraft_client_api::server_entry::{
   check_discovery, is_provider_endpoint,
 };
 use teamcraft_client_api::sign_in_look::SignInLook;
+use teamcraft_core::api::dpop::{
+  Authorization as TokenAuthorization, DPOP_ALGORITHM_FOR_DISCOVERY, DPOP_HEADER, DPOP_NONCE_HEADER,
+  DpopAnswer, DpopProofError, DpopProver, DpopSendError, Learned, SoftwareDpopSigner, TokenEndpointAttempt,
+  signed_headers, with_token_endpoint_proof,
+};
 use teamcraft_core::store::SessionNote;
-use teamcraft_proto::{GetMeResponse, UserId};
+use teamcraft_crypto::dpop::{DpopSigningKey, JwkThumbprint, token_bound_key};
+use teamcraft_proto::{ErrorBody, GetMeResponse, UserId};
 
 use callback_page::CallbackOutcome;
 use local::{LOCAL_LOGIN_PATH, LOCAL_LOGOUT_PATH, LocalRefusal, LocalSession};
@@ -167,6 +175,9 @@ pub enum AuthError {
   /// The server refused a local account's sign-in.
   #[error("the server refused the sign-in: {}", .0.kind())]
   LocalRefused(LocalRefusal),
+  /// The sign-in is bound to a key this computer doesn't have any more (e2ee.md §3.1.2).
+  #[error("the key this sign-in is bound to is gone")]
+  KeyLost,
 }
 
 /// Why a server's `GET /api/v1/server-info` could not be used.
@@ -209,6 +220,7 @@ impl AuthError {
       Self::Unsupported(_) => "unsupported",
       Self::NoServer => "no_server",
       Self::LocalRefused(refusal) => refusal.kind(),
+      Self::KeyLost => "key_lost",
     }
   }
 }
@@ -235,6 +247,9 @@ struct Discovery {
   token_endpoint: String,
   #[serde(default)]
   end_session_endpoint: Option<String>,
+  /// RFC 9449 §5.1: the provider takes proofs signed so.
+  #[serde(default)]
+  dpop_signing_alg_values_supported: Vec<String>,
 }
 
 /// The access token as it stands right now, read without waiting or refreshing
@@ -255,6 +270,9 @@ pub enum TokenPeek {
   /// The identity provider refused the refresh token (`invalid_grant`): the user has to sign in
   /// again.
   Expired,
+  /// The session was bound to a key this computer doesn't have any more: the user has to sign in
+  /// again, and is told why.
+  KeyLost,
   /// A sign-in or refresh holds the session: the caller may use the token it saw last, while that
   /// is still valid.
   Busy,
@@ -316,6 +334,24 @@ struct Session {
   maybe_discovery: Option<Discovery>,
   /// The identity provider refused the refresh token since the last sign-in.
   is_expired: bool,
+  /// The session's refresh token is bound to a key that is gone.
+  is_key_lost: bool,
+  /// The DPoP key with what is known about the identity provider.
+  maybe_provider_prover: Option<Arc<DpopProver>>,
+}
+
+/// One answer of the server to a signed request, read whole: the one more try may need its body.
+struct SignedAnswer {
+  status: u16,
+  maybe_content_type: Option<String>,
+  body: Vec<u8>,
+}
+
+/// What a token request does about a proof.
+enum TokenProof {
+  /// The provider doesn't take proofs, or the server wouldn't check them: an unbound session.
+  Unbound,
+  With(Arc<DpopProver>),
 }
 
 pub struct AuthService<S: TokenStore> {
@@ -331,6 +367,9 @@ pub struct AuthService<S: TokenStore> {
   /// The user the server named last for this session (`GET /me`). A confirmation that arrives later
   /// than a new sign-in doesn't name this user, and isn't kept.
   maybe_confirmed_user: StdMutex<Option<UserId>>,
+  /// The active server's DPoP key with what is known about the server, once it was read or made. The
+  /// core reads it without waiting for the session, like its token.
+  maybe_prover: StdMutex<Option<Arc<DpopProver>>>,
   cancel: Notify,
   now_ms: WallClock,
 }
@@ -344,6 +383,7 @@ impl<S: TokenStore> AuthService<S> {
       session: Mutex::new(Session::default()),
       is_unconfirmed: AtomicBool::new(false),
       maybe_confirmed_user: StdMutex::new(None),
+      maybe_prover: StdMutex::new(None),
       cancel: Notify::new(),
       now_ms: Arc::new(local::now_ms),
     })
@@ -378,6 +418,7 @@ impl<S: TokenStore> AuthService<S> {
     *session = Session::default();
     self.is_unconfirmed.store(false, Ordering::Release);
     *self.confirmed_user() = None;
+    *self.prover_slot() = None;
     *self.server.write().unwrap_or_else(PoisonError::into_inner) = maybe_server;
     self.cancel.notify_waiters();
   }
@@ -432,7 +473,7 @@ impl<S: TokenStore> AuthService<S> {
     // waits for the server to confirm the account.
     if matches!(
       outcome,
-      Ok(false) | Err(AuthError::Denied(_) | AuthError::NotSignedIn)
+      Ok(false) | Err(AuthError::Denied(_) | AuthError::NotSignedIn | AuthError::KeyLost)
     ) {
       self.forget_cached_account().await;
     }
@@ -560,6 +601,16 @@ impl<S: TokenStore> AuthService<S> {
         self.store.clear(&server.token_key()).await?;
         Err(AuthError::Denied(reason))
       },
+      // The refresh token only works with a key that is gone: it goes too, and the user is told.
+      Err(AuthError::KeyLost) => {
+        session.is_key_lost = true;
+        self.store.clear(&server.token_key()).await?;
+        self
+          .store
+          .clear_note(SessionNote::TokenBinding, &server.token_key())
+          .await?;
+        Err(AuthError::KeyLost)
+      },
       Err(AuthError::NotSignedIn) => {
         self.store.clear(&server.token_key()).await?;
         Ok(false)
@@ -663,9 +714,15 @@ impl<S: TokenStore> AuthService<S> {
     code: Result<String, AuthError>,
     verifier: PkceCodeVerifier,
   ) -> Result<SignedIn, AuthError> {
-    let http = self.oauth_http();
+    let code = code?;
+    let token_proof = {
+      let mut session = self.session.lock().await;
+      let discovery = self.discovery_in(&mut session, server).await?;
+      self.new_session_proof(&mut session, server, &discovery).await
+    };
+    let http = self.oauth_http(&token_proof);
     let response = client
-      .exchange_code(AuthorizationCode::new(code?))
+      .exchange_code(AuthorizationCode::new(code))
       .set_pkce_verifier(verifier)
       .request_async(&http)
       .await
@@ -729,6 +786,7 @@ impl<S: TokenStore> AuthService<S> {
     let Some(server) = self.active_server() else {
       return Ok(());
     };
+    let maybe_end_session_prover = self.end_session_prover(&server).await;
     let (in_memory, discovery, maybe_local) = {
       let mut session = self.session.lock().await;
       (
@@ -752,6 +810,13 @@ impl<S: TokenStore> AuthService<S> {
     // Whatever happens to the local copy, the provider still hears of the sign-out: the token was
     // taken above, and a retry couldn't end the session any more.
     let cleared = self.store.clear(&server.token_key()).await;
+    if let Err(error) = self
+      .store
+      .clear_note(SessionNote::TokenBinding, &server.token_key())
+      .await
+    {
+      tracing::warn!(%error, "could not forget the sign-in's binding");
+    }
     *self.confirmed_user() = None;
     self.forget_cached_account().await;
     if let (Some(refresh), Some(endpoint)) = (refresh, discovery.and_then(|found| found.end_session_endpoint))
@@ -760,7 +825,15 @@ impl<S: TokenStore> AuthService<S> {
         ("client_id", server.client_id.as_str()),
         ("refresh_token", refresh.expose_secret()),
       ];
-      if let Err(error) = self.http().post(endpoint).form(&form).send().await {
+      let mut request = self.http().post(&endpoint);
+      if let Some(prover) = maybe_end_session_prover {
+        // The provider asks for the proof of a bound refresh token here as well.
+        match prover.proof("POST", &endpoint, None).await {
+          Ok(proof) => request = request.header(DPOP_HEADER, proof.as_str()),
+          Err(error) => tracing::warn!(%error, "no proof for ending the provider session"),
+        }
+      }
+      if let Err(error) = request.form(&form).send().await {
         // The local session is gone either way; the provider session expires on its own.
         tracing::warn!(%error, "could not end the provider session");
       }
@@ -770,6 +843,14 @@ impl<S: TokenStore> AuthService<S> {
       .purge_after_sign_out(&server.token_key(), &server.server_url)
       .await;
     local.and(cleared).and(purged)
+  }
+
+  /// The provider's prover for ending a bound session; `None` for an unbound one. The key itself
+  /// stays: it is per device, and says nothing without a token.
+  async fn end_session_prover(&self, server: &DesktopConfig) -> Option<Arc<DpopProver>> {
+    let bound = self.stored_binding(server).await.ok()??;
+    let prover = self.stored_prover(server).await.ok()??;
+    (prover.thumbprint() == bound).then(|| Arc::new(prover.for_another_party()))
   }
 
   /// `GET {server}{path}` with a fresh access token.
@@ -868,25 +949,19 @@ impl<S: TokenStore> AuthService<S> {
     let server = self.server()?;
     let token = self.access_token(&server).await?;
     let url = format!("{}{path}", server.server_url.trim_end_matches('/'));
-    let mut request = self
-      .http()
-      .request(reqwest_method(method), url)
-      .bearer_auth(token.expose_secret())
-      .header(reqwest::header::ACCEPT, "application/json");
-    if let Some(body) = maybe_body {
-      request = request
-        .header(reqwest::header::CONTENT_TYPE, "application/json")
-        .body(body);
-    }
-    let response = request
-      .send()
-      .await
-      .map_err(|error| AuthError::Network(error.to_string()))?;
-    let status = response.status().as_u16();
-    let body = response
-      .text()
-      .await
-      .map_err(|error| AuthError::Network(error.to_string()))?;
+    let answer = self
+      .send_signed(&server, &token, method, &url, |mut request| {
+        request = request.header(reqwest::header::ACCEPT, "application/json");
+        if let Some(body) = &maybe_body {
+          request = request
+            .header(reqwest::header::CONTENT_TYPE, "application/json")
+            .body(body.clone());
+        }
+        request
+      })
+      .await?;
+    let status = answer.status;
+    let body = String::from_utf8_lossy(&answer.body).into_owned();
     if path == ME_PATH
       && status == 200
       && let Ok(me) = serde_json::from_str::<GetMeResponse>(&body)
@@ -909,34 +984,248 @@ impl<S: TokenStore> AuthService<S> {
     let server = self.server()?;
     let token = self.access_token(&server).await?;
     let url = format!("{}{path}", server.server_url.trim_end_matches('/'));
+    let answer = self
+      .send_signed(&server, &token, method, &url, |mut request| {
+        if let Some((content_type, bytes)) = &maybe_body {
+          request = request
+            .header(reqwest::header::CONTENT_TYPE, content_type.clone())
+            .body(bytes.clone());
+        }
+        request
+      })
+      .await?;
+    Ok(ApiBytesResponse {
+      status: answer.status,
+      content_type: answer.maybe_content_type,
+      body_base64: base64::engine::general_purpose::STANDARD.encode(&answer.body),
+    })
+  }
+
+  /// A request with `token`, signed for a bound one, with what DPoP asks for: the answer's nonce and
+  /// clock are kept, and a proof refused for them is made again once, never more (e2ee.md §3.1.2).
+  async fn send_signed(
+    &self,
+    server: &DesktopConfig,
+    token: &SecretString,
+    method: ApiMethod,
+    url: &str,
+    build: impl Fn(reqwest::RequestBuilder) -> reqwest::RequestBuilder,
+  ) -> Result<SignedAnswer, AuthError> {
+    let maybe_prover = match TokenAuthorization::of(token.expose_secret()) {
+      TokenAuthorization::Bearer => None,
+      TokenAuthorization::Bound(_) => Some(self.stored_prover(server).await?.ok_or(AuthError::KeyLost)?),
+    };
+    let (first, learned) = self
+      .signed_attempt(maybe_prover.as_deref(), token, method, url, &build)
+      .await?;
+    let is_retried = first.status == 401
+      && serde_json::from_slice::<ErrorBody>(&first.body)
+        .is_ok_and(|body| learned.is_worth_a_retry(&body.error_code));
+    if !is_retried {
+      return Ok(first);
+    }
+    let (second, _) = self
+      .signed_attempt(maybe_prover.as_deref(), token, method, url, &build)
+      .await?;
+    Ok(second)
+  }
+
+  async fn signed_attempt(
+    &self,
+    maybe_prover: Option<&DpopProver>,
+    token: &SecretString,
+    method: ApiMethod,
+    url: &str,
+    build: &impl Fn(reqwest::RequestBuilder) -> reqwest::RequestBuilder,
+  ) -> Result<(SignedAnswer, Learned), AuthError> {
+    let method = reqwest_method(method);
+    let signed = signed_headers(maybe_prover, token.expose_secret(), method.as_str(), url)
+      .await
+      .map_err(|error| match error {
+        DpopSendError::KeyLost => AuthError::KeyLost,
+        DpopSendError::Proof(error) => AuthError::Unsupported(error.to_string()),
+      })?;
     let mut request = self
       .http()
-      .request(reqwest_method(method), url)
-      .bearer_auth(token.expose_secret());
-    if let Some((content_type, bytes)) = maybe_body {
-      request = request
-        .header(reqwest::header::CONTENT_TYPE, content_type)
-        .body(bytes);
+      .request(method, url)
+      .header(AUTHORIZATION, signed.authorization);
+    if let Some(proof) = signed.maybe_proof {
+      request = request.header(DPOP_HEADER, proof.as_str());
     }
-    let response = request
+    let response = build(request)
       .send()
       .await
       .map_err(|error| AuthError::Network(error.to_string()))?;
+    let learned =
+      maybe_prover.map_or_else(Learned::default, |prover| note_answer(prover, response.headers()));
     let status = response.status().as_u16();
-    let content_type = response
+    let maybe_content_type = response
       .headers()
       .get(reqwest::header::CONTENT_TYPE)
       .and_then(|value| value.to_str().ok())
       .map(str::to_owned);
-    let bytes = response
+    let body = response
       .bytes()
       .await
-      .map_err(|error| AuthError::Network(error.to_string()))?;
-    Ok(ApiBytesResponse {
-      status,
-      content_type,
-      body_base64: base64::engine::general_purpose::STANDARD.encode(&bytes),
-    })
+      .map_err(|error| AuthError::Network(error.to_string()))?
+      .to_vec();
+    Ok((
+      SignedAnswer {
+        status,
+        maybe_content_type,
+        body,
+      },
+      learned,
+    ))
+  }
+
+  /// What the core signs its requests with: the key is in memory from the sign-in or refresh that
+  /// gave it a token, and a read here touches neither the file nor the keychain.
+  pub fn peek_dpop_prover(&self) -> Option<Arc<DpopProver>> {
+    self.prover_slot().clone()
+  }
+
+  fn prover_slot(&self) -> std::sync::MutexGuard<'_, Option<Arc<DpopProver>>> {
+    self.maybe_prover.lock().unwrap_or_else(PoisonError::into_inner)
+  }
+
+  /// The server's DPoP key, if it has one: from memory, or from the sealed file, which is open
+  /// already and costs no keychain access (#1150). A note that doesn't make a key counts as none.
+  async fn stored_prover(&self, server: &DesktopConfig) -> Result<Option<Arc<DpopProver>>, AuthError> {
+    if let Some(prover) = self.peek_dpop_prover() {
+      return Ok(Some(prover));
+    }
+    let Some(note) = self
+      .store
+      .load_note(SessionNote::DpopKey, &server.server_url)
+      .await?
+    else {
+      return Ok(None);
+    };
+    let decoded = base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(note);
+    let Some(key) = decoded
+      .ok()
+      .and_then(|secret| DpopSigningKey::from_secret_bytes(&Zeroizing::new(secret)).ok())
+    else {
+      tracing::warn!("the stored DPoP key can't be used");
+      return Ok(None);
+    };
+    Ok(Some(self.keep_prover(key)))
+  }
+
+  /// The server's DPoP key, made and kept on first use.
+  async fn prover_or_new(&self, server: &DesktopConfig) -> Result<Arc<DpopProver>, AuthError> {
+    if let Some(prover) = self.stored_prover(server).await? {
+      return Ok(prover);
+    }
+    let key = DpopSigningKey::generate();
+    let secret = key.to_secret_bytes();
+    let note = Zeroizing::new(base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(secret.as_slice()));
+    self
+      .store
+      .save_note(SessionNote::DpopKey, &server.server_url, &note)
+      .await?;
+    Ok(self.keep_prover(key))
+  }
+
+  fn keep_prover(&self, key: DpopSigningKey) -> Arc<DpopProver> {
+    let prover = Arc::new(DpopProver::new(Arc::new(SoftwareDpopSigner::new(key))));
+    *self.prover_slot() = Some(Arc::clone(&prover));
+    prover
+  }
+
+  /// The proof of a token request for a session that isn't bound to a key yet: with one only if the
+  /// provider takes them and the server would check them (it offers its nonce on `server-info`).
+  /// Otherwise, or when the key can't be kept, the session stays unbound, as it always was: nobody
+  /// is locked out by a binding the other side doesn't know (e2ee.md §3.1.2).
+  async fn new_session_proof(
+    &self,
+    session: &mut Session,
+    server: &DesktopConfig,
+    discovery: &Discovery,
+  ) -> TokenProof {
+    let takes_proofs = discovery
+      .dpop_signing_alg_values_supported
+      .iter()
+      .any(|algorithm| algorithm == DPOP_ALGORITHM_FOR_DISCOVERY);
+    if !takes_proofs {
+      return TokenProof::Unbound;
+    }
+    let Some(nonce) = self.server_nonce(server).await else {
+      return TokenProof::Unbound;
+    };
+    match self.prover_or_new(server).await {
+      Ok(prover) => {
+        prover.remember_nonce(&nonce);
+        TokenProof::With(provider_prover(session, &prover))
+      },
+      Err(error) => {
+        tracing::warn!(%error, "could not keep a DPoP key, the sign-in stays unbound");
+        TokenProof::Unbound
+      },
+    }
+  }
+
+  /// The nonce `server-info` offers. None means an older server, a proxy that strips the header, an
+  /// address the server doesn't know, or no answer; it is asked again at the next refresh.
+  async fn server_nonce(&self, server: &DesktopConfig) -> Option<String> {
+    let url = format!(
+      "{}{}",
+      server.server_url.trim_end_matches('/'),
+      server_entry::SERVER_INFO_PATH
+    );
+    let response = self.http().get(url).send().await.ok()?;
+    if !response.status().is_success() {
+      return None;
+    }
+    let nonce = response.headers().get(DPOP_NONCE_HEADER)?.to_str().ok()?;
+    Some(nonce.to_owned())
+  }
+
+  /// The proof of a refresh: with the key the refresh token is bound to and no other, or, for an
+  /// unbound one, as for a new session.
+  async fn refresh_proof(
+    &self,
+    session: &mut Session,
+    server: &DesktopConfig,
+    discovery: &Discovery,
+  ) -> Result<TokenProof, AuthError> {
+    let Some(bound) = self.stored_binding(server).await? else {
+      return Ok(self.new_session_proof(session, server, discovery).await);
+    };
+    let Some(prover) = self.stored_prover(server).await? else {
+      return Err(AuthError::KeyLost);
+    };
+    if prover.thumbprint() != bound {
+      return Err(AuthError::KeyLost);
+    }
+    Ok(TokenProof::With(provider_prover(session, &prover)))
+  }
+
+  /// The key the stored refresh token is bound to.
+  async fn stored_binding(&self, server: &DesktopConfig) -> Result<Option<JwkThumbprint>, AuthError> {
+    let maybe_note = self
+      .store
+      .load_note(SessionNote::TokenBinding, &server.token_key())
+      .await?;
+    Ok(maybe_note.and_then(|note| JwkThumbprint::parse(&note).ok()))
+  }
+
+  /// Keeps what a token answer says about its binding, for the next refresh of the refresh token.
+  async fn note_binding(&self, server: &DesktopConfig, access: &str) {
+    let key = server.token_key();
+    let saved = match token_bound_key(access) {
+      Some(bound) => {
+        self
+          .store
+          .save_note(SessionNote::TokenBinding, &key, bound.as_str())
+          .await
+      },
+      None => self.store.clear_note(SessionNote::TokenBinding, &key).await,
+    };
+    if let Err(error) = saved {
+      tracing::warn!(%error, "could not keep the sign-in's binding");
+    }
   }
 
   /// The current access token as text, refreshed when needed (tests; the app uses
@@ -996,6 +1285,7 @@ impl<S: TokenStore> AuthService<S> {
           )
         })
       },
+      (None, None) if session.is_key_lost => return TokenPeek::KeyLost,
       (None, None) if session.is_expired => return TokenPeek::Expired,
       (None, None) => None,
     };
@@ -1120,11 +1410,12 @@ impl<S: TokenStore> AuthService<S> {
     let result = self.refresh_with(session, server, refresh).await;
     if let Err(error) = &result {
       tracing::warn!(kind = error.kind(), "token refresh failed");
-      if matches!(error, AuthError::Denied(_)) {
-        // Only the provider's refusal ends the session; no answer keeps it (issue #883). The
-        // stored token goes too, so the next start doesn't offer it again.
+      if matches!(error, AuthError::Denied(_) | AuthError::KeyLost) {
+        // Only the provider's refusal, or a key that is gone, ends the session; no answer keeps it
+        // (issue #883). The stored token goes too, so the next start doesn't offer it again.
         session.maybe_tokens = None;
         session.is_expired = true;
+        session.is_key_lost = matches!(error, AuthError::KeyLost);
         if let Err(error) = self.store.clear(&server.token_key()).await {
           tracing::warn!(%error, "could not forget the refused refresh token");
         }
@@ -1149,12 +1440,23 @@ impl<S: TokenStore> AuthService<S> {
     let discovery = self.discovery_in(session, server).await?;
     // The redirect URI is not used for refreshing, but the client needs a valid one.
     let client = self.client(&discovery, REDIRECT_URI_PATTERN, server)?;
-    let http = self.oauth_http();
-    let response = client
-      .exchange_refresh_token(&RefreshToken::new(refresh.expose_secret().to_owned()))
-      .request_async(&http)
-      .await
-      .map_err(map_token_error)?;
+    let token_proof = self.refresh_proof(session, server, &discovery).await?;
+    let http = self.oauth_http(&token_proof);
+    let refresh_token = RefreshToken::new(refresh.expose_secret().to_owned());
+    let refreshing = client.exchange_refresh_token(&refresh_token);
+    let exchange = refreshing.request_async(&http);
+    // Next to the refresh, not after it: the nonce saves the first request after a start its
+    // challenge, for no extra wait.
+    let (response, maybe_nonce) = tokio::join!(exchange, async {
+      match &token_proof {
+        TokenProof::With(_) => self.server_nonce(server).await,
+        TokenProof::Unbound => None,
+      }
+    });
+    if let (Some(nonce), Some(prover)) = (maybe_nonce, self.peek_dpop_prover()) {
+      prover.remember_nonce(&nonce);
+    }
+    let response = response.map_err(map_token_error)?;
     self
       .adopt(session, server, &response, TokenOrigin::SameSession)
       .await
@@ -1219,6 +1521,7 @@ impl<S: TokenStore> AuthService<S> {
     if let Some(refresh) = &refresh {
       self.store.save(&server.token_key(), refresh).await?;
     }
+    self.note_binding(server, response.access_token().secret()).await;
     if let Some(subject) = maybe_subject {
       // Not saved: no cached start until a refresh saves it. It was cleared before the token went in.
       if let Err(error) = self
@@ -1237,6 +1540,7 @@ impl<S: TokenStore> AuthService<S> {
     let ms = |duration: Duration| i64::try_from(duration.as_millis()).unwrap_or(i64::MAX);
     let expires_at_ms = now_ms.saturating_add(ms(lifetime));
     session.is_expired = false;
+    session.is_key_lost = false;
     session.maybe_tokens = Some(Tokens {
       access: SecretString::from(response.access_token().secret().clone()),
       refresh: refresh.map(SecretString::from),
@@ -1390,9 +1694,15 @@ impl<S: TokenStore> AuthService<S> {
     self.http.read().unwrap_or_else(PoisonError::into_inner).clone()
   }
 
-  /// HTTP client of the `oauth2` crate on top of our `reqwest` client.
-  fn oauth_http(&self) -> OAuthHttp {
-    OAuthHttp(self.http())
+  /// HTTP client of the `oauth2` crate on top of our `reqwest` client, with `proof`'s DPoP proofs.
+  fn oauth_http(&self, proof: &TokenProof) -> OAuthHttp {
+    OAuthHttp {
+      http: self.http(),
+      maybe_prover: match proof {
+        TokenProof::Unbound => None,
+        TokenProof::With(prover) => Some(Arc::clone(prover)),
+      },
+    }
   }
 }
 
@@ -1442,7 +1752,10 @@ fn callback_outcome<T>(outcome: &Result<T, AuthError>) -> CallbackOutcome {
 }
 
 /// Adapter that lets the `oauth2` crate send its token requests through our `reqwest` client.
-struct OAuthHttp(reqwest::Client);
+struct OAuthHttp {
+  http: reqwest::Client,
+  maybe_prover: Option<Arc<DpopProver>>,
+}
 
 impl<'c> oauth2::AsyncHttpClient<'c> for OAuthHttp {
   type Error = OAuthHttpError;
@@ -1453,26 +1766,88 @@ impl<'c> oauth2::AsyncHttpClient<'c> for OAuthHttp {
   fn call(&'c self, request: oauth2::HttpRequest) -> Self::Future {
     Box::pin(async move {
       let (parts, body) = request.into_parts();
-      let response = self
-        .0
-        .request(parts.method, parts.uri.to_string())
-        .headers(parts.headers)
-        .body(body)
-        .send()
-        .await
-        .map_err(|error| OAuthHttpError(error.to_string()))?;
-      let mut builder = oauth2::http::Response::builder().status(response.status());
-      for (name, value) in response.headers() {
-        builder = builder.header(name, value);
+      let url = parts.uri.to_string();
+      let attempt = |maybe_proof: Option<String>| {
+        let mut request = self
+          .http
+          .request(parts.method.clone(), &url)
+          .headers(parts.headers.clone())
+          .body(body.clone());
+        if let Some(proof) = maybe_proof {
+          request = request.header(DPOP_HEADER, proof);
+        }
+        send_oauth(request)
+      };
+      match &self.maybe_prover {
+        Some(prover) => with_token_endpoint_proof(prover, &url, |proof| attempt(Some(proof))).await,
+        None => attempt(None).await.map(|answer| answer.response),
       }
-      let bytes = response
-        .bytes()
-        .await
-        .map_err(|error| OAuthHttpError(error.to_string()))?;
-      builder
-        .body(bytes.to_vec())
-        .map_err(|error| OAuthHttpError(error.to_string()))
     })
+  }
+}
+
+/// One request of the `oauth2` crate.
+async fn send_oauth(
+  request: reqwest::RequestBuilder,
+) -> Result<TokenEndpointAttempt<oauth2::HttpResponse>, OAuthHttpError> {
+  let response = request
+    .send()
+    .await
+    .map_err(|error| OAuthHttpError(error.to_string()))?;
+  let status = response.status();
+  let header = |name: &str| {
+    response
+      .headers()
+      .get(name)
+      .and_then(|value| value.to_str().ok())
+      .map(str::to_owned)
+  };
+  let (maybe_nonce, maybe_date) = (header(DPOP_NONCE_HEADER), header(DATE.as_str()));
+  let mut builder = oauth2::http::Response::builder().status(status);
+  for (name, value) in response.headers() {
+    builder = builder.header(name, value);
+  }
+  let bytes = response
+    .bytes()
+    .await
+    .map_err(|error| OAuthHttpError(error.to_string()))?;
+  let answer = builder
+    .body(bytes.to_vec())
+    .map_err(|error| OAuthHttpError(error.to_string()))?;
+  Ok(TokenEndpointAttempt {
+    status: status.as_u16(),
+    body: bytes.to_vec(),
+    maybe_nonce,
+    maybe_date,
+    response: answer,
+  })
+}
+
+/// Takes in what an API answer says for the next proof.
+fn note_answer(prover: &DpopProver, headers: &HeaderMap) -> Learned {
+  let text = |name: &str| headers.get(name).and_then(|value| value.to_str().ok());
+  prover.note_answer(DpopAnswer {
+    maybe_nonce: text(DPOP_NONCE_HEADER),
+    maybe_date: text(DATE.as_str()),
+  })
+}
+
+/// The identity provider's prover of `prover`'s key, kept for the session: it knows the provider's
+/// nonce.
+fn provider_prover(session: &mut Session, prover: &DpopProver) -> Arc<DpopProver> {
+  match &session.maybe_provider_prover {
+    Some(known) if known.thumbprint() == prover.thumbprint() => Arc::clone(known),
+    _ => {
+      let made = Arc::new(prover.for_another_party());
+      session.maybe_provider_prover = Some(Arc::clone(&made));
+      made
+    },
+  }
+}
+
+impl From<DpopProofError> for OAuthHttpError {
+  fn from(error: DpopProofError) -> Self {
+    Self(error.to_string())
   }
 }
 
@@ -2835,6 +3210,499 @@ mod tests {
         issuer: "https://auth.example.com/realms/company".into(),
         client_id: "teamcraft".into(),
         scopes: vec!["openid".into()],
+      }
+    }
+  }
+
+  /// DPoP on the desktop (e2ee.md §3.1.2) against a fake server and identity provider at one address.
+  mod dpop {
+    use std::sync::Mutex as TestMutex;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+    use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+
+    use teamcraft_core::store::{KeySourceError, Keystore, SecretVault};
+    use teamcraft_crypto::dpop::DpopPublicKey;
+    use zeroize::Zeroizing;
+
+    use super::*;
+    use crate::auth::store::MemoryStore;
+
+    const NONCE: &str = "server-nonce";
+    const PROVIDER_NONCE: &str = "provider-nonce";
+
+    /// What the fake does.
+    #[derive(Default)]
+    struct Script {
+      /// The discovery document lists ES256.
+      advertises: AtomicBool,
+      /// `server-info` offers a nonce: a server that checks proofs.
+      offers_nonce: AtomicBool,
+      /// The token endpoint asks for its own nonce first.
+      wants_nonce: AtomicBool,
+      /// The proofs the token endpoint saw, `None` for a request without one.
+      token_proofs: TestMutex<Vec<Option<String>>>,
+      /// What the end-session endpoint saw.
+      logout_proofs: TestMutex<Vec<Option<String>>>,
+      /// How many requests reached `/api/v1/me`.
+      me_requests: AtomicUsize,
+    }
+
+    struct Fake {
+      base: String,
+      script: Arc<Script>,
+    }
+
+    impl Fake {
+      async fn start() -> Self {
+        let listener = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+          .await
+          .unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let script = Arc::new(Script::default());
+        let (serving, shared) = (base.clone(), Arc::clone(&script));
+        tokio::spawn(async move {
+          while let Ok((socket, _)) = listener.accept().await {
+            let (base, script) = (serving.clone(), Arc::clone(&shared));
+            tokio::spawn(async move { serve(socket, &base, &script).await });
+          }
+        });
+        Self { base, script }
+      }
+
+      /// A provider and a server that both do DPoP.
+      async fn with_dpop() -> Self {
+        let fake = Self::start().await;
+        fake.script.advertises.store(true, Ordering::SeqCst);
+        fake.script.offers_nonce.store(true, Ordering::SeqCst);
+        fake
+      }
+
+      fn config(&self) -> DesktopConfig {
+        DesktopConfig {
+          server_url: self.base.clone(),
+          issuer: self.base.clone(),
+          client_id: "teamcraft".into(),
+          scopes: vec!["openid".into(), "offline_access".into()],
+        }
+      }
+
+      fn token_proofs(&self) -> Vec<Option<String>> {
+        self.script.token_proofs.lock().unwrap().clone()
+      }
+    }
+
+    async fn serve(mut socket: tokio::net::TcpStream, base: &str, script: &Script) {
+      let mut request = Vec::new();
+      let mut chunk = [0_u8; 8192];
+      while !request.windows(4).any(|window| window == b"\r\n\r\n") {
+        match socket.read(&mut chunk).await {
+          Ok(0) | Err(_) => return,
+          Ok(read) => request.extend_from_slice(&chunk[..read]),
+        }
+      }
+      let head = String::from_utf8_lossy(&request).into_owned();
+      let proof = header_of(&head, "dpop");
+      let (status, extra, body) = if head.starts_with("GET /.well-known/openid-configuration") {
+        let mut discovery = serde_json::json!({
+          "issuer": base,
+          "authorization_endpoint": format!("{base}/auth"),
+          "token_endpoint": format!("{base}/token"),
+          "end_session_endpoint": format!("{base}/logout"),
+        });
+        if script.advertises.load(Ordering::SeqCst) {
+          discovery["dpop_signing_alg_values_supported"] = serde_json::json!(["ES256"]);
+        }
+        ("200 OK", String::new(), discovery.to_string())
+      } else if head.starts_with("GET /api/v1/server-info") {
+        let extra = if script.offers_nonce.load(Ordering::SeqCst) {
+          format!("DPoP-Nonce: {NONCE}\r\n")
+        } else {
+          String::new()
+        };
+        ("200 OK", extra, "{}".to_owned())
+      } else if head.starts_with("GET /api/v1/me") {
+        script.me_requests.fetch_add(1, Ordering::SeqCst);
+        answer_me(&head, proof.as_deref())
+      } else if head.starts_with("POST /logout") {
+        script.logout_proofs.lock().unwrap().push(proof);
+        ("200 OK", String::new(), String::new())
+      } else {
+        answer_token(script, proof)
+      };
+      let response = format!(
+        "HTTP/1.1 {status}\r\nContent-Type: application/json\r\n{extra}Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        body.len()
+      );
+      drop(socket.write_all(response.as_bytes()).await);
+    }
+
+    fn answer_token(script: &Script, proof: Option<String>) -> (&'static str, String, String) {
+      script.token_proofs.lock().unwrap().push(proof.clone());
+      let Some(proof) = proof else {
+        return (
+          "200 OK",
+          String::new(),
+          token_answer("Bearer", &jwt(r#"{"sub":"alice"}"#)),
+        );
+      };
+      let claims = claims_of(&proof);
+      if script.wants_nonce.load(Ordering::SeqCst) && claims["nonce"] != PROVIDER_NONCE {
+        return (
+          "400 Bad Request",
+          format!("DPoP-Nonce: {PROVIDER_NONCE}\r\n"),
+          r#"{"error":"use_dpop_nonce"}"#.to_owned(),
+        );
+      }
+      let jkt = thumbprint_of(&proof);
+      let access = jwt(&format!(
+        r#"{{"sub":"alice","typ":"DPoP","cnf":{{"jkt":"{}"}}}}"#,
+        jkt.as_str()
+      ));
+      ("200 OK", String::new(), token_answer("DPoP", &access))
+    }
+
+    /// The server: a bound token needs the `DPoP` scheme and a proof with its nonce.
+    fn answer_me(head: &str, proof: Option<&str>) -> (&'static str, String, String) {
+      let authorization = header_of(head, "authorization").unwrap_or_default();
+      if authorization.starts_with("Bearer ") {
+        return (
+          "200 OK",
+          String::new(),
+          r#"{"id":"42","display_name":"Alice","role":"owner"}"#.to_owned(),
+        );
+      }
+      let nonce = proof.map(|proof| claims_of(proof)["nonce"].clone());
+      if nonce.as_ref().and_then(|nonce| nonce.as_str()) != Some(NONCE) {
+        return (
+          "401 Unauthorized",
+          format!("DPoP-Nonce: {NONCE}\r\n"),
+          r#"{"error_code":"use_dpop_nonce","message":"the nonce"}"#.to_owned(),
+        );
+      }
+      (
+        "200 OK",
+        format!("DPoP-Nonce: {NONCE}\r\n"),
+        r#"{"id":"42","display_name":"Alice","role":"owner"}"#.to_owned(),
+      )
+    }
+
+    fn token_answer(token_type: &str, access: &str) -> String {
+      serde_json::json!({
+        "access_token": access,
+        "token_type": token_type,
+        "expires_in": 300,
+        "refresh_token": "rotated-refresh",
+      })
+      .to_string()
+    }
+
+    fn header_of(head: &str, name: &str) -> Option<String> {
+      head.lines().find_map(|line| {
+        let (key, value) = line.split_once(':')?;
+        key.eq_ignore_ascii_case(name).then(|| value.trim().to_owned())
+      })
+    }
+
+    fn jwt(claims: &str) -> String {
+      format!("e30.{}.c2ln", URL_SAFE_NO_PAD.encode(claims))
+    }
+
+    fn claims_of(proof: &str) -> serde_json::Value {
+      let part = proof.split('.').nth(1).unwrap();
+      serde_json::from_slice(&URL_SAFE_NO_PAD.decode(part).unwrap()).unwrap()
+    }
+
+    fn thumbprint_of(proof: &str) -> JwkThumbprint {
+      let part = proof.split('.').next().unwrap();
+      let header: serde_json::Value = serde_json::from_slice(&URL_SAFE_NO_PAD.decode(part).unwrap()).unwrap();
+      let jwk = &header["jwk"];
+      DpopPublicKey::from_coordinates(jwk["x"].as_str().unwrap(), jwk["y"].as_str().unwrap())
+        .unwrap()
+        .thumbprint()
+    }
+
+    /// A store with the refresh token of an earlier sign-in, and the service on it.
+    async fn starting(fake: &Fake, store: MemoryStore) -> AuthService<MemoryStore> {
+      store
+        .save(&fake.config().token_key(), "stored-refresh")
+        .await
+        .unwrap();
+      AuthService::new(Some(fake.config()), store).unwrap()
+    }
+
+    /// The same store, as a restart finds it.
+    fn after_restart(service: AuthService<MemoryStore>, fake: &Fake) -> AuthService<MemoryStore> {
+      AuthService::new(Some(fake.config()), service.store).unwrap()
+    }
+
+    mod binding {
+      use super::*;
+
+      #[tokio::test]
+      async fn a_provider_and_a_server_that_do_dpop_bind_the_session() {
+        let fake = Fake::with_dpop().await;
+        let service = starting(&fake, MemoryStore::default()).await;
+        assert!(service.restore().await.unwrap());
+        let proofs = fake.token_proofs();
+        assert_eq!(proofs.len(), 1);
+        let proof = proofs[0].as_deref().expect("a proof at the token endpoint");
+        assert_eq!(claims_of(proof)["htm"], "POST");
+        assert_eq!(claims_of(proof)["htu"], format!("{}/token", fake.base));
+        assert!(claims_of(proof).get("ath").is_none());
+        let token = service.bearer_token().await.unwrap();
+        assert_eq!(
+          token_bound_key(&token),
+          service.peek_dpop_prover().map(|prover| prover.thumbprint())
+        );
+      }
+
+      #[tokio::test]
+      async fn a_provider_without_dpop_gets_no_proof_and_no_key_is_made() {
+        let fake = Fake::start().await;
+        fake.script.offers_nonce.store(true, Ordering::SeqCst);
+        let service = starting(&fake, MemoryStore::default()).await;
+        assert!(service.restore().await.unwrap());
+        assert_eq!(fake.token_proofs(), vec![None]);
+        assert!(service.peek_dpop_prover().is_none());
+        assert_eq!(
+          service
+            .store
+            .load_note(SessionNote::DpopKey, &fake.config().server_url)
+            .await
+            .unwrap(),
+          None
+        );
+      }
+
+      /// An older server, or a proxy that strips `DPoP-Nonce`: it would refuse a bound token.
+      #[tokio::test]
+      async fn a_server_that_offers_no_nonce_keeps_the_session_unbound() {
+        let fake = Fake::start().await;
+        fake.script.advertises.store(true, Ordering::SeqCst);
+        let service = starting(&fake, MemoryStore::default()).await;
+        assert!(service.restore().await.unwrap());
+        assert_eq!(fake.token_proofs(), vec![None]);
+        let answer = service.api_get(ME_PATH).await.unwrap();
+        assert_eq!(answer.status, 200);
+      }
+
+      #[tokio::test]
+      async fn the_providers_nonce_challenge_gets_one_more_try() {
+        let fake = Fake::with_dpop().await;
+        fake.script.wants_nonce.store(true, Ordering::SeqCst);
+        let service = starting(&fake, MemoryStore::default()).await;
+        assert!(service.restore().await.unwrap());
+        let proofs = fake.token_proofs();
+        assert_eq!(proofs.len(), 2);
+        assert_eq!(claims_of(proofs[1].as_deref().unwrap())["nonce"], PROVIDER_NONCE);
+      }
+    }
+
+    mod requests {
+      use super::*;
+
+      #[tokio::test]
+      async fn an_api_request_meets_the_challenge_once_and_then_has_the_nonce() {
+        let fake = Fake::start().await;
+        fake.script.advertises.store(true, Ordering::SeqCst);
+        fake.script.offers_nonce.store(true, Ordering::SeqCst);
+        let service = starting(&fake, MemoryStore::default()).await;
+        service.restore().await.unwrap();
+        // The nonce of `server-info` came along: no challenge at all.
+        assert_eq!(service.api_get(ME_PATH).await.unwrap().status, 200);
+        assert_eq!(fake.script.me_requests.load(Ordering::SeqCst), 1);
+
+        // An old nonce in memory (a server restart, a long idle time): one retry.
+        service.peek_dpop_prover().unwrap().remember_nonce("old");
+        assert_eq!(service.api_get(ME_PATH).await.unwrap().status, 200);
+        assert_eq!(fake.script.me_requests.load(Ordering::SeqCst), 3);
+      }
+    }
+
+    mod restart {
+      use super::*;
+
+      #[tokio::test]
+      async fn a_restart_keeps_the_key_and_the_refresh_token_works() {
+        let fake = Fake::with_dpop().await;
+        let service = starting(&fake, MemoryStore::default()).await;
+        service.restore().await.unwrap();
+        let bound = service.peek_dpop_prover().unwrap().thumbprint();
+
+        let restarted = after_restart(service, &fake);
+        assert!(restarted.restore().await.unwrap());
+        let proofs = fake.token_proofs();
+        assert_eq!(proofs.len(), 2);
+        assert_eq!(thumbprint_of(proofs[1].as_deref().unwrap()), bound);
+        assert_eq!(restarted.peek_dpop_prover().unwrap().thumbprint(), bound);
+        // The nonce came with the refresh: the first request after the start has no challenge.
+        assert_eq!(restarted.api_get(ME_PATH).await.unwrap().status, 200);
+        assert_eq!(fake.script.me_requests.load(Ordering::SeqCst), 1);
+      }
+
+      /// The provider stopped advertising, or the server is older now: a bound refresh token still
+      /// takes its proof, or it is refused.
+      #[tokio::test]
+      async fn a_bound_refresh_token_keeps_its_proof_whatever_the_discovery_says() {
+        let fake = Fake::with_dpop().await;
+        let service = starting(&fake, MemoryStore::default()).await;
+        service.restore().await.unwrap();
+        fake.script.advertises.store(false, Ordering::SeqCst);
+        fake.script.offers_nonce.store(false, Ordering::SeqCst);
+
+        let restarted = after_restart(service, &fake);
+        assert!(restarted.restore().await.unwrap());
+        assert!(fake.token_proofs()[1].is_some());
+        // Without a nonce from `server-info`, the first request meets the challenge and passes it.
+        assert_eq!(restarted.api_get(ME_PATH).await.unwrap().status, 200);
+        assert_eq!(fake.script.me_requests.load(Ordering::SeqCst), 2);
+      }
+
+      #[tokio::test]
+      async fn a_lost_key_ends_the_session_and_says_so() {
+        let fake = Fake::with_dpop().await;
+        let service = starting(&fake, MemoryStore::default()).await;
+        service.restore().await.unwrap();
+        let config = fake.config();
+        service
+          .store
+          .clear_note(SessionNote::DpopKey, &config.server_url)
+          .await
+          .unwrap();
+
+        let restarted = after_restart(service, &fake);
+        let error = restarted.restore().await.unwrap_err();
+        assert!(matches!(error, AuthError::KeyLost), "{error}");
+        assert_eq!(error.kind(), "key_lost");
+        assert_eq!(fake.token_proofs().len(), 1, "nothing goes to the provider");
+        assert!(matches!(restarted.peek_server_bearer_token(), TokenPeek::KeyLost));
+        assert!(
+          restarted.store.load(&config.token_key()).await.unwrap().is_none(),
+          "the refresh token that needs it goes too"
+        );
+      }
+
+      #[tokio::test]
+      async fn a_sign_out_ends_the_bound_session_with_a_proof_and_keeps_the_key() {
+        let fake = Fake::with_dpop().await;
+        let service = starting(&fake, MemoryStore::default()).await;
+        service.restore().await.unwrap();
+        service.logout().await.unwrap();
+        let proofs = fake.script.logout_proofs.lock().unwrap().clone();
+        assert_eq!(proofs.len(), 1);
+        assert!(proofs[0].is_some());
+        let config = fake.config();
+        assert_eq!(
+          service
+            .store
+            .load_note(SessionNote::TokenBinding, &config.token_key())
+            .await
+            .unwrap(),
+          None
+        );
+        assert!(
+          service
+            .store
+            .load_note(SessionNote::DpopKey, &config.server_url)
+            .await
+            .unwrap()
+            .is_some()
+        );
+      }
+    }
+
+    /// #1150: the key is in the sealed file, so it costs no keychain access at the start or later.
+    mod keychain {
+      use super::*;
+
+      #[derive(Default)]
+      struct CountingKeystore {
+        calls: AtomicUsize,
+        secrets: TestMutex<std::collections::HashMap<String, Vec<u8>>>,
+      }
+
+      impl Keystore for CountingKeystore {
+        fn read_secret(
+          &self,
+          service: &str,
+          account: &str,
+        ) -> Result<Option<Zeroizing<Vec<u8>>>, KeySourceError> {
+          self.calls.fetch_add(1, Ordering::SeqCst);
+          let secrets = self.secrets.lock().unwrap();
+          Ok(
+            secrets
+              .get(&format!("{service}/{account}"))
+              .cloned()
+              .map(Zeroizing::new),
+          )
+        }
+
+        fn read_text(
+          &self,
+          _service: &str,
+          _account: &str,
+        ) -> Result<Option<Zeroizing<String>>, KeySourceError> {
+          self.calls.fetch_add(1, Ordering::SeqCst);
+          Ok(None)
+        }
+
+        fn write_secret(&self, service: &str, account: &str, secret: &[u8]) -> Result<(), KeySourceError> {
+          self.calls.fetch_add(1, Ordering::SeqCst);
+          let mut secrets = self.secrets.lock().unwrap();
+          secrets.insert(format!("{service}/{account}"), secret.to_vec());
+          Ok(())
+        }
+
+        fn delete(&self, _service: &str, _account: &str) -> Result<(), KeySourceError> {
+          self.calls.fetch_add(1, Ordering::SeqCst);
+          Ok(())
+        }
+      }
+
+      #[tokio::test(flavor = "multi_thread")]
+      async fn making_and_using_the_key_costs_no_keychain_access() {
+        let fake = Fake::with_dpop().await;
+        let keystore = Arc::new(CountingKeystore::default());
+        let directory = std::env::temp_dir().join(format!("teamcraft-dpop-vault-{}", std::process::id()));
+        let open_vault = || {
+          let vault = Arc::new(SecretVault::new(Arc::clone(&keystore) as Arc<dyn Keystore>));
+          vault.set_directory(&directory);
+          vault
+        };
+        let first = VaultStore::new(open_vault());
+        first.save(&fake.config().token_key(), "refresh").await.unwrap();
+        first
+          .clear_local_session(&fake.config().server_url)
+          .await
+          .unwrap();
+        drop(first);
+        keystore.calls.store(0, Ordering::SeqCst);
+
+        // The first start with DPoP: the key is made.
+        let service = AuthService::new(Some(fake.config()), VaultStore::new(open_vault())).unwrap();
+        assert!(service.restore().await.unwrap());
+        assert_eq!(keystore.calls.load(Ordering::SeqCst), 1, "one read per start");
+        let bound = service.peek_dpop_prover().unwrap().thumbprint();
+        keystore.calls.store(0, Ordering::SeqCst);
+        for _ in 0..3 {
+          assert_eq!(service.api_get(ME_PATH).await.unwrap().status, 200);
+        }
+        assert_eq!(
+          keystore.calls.load(Ordering::SeqCst),
+          0,
+          "no access while running"
+        );
+        drop(service);
+
+        // The next start: one read for the file, and the key is in it.
+        let restarted = AuthService::new(Some(fake.config()), VaultStore::new(open_vault())).unwrap();
+        assert!(restarted.restore().await.unwrap());
+        assert_eq!(keystore.calls.load(Ordering::SeqCst), 1, "one read per start");
+        assert_eq!(restarted.peek_dpop_prover().unwrap().thumbprint(), bound);
+        drop(std::fs::remove_dir_all(&directory));
       }
     }
   }

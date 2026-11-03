@@ -128,15 +128,15 @@ mod service_worker {
   use web_sys::{NotificationOptions, ServiceWorkerGlobalScope};
 
   use crate::api::ApiError;
-  use crate::api::{HttpServerApi, ServerApi, StaticToken, change_web_push_subscription};
+  use crate::api::{HttpServerApi, ProvenToken, ServerApi, change_web_push_subscription};
   use crate::clock::{Clock, SystemClock};
   use crate::error::CoreError;
   use crate::media_cache::{BrowserMediaCache, MAX_MEDIA_MAX_AGE, MediaKey};
   use crate::push_picture::{account_user, icon_data_url, push_picture_keys};
-  use crate::push_preview::{PushPreview, push_preview, push_session};
+  use crate::push_preview::{PushPreview, PushSession, push_preview, push_session};
   use crate::push_subscription::{subscription_change, subscription_change_from};
   use crate::push_text::{NotificationLabels, notification_text};
-  use crate::store::{IndexedDbStore, browser_database_key_without_upgrade};
+  use crate::store::{IndexedDbStore, browser_database_key_without_upgrade, browser_dpop_prover};
 
   /// Key of the conversation ID in a notification's `data`.
   const CONVERSATION_FIELD: &str = "conversation_id";
@@ -281,7 +281,7 @@ mod service_worker {
     let store = IndexedDbStore::open_without_upgrade(database_name, &key).await?;
     let session = push_session(&store, SystemClock.now_ms())?
       .ok_or_else(|| CoreError::Browser("no valid push session".into()))?;
-    let api = HttpServerApi::new(&session.server_url, StaticToken(session.access_token));
+    let api = session_api(session).await;
     api
       .set_read_position(conversation, &SetReadPositionRequest { message_id })
       .await?;
@@ -361,12 +361,30 @@ mod service_worker {
     picture_keys: Vec<MediaKey>,
   }
 
+  /// The API with the stored session's token and, for a bound one, this browser's key. Without the
+  /// key the server refuses the token, and the notification goes without what it would have read.
+  async fn session_api(session: PushSession) -> HttpServerApi<ProvenToken> {
+    let maybe_prover = browser_dpop_prover().await.unwrap_or_else(|error| {
+      tracing::debug!(%error, "the service worker can't read the DPoP key");
+      None
+    });
+    HttpServerApi::new(
+      &session.server_url,
+      ProvenToken {
+        token: session.access_token,
+        maybe_prover,
+      },
+    )
+  }
+
   async fn preview(database_name: &str, payload: &[u8]) -> Result<OpenedPush, CoreError> {
     // Never upgrades the database: only the page that owns the store does (e2ee.md §9.4).
     let key = browser_database_key_without_upgrade(database_name).await?;
     let store = IndexedDbStore::open_without_upgrade(database_name, &key).await?;
-    let maybe_api = push_session(&store, SystemClock.now_ms())?
-      .map(|session| HttpServerApi::new(&session.server_url, StaticToken(session.access_token)));
+    let maybe_api = match push_session(&store, SystemClock.now_ms())? {
+      Some(session) => Some(session_api(session).await),
+      None => None,
+    };
     // Read-only: the preview never writes, so the app's own cache stays authoritative.
     let preview = push_preview(&store, maybe_api.as_ref(), payload).await?;
     let picture_keys = push_picture_keys(&store, &preview);

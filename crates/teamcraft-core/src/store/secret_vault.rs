@@ -100,6 +100,12 @@ pub enum SessionNote {
   CachedAccount,
   /// The account at the identity provider that the stored refresh token belongs to.
   TokenSubject,
+  /// The device's DPoP key for a server, in base64url (e2ee.md §3.1.2). In this file so that using
+  /// it never raises a keychain dialog (#1150), and a damaged file costs a sign-in, as for the
+  /// refresh token that needs it.
+  DpopKey,
+  /// The thumbprint of the key the stored refresh token is bound to.
+  TokenBinding,
 }
 
 impl SessionNote {
@@ -107,6 +113,8 @@ impl SessionNote {
     match self {
       Self::CachedAccount => "cached-account",
       Self::TokenSubject => "token-subject",
+      Self::DpopKey => "dpop-key",
+      Self::TokenBinding => "token-binding",
     }
   }
 }

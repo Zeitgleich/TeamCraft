@@ -341,6 +341,7 @@ impl<G: GatewayConnection> ConnectionSupervisor<G> {
         self.maybe_refused_token = token_fingerprint(client).await;
         let reason = match &error {
           CoreError::Api(ApiError::SignInExpired) => SignInReason::SignInExpired,
+          CoreError::Api(ApiError::BoundKeyLost) => SignInReason::DeviceKeyLost,
           CoreError::Api(api) => api
             .error_code()
             .map(SignInReason::from_error_code)
@@ -751,6 +752,7 @@ impl From<ConnectionState> for teamcraft_client_api::remote::CoreConnection {
           Interception::UntrustedCertificate => {
             teamcraft_client_api::remote::NetworkInterception::UntrustedCertificate
           },
+          Interception::ProofRefused => teamcraft_client_api::remote::NetworkInterception::ProofRefused,
         }),
       },
       ConnectionState::SignInRequired { reason } => Self::SignInRequired { reason },

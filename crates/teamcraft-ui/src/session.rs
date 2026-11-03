@@ -115,6 +115,10 @@ pub enum LoginProblem {
   SessionEnded,
   /// The workspace's idle limit ended the session (`session_timed_out`): sign in again.
   SessionTimedOut,
+  /// The server only takes tokens bound to a key on the device, and this one isn't (`dpop_required`).
+  DeviceBindingRequired,
+  /// The sign-in is bound to a key this device doesn't have any more: sign in again (e2ee.md §3.1.2).
+  DeviceKeyLost,
   /// The account no longer exists (`account_deleted`).
   AccountDeleted,
   /// The identity provider refused the sign-in in its redirect (issue #1063): `kind` picks the
@@ -255,6 +259,9 @@ impl SessionControl {
         // A sign-out in a tab closed before it finished may have left a cache behind (#749).
         crate::persisted_media::sweep_signed_out().await;
       },
+      Err(AuthError::KeyLost) => self
+        .state
+        .set_if_alive(SessionState::SignedOut(Some(LoginProblem::DeviceKeyLost))),
       // The provider refused the stored sign-in: say so instead of a bare sign-in screen.
       Err(AuthError::Denied(_)) => self
         .state
@@ -882,6 +889,7 @@ fn problem_from_auth(error: &AuthError) -> LoginProblem {
   match error {
     AuthError::Cancelled => LoginProblem::Cancelled,
     AuthError::Network(_) => LoginProblem::ServerUnreachable,
+    AuthError::KeyLost => LoginProblem::DeviceKeyLost,
     AuthError::AuthorizationRefused(code) => LoginProblem::ProviderRefused {
       kind: AuthorizationErrorKind::from_code(code),
       code: code.clone(),
@@ -898,7 +906,7 @@ fn restore_verdict(outcome: Result<bool, AuthError>) -> RestoreVerdict {
     Err(AuthError::Denied(_) | AuthError::NotSignedIn) => {
       RestoreVerdict::Over(Some(LoginProblem::SessionExpired))
     },
-    Err(error @ (AuthError::StateMismatch | AuthError::AuthorizationRefused(_))) => {
+    Err(error @ (AuthError::StateMismatch | AuthError::AuthorizationRefused(_) | AuthError::KeyLost)) => {
       RestoreVerdict::Over(Some(problem_from_auth(&error)))
     },
     Err(
@@ -919,6 +927,7 @@ fn account_verdict(outcome: Result<ApiResponse, AuthError>, has_restored: bool) 
     Err(AuthError::NotSignedIn) => return AccountVerdict::RestoreFirst,
     // The token ran out meanwhile, and its refresh was refused: the stored one is gone.
     Err(AuthError::Denied(_)) => return AccountVerdict::SessionOver,
+    Err(AuthError::KeyLost) => return AccountVerdict::Refused(LoginProblem::DeviceKeyLost),
     Err(_) => return AccountVerdict::NoVerdict,
   };
   if response.status == 200 {
@@ -933,12 +942,20 @@ fn account_verdict(outcome: Result<ApiResponse, AuthError>, has_restored: bool) 
   let Ok(body) = serde_json::from_str::<ErrorBody>(&response.body) else {
     return AccountVerdict::NoVerdict;
   };
+  // The token is fine, the proof with it isn't: a sign-in wouldn't help, and the data stays.
+  if matches!(
+    body.error_code,
+    ErrorCode::UseDpopNonce | ErrorCode::InvalidDpopProof
+  ) {
+    return AccountVerdict::NoVerdict;
+  }
   let is_final = matches!(
     body.error_code,
     ErrorCode::SessionEnded
       | ErrorCode::SessionTimedOut
       | ErrorCode::AccountDeleted
       | ErrorCode::AccountDeactivated
+      | ErrorCode::DpopRequired
   );
   if response.status == 401 && !is_final && !has_restored {
     return AccountVerdict::RestoreFirst;
@@ -978,6 +995,7 @@ pub fn interpret_me_response(response: ApiResponse) -> Result<GetMeResponse, Log
       Ok(body) if body.error_code == ErrorCode::AccountDeleted => Err(LoginProblem::AccountDeleted),
       Ok(body) if body.error_code == ErrorCode::SessionEnded => Err(LoginProblem::SessionEnded),
       Ok(body) if body.error_code == ErrorCode::SessionTimedOut => Err(LoginProblem::SessionTimedOut),
+      Ok(body) if body.error_code == ErrorCode::DpopRequired => Err(LoginProblem::DeviceBindingRequired),
       Ok(body) => Err(LoginProblem::Failed(format!("{} ({status})", body.error_code))),
       Err(_) => Err(LoginProblem::Failed(format!("HTTP {status}"))),
     },
@@ -989,6 +1007,55 @@ mod tests {
   use super::*;
 
   const ME: &str = r#"{"id":"42","username":"alice","display_name":"Alice","role":"owner"}"#;
+
+  mod dpop {
+    use super::*;
+
+    #[test]
+    fn a_refused_proof_is_no_verdict_on_the_account() {
+      for code in ["use_dpop_nonce", "invalid_dpop_proof"] {
+        let verdict = account_verdict(
+          Ok(ApiResponse {
+            status: 401,
+            body: format!(r#"{{"error_code":"{code}","message":"refused"}}"#),
+          }),
+          true,
+        );
+        assert_eq!(verdict, AccountVerdict::NoVerdict, "{code}");
+      }
+    }
+
+    #[test]
+    fn a_server_that_requires_binding_says_so_at_once() {
+      let verdict = account_verdict(
+        Ok(ApiResponse {
+          status: 401,
+          body: r#"{"error_code":"dpop_required","message":"refused"}"#.to_owned(),
+        }),
+        false,
+      );
+      assert_eq!(
+        verdict,
+        AccountVerdict::Refused(LoginProblem::DeviceBindingRequired)
+      );
+    }
+
+    #[test]
+    fn a_lost_key_is_said_as_such() {
+      assert_eq!(
+        account_verdict(Err(AuthError::KeyLost), false),
+        AccountVerdict::Refused(LoginProblem::DeviceKeyLost)
+      );
+      assert_eq!(
+        restore_verdict(Err(AuthError::KeyLost)),
+        RestoreVerdict::Over(Some(LoginProblem::DeviceKeyLost))
+      );
+      assert_eq!(
+        problem_from_auth(&AuthError::KeyLost),
+        LoginProblem::DeviceKeyLost
+      );
+    }
+  }
 
   #[test]
   fn account_is_parsed() {

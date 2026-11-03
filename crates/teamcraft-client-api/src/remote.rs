@@ -519,6 +519,8 @@ pub enum NetworkInterception {
   CaptivePortal,
   /// A certificate the device doesn't trust, usually a proxy that inspects encrypted traffic.
   UntrustedCertificate,
+  /// The server keeps refusing this device's DPoP proofs, usually because a proxy changes requests.
+  ProofRefused,
 }
 
 /// Whether the local data keeps up with the core. The browser can refuse writes (quota) or hand

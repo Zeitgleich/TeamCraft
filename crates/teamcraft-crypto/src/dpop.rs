@@ -25,6 +25,8 @@ use zeroize::Zeroizing;
 
 /// The only signature algorithm accepted, also the `algs` value of a `WWW-Authenticate` challenge.
 pub const DPOP_ALGORITHM: &str = "ES256";
+/// Bytes of an ES256 signature as a JWS carries it.
+pub const DPOP_SIGNATURE_BYTES: usize = 64;
 /// Longest proof accepted (bytes): a real one is about 500 bytes plus the URL and the nonce.
 pub const MAX_PROOF_BYTES: usize = 4096;
 /// The `typ` a proof's header must carry (RFC 9449 §4.2).
@@ -32,7 +34,7 @@ const PROOF_TYPE: &str = "dpop+jwt";
 /// Longest `jti` accepted (bytes); ours are 22 characters.
 const MAX_JTI_BYTES: usize = 128;
 /// Longest `nonce` accepted (bytes); ours are 43 characters.
-const MAX_NONCE_BYTES: usize = 256;
+pub const MAX_NONCE_BYTES: usize = 256;
 /// Bytes of a P-256 coordinate.
 const COORDINATE_BYTES: usize = 32;
 /// Bytes of a SHA-256 hash, and characters of one in unpadded base64url.
@@ -47,9 +49,23 @@ const NONCE_RANDOM_BYTES: usize = 32;
 pub struct DpopProof(String);
 
 /// A device's proof key. The private scalar is wiped on drop (`SigningKey` zeroizes itself) and the
-/// type is not `Clone`. Hardware-backed keys never become one of these: they sign elsewhere.
+/// type is not `Clone`. Hardware-backed keys never become one of these: they sign elsewhere, with
+/// [`DpopPublicKey`] and [`DpopProofDraft`].
 pub struct DpopSigningKey {
   key: SigningKey,
+}
+
+/// The public half of a proof key, as the proof's header names it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DpopPublicKey {
+  x: String,
+  y: String,
+}
+
+/// A proof waiting for its signature: for a key whose private half can't leave where it lives (Web
+/// Crypto, a platform's key store). Sign [`Self::signing_input`] with ES256, then [`Self::finish`].
+pub struct DpopProofDraft {
+  signing_input: String,
 }
 
 /// What a client signs a proof for. Its `Debug` doesn't print the token.
@@ -240,21 +256,65 @@ impl DpopSigningKey {
 
   /// The thumbprint the identity provider binds tokens to.
   pub fn thumbprint(&self) -> JwkThumbprint {
-    let (x, y) = self.public_coordinates();
-    JwkThumbprint::of_coordinates(&x, &y)
+    self.public_key().thumbprint()
+  }
+
+  /// The public half, for the proof's header.
+  pub fn public_key(&self) -> DpopPublicKey {
+    let point = self.key.verifying_key().to_encoded_point(false);
+    // Invariant: an uncompressed point of a valid key is 0x04, x, y, of 32 bytes each.
+    let (x, y) = point.as_bytes()[1..].split_at(COORDINATE_BYTES);
+    DpopPublicKey {
+      x: URL_SAFE_NO_PAD.encode(x),
+      y: URL_SAFE_NO_PAD.encode(y),
+    }
+  }
+
+  /// The ES256 signature of `message`, 32 bytes of `r` and 32 of `s` (RFC 7518 §3.4).
+  pub fn sign_bytes(&self, message: &[u8]) -> [u8; DPOP_SIGNATURE_BYTES] {
+    let signature: Signature = self.key.sign(message);
+    signature.to_bytes().into()
   }
 
   /// Signs a proof.
   pub fn sign_proof(&self, request: &DpopProofRequest<'_>) -> Result<DpopProof, DpopError> {
+    let draft = DpopProofDraft::new(&self.public_key(), request)?;
+    let signature = self.sign_bytes(draft.signing_input());
+    Ok(draft.finish(&signature))
+  }
+}
+
+impl DpopPublicKey {
+  /// From the base64url coordinates a key store hands out. A point that is not on the curve is
+  /// refused here, not by the server later.
+  pub fn from_coordinates(x: &str, y: &str) -> Result<Self, DpopError> {
+    let mut point = Vec::with_capacity(1 + 2 * COORDINATE_BYTES);
+    point.push(0x04);
+    point.extend_from_slice(&decode_coordinate(x)?);
+    point.extend_from_slice(&decode_coordinate(y)?);
+    VerifyingKey::from_sec1_bytes(&point).map_err(|_| DpopError::BadKey)?;
+    Ok(Self {
+      x: x.to_owned(),
+      y: y.to_owned(),
+    })
+  }
+
+  /// The thumbprint the identity provider binds tokens to.
+  pub fn thumbprint(&self) -> JwkThumbprint {
+    JwkThumbprint::of_coordinates(&self.x, &self.y)
+  }
+}
+
+impl DpopProofDraft {
+  pub fn new(key: &DpopPublicKey, request: &DpopProofRequest<'_>) -> Result<Self, DpopError> {
     let mut target = Url::parse(request.target_uri).map_err(|_| DpopError::WrongUri)?;
     target.set_query(None);
     target.set_fragment(None);
 
-    let (x, y) = self.public_coordinates();
     let header = serde_json::json!({
       "typ": PROOF_TYPE,
       "alg": DPOP_ALGORITHM,
-      "jwk": {"kty": "EC", "crv": "P-256", "x": x, "y": y},
+      "jwk": {"kty": "EC", "crv": "P-256", "x": key.x, "y": key.y},
     });
     let mut claims = serde_json::json!({
       "jti": random_base64url::<JTI_RANDOM_BYTES>(),
@@ -268,23 +328,27 @@ impl DpopSigningKey {
     if let Some(nonce) = request.maybe_nonce {
       claims["nonce"] = serde_json::Value::String(nonce.to_owned());
     }
-    let signing_input = format!(
-      "{}.{}",
-      URL_SAFE_NO_PAD.encode(header.to_string()),
-      URL_SAFE_NO_PAD.encode(claims.to_string())
-    );
-    let signature: Signature = self.key.sign(signing_input.as_bytes());
-    Ok(DpopProof(format!(
-      "{signing_input}.{}",
-      URL_SAFE_NO_PAD.encode(signature.to_bytes())
-    )))
+    Ok(Self {
+      signing_input: format!(
+        "{}.{}",
+        URL_SAFE_NO_PAD.encode(header.to_string()),
+        URL_SAFE_NO_PAD.encode(claims.to_string())
+      ),
+    })
   }
 
-  fn public_coordinates(&self) -> (String, String) {
-    let point = self.key.verifying_key().to_encoded_point(false);
-    // Invariant: an uncompressed point of a valid key is 0x04, x, y, of 32 bytes each.
-    let (x, y) = point.as_bytes()[1..].split_at(COORDINATE_BYTES);
-    (URL_SAFE_NO_PAD.encode(x), URL_SAFE_NO_PAD.encode(y))
+  /// What the key has to sign.
+  pub fn signing_input(&self) -> &[u8] {
+    self.signing_input.as_bytes()
+  }
+
+  /// The proof, with the ES256 signature of [`Self::signing_input`].
+  pub fn finish(self, signature: &[u8; DPOP_SIGNATURE_BYTES]) -> DpopProof {
+    DpopProof(format!(
+      "{}.{}",
+      self.signing_input,
+      URL_SAFE_NO_PAD.encode(signature)
+    ))
   }
 }
 
@@ -320,6 +384,21 @@ impl JwkThumbprint {
 }
 
 impl PublicOrigin {
+  /// Whether a request's `Host` value (`host[:port]`, in any case) names this origin. A hint for
+  /// what the server tells clients, never a check on a proof, which only goes by the configuration.
+  pub fn is_host(&self, host: &str) -> bool {
+    let Origin::Tuple(scheme, origin_host, port) = &self.0 else {
+      return false;
+    };
+    let Ok(url) = Url::parse(&format!("{scheme}://{host}")) else {
+      return false;
+    };
+    url
+      .host()
+      .is_some_and(|parsed| parsed.to_string() == origin_host.to_string())
+      && url.port_or_known_default() == Some(*port)
+  }
+
   /// From `http(s)://host[:port]`, with or without a trailing slash. A path, query or credentials
   /// are refused: an origin that isn't one is a configuration mistake to report, not to guess at.
   pub fn parse(origin: &str) -> Result<Self, DpopError> {
@@ -380,6 +459,24 @@ impl DpopNonces {
 /// The `ath` of a token: base64url of the SHA-256 of its ASCII form (RFC 9449 §4.2).
 pub fn access_token_hash(token: &str) -> String {
   URL_SAFE_NO_PAD.encode(Sha256::digest(token.as_bytes()))
+}
+
+/// The key a JWT access token says it is bound to (`cnf.jkt`), read without checking the signature:
+/// the client got the token from the identity provider over TLS and only asks how to present it.
+/// `None` for an opaque token and for one without a usable `cnf.jkt`.
+pub fn token_bound_key(token: &str) -> Option<JwkThumbprint> {
+  #[derive(Deserialize)]
+  struct Claims {
+    cnf: Confirmation,
+  }
+  #[derive(Deserialize)]
+  struct Confirmation {
+    jkt: String,
+  }
+  let payload = token.split('.').nth(1)?;
+  let json = URL_SAFE_NO_PAD.decode(payload).ok()?;
+  let claims: Claims = serde_json::from_slice(&json).ok()?;
+  JwkThumbprint::parse(&claims.cnf.jkt).ok()
 }
 
 /// How long a replay cache has to remember a proof it accepted: until its `iat` window ended in the
@@ -604,6 +701,85 @@ mod tests {
       let verified = check(&proof, &bound_to(&key)).unwrap();
       assert_eq!(verified.key, key.thumbprint());
       assert_eq!(verified.maybe_nonce.as_deref(), Some("server-nonce"));
+    }
+
+    #[test]
+    fn a_key_that_signs_elsewhere_makes_the_same_proofs() {
+      let key = DpopSigningKey::generate();
+      let public = key.public_key();
+      let proof_request = DpopProofRequest {
+        method: "GET",
+        target_uri: "https://chat.example.com/api/v1/me",
+        issued_at_unix: 1_000,
+        maybe_access_token: Some("token"),
+        maybe_nonce: None,
+      };
+      let draft = DpopProofDraft::new(&public, &proof_request).unwrap();
+      let signature = key.sign_bytes(draft.signing_input());
+      let proof = draft.finish(&signature);
+      let (x, y) = (public.x.clone(), public.y.clone());
+      let again = DpopPublicKey::from_coordinates(&x, &y).unwrap();
+      assert_eq!(again.thumbprint(), key.thumbprint());
+      assert_eq!(proof.as_str().split('.').count(), 3);
+      let origins = [PublicOrigin::parse("https://chat.example.com").unwrap()];
+      let bound = key.thumbprint();
+      verify_proof(
+        proof.as_str(),
+        &DpopExpectation {
+          method: "GET",
+          path: "/api/v1/me",
+          public_origins: &origins,
+          now_unix: 1_000,
+          max_age_secs: 60,
+          leeway_secs: 60,
+          access_token: "token",
+          maybe_bound_key: Some(&bound),
+        },
+      )
+      .unwrap();
+    }
+
+    #[test]
+    fn a_point_off_the_curve_is_no_public_key() {
+      let zero = URL_SAFE_NO_PAD.encode([0u8; 32]);
+      assert_eq!(
+        DpopPublicKey::from_coordinates(&zero, &zero),
+        Err(DpopError::BadKey)
+      );
+      assert!(DpopPublicKey::from_coordinates("short", "short").is_err());
+    }
+
+    #[test]
+    fn a_token_names_its_key_in_cnf_jkt() {
+      let key = DpopSigningKey::generate();
+      let jkt = key.thumbprint();
+      let jwt = |claims: String| format!("e30.{}.c2ln", URL_SAFE_NO_PAD.encode(claims));
+      let bound = jwt(format!(r#"{{"cnf":{{"jkt":"{}"}}}}"#, jkt.as_str()));
+      assert_eq!(token_bound_key(&bound), Some(jkt));
+      for unbound in [
+        jwt(r#"{"sub":"1"}"#.to_owned()),
+        jwt(r#"{"cnf":{"x5t#S256":"abc"}}"#.to_owned()),
+        jwt(r#"{"cnf":{"jkt":"short"}}"#.to_owned()),
+        "opaque-token".to_owned(),
+        "a.!!!.c".to_owned(),
+        String::new(),
+      ] {
+        assert_eq!(token_bound_key(&unbound), None, "{unbound}");
+      }
+    }
+
+    #[test]
+    fn a_host_header_matches_its_origin() {
+      let origin = PublicOrigin::parse("https://chat.example.com").unwrap();
+      assert!(origin.is_host("chat.example.com"));
+      assert!(origin.is_host("CHAT.example.com"));
+      assert!(origin.is_host("chat.example.com:443"));
+      assert!(!origin.is_host("chat.example.com:8443"));
+      assert!(!origin.is_host("chat.example.net"));
+      assert!(!origin.is_host(""));
+      let ipv6 = PublicOrigin::parse("http://[::1]:8081").unwrap();
+      assert!(ipv6.is_host("[::1]:8081"));
+      assert!(!ipv6.is_host("[::1]:8082"));
     }
 
     #[test]

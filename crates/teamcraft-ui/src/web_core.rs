@@ -18,6 +18,7 @@ use std::future::Future;
 use std::ops::ControlFlow;
 use std::pin::{Pin, pin};
 use std::rc::Rc;
+use std::sync::Arc;
 use std::time::Duration;
 
 use base64::Engine;
@@ -37,6 +38,7 @@ use teamcraft_client_api::remote::{
   SecuritySnapshot, StoreHealth, StoreProblem,
 };
 use teamcraft_client_api::snapshot_changes::{SnapshotChanges, SnapshotCursor};
+use teamcraft_core::api::dpop::DpopProver;
 use teamcraft_core::api::{AccessTokenSource, ApiError, HttpServerApi, ServerApi};
 use teamcraft_core::client::files::BlobUpload;
 use teamcraft_core::client::{
@@ -187,6 +189,8 @@ impl Running {
 #[derive(Clone)]
 struct WebTokens {
   slot: Rc<RefCell<TokenSlot>>,
+  /// Signs the proofs of a bound token; set before the token it goes with.
+  maybe_prover: Rc<RefCell<Option<Arc<DpopProver>>>>,
   /// Cuts the wait of [`keep_token_fresh`] for a first token short: the network may be back.
   maybe_wake: Rc<RefCell<Option<oneshot::Sender<()>>>>,
 }
@@ -204,12 +208,17 @@ impl WebTokens {
   fn new(slot: TokenSlot) -> Self {
     Self {
       slot: Rc::new(RefCell::new(slot)),
+      maybe_prover: Rc::default(),
       maybe_wake: Rc::default(),
     }
   }
 
   fn is_waiting(&self) -> bool {
     matches!(*self.slot.borrow(), TokenSlot::Waiting)
+  }
+
+  fn set_prover(&self, maybe_prover: Option<Arc<DpopProver>>) {
+    *self.maybe_prover.borrow_mut() = maybe_prover;
   }
 
   /// Takes a new token; answers whether it is the first.
@@ -240,6 +249,10 @@ impl AccessTokenSource for WebTokens {
       TokenSlot::Waiting => Err(ApiError::Network("waiting for a fresh access token".to_owned())),
       TokenSlot::Ready(token) => Ok(token.clone()),
     }
+  }
+
+  fn dpop_prover(&self) -> Option<Arc<DpopProver>> {
+    self.maybe_prover.borrow().clone()
   }
 }
 
@@ -740,7 +753,9 @@ async fn start_owner(user: UserId, maybe_lock: Option<OwnerLock>) -> Result<(), 
         .access_token()
         .await
         .map_err(|error: AuthError| error.to_string())?;
-      WebTokens::new(TokenSlot::Ready(first))
+      let tokens = WebTokens::new(TokenSlot::Ready(first));
+      tokens.set_prover(auth.dpop_prover().await);
+      tokens
     };
     let (sender, receiver) = mpsc::unbounded();
     let maybe_channel = match maybe_lock.is_some() {
@@ -1020,7 +1035,8 @@ fn keep_token_fresh(auth: Rc<dyn Authenticator>, tokens: WebTokens, alive: std::
       }
       match auth.access_token().await {
         Ok(token) => {
-          // async-ok: the core's copy of the token, not a signal.
+          // async-ok: the core's copies of the key and the token, not signals.
+          tokens.set_prover(auth.dpop_prover().await);
           if tokens.set(token)
             && let Err(error) = send(Request::NetworkChanged)
           {

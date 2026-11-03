@@ -403,7 +403,14 @@ carried over. Work through it in this order:
 DPoP (RFC 9449) ties access tokens to a key on the device, so a stolen token, or one relayed by a
 look-alike server, doesn't work without that key (e2ee.md §3.1.2). The setting is in the admin console:
 Instance settings, "Binding sign-ins to devices". The default `optional` changes nothing for clients
-that don't support it. **The current apps don't send proofs yet**, so stay on `optional` for now.
+that don't support it. **The desktop and web apps send proofs, the mobile apps don't yet**, so stay on
+`optional` for now if people use those.
+
+An identity provider that advertises DPoP (`dpop_signing_alg_values_supported`, on by default with
+current Keycloak) gets proofs from the desktop and web apps as soon as this server knows its origin,
+and binds their tokens without further setup. To hold that back, leave the origin out of
+`public_origins` and the other settings below: `server-info` then offers no nonce and the apps stay
+unbound.
 
 **What the server has to know: its public origin.** Proofs name the URL the client used, and the
 server compares it with what it was told, never with what a request claims. Host names of `[[brands]]`
@@ -427,6 +434,9 @@ and the console refuses `required`.
 2. Ship apps that send proofs to everybody, on all platforms in use.
 3. Let the identity provider bind tokens: allow DPoP on the app's OIDC client, without forcing it yet.
    Apps that send a proof at the token endpoint then get bound tokens, the others go on as before.
+   Check it from one browser: in the provider's discovery document, `dpop_signing_alg_values_supported`
+   lists `ES256`; `GET /api/v1/server-info` has a `DPoP-Nonce` header; after a sign-in `bound` counts up.
+   A web app needs the provider's CORS rule to allow the `DPoP` request header and to expose `DPoP-Nonce`.
 4. Watch `teamcraft_dpop_requests_total`. `unbound` counts requests that `required` would refuse, and
    it should reach 0 for longer than your slowest users take to update. `refused` should stay near
    0. Bots, local accounts and meeting guests aren't counted, and `required` doesn't affect them.
@@ -439,7 +449,14 @@ and the console refuses `required`.
 **When something goes wrong**
 
 - 401 `invalid_dpop_proof` for everybody, "names another URL" in `WWW-Authenticate`: the public origin
-  is wrong or missing, or the proxy rewrites the path. Set `public_origins` and restart.
+  is wrong or missing, or the proxy rewrites the path. Set `public_origins` and restart. The apps show
+  this as a banner naming a proxy or the server's address and keep the session.
+- The apps stay unbound although the provider advertises DPoP: `GET /api/v1/server-info` on the public
+  address has no `DPoP-Nonce`. The proxy strips it, the policy is `off`, or the host is not among the
+  public origins (behind a proxy that rewrites `Host`, the server also has to trust its
+  `X-Forwarded-Host`).
+- "This device lost the key" for one person: the app's local data was cleared or damaged, and the bound
+  refresh token can't be used without its key. Signing in again makes a new key. No data is lost.
 - 401 `invalid_dpop_proof` for one person, "too old or from the future": their device's clock is off
   by more than the proof's window, and the app doesn't correct for it. Raise `proof_leeway_secs` for
   the time being.

@@ -7,6 +7,7 @@
 //! in again through the provider's session (a redirect round trip without a password prompt).
 
 use std::cell::RefCell;
+use std::sync::Arc;
 
 use oauth2::{
   AuthUrl, AuthorizationCode, ClientId, PkceCodeChallenge, PkceCodeVerifier, RedirectUrl, RefreshToken,
@@ -19,9 +20,14 @@ use teamcraft_client_api::oidc_login::{
   oidc_client, shown_error_code,
 };
 use teamcraft_client_api::server_entry::{HttpPolicy, SERVER_INFO_PATH, check_discovery};
-use teamcraft_proto::{GetMeResponse, SERVER_INFO_PRODUCT, ServerInfoResponse};
+use teamcraft_core::api::dpop::{
+  Authorization, DPOP_ALGORITHM_FOR_DISCOVERY, DPOP_HEADER, DpopAnswer, DpopProofError, DpopProver,
+  DpopSendError, TokenEndpointAttempt, signed_headers, with_token_endpoint_proof,
+};
+use teamcraft_crypto::dpop::{JwkThumbprint, token_bound_key};
+use teamcraft_proto::{ErrorBody, ErrorCode, GetMeResponse, SERVER_INFO_PRODUCT, ServerInfoResponse};
 
-use super::fetch::fetch;
+use super::fetch::{FetchResponse, fetch};
 use super::token_vault::{self, CachedAccount, RefreshPlan, Tokens};
 use super::{
   ApiBytes, ApiMethod, ApiResponse, AppConfig, AuthError, Authenticator, BinaryBody, LocalFuture, SignInLook,
@@ -53,6 +59,10 @@ pub struct BrowserAuth {
   /// and the server hasn't been asked yet. The server is not trusted: its answer may name another
   /// provider, and a refresh token only ever goes to the provider it came from.
   maybe_cached_provider: RefCell<Option<(String, String)>>,
+  /// The device's DPoP key with what is known about this server, once it is read or made.
+  maybe_prover: RefCell<Option<Arc<DpopProver>>>,
+  /// The same key with what is known about the identity provider.
+  maybe_provider_prover: RefCell<Option<Arc<DpopProver>>>,
 }
 
 /// How to sign in: the server's settings, or the development overrides of [`AppConfig`].
@@ -63,6 +73,9 @@ struct SignIn {
   scopes: Vec<String>,
   /// Interactive sign-ins ask for the provider's login page (the server's setting).
   is_login_page_always_shown: bool,
+  /// What server-info said about proofs: `DPoP-Nonce` means the server would check them on this
+  /// host. Without it a bound token would be refused, so the sign-in stays unbound.
+  maybe_server_nonce: Option<String>,
 }
 
 /// The login hint with the identity provider it belongs to: a server that switched providers
@@ -91,6 +104,9 @@ struct Discovery {
   token_endpoint: String,
   #[serde(default, rename = "end_session_endpoint")]
   maybe_end_session_endpoint: Option<String>,
+  /// RFC 9449 §5.1: the provider takes proofs signed so.
+  #[serde(default)]
+  dpop_signing_alg_values_supported: Vec<String>,
 }
 
 /// What must survive the redirect to the identity provider.
@@ -117,6 +133,23 @@ struct Pending {
 #[error("{0}")]
 struct HttpError(String);
 
+impl From<DpopProofError> for HttpError {
+  fn from(error: DpopProofError) -> Self {
+    Self(error.to_string())
+  }
+}
+
+/// What a token request with a proof does when it gets no answer at all.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TokenFallback {
+  /// Nothing: the session is bound, and only a proof will do.
+  None,
+  /// The same request once more without the proof. A provider that advertises DPoP can still have a
+  /// CORS rule without the `DPoP` header, and the browser then stops the request before it leaves.
+  /// A code or refresh token isn't used up by that, and being unbound is what the session is anyway.
+  WithoutProof,
+}
+
 impl BrowserAuth {
   pub fn new(config: AppConfig) -> Self {
     Self {
@@ -126,6 +159,8 @@ impl BrowserAuth {
       sign_in: RefCell::new(None),
       discovery: RefCell::new(None),
       maybe_cached_provider: RefCell::new(None),
+      maybe_prover: RefCell::new(None),
+      maybe_provider_prover: RefCell::new(None),
     }
   }
 
@@ -322,10 +357,12 @@ impl BrowserAuth {
     let sign_in = self.sign_in().await?;
     let discovery = self.discovery().await?;
     let client = self.client(&discovery, &pending.redirect_uri, &sign_in)?;
+    let maybe_prover = self.new_session_prover(&sign_in, &discovery).await;
+    let http = |request| token_request(maybe_prover.clone(), TokenFallback::WithoutProof, request);
     let response = client
       .exchange_code(AuthorizationCode::new(code.to_owned()))
       .set_pkce_verifier(PkceCodeVerifier::new(pending.verifier))
-      .request_async(&http_client)
+      .request_async(&http)
       .await
       .map_err(map_token_error)?;
     self.tokens.replace(Some(tokens_from(&response, None, None)));
@@ -350,7 +387,7 @@ impl BrowserAuth {
     let _turn = token_vault::refresh_turn().await;
     let maybe_saved = token_vault::load(&sign_in.issuer, &sign_in.client_id).await;
     let plan = token_vault::plan_refresh(self.tokens.borrow().as_ref(), maybe_saved, now_ms());
-    let (refresh, maybe_subject, is_shared) = match plan {
+    let (refresh, maybe_subject, maybe_bound_key, is_shared) = match plan {
       RefreshPlan::Adopt(tokens) => {
         self.tokens.replace(Some(tokens));
         return Ok(());
@@ -358,15 +395,35 @@ impl BrowserAuth {
       RefreshPlan::Refresh {
         token,
         maybe_subject,
+        maybe_bound_key,
         is_shared,
-      } => (token, maybe_subject, is_shared),
+      } => (token, maybe_subject, maybe_bound_key, is_shared),
       RefreshPlan::NotSignedIn => return Err(AuthError::NotSignedIn),
     };
     let discovery = self.discovery().await?;
     let client = self.client(&discovery, &redirect_uri()?, &sign_in)?;
+    let (maybe_prover, fallback) = match maybe_bound_key {
+      Some(bound) => match self.provider_prover_of_key(&bound).await {
+        Some(prover) => (Some(prover), TokenFallback::None),
+        None => {
+          // The refresh token only works with that key. Nothing can bring it back.
+          tracing::warn!("the DPoP key of this sign-in is gone");
+          self.tokens.replace(None);
+          if is_shared {
+            token_vault::forget().await;
+          }
+          return Err(AuthError::KeyLost);
+        },
+      },
+      None => (
+        self.new_session_prover(&sign_in, &discovery).await,
+        TokenFallback::WithoutProof,
+      ),
+    };
+    let http = |request| token_request(maybe_prover.clone(), fallback, request);
     match client
       .exchange_refresh_token(&RefreshToken::new(refresh.expose_secret().to_owned()))
-      .request_async(&http_client)
+      .request_async(&http)
       .await
     {
       Ok(response) => {
@@ -513,6 +570,7 @@ impl BrowserAuth {
         client_id: client_id.clone(),
         scopes: vec![OPENID_SCOPE.to_owned()],
         is_login_page_always_shown: true,
+        maybe_server_nonce: None,
       },
       _ => self.server_sign_in().await?,
     };
@@ -548,6 +606,7 @@ impl BrowserAuth {
         .filter(|scope| scope != OPENID_SCOPE),
     );
     Ok(SignIn {
+      maybe_server_nonce: response.maybe_dpop_nonce.clone(),
       issuer: info.sign_in.issuer,
       client_id: info.sign_in.client_id,
       scopes,
@@ -589,6 +648,130 @@ impl BrowserAuth {
       .map_err(|error| AuthError::InvalidResponse(error.to_string()))?;
     self.discovery.replace(Some(found.clone()));
     Ok(found)
+  }
+
+  /// The DPoP key with what is known about this server, read once. `None` while there is no key.
+  async fn prover(&self) -> Option<Arc<DpopProver>> {
+    if let Some(prover) = self.maybe_prover.borrow().as_ref() {
+      return Some(Arc::clone(prover));
+    }
+    let found = stored_prover().await?;
+    self.maybe_prover.replace(Some(Arc::clone(&found)));
+    Some(found)
+  }
+
+  /// What proves the key at the token endpoint for a session that isn't bound yet: only when the
+  /// provider takes proofs and the server would check them. Otherwise, or when the key can't be
+  /// made, the session stays unbound, as it always was.
+  async fn new_session_prover(&self, sign_in: &SignIn, discovery: &Discovery) -> Option<Arc<DpopProver>> {
+    let takes_proofs = discovery
+      .dpop_signing_alg_values_supported
+      .iter()
+      .any(|algorithm| algorithm == DPOP_ALGORITHM_FOR_DISCOVERY);
+    let server_nonce = sign_in.maybe_server_nonce.as_deref().filter(|_| takes_proofs)?;
+    let prover = match self.prover().await {
+      Some(prover) => prover,
+      None => {
+        let made = new_prover().await?;
+        self.maybe_prover.replace(Some(Arc::clone(&made)));
+        made
+      },
+    };
+    prover.remember_nonce(server_nonce);
+    Some(self.provider_prover(&prover))
+  }
+
+  /// The provider's prover for the key a session is bound to; `None` if this device doesn't have it.
+  async fn provider_prover_of_key(&self, bound: &JwkThumbprint) -> Option<Arc<DpopProver>> {
+    let prover = self.prover().await?;
+    (prover.thumbprint() == *bound).then(|| {
+      // The nonce server-info offered saves the first request its challenge.
+      let sign_in = self.sign_in.borrow();
+      if let Some(nonce) = sign_in
+        .as_ref()
+        .and_then(|found| found.maybe_server_nonce.as_deref())
+      {
+        prover.remember_nonce(nonce);
+      }
+      self.provider_prover(&prover)
+    })
+  }
+
+  fn provider_prover(&self, prover: &DpopProver) -> Arc<DpopProver> {
+    if let Some(known) = self.maybe_provider_prover.borrow().as_ref()
+      && known.thumbprint() == prover.thumbprint()
+    {
+      return Arc::clone(known);
+    }
+    // In the browser the key is Web Crypto's and stays on this thread; `Arc` is the shared interface's.
+    #[cfg_attr(target_arch = "wasm32", allow(clippy::arc_with_non_send_sync))]
+    let made = Arc::new(prover.for_another_party());
+    self.maybe_provider_prover.replace(Some(Arc::clone(&made)));
+    made
+  }
+
+  /// A request with the current token, signed for a bound one, with what DPoP asks for: the answer's
+  /// nonce and clock are kept, and a proof refused for them is made again once, never more.
+  async fn authorized_fetch(
+    &self,
+    method: &str,
+    url: &str,
+    mut headers: Vec<(String, String)>,
+    maybe_body: Option<Vec<u8>>,
+  ) -> Result<FetchResponse, AuthError> {
+    let token = self.access_token().await?;
+    let maybe_prover = match Authorization::of(&token) {
+      Authorization::Bearer => None,
+      Authorization::Bound(_) => Some(self.prover().await.ok_or(AuthError::KeyLost)?),
+    };
+    let first_headers = sign_headers(maybe_prover.as_deref(), &token, method, url).await?;
+    headers.extend(first_headers);
+    let first = fetch(method, url, &headers, maybe_body.clone())
+      .await
+      .map_err(AuthError::Network)?;
+    let Some(prover) = maybe_prover else {
+      return Ok(first);
+    };
+    let learned = prover.note_answer(DpopAnswer {
+      maybe_nonce: first.maybe_dpop_nonce.as_deref(),
+      maybe_date: first.maybe_date.as_deref(),
+    });
+    let is_retried = first.status == UNAUTHORIZED
+      && serde_json::from_slice::<ErrorBody>(&first.body)
+        .is_ok_and(|body| learned.is_worth_a_retry(&body.error_code));
+    if !is_retried {
+      return Ok(first);
+    }
+    let second_headers = sign_headers(Some(&prover), &token, method, url).await?;
+    headers.retain(|(name, _)| name != "Authorization" && name != DPOP_HEADER);
+    headers.extend(second_headers);
+    let second = fetch(method, url, &headers, maybe_body)
+      .await
+      .map_err(AuthError::Network)?;
+    prover.note_answer(DpopAnswer {
+      maybe_nonce: second.maybe_dpop_nonce.as_deref(),
+      maybe_date: second.maybe_date.as_deref(),
+    });
+    Ok(second)
+  }
+
+  /// The key of the session is gone: the tokens are of no use any more, and go.
+  async fn forget_after_lost_key(&self) {
+    self.tokens.replace(None);
+    let _turn = token_vault::refresh_turn().await;
+    token_vault::forget().await;
+  }
+
+  /// A proof for the identity provider's end-session request, if the session is bound.
+  async fn end_session_proof(&self, endpoint: &str, maybe_bound: Option<&JwkThumbprint>) -> Option<String> {
+    let prover = self.provider_prover_of_key(maybe_bound?).await?;
+    match prover.proof("POST", endpoint, None).await {
+      Ok(proof) => Some(proof.as_str().to_owned()),
+      Err(error) => {
+        tracing::warn!(%error, "no proof for ending the session");
+        None
+      },
+    }
   }
 
   fn client(
@@ -638,6 +821,10 @@ impl Authenticator for BrowserAuth {
     Box::pin(BrowserAuth::access_token(self))
   }
 
+  fn dpop_prover(&self) -> LocalFuture<'_, Option<Arc<DpopProver>>> {
+    Box::pin(self.prover())
+  }
+
   fn login(&self, look: SignInLook) -> LocalFuture<'_, Result<(), AuthError>> {
     Box::pin(async move {
       self.begin_login(Some(&look)).await?;
@@ -673,7 +860,11 @@ impl Authenticator for BrowserAuth {
         }
         return Ok(());
       }
-      let maybe_refresh = self.tokens.replace(None).and_then(|tokens| tokens.maybe_refresh);
+      let maybe_tokens = self.tokens.replace(None);
+      let maybe_bound = maybe_tokens
+        .as_ref()
+        .and_then(|tokens| token_bound_key(tokens.access.expose_secret()));
+      let maybe_refresh = maybe_tokens.and_then(|tokens| tokens.maybe_refresh);
       let maybe_cached_provider = self.maybe_cached_provider.take();
       local_remove(SIGNED_IN_HINT_KEY);
       session_remove(AUTOLOGIN_TRIED_KEY);
@@ -699,10 +890,13 @@ impl Authenticator for BrowserAuth {
           encode(&sign_in.client_id),
           encode(refresh.expose_secret())
         );
-        let headers = [(
+        let mut headers = vec![(
           "Content-Type".to_owned(),
           "application/x-www-form-urlencoded".to_owned(),
         )];
+        if let Some(proof) = self.end_session_proof(&endpoint, maybe_bound.as_ref()).await {
+          headers.push((DPOP_HEADER.to_owned(), proof));
+        }
         match fetch("POST", &endpoint, &headers, Some(body.into_bytes())).await {
           Ok(response) if response.status < 300 => {},
           Ok(response) => tracing::warn!(status = response.status, "the provider did not end the session"),
@@ -721,22 +915,17 @@ impl Authenticator for BrowserAuth {
   ) -> LocalFuture<'_, Result<ApiResponse, AuthError>> {
     let url = self.config.api_url(path);
     Box::pin(async move {
-      let token = self.access_token().await?;
-      let mut headers = vec![
-        ("Authorization".to_owned(), format!("Bearer {token}")),
-        ("Accept".to_owned(), "application/json".to_owned()),
-      ];
+      let mut headers = vec![("Accept".to_owned(), "application/json".to_owned())];
       if maybe_body.is_some() {
         headers.push(("Content-Type".to_owned(), "application/json".to_owned()));
       }
-      let response = fetch(
-        method.as_str(),
-        &url,
-        &headers,
-        maybe_body.map(String::into_bytes),
-      )
-      .await
-      .map_err(AuthError::Network)?;
+      let outcome = self
+        .authorized_fetch(method.as_str(), &url, headers, maybe_body.map(String::into_bytes))
+        .await;
+      if matches!(outcome, Err(AuthError::KeyLost)) {
+        self.forget_after_lost_key().await;
+      }
+      let response = outcome?;
       if is_refused_token(response.status, &response.body) {
         self.on_unauthorized().await;
       }
@@ -755,14 +944,17 @@ impl Authenticator for BrowserAuth {
   ) -> LocalFuture<'_, Result<ApiBytes, AuthError>> {
     let url = self.config.api_url(path);
     Box::pin(async move {
-      let token = self.access_token().await?;
-      let mut headers = vec![("Authorization".to_owned(), format!("Bearer {token}"))];
+      let mut headers = Vec::new();
       if let Some(body) = &maybe_body {
         headers.push(("Content-Type".to_owned(), body.content_type.clone()));
       }
-      let response = fetch(method.as_str(), &url, &headers, maybe_body.map(|body| body.bytes))
-        .await
-        .map_err(AuthError::Network)?;
+      let outcome = self
+        .authorized_fetch(method.as_str(), &url, headers, maybe_body.map(|body| body.bytes))
+        .await;
+      if matches!(outcome, Err(AuthError::KeyLost)) {
+        self.forget_after_lost_key().await;
+      }
+      let response = outcome?;
       if is_refused_token(response.status, &response.body) {
         self.on_unauthorized().await;
       }
@@ -800,8 +992,15 @@ fn tokens_from(
   )
 }
 
-/// HTTP client for the `oauth2` crate on top of `fetch`.
-async fn http_client(request: oauth2::HttpRequest) -> Result<oauth2::HttpResponse, HttpError> {
+/// HTTP client for the `oauth2` crate on top of `fetch`, with a DPoP proof when a key is given.
+async fn token_request(
+  maybe_prover: Option<Arc<DpopProver>>,
+  fallback: TokenFallback,
+  request: oauth2::HttpRequest,
+) -> Result<oauth2::HttpResponse, HttpError> {
+  let method = request.method().as_str().to_owned();
+  let url = request.uri().to_string();
+  let body = request.body().clone();
   let headers: Vec<(String, String)> = request
     .headers()
     .iter()
@@ -812,18 +1011,98 @@ async fn http_client(request: oauth2::HttpRequest) -> Result<oauth2::HttpRespons
         .map(|value| (name.to_string(), value.to_owned()))
     })
     .collect();
-  let response = fetch(
-    request.method().as_str(),
-    &request.uri().to_string(),
-    &headers,
-    Some(request.body().clone()),
-  )
-  .await
-  .map_err(HttpError)?;
-  oauth2::http::Response::builder()
-    .status(response.status)
-    .body(response.body)
-    .map_err(|error| HttpError(error.to_string()))
+  let plain = || token_attempt(&method, &url, &headers, &body, None);
+  let Some(prover) = maybe_prover else {
+    return plain().await.map(|attempt| attempt.response);
+  };
+  let attempt = |proof: String| {
+    let (method, url, headers, body) = (&method, &url, &headers, &body);
+    async move { token_attempt(method, url, headers, body, Some(proof)).await }
+  };
+  match with_token_endpoint_proof(&prover, &url, attempt).await {
+    Err(error) if fallback == TokenFallback::WithoutProof => {
+      tracing::debug!(%error, "no answer to a token request with a proof, trying without");
+      plain().await.map(|attempt| attempt.response)
+    },
+    outcome => outcome,
+  }
+}
+
+async fn token_attempt(
+  method: &str,
+  url: &str,
+  headers: &[(String, String)],
+  body: &[u8],
+  maybe_proof: Option<String>,
+) -> Result<TokenEndpointAttempt<oauth2::HttpResponse>, HttpError> {
+  let mut headers = headers.to_vec();
+  if let Some(proof) = maybe_proof {
+    headers.push((DPOP_HEADER.to_owned(), proof));
+  }
+  let answer = fetch(method, url, &headers, Some(body.to_vec()))
+    .await
+    .map_err(HttpError)?;
+  let response = oauth2::http::Response::builder()
+    .status(answer.status)
+    .body(answer.body.clone())
+    .map_err(|error| HttpError(error.to_string()))?;
+  Ok(TokenEndpointAttempt {
+    status: answer.status,
+    body: answer.body,
+    maybe_nonce: answer.maybe_dpop_nonce,
+    maybe_date: answer.maybe_date,
+    response,
+  })
+}
+
+/// `Authorization`, and `DPoP` for a bound token.
+async fn sign_headers(
+  maybe_prover: Option<&DpopProver>,
+  token: &str,
+  method: &str,
+  url: &str,
+) -> Result<Vec<(String, String)>, AuthError> {
+  let signed = signed_headers(maybe_prover, token, method, url)
+    .await
+    .map_err(|error| match error {
+      DpopSendError::KeyLost => AuthError::KeyLost,
+      DpopSendError::Proof(error) => AuthError::Unsupported(error.to_string()),
+    })?;
+  let mut headers = vec![("Authorization".to_owned(), signed.authorization)];
+  if let Some(proof) = signed.maybe_proof {
+    headers.push((DPOP_HEADER.to_owned(), proof.as_str().to_owned()));
+  }
+  Ok(headers)
+}
+
+/// This browser's DPoP key, if it has one.
+#[cfg(target_arch = "wasm32")]
+async fn stored_prover() -> Option<Arc<DpopProver>> {
+  teamcraft_core::store::browser_dpop_prover()
+    .await
+    .unwrap_or_else(|error| {
+      tracing::warn!(%error, "could not read the DPoP key");
+      None
+    })
+}
+
+/// A new DPoP key for this browser. If that fails the session goes without.
+#[cfg(target_arch = "wasm32")]
+async fn new_prover() -> Option<Arc<DpopProver>> {
+  teamcraft_core::store::browser_dpop_prover_or_new()
+    .await
+    .inspect_err(|error| tracing::warn!(%error, "could not make a DPoP key"))
+    .ok()
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+async fn stored_prover() -> Option<Arc<DpopProver>> {
+  None
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+async fn new_prover() -> Option<Arc<DpopProver>> {
+  None
 }
 
 type TokenError =
@@ -849,9 +1128,16 @@ fn map_refresh_error(error: TokenError) -> AuthError {
 }
 
 /// A 401 of the server itself, with its error body. A proxy's or captive portal's page with that
-/// status says nothing about the token (robustness.md, "Hostile networks").
+/// status says nothing about the token (robustness.md, "Hostile networks"), and neither do the
+/// DPoP codes: a refused proof isn't a refused token, and a new token wouldn't be bound either.
 fn is_refused_token(status: u16, body: &[u8]) -> bool {
-  status == UNAUTHORIZED && serde_json::from_slice::<teamcraft_proto::ErrorBody>(body).is_ok()
+  status == UNAUTHORIZED
+    && serde_json::from_slice::<ErrorBody>(body).is_ok_and(|body| {
+      !matches!(
+        body.error_code,
+        ErrorCode::UseDpopNonce | ErrorCode::InvalidDpopProof | ErrorCode::DpopRequired
+      )
+    })
 }
 
 fn map_token_error(error: TokenError) -> AuthError {
@@ -1191,6 +1477,7 @@ mod tests {
       client_id: "teamcraft".into(),
       scopes: vec![OPENID_SCOPE.to_owned()],
       is_login_page_always_shown: true,
+      maybe_server_nonce: None,
     };
     let look = SignInLook {
       maybe_locale: Some("de".into()),

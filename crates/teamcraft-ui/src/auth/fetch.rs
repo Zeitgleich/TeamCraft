@@ -1,6 +1,7 @@
 //! A minimal `fetch` wrapper shared by the OIDC flow and API calls.
 
 use js_sys::Uint8Array;
+use teamcraft_core::api::dpop::DPOP_NONCE_HEADER;
 use wasm_bindgen::{JsCast, JsValue};
 use wasm_bindgen_futures::JsFuture;
 use web_sys::{Headers, Request, RequestInit, RequestRedirect, Response};
@@ -8,6 +9,10 @@ use web_sys::{Headers, Request, RequestInit, RequestRedirect, Response};
 pub(crate) struct FetchResponse {
   pub status: u16,
   pub maybe_content_type: Option<String>,
+  /// `DPoP-Nonce` and `Date`, which a cross-origin answer only shows when it says so (an identity
+  /// provider's often doesn't).
+  pub maybe_dpop_nonce: Option<String>,
+  pub maybe_date: Option<String>,
   pub body: Vec<u8>,
 }
 
@@ -45,6 +50,8 @@ pub(crate) async fn fetch(
   Ok(FetchResponse {
     status: response.status(),
     maybe_content_type,
+    maybe_dpop_nonce: response.headers().get(DPOP_NONCE_HEADER).ok().flatten(),
+    maybe_date: response.headers().get("Date").ok().flatten(),
     body: Uint8Array::new(&buffer).to_vec(),
   })
 }

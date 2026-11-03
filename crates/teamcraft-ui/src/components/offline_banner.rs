@@ -200,12 +200,15 @@ fn ConnectionNotice(notice: Notice, maybe_session: Option<SessionControl>) -> im
         None => "connection-banner-unreachable",
         Some(NetworkInterception::CaptivePortal) => "connection-banner-captive-portal",
         Some(NetworkInterception::UntrustedCertificate) => "connection-banner-untrusted-certificate",
+        Some(NetworkInterception::ProofRefused) => "connection-banner-proof-refused",
       },
       &[("seconds", &retry_in_secs.to_string())],
     ),
     Notice::SignInRequired(reason) => i18n.t(match reason {
       SignInReason::SessionEnded => "connection-banner-session-ended",
       SignInReason::SessionTimedOut => "connection-banner-session-timed-out",
+      SignInReason::DeviceBindingRequired => "connection-banner-device-binding-required",
+      SignInReason::DeviceKeyLost => "connection-banner-device-key-lost",
       SignInReason::SignInExpired | SignInReason::Unknown => "connection-banner-sign-in",
     }),
   };

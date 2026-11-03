@@ -272,6 +272,7 @@ impl CoreError {
       Self::Api(ApiError::Intercepted { kind, .. }) => match kind {
         Interception::CaptivePortal => FailureKind::CaptivePortal,
         Interception::UntrustedCertificate => FailureKind::UntrustedCertificate,
+        Interception::ProofRefused => FailureKind::Server(teamcraft_proto::ErrorCode::InvalidDpopProof),
       },
       Self::Api(error) => error
         .error_code()

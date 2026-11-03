@@ -16,12 +16,14 @@ mod token_vault;
 use std::future::Future;
 use std::pin::Pin;
 use std::rc::Rc;
+use std::sync::Arc;
 
 use account_gate::AccountGate;
 pub use account_gate::ME_PATH;
 pub use config::AppConfig;
 pub use teamcraft_client_api::remote::ApiMethod;
 pub use teamcraft_client_api::sign_in_look::SignInLook;
+use teamcraft_core::api::dpop::DpopProver;
 use teamcraft_proto::GetMeResponse;
 
 /// A boxed future that does not need to be `Send`; everything here runs on the UI thread.
@@ -54,6 +56,10 @@ pub enum AuthError {
   /// The platform lacks something the flow needs (e.g. no keyring).
   #[error("not supported here: {0}")]
   Unsupported(String),
+  /// The sign-in is bound to a key this device doesn't have any more (e2ee.md §3.1.2): the user has
+  /// to sign in again, and is told why.
+  #[error("the key this sign-in is bound to is gone")]
+  KeyLost,
 }
 
 /// Response of an authenticated API call.
@@ -146,6 +152,12 @@ pub trait Authenticator {
         "the tokens stay in the desktop shell".to_owned(),
       ))
     })
+  }
+
+  /// What signs DPoP proofs for the page's core, next to [`Self::access_token`]. The desktop shell
+  /// signs itself.
+  fn dpop_prover(&self) -> LocalFuture<'_, Option<Arc<DpopProver>>> {
+    Box::pin(async { None })
   }
 
   /// Like [`Self::api_request`] for bodies that are bytes: uploads of images and downloads of them.
