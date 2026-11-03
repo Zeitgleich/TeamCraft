@@ -341,8 +341,8 @@ impl ChannelRoleState {
         .workspace
         .is_roster_fresh(verifier.now_ms, verifier.roster_max_age_ms)
       && signers
-      .iter()
-      .any(|(_, authority)| matches!(authority, SignerAuthority::Workspace { .. }));
+        .iter()
+        .any(|(_, authority)| matches!(authority, SignerAuthority::Workspace { .. }));
     for (signer, authority) in signers {
       outcome = self.check_document(&document, verifier.conversation, signer, authority);
       if outcome.is_ok() {
@@ -368,7 +368,9 @@ impl ChannelRoleState {
       _ if is_by_workspace_admin => self.is_workspace_anchored = true,
       // A claim, or a roster admin on a roster too old to anchor anything: their snapshot replaces
       // what was anchored before.
-      Some(SignerAuthority::Founder | SignerAuthority::Workspace { .. }) => self.is_workspace_anchored = false,
+      Some(SignerAuthority::Founder | SignerAuthority::Workspace { .. }) => {
+        self.is_workspace_anchored = false
+      },
       // A channel admin carries on what the snapshot they build on was.
       Some(SignerAuthority::ChannelAdmin) | None => {},
     }
@@ -736,7 +738,14 @@ mod tests {
       assert!(state.is_workspace_anchored);
 
       world.now_ms = NOW_MS + MAX_AGE_MS + 1;
-      let mut checkpoint = eve.entry(&state, &[(&mallory, ChannelRole::Admin)]);
+      let mut checkpoint = eve.entry(
+        &state,
+        &[
+          (&eve, ChannelRole::Admin),
+          (&alice, ChannelRole::Admin),
+          (&mallory, ChannelRole::Admin),
+        ],
+      );
       checkpoint.created_at = UnixMillis(NOW_MS);
       assert!(world.apply(&mut state, checkpoint).is_empty());
 

@@ -337,11 +337,18 @@ mod false_claims {
       Box::new(clock.clone()),
     )
     .await;
-    make_workspace_admin(&server, &mut alice, &mut eve).await;
     let channel = channel_with_history(&mut alice, &mut bob).await;
+    make_workspace_admin(&server, &mut alice, &mut eve).await;
     add(&mut alice, &mut bob, &mut mallory, channel).await;
+    bob.client.full_sync().await.unwrap();
     bob.client.sync_channel_roles(channel).await.unwrap();
-    assert!(bob.client.channel_role_state(channel).unwrap().is_workspace_anchored);
+    assert!(
+      bob
+        .client
+        .channel_role_state(channel)
+        .unwrap()
+        .is_workspace_anchored
+    );
 
     clock.advance(31 * 24 * 60 * 60 * 1000);
     let mallory_id = mallory.client.user_id();
