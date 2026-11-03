@@ -2,7 +2,8 @@
 import json
 import sys
 
-rows = [json.loads(line) for line in open(sys.argv[1]) if line.strip()]
+with open(sys.argv[1]) as results:
+    rows = [json.loads(line) for line in results if line.strip()]
 print(f"{'scenario':10} {'size':9} {'target':>6} {'mode':8} {'kbit/s':>6} {'frame':>6} {'p95 fr':>6} {'100ms':>6} "
       f"{'1s':>5} {'first s':>7} {'delay ms':>8} {'>100ms':>6} {'stall':>5} {'lost':>4} {'PSNR':>5} {'key':>5} {'delta':>5}")
 for r in rows:
