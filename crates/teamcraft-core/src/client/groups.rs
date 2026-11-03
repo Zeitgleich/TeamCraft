@@ -675,8 +675,9 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     match self.mls_epoch(id)? {
       // A meeting chat is only ever founded by the organizer's devices: the winner is the
       // organizer's other device, which sends this one no welcome. It joins by external commit.
+      // Unless that commit is the other device joining this very group: the queue tells.
       Some(0) if server_epoch > 0 && is_meeting_chat => {
-        self.rejoin_superseded_group(id).await?;
+        self.sync_mls(id).await?;
         if !self.has_group(id)? {
           return self.complete_dm_setup(id, others);
         }
@@ -914,6 +915,14 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     )
   }
 
+  /// Whether this device leaves the conversation's MLS queue unread because its group is an
+  /// unfinished founding. Not a meeting chat's: while the founder waits for an invitee (one
+  /// who hasn't set up the app, or has no key package), the organizer's other device may join the
+  /// group by external commit or ask to be added, both through the queue (e2ee.md §4.6, #796).
+  pub(crate) fn ignores_queue_while_founding(&mut self, id: ConversationId) -> Result<bool, CoreError> {
+    Ok(self.is_unfinished_dm_founding(id)? && !self.dm_setup(id)?.is_some_and(|setup| setup.is_meeting_chat))
+  }
+
   /// Whether this device opened the DM and keeps its setup record.
   pub(crate) fn has_dm_setup(&self, id: ConversationId) -> Result<bool, CoreError> {
     Ok(self.dm_setup(id)?.is_some())
@@ -1087,7 +1096,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     conversation: ConversationId,
     maybe_first: Option<Result<ListMlsMessagesResponse, ApiError>>,
   ) -> Result<(), CoreError> {
-    if self.is_unfinished_dm_founding(conversation)? {
+    if self.ignores_queue_while_founding(conversation)? {
       // Nobody else is in this group, so the queue can only hold another founding's group
       // (whose welcome replaces this one) or nothing: following it would only refuse its entries
       // and ask to be added back to a group this device was never in.
@@ -1111,6 +1120,13 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       // it. Another commit may win meanwhile; the next pass finds out.
       self.post_pending_again(conversation).await?;
       catch_up = self.catch_up_mls(conversation, None).await?;
+    }
+    if catch_up.current_epoch > 0 && self.is_unfinished_dm_founding(conversation)? {
+      // A meeting chat's founder that read the queue and is still at epoch 0: those commits were
+      // of another group, which the organizer's other device founded first. That device sends
+      // no welcome, so this one joins its group by external commit (e2ee.md §4.6).
+      self.rejoin_superseded_group(conversation).await?;
+      return Ok(());
     }
     // A request that went unanswered (members ignore repeats within `rejoin_cooldown`, issue
     // #149): the cursor went past the entries that showed this device behind, the epoch still does.

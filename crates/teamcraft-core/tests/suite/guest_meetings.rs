@@ -76,6 +76,27 @@ async fn a_guest_let_in_by_the_organizer_reads_only_from_the_admission_on() {
   );
 }
 
+/// A guest the server admitted, who starts the call before the organizer's device let them in
+/// (#796): told at once, and a retry gets in afterwards.
+#[tokio::test]
+async fn a_guest_is_told_clearly_until_the_organizer_let_them_in() {
+  let mut rig = rig().await;
+  rig.guest_knows_the_link();
+  rig.server_admits_the_guest().await;
+  assert!(matches!(
+    rig.guest.client.prepare_call(rig.chat).await,
+    Err(CoreError::CallEncryptionPending(id)) if id == rig.chat
+  ));
+  assert!(
+    !rig.guest.client.has_group(rig.chat).unwrap(),
+    "a guest never founds"
+  );
+
+  rig.organizer_lets_the_guest_in(NOW_MS + 3_600_000).await.unwrap();
+  let prepared = rig.guest.client.prepare_call(rig.chat).await.unwrap();
+  assert_eq!(prepared.devices.len(), 2, "the retry gets in");
+}
+
 #[tokio::test]
 async fn the_link_carries_the_organizers_fingerprint_for_every_member() {
   let rig = rig().await;

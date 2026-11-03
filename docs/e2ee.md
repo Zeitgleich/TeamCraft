@@ -1074,7 +1074,11 @@ never by the server's member list:
   asks no more), so the organizer's other devices join by external commit
   even while the group holds nobody else (an instant meeting). Any other device, the organizer's
   included, only joins: as a further device, from a welcome, or by a device-add request. It never
-  founds, so a server that hides a group can't make a second device fork it.
+  founds, so a server that hides a group can't make a second device fork it. While the founder's
+  setup is unfinished (an invitee has no device or key package yet) it keeps reading the group's
+  queue, unlike a DM's founder: another device of the organizer may have joined its group or asked
+  to be added (#796). Only when the queue leaves it at epoch 0 while the server is past that do the
+  commits belong to another group, and it gives its own up and joins that one.
 - **Old meetings.** A meeting made before the server stopped founding these groups has a chat
   without one. The organizer's device founds it the first time the organizer opens or joins the
   meeting (the same `set_up_meeting_chat`, with the attendees as that device knows the meeting; it
