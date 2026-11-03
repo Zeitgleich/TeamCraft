@@ -108,11 +108,5 @@ cargo deny check
   when the whole CI passed; without it CI is skipped and it passes at once. So auto-merge
   (`gh pr merge --auto --squash`) waits for CI exactly when the pull request asked for it. Admins
   bypass the rule (batch merges); the nightly workflow marks its bump commit (docs/release.md).
-  CI starts on `opened`, `synchronize` and `reopened`, not on every label (the newest run of a
-  workflow replaces the earlier ones in the PR's checks, so an unrelated label would hide the real
-  `ci-gate`). The `opened` run waits 15 s and reads the labels live, so `gh pr create --label ci`
-  works; a `ci` or `arm` label added later starts the run through `ci-label.yml` (a `workflow_dispatch`
-  of `ci.yml` with the PR number; own-repo branches only). A run cancelled by a newer one reports
-  `ci-gate (cancelled run)`, which the ruleset doesn't require, instead of a red `ci-gate`.
 - Commit messages: imperative subject line (≤ 72 chars), body explains *why*. Sign off with
   `git commit -s` (Developer Certificate of Origin, as in CalCraft).

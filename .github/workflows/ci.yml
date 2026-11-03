@@ -7,25 +7,15 @@ on:
       - "docs/**"
       - "**/*.md"
   # Every pull request, docs too: `ci-gate` is the required check of `main` and must appear on each.
-  # Without the `ci` label the jobs are skipped and the gate passes in seconds. Not `labeled`: a
-  # label event always starts a run, and the newest run of a workflow replaces the earlier ones in
-  # the pull request's checks, so an unrelated label would hide the real run's `ci-gate`. The `ci`
-  # and `arm` labels start a run through ci-label.yml instead (a dispatch with `pr`).
+  # Without the `ci` label the jobs are skipped and the gate passes in seconds.
   pull_request:
-    types: [opened, synchronize, reopened]
-  # By hand, e.g. to get a verdict on main after a docs-only merge before tagging a release. With
-  # `pr` (started by ci-label.yml) it is the run of that pull request's branch, as if labelled.
+    types: [opened, synchronize, reopened, labeled]
+  # By hand, e.g. to get a verdict on main after a docs-only merge before tagging a release.
   workflow_dispatch:
-    inputs:
-      pr:
-        description: "Pull request number (set by ci-label.yml); empty for a run on main"
-        required: false
-        type: string
 
 # A new push to the same branch or PR cancels the run still going for the previous one.
 concurrency:
-  # The run for a pull request's label (dispatch with `pr`) shares the group of its pull request runs.
-  group: ${{ github.workflow }}-${{ inputs.pr && format('refs/pull/{0}/merge', inputs.pr) || github.ref }}
+  group: ${{ github.workflow }}-${{ github.ref }}
   # Superseded PR runs are cancelled; a running main run finishes so main always gets a verdict
   # (only the newest queued main run is kept).
   cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
@@ -48,56 +38,11 @@ env:
 # release caches out of the repository's 10 GB budget).
 
 jobs:
-  # Decides what this run does, from the pull request's labels as they are now (not the event's
-  # payload). `run_ci`: the jobs below run (always on push and on a dispatch without `pr`; with the
-  # `ci` label on pull requests); `arm`: also on arm64.
-  #
-  # On `opened` it first waits: `gh pr create --label` adds the labels a moment after opening, and a
-  # gate that passed in that moment would let auto-merge merge before the labelled run. A label
-  # added later starts its own run (ci-label.yml, only when the pull request is older than the
-  # wait), so every label is seen by exactly one of the two.
-  plan:
-    name: plan
-    runs-on: ubuntu-latest
-    permissions:
-      pull-requests: read
-    outputs:
-      run_ci: ${{ steps.plan.outputs.run_ci }}
-      arm: ${{ steps.plan.outputs.arm }}
-    steps:
-      - id: plan
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          EVENT: ${{ github.event_name }}
-          ACTION: ${{ github.event.action }}
-          AUTHOR: ${{ github.event.pull_request.user.login }}
-          PR_NUMBER: ${{ github.event.pull_request.number || inputs.pr }}
-        run: |
-          set -eu
-          arm=false
-          if [ "$EVENT" = push ] || [ -z "$PR_NUMBER" ]; then
-            run_ci=true
-            [ "$EVENT" = push ] && arm=true
-          else
-            [ "$ACTION" = opened ] && sleep 15
-            run_ci=false
-            labels="$(gh api --paginate "repos/$GITHUB_REPOSITORY/issues/$PR_NUMBER/labels" --jq '.[].name')"
-            echo "labels: $(echo $labels)"
-            if [ "$AUTHOR" = 'dependabot[bot]' ] || echo "$labels" | grep -qx ci; then run_ci=true; fi
-            if echo "$labels" | grep -qx arm; then arm=true; fi
-          fi
-          echo "event=$EVENT action=$ACTION run_ci=$run_ci arm=$arm"
-          {
-            echo "run_ci=$run_ci"
-            echo "arm=$arm"
-          } >> "$GITHUB_OUTPUT"
-
   check:
     # Pull requests run only with the `ci` label (or from Dependabot): branches are checked locally
     # before merging, and main gets one run per batch. This keeps the runner budget for main and
     # releases.
-    needs: [plan]
-    if: needs.plan.outputs.run_ci == 'true'
+    if: github.event_name != 'pull_request' || github.event.pull_request.user.login == 'dependabot[bot]' || contains(github.event.pull_request.labels.*.name, 'ci')
     name: check (${{ matrix.arch }})
     # Both Linux architectures the desktop ships for, each on a native runner; they run in
     # parallel, so arm64 adds no wall-clock time. Format and the wasm build are
@@ -105,7 +50,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        include: ${{ fromJSON(needs.plan.outputs.arm == 'true' && '[{"arch":"x86_64","runner":"ubuntu-latest"},{"arch":"aarch64","runner":"ubuntu-24.04-arm"}]' || '[{"arch":"x86_64","runner":"ubuntu-latest"}]') }}
+        include: ${{ fromJSON((github.event_name == 'push' || contains(github.event.pull_request.labels.*.name, 'arm')) && '[{"arch":"x86_64","runner":"ubuntu-latest"},{"arch":"aarch64","runner":"ubuntu-24.04-arm"}]' || '[{"arch":"x86_64","runner":"ubuntu-latest"}]') }}
     runs-on: ${{ matrix.runner }}
     container:
       image: ghcr.io/zeitgleich/teamcraft-ci@sha256:24fe71e069885c93b38cc6997f8005fb06b94e501dde7a07ce39c04c46d03e40
@@ -156,13 +101,12 @@ jobs:
     # Pull requests run only with the `ci` label (or from Dependabot): branches are checked locally
     # before merging, and main gets one run per batch. This keeps the runner budget for main and
     # releases.
-    needs: [plan]
-    if: needs.plan.outputs.run_ci == 'true'
+    if: github.event_name != 'pull_request' || github.event.pull_request.user.login == 'dependabot[bot]' || contains(github.event.pull_request.labels.*.name, 'ci')
     name: test (${{ matrix.arch }})
     strategy:
       fail-fast: false
       matrix:
-        include: ${{ fromJSON(needs.plan.outputs.arm == 'true' && '[{"arch":"x86_64","runner":"ubuntu-latest"},{"arch":"aarch64","runner":"ubuntu-24.04-arm"}]' || '[{"arch":"x86_64","runner":"ubuntu-latest"}]') }}
+        include: ${{ fromJSON((github.event_name == 'push' || contains(github.event.pull_request.labels.*.name, 'arm')) && '[{"arch":"x86_64","runner":"ubuntu-latest"},{"arch":"aarch64","runner":"ubuntu-24.04-arm"}]' || '[{"arch":"x86_64","runner":"ubuntu-latest"}]') }}
     runs-on: ${{ matrix.runner }}
     container:
       image: ghcr.io/zeitgleich/teamcraft-ci@sha256:24fe71e069885c93b38cc6997f8005fb06b94e501dde7a07ce39c04c46d03e40
@@ -212,8 +156,7 @@ jobs:
     # Pull requests run only with the `ci` label (or from Dependabot): branches are checked locally
     # before merging, and main gets one run per batch. This keeps the runner budget for main and
     # releases.
-    needs: [plan]
-    if: needs.plan.outputs.run_ci == 'true'
+    if: github.event_name != 'pull_request' || github.event.pull_request.user.login == 'dependabot[bot]' || contains(github.event.pull_request.labels.*.name, 'ci')
     runs-on: ubuntu-latest
     container:
       image: ghcr.io/zeitgleich/teamcraft-ci@sha256:24fe71e069885c93b38cc6997f8005fb06b94e501dde7a07ce39c04c46d03e40
@@ -257,8 +200,7 @@ jobs:
     # Pull requests run only with the `ci` label (or from Dependabot): branches are checked locally
     # before merging, and main gets one run per batch. This keeps the runner budget for main and
     # releases.
-    needs: [plan]
-    if: needs.plan.outputs.run_ci == 'true'
+    if: github.event_name != 'pull_request' || github.event.pull_request.user.login == 'dependabot[bot]' || contains(github.event.pull_request.labels.*.name, 'ci')
     runs-on: ubuntu-latest
     container:
       image: ghcr.io/zeitgleich/teamcraft-ci@sha256:24fe71e069885c93b38cc6997f8005fb06b94e501dde7a07ce39c04c46d03e40
@@ -289,8 +231,7 @@ jobs:
     # Pull requests run only with the `ci` label (or from Dependabot): branches are checked locally
     # before merging, and main gets one run per batch. This keeps the runner budget for main and
     # releases.
-    needs: [plan]
-    if: needs.plan.outputs.run_ci == 'true'
+    if: github.event_name != 'pull_request' || github.event.pull_request.user.login == 'dependabot[bot]' || contains(github.event.pull_request.labels.*.name, 'ci')
     runs-on: windows-latest
     env:
       SQLX_OFFLINE: "true"
@@ -330,8 +271,7 @@ jobs:
     # Pull requests run only with the `ci` label (or from Dependabot): branches are checked locally
     # before merging, and main gets one run per batch. This keeps the runner budget for main and
     # releases.
-    needs: [plan]
-    if: needs.plan.outputs.run_ci == 'true'
+    if: github.event_name != 'pull_request' || github.event.pull_request.user.login == 'dependabot[bot]' || contains(github.event.pull_request.labels.*.name, 'ci')
     runs-on: macos-26
     env:
       # Current macOS and the two releases before it (26 Tahoe, 15 Sequoia, 14 Sonoma).
@@ -380,8 +320,7 @@ jobs:
     # Pull requests run only with the `ci` label (or from Dependabot): branches are checked locally
     # before merging, and main gets one run per batch. This keeps the runner budget for main and
     # releases.
-    needs: [plan]
-    if: needs.plan.outputs.run_ci == 'true'
+    if: github.event_name != 'pull_request' || github.event.pull_request.user.login == 'dependabot[bot]' || contains(github.event.pull_request.labels.*.name, 'ci')
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -392,8 +331,7 @@ jobs:
     # Pull requests run only with the `ci` label (or from Dependabot): branches are checked locally
     # before merging, and main gets one run per batch. This keeps the runner budget for main and
     # releases.
-    needs: [plan]
-    if: needs.plan.outputs.run_ci == 'true'
+    if: github.event_name != 'pull_request' || github.event.pull_request.user.login == 'dependabot[bot]' || contains(github.event.pull_request.labels.*.name, 'ci')
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -421,33 +359,58 @@ jobs:
             --images "$RUNNER_TEMP/images.txt" > "$RUNNER_TEMP/notes.md"
           if grep -n '{{' "$RUNNER_TEMP/notes.md"; then echo "::error::unfilled placeholder"; exit 1; fi
 
+  # Two things `cargo test --workspace` never sees: `crates/vendor` is outside the workspace, so
+  # davey's own known-answer tests (the DAVE hash ratchet and AES-GCM vectors, VENDORED.md) run here,
+  # and `fuzz/` has its own lockfile and is otherwise only built by hand. `--locked` makes a stale
+  # `fuzz/Cargo.lock` fail; building the targets (stable is enough) catches decoder API drift.
+  vendored-and-fuzz:
+    # Pull requests run only with the `ci` label (or from Dependabot): branches are checked locally
+    # before merging, and main gets one run per batch. This keeps the runner budget for main and
+    # releases.
+    if: github.event_name != 'pull_request' || github.event.pull_request.user.login == 'dependabot[bot]' || contains(github.event.pull_request.labels.*.name, 'ci')
+    runs-on: ubuntu-latest
+    container:
+      image: ghcr.io/zeitgleich/teamcraft-ci@sha256:24fe71e069885c93b38cc6997f8005fb06b94e501dde7a07ce39c04c46d03e40
+      credentials:
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+    env:
+      SQLX_OFFLINE: "true"
+      CARGO_PROFILE_DEV_DEBUG: "0"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          key: vendored-and-fuzz
+          workspaces: |
+            crates/vendor/davey
+            fuzz
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+          cache-bin: "false"
+      - name: Davey tests
+        run: cargo test --manifest-path crates/vendor/davey/Cargo.toml
+      - name: Davey clippy
+        run: cargo clippy --manifest-path crates/vendor/davey/Cargo.toml --all-targets -- -D warnings
+      - name: Fuzz targets build (lockfile up to date)
+        run: cargo build --manifest-path fuzz/Cargo.toml --bins --locked
+
   # The one required check of `main` (repository ruleset), so auto-merge waits for CI where it ran:
   # with the `ci` label it passes only when every job above passed; without it the jobs are skipped
   # and it passes at once, so an unlabelled pull request doesn't wait for builds nobody asked for.
-  #
-  # A run cancelled by a newer one (a push) or by hand reports under another name, which no ruleset
-  # requires, instead of a red `ci-gate` (a skipped or green one would count as passed). Every other
-  # run reports `ci-gate`, also when `plan` failed (the name falls back to it).
   ci-gate:
-    name: ${{ contains(needs.*.result, 'cancelled') && 'ci-gate (cancelled run)' || 'ci-gate' }}
+    name: ci-gate
     if: always()
-    needs: [plan, check, test, browser-tests, audio-processing, windows, macos, deny, versions]
+    needs: [check, test, browser-tests, audio-processing, windows, macos, deny, versions, vendored-and-fuzz]
     runs-on: ubuntu-latest
     steps:
       - name: Every job that ran passed
         env:
           RESULTS: ${{ join(needs.*.result, ' ') }}
-          RUN_CI: ${{ needs.plan.outputs.run_ci }}
         run: |
-          echo "job results: $RESULTS (run_ci=$RUN_CI)"
-          case " $RESULTS " in
-            *" cancelled "*) echo "::notice::this run was cancelled; no ci-gate is reported"; exit 0 ;;
-          esac
+          echo "job results: $RESULTS"
           for result in $RESULTS; do
             case "$result" in
-              success) ;;
-              # Jobs are skipped on purpose only without the `ci` label; with it, a skip is a fault.
-              skipped) [ "$RUN_CI" != true ] || { echo "::error::a CI job was skipped although CI was requested"; exit 1; } ;;
+              success | skipped) ;;
               *) echo "::error::a CI job ended with '$result'"; exit 1 ;;
             esac
           done
