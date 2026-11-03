@@ -2,9 +2,8 @@
 //! (e2ee.md §9.1).
 //!
 //! [`LocalStore`] is synchronous, IndexedDB is not. Opening reads every record's ciphertext into
-//! memory, a page at a time in one read-only transaction so the page keeps its thread, and the store
-//! decrypts a record only when it is asked for (issue #155, #778, #1127; docs/performance.md says why
-//! it can't fetch per conversation instead); writes are queued
+//! memory, which the store decrypts only when a record is asked for (issue #155, #778; #1127 in
+//! docs/performance.md says why it can't fetch per conversation instead); writes are queued
 //! and issued together in one transaction a moment later ([`BATCH_DELAY`], or at once when much is
 //! queued or on [`IndexedDbStore::flush`]). Of several writes of one record in that time only the
 //! last is issued: a catch-up rewrites some records after every group it processes, and one
@@ -49,7 +48,7 @@ use teamcraft_crypto::local_store::LookupId;
 use teamcraft_crypto::secret::SymmetricKey;
 use wasm_bindgen::prelude::Closure;
 use wasm_bindgen::{JsCast, JsValue};
-use web_sys::{IdbDatabase, IdbKeyRange, IdbObjectStore, IdbRequest, IdbTransaction, IdbTransactionMode};
+use web_sys::{IdbDatabase, IdbObjectStore, IdbTransaction, IdbTransactionMode};
 
 use super::idb::{self, OpenMode, RECORDS};
 use crate::store::sealed::{BuildStep, LazySeal, RecordBackend, SealedStore, format_id, parse_id};
@@ -65,8 +64,6 @@ const LARGE_BATCH_EXTRA: Duration = Duration::from_millis(200);
 const BATCH_PROPERTY: &str = "teamcraftBatch";
 /// `DOMException.name` of a write refused for lack of space.
 const QUOTA_EXCEEDED: &str = "QuotaExceededError";
-/// Records read per task when the store opens: a few milliseconds of copying.
-const READ_PAGE_RECORDS: u32 = 1024;
 
 /// The encrypted browser store.
 pub type IndexedDbStore = SealedStore<IndexedDbRecords>;
@@ -265,7 +262,7 @@ impl IndexedDbRecords {
     let started_ms = js_sys::Date::now();
     match read_all(&database).await {
       Ok(records) => {
-        let sealed_bytes: usize = records.values().map(Vec::len).sum();
+        let sealed_bytes: usize = records.iter().map(|(_, sealed)| sealed.len()).sum();
         tracing::info!(
           records = records.len(),
           sealed_mib = sealed_bytes / (1024 * 1024),
@@ -273,7 +270,7 @@ impl IndexedDbRecords {
           wasm_mib = core::arch::wasm32::memory_size(0) / 16,
           "opened the local store"
         );
-        Ok(Self::new(database, records))
+        Ok(Self::new(database, records.into_iter().collect()))
       },
       Err(error) => {
         // Closed, so a reset can delete the database (issue #160) instead of being blocked by it.
@@ -495,29 +492,24 @@ fn classify(name: &str) -> WriteFailure {
   }
 }
 
-/// Every record, [`READ_PAGE_RECORDS`] per task. One transaction, so they are one snapshot: the next
-/// page is asked for in the same task that got the last (the transaction stays active for it), and a
-/// browser only runs other tasks in between. Reading them all at once made one long task of them, and
-/// held every record twice, in JavaScript and in the store, at the peak.
-async fn read_all(database: &IdbDatabase) -> Result<BTreeMap<LookupId, Vec<u8>>, StoreError> {
-  let mut records = BTreeMap::new();
-  let mut store = read_transaction(database)?;
-  let mut maybe_last_key = None;
-  loop {
-    let (keys, values) = match request_page(&store, maybe_last_key.as_ref()) {
-      Ok(requests) => requests,
-      // The browser ended the transaction between two pages after all: the rest is read in a new
-      // one. Only this page writes while it opens the store, and it doesn't yet.
-      Err(_) => {
-        store = read_transaction(database)?;
-        request_page(&store, maybe_last_key.as_ref()).map_err(|error| idb::js_error("load", &error))?
-      },
-    };
-    let keys: js_sys::Array = idb::request_result(&keys).await?.unchecked_into();
-    let values: js_sys::Array = idb::request_result(&values).await?.unchecked_into();
-    let count = keys.length();
-    // Both lists come in key order, so they line up.
-    for (key, value) in keys.iter().zip(values.iter()) {
+async fn read_all(database: &IdbDatabase) -> Result<Vec<(LookupId, Vec<u8>)>, StoreError> {
+  let transaction = database
+    .transaction_with_str(RECORDS)
+    .map_err(|error| idb::js_error("load", &error))?;
+  let records = transaction
+    .object_store(RECORDS)
+    .map_err(|error| idb::js_error("load", &error))?;
+  // Both lists come in key order, so they line up.
+  let keys = records
+    .get_all_keys()
+    .map_err(|error| idb::js_error("load", &error))?;
+  let values = records.get_all().map_err(|error| idb::js_error("load", &error))?;
+  let keys: js_sys::Array = idb::request_result(&keys).await?.unchecked_into();
+  let values: js_sys::Array = idb::request_result(&values).await?.unchecked_into();
+  keys
+    .iter()
+    .zip(values.iter())
+    .map(|(key, value)| {
       let id = key
         .as_string()
         .as_deref()
@@ -527,33 +519,7 @@ async fn read_all(database: &IdbDatabase) -> Result<BTreeMap<LookupId, Vec<u8>>,
         .dyn_ref::<js_sys::Uint8Array>()
         .ok_or_else(|| StoreError::Corrupt("record value".into()))?
         .to_vec();
-      records.insert(id, sealed);
-    }
-    if count < READ_PAGE_RECORDS {
-      return Ok(records);
-    }
-    maybe_last_key = Some(keys.get(count - 1));
-  }
-}
-
-fn read_transaction(database: &IdbDatabase) -> Result<IdbObjectStore, StoreError> {
-  database
-    .transaction_with_str(RECORDS)
-    .and_then(|transaction| transaction.object_store(RECORDS))
-    .map_err(|error| idb::js_error("load", &error))
-}
-
-/// The requests for the keys and the values of the page after `maybe_last_key`.
-fn request_page(
-  store: &IdbObjectStore,
-  maybe_last_key: Option<&JsValue>,
-) -> Result<(IdbRequest, IdbRequest), JsValue> {
-  let range = match maybe_last_key {
-    Some(last) => JsValue::from(IdbKeyRange::lower_bound_with_open(last, true)?),
-    None => JsValue::UNDEFINED,
-  };
-  Ok((
-    store.get_all_keys_with_key_and_limit(&range, READ_PAGE_RECORDS)?,
-    store.get_all_with_key_and_limit(&range, READ_PAGE_RECORDS)?,
-  ))
+      Ok((id, sealed))
+    })
+    .collect()
 }

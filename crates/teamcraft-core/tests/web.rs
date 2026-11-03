@@ -295,28 +295,6 @@ async fn a_catalog_build_reports_progress_and_goes_on_where_it_stopped() {
   assert_eq!(texts(&store, id(1)).len(), usize::from(MESSAGES));
 }
 
-/// Issue #1127: opening reads a page at a time, and more than one page reads back whole, with the
-/// records around a page's end among them.
-#[wasm_bindgen_test]
-async fn a_store_of_several_read_pages_reads_back_whole() {
-  const RECORDS: usize = 2500;
-  let name = database_name();
-  let key = browser_database_key(&name).await.unwrap();
-  let store = IndexedDbStore::open(&name, &key).await.unwrap();
-  store.begin_writes().unwrap();
-  for index in 0..RECORDS {
-    store
-      .put(Table::Users, &format!("key {index}"), b"value")
-      .unwrap();
-  }
-  store.end_writes().unwrap();
-  store.flush().await.unwrap();
-  drop(store);
-
-  let store = IndexedDbStore::open(&name, &key).await.unwrap();
-  assert_eq!(store.list(Table::Users).unwrap().len(), RECORDS);
-}
-
 #[wasm_bindgen_test]
 fn push_wake_up_round_trips_in_wasm() {
   let key = SymmetricKey::generate(&mut OsRng);
