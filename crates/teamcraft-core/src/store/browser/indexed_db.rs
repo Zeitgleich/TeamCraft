@@ -157,6 +157,8 @@ impl SealedStore<IndexedDbRecords> {
       if inner.writes.borrow().is_past(maybe_due) {
         break;
       }
+      // Written meanwhile, with nothing running: no need to wait for the batch timer.
+      inner.issue_queued();
     }
     inner.writes.borrow().failure()
   }
