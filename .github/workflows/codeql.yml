@@ -33,7 +33,7 @@ jobs:
       fail-fast: false
       matrix:
         # No build needed: Rust, Python, JavaScript/TypeScript and workflow files are extracted from
-        # source. Kotlin and Swift would need the Android and iOS builds and stay out, as before.
+        # source. Kotlin and Swift need the Android and iOS builds: see codeql-mobile.yml.
         language: [actions, javascript-typescript, python, rust]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
