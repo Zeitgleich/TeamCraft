@@ -152,6 +152,8 @@ pub type WriteBarrier = std::rc::Rc<dyn Fn() -> futures_util::future::LocalBoxFu
 pub struct HttpServerApi<T> {
   /// Replaced by [`HttpServerApi::drop_connections`] after a wake-up or network change.
   client: RwLock<reqwest::Client>,
+  /// For requests with a proof, which stay on their host; made when the first one goes out.
+  maybe_proof_client: RwLock<Option<reqwest::Client>>,
   /// Awaited before every request that changes server state.
   #[cfg(target_arch = "wasm32")]
   maybe_write_barrier: Option<WriteBarrier>,
@@ -178,6 +180,7 @@ impl<T: AccessTokenSource> HttpServerApi<T> {
     let base_url = base_url.into().trim_end_matches('/').to_string();
     Self {
       client,
+      maybe_proof_client: RwLock::new(None),
       maybe_insecure: insecure_reason(&base_url),
       base_url,
       tokens,
@@ -199,6 +202,20 @@ impl<T: AccessTokenSource> HttpServerApi<T> {
   /// Requests already running keep theirs.
   pub fn drop_connections(&self) {
     *self.client.write().unwrap_or_else(PoisonError::into_inner) = http_client();
+    *self
+      .maybe_proof_client
+      .write()
+      .unwrap_or_else(PoisonError::into_inner) = None;
+  }
+
+  /// The client of a request with a proof. reqwest takes `Authorization` off a redirect to another
+  /// host and leaves `DPoP` on, so these requests don't follow one at all.
+  fn proof_http(&self) -> reqwest::Client {
+    let mut slot = self
+      .maybe_proof_client
+      .write()
+      .unwrap_or_else(PoisonError::into_inner);
+    slot.get_or_insert_with(same_origin_http_client).clone()
   }
 
   /// The HTTP client of the next request (a cheap handle on the shared pool).
@@ -225,8 +242,12 @@ impl<T: AccessTokenSource> HttpServerApi<T> {
     let url = format!("{}/api/v1{path}", self.base_url);
     let maybe_prover = self.tokens.dpop_prover();
     let signed = signed_headers(maybe_prover.as_deref(), &token, method.as_str(), &url).await?;
-    let mut request = self
-      .http()
+    let client = if signed.maybe_proof.is_some() {
+      self.proof_http()
+    } else {
+      self.http()
+    };
+    let mut request = client
       .request(method, url)
       .header(reqwest::header::AUTHORIZATION, sensitive(&signed.authorization)?);
     if let Some(proof) = signed.maybe_proof {
@@ -2110,6 +2131,44 @@ fn http_client() -> reqwest::Client {
   }
 }
 
+/// [`http_client`] that follows no redirect to another origin (see [`HttpServerApi::proof_http`]).
+#[cfg(not(target_arch = "wasm32"))]
+fn same_origin_http_client() -> reqwest::Client {
+  match http_client_builder()
+    .redirect(reqwest::redirect::Policy::custom(follow_same_origin_redirect))
+    .build()
+  {
+    Ok(client) => client,
+    Err(error) => {
+      tracing::error!(%error, "HTTP client configuration rejected, using the default client");
+      reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .unwrap_or_default()
+    },
+  }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn follow_same_origin_redirect(attempt: reqwest::redirect::Attempt<'_>) -> reqwest::redirect::Action {
+  let is_same_origin = attempt
+    .previous()
+    .last()
+    .is_some_and(|previous| previous.origin() == attempt.url().origin());
+  if is_same_origin {
+    follow_redirect(attempt)
+  } else {
+    attempt.stop()
+  }
+}
+
+/// reqwest has no redirect policy in the browser, whose `fetch` follows redirects itself, and takes a
+/// custom header to another origin only if that origin's CORS rule allows it.
+#[cfg(target_arch = "wasm32")]
+fn same_origin_http_client() -> reqwest::Client {
+  http_client()
+}
+
 /// reqwest races IPv6 and IPv4 itself (hyper-util's Happy Eyeballs, 300 ms; issue #420), with the
 /// connect timeout split across a family's addresses.
 #[cfg(not(target_arch = "wasm32"))]
@@ -2247,7 +2306,10 @@ async fn send_noting(
       detail,
     });
   }
-  note(response.headers());
+  // Another host's clock and nonce say nothing about the server.
+  if response.url().origin() == origin {
+    note(response.headers());
+  }
   if status.is_success() {
     return Ok(response);
   }
@@ -2283,6 +2345,13 @@ fn captive_portal_sign(origin: &url::Origin, response: &Response) -> Option<Stri
   if status == reqwest::StatusCode::NETWORK_AUTHENTICATION_REQUIRED {
     return Some("HTTP 511 network authentication required".into());
   }
+  // Only a client that doesn't follow it gets to see one (requests with a proof). The API doesn't
+  // send people to other sites.
+  if status.is_redirection()
+    && let Some(host) = redirect_host_elsewhere(origin, response)
+  {
+    return Some(format!("redirected to {host}"));
+  }
   if !status.is_success() {
     return None;
   }
@@ -2294,6 +2363,13 @@ fn captive_portal_sign(origin: &url::Origin, response: &Response) -> Option<Stri
     return Some(format!("redirected to an HTML page on {host}"));
   }
   Some(format!("HTTP {} with an HTML page", status.as_u16()))
+}
+
+/// The host a redirect points to, if that is another origin.
+fn redirect_host_elsewhere(origin: &url::Origin, response: &Response) -> Option<String> {
+  let location = response.headers().get(reqwest::header::LOCATION)?.to_str().ok()?;
+  let target = response.url().join(location).ok()?;
+  (target.origin() != *origin).then(|| target.host_str().unwrap_or_default().to_owned())
 }
 
 fn is_html(headers: &reqwest::header::HeaderMap) -> bool {
@@ -2664,6 +2740,55 @@ mod tests {
       let error = bound_api(&server.url).me().await.unwrap_err();
       assert_eq!(server.requests(), 1);
       assert!(error.is_sign_in_required());
+    }
+
+    /// reqwest leaves `DPoP` on a redirect to another host. A request with a proof doesn't follow it.
+    #[tokio::test]
+    async fn a_proof_never_follows_a_redirect_to_another_host() {
+      let elsewhere = scripted(|_| {
+        "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: 2\r\nconnection: close\r\n\r\n{}"
+          .to_owned()
+      })
+      .await;
+      let target = elsewhere.url.clone();
+      let server = scripted(move |_| {
+        format!(
+          "HTTP/1.1 302 Found\r\nlocation: {target}/x\r\ncontent-length: 0\r\nconnection: close\r\n\r\n"
+        )
+      })
+      .await;
+      let error = bound_api(&server.url).me().await.unwrap_err();
+      assert_eq!(elsewhere.requests(), 0);
+      assert_eq!(error.interception(), Some(Interception::CaptivePortal), "{error}");
+    }
+
+    /// An unbound request still follows, as before; what the other host says isn't taken in.
+    #[tokio::test]
+    async fn another_hosts_answer_teaches_the_prover_nothing() {
+      let elsewhere = scripted(|_| {
+        "HTTP/1.1 403 Forbidden\r\ndpop-nonce: from-elsewhere\r\ndate: Sun, 06 Nov 1994 08:49:37 GMT\r\ncontent-length: 0\r\nconnection: close\r\n\r\n"
+          .to_owned()
+      })
+      .await;
+      let target = elsewhere.url.clone();
+      let server = scripted(move |_| {
+        format!(
+          "HTTP/1.1 302 Found\r\nlocation: {target}/x\r\ncontent-length: 0\r\nconnection: close\r\n\r\n"
+        )
+      })
+      .await;
+      let prover = prover();
+      let api = HttpServerApi::new(
+        server.url.as_str(),
+        ProvenToken {
+          token: "unbound".to_owned(),
+          maybe_prover: Some(Arc::clone(&prover)),
+        },
+      );
+      api.me().await.unwrap_err();
+      assert_eq!(elsewhere.requests(), 1);
+      assert!(!prover.has_nonce());
+      assert_eq!(prover.clock_offset(), 0);
     }
 
     /// A captive portal's `Date` and headers say nothing about the server.

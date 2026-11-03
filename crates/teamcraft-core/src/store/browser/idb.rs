@@ -28,6 +28,9 @@ pub(crate) enum OpenMode {
   /// At whatever version it has, never upgrading it: the service worker. Upgrading closes an older
   /// page that still owns the store; that page would go on without saving (issue #424 review, M2).
   AsIs,
+  /// At this version of its own, which never follows [`SCHEMA_VERSION`]: a database that any version
+  /// of the app, and the service worker, can open without upgrading anything.
+  At(u32),
 }
 
 /// Opens (and on first use creates) the database `name`, upgrading it to this version.
@@ -41,6 +44,7 @@ pub(crate) async fn open_database_with(name: &str, mode: OpenMode) -> Result<Idb
   let request = match mode {
     OpenMode::Upgrade => factory.open_with_u32(name, SCHEMA_VERSION),
     OpenMode::AsIs => factory.open(name),
+    OpenMode::At(version) => factory.open_with_u32(name, version),
   }
   .map_err(|error| js_error("open", &error))?;
   let on_upgrade = Closure::<dyn FnMut(web_sys::Event)>::new({
@@ -58,9 +62,13 @@ pub(crate) async fn open_database_with(name: &str, mode: OpenMode) -> Result<Idb
       .flatten()
       .is_some_and(|error| error.name() == "VersionError")
   {
+    let supported = match mode {
+      OpenMode::At(version) => version,
+      OpenMode::Upgrade | OpenMode::AsIs => SCHEMA_VERSION,
+    };
     return Err(StoreError::NewerSchema {
-      found: i64::from(SCHEMA_VERSION) + 1,
-      supported: i64::from(SCHEMA_VERSION),
+      found: i64::from(supported) + 1,
+      supported: i64::from(supported),
     });
   }
   result?

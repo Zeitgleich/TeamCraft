@@ -1035,8 +1035,9 @@ fn keep_token_fresh(auth: Rc<dyn Authenticator>, tokens: WebTokens, alive: std::
       }
       match auth.access_token().await {
         Ok(token) => {
-          // async-ok: the core's copies of the key and the token, not signals.
+          // The key goes first: the token needs it.
           tokens.set_prover(auth.dpop_prover().await);
+          // async-ok: the core's copy of the token, not a signal.
           if tokens.set(token)
             && let Err(error) = send(Request::NetworkChanged)
           {

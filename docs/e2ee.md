@@ -179,7 +179,10 @@ A token with a `cnf` that can't be checked (no `jkt`) is refused, not taken as u
 and the `error_code` values `use_dpop_nonce`, `invalid_dpop_proof`, `dpop_required`. Every answer to
 a request with a proof carries `DPoP-Nonce`, so a rotation normally costs no extra round trip. The
 nonce challenge doesn't count as a failed sign-in for the rate limits, since everybody meets it after
-a restart. Other refusals on REST do.
+a restart, and neither does any other refusal of a proof or binding (`AuthError::is_dpop_refusal`): the
+token was valid by then, so nothing was guessed, and with a wrong public origin it would block a whole
+address, bearer users behind the same NAT included. Those requests stay under the per-address limit, and
+guessed tokens still block an address.
 
 **Policy** (admin console, group `token_binding`; default `optional`). The setting is not part of the
 signed policy: only the server enforces it, and a server that ignored it could ignore a signature on
@@ -249,27 +252,52 @@ desktop: `apps/desktop/src/auth`).
   token proves nothing (see the policy table), would cost a round trip, and could get the session
   refused for an origin the server has wrong.
 - **When a session gets bound.** The token endpoint gets a proof only if the provider advertises
-  ES256 in `dpop_signing_alg_values_supported` *and* `GET /server-info` carries `DPoP-Nonce`, which
-  the server only sends under `optional` and `required`, on a host its public origins name. Otherwise
-  the session stays unbound as before. So an older server (which refuses `typ: DPoP` tokens outright),
-  a proxy that strips the header, or a wrong origin leave people signed in and don't lock them out. A
-  look-alike that withholds the header gets an unbound token: that is the residual risk of
-  `optional`, and only `required` closes it. In the browser a proof-carrying request without any
-  answer (a provider whose CORS rule lacks `DPoP`) is sent once more without the proof, unless the
-  session is bound.
+  ES256 in `dpop_signing_alg_values_supported` *and* a fresh `GET /server-info` (`no-store`) carries
+  `DPoP-Nonce`, which the server only sends under `optional` and `required`, on a host its public origins
+  name. Without the header the session stays unbound as before, so an older server (which refuses
+  `typ: DPoP` tokens outright), a proxy that strips the header, or a wrong origin don't lock anybody out.
+  No answer from the server is not "no header": a desktop sign-in fails with a network error after
+  one more try. A refresh of an unbound session goes on unbound and asks again next time.
+- **Going without the proof.** Only for a session that isn't bound, and each case logs. A refusal
+  (400 or 401) of a request with a proof is sent once more without it, since a provider may advertise
+  ES256 and not take proofs for this client, or refuse a date whose correction it hides from the browser.
+  Later refreshes in that run skip the proof; a new sign-in tries again. In the browser, a proof-carrying
+  request without any answer, twice, is also sent without the proof, because a CORS rule lacking `DPoP`
+  looks exactly like that. A bound session never goes without its proof.
+- **What that leaves open.** A new sign-in can be made unbound by whoever controls the server's answer or
+  makes the provider refuse: a look-alike withholding `DPoP-Nonce` (it needs nothing else), a proxy on a
+  TLS-terminating path, a provider's CORS rule, and in a browser a network that drops the first two tries
+  of the request (it can't see which one has the proof, but it can drop by size or timing). The token is
+  then a bearer token, and can be relayed under `optional`. A device that has a key and signs in unbound
+  logs a warning; it shows nothing, since the user can't act on it and it works. Binding is not enforced
+  on the client: only `required` on the real server closes this, since it refuses unbound tokens from
+  anywhere.
 - **A bound session.** Whether the refresh token is bound is read from the access token's `cnf.jkt`
-  (browser: kept with the tokens; desktop: note `TokenBinding` in the sealed file). A bound refresh token
+  (browser: kept with the tokens; desktop: note `TokenBinding` in the sealed file, written before the
+  token, and a failure to write it stops like a failure to save the token). A bound refresh token
   always gets a proof with that key, whatever the discovery document says by now. If the key is gone,
   nothing goes to the provider: the tokens go, and the user is told "sign in again, this device gets a
-  new key" (`DeviceKeyLost`). End-session requests carry a proof too.
+  new key" (`DeviceKeyLost`). Only a store that was read and lacks the key means gone: a store that can't
+  be read keeps the session and reads as a network problem, retried, with the bound token held back. The
+  browser's key database has its own fixed version, so no schema bump locks an older bundle or the service
+  worker out. A sign-out sends end-session with a proof and one nonce retry, and if that is refused
+  revokes the refresh token (RFC 7009): the reference provider (Keycloak) refuses end-session for a bound
+  refresh token even with its proof, and revoking ends the session there.
 - **Nonce.** Remembered per party (the server's and the provider's are separate), taken from every
   answer and from `dpop_nonce` frames. A `use_dpop_nonce` is retried once if the answer brought a new
   nonce. Without one (a proxy stripping it) a retry would change nothing and isn't made. On a WebSocket
   the challenge ends the connection, so that is one more connection.
-- **Clock.** `iat` is the local time plus the offset to the server's `Date`, kept from every answer
-  (not `server-info`, which caches may hold, and not a captive portal's). `invalid_dpop_proof` is
-  retried once if the answer's `Date` moved the offset by 5 s or more. Frames have no `Date`, so on
-  the gateway a request corrects the clock first.
+- **Clock.** `iat` is the local time plus the offset to the party's `Date`, kept from every answer of
+  that party (not a captive portal's or another host's after a redirect, and not one with an `Age`),
+  within 10 years. The provider's prover takes the server's offset at each use until it has read the
+  provider's own `Date`, which a browser often can't. A refusal is retried once if the answer's `Date`
+  moved the offset by 5 s or more; providers word that refusal differently. Frames have no `Date`, so
+  on the gateway a request corrects the clock first.
+- **Redirects.** reqwest takes `Authorization` off a redirect to another host and leaves `DPoP` on, so
+  native requests with a proof don't follow one to another origin (it reads as a captive portal). In the
+  browser the core's `fetch` follows redirects by itself, with no option through reqwest: the proof goes
+  along only if the target's CORS rule allows `DPoP`. Only the server or something terminating its TLS can
+  send that redirect, and the token stays behind.
 - **Never a loop.** One retry per request or connection. What stays refused is an error: `use_dpop_nonce`
   and `invalid_dpop_proof` are no sign-in problem, since another token wouldn't help. The session
   stays, the app retries with backoff, and the banner names a proxy or the server's address

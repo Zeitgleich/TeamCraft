@@ -13,13 +13,16 @@ use wasm_bindgen_futures::JsFuture;
 use web_sys::{CryptoKey, EcKeyGenParams, EcdsaParams, IdbDatabase, IdbTransactionMode};
 
 use super::browser_key::{crypto_error, subtle};
-use super::idb::{self, KEYS};
+use super::idb::{self, KEYS, OpenMode};
 use crate::api::dpop::{DpopProofError, DpopProver, DpopSignature, DpopSigner, SignFuture};
 use crate::store::StoreError;
 
 /// Its own database, so that nothing that clears the session or an account's store takes it along
 /// while another tab still signs with it.
 const DATABASE: &str = "teamcraft-dpop";
+/// Fixed, apart from the account store's schema: a bump there must not make an older bundle or the
+/// service worker unable to read the key, since a key that can't be read looks like a lost one.
+const DATABASE_VERSION: u32 = 1;
 const KEY_PAIR: &str = "key_pair";
 const ECDSA: &str = "ECDSA";
 const CURVE: &str = "P-256";
@@ -55,9 +58,10 @@ impl DpopSigner for BrowserDpopSigner {
   }
 }
 
-/// What signs this browser's proofs, if the key exists.
+/// What signs this browser's proofs. `Ok(None)` only if the store was read and has no key; a store that
+/// can't be read is an error, which says nothing about the sign-in that needs the key.
 pub async fn browser_dpop_prover() -> Result<Option<Arc<DpopProver>>, StoreError> {
-  let database = idb::open_database(DATABASE).await?;
+  let database = idb::open_database_with(DATABASE, OpenMode::At(DATABASE_VERSION)).await?;
   let result = stored_prover(&database).await;
   database.close();
   result
@@ -65,7 +69,7 @@ pub async fn browser_dpop_prover() -> Result<Option<Arc<DpopProver>>, StoreError
 
 /// [`browser_dpop_prover`], creating the key on first use. Two tabs creating it at once agree on one.
 pub async fn browser_dpop_prover_or_new() -> Result<Arc<DpopProver>, StoreError> {
-  let database = idb::open_database(DATABASE).await?;
+  let database = idb::open_database_with(DATABASE, OpenMode::At(DATABASE_VERSION)).await?;
   let result = stored_or_new(&database).await;
   database.close();
   result

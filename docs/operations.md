@@ -457,6 +457,16 @@ and the console refuses `required`.
   `X-Forwarded-Host`).
 - "This device lost the key" for one person: the app's local data was cleared or damaged, and the bound
   refresh token can't be used without its key. Signing in again makes a new key. No data is lost.
+- "this device has a DPoP key and signed in without binding" in an app's log, or "refused a request with
+  a proof": the session went on unbound. A provider that advertises DPoP may not take proofs for this
+  client, or the device's clock is off and the provider's `Date` isn't readable. For a web app, expose
+  `Date` and `DPoP-Nonce` in the provider's CORS rule. Under `required` such a session is refused.
+- A sign-out that doesn't end the provider session: bound refresh tokens are ended by the end-session
+  request or, if the provider refuses that, by revocation. The discovery document has to name
+  `revocation_endpoint`, and for a web app its CORS rule has to allow the app's origin.
+
+Refused proofs and `dpop_required` don't count as failed sign-ins, so a wrong public origin doesn't block
+an address with 429. Guessed tokens still do, and every request stays under the per-address limit.
 - 401 `invalid_dpop_proof` for one person, "too old or from the future": their device's clock is off
   by more than the proof's window, and the app doesn't correct for it. Raise `proof_leeway_secs` for
   the time being.

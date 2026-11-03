@@ -27,6 +27,11 @@ pub const DPOP_ALGORITHM_FOR_DISCOVERY: &str = teamcraft_crypto::dpop::DPOP_ALGO
 /// A `Date` this much off the current offset is worth one more try after `invalid_dpop_proof`. Less
 /// than that can't be why the proof was refused: the server allows a minute by default.
 const CLOCK_CORRECTION_SECS: i64 = 5;
+/// The furthest a `Date` may move the clock: a device whose clock is wrong by more isn't helped by
+/// anything here, and a hostile `Date` gets no further.
+pub const MAX_CLOCK_OFFSET_SECS: i64 = 10 * 366 * 86_400;
+/// The years an HTTP date is read in. Anything else is no date, and its arithmetic stays in range.
+const HTTP_DATE_YEARS: std::ops::RangeInclusive<i64> = 1970..=9999;
 
 /// A future of a signer: `Send` where the app signs from several threads, not in the browser, whose
 /// Web Crypto objects stay on one.
@@ -68,8 +73,24 @@ pub struct DpopProver {
 #[derive(Debug, Default)]
 struct ProverState {
   maybe_nonce: Option<String>,
-  /// The server's clock minus the local one, in seconds.
+  /// The other party's clock minus the local one, in seconds.
   clock_offset_secs: i64,
+  /// This party's own `Date` was read, which beats anything seeded.
+  has_heard_date: bool,
+  /// This party refused a proof for a session that isn't bound (see [`DpopProver::note_proof_refused`]).
+  has_refused_proof: bool,
+}
+
+/// When a request of a session that isn't bound goes without its proof after all.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProofFallback {
+  /// Never: the session is bound, and only its proof will do.
+  None,
+  /// The provider refused the request (400 or 401). It may not take proofs for this client after all,
+  /// or the date may be off in a way the answer doesn't show.
+  OnRefusal,
+  /// That, or no answer twice: in a browser that is what a CORS rule without `DPoP` looks like.
+  OnRefusalOrNoAnswer,
 }
 
 /// Why no proof could be made.
@@ -101,6 +122,10 @@ pub enum DpopSendError {
   /// The token is bound to a key this device doesn't have any more. Signing in again is the way out.
   #[error("the key this sign-in is bound to is gone")]
   KeyLost,
+  /// The token is bound, and no key is at hand right now (its store couldn't be read, or isn't read
+  /// yet). A bound token never goes without its proof, and nothing is decided about the session.
+  #[error("the key this sign-in is bound to can't be read right now")]
+  KeyUnavailable,
   #[error(transparent)]
   Proof(#[from] DpopProofError),
 }
@@ -162,8 +187,8 @@ impl DpopProver {
     Self {
       signer: Arc::clone(&self.signer),
       state: Mutex::new(ProverState {
-        maybe_nonce: None,
         clock_offset_secs: self.state().clock_offset_secs,
+        ..ProverState::default()
       }),
     }
   }
@@ -206,14 +231,39 @@ impl DpopProver {
       self.remember_nonce(nonce);
       learned.has_nonce = is_usable_nonce(nonce);
     }
-    if let Some(server_now) = answer.maybe_date.and_then(parse_http_date) {
-      let offset = server_now.saturating_sub(now_unix());
+    if let Some(offset) = answer.maybe_date.and_then(clock_offset_of) {
       let mut state = self.state();
       let moved = offset.saturating_sub(state.clock_offset_secs).abs();
       learned.has_clock_moved = moved >= CLOCK_CORRECTION_SECS;
       state.clock_offset_secs = offset;
+      state.has_heard_date = true;
     }
     learned
+  }
+
+  /// Takes the clock from what is known about another party, unless this party's own `Date` was read:
+  /// an identity provider's is often out of a browser's reach, and both go by real time.
+  pub fn seed_clock(&self, offset_secs: i64) {
+    let mut state = self.state();
+    if !state.has_heard_date {
+      state.clock_offset_secs = offset_secs.clamp(-MAX_CLOCK_OFFSET_SECS, MAX_CLOCK_OFFSET_SECS);
+    }
+  }
+
+  /// The clock offset as far as known, for [`Self::seed_clock`] of another party's prover.
+  pub fn clock_offset(&self) -> i64 {
+    self.state().clock_offset_secs
+  }
+
+  /// This party refused a proof for a session that isn't bound: refreshes of that session go without
+  /// one from now on, instead of paying for the refusal each time. A new sign-in tries again.
+  pub fn note_proof_refused(&self) {
+    self.state().has_refused_proof = true;
+  }
+
+  /// See [`Self::note_proof_refused`].
+  pub fn has_refused_proof(&self) -> bool {
+    self.state().has_refused_proof
   }
 
   /// Takes in the nonce of a `dpop_nonce` frame or of an answer whose `Date` says nothing (one from
@@ -267,26 +317,29 @@ impl From<DpopSendError> for ApiError {
   fn from(error: DpopSendError) -> Self {
     match error {
       DpopSendError::KeyLost => Self::BoundKeyLost,
+      DpopSendError::KeyUnavailable => Self::Network(error.to_string()),
       DpopSendError::Proof(error) => Self::Token(error.to_string()),
     }
   }
 }
 
 /// How `token` goes out on `method url`. A token bound to the key of `maybe_prover` gets a proof; one
-/// bound to another key can't be used by this device ([`DpopSendError::KeyLost`]). On a platform with
-/// no key, a bound token goes as a bearer token, and the server says `dpop_required`.
+/// bound to another key can't be used by this device ([`DpopSendError::KeyLost`]). A bound token with
+/// no key at hand doesn't go at all ([`DpopSendError::KeyUnavailable`]): the store may only have failed
+/// to read, and without its proof it would be refused anyway. Platforms without keys get no bound tokens.
 pub async fn signed_headers(
   maybe_prover: Option<&DpopProver>,
   token: &str,
   method: &str,
   url: &str,
 ) -> Result<SignedHeaders, DpopSendError> {
-  let (Authorization::Bound(bound), Some(prover)) = (Authorization::of(token), maybe_prover) else {
+  let Authorization::Bound(bound) = Authorization::of(token) else {
     return Ok(SignedHeaders {
       authorization: format!("Bearer {token}"),
       maybe_proof: None,
     });
   };
+  let prover = maybe_prover.ok_or(DpopSendError::KeyUnavailable)?;
   if prover.thumbprint() != bound {
     return Err(DpopSendError::KeyLost);
   }
@@ -297,36 +350,93 @@ pub async fn signed_headers(
   })
 }
 
-/// A request to an OAuth token endpoint with a proof: `attempt` sends it with the proof it is given.
-/// The provider's nonce challenge (RFC 9449 §8) or a date it refuses gets exactly one more try.
+/// A request to an OAuth endpoint with a proof: `attempt` sends it with the proof it is given, or
+/// without one. The provider's nonce challenge (RFC 9449 §8) or a date it refuses gets exactly one more
+/// try. For a session that isn't bound, `fallback` says when the request goes without the proof after
+/// all, so that nobody is locked out by binding; a bound session has only its proof.
 pub async fn with_token_endpoint_proof<R, E, F, Fut>(
   prover: &DpopProver,
   token_endpoint: &str,
+  fallback: ProofFallback,
   attempt: F,
 ) -> Result<R, E>
 where
+  E: From<DpopProofError> + std::fmt::Display,
+  F: Fn(Option<String>) -> Fut,
+  Fut: Future<Output = Result<TokenEndpointAttempt<R>, E>>,
+{
+  let mut outcome = proven_attempt(prover, token_endpoint, &attempt).await;
+  if fallback == ProofFallback::OnRefusalOrNoAnswer && outcome.is_err() {
+    // A blip is no reason to go without: only what fails twice might be the browser refusing the
+    // header (a CORS rule without `DPoP`), which no error tells apart.
+    outcome = proven_attempt(prover, token_endpoint, &attempt).await;
+  }
+  match outcome {
+    Ok(answer) if fallback == ProofFallback::None || !is_refusal(answer.status) => Ok(answer.response),
+    Ok(answer) => {
+      tracing::warn!(
+        status = answer.status,
+        "the identity provider refused a request with a proof: this session goes on unbound"
+      );
+      prover.note_proof_refused();
+      Ok(attempt(None).await?.response)
+    },
+    Err(error) if fallback == ProofFallback::OnRefusalOrNoAnswer => {
+      tracing::warn!(%error, "no answer to a token request with a proof: trying without");
+      Ok(attempt(None).await?.response)
+    },
+    Err(error) => Err(error),
+  }
+}
+
+/// The request with its proof, and its one more try.
+async fn proven_attempt<R, E, F, Fut>(
+  prover: &DpopProver,
+  token_endpoint: &str,
+  attempt: &F,
+) -> Result<TokenEndpointAttempt<R>, E>
+where
   E: From<DpopProofError>,
-  F: Fn(String) -> Fut,
+  F: Fn(Option<String>) -> Fut,
   Fut: Future<Output = Result<TokenEndpointAttempt<R>, E>>,
 {
   let proof = prover.proof("POST", token_endpoint, None).await?;
-  let first = attempt(proof.as_str().to_owned()).await?;
+  let first = attempt(Some(proof.as_str().to_owned())).await?;
   let learned = prover.note_answer(DpopAnswer {
     maybe_nonce: first.maybe_nonce.as_deref(),
     maybe_date: first.maybe_date.as_deref(),
   });
-  let is_retried =
-    token_endpoint_error(first.status, &first.body).is_some_and(|code| learned.is_worth_a_retry(&code));
+  // Providers word a date they refuse differently (`invalid_dpop_proof`, `invalid_request`), so any
+  // refusal counts once the answer's `Date` says the proof's date was off.
+  let is_retried = is_refusal(first.status)
+    && (learned.has_clock_moved
+      || token_endpoint_error(first.status, &first.body).is_some_and(|code| learned.is_worth_a_retry(&code)));
   if !is_retried {
-    return Ok(first.response);
+    return Ok(first);
   }
   let proof = prover.proof("POST", token_endpoint, None).await?;
-  let second = attempt(proof.as_str().to_owned()).await?;
+  let second = attempt(Some(proof.as_str().to_owned())).await?;
   prover.note_answer(DpopAnswer {
     maybe_nonce: second.maybe_nonce.as_deref(),
     maybe_date: second.maybe_date.as_deref(),
   });
-  Ok(second.response)
+  Ok(second)
+}
+
+/// How an OAuth endpoint says no to the request itself, as opposed to being down.
+fn is_refusal(status: u16) -> bool {
+  matches!(status, 400 | 401)
+}
+
+/// The clock offset an answer's `Date` names, within [`MAX_CLOCK_OFFSET_SECS`]. For a value that has
+/// to be kept until a prover exists: the offset stays right while the `Date` itself ages.
+pub fn clock_offset_of(date: &str) -> Option<i64> {
+  let server_now = parse_http_date(date)?;
+  Some(
+    server_now
+      .saturating_sub(now_unix())
+      .clamp(-MAX_CLOCK_OFFSET_SECS, MAX_CLOCK_OFFSET_SECS),
+  )
 }
 
 /// What the error of an OAuth token endpoint means for its proof (RFC 9449 §8): `use_dpop_nonce` and
@@ -353,7 +463,11 @@ pub fn parse_http_date(value: &str) -> Option<i64> {
   let _weekday = parts.next()?.strip_suffix(',')?;
   let day: i64 = parts.next()?.parse().ok()?;
   let month = parts.next()?;
-  let year: i64 = parts.next()?.parse().ok()?;
+  let year: i64 = parts
+    .next()?
+    .parse()
+    .ok()
+    .filter(|year| HTTP_DATE_YEARS.contains(year))?;
   let mut time = parts.next()?.split(':').map(str::parse::<i64>);
   let (hour, minute, second) = (time.next()?.ok()?, time.next()?.ok()?, time.next()?.ok()?);
   if parts.next()? != "GMT" || parts.next().is_some() || time.next().is_some() {
@@ -402,6 +516,7 @@ mod tests {
 
   const TARGET: &str = "https://chat.example.com/api/v1/me?x=1";
   const NONCE: &str = "the-nonce";
+  const TOKEN_ENDPOINT: &str = "https://sso.example.com/token";
 
   mod proofs {
     use super::*;
@@ -445,6 +560,31 @@ mod tests {
       let first = claims_of(&prover.proof("GET", TARGET, None).await.unwrap());
       let second = claims_of(&prover.proof("GET", TARGET, None).await.unwrap());
       assert_ne!(first["jti"], second["jti"]);
+    }
+
+    /// A browser often can't read the provider's `Date`: the provider's prover goes by the server's,
+    /// also when that is learned after the prover was made. Its own `Date` wins once there is one.
+    #[tokio::test]
+    async fn a_seeded_clock_follows_until_the_party_has_its_own_date() {
+      let server = prover();
+      let provider = server.for_another_party();
+      assert_eq!(provider.clock_offset(), 0);
+      server.note_answer(DpopAnswer {
+        maybe_nonce: None,
+        maybe_date: Some(&http_date(now_unix() + 3_600)),
+      });
+      provider.seed_clock(server.clock_offset());
+      let iat = claims_of(&provider.proof("POST", TARGET, None).await.unwrap())["iat"]
+        .as_i64()
+        .unwrap();
+      assert!((iat - (now_unix() + 3_600)).abs() <= 2, "{iat}");
+
+      provider.note_answer(DpopAnswer {
+        maybe_nonce: None,
+        maybe_date: Some(&http_date(now_unix() - 600)),
+      });
+      provider.seed_clock(server.clock_offset());
+      assert!((provider.clock_offset() + 600).abs() <= 2);
     }
 
     #[tokio::test]
@@ -499,44 +639,190 @@ mod tests {
 
     #[tokio::test]
     async fn the_token_endpoint_gets_one_more_try_and_never_a_third() {
-      let prover = prover();
       let attempts = std::cell::Cell::new(0);
-      let body: Result<u16, DpopProofError> =
-        with_token_endpoint_proof(&prover, "https://sso.example.com/token", |_proof| {
-          attempts.set(attempts.get() + 1);
-          let nonce = format!("nonce-{}", attempts.get());
-          std::future::ready(Ok(TokenEndpointAttempt {
-            status: 400,
-            body: br#"{"error":"use_dpop_nonce"}"#.to_vec(),
-            maybe_nonce: Some(nonce),
-            maybe_date: None,
-            response: 400,
-          }))
-        })
-        .await;
-      assert_eq!(body, Ok(400));
+      let status = token_request(ProofFallback::None, |maybe_proof| {
+        assert!(maybe_proof.is_some());
+        attempts.set(attempts.get() + 1);
+        Ok(answer(
+          400,
+          r#"{"error":"use_dpop_nonce"}"#,
+          Some(format!("nonce-{}", attempts.get())),
+          None,
+        ))
+      })
+      .await;
+      assert_eq!(status, Ok(400));
       assert_eq!(attempts.get(), 2);
     }
 
     #[tokio::test]
     async fn a_token_endpoint_that_says_yes_is_asked_once() {
-      let prover = prover();
       let attempts = std::cell::Cell::new(0);
-      let body: Result<u16, DpopProofError> =
-        with_token_endpoint_proof(&prover, "https://sso.example.com/token", |proof| {
-          assert_eq!(proof.split('.').count(), 3);
+      let status = token_request(ProofFallback::OnRefusal, |maybe_proof| {
+        assert_eq!(maybe_proof.unwrap().split('.').count(), 3);
+        attempts.set(attempts.get() + 1);
+        Ok(answer(200, "{}", None, None))
+      })
+      .await;
+      assert_eq!(status, Ok(200));
+      assert_eq!(attempts.get(), 1);
+    }
+
+    /// The wording of a refused date differs by provider; the dev realm's Keycloak says
+    /// `invalid_request`. What counts is that the `Date` shows the date was off.
+    #[tokio::test]
+    async fn a_date_refused_in_any_words_is_retried_with_the_providers_clock() {
+      let attempts = std::cell::Cell::new(0);
+      let date = http_date(now_unix() + 3_600);
+      let prover = prover();
+      let status: Result<u16, TestError> =
+        with_token_endpoint_proof(&prover, TOKEN_ENDPOINT, ProofFallback::None, |maybe_proof| {
           attempts.set(attempts.get() + 1);
-          std::future::ready(Ok(TokenEndpointAttempt {
-            status: 200,
-            body: b"{}".to_vec(),
-            maybe_nonce: None,
-            maybe_date: None,
-            response: 200,
+          let iat = claims_of_text(&maybe_proof.unwrap())["iat"].as_i64().unwrap();
+          let is_fresh = (iat - (now_unix() + 3_600)).abs() < 60;
+          std::future::ready(Ok(if is_fresh {
+            answer(200, "{}", None, Some(date.clone()))
+          } else {
+            answer(400, r#"{"error":"invalid_request"}"#, None, Some(date.clone()))
           }))
         })
         .await;
-      assert_eq!(body, Ok(200));
-      assert_eq!(attempts.get(), 1);
+      assert_eq!(status, Ok(200));
+      assert_eq!(attempts.get(), 2);
+    }
+
+    mod fallback {
+      use super::*;
+
+      #[tokio::test]
+      async fn a_bound_session_never_goes_without_its_proof() {
+        let status = token_request(ProofFallback::None, |maybe_proof| {
+          assert!(
+            maybe_proof.is_some(),
+            "a bound refresh token went without a proof"
+          );
+          Ok(answer(400, r#"{"error":"invalid_dpop_proof"}"#, None, None))
+        })
+        .await;
+        assert_eq!(status, Ok(400));
+      }
+
+      /// A wrong clock whose `Date` can't be read, or a provider that doesn't take proofs for this
+      /// client: the unbound session goes on.
+      #[tokio::test]
+      async fn an_unbound_session_goes_without_after_a_refusal_and_remembers() {
+        let prover = prover();
+        let seen = std::cell::RefCell::new(Vec::new());
+        let status: Result<u16, TestError> = with_token_endpoint_proof(
+          &prover,
+          TOKEN_ENDPOINT,
+          ProofFallback::OnRefusal,
+          |maybe_proof: Option<String>| {
+            seen.borrow_mut().push(maybe_proof.is_some());
+            std::future::ready(Ok(if maybe_proof.is_some() {
+              answer(400, r#"{"error":"invalid_dpop_proof"}"#, None, None)
+            } else {
+              answer(200, "{}", None, None)
+            }))
+          },
+        )
+        .await;
+        assert_eq!(status, Ok(200));
+        assert_eq!(*seen.borrow(), vec![true, false]);
+        assert!(prover.has_refused_proof());
+      }
+
+      #[tokio::test]
+      async fn a_provider_that_is_down_is_no_refusal() {
+        let attempts = std::cell::Cell::new(0);
+        let status = token_request(ProofFallback::OnRefusal, |maybe_proof| {
+          assert!(maybe_proof.is_some());
+          attempts.set(attempts.get() + 1);
+          Ok(answer(503, "", None, None))
+        })
+        .await;
+        assert_eq!(status, Ok(503));
+        assert_eq!(attempts.get(), 1);
+      }
+
+      #[tokio::test]
+      async fn no_answer_is_tried_again_with_the_proof_before_going_without() {
+        let seen = std::cell::RefCell::new(Vec::new());
+        let status = token_request(ProofFallback::OnRefusalOrNoAnswer, |maybe_proof| {
+          seen.borrow_mut().push(maybe_proof.is_some());
+          match maybe_proof {
+            Some(_) => Err(TestError("no answer".into())),
+            None => Ok(answer(200, "{}", None, None)),
+          }
+        })
+        .await;
+        assert_eq!(status, Ok(200));
+        assert_eq!(*seen.borrow(), vec![true, true, false]);
+
+        // One blip: the second try with the proof goes through, and the session gets bound.
+        let seen = std::cell::RefCell::new(Vec::new());
+        let status = token_request(ProofFallback::OnRefusalOrNoAnswer, |maybe_proof| {
+          seen.borrow_mut().push(maybe_proof.is_some());
+          if seen.borrow().len() == 1 {
+            Err(TestError("no answer".into()))
+          } else {
+            Ok(answer(200, "{}", None, None))
+          }
+        })
+        .await;
+        assert_eq!(status, Ok(200));
+        assert_eq!(*seen.borrow(), vec![true, true]);
+      }
+
+      #[tokio::test]
+      async fn without_that_fallback_no_answer_stays_an_error() {
+        let status = token_request(ProofFallback::OnRefusal, |maybe_proof| {
+          assert!(maybe_proof.is_some());
+          Err(TestError("no answer".into()))
+        })
+        .await;
+        assert!(status.is_err());
+      }
+    }
+
+    #[derive(Debug, PartialEq, thiserror::Error)]
+    #[error("{0}")]
+    struct TestError(String);
+
+    impl From<DpopProofError> for TestError {
+      fn from(error: DpopProofError) -> Self {
+        Self(error.to_string())
+      }
+    }
+
+    fn answer(
+      status: u16,
+      body: &str,
+      maybe_nonce: Option<String>,
+      maybe_date: Option<String>,
+    ) -> TokenEndpointAttempt<u16> {
+      TokenEndpointAttempt {
+        status,
+        body: body.as_bytes().to_vec(),
+        maybe_nonce,
+        maybe_date,
+        response: status,
+      }
+    }
+
+    async fn token_request(
+      fallback: ProofFallback,
+      attempt: impl Fn(Option<String>) -> Result<TokenEndpointAttempt<u16>, TestError>,
+    ) -> Result<u16, TestError> {
+      with_token_endpoint_proof(&prover(), TOKEN_ENDPOINT, fallback, |maybe_proof| {
+        std::future::ready(attempt(maybe_proof))
+      })
+      .await
+    }
+
+    fn claims_of_text(proof: &str) -> Value {
+      let payload = proof.split('.').nth(1).unwrap();
+      serde_json::from_slice(&URL_SAFE_NO_PAD.decode(payload).unwrap()).unwrap()
     }
 
     #[test]
@@ -603,11 +889,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn without_a_key_a_bound_token_goes_as_a_bearer_token() {
+    async fn a_bound_token_never_goes_without_its_proof() {
       let bound = bound_token(&prover().thumbprint());
       let url = "https://chat.example.com/api/v1/me";
-      let plain = signed_headers(None, &bound, "GET", url).await.unwrap();
-      assert_eq!(plain.authorization, format!("Bearer {bound}"));
+      let refused = signed_headers(None, &bound, "GET", url).await;
+      assert_eq!(refused.err(), Some(DpopSendError::KeyUnavailable));
+      let error = ApiError::from(DpopSendError::KeyUnavailable);
+      assert!(error.is_transient() && !error.is_sign_in_required(), "{error}");
     }
 
     fn bound_token(jkt: &JwkThumbprint) -> String {
@@ -630,6 +918,23 @@ mod tests {
 
   mod dates {
     use super::*;
+
+    #[test]
+    fn a_hostile_date_moves_the_clock_no_further_than_the_limit() {
+      let prover = prover();
+      for date in ["Fri, 31 Dec 9999 23:59:59 GMT", "Thu, 01 Jan 1970 00:00:00 GMT"] {
+        prover.note_answer(DpopAnswer {
+          maybe_nonce: None,
+          maybe_date: Some(date),
+        });
+        assert_eq!(prover.clock_offset().abs(), MAX_CLOCK_OFFSET_SECS, "{date}");
+      }
+      prover.seed_clock(i64::MAX);
+      assert_eq!(prover.clock_offset().abs(), MAX_CLOCK_OFFSET_SECS);
+      let unseeded = self::prover();
+      unseeded.seed_clock(i64::MAX);
+      assert_eq!(unseeded.clock_offset(), MAX_CLOCK_OFFSET_SECS);
+    }
 
     #[test]
     fn known_dates_parse() {
@@ -661,6 +966,11 @@ mod tests {
         "Sun, 32 Nov 1994 08:49:37 GMT",
         "Sun, 06 Nov 1994 25:49:37 GMT",
         "Sun, 06 Nov 1994 08:49 GMT",
+        "Sun, 06 Nov 9223372036854775807 08:49:37 GMT",
+        "Sun, 06 Nov -9223372036854775808 08:49:37 GMT",
+        "Sun, 06 Nov 10000 08:49:37 GMT",
+        "Sun, 06 Nov 1969 08:49:37 GMT",
+        "Sun, 06 Nov 99999999999999999999 08:49:37 GMT",
       ] {
         assert_eq!(parse_http_date(value), None, "{value}");
       }

@@ -29,9 +29,15 @@ const DPOP_USER_LIMIT_RETRY_AFTER_SECS: u64 = 30;
 pub struct DatabaseOutage;
 
 /// In a response's extensions: the 401 only asks for a proof with the current nonce. Everybody
-/// meets it after a restart, so it doesn't count as a failed authentication (`security.rs`).
+/// meets it after a restart.
 #[derive(Debug, Clone, Copy)]
 pub struct DpopNonceChallenge;
+
+/// In a response's extensions: the token was valid and the 401 is about its proof or its binding, so
+/// nothing was guessed (`AuthError::is_dpop_refusal`). No failed authentication (`security.rs`): with
+/// a wrong public origin it would block the whole address, bearer users behind the same NAT included.
+#[derive(Debug, Clone, Copy)]
+pub struct DpopProofRefusal;
 
 /// Every error a handler can return; maps to a status code and the stable `error_code` body.
 #[derive(Debug, thiserror::Error)]
@@ -514,6 +520,9 @@ impl IntoResponse for ApiError {
     }
     if self.is_dpop_nonce_challenge() {
       response.extensions_mut().insert(DpopNonceChallenge);
+    }
+    if matches!(&self, Self::Auth(auth) if auth.is_dpop_refusal()) {
+      response.extensions_mut().insert(DpopProofRefusal);
     }
     response
   }
