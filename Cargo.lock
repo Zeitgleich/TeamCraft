@@ -10850,6 +10850,7 @@ dependencies = [
  "subtle",
  "thiserror 2.0.21",
  "tls_codec",
+ "url",
  "vsss-rs",
  "x25519-dalek 2.0.1",
  "zeroize",
