@@ -39,6 +39,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "call_fallback_frame"
+path = "fuzz_targets/call_fallback_frame.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "proto_gateway"
 path = "fuzz_targets/proto_gateway.rs"
 test = false

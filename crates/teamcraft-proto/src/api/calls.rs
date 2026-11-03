@@ -18,6 +18,11 @@ pub struct CallJoinTokenResponse {
   pub token: String,
   /// WebTransport URL of the SFU, e.g. `https://sfu.example.com:4433/call`.
   pub sfu_url: String,
+  /// WebSocket URL of the SFU's fallback for networks that block UDP (ARCHITECTURE.md §6.6), e.g.
+  /// `wss://sfu.example.com/call/fallback`. Clients use it only when QUIC doesn't connect. Absent
+  /// from older servers, and when the instance turned the fallback off.
+  #[serde(rename = "sfu_fallback_url", default, skip_serializing_if = "Option::is_none")]
+  pub maybe_sfu_fallback_url: Option<String>,
   pub expires_at: UnixMillis,
   /// SHA-256s of the SFU's certificates (64 hex digits each) when they are short-lived self-signed
   /// ones (test and development setups): browsers accept them through `serverCertificateHashes`.
@@ -39,6 +44,7 @@ impl std::fmt::Debug for CallJoinTokenResponse {
     f.debug_struct("CallJoinTokenResponse")
       .field("call_id", &self.call_id)
       .field("token", &"[redacted]")
+      .field("maybe_sfu_fallback_url", &self.maybe_sfu_fallback_url)
       .field("sfu_url", &self.sfu_url)
       .field("expires_at", &self.expires_at)
       .field("ends_when_one_side_leaves", &self.ends_when_one_side_leaves)

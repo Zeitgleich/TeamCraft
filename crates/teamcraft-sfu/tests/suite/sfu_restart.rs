@@ -345,6 +345,7 @@ impl JoinTicketSource for FrontTickets {
       sfu_url: self.url.clone(),
       token: token(self.device),
       certificate_hashes: vec![*self.announced.lock().unwrap()],
+      maybe_fallback_url: None,
     };
     Box::pin(async move { Ok(ticket) })
   }

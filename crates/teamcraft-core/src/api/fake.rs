@@ -3115,6 +3115,7 @@ impl ServerApi for FakeServerApi {
         call_id,
         token: format!("fake:{conversation}"),
         sfu_url: "https://sfu.invalid/call".to_owned(),
+        maybe_sfu_fallback_url: None,
         expires_at: UnixMillis(0),
         sfu_certificate_sha256: Vec::new(),
         ends_when_one_side_leaves: false,

@@ -532,6 +532,8 @@ fn bind_sfu() -> Sfu {
 fn calls_config(sfu_url: &str) -> CallsConfig {
   CallsConfig {
     sfu_url: sfu_url.into(),
+    sfu_fallback_enabled: true,
+    maybe_sfu_fallback_url: None,
     issuer: TEST_ISSUER.into(),
     signing_key_path: PathBuf::from("unused.pem"),
     join_token_ttl_secs: 60,

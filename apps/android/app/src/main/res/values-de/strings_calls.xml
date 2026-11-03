@@ -51,6 +51,7 @@
   <string name="call_ongoing">TeamCraft-Anruf</string>
   <string name="call_connecting">Verbinde…</string>
   <string name="call_reconnecting">Verbindung unterbrochen, wird wiederhergestellt…</string>
+  <string name="call_limited_network">Eingeschränktes Netzwerk, die Gesprächsqualität kann geringer sein</string>
   <string name="call_securing">Anruf wird abgesichert…</string>
   <string name="call_secured">Ende-zu-Ende-verschlüsselt</string>
   <string name="call_ended">Anruf beendet</string>

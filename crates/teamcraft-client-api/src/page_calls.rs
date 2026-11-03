@@ -116,6 +116,9 @@ pub const EXPORT_SHARE_SCREEN: &str = "share_screen";
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PreparedCall {
   pub sfu_url: String,
+  /// The SFU's WebSocket fallback, if the instance offers one (ARCHITECTURE.md §6.6).
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub maybe_fallback_url: Option<String>,
   pub token: String,
   pub user_id: UserId,
   pub device_id: DeviceId,
@@ -239,6 +242,7 @@ mod tests {
   fn a_prepared_call_round_trips_and_hides_its_token() {
     let prepared = PreparedCall {
       sfu_url: "https://sfu.example.com:4433/call".into(),
+      maybe_fallback_url: None,
       token: "secret".into(),
       user_id: id_from_raw(1),
       device_id: id_from_raw(10),

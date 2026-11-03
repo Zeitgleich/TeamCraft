@@ -730,6 +730,10 @@ pub struct ActiveCall {
   /// Others whose connection was lost and who are rejoining.
   #[serde(default)]
   pub reconnecting: Vec<UserId>,
+  /// The call runs on the fallback for networks that block UDP (ARCHITECTURE.md §6.6): the UI says
+  /// quality may be lower.
+  #[serde(default)]
+  pub is_on_limited_network: bool,
   /// Somebody added people to this DM call: it moved into this meeting chat, and the UI switches
   /// over to its call (docs/meetings.md, "A call becomes a meeting").
   #[serde(default, skip_serializing_if = "Option::is_none")]

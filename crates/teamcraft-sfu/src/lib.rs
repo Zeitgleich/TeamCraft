@@ -8,6 +8,7 @@ pub mod config;
 pub mod control;
 pub mod dave_coordinator;
 pub mod dev_page;
+mod fallback;
 pub mod forwarding;
 pub mod health;
 pub mod ids;

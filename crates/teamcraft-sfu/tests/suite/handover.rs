@@ -297,6 +297,7 @@ impl JoinTicketSource for DirectTickets {
       token: format!("dev:{CALL_ID}:{ALICE}:{ALICE}"),
       // The pinned certificate (`maybe_certificate_hash`) applies to every connection.
       certificate_hashes: Vec::new(),
+      maybe_fallback_url: None,
     };
     Box::pin(async move { Ok(ticket) })
   }

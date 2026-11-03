@@ -822,6 +822,7 @@ mod tests {
         screen_sound: ScreenShareSound::Off,
         is_reconnecting: false,
         reconnecting: Vec::new(),
+        is_on_limited_network: false,
         maybe_moved_to: None,
       };
       call.resume(&active);

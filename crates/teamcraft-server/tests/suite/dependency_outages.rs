@@ -476,6 +476,8 @@ mod sfu {
   fn calls_config(control_url: &str) -> CallsConfig {
     CallsConfig {
       sfu_url: "https://sfu.example.com:4433/call".into(),
+      sfu_fallback_enabled: true,
+      maybe_sfu_fallback_url: None,
       issuer: "https://teamcraft.example.com".into(),
       signing_key_path: "unused.pem".into(),
       join_token_ttl_secs: 60,

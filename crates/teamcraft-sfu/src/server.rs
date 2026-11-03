@@ -17,11 +17,17 @@
 //! [`SfuConfig::roster_interval`] and right after a call moved between a user's devices. The server
 //! drops what the SFU no longer has, so a lost leave (or one never sent while going away, by a
 //! client that didn't come back) can't keep a device in a call for good.
+//!
+//! Networks that block UDP reach the same rooms through the WebSocket fallback ([`crate::fallback`]),
+//! admitted by the same [`admit`].
 
 use std::{
   future::Future,
   net::{SocketAddr, UdpSocket},
-  sync::Arc,
+  sync::{
+    Arc,
+    atomic::{AtomicBool, AtomicUsize, Ordering},
+  },
   time::{Duration, Instant},
 };
 
@@ -31,9 +37,10 @@ use teamcraft_proto::{
   SfuControlRequest, SfuRosterReport,
 };
 use thiserror::Error;
+use tokio::net::TcpListener;
 use tokio::sync::{Notify, mpsc};
 use tokio::time::MissedTickBehavior;
-use tracing::{Instrument, debug, info, info_span, warn};
+use tracing::{Instrument, debug, error, info, info_span, warn};
 use wtransport::{
   Connection, Endpoint, Identity, RecvStream, SendStream, ServerConfig,
   endpoint::{IncomingSession, endpoint_side::Server},
@@ -43,6 +50,8 @@ use wtransport::{
 use crate::{
   auth::{JoinGrant, JoinTokenVerifier},
   config::SfuConfig,
+  fallback,
+  net::bind_dual_stack,
   prejoin::PreJoinLimiter,
   reporting::{NoReporter, ParticipantReporter},
   room::{JoinOutcome, ParticipantHandle, Room, RoomError, RoomStats, Rooms, SessionId},
@@ -64,19 +73,26 @@ pub const CALL_PATH: &str = "/call";
 pub struct Sfu {
   endpoint: Endpoint<Server>,
   certificate_hash: Sha256Digest,
+  maybe_fallback_listener: Option<TcpListener>,
   shared: Arc<Shared>,
 }
 
-struct Shared {
-  config: SfuConfig,
-  rooms: Rooms,
+pub(crate) struct Shared {
+  pub(crate) config: SfuConfig,
+  pub(crate) rooms: Rooms,
   verifier: Arc<dyn JoinTokenVerifier>,
   reporter: Arc<dyn ParticipantReporter>,
   prejoin: Arc<PreJoinLimiter>,
+  /// The fallback's own: what fills it, through a proxy or not, costs a QUIC session nothing.
+  pub(crate) fallback_prejoin: Arc<PreJoinLimiter>,
   /// When this SFU started: the roster tells the server how fresh its rooms are.
   started_at: Instant,
   /// Wakes the roster reporter before its interval (a call moved between devices).
   roster_now: Arc<Notify>,
+  /// Open connections of the WebSocket fallback, for the metrics.
+  pub(crate) fallback_connections: AtomicUsize,
+  /// Told the operator of a forwarded address from somebody who isn't a trusted proxy.
+  pub(crate) has_warned_of_forwarding: AtomicBool,
 }
 
 /// Carries out meeting host controls on this SFU's calls (see [`crate::control`]).
@@ -85,9 +101,8 @@ pub struct SfuControl {
   shared: Arc<Shared>,
 }
 
-/// One joined participant's session.
-struct ParticipantSession {
-  connection: Connection,
+/// One joined participant's session, whatever carries it.
+pub(crate) struct ParticipantSession {
   room: Arc<Room>,
   grant: JoinGrant,
   signal_tx: mpsc::Sender<Outgoing>,
@@ -97,7 +112,7 @@ struct ParticipantSession {
 
 /// How a participant's session ended.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum SessionEnd {
+pub(crate) enum SessionEnd {
   /// The client left, or the SFU closed the connection (host control, protocol violation).
   Closed,
   /// The connection broke (idle timeout, reset): the client is expected back.
@@ -108,14 +123,36 @@ enum SessionEnd {
 pub enum SfuError {
   #[error("binding the endpoint failed: {0}")]
   Bind(#[source] std::io::Error),
+  #[error("binding the fallback's listener failed: {0}")]
+  BindFallback(#[source] std::io::Error),
   #[error("the TLS identity has no certificate")]
   NoCertificate,
   #[error("the idle timeout is out of range")]
   IdleTimeout,
 }
 
+/// What the first frame of a session led to, on either transport.
+pub(crate) enum Admission {
+  Admitted(Admitted),
+  Refused(Refusal),
+}
+
+/// A session that joined its call.
+pub(crate) struct Admitted {
+  pub(crate) room: Arc<Room>,
+  pub(crate) grant: JoinGrant,
+  pub(crate) session_id: SessionId,
+}
+
+/// A first frame the session is refused for: what to tell the client, and how the session ended.
+pub(crate) struct Refusal {
+  code: ErrorCode,
+  text: String,
+  pub(crate) result: Result<(), SessionError>,
+}
+
 #[derive(Debug, Error)]
-enum SessionError {
+pub(crate) enum SessionError {
   #[error("connection failed: {0}")]
   Connection(#[from] wtransport::error::ConnectionError),
   #[error("signaling failed: {0}")]
@@ -151,17 +188,30 @@ impl Sfu {
       .build();
     let endpoint = Endpoint::server(server_config).map_err(SfuError::Bind)?;
     let rooms = Rooms::new(config.clone());
+    // Calls on QUIC don't depend on it: a port that is taken costs the fallback, not the SFU.
+    let maybe_fallback_listener = config.fallback.maybe_bind_addr.and_then(|addr| {
+      bind_dual_stack(addr)
+        .inspect_err(|error| error!(%addr, %error, "no call fallback: its port can't be bound"))
+        .ok()
+    });
+    if maybe_fallback_listener.is_some() {
+      fallback::warn_if_descriptors_are_short(&config.fallback);
+    }
     Ok(Self {
       endpoint,
       certificate_hash,
+      maybe_fallback_listener,
       shared: Arc::new(Shared {
         config,
         rooms,
         verifier,
         reporter: Arc::new(NoReporter),
         prejoin: Arc::new(PreJoinLimiter::default()),
+        fallback_prejoin: Arc::new(PreJoinLimiter::default()),
         started_at: Instant::now(),
         roster_now: Arc::new(Notify::new()),
+        fallback_connections: AtomicUsize::new(0),
+        has_warned_of_forwarding: AtomicBool::new(false),
       }),
     })
   }
@@ -177,6 +227,16 @@ impl Sfu {
 
   pub fn local_addr(&self) -> Result<SocketAddr, SfuError> {
     self.endpoint.local_addr().map_err(SfuError::Bind)
+  }
+
+  /// Where the WebSocket fallback listens, if it does.
+  pub fn fallback_addr(&self) -> Result<Option<SocketAddr>, SfuError> {
+    self
+      .maybe_fallback_listener
+      .as_ref()
+      .map(TcpListener::local_addr)
+      .transpose()
+      .map_err(SfuError::BindFallback)
   }
 
   /// A handle for host controls; take it after [`Self::with_reporter`] and before [`Self::run`].
@@ -199,10 +259,19 @@ impl Sfu {
   /// Accepts sessions until `shutdown` resolves (SIGTERM), then goes away: every connection is
   /// closed with [`SFU_GOING_AWAY_CLOSE_CODE`], so its client rejoins instead of ending the call,
   /// and the closes get up to [`SfuConfig::shutdown_drain`] to reach the clients.
-  pub async fn run_until(self, shutdown: impl Future<Output = ()>) {
+  pub async fn run_until(mut self, shutdown: impl Future<Output = ()>) {
     let rosters = tokio::spawn(report_rosters(Arc::clone(&self.shared)));
+    let maybe_fallback = self.maybe_fallback_listener.take();
+    let shared = Arc::clone(&self.shared);
+    let fallback = async move {
+      match maybe_fallback {
+        Some(listener) => fallback::serve(listener, shared).await,
+        None => std::future::pending().await,
+      }
+    };
     tokio::select! {
       () = self.accept_sessions() => {},
+      () = fallback => {},
       () = shutdown => {},
     }
     // Going away empties the rooms; that is no roster to tell the server.
@@ -320,29 +389,58 @@ async fn handle_session(incoming: IncomingSession, shared: &Shared) -> Result<()
     .await
     .map_err(|_| SessionError::JoinTimeout)??;
 
-  let max_bytes = shared.config.max_signaling_message_bytes;
   let first = tokio::time::timeout(
     shared.config.join_timeout,
-    read_message::<CallClientMessage>(&mut recv, max_bytes),
+    read_message::<CallClientMessage>(&mut recv, shared.config.max_signaling_message_bytes),
   )
   .await
   .map_err(|_| SessionError::JoinTimeout)??;
-  let CallClientMessage::Join { token, capabilities } = first else {
-    reject(&mut send, ErrorCode::ProtocolViolation, "expected join").await;
-    return Err(SessionError::ExpectedJoin);
-  };
-  let grant = match shared.verifier.verify(&token) {
-    Ok(grant) => grant,
-    Err(error) => {
-      reject(&mut send, ErrorCode::InvalidJoinToken, &error.to_string()).await;
-      return Ok(());
-    },
-  };
 
   let (signal_tx, signal_rx) = mpsc::channel(shared.config.signaling_queue_len.max(1));
   let handle = ParticipantHandle {
     link: Arc::new(connection.clone()),
     signal_tx: signal_tx.clone(),
+  };
+  let Admitted {
+    room,
+    grant,
+    session_id,
+  } = match admit(shared, first, handle) {
+    Admission::Admitted(admitted) => admitted,
+    Admission::Refused(refusal) => {
+      reject(&mut send, refusal.code, &refusal.text).await;
+      return refusal.result;
+    },
+  };
+
+  drop(prejoin_slot);
+  let session = ParticipantSession::new(Arc::clone(&room), grant, signal_tx, shared);
+  let (end, result) = session.run(connection, send, recv, signal_rx).await;
+  drop(session);
+  release_slot(shared, &room, grant, session_id, end).await;
+  result
+}
+
+/// The join every session starts with, whichever transport brought it: the first message must be
+/// `join`, its token must verify, and the room must take the device. The one place a join token is
+/// checked (ARCHITECTURE.md §6.6: the fallback's first frame gets what QUIC's gets).
+pub(crate) fn admit(shared: &Shared, first: CallClientMessage, handle: ParticipantHandle) -> Admission {
+  let CallClientMessage::Join { token, capabilities } = first else {
+    return Admission::Refused(Refusal {
+      code: ErrorCode::ProtocolViolation,
+      text: "expected join".to_owned(),
+      result: Err(SessionError::ExpectedJoin),
+    });
+  };
+  let grant = match shared.verifier.verify(&token) {
+    Ok(grant) => grant,
+    Err(error) => {
+      return Admission::Refused(Refusal {
+        code: ErrorCode::InvalidJoinToken,
+        text: error.to_string(),
+        result: Ok(()),
+      });
+    },
   };
   let (room, session_id, outcome) = match shared.rooms.join(grant, capabilities, handle) {
     Ok(joined) => joined,
@@ -353,12 +451,13 @@ async fn handle_session(incoming: IncomingSession, shared: &Shared) -> Result<()
         RoomError::TooManyDevices(_) => ErrorCode::CallDeviceLimit,
         _ => ErrorCode::AlreadyJoined,
       };
-      reject(&mut send, code, &error.to_string()).await;
-      return Err(error.into());
+      return Admission::Refused(Refusal {
+        code,
+        text: error.to_string(),
+        result: Err(error.into()),
+      });
     },
   };
-
-  drop(prejoin_slot);
   // The call the device is in: the running call of its conversation when the token named another.
   let grant = JoinGrant {
     call_id: room.call_id(),
@@ -368,23 +467,25 @@ async fn handle_session(incoming: IncomingSession, shared: &Shared) -> Result<()
   if outcome == JoinOutcome::Joined {
     shared.reporter.joined(grant);
   }
-  let session = ParticipantSession {
-    connection,
-    room: Arc::clone(&room),
+  Admission::Admitted(Admitted {
+    room,
     grant,
-    signal_tx,
-    max_bytes,
-    roster_now: Arc::clone(&shared.roster_now),
-  };
-  let (end, result) = session.run(send, recv, signal_rx).await;
-  drop(session);
-  release_slot(shared, &room, grant, session_id, end).await;
-  result
+    session_id,
+  })
+}
+
+impl Refusal {
+  /// What the client gets to read.
+  pub(crate) fn message(&self) -> CallServerMessage {
+    CallServerMessage::Error {
+      error: ErrorBody::new(self.code.clone(), &self.text),
+    }
+  }
 }
 
 /// Ends a session's hold on its slot: at once after a close, after the reconnect grace period
 /// after a loss (unless the device took the slot back on a new connection meanwhile).
-async fn release_slot(
+pub(crate) async fn release_slot(
   shared: &Shared,
   room: &Room,
   grant: JoinGrant,
@@ -415,6 +516,11 @@ impl SfuControl {
     self.shared.rooms.stats()
   }
 
+  /// Open connections on the WebSocket fallback, for a scrape of the metrics.
+  pub fn fallback_connections(&self) -> usize {
+    self.shared.fallback_connections.load(Ordering::Relaxed)
+  }
+
   pub fn apply(&self, request: &SfuControlRequest) -> Result<(), RoomError> {
     self
       .shared
@@ -424,19 +530,35 @@ impl SfuControl {
 }
 
 impl ParticipantSession {
-  /// Runs until the client disconnects or violates the protocol.
+  pub(crate) fn new(
+    room: Arc<Room>,
+    grant: JoinGrant,
+    signal_tx: mpsc::Sender<Outgoing>,
+    shared: &Shared,
+  ) -> Self {
+    Self {
+      room,
+      grant,
+      signal_tx,
+      max_bytes: shared.config.max_signaling_message_bytes,
+      roster_now: Arc::clone(&shared.roster_now),
+    }
+  }
+
+  /// Runs a QUIC session until the client disconnects or violates the protocol.
   async fn run(
     &self,
+    connection: Connection,
     send: SendStream,
     recv: RecvStream,
     signal_rx: mpsc::Receiver<Outgoing>,
   ) -> (SessionEnd, Result<(), SessionError>) {
-    let result = self.serve(send, recv, signal_rx).await;
+    let result = self.serve(&connection, send, recv, signal_rx).await;
     // A failed stream read says little; the connection's close reason tells a loss from a close.
     // Still open means the session failed on its own (a protocol violation): closed by us.
     let end = match &result {
       Err(SessionError::Connection(error)) => session_end(error),
-      _ => match tokio::time::timeout(Duration::ZERO, self.connection.closed()).await {
+      _ => match tokio::time::timeout(Duration::ZERO, connection.closed()).await {
         Ok(error) => session_end(&error),
         Err(_) => SessionEnd::Closed,
       },
@@ -452,6 +574,7 @@ impl ParticipantSession {
 
   async fn serve(
     &self,
+    connection: &Connection,
     send: SendStream,
     mut recv: RecvStream,
     signal_rx: mpsc::Receiver<Outgoing>,
@@ -465,39 +588,45 @@ impl ParticipantSession {
     };
     let media = async {
       loop {
-        let datagram = self.connection.receive_datagram().await?;
-        if let Err(error) =
-          self
-            .room
-            .forward_datagram(self.grant.device_id, &datagram.payload(), Instant::now())
-        {
-          debug!(participant_id = %self.grant.device_id, %error, "dropping invalid datagram");
-        }
-      }
-    };
-    let periodic = async {
-      let mut interval = tokio::time::interval(PERIODIC_INTERVAL);
-      loop {
-        interval.tick().await;
-        self.room.on_timer(self.grant.device_id, Instant::now());
-        if let Some(feedback) = self.room.take_uplink_feedback(self.grant.device_id) {
-          // Fails only when the writer task ended, i.e. the session is closing anyway.
-          let _ = self
-            .signal_tx
-            .try_send(Outgoing::Event(CallEvent::TransportFeedback { feedback }));
-        }
+        let datagram = connection.receive_datagram().await?;
+        self.on_datagram(&datagram.payload());
       }
     };
     let result: Result<(), SessionError> = tokio::select! {
       result = signaling => result,
       result = media => result,
-      () = periodic => Ok(()),
+      () = self.periodic() => Ok(()),
     };
     writer.abort();
     result
   }
 
-  fn handle_client_message(&self, message: CallClientMessage) {
+  /// One media datagram from the client.
+  pub(crate) fn on_datagram(&self, datagram: &[u8]) {
+    if let Err(error) = self
+      .room
+      .forward_datagram(self.grant.device_id, datagram, Instant::now())
+    {
+      debug!(participant_id = %self.grant.device_id, %error, "dropping invalid datagram");
+    }
+  }
+
+  /// Timers and uplink feedback; runs for as long as the session does.
+  pub(crate) async fn periodic(&self) {
+    let mut interval = tokio::time::interval(PERIODIC_INTERVAL);
+    loop {
+      interval.tick().await;
+      self.room.on_timer(self.grant.device_id, Instant::now());
+      if let Some(feedback) = self.room.take_uplink_feedback(self.grant.device_id) {
+        // Fails only when the writer task ended, i.e. the session is closing anyway.
+        let _ = self
+          .signal_tx
+          .try_send(Outgoing::Event(CallEvent::TransportFeedback { feedback }));
+      }
+    }
+  }
+
+  pub(crate) fn handle_client_message(&self, message: CallClientMessage) {
     // Proves the session's path to a browser, which can't see QUIC keep-alives. One small answer
     // per ping; when the queue is full it is dropped, and the client's next ping asks again.
     if let CallClientMessage::Ping { id } = message {

@@ -2228,8 +2228,30 @@ fn http_client() -> reqwest::Client {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-type NativeSocket =
+pub type NativeSocket =
   tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
+
+/// The largest message on a call's fallback socket: a signaling message and its kind byte. Bounds
+/// what a server or a proxy in the way can make the client hold.
+#[cfg(not(target_arch = "wasm32"))]
+const MAX_CALL_SOCKET_MESSAGE_BYTES: usize = 1024 * 1024 + 1;
+
+/// Opens a call's WebSocket fallback for networks that block UDP (ARCHITECTURE.md §6.6): like the
+/// gateway's, through the same proxy with the same trust store. Nothing is sent on it yet.
+#[cfg(not(target_arch = "wasm32"))]
+pub async fn open_call_socket(url: &str) -> Result<NativeSocket, ApiError> {
+  let parsed = url::Url::parse(url).map_err(|error| ApiError::Network(format!("{url}: {error}")))?;
+  let maybe_proxy = super::proxy::tunnel_proxy_for(&parsed);
+  let config = tokio_tungstenite::tungstenite::protocol::WebSocketConfig::default()
+    .max_message_size(Some(MAX_CALL_SOCKET_MESSAGE_BYTES))
+    .max_frame_size(Some(MAX_CALL_SOCKET_MESSAGE_BYTES));
+  tokio::time::timeout(
+    WEBSOCKET_CONNECT_TIMEOUT,
+    open_websocket_with(&parsed, maybe_proxy.as_ref(), Some(config)),
+  )
+  .await
+  .map_err(|_| ApiError::Network("WebSocket connection timed out".into()))?
+}
 
 /// Opens a WebSocket: TCP with Happy Eyeballs, through the system or environment proxy with
 /// `CONNECT` if one applies (issue #157), then TLS and the WebSocket handshake.
@@ -2249,13 +2271,22 @@ async fn connect_websocket(url: &str) -> Result<NativeSocket, ApiError> {
 
 #[cfg(not(target_arch = "wasm32"))]
 async fn open_websocket(url: &url::Url, maybe_proxy: Option<&url::Url>) -> Result<NativeSocket, ApiError> {
+  open_websocket_with(url, maybe_proxy, None).await
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+async fn open_websocket_with(
+  url: &url::Url,
+  maybe_proxy: Option<&url::Url>,
+  maybe_config: Option<tokio_tungstenite::tungstenite::protocol::WebSocketConfig>,
+) -> Result<NativeSocket, ApiError> {
   let stream = super::connect::connect_via(url, maybe_proxy)
     .await
     .map_err(|error| ApiError::Network(error.to_string()))?;
   // Always an explicit configuration: tungstenite's default one panics in rustls (api/tls.rs).
   let maybe_connector = Some(tokio_tungstenite::Connector::Rustls(super::tls::client_config()));
   let (socket, _) =
-    tokio_tungstenite::client_async_tls_with_config(url.as_str(), stream, None, maybe_connector)
+    tokio_tungstenite::client_async_tls_with_config(url.as_str(), stream, maybe_config, maybe_connector)
       .await
       .map_err(websocket_error)?;
   Ok(socket)

@@ -328,7 +328,7 @@ The same approach Fluxer announced for its new voice system (see https://fluxer.
 - Browser support (MDN browser-compat-data, checked 2026-10): WebTransport incl. datagrams in Chrome 97,
   Firefox 114, **Safari / iOS Safari 26.4**; WebCodecs `VideoEncoder`/`VideoDecoder` in Chrome 94,
   Firefox 130, Safari 16.4; `AudioEncoder`/`AudioDecoder` in Safari 26. No WebRTC fallback planned;
-  networks that block UDP: §6.6.
+  networks that block UDP fall back to a WebSocket (§6.6).
 - `MediaStreamTrackProcessor` (raw frames from the camera/mic track) is missing in Firefox: fall back to
   an `AudioWorklet` for audio and `<video>` → `VideoFrame` for video there. Codec availability (e.g.
   Opus in `AudioEncoder`) is checked at runtime with `isConfigSupported()`; fallback is a WASM Opus
@@ -737,26 +737,102 @@ that changes its address (migration) or drops everything (rejoin). Real radios:
 
 ### 6.6 Networks that block UDP
 
-Calls need UDP to the SFU's QUIC port (default 3478: the STUN/TURN port Teams, Zoom and WebRTC
+Calls prefer UDP to the SFU's QUIC port (default 3478: the STUN/TURN port Teams, Zoom and WebRTC
 services use, so restrictive networks often allow it already; 443/udp is taken by the proxy's
-HTTP/3). Some corporate, hotel and guest networks block UDP or everything but 80/443 over TCP; there
-the WebTransport handshake fails and joining a call fails after the connection timeout. Chat is
-unaffected (HTTPS and WebSocket over TCP). There is no TCP fallback today.
+HTTP/3). Some corporate, hotel and guest networks block UDP or everything but 80/443 over TCP. There
+the call runs on a **WebSocket fallback**: one TLS connection on 443, through the same kind of
+reverse proxy as the gateway. Setup and what an existing deployment has to change: docs/operations.md.
 
-Options for a fallback, by fit with §6.1:
+**Why a WebSocket.** Decided on these findings (2026-11):
 
-- **WebTransport over HTTP/2** (IETF draft): the same API over TCP/TLS. Browser support is the
-  question – check the current state before relying on it; `wtransport` doesn't implement it.
-- **A TCP/TLS relay on 443 next to the SFU**: the client carries the signaling stream and the media
-  datagrams (length-prefixed frames) over one TLS connection – WebSocket in browsers, plain TLS in
-  native clients – and the relay hands them to the SFU as if they came over QUIC. Works everywhere
-  HTTPS works; costs head-of-line blocking on loss, so the relay drops media frames that wait too
-  long instead of queuing them. The SFU, DAVE and the engine stay as they are.
-- **TURN over TCP/TLS**: needs ICE, i.e. WebRTC – ruled out by §6.1.
+| Option                   | Finding                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               | Verdict    |
+|--------------------------|-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|------------|
+| WebTransport over HTTP/2 | `wtransport` 0.7 has no HTTP/2 at all, and no maintained Rust server does. The draft is still a draft (draft-ietf-webtrans-http2-15, July 2026). MDN's data list `WebTransport.supportsReliableOnly` only from Chrome 157 and Firefox 158, which says the API exists, not that the session works, and older browsers would be left out. **Reliable-only sessions have no datagrams**, so media would need our own framing on a stream anyway. Reverse proxies don't pass its extended CONNECT either. | No         |
+| TLS over raw TCP         | Browsers can't open raw TCP, so the web client would stay without calls                                                                                                                                                                                                                                                                                                                                                                                                                               | No         |
+| TURN over TCP/TLS        | Needs ICE, i.e. WebRTC – ruled out by §6.1                                                                                                                                                                                                                                                                                                                                                                                                                                                            | No         |
+| WebSocket                | Every browser and every proxy that carries the gateway; `tokio-tungstenite` is already in the tree; native clients and the browser share one path and one framing. Costs TCP's head-of-line blocking, handled below                                                                                                                                                                                                                                                                                   | **Chosen** |
 
-Recommendation: the TLS/WebSocket relay, tried by the client after QUIC fails or doesn't connect
-within a few seconds (happy-eyeballs style), with the relay's port behind the same reverse proxy as
-the server. Until then, operators document that calls need outbound UDP 3478 (docs/operations.md).
+**How it works.**
+
+- **Framing** (`teamcraft_proto::FallbackFrame`): each WebSocket message is a kind byte and what QUIC
+  would carry: a JSON signaling message, or a media datagram as is, or a close with QUIC's close code.
+  The engine and DAVE don't know the difference. The SFU reads the same datagram and RTP headers, so
+  it **still never sees media payload**. Nothing of DAVE or the key handling changed.
+- **The SFU** (`crates/teamcraft-sfu/src/fallback.rs`) serves plain HTTP on a TCP listener of its own
+  (`TEAMCRAFT_SFU_FALLBACK_BIND`: `127.0.0.1:8082` by default, for a proxy on the same machine,
+  and `[::]:8082`, dual stack, in the container image, whose proxy is another container); TLS
+  terminates at the proxy. A
+  session on it is a participant in the same `Room`, behind the same `ParticipantLink` trait.
+- **First-frame auth is the same code**: both paths call `server::admit`. The first frame has to be
+  `join` with a join token, verified against the server's key, under the same join timeout and
+  per-address pre-join limit. The SFU has no DPoP on either path: a DPoP-bound sign-in token (#1184,
+  #1195) is checked by the server's REST API when it issues the join token, which is short-lived and
+  names the call and the device; gateway and rendezvous relay check their proofs because they take
+  the sign-in token itself in their first frame. The join token never travels in a URL.
+- **Choosing the path** (`call_resilience::connect_preferring_quic`): QUIC starts first. Only if it
+  hasn't connected after `ResilienceConfig::fallback_after` (3 s) or failed does the fallback start
+  next to it, and whichever connects first wins; nothing is sent before that. So a network where
+  QUIC works never opens a socket and joins as fast as before, and a slow QUIC isn't punished. The
+  choice lasts one call. A rejoin within a call that is on the fallback starts both at once; a new
+  call always tries QUIC first. A call on the fallback doesn't move back to QUIC by itself until it
+  rejoins for another reason.
+- **Head-of-line blocking** (`fallback_queue::MediaQueue`): a lost TCP segment holds up all that
+  follows. In front of each socket, on the SFU and in the native clients, a queue bounded in bytes
+  (1 MiB) and age (300 ms) drops the oldest video first and audio last; audio overtakes video. A
+  dropped datagram leaves a gap in the transport sequence numbers, so the bandwidth estimators react as
+  to a lost QUIC datagram. The SFU's socket buffer is small (128 KiB), since what is inside can't be
+  dropped; a browser can't drop what it buffered, so it stops adding at 64 KiB of video or 256 KiB
+  of audio (`bufferedAmount`). Audio jitter buffers go from 60 ms to 160 ms on this path
+  (`JitterBufferConfig::for_fallback`).
+- **Bounds and hostile peers:** a limit on connections in a call, the message size limit, a write
+  timeout that drops a peer that stopped reading, the idle timeout, and everything rooms enforce. A
+  lost connection gives up its slot at once, and only its place in the call waits for the reconnect
+  grace period. Frames from the network go through a parser with hostile-input tests and a fuzz
+  target (`call_fallback_frame`).
+- **Before the join**, anybody can connect, so those connections get limits that can't touch anything
+  else: a cap of their own (128), 3 s for the upgrade, 16 per address (an IPv6 /64 counts as one)
+  in a limiter apart from QUIC's. `X-Forwarded-For` counts only from the listed trusted proxies. A
+  flood costs new fallback joins while it lasts, not a running call or a QUIC session. A client
+  turned away after the upgrade counts that as a failed attempt: it retries with backoff and jitter
+  until the grace period ends, so a full SFU isn't hammered and the call doesn't end. Someone with
+  many addresses can still fill the 128 (each holds its place at most 3 s plus the join timeout).
+- **Rejoin loops re-key.** A member with a valid token who connects, joins and drops in a loop makes
+  the group re-key each time. That is the case on QUIC too and not specific to this path: limiting
+  it means deciding what a legitimately flapping client gets, which affects both (#1227).
+- **Residual risk of TLS:** the socket verifies the SFU with the platform's trust store (or the
+  browser's). `sfu_certificate_sha256` applies to QUIC only, since a browser's WebSocket can't pin,
+  so an explicit `sfu_fallback_url` on an SFU pinned by hash loses that pin. A TLS-intercepting
+  middlebox with a trusted root (a company's, typically) can read the join token, the signaling and
+  the RTP headers on this path, and replay the token until it expires, within 60 s by default. That
+  gets it into the call's signaling, not into the media: DAVE keys are bound to device identities,
+  so media stays protected and an unknown device shows as such. QUIC has the same exposure unless
+  pinned.
+- **Liveness:** the SFU pings each second, which keeps proxies from closing a quiet call. Native
+  clients count frames as they count QUIC packets, and browsers use the pings they use on Safari.
+  A TCP connection can't migrate: after a network change it goes silent and the call rejoins.
+
+The UI says "Limited network, call quality may be lower" for as long as the call is on the fallback.
+
+**Measured** on a shaped loopback with two native clients and the SFU, 30 s, 192 kbit/s of test video
+and Opus audio (`scripts/sfu-no-udp-test.sh -- quality::`). Audio is frames reaching the engine, not
+played; latency is the video frame's, from the sender's engine to the viewer's, one way:
+
+| Link (per direction) | Path     | Audio arrived | Video arrived | Latency p50 | Latency p95 |
+|----------------------|----------|---------------|---------------|-------------|-------------|
+| Loopback             | Fallback | 99.7 %        | 96 %          | 5 ms        | 19 ms       |
+| Loopback             | QUIC     | 99.7 %        | 97 %          | 1 ms        | 1 ms        |
+| 40 ± 10 ms, 1 % loss | Fallback | 98.5 %        | 95 %          | 136 ms      | 228 ms      |
+| 40 ± 10 ms, 1 % loss | QUIC     | 96.6 %        | 14 %          | 87 ms       | 120 ms      |
+| 60 ± 20 ms, 3 % loss | Fallback | 97.6 %        | 94 %          | 212 ms      | 517 ms      |
+| 60 ± 20 ms, 3 % loss | QUIC     | 92.9 %        | 1 %           | 243 ms      | 261 ms      |
+| 40 ms, 1 Mbit/s      | Fallback | 98.0 %        | 95 %          | 257 ms      | 355 ms      |
+| 40 ms, 1 Mbit/s      | QUIC     | 98.4 %        | 95 %          | 98 ms       | 100 ms      |
+
+So: about 50 to 250 ms more latency, more on loss, as TCP's nature would have it. The fallback's video
+counts look better than QUIC's on a lossy link only because the SFU's QUIC path reacts to loss by
+pausing this test's unadaptive video; real encoders adapt, so don't read this as the fallback being
+better. A call through a real reverse proxy (nginx, without TLS, on loopback) works with the same
+numbers; on a poor link the proxy's own buffers come on top, which isn't measured.
 
 ## 7. Clients
 

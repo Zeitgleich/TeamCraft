@@ -151,6 +151,7 @@ the start; only an IPv6 address that fails after another one worked is skipped (
 | `teamcraft_dpop_requests_total`                | counter   | `outcome`                 | server         | Requests with an identity provider's token: `bound`, `unbound`, `refused`         |
 | `teamcraft_sfu_rooms`                          | gauge     |                           | SFU            | Calls running                                                                     |
 | `teamcraft_sfu_participants`                   | gauge     |                           | SFU            | Devices in those calls, reconnecting ones included                                |
+| `teamcraft_sfu_fallback_connections`           | gauge     |                           | SFU            | Open connections on the WebSocket fallback, for networks that block UDP           |
 | `teamcraft_bridge_queue_depth`                 | gauge     |                           | bridge         | Submissions waiting for the worker (it holds 4096)                                |
 
 Label values come from fixed lists, so the number of series is bounded, and each binary's tests check
@@ -187,9 +188,56 @@ The endpoint can't tell you that the server is down: probe `/readyz` from outsid
 - Never expose `/api/internal/` to the internet: it is for the SFU and the mail inbox handler, and is
   protected by bearer tokens, but there is no reason to publish it.
 - Everything facing the network is dual stack (IPv4 and IPv6). The SFU needs UDP `3478` reachable
-  from clients (QUIC); its health endpoint (`8081/tcp`) is for the orchestrator only. Calls don't
-  work on networks that block outbound UDP (some corporate, hotel and guest networks); there is no
-  TCP fallback yet (ARCHITECTURE.md §6.6), so name the port in the instructions for users.
+  from clients (QUIC); its health endpoint (`8081/tcp`) is for the orchestrator only. On networks
+  that block outbound UDP (some corporate, hotel and guest networks), calls use the WebSocket
+  fallback below, at lower quality, if your proxy passes it.
+- **The call fallback for networks that block UDP** (ARCHITECTURE.md §6.6). The SFU listens for it on
+  `TEAMCRAFT_SFU_FALLBACK_BIND`, plain HTTP: **never publish this port**, the join token would go in
+  the clear. The default is `127.0.0.1:8082`, for a proxy on the same machine; the container image
+  sets `[::]:8082`, since the proxy is another container there, so don't publish it and don't run
+  that image with host networking without changing it. If the port can't be bound, the SFU logs an
+  error and runs on without the fallback. **An existing deployment has to add this**, or clients on
+  such networks keep failing to join as before; nothing else breaks without it:
+  - The reverse proxy serves `wss://<SFU host>/call/fallback` on 443 and passes it to that port:
+    WebSocket upgrade allowed, no response buffering, idle timeout above a few seconds (the SFU pings
+    each second), `X-Forwarded-For` set. The SFU host name needs a TCP/443 route and a certificate;
+    the bundled playbook's certificate already covers `sfu.<host>`. In nginx (tested without TLS):
+
+    ```nginx
+    location /call/fallback {
+      proxy_pass http://sfu:8082;
+      proxy_http_version 1.1;
+      proxy_set_header Upgrade $http_upgrade;
+      proxy_set_header Connection "upgrade";
+      proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+      proxy_buffering off;
+      proxy_read_timeout 30s;
+    }
+    ```
+
+    The deployment repository (Zeitgleich/teamcraft-deploy) needs this route and the setting below.
+  - `TEAMCRAFT_SFU_FALLBACK_TRUSTED_PROXIES` names the proxy: addresses or networks, comma-separated
+    (`172.18.0.0/16`). Only from these peers does the last `X-Forwarded-For` entry count for the
+    limit of 16 unjoined connections per address (an IPv6 /64 is one address). The default is the
+    machine itself, which fits a proxy on the same host; **a proxy in another container has to be
+    listed, or all its clients share one limit**, and the SFU logs one warning when it sees the
+    header from a peer it doesn't trust. Don't list networks that clients can connect from: they
+    could then name any address.
+  - Clients are told the URL with their join token. The default is `wss://<host of sfu_url>/call/fallback`;
+    `[calls] sfu_fallback_url` sets another one, and the web client's `connect-src` follows it.
+  - **Turning it off:** `[calls] sfu_fallback_enabled = false` on the server stops offering it, and
+    `TEAMCRAFT_SFU_FALLBACK_ENABLED=0` on the SFU closes the listener. Without an offer, clients behave
+    as if there were no fallback; QUIC's behaviour doesn't depend on it either way.
+  - Bounds, each with a setting: `TEAMCRAFT_SFU_FALLBACK_MAX_CONNECTIONS` (in a call, default 1024),
+    `TEAMCRAFT_SFU_FALLBACK_MAX_UNJOINED_CONNECTIONS` (not yet in a call, default 128),
+    `TEAMCRAFT_SFU_FALLBACK_HANDSHAKE_TIMEOUT_MILLIS` (the upgrade, default 3000),
+    `TEAMCRAFT_SFU_FALLBACK_QUEUE_BYTES` (per connection, default 1 MiB, so at most about 1 GiB in all
+    with every connection full), `TEAMCRAFT_SFU_FALLBACK_QUEUE_MAX_AGE_MILLIS` (default 300) and
+    `TEAMCRAFT_SFU_FALLBACK_SEND_BUFFER_BYTES` (default 128 KiB). `teamcraft_sfu_fallback_connections`
+    in the metrics shows how many use it.
+  - **Descriptors:** the SFU warns at start when `RLIMIT_NOFILE` is below those two connection limits
+    plus a margin. Raise it (`LimitNOFILE=` in systemd, `--ulimit nofile=` in Docker) or lower the
+    limits: running out would also hurt QUIC calls through the roster reports and the health endpoint.
 - The SFU asks for a 4 MiB UDP receive buffer (`TEAMCRAFT_SFU_UDP_RECEIVE_BUFFER_BYTES`), so a
   keyframe's burst isn't lost while it is busy. The kernel caps it at `net.core.rmem_max` without an
   error, often about 200 KiB: raise that sysctl on the host to at least the same value (it isn't
@@ -249,7 +297,8 @@ How the apps behave on networks between the user and the server (issue #157):
   talked the user into installing reads nothing. An organization that inspects TLS on managed
   devices turns on `trust_user_certificates` in its MDM's managed configuration for the app; it
   applies at the next app start.
-- Calls (QUIC over UDP to the SFU) never go through an HTTP proxy.
+- Calls over QUIC never go through an HTTP proxy. Where that is all there is, the call fallback's
+  WebSocket does: the apps tunnel it with `CONNECT` as they do the gateway, the browser by itself.
 - A captive portal (a login page answering instead of the server: HTML where the API answers JSON, a
   redirect to another site, HTTP 511) and a refused certificate are shown in the connection banner
   as such ("sign in to this network", "this network may inspect encrypted traffic"); queued messages

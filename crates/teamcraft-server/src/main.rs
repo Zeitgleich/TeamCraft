@@ -583,6 +583,8 @@ fn allow_web_connections(config: &mut Config) {
     urls.push(&calls.sfu_url);
   }
   let mut urls: Vec<String> = urls.into_iter().map(str::to_owned).collect();
+  // `https:` in a policy doesn't cover `wss:`: the fallback's origin is listed by itself.
+  urls.extend(config.calls.as_ref().and_then(|calls| calls.sfu_fallback_url()));
   if let Some(storage) = &config.storage {
     urls.push(storage.client_url());
   }
