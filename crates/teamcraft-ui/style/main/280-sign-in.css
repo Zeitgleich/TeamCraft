@@ -4,7 +4,11 @@
    and radius tokens at the top; nothing here picks its own colour. */
 
 .auth-page {
-  min-height: 100dvh;
+  /* Pinned to the window's edges, not `min-height: 100dvh` (#1222): Safari keeps the `dvh` it
+     computed with its toolbar expanded when the toolbar collapses, which left a band of the dark
+     page background below the page. A fixed box follows the visible window. */
+  position: fixed;
+  inset: 0;
   display: grid;
   place-items: center;
   padding: var(--space-6) var(--space-4);
